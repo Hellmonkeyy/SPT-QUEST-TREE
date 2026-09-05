@@ -27,7 +27,8 @@ namespace QuestTree.QuestGraph
 
         /// <summary>The full quest list, or null when the companion server mod is not installed or
         /// did not answer. Fetched once per game session - the quest database cannot change while
-        /// the server is running, so there is nothing to invalidate.</summary>
+        /// the server is running, so the only thing that invalidates it is connecting somewhere
+        /// else, which is what <see cref="ResetSession"/> is for.</summary>
         public static List<QuestDto> TryFetchAll()
         {
             if (_attempted) return _cached;
@@ -98,6 +99,23 @@ namespace QuestTree.QuestGraph
 
         /// <summary>Drops the cached Kappa result so the next <see cref="GetKappa"/> re-fetches.</summary>
         public static void InvalidateKappa() => _kappaResult = null;
+
+        /// <summary>
+        /// Forgets everything fetched for the previous profile/server, so the next request starts
+        /// from scratch.
+        ///
+        /// The caches above are static, which means they outlive the game session rather than the
+        /// process: connect to a server without the companion mod once and _attempted latches, so
+        /// reconnecting to a server that DOES have it still showed only the already-unlocked quests
+        /// until the game was restarted. That happened in the wild. The quest list is also
+        /// per-server and the Kappa result per-profile, so neither may survive a change of either.
+        /// </summary>
+        public static void ResetSession()
+        {
+            _cached = null;
+            _attempted = false;
+            _kappaResult = null;
+        }
 
         private static KappaFetchResult FetchKappa()
         {

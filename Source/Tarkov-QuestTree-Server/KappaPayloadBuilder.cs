@@ -49,6 +49,13 @@ namespace QuestTreeServer
             DefaultIgnoreCondition = JsonIgnoreCondition.Never
         };
 
+        /// <summary>Guards the two fields below. This is a DI singleton serving concurrent HTTP
+        /// requests, and while the unguarded race was benign - two callers would at worst each read
+        /// the same file once and reach the same answer - it read as an oversight next to
+        /// <see cref="QuestPayloadBuilder"/>, which locks the identical pattern. Consistency, not a
+        /// fix for an observed bug.</summary>
+        private readonly object _canonicalLock = new();
+
         /// <summary>The canonical Kappa list, cached after the first successful read. The shipped
         /// database cannot change while the server runs.</summary>
         private List<string>? _canonicalKappaQuestIds;
@@ -150,6 +157,22 @@ namespace QuestTreeServer
             if (_canonicalKappaQuestIds != null) return _canonicalKappaQuestIds;
             if (_canonicalReadFailed) return null;
 
+            lock (_canonicalLock)
+            {
+                if (_canonicalKappaQuestIds != null) return _canonicalKappaQuestIds;
+                if (_canonicalReadFailed) return null;
+
+                _canonicalKappaQuestIds = ReadCanonicalKappaQuestIds(collectorId);
+                _canonicalReadFailed = _canonicalKappaQuestIds == null;
+                return _canonicalKappaQuestIds;
+            }
+        }
+
+        /// <summary>The one read of the shipped database, or null when it cannot be used. Caching
+        /// and its flags are the caller's job, so this stays a plain read with nothing to unwind if
+        /// it throws part way through.</summary>
+        private List<string>? ReadCanonicalKappaQuestIds(string collectorId)
+        {
             try
             {
                 // AppContext.BaseDirectory is the server's own folder, so this resolves without any
@@ -160,7 +183,6 @@ namespace QuestTreeServer
                 if (!File.Exists(path))
                 {
                     logger.Warning($"Quest Tracker: {path} not found - falling back to the live Collector prerequisites for the Kappa list.");
-                    _canonicalReadFailed = true;
                     return null;
                 }
 
@@ -172,7 +194,6 @@ namespace QuestTreeServer
                     !conditions.TryGetProperty("AvailableForStart", out var availableForStart))
                 {
                     logger.Warning("Quest Tracker: the shipped quests.json has no Collector start conditions - falling back to the live table.");
-                    _canonicalReadFailed = true;
                     return null;
                 }
 
@@ -202,13 +223,11 @@ namespace QuestTreeServer
                 }
 
                 logger.Info($"Quest Tracker: Kappa quest list read from the shipped database - {ids.Count} quests.");
-                _canonicalKappaQuestIds = ids;
                 return ids;
             }
             catch (Exception ex)
             {
                 logger.Warning($"Quest Tracker: could not read the Kappa quest list from the shipped database ({ex.Message}) - using the live table instead.");
-                _canonicalReadFailed = true;
                 return null;
             }
         }

@@ -7,10 +7,12 @@ namespace QuestTree.QuestGraph
     /// Client-side mirror of the payload served by the QuestTreeServer companion mod on
     /// /questtree/quests.
     ///
-    /// This duplicates Tarkov-QuestTree-Server/QuestTreeDtos.cs on purpose - the two halves target
-    /// different frameworks (netstandard2.1 here for Unity, net10.0 for the server), so they cannot
-    /// share a source file. If you change one, change the other; SchemaVersion exists to make a
-    /// mismatch say so out loud instead of silently parsing to nulls.
+    /// This duplicates Source/Tarkov-QuestTree-Server/QuestTreeDtos.cs on purpose - the two halves
+    /// target different frameworks (netstandard2.1 here for Unity, net10.0 for the server), so they
+    /// cannot share a source file. Every type below, KappaPayloadDto included, is a hand-mirror of
+    /// one in that file: change either and change the other in the same commit. SchemaVersion
+    /// exists to make a mismatch that slips through say so out loud instead of silently parsing to
+    /// nulls.
     ///
     /// The server sends camelCase, which Newtonsoft matches case-insensitively by default, so no
     /// per-property attributes are needed beyond the naming below.

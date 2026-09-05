@@ -22,7 +22,9 @@ namespace QuestTreeServer
 
         public List<string>? Contributors { get; init; }
 
-        public Version Version { get; init; } = new("1.0.0");
+        /// <summary>Built from <see cref="ModInfo.Version"/> so the version the server logs is the
+        /// same one the payloads carry - they drifted apart while both were written out by hand.</summary>
+        public Version Version { get; init; } = new(ModInfo.Version);
 
         public Range SptVersion { get; init; } = new("~4.1.0");
 

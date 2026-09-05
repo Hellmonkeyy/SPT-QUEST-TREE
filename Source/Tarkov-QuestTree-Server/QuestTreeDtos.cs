@@ -7,9 +7,11 @@ namespace QuestTreeServer
     /// name and description here is already a display string, so the client never has to reach for
     /// a locale table it may not have an entry in for a quest it has never unlocked.
     ///
-    /// The client mod mirrors these records in QuestGraph/QuestDto.cs. The two must stay in step -
-    /// they cannot share a file, because the two halves target different frameworks (net10.0 here,
-    /// netstandard2.1 in the Unity plugin).
+    /// The client mod hand-mirrors every type in this file, KappaPayloadDto included, in
+    /// Source/Tarkov-QuestTree/QuestGraph/QuestDto.cs. The two must stay in step - they cannot
+    /// share a file, because the two halves target different frameworks (net10.0 here,
+    /// netstandard2.1 in the Unity plugin) - so change either and change the other in the same
+    /// commit.
     /// </summary>
     public sealed class QuestPayloadDto
     {

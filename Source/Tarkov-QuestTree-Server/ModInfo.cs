@@ -7,6 +7,10 @@ namespace QuestTreeServer
     /// the mod was first shared and a client hit a server without the Kappa route.
     ///
     /// Keep in step with QuestTree.ModInfo.Version in the client half.
+    ///
+    /// This is the source of truth for every version the server reports, ModMetadata included.
+    /// Only QuestTreeServer.csproj's AssemblyVersion has to be edited alongside it, because
+    /// MSBuild cannot read a C# constant.
     /// </summary>
     public static class ModInfo
     {

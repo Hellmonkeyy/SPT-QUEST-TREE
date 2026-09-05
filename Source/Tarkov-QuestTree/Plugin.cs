@@ -5,7 +5,10 @@ using QuestTree.Patches;
 
 namespace QuestTree
 {
-    [BepInPlugin("com.takov.questtree", "QuestTree", "1.0.0")]
+    // The version is ModInfo.Version rather than a literal: BepInEx shows one number, the
+    // mismatch message shows another, and four copies of a version string is four chances to
+    // ship halves that disagree about which build they are.
+    [BepInPlugin("com.takov.questtree", "QuestTree", ModInfo.Version)]
     public class Plugin : BaseUnityPlugin
     {
         public static ManualLogSource LogSource;

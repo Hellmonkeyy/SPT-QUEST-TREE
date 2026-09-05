@@ -38,23 +38,8 @@ namespace QuestTree.QuestGraph
         public static KappaFetchResult Failed(EKappaFetchStatus status, string serverVersion = "") =>
             new() { Status = status, ServerVersion = serverVersion ?? "" };
 
-        /// <summary>A player-facing explanation with the actual fix, not just a symptom.</summary>
-        public string Explain(string clientVersion) => Status switch
-        {
-            EKappaFetchStatus.ServerHalfMissing =>
-                "The server half of this mod is missing, or is older than the client half. " +
-                "Copy <b>SPT_Runtime\\user\\mods\\QuestTree</b> from the same download as your " +
-                "BepInEx plugin, then restart the server.",
-
-            EKappaFetchStatus.VersionMismatch =>
-                $"Both halves are installed but from different versions - server {ServerVersion}, " +
-                $"client {clientVersion}. Reinstall both from the same download.",
-
-            EKappaFetchStatus.Unreachable =>
-                "Could not reach the SPT server. If you are playing on someone else's Fika server, " +
-                "they need the server half installed too.",
-
-            _ => ""
-        };
+        // The player-facing wording for each status lives in UI/KappaView, not here: this type is
+        // what the fetch produced, and the sentence shown about it is the view's business - markup
+        // and all.
     }
 }

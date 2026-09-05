@@ -71,12 +71,32 @@ namespace QuestTree.UI
         {
             AuxLayout.AddHeading(parent, ref y, "Kappa progress unavailable");
             AuxLayout.AddText(parent, ref y,
-                $"<color=#C86464>{result.Explain(ModInfo.Version)}</color>", 72f, 12);
+                $"<color=#C86464>{Explain(result)}</color>", 72f, 12);
             AuxLayout.AddSpacer(ref y, 8f);
             AuxLayout.AddText(parent, ref y,
                 "<color=#FFFFFF80>The quest tree itself still works - only the Kappa checklist and " +
                 "quest list need the server half.</color>", 32f, 11);
         }
+
+        /// <summary>The sentence for one failure. Each names the fix rather than the symptom, which
+        /// is the whole point of keeping the three statuses apart in the first place.</summary>
+        private static string Explain(KappaFetchResult result) => result.Status switch
+        {
+            EKappaFetchStatus.ServerHalfMissing =>
+                "The server half of this mod is missing, or is older than the client half. " +
+                "Copy <b>SPT_Runtime\\user\\mods\\QuestTree</b> from the same download as your " +
+                "BepInEx plugin, then restart the server.",
+
+            EKappaFetchStatus.VersionMismatch =>
+                $"Both halves are installed but from different versions - server {result.ServerVersion}, " +
+                $"client {ModInfo.Version}. Reinstall both from the same download.",
+
+            EKappaFetchStatus.Unreachable =>
+                "Could not reach the SPT server. If you are playing on someone else's Fika server, " +
+                "they need the server half installed too.",
+
+            _ => ""
+        };
 
         private static bool LiveRequirementDiffers(KappaPayloadDto payload) =>
             payload?.KappaQuestIds != null &&
