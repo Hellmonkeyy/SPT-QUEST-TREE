@@ -51,6 +51,12 @@ namespace QuestTree.UI
             AuxLayout.AddHeading(parent, ref y, "Display");
 
             AuxLayout.AddToggle(parent, ref y,
+                "Compact layout",
+                "Smaller boxes packed tighter - far more of the tree on screen, minus the objective line.",
+                ModSettings.CompactLayout.Value,
+                value => ModSettings.CompactLayout.Value = value);
+
+            AuxLayout.AddToggle(parent, ref y,
                 "Draw prerequisite lines",
                 "Turning this off is a noticeable speed-up on very dense trader chains.",
                 ModSettings.DrawEdges.Value,

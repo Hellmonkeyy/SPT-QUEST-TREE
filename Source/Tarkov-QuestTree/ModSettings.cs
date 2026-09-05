@@ -19,6 +19,7 @@ namespace QuestTree
         public static ConfigEntry<bool> HideCompleted { get; private set; }
         public static ConfigEntry<bool> HideTraderless { get; private set; }
         public static ConfigEntry<bool> DrawEdges { get; private set; }
+        public static ConfigEntry<bool> CompactLayout { get; private set; }
         public static ConfigEntry<int> MaxVisibleNodes { get; private set; }
 
         public static void Init(ConfigFile config)
@@ -42,6 +43,12 @@ namespace QuestTree
                 "Draw the lines between a quest and what it unlocks. Turning this off is a " +
                 "noticeable speed-up on very dense trader chains.");
 
+            CompactLayout = config.Bind(
+                "Display", "Compact layout", false,
+                "Draw smaller quest boxes packed more tightly together. Fits far more of the tree " +
+                "on screen at once, at the cost of the objective line on each box. Off restores " +
+                "the original, roomier layout exactly.");
+
             MaxVisibleNodes = config.Bind(
                 "Performance", "Max visible quests", 600,
                 new ConfigDescription(
@@ -56,6 +63,7 @@ namespace QuestTree
             HideCompleted.SettingChanged += Raise;
             HideTraderless.SettingChanged += Raise;
             DrawEdges.SettingChanged += Raise;
+            CompactLayout.SettingChanged += Raise;
             MaxVisibleNodes.SettingChanged += Raise;
         }
 

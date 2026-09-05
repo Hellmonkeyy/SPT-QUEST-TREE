@@ -14,8 +14,11 @@ namespace QuestTree.UI
     /// prefab to instantiate instead.</summary>
     internal sealed class QuestNodeView : MonoBehaviour, IPointerClickHandler
     {
-        public const float Width = 220f;
-        public const float Height = 84f;
+        /// <summary>Node size now follows the layout-density setting - see UI/LayoutMetrics.cs.
+        /// Kept under these names so every existing call site (framing, visibility, edge maths)
+        /// reads unchanged.</summary>
+        public static float Width => LayoutMetrics.NodeWidth;
+        public static float Height => LayoutMetrics.NodeHeight;
 
         // Matches the vanilla quest-status convention (Tasks screen): grey/white/amber/green,
         // rather than the arbitrary blue "available" this started with.
@@ -75,20 +78,29 @@ namespace QuestTree.UI
 
             var view = go.AddComponent<QuestNodeView>();
             view._border = border;
-            view._title = CreateText(rect, "Title", 14, FontStyles.Bold, new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(6f, -18f));
-            view._subtitle = CreateText(rect, "Subtitle", 10, FontStyles.Normal, new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(6f, -36f));
+            view._title = CreateText(rect, "Title", LayoutMetrics.TitleFontSize, FontStyles.Bold,
+                new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(6f, LayoutMetrics.TitleOffsetY));
+            view._subtitle = CreateText(rect, "Subtitle", LayoutMetrics.SubtitleFontSize, FontStyles.Normal,
+                new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(6f, LayoutMetrics.SubtitleOffsetY));
             // Top-pinned (0,1)-(1,1), matching Title/Subtitle above - was (0,0)-(1,1) (full
             // vertical stretch), which combined with sizeDelta.y=16 computed to ~100px tall inside
             // this 84px-tall node and overlapped the subtitle band instead of sitting as a clean
             // line near the bottom.
-            view._objectivePreview = CreateText(rect, "Objective", 9, FontStyles.Italic, new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(6f, -52f));
-            view._objectivePreview.color = new Color(1f, 1f, 1f, 0.75f);
+            // Dropped entirely in compact mode - there is no room for it, and the title plus
+            // trader is what identifies a quest.
+            if (LayoutMetrics.ShowObjectivePreview)
+            {
+                view._objectivePreview = CreateText(rect, "Objective", LayoutMetrics.ObjectiveFontSize,
+                    FontStyles.Italic, new Vector2(0f, 1f), new Vector2(1f, 1f),
+                    new Vector2(6f, LayoutMetrics.ObjectiveOffsetY));
+                view._objectivePreview.color = new Color(1f, 1f, 1f, 0.75f);
+            }
 
             // Bottom band. The title/subtitle/objective rows occupy y -18/-36/-52, so this sits
             // below them rather than overlapping the title - and CreateText's rects are
             // horizontally stretched, so it has to live in a band of its own rather than a corner.
-            var glyph = CreateText(rect, "StatusGlyph", 13, FontStyles.Bold,
-                new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(6f, -66f));
+            var glyph = CreateText(rect, "StatusGlyph", LayoutMetrics.SubtitleFontSize + 2, FontStyles.Bold,
+                new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(6f, LayoutMetrics.StatusGlyphOffsetY));
             glyph.alignment = TextAlignmentOptions.TopLeft;
             view._statusGlyph = glyph;
 
@@ -98,7 +110,7 @@ namespace QuestTree.UI
             badgeRect.anchorMin = badgeRect.anchorMax = new Vector2(1f, 1f);
             badgeRect.pivot = new Vector2(1f, 1f);
             badgeRect.anchoredPosition = new Vector2(-4f, -4f);
-            badgeRect.sizeDelta = new Vector2(18f, 18f);
+            badgeRect.sizeDelta = new Vector2(LayoutMetrics.KappaBadgeSize, LayoutMetrics.KappaBadgeSize);
             badgeGo.GetComponent<Image>().color = new Color(0.85f, 0.65f, 0.1f);
             var badgeText = CreateText(badgeRect, "K", 11, FontStyles.Bold, Vector2.zero, Vector2.one, Vector2.zero);
             badgeText.alignment = TextAlignmentOptions.Center;
@@ -163,8 +175,11 @@ namespace QuestTree.UI
             var parts = new[] { Node.TraderName, level, map }.Where(p => !string.IsNullOrEmpty(p));
             _subtitle.text = string.Join("  •  ", parts);
 
-            var firstObjective = Node.NecessaryObjectives.FirstOrDefault();
-            _objectivePreview.text = firstObjective != null ? firstObjective.Text : "";
+            if (_objectivePreview != null)
+            {
+                var firstObjective = Node.NecessaryObjectives.FirstOrDefault();
+                _objectivePreview.text = firstObjective != null ? firstObjective.Text : "";
+            }
         }
 
         public void OnPointerClick(PointerEventData eventData) => OnClicked?.Invoke(Node);

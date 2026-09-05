@@ -29,8 +29,8 @@ namespace QuestTree.UI
     /// </summary>
     internal sealed class QuestTreePanel : UIElement
     {
-        private const float ColumnSpacing = 260f;
-        private const float RowSpacing = 100f;
+        // Spacing follows the layout-density setting - see UI/LayoutMetrics.cs, which holds both
+        // presets so "Compact layout" is reversible rather than a one-way change.
         private const float MinZoom = 0.25f;
         private const float MaxZoom = 1.5f;
         private const float ZoomSpeed = 0.08f;
@@ -152,6 +152,10 @@ namespace QuestTree.UI
 
             try
             {
+                // Pooled views carry the geometry they were built with, so a density change has to
+                // throw them away rather than recycle them - otherwise half the tree would render
+                // at the old size.
+                DiscardViewPools();
                 RenderSelectedTab();
             }
             catch (Exception ex)
@@ -1114,7 +1118,9 @@ namespace QuestTree.UI
 
             _layout.Clear();
             foreach (var node in matching)
-                _layout[node] = new Vector2(node.Depth * ColumnSpacing, -y[node] * RowSpacing);
+                _layout[node] = new Vector2(
+                    node.Depth * LayoutMetrics.ColumnSpacing,
+                    -y[node] * LayoutMetrics.RowSpacing);
 
             _layoutOrder = matching.ToArray();
             BuildEdgeLayout(matching);
@@ -1424,6 +1430,25 @@ namespace QuestTree.UI
             if (line == null) return;
             line.gameObject.SetActive(false);
             _edgePool.Push(line);
+        }
+
+        /// <summary>Destroys the pooled views outright, rather than returning them for reuse. Used
+        /// when something about how a node is BUILT has changed - currently only layout density.</summary>
+        private void DiscardViewPools()
+        {
+            ClearGraphViews();
+
+            while (_nodePool.Count > 0)
+            {
+                var view = _nodePool.Pop();
+                if (view != null) Destroy(view.gameObject);
+            }
+
+            while (_edgePool.Count > 0)
+            {
+                var line = _edgePool.Pop();
+                if (line != null) Destroy(line.gameObject);
+            }
         }
 
         /// <summary>Returns every built node and edge to its pool. Used when the tab or search
