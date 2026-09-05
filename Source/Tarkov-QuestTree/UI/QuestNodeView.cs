@@ -12,11 +12,15 @@ namespace QuestTree.UI
     /// trader/level/map subtitle, a one-line objective preview, and a Kappa badge. Built entirely
     /// from runtime UI primitives - this project ships no AssetBundle, so there is no authored
     /// prefab to instantiate instead.</summary>
-    internal sealed class QuestNodeView : MonoBehaviour, IPointerClickHandler
+    internal sealed class QuestNodeView : MonoBehaviour, IPointerClickHandler, IPointerEnterHandler, IPointerExitHandler
     {
         /// <summary>Node size now follows the layout-density setting - see UI/LayoutMetrics.cs.
         /// Kept under these names so every existing call site (framing, visibility, edge maths)
         /// reads unchanged.</summary>
+        /// <summary>How far a node fades when it is not part of the hovered quest's chain. Low
+        /// enough to recede, high enough that the shape of the rest of the tree is still readable.</summary>
+        private const float DimmedAlpha = 0.25f;
+
         public static float Width => LayoutMetrics.NodeWidth;
         public static float Height => LayoutMetrics.NodeHeight;
 
@@ -61,8 +65,14 @@ namespace QuestTree.UI
         private TMP_Text _objectivePreview;
         private GameObject _kappaBadge;
 
+        /// <summary>Dims the whole node in one operation when another quest's chain is highlighted.
+        /// A CanvasGroup is one component and one float, versus recolouring every child graphic.</summary>
+        private CanvasGroup _canvasGroup;
+
         public QuestNode Node { get; private set; }
         public Action<QuestNode> OnClicked;
+        public Action<QuestNode> OnHoverEnter;
+        public Action<QuestNode> OnHoverExit;
 
         public static QuestNodeView Create(RectTransform parent)
         {
@@ -77,6 +87,11 @@ namespace QuestTree.UI
             GameStyle.ApplyPanel(border);
 
             var view = go.AddComponent<QuestNodeView>();
+            view._canvasGroup = go.AddComponent<CanvasGroup>();
+            // Dimming must never make a node unclickable - hovering a neighbour dims this one, and
+            // it still has to accept the click that would select it.
+            view._canvasGroup.blocksRaycasts = true;
+            view._canvasGroup.interactable = true;
             view._border = border;
             view._title = CreateText(rect, "Title", LayoutMetrics.TitleFontSize, FontStyles.Bold,
                 new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(6f, LayoutMetrics.TitleOffsetY));
@@ -140,10 +155,17 @@ namespace QuestTree.UI
             return text;
         }
 
-        public void Bind(QuestNode node, Action<QuestNode> onClicked)
+        public void Bind(QuestNode node, Action<QuestNode> onClicked,
+            Action<QuestNode> onHoverEnter = null, Action<QuestNode> onHoverExit = null)
         {
             Node = node;
             OnClicked = onClicked;
+            OnHoverEnter = onHoverEnter;
+            OnHoverExit = onHoverExit;
+
+            // Views are pooled, so a recycled one arrives carrying whatever dim the highlight left
+            // on it. Reset here for the same reason RefreshStatus resets the border colour.
+            SetDimmed(false);
 
             _title.text = node.Name;
             _kappaBadge.SetActive(node.IsKappaRequired);
@@ -182,6 +204,17 @@ namespace QuestTree.UI
             }
         }
 
+        /// <summary>Dim state for the chain highlight. Alpha only - the node keeps its layout,
+        /// its position and its ability to be clicked.</summary>
+        public void SetDimmed(bool dimmed)
+        {
+            if (_canvasGroup != null) _canvasGroup.alpha = dimmed ? DimmedAlpha : 1f;
+        }
+
         public void OnPointerClick(PointerEventData eventData) => OnClicked?.Invoke(Node);
+
+        public void OnPointerEnter(PointerEventData eventData) => OnHoverEnter?.Invoke(Node);
+
+        public void OnPointerExit(PointerEventData eventData) => OnHoverExit?.Invoke(Node);
     }
 }

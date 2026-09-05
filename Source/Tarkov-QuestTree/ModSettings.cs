@@ -22,6 +22,14 @@ namespace QuestTree
         public static ConfigEntry<bool> CompactLayout { get; private set; }
         public static ConfigEntry<int> MaxVisibleNodes { get; private set; }
 
+        /// <summary>Remembered rather than reset each time, because it is a working preference -
+        /// someone who wants the graph wide wants it wide every time they open the tree.</summary>
+        public static ConfigEntry<bool> DetailPanelCollapsed { get; private set; }
+
+        /// <summary>Cleared once the intro has been dismissed. Not shown in the Settings tab - it is
+        /// state, not a preference; the "?" button in the toolbar is how you get the hint back.</summary>
+        public static ConfigEntry<bool> HasSeenIntro { get; private set; }
+
         public static void Init(ConfigFile config)
         {
             HideUnobtainable = config.Bind(
@@ -56,6 +64,14 @@ namespace QuestTree
                     "right out on a large tree; raising it costs frame time, lowering it makes a " +
                     "zoomed-out view show fewer quests.",
                     new AcceptableValueRange<int>(100, 2000)));
+
+            DetailPanelCollapsed = config.Bind(
+                "State", "Detail panel collapsed", false,
+                "Remembers whether the quest detail panel was left collapsed.");
+
+            HasSeenIntro = config.Bind(
+                "State", "Intro shown", false,
+                "Set once the first-run controls hint has been dismissed. Clear it to see the hint again.");
 
             // One handler per entry rather than a single global hook, so this only fires for
             // settings this mod actually owns.

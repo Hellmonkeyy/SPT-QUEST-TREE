@@ -9,5 +9,6 @@ obj/
 *.user
 *.suo
 
-# Packaged releases are build artifacts; keep the source that produces them instead.
+# Packaged zips are build artifacts. The README they ship is versioned at the repo root
+# instead, so it cannot be lost with a cleared temp folder the way it nearly was.
 Releases/

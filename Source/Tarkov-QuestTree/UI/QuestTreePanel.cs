@@ -68,6 +68,7 @@ namespace QuestTree.UI
         private RectTransform _auxPanel;
         private RectTransform _auxContent;
         private RectTransform _loadingPanel;
+        private RectTransform _introPanel;
         private TMP_Text _loadingLabel;
         private RectTransform _tabRow;
         private RectTransform _tabContent;
@@ -176,6 +177,10 @@ namespace QuestTree.UI
 
             TryRebuildGraph(session);
             ShowLoading(false);
+
+            // Only after the tree is actually up - showing the controls hint over a loading screen
+            // would explain how to drive something that is not there yet.
+            if (ModSettings.Ready && !ModSettings.HasSeenIntro.Value) ShowIntro(true);
         }
 
         /// <summary>Separate from the coroutine because C# forbids yielding inside a try/catch that
@@ -212,9 +217,10 @@ namespace QuestTree.UI
         {
             if (Input.GetKeyDown(KeyCode.Escape))
             {
-                // Layered: the detail panel is the innermost thing open, so it goes first. A second
-                // press closes the tree itself.
-                if (_detail.IsOpen) _detail.Hide();
+                // Layered, outermost last: the controls hint sits over everything, then the quest
+                // detail, then the tree itself. Each press peels off one layer.
+                if (_introPanel != null && _introPanel.gameObject.activeSelf) ShowIntro(false);
+                else if (_detail.IsOpen) _detail.Hide();
                 else HideGameObject();
                 return;
             }
@@ -280,10 +286,60 @@ namespace QuestTree.UI
                 frameContent: _graphView.FrameContent,
                 toggleSettings: () =>
                     SelectTab(_selectedTraderId == SettingsTabId ? _tabBeforeSettings : SettingsTabId),
-                closeTree: CloseTree);
+                closeTree: CloseTree,
+                showIntro: () => ShowIntro(true));
 
             BuildTabRow(root);
             _detail.Build(root, _graph);
+            BuildIntroPanel(root);
+        }
+
+        /// <summary>
+        /// The controls hint. Nothing else on screen says the graph pans, that the tab row scrolls,
+        /// or that there are shortcuts at all - none of which is discoverable by looking.
+        ///
+        /// Shown once per install (ModSettings.HasSeenIntro) and thereafter only on demand from the
+        /// "?" button, so it informs the first time without nagging afterwards.
+        /// </summary>
+        private void BuildIntroPanel(RectTransform root)
+        {
+            var panelGo = new GameObject("IntroPanel", typeof(RectTransform), typeof(Image));
+            _introPanel = (RectTransform)panelGo.transform;
+            _introPanel.SetParent(root, worldPositionStays: false);
+            _introPanel.anchorMin = _introPanel.anchorMax = new Vector2(0.5f, 0.5f);
+            _introPanel.pivot = new Vector2(0.5f, 0.5f);
+            _introPanel.sizeDelta = new Vector2(420f, 230f);
+            _introPanel.anchoredPosition = Vector2.zero;
+
+            var background = panelGo.GetComponent<Image>();
+            background.color = GameStyle.ScreenColor;
+            GameStyle.ApplyPanel(background);
+
+            var y = AuxLayout.Padding;
+            AuxLayout.AddHeading(_introPanel, ref y, "Getting around");
+            AuxLayout.AddText(_introPanel, ref y, "Drag to pan  ·  mouse wheel to zoom", 20f, 12);
+            AuxLayout.AddText(_introPanel, ref y, "The trader tabs scroll - wheel or drag them too", 20f, 12);
+            AuxLayout.AddSpacer(ref y, 8f);
+            AuxLayout.AddText(_introPanel, ref y, "<b>F</b>  fit the whole tab on screen", 20f, 12);
+            AuxLayout.AddText(_introPanel, ref y, "<b>M</b>  jump to the quests you can work on", 20f, 12);
+            AuxLayout.AddText(_introPanel, ref y, "<b>/</b>  search quests and traders", 20f, 12);
+            AuxLayout.AddText(_introPanel, ref y, "<b>Esc</b>  close the quest detail, then the tree", 20f, 12);
+            AuxLayout.AddSpacer(ref y, 10f);
+            AuxLayout.AddButton(_introPanel, ref y, "Got it", () => ShowIntro(false));
+
+            _introPanel.gameObject.SetActive(false);
+        }
+
+        /// <summary>Shows or dismisses the hint. Dismissing records it, so it does not reappear on
+        /// its own; the "?" button reopens it without clearing that.</summary>
+        private void ShowIntro(bool visible)
+        {
+            if (_introPanel == null) return;
+
+            if (!visible && ModSettings.Ready) ModSettings.HasSeenIntro.Value = true;
+
+            _introPanel.gameObject.SetActive(visible);
+            if (visible) _introPanel.SetAsLastSibling();
         }
 
         /// <summary>A full-panel "working on it" notice, shown while the graph is being fetched and

@@ -55,7 +55,8 @@ namespace QuestTree.UI
             Action frameMyQuests,
             Action frameContent,
             Action toggleSettings,
-            Action closeTree)
+            Action closeTree,
+            Action showIntro)
         {
             _graph = graph;
             _toggleSettings = toggleSettings;
@@ -136,6 +137,11 @@ namespace QuestTree.UI
             var navX = padding + searchWidth + 10f;
             navX += BuildToolbarAction(toolbar, "My quests (M)", navX, itemY, itemHeight, 110f, frameMyQuests);
             navX += BuildToolbarAction(toolbar, "Fit (F)", navX, itemY, itemHeight, 70f, frameContent);
+
+            // The controls hint is shown once and then never again on its own, which would make it
+            // useless to anyone who dismissed it before they knew what it was for. This is how you
+            // get it back.
+            navX += BuildToolbarAction(toolbar, "?", navX, itemY, itemHeight, 30f, showIntro);
 
             BuildRenderNotice(toolbar, itemY, itemHeight, navX + 8f);
             BuildCloseButton(toolbar, itemY, itemHeight, padding, closeTree);

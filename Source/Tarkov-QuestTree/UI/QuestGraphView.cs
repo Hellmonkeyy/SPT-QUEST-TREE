@@ -63,7 +63,17 @@ namespace QuestTree.UI
             Array.Empty<(QuestNode, QuestNode, Vector2, Vector2)>();
 
         /// <summary>Edges currently on screen, keyed by their layout index.</summary>
+        /// <summary>Edge colours. Normal is the resting line; highlighted is a chain member;
+        /// dimmed is everything outside the hovered chain.</summary>
+        private static readonly Color EdgeColor = new(1f, 1f, 1f, 0.25f);
+        private static readonly Color EdgeHighlightColor = new(0.95f, 0.8f, 0.25f, 0.95f);
+        private static readonly Color EdgeDimmedColor = new(1f, 1f, 1f, 0.06f);
+
         private readonly Dictionary<int, RectTransform> _edgeViews = new();
+
+        /// <summary>The hovered quest's chain. Held so ClearHighlight can no-op when nothing is
+        /// highlighted rather than sweeping every built view on every pointer exit.</summary>
+        private readonly HashSet<QuestNode> _highlighted = new();
 
         // Released views are deactivated and kept rather than destroyed - panning across a large
         // tree otherwise means a constant churn of Instantiate/Destroy, which is the expensive part.
@@ -299,7 +309,7 @@ namespace QuestTree.UI
 
                 var view = AcquireNodeView();
                 ((RectTransform)view.transform).anchoredPosition = _layout[node];
-                view.Bind(node, _onNodeClicked);
+                view.Bind(node, _onNodeClicked, HighlightChain, _ => ClearHighlight());
                 _views[node] = view;
             }
 
@@ -344,6 +354,63 @@ namespace QuestTree.UI
 
         /// <summary>Recentres on the quest nearest a point, keeping the current zoom, then rebuilds
         /// the visible set. Used only as the never-empty recovery above.</summary>
+        /// <summary>
+        /// Lights up a quest, everything it requires and everything it unlocks, and dims the rest -
+        /// the quickest way to read a chain out of a dense graph.
+        ///
+        /// Only currently-built views are touched, which is exactly right: virtualization means
+        /// nothing else exists, and anything scrolled in afterwards is Bind-ed fresh (and Bind
+        /// clears the dim). The related set comes straight off QuestNode, so this is a set build
+        /// rather than a graph walk.
+        /// </summary>
+        public void HighlightChain(QuestNode node)
+        {
+            if (node == null)
+            {
+                ClearHighlight();
+                return;
+            }
+
+            _highlighted.Clear();
+            _highlighted.Add(node);
+
+            foreach (var prerequisiteId in node.PrerequisiteIds)
+            {
+                if (_graph.NodesById.TryGetValue(prerequisiteId, out var prerequisite))
+                    _highlighted.Add(prerequisite);
+            }
+
+            foreach (var unlocked in node.Unlocks)
+                _highlighted.Add(unlocked);
+
+            foreach (var (built, view) in _views)
+                view.SetDimmed(!_highlighted.Contains(built));
+
+            // An edge only counts as part of the chain when BOTH of its ends are in it, otherwise
+            // every line leaving a neighbour would light up too and the chain would not read.
+            foreach (var (index, line) in _edgeViews)
+            {
+                if (index < 0 || index >= _edgeLayout.Length) continue;
+
+                var edge = _edgeLayout[index];
+                var inChain = _highlighted.Contains(edge.From) && _highlighted.Contains(edge.To);
+                SetEdgeColor(line, inChain ? EdgeHighlightColor : EdgeDimmedColor);
+            }
+        }
+
+        /// <summary>Restores every built node and edge to its normal appearance.</summary>
+        public void ClearHighlight()
+        {
+            if (_highlighted.Count == 0) return;
+            _highlighted.Clear();
+
+            foreach (var view in _views.Values)
+                view.SetDimmed(false);
+
+            foreach (var line in _edgeViews.Values)
+                SetEdgeColor(line, EdgeColor);
+        }
+
         private void SnapToNearestNode(Vector2 target)
         {
             QuestNode nearest = null;
@@ -511,14 +578,24 @@ namespace QuestTree.UI
 
         private RectTransform AcquireEdge(Vector2 from, Vector2 to)
         {
-            var color = new Color(1f, 1f, 1f, 0.25f);
-
-            if (_edgePool.Count == 0) return UILineConnector.Create(_content, from, to, color, 2f);
+            if (_edgePool.Count == 0) return UILineConnector.Create(_content, from, to, EdgeColor, 2f);
 
             var line = _edgePool.Pop();
             line.gameObject.SetActive(true);
             UILineConnector.Apply(line, from, to, 2f);
+
+            // Reset the colour on EVERY acquire, not just on create. UILineConnector.Apply only
+            // re-aims the line, so a pooled edge keeps whatever colour it last had - and once the
+            // chain highlight started recolouring edges, that meant highlight colours leaking onto
+            // unrelated edges as soon as one was recycled.
+            SetEdgeColor(line, EdgeColor);
             return line;
+        }
+
+        private static void SetEdgeColor(RectTransform line, Color color)
+        {
+            var image = line != null ? line.GetComponent<Image>() : null;
+            if (image != null) image.color = color;
         }
 
         private void ReleaseEdge(RectTransform line)
@@ -563,6 +640,10 @@ namespace QuestTree.UI
             _layout.Clear();
             _layoutOrder = Array.Empty<QuestNode>();
             _edgeLayout = Array.Empty<(QuestNode, QuestNode, Vector2, Vector2)>();
+
+            // The hovered set refers to nodes from the tab being torn down; keeping it would leave
+            // ClearHighlight sweeping views that no longer relate to it.
+            _highlighted.Clear();
         }
 
         /// <summary>The Settings-tab filters. Applied before layout so hiding a category actually
