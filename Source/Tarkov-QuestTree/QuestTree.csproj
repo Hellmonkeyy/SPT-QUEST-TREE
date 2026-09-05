@@ -1,0 +1,128 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <RootNamespace>QuestTree</RootNamespace>
+    <AssemblyName>QuestTree</AssemblyName>
+    <Nullable>disable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyVersion>1.0.0</AssemblyVersion>
+    <FileVersion>$(AssemblyVersion)</FileVersion>
+    <Version>$(AssemblyVersion)</Version>
+    <Deterministic>true</Deterministic>
+    <Title>QuestTree</Title>
+    <Product>QuestTree</Product>
+    <Description>Adds a live, full-game quest progression tree to the Tasks screen.</Description>
+  </PropertyGroup>
+
+  <!--
+    Path to the root of the SPT install (the folder containing BepInEx\ and
+    EscapeFromTarkov_Data\). Resolution order:
+      1) -p:SptPath="C:\Path\To\SPT" on the build command line
+      2) the SPT_PATH environment variable
+      3) two folders up, i.e. this project sitting in [SPT root]\Development\Tarkov-QuestTree\
+  -->
+  <PropertyGroup>
+    <SptPath Condition="'$(SptPath)' == '' AND '$(SPT_PATH)' != ''">$(SPT_PATH)</SptPath>
+    <SptPath Condition="'$(SptPath)' == ''">$(MSBuildProjectDirectory)\..\..</SptPath>
+    <ManagedPath>$(SptPath)\EscapeFromTarkov_Data\Managed</ManagedPath>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Reference Include="BepInEx">
+      <HintPath>$(SptPath)\BepInEx\core\BepInEx.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>$(SptPath)\BepInEx\core\0Harmony.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="spt-common">
+      <HintPath>$(SptPath)\BepInEx\plugins\spt\spt-common.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="spt-reflection">
+      <HintPath>$(SptPath)\BepInEx\plugins\spt\spt-reflection.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(ManagedPath)\Assembly-CSharp.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Comfort">
+      <HintPath>$(ManagedPath)\Comfort.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Comfort.Unity">
+      <HintPath>$(ManagedPath)\Comfort.Unity.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Newtonsoft.Json">
+      <HintPath>$(ManagedPath)\Newtonsoft.Json.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <!-- UIElement (base class of the vanilla screens this mod patches/extends) derives from
+         SerializedMonoBehaviour, so the compiler needs to see its inherited members. -->
+    <Reference Include="Sirenix.Serialization">
+      <HintPath>$(ManagedPath)\Sirenix.Serialization.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Sirenix.OdinInspector.Attributes">
+      <HintPath>$(ManagedPath)\Sirenix.OdinInspector.Attributes.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Unity.TextMeshPro">
+      <HintPath>$(ManagedPath)\Unity.TextMeshPro.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+
+    <Reference Include="UnityEngine">
+      <HintPath>$(ManagedPath)\UnityEngine.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(ManagedPath)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <!-- Animator (MenuTaskBarPatch disables the cloned toggle's animator when it keeps driving the
+         button label back to invisible) lives here, not CoreModule. -->
+    <Reference Include="UnityEngine.AnimationModule">
+      <HintPath>$(ManagedPath)\UnityEngine.AnimationModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <!-- UnityEngine.Input (Escape-to-close in QuestTreePanel.Update) lives here, not CoreModule. -->
+    <Reference Include="UnityEngine.InputLegacyModule">
+      <HintPath>$(ManagedPath)\UnityEngine.InputLegacyModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.TextRenderingModule">
+      <HintPath>$(ManagedPath)\UnityEngine.TextRenderingModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UI">
+      <HintPath>$(ManagedPath)\UnityEngine.UI.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UIModule">
+      <HintPath>$(ManagedPath)\UnityEngine.UIModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!--
+    Copy the built plugin into BepInEx\plugins\QuestTree\. The folder is created first so the copy
+    doesn't silently fail if it's missing on a first build.
+  -->
+  <Target Name="CopyToPlugins" AfterTargets="PostBuildEvent">
+    <MakeDir Directories="$(SptPath)\BepInEx\plugins\QuestTree" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(SptPath)\BepInEx\plugins\QuestTree\" SkipUnchangedFiles="true" />
+    <!-- Only copied if it doesn't already exist there, so a user's edited Kappa list is never
+         overwritten by a rebuild. -->
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\kappa-quests.json"
+          DestinationFolder="$(SptPath)\BepInEx\plugins\QuestTree\"
+          SkipUnchangedFiles="true"
+          Condition="!Exists('$(SptPath)\BepInEx\plugins\QuestTree\kappa-quests.json')" />
+  </Target>
+
+</Project>

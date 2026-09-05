@@ -1,0 +1,72 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!--
+      net10.0 to match the server itself - confirmed from SPT_Runtime\SPT.Server.runtimeconfig.json
+      ("tfm": "net10.0"). This is deliberately NOT the client mod's netstandard2.1: the client half
+      of this mod runs inside Unity/BepInEx, the server half runs inside the SPT server process.
+    -->
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>QuestTreeServer</RootNamespace>
+    <AssemblyName>QuestTreeServer</AssemblyName>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <AssemblyVersion>1.0.0</AssemblyVersion>
+    <FileVersion>$(AssemblyVersion)</FileVersion>
+    <Version>$(AssemblyVersion)</Version>
+    <Title>QuestTreeServer</Title>
+    <Product>QuestTreeServer</Product>
+    <Description>Serves the complete, unfiltered quest list to the Quest Tracker client mod.</Description>
+    <!-- Nothing here is a NuGet dependency, so no deps file is wanted next to the mod DLL. -->
+    <GenerateDependencyFile>false</GenerateDependencyFile>
+  </PropertyGroup>
+
+  <!--
+    Path to the root of the SPT install (the folder containing SPT_Runtime\ and BepInEx\).
+    Resolution order matches the client project's QuestTree.csproj:
+      1) -p:SptPath="C:\Path\To\SPT" on the build command line
+      2) the SPT_PATH environment variable
+      3) two folders up
+  -->
+  <PropertyGroup>
+    <SptPath Condition="'$(SptPath)' == '' AND '$(SPT_PATH)' != ''">$(SPT_PATH)</SptPath>
+    <SptPath Condition="'$(SptPath)' == ''">$(MSBuildProjectDirectory)\..\..</SptPath>
+    <ServerPath>$(SptPath)\SPT_Runtime</ServerPath>
+  </PropertyGroup>
+
+  <!--
+    Referenced as local DLLs rather than the SPTushonka.* NuGet packages on purpose: the server
+    refuses to load a mod built against a different SPTarkov.Server.Core version than its own, and
+    referencing the DLLs from this exact install makes a version mismatch impossible. Same
+    HintPath-off-SptPath convention the client project already uses.
+  -->
+  <ItemGroup>
+    <Reference Include="SPTarkov.Server.Core">
+      <HintPath>$(ServerPath)\SPTarkov.Server.Core.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="SPTarkov.DI">
+      <HintPath>$(ServerPath)\SPTarkov.DI.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="SPTarkov.Common">
+      <HintPath>$(ServerPath)\SPTarkov.Common.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <!-- IModMetadata.SptVersion/Version are SemanticVersioning types, not System.Version. -->
+    <Reference Include="SemanticVersioning">
+      <HintPath>$(ServerPath)\SemanticVersioning.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!--
+    Server mods live in SPT_Runtime\user\mods\<mod folder>\ in SPT 4.1 - NOT SPT\user\mods, which
+    is the 4.0 location.
+  -->
+  <Target Name="CopyToServerMods" AfterTargets="PostBuildEvent">
+    <MakeDir Directories="$(ServerPath)\user\mods\QuestTree" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(ServerPath)\user\mods\QuestTree\" SkipUnchangedFiles="true" />
+  </Target>
+
+</Project>
