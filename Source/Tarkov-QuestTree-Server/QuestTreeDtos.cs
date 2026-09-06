@@ -255,4 +255,34 @@ namespace QuestTreeServer
         /// from its own graph.</summary>
         public List<string> BlockingQuestIds { get; set; } = new();
     }
+
+    /// <summary>Quest-item spawn markers, grouped by map. See MapMarkerPayloadBuilder for why the
+    /// positions come from the loot table rather than from the quests.</summary>
+    public class MapMarkerPayloadDto
+    {
+        public string Version { get; set; } = "";
+        public List<MapMarkerSetDto> Maps { get; set; } = new();
+    }
+
+    public class MapMarkerSetDto
+    {
+        /// <summary>The map's internal name ("bigmap"), matching QuestDto.LocationKey.</summary>
+        public string LocationKey { get; set; } = "";
+
+        public List<MapMarkerDto> Markers { get; set; } = new();
+    }
+
+    public class MapMarkerDto
+    {
+        public string ItemName { get; set; } = "";
+
+        /// <summary>The quests that want this item, by display name.</summary>
+        public List<string> Quests { get; set; } = new();
+
+        /// <summary>World coordinates. Y is deliberately absent - the map is a top-down projection,
+        /// so height would only be needed to pick a floor, and only ground level is drawn.</summary>
+        public float X { get; set; }
+
+        public float Z { get; set; }
+    }
 }

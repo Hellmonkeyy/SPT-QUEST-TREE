@@ -129,7 +129,7 @@ namespace QuestTreeServer
         /// <summary>Quest.Name is a locale key, not a display name - the real name lives under
         /// "&lt;questId&gt; name" (the same key QuestHelper.GetQuestNameFromLocale uses). Falls back
         /// to the internal QuestName rather than to a raw key, so the client never renders one.</summary>
-        private static string ResolveQuestName(Quest quest, string id, Dictionary<string, string> locale)
+        internal static string ResolveQuestName(Quest quest, string id, Dictionary<string, string> locale)
         {
             if (locale.TryGetValue($"{id} name", out var localized) && !string.IsNullOrWhiteSpace(localized))
                 return localized;

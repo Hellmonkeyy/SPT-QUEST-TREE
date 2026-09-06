@@ -22,6 +22,7 @@ namespace QuestTree.QuestGraph
         private const string Route = "/questtree/quests";
         private const string KappaRoute = "/questtree/kappa";
         private const string ProfileRoute = "/questtree/profile";
+        private const string MapMarkerRoute = "/questtree/mapmarkers";
 
         private static List<QuestDto> _cached;
         private static bool _attempted;
@@ -119,6 +120,53 @@ namespace QuestTree.QuestGraph
             }
         }
 
+        private static MapMarkerPayloadDto _markers;
+        private static bool _markersAttempted;
+
+        /// <summary>
+        /// Quest-item spawn markers, keyed by map.
+        ///
+        /// Fetched once and kept for the session, unlike the profile and Kappa payloads: where an
+        /// item spawns is a property of the map, identical for every player, and cannot change
+        /// while the server is up. The server builds it once too - the first request reads every
+        /// map's loot table off disk and takes a few seconds.
+        /// </summary>
+        public static MapMarkerPayloadDto GetMapMarkers()
+        {
+            if (_markersAttempted) return _markers;
+            _markersAttempted = true;
+
+            try
+            {
+                var json = RequestHandler.GetJson(MapMarkerRoute);
+
+                if (string.IsNullOrEmpty(json))
+                {
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: {MapMarkerRoute} returned nothing - the server half is missing or " +
+                        "predates this route, so the map will show no markers.");
+                    return null;
+                }
+
+                _markers = JsonConvert.DeserializeObject<MapMarkerPayloadDto>(json);
+
+                var count = 0;
+                if (_markers?.Maps != null)
+                {
+                    foreach (var map in _markers.Maps)
+                        count += map?.Markers?.Count ?? 0;
+                }
+
+                Plugin.LogSource?.LogInfo($"QuestTree: loaded {count} quest-item map markers.");
+                return _markers;
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning($"QuestTree: could not reach {MapMarkerRoute} ({ex.Message}).");
+                return null;
+            }
+        }
+
         /// <summary>Drops the cached profile so the next GetProfile re-fetches. Paired with
         /// InvalidateKappa - the same events move both.</summary>
         public static void InvalidateProfile()
@@ -166,6 +214,8 @@ namespace QuestTree.QuestGraph
         /// </summary>
         public static void ResetSession()
         {
+            _markers = null;
+            _markersAttempted = false;
             _cached = null;
             _attempted = false;
             _kappaResult = null;

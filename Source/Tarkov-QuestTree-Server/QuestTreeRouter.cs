@@ -24,14 +24,14 @@ namespace QuestTreeServer
     {
         public QuestTreeRouter(
             JsonUtil jsonUtil, QuestPayloadBuilder payloadBuilder, KappaPayloadBuilder kappaBuilder,
-            ProfilePayloadBuilder profileBuilder)
-            : base(jsonUtil, BuildRoutes(payloadBuilder, kappaBuilder, profileBuilder))
+            ProfilePayloadBuilder profileBuilder, MapMarkerPayloadBuilder markerBuilder)
+            : base(jsonUtil, BuildRoutes(payloadBuilder, kappaBuilder, profileBuilder, markerBuilder))
         {
         }
 
         private static IEnumerable<RouteAction> BuildRoutes(
             QuestPayloadBuilder payloadBuilder, KappaPayloadBuilder kappaBuilder,
-            ProfilePayloadBuilder profileBuilder) =>
+            ProfilePayloadBuilder profileBuilder, MapMarkerPayloadBuilder markerBuilder) =>
             new List<RouteAction>
             {
                 new RouteAction<EmptyRequestData>(
@@ -51,7 +51,14 @@ namespace QuestTreeServer
                 new RouteAction<EmptyRequestData>(
                     "/questtree/profile",
                     (url, info, sessionId, output, cancellationToken) =>
-                        new ValueTask<string>(profileBuilder.GetPayloadJson(sessionId)))
+                        new ValueTask<string>(profileBuilder.GetPayloadJson(sessionId))),
+
+                // Not profile-scoped: where an item spawns is a property of the map, the same for
+                // everyone, so this is built once and cached like the quest list.
+                new RouteAction<EmptyRequestData>(
+                    "/questtree/mapmarkers",
+                    (url, info, sessionId, output, cancellationToken) =>
+                        new ValueTask<string>(markerBuilder.GetPayloadJson()))
             };
     }
 }

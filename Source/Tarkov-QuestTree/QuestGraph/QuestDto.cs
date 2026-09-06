@@ -293,4 +293,45 @@ namespace QuestTree.QuestGraph
         [JsonProperty("blockingQuestIds")]
         public List<string> BlockingQuestIds { get; set; }
     }
+
+    /// <summary>Mirror of the server's MapMarkerPayloadDto. Hand-copied rather than shared: the two
+    /// halves target different frameworks (netstandard2.1 and net10.0), so there is no project both
+    /// can reference.</summary>
+    internal sealed class MapMarkerPayloadDto
+    {
+        [JsonProperty("version")]
+        public string Version { get; set; }
+
+        [JsonProperty("maps")]
+        public List<MapMarkerSetDto> Maps { get; set; }
+    }
+
+    internal sealed class MapMarkerSetDto
+    {
+        /// <summary>The map's internal name ("bigmap"), matching QuestDto.LocationKey and the
+        /// names DynamicMaps keys its own maps on.</summary>
+        [JsonProperty("locationKey")]
+        public string LocationKey { get; set; }
+
+        [JsonProperty("markers")]
+        public List<MapMarkerDto> Markers { get; set; }
+    }
+
+    internal sealed class MapMarkerDto
+    {
+        [JsonProperty("itemName")]
+        public string ItemName { get; set; }
+
+        /// <summary>The quests that want this item, by display name.</summary>
+        [JsonProperty("quests")]
+        public List<string> Quests { get; set; }
+
+        /// <summary>World coordinates. Y is absent on purpose: the map is a top-down projection, so
+        /// height would only pick a floor, and only ground level is drawn.</summary>
+        [JsonProperty("x")]
+        public float X { get; set; }
+
+        [JsonProperty("z")]
+        public float Z { get; set; }
+    }
 }

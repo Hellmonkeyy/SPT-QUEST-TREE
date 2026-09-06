@@ -43,6 +43,10 @@ namespace QuestTree.UI
         private const float MaxZoom = 8f;
         private const float ZoomSpeed = 0.25f;
 
+        /// <summary>Marker dot size in pixels, unscaled by zoom - so zooming in separates
+        /// spawns that sit on top of each other when zoomed out.</summary>
+        private const float MarkerSize = 9f;
+
         /// <summary>Which map the view is showing. Static so it survives a re-render - switching map
         /// rebuilds the whole aux panel, and resetting to the first map each time would make the
         /// picker unusable.</summary>
@@ -162,7 +166,7 @@ namespace QuestTree.UI
 
             if (sprite != null)
             {
-                BuildMapViewport(parent, sprite, left, y, mapWidth);
+                BuildMapViewport(parent, entry, sprite, left, y, mapWidth);
                 mapBottom = y + MapViewportHeight;
                 AddCredit(parent, entry, left, mapBottom + 4f);
                 mapBottom += 22f;
@@ -232,7 +236,8 @@ namespace QuestTree.UI
         /// scrolling over the map zooms it instead of scrolling the panel.
         /// </summary>
         private static void BuildMapViewport(
-            RectTransform parent, Sprite sprite, float x, float y, float width)
+            RectTransform parent, DynamicMapsLibrary.MapEntry entry, Sprite sprite,
+            float x, float y, float width)
         {
             var viewportGo = new GameObject(
                 "MapViewport", typeof(RectTransform), typeof(Image), typeof(RectMask2D));
@@ -249,21 +254,128 @@ namespace QuestTree.UI
             backing.color = new Color(0f, 0f, 0f, 0.25f);
             GameStyle.ApplyPanel(backing);
 
+            // The content rect is built to the map's own aspect rather than the viewport's, and
+            // preserveAspect is then off. That is what makes markers land in the right place: with
+            // letterboxing the drawn rectangle is smaller than the rect by bars of unknown size,
+            // and every marker would be off by them. Sized to the aspect, picture and rect coincide.
+            var aspect = entry != null && entry.HasBounds ? entry.AspectRatio : 1f;
+
+            var contentWidth = width;
+            var contentHeight = width / Mathf.Max(0.01f, aspect);
+
+            if (contentHeight > MapViewportHeight)
+            {
+                contentHeight = MapViewportHeight;
+                contentWidth = contentHeight * aspect;
+            }
+
             var contentGo = new GameObject("MapContent", typeof(RectTransform), typeof(SVGImage));
             var content = (RectTransform)contentGo.transform;
             content.SetParent(viewport, worldPositionStays: false);
             content.anchorMin = content.anchorMax = new Vector2(0f, 1f);
             content.pivot = new Vector2(0f, 1f);
-            content.anchoredPosition = Vector2.zero;
-            content.sizeDelta = new Vector2(width, MapViewportHeight);
+            content.anchoredPosition = new Vector2(
+                (width - contentWidth) * 0.5f, -(MapViewportHeight - contentHeight) * 0.5f);
+            content.sizeDelta = new Vector2(contentWidth, contentHeight);
 
             var image = contentGo.GetComponent<SVGImage>();
             image.sprite = sprite;
-            // Maps are not square; preserveAspect letterboxes rather than stretching the geometry.
-            image.preserveAspect = true;
+            image.preserveAspect = false;
             image.raycastTarget = false;
 
+            BuildMarkers(content, entry, contentWidth, contentHeight);
+
             viewportGo.AddComponent<PanZoomHandler>().Init(content, MinZoom, MaxZoom, ZoomSpeed);
+        }
+
+        /// <summary>
+        /// Pins where the items your quests want actually spawn.
+        ///
+        /// The positions come from the server's map-marker route, which reads them out of each
+        /// map's forced loot spawns - see MapMarkerPayloadBuilder for why that is the only honest
+        /// source. They are parented to the map content, so they pan and zoom with it and stay put
+        /// relative to the ground underneath.
+        ///
+        /// Markers are drawn at a fixed pixel size and are NOT counter-scaled as you zoom, so
+        /// zooming in genuinely separates two spawns that overlap when zoomed out.
+        /// </summary>
+        private static void BuildMarkers(
+            RectTransform content, DynamicMapsLibrary.MapEntry entry, float width, float height)
+        {
+            if (entry == null || !entry.HasBounds) return;
+
+            var payload = QuestDataClient.GetMapMarkers();
+            if (payload?.Maps == null) return;
+
+            var set = payload.Maps.FirstOrDefault(m =>
+                m != null && string.Equals(m.LocationKey, MatchedKey(entry), StringComparison.OrdinalIgnoreCase));
+
+            if (set?.Markers == null) return;
+
+            foreach (var marker in set.Markers)
+            {
+                if (marker == null) continue;
+
+                var normalized = entry.Normalize(marker.X, marker.Z);
+
+                // Off the edge of the picture means the marker is not describable on this image;
+                // clamping it to the border would be a confident lie about where the item is.
+                if (normalized.x < 0f || normalized.x > 1f || normalized.y < 0f || normalized.y > 1f)
+                    continue;
+
+                var go = new GameObject("QuestMarker", typeof(RectTransform), typeof(Image));
+                var rect = (RectTransform)go.transform;
+                rect.SetParent(content, worldPositionStays: false);
+                rect.anchorMin = rect.anchorMax = new Vector2(0f, 0f);
+                rect.pivot = new Vector2(0.5f, 0.5f);
+                rect.sizeDelta = new Vector2(MarkerSize, MarkerSize);
+                rect.anchoredPosition = new Vector2(normalized.x * width, normalized.y * height);
+
+                var dot = go.GetComponent<Image>();
+                dot.color = GameStyle.AccentColor;
+                dot.raycastTarget = false;
+
+                // The item and the quests that want it, as a label beside the dot. No hover: the
+                // aux panel has no tooltip layer, and a marker you have to hover to identify is no
+                // better than no marker when you are deciding which one to walk to.
+                var labelGo = new GameObject("Label", typeof(RectTransform));
+                var labelRect = (RectTransform)labelGo.transform;
+                labelRect.SetParent(rect, worldPositionStays: false);
+                labelRect.anchorMin = labelRect.anchorMax = new Vector2(0.5f, 0.5f);
+                labelRect.pivot = new Vector2(0f, 0.5f);
+                labelRect.anchoredPosition = new Vector2(MarkerSize, 0f);
+                labelRect.sizeDelta = new Vector2(190f, 16f);
+
+                var label = labelGo.AddComponent<TextMeshProUGUI>();
+                label.text = marker.ItemName;
+                label.fontSize = 10;
+                label.color = GameStyle.AccentColor;
+                label.alignment = TextAlignmentOptions.Left;
+                label.enableWordWrapping = false;
+                label.overflowMode = TextOverflowModes.Ellipsis;
+                label.raycastTarget = false;
+                GameStyle.ApplyOutlined(label);
+            }
+        }
+
+        /// <summary>The internal name the server keyed this map's markers under. A DynamicMaps entry
+        /// can cover several (Factory is day and night), and the marker set is per game location, so
+        /// the first of its names that the payload actually has is the right one.</summary>
+        private static string MatchedKey(DynamicMapsLibrary.MapEntry entry)
+        {
+            var payload = QuestDataClient.GetMapMarkers();
+            if (payload?.Maps == null) return entry.InternalNames.FirstOrDefault() ?? "";
+
+            foreach (var name in entry.InternalNames)
+            {
+                if (payload.Maps.Any(m =>
+                        m != null && string.Equals(m.LocationKey, name, StringComparison.OrdinalIgnoreCase)))
+                {
+                    return name;
+                }
+            }
+
+            return entry.InternalNames.FirstOrDefault() ?? "";
         }
 
         /// <summary>The map's own author credit, shown because the images are someone else's work

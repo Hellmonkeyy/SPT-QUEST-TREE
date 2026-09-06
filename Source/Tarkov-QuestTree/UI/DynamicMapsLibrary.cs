@@ -48,6 +48,33 @@ namespace QuestTree.UI
             /// answers "where is this on the map".</summary>
             public string ImagePath = "";
 
+            /// <summary>The world-coordinate rectangle the image covers, as (minX, minZ) to
+            /// (maxX, maxZ). This is what turns a spawn position into a point on the picture.
+            /// Zero-sized when the config did not declare Bounds, which is the signal not to draw
+            /// markers rather than to draw them somewhere invented.</summary>
+            public Vector2 BoundsMin;
+            public Vector2 BoundsMax;
+
+            public bool HasBounds => BoundsMax.x > BoundsMin.x && BoundsMax.y > BoundsMin.y;
+
+            /// <summary>Where a world position lands on the image, as 0-1 across and up. Verified
+            /// against the DynamicMaps source rather than guessed: its rotation is applied to the
+            /// map CONTAINER's transform, and markers are placed in unrotated world (x, z) against
+            /// these bounds - which is also what the data says, since the declared rotation puts
+            /// only a quarter of Sandbox's markers inside its bounds and none of Labs', while no
+            /// rotation puts every marker on every map inside.</summary>
+            public Vector2 Normalize(float worldX, float worldZ) => new(
+                (worldX - BoundsMin.x) / (BoundsMax.x - BoundsMin.x),
+                (worldZ - BoundsMin.y) / (BoundsMax.y - BoundsMin.y));
+
+            /// <summary>Width divided by height of the area the image covers. The map rect is built
+            /// to this so the picture fills it exactly - with letterboxing the drawn rectangle would
+            /// be unknown, and every marker would sit at the wrong place by the size of the bars.</summary>
+            public float AspectRatio =>
+                (BoundsMax.y - BoundsMin.y) <= 0f
+                    ? 1f
+                    : (BoundsMax.x - BoundsMin.x) / (BoundsMax.y - BoundsMin.y);
+
             private Sprite _sprite;
             private bool _spriteFailed;
 
@@ -145,6 +172,7 @@ namespace QuestTree.UI
                 }
 
                 entry.ImagePath = ResolveImagePath(root["Layers"] as JObject, mapsRoot);
+                ReadBounds(root["Bounds"] as JObject, entry);
 
                 return string.IsNullOrEmpty(entry.ImagePath) ? null : entry;
             }
@@ -154,6 +182,20 @@ namespace QuestTree.UI
                     $"QuestTree: skipped DynamicMaps config '{Path.GetFileName(configPath)}' ({ex.Message}).");
                 return null;
             }
+        }
+
+        /// <summary>Reads the world rectangle the image covers. Left zero-sized when absent, which
+        /// the marker code reads as "do not place markers on this map".</summary>
+        private static void ReadBounds(JObject bounds, MapEntry entry)
+        {
+            if (bounds == null) return;
+
+            var min = bounds["Min"];
+            var max = bounds["Max"];
+            if (min == null || max == null) return;
+
+            entry.BoundsMin = new Vector2((float?)min["x"] ?? 0f, (float?)min["y"] ?? 0f);
+            entry.BoundsMax = new Vector2((float?)max["x"] ?? 0f, (float?)max["y"] ?? 0f);
         }
 
         /// <summary>Picks the layer to show: the one at level 0 where there is one, else the first.
