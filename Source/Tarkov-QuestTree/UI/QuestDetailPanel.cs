@@ -245,6 +245,10 @@ namespace QuestTree.UI
         {
             _detailNode = node;
 
+            // Read once per open rather than per line - it is a cached fetch, but this method reads
+            // it for the lock reason and again for every objective.
+            var profile = QuestDataClient.GetProfile();
+
             var lines = new List<string>
             {
                 $"<b>{node.Name}</b>",
@@ -254,6 +258,10 @@ namespace QuestTree.UI
                 // Faction- and edition-locked quests are shown rather than hidden, so this is what
                 // stops one reading as a bug in the tree.
                 node.UnobtainableReason != null ? $"<color=#C86464>{node.UnobtainableReason}</color>" : null,
+                // The single gate actually stopping you, computed server-side against your level,
+                // loyalty and standing. Until this existed a locked quest was a grey box with no
+                // explanation of what to go and do about it.
+                FormatLockReason(node, profile),
                 ""
             };
 
@@ -276,7 +284,7 @@ namespace QuestTree.UI
             // Available for a locked quest too, not just an accepted one: the objective text
             // arrives with the companion mod's payload rather than being read off a live Quest
             // instance the game only creates once the quest is unlocked.
-            var objectives = node.NecessaryObjectives.Select(o => o.Text).ToList();
+            var objectives = node.NecessaryObjectives.Select(o => FormatObjective(o, profile)).ToList();
             if (objectives.Count > 0)
             {
                 lines.Add("<b>Objectives</b>");
@@ -315,6 +323,55 @@ namespace QuestTree.UI
         public void HideForTabSwitch()
         {
             if (_detailPanel != null) _detailPanel.gameObject.SetActive(false);
+        }
+
+        /// <summary>
+        /// The one gate blocking this quest, phrased as something to act on. Trader-scoped gates are
+        /// named from the client's own trader list rather than the server guessing a display name,
+        /// and a prerequisite names the actual quest, since the client has the graph to resolve it.
+        /// </summary>
+        private string FormatLockReason(QuestNode node, ProfilePayloadDto profile)
+        {
+            if (profile?.LockReasons == null) return null;
+            if (!profile.LockReasons.TryGetValue(node.Id, out var reason) || reason == null) return null;
+
+            var detail = reason.Detail;
+
+            if (!string.IsNullOrEmpty(reason.TraderId) &&
+                _graph.TraderNames.TryGetValue(reason.TraderId, out var traderName))
+            {
+                detail = $"{traderName}: {detail}";
+            }
+
+            if (reason.Kind == "Level" && reason.CurrentValue > 0)
+                detail = $"{detail} (you are {reason.CurrentValue})";
+
+            if (reason.Kind == "Prerequisite" && reason.BlockingQuestIds != null)
+            {
+                var names = reason.BlockingQuestIds
+                    .Select(id => _graph.NodesById.TryGetValue(id, out var n) ? n.Name : null)
+                    .Where(n => !string.IsNullOrEmpty(n))
+                    .ToList();
+
+                if (names.Count > 0) detail = $"Requires: {string.Join(", ", names)}";
+            }
+
+            return $"<color=#D9A61A>Locked - {detail}</color>";
+        }
+
+        /// <summary>An objective with its live counter where the game is tracking one. Counters only
+        /// exist for quests actually in progress, so most objectives render unchanged.</summary>
+        private static string FormatObjective(ObjectiveDto objective, ProfilePayloadDto profile)
+        {
+            if (objective == null) return "";
+            if (profile?.ConditionProgress == null || string.IsNullOrEmpty(objective.Id)) return objective.Text;
+            if (!profile.ConditionProgress.TryGetValue(objective.Id, out var done)) return objective.Text;
+
+            var target = Mathf.Max(1, objective.Count);
+            var current = Mathf.Clamp((int)done, 0, target);
+
+            var color = current >= target ? "#6FBF6F" : "#FFFFFF80";
+            return $"{objective.Text}  <color={color}>{current}/{target}</color>";
         }
 
         /// <summary>Turns one payload reward into a display line. Trader-scoped rewards are named

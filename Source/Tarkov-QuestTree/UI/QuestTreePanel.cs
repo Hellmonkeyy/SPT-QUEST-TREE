@@ -48,6 +48,7 @@ namespace QuestTree.UI
         /// same way QuestNode.NoTraderId is so they can never collide with a real trader id.</summary>
         private const string KappaTabId = "__kappa__";
         private const string ItemsTabId = "__items__";
+        private const string MapsTabId = "__maps__";
         private const string SettingsTabId = "__settings__";
 
         private static readonly Color SelectedTabColor = new(0.35f, 0.35f, 0.2f, 0.95f);
@@ -562,6 +563,7 @@ namespace QuestTree.UI
             // Appended after the traders, not next to "All": Kappa is a destination of its own
             // rather than another slice of the same tree. Settings is NOT here - it sits in the
             // toolbar beside Close, since it is not quest data at all.
+            CreateTabButton("Maps", MapsTabId);
             CreateTabButton("Items", ItemsTabId);
             CreateTabButton("Kappa", KappaTabId);
 
@@ -681,7 +683,7 @@ namespace QuestTree.UI
 
         /// <summary>The tabs that are not the quest graph, and so ignore search and filters.</summary>
         private static bool IsAuxTab(string tabId) =>
-            tabId == KappaTabId || tabId == SettingsTabId || tabId == ItemsTabId;
+            tabId == KappaTabId || tabId == SettingsTabId || tabId == ItemsTabId || tabId == MapsTabId;
 
         private void SelectTab(string traderId)
         {
@@ -764,7 +766,9 @@ namespace QuestTree.UI
             foreach (Transform child in _auxContent)
                 Destroy(child.gameObject);
 
-            var height = _selectedTraderId == ItemsTabId
+            var height = _selectedTraderId == MapsTabId
+                ? MapView.Build(_auxContent, _graph)
+                : _selectedTraderId == ItemsTabId
                 ? ItemWatchlistView.Build(_auxContent, _graph, () =>
                 {
                     QuestDataClient.InvalidateProfile();
