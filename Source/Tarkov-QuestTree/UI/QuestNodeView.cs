@@ -188,7 +188,7 @@ namespace QuestTree.UI
         public void RefreshStatus()
         {
             var color = ColorFor(Node.Status);
-            _border.color = color;
+            if (_border != null) _border.color = color;
 
             // The status colour fills the whole box, so the text has to be picked against it rather
             // than left on the harvested body colour - that colour is a muted tan taken off the

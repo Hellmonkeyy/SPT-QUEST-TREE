@@ -125,7 +125,21 @@ namespace QuestTreeServer
             {
                 if (_cachedJson != null) return _cachedJson;
 
-                var payload = Build();
+                MapMarkerPayloadDto payload;
+
+                try
+                {
+                    payload = Build();
+                }
+                catch (Exception ex)
+                {
+                    // Built during server startup (OnLoadAsync), where an exception would abort
+                    // SPT's boot - one malformed modded quest is not worth the whole server. An
+                    // empty set means "no pins", which the client already handles.
+                    logger.Error($"Quest Tracker: could not build map markers - maps will show no pins: {ex}");
+                    payload = new MapMarkerPayloadDto { Version = ModInfo.Version };
+                }
+
                 _cachedJson = JsonSerializer.Serialize(payload, SerializerOptions);
 
                 var items = payload.Maps.Sum(m => m.Markers.Count(x => x.Kind == ItemKind));
@@ -152,20 +166,22 @@ namespace QuestTreeServer
                 if (string.IsNullOrWhiteSpace(internalName) || string.IsNullOrWhiteSpace(locationId))
                     continue;
 
-                if (!wantedByLocation.TryGetValue(locationId, out var wanted) || wanted.Count == 0)
-                    continue;
+                var markers = new List<MapMarkerDto>();
 
-                List<MapMarkerDto> markers;
-
-                try
+                // Item spawns need the map's loot table, so only maps with wanted items pay for
+                // reading one. The objective pins below do not, and must not be skipped with it:
+                // Factory and Labs have no find-item quests and used to lose every pin this way.
+                if (wantedByLocation.TryGetValue(locationId, out var wanted) && wanted.Count > 0)
                 {
-                    markers = CollectMarkers(location!, wanted);
-                }
-                catch (Exception ex)
-                {
-                    // One unreadable loot table must not cost every other map its markers.
-                    logger.Warning($"Quest Tracker: no markers for '{internalName}': {ex.Message}");
-                    continue;
+                    try
+                    {
+                        markers.AddRange(CollectMarkers(location!, wanted));
+                    }
+                    catch (Exception ex)
+                    {
+                        // One unreadable loot table must not cost every other map its markers.
+                        logger.Warning($"Quest Tracker: no item markers for '{internalName}': {ex.Message}");
+                    }
                 }
 
                 markers.AddRange(ObjectiveMarkersFor(locationId!));

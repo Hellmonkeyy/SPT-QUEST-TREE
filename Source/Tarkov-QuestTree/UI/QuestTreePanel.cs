@@ -247,6 +247,22 @@ namespace QuestTree.UI
 
         public override void Close()
         {
+            Unsubscribe();
+            base.Close();
+        }
+
+        /// <summary>Unity's own teardown. Close is UIElement's destroy path and nothing in this mod
+        /// calls it (see Show), so the menu being torn down after a raid destroyed this panel with
+        /// both subscriptions still live: QuestController went on invoking HandleStatusChanged on a
+        /// dead panel, and the static ModSettings.Changed pinned the panel and its whole graph for
+        /// the life of the process, one more per menu visit.</summary>
+        public void OnDestroy()
+        {
+            Unsubscribe();
+        }
+
+        private void Unsubscribe()
+        {
             if (_questController != null)
             {
                 _questController.OnConditionalStatusChanged -= HandleStatusChanged;
@@ -254,19 +270,27 @@ namespace QuestTree.UI
             }
 
             ModSettings.Changed -= HandleSettingsChanged;
-
-            base.Close();
         }
 
         private void HandleStatusChanged()
         {
-            // A quest turning in can hand over Collector items, and it also moves level, trader
-            // standing, objective counters and what is still locked - so both caches are stale.
-            QuestDataClient.InvalidateKappa();
-            QuestDataClient.InvalidateProfile();
+            // Invoked straight off QuestController's event, in the same invocation list as the
+            // vanilla task list - an exception here aborts every subscriber after this one, in the
+            // middle of a hand-in. Nothing that can go wrong in a recolor is worth that.
+            try
+            {
+                // A quest turning in can hand over Collector items, and it also moves level, trader
+                // standing, objective counters and what is still locked - so both caches are stale.
+                QuestDataClient.InvalidateKappa();
+                QuestDataClient.InvalidateProfile();
 
-            _graph.RefreshStatuses();
-            _graphView.RefreshNodeStatuses();
+                _graph.RefreshStatuses();
+                _graphView.RefreshNodeStatuses();
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogError($"QuestTree: failed to refresh quest statuses: {ex}");
+            }
         }
 
         // ------------------------------------------------------------------ shell
