@@ -103,7 +103,7 @@ namespace QuestTree.UI
             }
         }
 
-        private void HandleSettingsChanged()
+        private void HandleSettingsChanged(bool affectsLayout)
         {
             if (!_builtShell || _questController == null) return;
 
@@ -111,8 +111,10 @@ namespace QuestTree.UI
             {
                 // Pooled views carry the geometry they were built with, so a density change has to
                 // throw them away rather than recycle them - otherwise half the tree would render
-                // at the old size.
-                _graphView.DiscardViewPools();
+                // at the old size. Only a density change, though: the Maps toggles come through
+                // this same event, and destroying every pooled node per click of "Accepted quests
+                // only" was exactly the churn the pool exists to avoid.
+                if (affectsLayout) _graphView.DiscardViewPools();
                 RenderSelectedTab();
             }
             catch (Exception ex)
@@ -947,10 +949,20 @@ namespace QuestTree.UI
             // rewind to the top above happens before the view is even built. The Maps tab uses this
             // to keep a quest opened from its map pin on screen, which it would otherwise not be
             // whenever the quest sits far enough down the list.
-            if (_selectedTraderId == MapsTabId && MapView.TryConsumePendingScroll(out var scrollTo))
+            if (_selectedTraderId == MapsTabId && MapView.TryConsumePendingScroll(out var rowY))
             {
-                var maxScroll = Mathf.Max(0f, height - _auxPanel.rect.height);
-                _auxContent.anchoredPosition = new Vector2(0f, Mathf.Clamp(scrollTo, 0f, maxScroll));
+                // Only if the row is actually off screen, and then only far enough to show it with
+                // room for its detail beneath. Always scrolling the row to the top pushed the map -
+                // and the pin the map had just flown to - off the top of the panel for any row
+                // past the first dozen.
+                var viewport = _auxPanel.rect.height;
+                var reveal = viewport * 0.4f;
+
+                if (rowY + reveal > viewport)
+                {
+                    var maxScroll = Mathf.Max(0f, height - viewport);
+                    _auxContent.anchoredPosition = new Vector2(0f, Mathf.Clamp(rowY - reveal, 0f, maxScroll));
+                }
             }
 
             _toolbar.SetNotice(NoticeForView(_selectedTraderId));

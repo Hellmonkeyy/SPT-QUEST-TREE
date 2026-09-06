@@ -152,11 +152,15 @@ namespace QuestTree.UI
             var name = string.IsNullOrEmpty(item.Name) ? item.Template : item.Name;
             var need = item.Required > 1 ? $" x{item.Required}" : "";
 
+            // The shared "completed" green, as the quest list below it uses - two greens one above
+            // the other read as two different states.
+            var done = QuestNodeView.HexFor(ENodeStatus.Completed);
+
             if (item.HandedIn)
-                return $"<color=#6FBF6F>[done]</color>  {name}{need}  <color=#FFFFFF60>handed in</color>";
+                return $"<color=#{done}>[done]</color>  {name}{need}  <color=#FFFFFF60>handed in</color>";
 
             if (item.OwnedFoundInRaid >= item.Required)
-                return $"<color=#6FBF6F>[ready]</color>  {name}{need}  " +
+                return $"<color=#{done}>[ready]</color>  {name}{need}  " +
                        $"<color=#FFFFFF60>{item.OwnedFoundInRaid} found in raid</color>";
 
             if (item.OwnedTotal > 0)

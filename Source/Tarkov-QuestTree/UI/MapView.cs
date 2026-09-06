@@ -77,8 +77,10 @@ namespace QuestTree.UI
 
         /// <summary>A marker whose quests the graph does not hold, so no status can honestly be
         /// claimed for it. Neutral grey rather than a guessed status colour. Status colours
-        /// themselves come from <see cref="QuestNodeView.ColorFor"/>, shared with the tree.</summary>
-        private static readonly Color UnknownMarkerColor = new(0.62f, 0.62f, 0.60f, 0.55f);
+        /// themselves come from <see cref="QuestNodeView.ColorFor"/>, shared with the tree.
+        /// Fully opaque like them: the "not started" dimming is applied to every pin alike where
+        /// they are drawn, and baking a second helping in here made these near invisible.</summary>
+        private static readonly Color UnknownMarkerColor = new(0.62f, 0.62f, 0.60f, 1f);
 
         /// <summary>Pan and zoom, kept across the rebuild that every dropdown click causes. Switching
         /// floor used to throw them away, which is useless when the whole point of switching floors
@@ -131,9 +133,9 @@ namespace QuestTree.UI
         /// the previous tab's height and then reset. QuestTreePanel calls this at the right moment
         /// instead - see ShowAuxTab.
         /// </summary>
-        public static bool TryConsumePendingScroll(out float y)
+        public static bool TryConsumePendingScroll(out float rowY)
         {
-            y = _pendingScrollY ?? 0f;
+            rowY = _pendingScrollY ?? 0f;
 
             var has = _pendingScrollY.HasValue;
             _pendingScrollY = null;
@@ -337,6 +339,14 @@ namespace QuestTree.UI
             var shownIds = new HashSet<string>(
                 visible.Take(MaxQuestRows).Select(q => q.Id), StringComparer.Ordinal);
 
+            // A selection the list no longer shows is dropped here, before either column is built.
+            // The "accepted only" toggle, a quest completing, or the row cap can all remove the
+            // selected quest's row - and its pin would otherwise stay painted as selected with
+            // nothing to explain it, and unclickable, since a pin only takes clicks for quests the
+            // list shows. There was no way to clear it short of selecting something else.
+            if (_selectedQuestId != null && !shownIds.Contains(_selectedQuestId))
+                _selectedQuestId = null;
+
             if (sprite != null)
             {
                 BuildMapViewport(parent, entry, layer, sprite, left, y, mapWidth, graph, shownIds, onRepaint);
@@ -344,6 +354,13 @@ namespace QuestTree.UI
                 AddCredit(parent, entry, left, mapBottom + 4f);
                 mapBottom += 22f;
                 listLeft = left + mapWidth + AuxLayout.Padding;
+            }
+            else
+            {
+                // The focus request is consumed inside the viewport build, so with no viewport it
+                // would survive to fire on whichever map next renders - flying that map to a quest
+                // nobody asked about.
+                _pendingFocusQuestId = null;
             }
 
             // A card behind the list, so the text reads as a column rather than as words floating
@@ -392,10 +409,14 @@ namespace QuestTree.UI
 
             if (visible.Count == 0)
             {
-                AddAt(parent,
+                // AddDetailLine rather than AddAt: this is a sentence, not a label, and AddAt
+                // ellipsises at the column edge - which cut off the part saying how to get the
+                // list back.
+                AddDetailLine(parent,
                     "<color=#FFFFFF60>No accepted quests on this map. Turn off “Accepted quests " +
                     "only” to see the rest.</color>",
-                    listLeft, ref listY, 36f, 11, QuestListWidth);
+                    listLeft, ref listY, QuestListWidth);
+                listY += 6f;
             }
 
             foreach (var node in visible.Take(MaxQuestRows))
@@ -773,11 +794,15 @@ namespace QuestTree.UI
         /// of four and one that told you the odds.
         /// </summary>
         private static string LabelFor(
-            MapMarkerDto marker, DynamicMapsLibrary.MapLayer owner, bool onThisFloor)
+            MapMarkerDto marker, DynamicMapsLibrary.MapLayer owner, bool onThisFloor, string openedQuestName)
         {
             var text = marker.ItemName;
 
-            var quest = marker.Quests != null && marker.Quests.Count > 0 ? marker.Quests[0] : null;
+            // Named after the quest a click will open, so the pin never reads one name and opens
+            // another. Falls back to the first name the server sent - and only by name: Quests and
+            // QuestIds are de-duplicated separately server-side, so they are not index-aligned.
+            var quest = openedQuestName
+                ?? (marker.Quests != null && marker.Quests.Count > 0 ? marker.Quests[0] : null);
 
             if (!string.IsNullOrEmpty(quest) && quest != marker.ItemName)
             {
@@ -902,6 +927,12 @@ namespace QuestTree.UI
             MapMarkerDto marker, QuestGraphBuilder graph, HashSet<string> shown)
         {
             if (marker.QuestIds == null) return null;
+
+            // The selected quest wins outright when the pin serves it: the pin is painted as
+            // selected because of it, so a second click has to close IT - not silently switch to
+            // whichever of the pin's other quests ranks higher.
+            if (_selectedQuestId != null && shown.Contains(_selectedQuestId) && marker.QuestIds.Contains(_selectedQuestId))
+                return _selectedQuestId;
 
             string best = null;
             var bestRank = int.MaxValue;
@@ -1095,7 +1126,10 @@ namespace QuestTree.UI
                 labelRect.sizeDelta = new Vector2(LabelWidth, LabelHeight);
 
                 var label = labelGo.AddComponent<TextMeshProUGUI>();
-                label.text = LabelFor(marker, owner, onThisFloor);
+                label.text = LabelFor(marker, owner, onThisFloor,
+                    clickTarget != null && graph.NodesById.TryGetValue(clickTarget, out var opened)
+                        ? opened.Name
+                        : null);
                 label.fontSize = 13;
                 label.color = colour;
                 label.alignment = TextAlignmentOptions.Left;

@@ -197,7 +197,7 @@ namespace QuestTree.UI
             var fir = item.NeedsFoundInRaid ? " <color=#FFFFFF60>(FiR)</color>" : "";
 
             if (held >= item.Required)
-                return $"<color=#6FBF6F>[have]</color>  {item.Name}  {held}/{item.Required}{fir}";
+                return $"<color=#{QuestNodeView.HexFor(ENodeStatus.Completed)}>[have]</color>  {item.Name}  {held}/{item.Required}{fir}";
 
             // Held but not found-in-raid is its own state: you own the thing and it still will not
             // count, which is exactly the case someone would otherwise get wrong.

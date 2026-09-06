@@ -188,7 +188,7 @@ namespace QuestTree.UI
             var target = Mathf.Max(1, objective.Count);
             var current = Mathf.Clamp((int)done, 0, target);
 
-            var color = current >= target ? "#6FBF6F" : "#FFFFFF80";
+            var color = current >= target ? "#" + QuestNodeView.HexFor(ENodeStatus.Completed) : "#FFFFFF80";
             return $"{objective.Text}  <color={color}>{current}/{target}</color>";
         }
 

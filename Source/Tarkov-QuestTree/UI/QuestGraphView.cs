@@ -577,6 +577,12 @@ namespace QuestTree.UI
         private void ReleaseNodeView(QuestNodeView view)
         {
             if (view == null) return;
+
+            // The highlight is normally cleared by the node's OnPointerExit, which Unity never
+            // delivers to a deactivated object - so a hovered node scrolled or framed (F, M) out of
+            // view left every other node dimmed at 25% with nothing to un-dim them.
+            if (view.Node != null && _highlighted.Contains(view.Node)) ClearHighlight();
+
             view.gameObject.SetActive(false);
             _nodePool.Push(view);
         }

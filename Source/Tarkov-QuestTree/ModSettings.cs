@@ -12,8 +12,10 @@ namespace QuestTree
     internal static class ModSettings
     {
         /// <summary>Raised whenever any setting changes, from either editor, so the panel can
-        /// re-render without each toggle having to know who is listening.</summary>
-        public static event Action Changed;
+        /// re-render without each toggle having to know who is listening. The argument is whether
+        /// the change alters node geometry (density, node budget) - the one case where the panel
+        /// has to throw its pooled views away rather than just repaint.</summary>
+        public static event Action<bool> Changed;
 
         public static ConfigEntry<bool> HideUnobtainable { get; private set; }
         public static ConfigEntry<bool> HideCompleted { get; private set; }
@@ -135,8 +137,7 @@ namespace QuestTree
         /// entry if the plugin ever fails to initialise.</summary>
         public static bool Ready => _ready;
 
-        public static void NotifyChanged() => Changed?.Invoke();
-
-        private static void Raise(object sender, EventArgs e) => Changed?.Invoke();
+        private static void Raise(object sender, EventArgs e) =>
+            Changed?.Invoke(ReferenceEquals(sender, CompactLayout) || ReferenceEquals(sender, MaxVisibleNodes));
     }
 }

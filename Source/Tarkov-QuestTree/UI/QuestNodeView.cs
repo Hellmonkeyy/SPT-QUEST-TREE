@@ -39,6 +39,11 @@ namespace QuestTree.UI
         private static readonly Color CompletedColor = new(0.24f, 0.52f, 0.3f, 0.95f);
 
         /// <summary>Shared with the legend so the two can never drift apart.</summary>
+        /// <summary>ColorFor as the hex a rich-text colour tag takes. ToHtmlStringRGB drops the
+        /// alpha, which is fine here: the lists separate states by hue and brightness, never by
+        /// alpha.</summary>
+        public static string HexFor(ENodeStatus status) => ColorUtility.ToHtmlStringRGB(ColorFor(status));
+
         public static Color ColorFor(ENodeStatus status) => status switch
         {
             ENodeStatus.Completed => CompletedColor,
