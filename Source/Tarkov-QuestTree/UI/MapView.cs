@@ -535,8 +535,16 @@ namespace QuestTree.UI
 
                 var text = go.AddComponent<TextMeshProUGUI>();
                 text.text = label.Text;
-                text.fontSize = 14;
-                text.color = new Color(1f, 1f, 1f, 0.75f);
+                text.fontSize = 15;
+
+                // Full strength and bold, against a background that is teal, tan and grey by turns.
+                // At 75% white it washed out over the pale buildings; the black outline the shared
+                // material already carries does the rest of the work. White rather than a hue on
+                // purpose - the markers own green and grey, and place names should not compete with
+                // them for meaning.
+                text.color = Color.white;
+                text.fontStyle = FontStyles.Bold;
+
                 text.alignment = TextAlignmentOptions.Center;
                 text.enableWordWrapping = false;
                 text.raycastTarget = false;
