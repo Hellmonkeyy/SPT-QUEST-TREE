@@ -391,7 +391,9 @@ namespace QuestTree.UI
             image.anchorMin = image.anchorMax = new Vector2(0.5f, 0.5f);
             image.pivot = new Vector2(0.5f, 0.5f);
 
-            PlaceArtwork(image, layer, bounds);
+            PlaceArtwork(image, layer, sprite, bounds);
+
+            if (ModSettings.ShowMapGuides.Value) BuildGuides(space, layer);
 
             var svg = imageGo.GetComponent<SVGImage>();
             svg.sprite = sprite;
@@ -439,9 +441,12 @@ namespace QuestTree.UI
         /// failed to parse loses its alignment rather than its picture.
         /// </summary>
         private static void PlaceArtwork(
-            RectTransform image, DynamicMapsLibrary.MapLayer layer, Vector2 bounds)
+            RectTransform image, DynamicMapsLibrary.MapLayer layer, Sprite sprite, Vector2 bounds)
         {
-            if (!layer.HasArtworkBounds)
+            // The clean case: the sprite was built against the viewBox, so its rect IS the
+            // rectangle ImageBounds describes and the picture simply lies over the bounds. No ink,
+            // no per-axis scale, no y-flip term - nothing left to get wrong.
+            if (IsViewBoxPinned(layer, sprite) || !layer.HasArtworkBounds)
             {
                 image.sizeDelta = bounds;
                 image.anchoredPosition = layer.BoundsCentre;
@@ -462,6 +467,60 @@ namespace QuestTree.UI
             image.anchoredPosition = new Vector2(
                 layer.BoundsMin.x + (ink.center.x - viewport.x) * scaleX,
                 layer.BoundsMax.y - (ink.center.y - viewport.y) * scaleY);
+        }
+
+        /// <summary>Whether the sprite came back sized to the SVG's viewBox rather than to its own
+        /// ink. When it did, placing the picture is exact by construction.</summary>
+        private static bool IsViewBoxPinned(DynamicMapsLibrary.MapLayer layer, Sprite sprite)
+        {
+            if (sprite == null || !layer.HasArtworkBounds) return false;
+
+            return Mathf.Abs(sprite.rect.width - layer.Viewport.width) < 1f &&
+                   Mathf.Abs(sprite.rect.height - layer.Viewport.height) < 1f;
+        }
+
+        /// <summary>
+        /// Draws the rectangle the map's coordinates claim to cover, plus a crosshair on the map
+        /// origin.
+        ///
+        /// A diagnostic, off by default. Judging alignment from a screenshot otherwise means
+        /// fitting a transform from label positions and comparing it against remembered geography,
+        /// which is how four wrong answers in a row got through. With a rectangle drawn at a known
+        /// map coordinate, the picture either fills it or does not, and by how much is readable
+        /// straight off the screen.
+        /// </summary>
+        private static void BuildGuides(RectTransform space, DynamicMapsLibrary.MapLayer layer)
+        {
+            var guide = new Color(1f, 0.3f, 0.3f, 0.85f);
+            var size = layer.BoundsSize;
+            var centre = layer.BoundsCentre;
+
+            // The ImageBounds rectangle, as four hairlines so the map stays visible through it.
+            AddGuideBar(space, new Vector2(centre.x, layer.BoundsMax.y), new Vector2(size.x, 3f), guide);
+            AddGuideBar(space, new Vector2(centre.x, layer.BoundsMin.y), new Vector2(size.x, 3f), guide);
+            AddGuideBar(space, new Vector2(layer.BoundsMin.x, centre.y), new Vector2(3f, size.y), guide);
+            AddGuideBar(space, new Vector2(layer.BoundsMax.x, centre.y), new Vector2(3f, size.y), guide);
+
+            // Map origin, which is a fixed point every coordinate is measured from.
+            var cross = new Color(0.4f, 0.9f, 1f, 0.9f);
+            AddGuideBar(space, Vector2.zero, new Vector2(size.x * 0.06f, 2f), cross);
+            AddGuideBar(space, Vector2.zero, new Vector2(2f, size.y * 0.06f), cross);
+        }
+
+        private static void AddGuideBar(
+            RectTransform space, Vector2 position, Vector2 size, Color colour)
+        {
+            var go = new GameObject("Guide", typeof(RectTransform), typeof(Image));
+            var rect = (RectTransform)go.transform;
+            rect.SetParent(space, worldPositionStays: false);
+            rect.anchorMin = rect.anchorMax = new Vector2(0.5f, 0.5f);
+            rect.pivot = new Vector2(0.5f, 0.5f);
+            rect.anchoredPosition = position;
+            rect.sizeDelta = size;
+
+            var image = go.GetComponent<Image>();
+            image.color = colour;
+            image.raycastTarget = false;
         }
 
         /// <summary>

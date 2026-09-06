@@ -23,6 +23,9 @@ namespace QuestTree
 
         /// <summary>Whether the Maps view pins only quests you have accepted.</summary>
         public static ConfigEntry<bool> MarkStartedOnly { get; private set; }
+
+        /// <summary>Diagnostic: outline the rectangle the map's coordinates cover.</summary>
+        public static ConfigEntry<bool> ShowMapGuides { get; private set; }
         public static ConfigEntry<int> MaxVisibleNodes { get; private set; }
 
         /// <summary>Remembered rather than reset each time, because it is a working preference -
@@ -53,6 +56,11 @@ namespace QuestTree
                 "Display", "Only mark started quests", false,
                 "On the Maps view, show markers only for quests you have actually accepted. The " +
                 "shortest way from a map covered in pins to the few that matter today.");
+
+            ShowMapGuides = config.Bind(
+                "Display", "Show map alignment guides", false,
+                "Diagnostic. Outlines the area the map's coordinates cover and marks the map " +
+                "origin, so a misaligned map picture is visible rather than a matter of opinion.");
 
             DrawEdges = config.Bind(
                 "Display", "Draw prerequisite lines", true,

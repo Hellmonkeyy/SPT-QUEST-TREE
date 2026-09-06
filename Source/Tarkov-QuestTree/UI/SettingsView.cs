@@ -63,6 +63,12 @@ namespace QuestTree.UI
                 value => ModSettings.MarkStartedOnly.Value = value);
 
             AuxLayout.AddToggle(parent, ref y,
+                "Show map alignment guides",
+                "Diagnostic: outline the area the map's coordinates cover, and mark its origin.",
+                ModSettings.ShowMapGuides.Value,
+                value => ModSettings.ShowMapGuides.Value = value);
+
+            AuxLayout.AddToggle(parent, ref y,
                 "Draw prerequisite lines",
                 "Turning this off is a noticeable speed-up on very dense trader chains.",
                 ModSettings.DrawEdges.Value,

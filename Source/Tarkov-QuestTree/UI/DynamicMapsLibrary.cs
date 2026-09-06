@@ -359,6 +359,42 @@ namespace QuestTree.UI
         }
 
         /// <summary>
+        /// Reports the rectangles the placement depends on, once per layer.
+        ///
+        /// This exists because four attempts at aligning the map were each reasoned from pixel
+        /// positions in a screenshot, and each was wrong in a way the next one only partly fixed.
+        /// The two facts that actually decide it - whether the sprite came back pinned to the
+        /// viewBox, and which way the tessellated ink's Y runs - are unknowable from outside the
+        /// running game and obvious from inside it.
+        /// </summary>
+        private static void LogArtworkGeometry(MapLayer layer, Sprite sprite)
+        {
+            if (sprite == null) return;
+
+            var pinned =
+                Mathf.Abs(sprite.rect.width - layer.Viewport.width) < 1f &&
+                Mathf.Abs(sprite.rect.height - layer.Viewport.height) < 1f;
+
+            Plugin.LogSource?.LogInfo(
+                $"QuestTree map geometry [{layer.Name}] " +
+                $"viewBox={Describe(layer.Viewport)} " +
+                $"ink={Describe(layer.Ink)} " +
+                $"spriteRect={Describe(sprite.rect)} " +
+                $"spriteBounds={Describe(sprite.bounds)} " +
+                $"pivot=({sprite.pivot.x:F1},{sprite.pivot.y:F1}) " +
+                $"ppu={sprite.pixelsPerUnit:F1} " +
+                $"bounds=({layer.BoundsMin.x:F0},{layer.BoundsMin.y:F0})-" +
+                $"({layer.BoundsMax.x:F0},{layer.BoundsMax.y:F0}) " +
+                $"viewBoxPinned={pinned}");
+        }
+
+        private static string Describe(Rect r) =>
+            $"[x{r.x:F1} y{r.y:F1} w{r.width:F1} h{r.height:F1}]";
+
+        private static string Describe(Bounds b) =>
+            $"[c({b.center.x:F2},{b.center.y:F2}) s({b.size.x:F2},{b.size.y:F2})]";
+
+        /// <summary>
         /// Turns an SVG into a Sprite using Unity's own vector graphics package, which the game
         /// already ships (Unity.VectorGraphics.dll in EscapeFromTarkov_Data/Managed) - the same API
         /// DynamicMaps itself uses. No third-party rasteriser and no bundled assets.
@@ -389,15 +425,27 @@ namespace QuestTree.UI
                 var geometry = VectorUtils.TessellateScene(scene.Scene, options);
                 if (geometry == null || geometry.Count == 0) return null;
 
-                // Both rectangles are only knowable here, and the view needs both to put the
-                // picture where its coordinates say. Each geometry's vertices are in its own local
-                // space, so WorldTransform has to be applied before they can be compared with the
-                // viewBox - which is the space the layer's ImageBounds describes.
+                // Both rectangles are only knowable here. Each geometry's vertices are in its own
+                // local space, so WorldTransform has to be applied before they can be compared with
+                // the viewBox - which is the space the layer's ImageBounds describes.
                 layer.Viewport = scene.SceneViewport;
                 layer.Ink = VectorUtils.Bounds(
                     geometry.SelectMany(part => part.Vertices.Select(part.WorldTransform.MultiplyPoint)));
 
-                return VectorUtils.BuildSprite(geometry, 100f, VectorUtils.Alignment.Center, Vector2.zero, 128);
+                // Built against the viewBox with the SVG's own origin, rather than letting the
+                // sprite be sized and centred on its ink. When this works the sprite's rect IS the
+                // viewBox, so the view can simply lay it over ImageBounds and there is no ink
+                // arithmetic left to get wrong - which is where the last four attempts went.
+                var sprite = layer.HasArtworkBounds
+                    ? VectorUtils.BuildSprite(
+                        geometry, layer.Viewport, 100f, VectorUtils.Alignment.SVGOrigin,
+                        Vector2.zero, 128, false)
+                    : VectorUtils.BuildSprite(
+                        geometry, 100f, VectorUtils.Alignment.Center, Vector2.zero, 128);
+
+                LogArtworkGeometry(layer, sprite);
+
+                return sprite;
             }
             catch (Exception ex)
             {
