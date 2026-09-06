@@ -56,6 +56,7 @@ namespace QuestTreeServer
 
         private readonly object _buildLock = new();
         private string? _cachedJson;
+        private Dictionary<string, string>? _locationIdToKey;
 
         /// <summary>Serialized once and cached: the quest database does not change while the server
         /// is running, and this payload covers every quest in the game.</summary>
@@ -115,6 +116,7 @@ namespace QuestTreeServer
                 Type = quest.Type.ToString(),
                 Level = ResolveLevelRequirement(quest),
                 LocationId = ResolveLocationName(quest, locale),
+                LocationKey = ResolveLocationKey(quest),
                 IsEvent = IsEventQuest(quest.Id),
                 EditionRestricted = IsEditionRestricted(quest.Id),
                 Prerequisites = MapPrerequisites(quest),
@@ -157,6 +159,39 @@ namespace QuestTreeServer
             if (questConfig.ProfileWhitelist?.ContainsKey(questId) == true) return true;
 
             return questConfig.ProfileBlacklist?.Values.Any(blacklisted => blacklisted.Contains(questId)) == true;
+        }
+
+        /// <summary>
+        /// The map's internal name ("bigmap", "Woods"), which is what other map tools key on.
+        ///
+        /// Quest.Location is the location's MongoId, not its internal name, so this inverts SPT's
+        /// own quest.json locationIdMap rather than guessing at a mapping - the config exists
+        /// precisely because quests reference locations by id. Built once and cached; falls back to
+        /// the raw id, which is at least stable, when a modded location is not in the map.
+        /// </summary>
+        private string ResolveLocationKey(Quest quest)
+        {
+            var location = quest.Location;
+            if (string.IsNullOrWhiteSpace(location)) return "";
+
+            _locationIdToKey ??= BuildLocationKeyLookup();
+
+            return _locationIdToKey.TryGetValue(location, out var key) ? key : location;
+        }
+
+        private Dictionary<string, string> BuildLocationKeyLookup()
+        {
+            var lookup = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            if (questConfig.LocationIdMap == null) return lookup;
+
+            foreach (var (internalName, locationId) in questConfig.LocationIdMap)
+            {
+                if (string.IsNullOrWhiteSpace(locationId)) continue;
+                lookup[locationId] = internalName;
+            }
+
+            return lookup;
         }
 
         /// <summary>Quest.Location is a raw map id (e.g. 5704e3c2d2720bac5b8b4567), which is no use

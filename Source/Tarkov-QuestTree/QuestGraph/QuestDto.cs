@@ -55,6 +55,11 @@ namespace QuestTree.QuestGraph
         [JsonProperty("locationId")]
         public string LocationId { get; set; }
 
+        /// <summary>The map's raw internal id ("bigmap"), for matching against other tools' map
+        /// data - a localized display name cannot be matched against those.</summary>
+        [JsonProperty("locationKey")]
+        public string LocationKey { get; set; }
+
         [JsonProperty("isEvent")]
         public bool IsEvent { get; set; }
 

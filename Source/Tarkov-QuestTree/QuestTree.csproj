@@ -102,6 +102,12 @@
       <HintPath>$(ManagedPath)\UnityEngine.TextRenderingModule.dll</HintPath>
       <Private>False</Private>
     </Reference>
+    <!-- SVG rasterising for the Maps view. The game already ships this package, so map images can
+         be rendered with Unity's own API rather than a bundled third-party renderer. -->
+    <Reference Include="Unity.VectorGraphics">
+      <HintPath>$(ManagedPath)\Unity.VectorGraphics.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
     <Reference Include="UnityEngine.UI">
       <HintPath>$(ManagedPath)\UnityEngine.UI.dll</HintPath>
       <Private>False</Private>

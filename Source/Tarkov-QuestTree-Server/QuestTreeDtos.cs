@@ -47,6 +47,11 @@ namespace QuestTreeServer
         /// <summary>Map the quest takes place on, or "any". Shown on the node subtitle.</summary>
         public string LocationId { get; set; } = "";
 
+        /// <summary>The map's raw internal id ("bigmap", "factory4_day"). Sent alongside the display
+        /// name because that is what other tools key on - DynamicMaps' map configs list internal
+        /// names, and a localized display name cannot be matched against them.</summary>
+        public string LocationKey { get; set; } = "";
+
         /// <summary>True when the quest is gated behind a seasonal/holiday event, so it reads as
         /// intentionally unavailable rather than as a bug in the tree.</summary>
         public bool IsEvent { get; set; }

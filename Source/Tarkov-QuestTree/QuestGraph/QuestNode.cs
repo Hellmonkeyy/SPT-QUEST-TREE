@@ -71,6 +71,9 @@ namespace QuestTree.QuestGraph
 
         public string LocationId => Dto.LocationId;
 
+        /// <summary>Raw map id, used to match this quest's map against external map data.</summary>
+        public string LocationKey => Dto.LocationKey;
+
         public QuestNode(QuestDto dto)
         {
             Dto = dto;

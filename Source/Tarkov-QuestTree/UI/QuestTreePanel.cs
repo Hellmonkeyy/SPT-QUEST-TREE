@@ -827,7 +827,7 @@ namespace QuestTree.UI
                     RenderSelectedTab();
                 })
                 : _selectedTraderId == MapsTabId
-                ? MapView.Build(_auxContent, _graph)
+                ? MapView.Build(_auxContent, _graph, RenderSelectedTab)
                 : _selectedTraderId == ItemsTabId
                 ? ItemWatchlistView.Build(_auxContent, _graph, () =>
                 {
