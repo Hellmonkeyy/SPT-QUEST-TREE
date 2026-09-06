@@ -293,6 +293,18 @@ namespace QuestTreeServer
         /// pin holds a copy.</summary>
         public int Alternatives { get; set; }
 
+        /// <summary>Objective markers only: where the point sits as a percentage across and down the
+        /// map image. Sent instead of world coordinates because that is how the source states it,
+        /// and because percentages need no coordinate transform - only the rectangle the image
+        /// covers, which the client knows and the server does not.</summary>
+        public float LeftPercent { get; set; }
+
+        public float TopPercent { get; set; }
+
+        /// <summary>The floor the source names, such as "Ground_Level" - the same shape as the map
+        /// layers' own names.</summary>
+        public string Floor { get; set; } = "";
+
         /// <summary>World coordinates. Y is the height, which is what decides the floor: a map's
         /// layers each declare the height band they cover.</summary>
         public float X { get; set; }

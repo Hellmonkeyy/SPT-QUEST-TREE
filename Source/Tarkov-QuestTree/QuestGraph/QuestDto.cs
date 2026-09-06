@@ -339,6 +339,18 @@ namespace QuestTree.QuestGraph
         [JsonProperty("alternatives")]
         public int Alternatives { get; set; }
 
+        /// <summary>Objective markers only: position as a percentage across and down the map image,
+        /// which the view turns into map coordinates using the layer's own bounds.</summary>
+        [JsonProperty("leftPercent")]
+        public float LeftPercent { get; set; }
+
+        [JsonProperty("topPercent")]
+        public float TopPercent { get; set; }
+
+        /// <summary>The floor named by the source, matched against the map's layer names.</summary>
+        [JsonProperty("floor")]
+        public string Floor { get; set; }
+
         /// <summary>World coordinates. Y is the height, which is what decides the floor: a map's
         /// layers each declare the height band they cover.</summary>
         [JsonProperty("x")]

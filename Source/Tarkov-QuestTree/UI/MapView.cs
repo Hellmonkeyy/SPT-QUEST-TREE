@@ -55,6 +55,10 @@ namespace QuestTree.UI
         /// out instead of magnifying the whole pile.</summary>
         private const float MarkerSize = 14f;
 
+        /// <summary>Height of a quest pin in screen pixels. Taller than a dot because it is read as
+        /// a shape rather than a point.</summary>
+        private const float PinSize = 26f;
+
         /// <summary>Roughly how much screen space a marker's name takes. Used to keep names from
         /// stacking into an unreadable block where several spawns sit close together.</summary>
         private const float LabelWidth = 260f;
@@ -612,6 +616,61 @@ namespace QuestTree.UI
             return text;
         }
 
+        /// <summary>
+        /// Where a marker sits, in map coordinates.
+        ///
+        /// Item spawns arrive as world coordinates and are used as they are. Objective markers
+        /// arrive as a percentage across and down the map IMAGE, because that is how their source
+        /// states it - so they are read against the layer's own rectangle and then turned by the
+        /// map's CoordinateRotation, the same turn the picture gets, which puts them in the same
+        /// frame as everything else.
+        ///
+        /// Confirmed numerically before it was written: mapping the percentages without that turn
+        /// put twelve Customs objectives 400-760 units from the very spawns their own items use,
+        /// and with it they land within 1 to 17.
+        /// </summary>
+        private static Vector2 PositionFor(
+            MapMarkerDto marker, DynamicMapsLibrary.MapLayer layer, DynamicMapsLibrary.MapEntry entry)
+        {
+            // Map space is (game.x, game.z) with game.y as the height - see DynamicMapsLibrary.
+            if (marker.LeftPercent <= 0f && marker.TopPercent <= 0f)
+                return new Vector2(marker.X, marker.Z);
+
+            var size = layer.BoundsSize;
+
+            var point = new Vector2(
+                layer.BoundsMin.x + marker.LeftPercent / 100f * size.x,
+                layer.BoundsMax.y - marker.TopPercent / 100f * size.y);
+
+            var rotation = entry?.CoordinateRotation ?? 0;
+            if (rotation == 0) return point;
+
+            var radians = rotation * Mathf.Deg2Rad;
+            var cos = Mathf.Cos(radians);
+            var sin = Mathf.Sin(radians);
+            var offset = point - layer.BoundsCentre;
+
+            return layer.BoundsCentre + new Vector2(
+                offset.x * cos - offset.y * sin,
+                offset.x * sin + offset.y * cos);
+        }
+
+        /// <summary>Which floor a marker belongs to. Objective markers name their floor outright, so
+        /// that is taken over the height-band test - the source knows, and a name is not a guess.</summary>
+        private static DynamicMapsLibrary.MapLayer OwnerFor(
+            MapMarkerDto marker, DynamicMapsLibrary.MapEntry entry)
+        {
+            if (!string.IsNullOrEmpty(marker.Floor))
+            {
+                var named = entry.Layers.FirstOrDefault(l =>
+                    string.Equals(l.Name.Replace(" ", "_"), marker.Floor, StringComparison.OrdinalIgnoreCase));
+
+                if (named != null) return named;
+            }
+
+            return entry.LayerFor(marker.X, marker.Z, marker.Y);
+        }
+
         /// <summary>Whether any quest wanting this item has been started. The payload carries the
         /// quest ids, and the client already knows every quest's live status, so this is a lookup
         /// rather than anything the server has to decide.</summary>
@@ -652,7 +711,7 @@ namespace QuestTree.UI
                 .Where(m => m != null)
                 .Select(m => (
                     Marker: m,
-                    Owner: entry.LayerFor(m.X, m.Z, m.Y),
+                    Owner: OwnerFor(m, entry),
                     Active: IsActive(m, graph),
                     Objective: string.Equals(m.Kind, ObjectiveKind, StringComparison.OrdinalIgnoreCase)))
                 .Where(m => !ModSettings.MarkStartedOnly.Value || m.Active)
@@ -681,8 +740,7 @@ namespace QuestTree.UI
 
                 if (!onThisFloor) colour.a *= 0.55f;
 
-                // Map space is (game.x, game.z) with game.y as the height - see DynamicMapsLibrary.
-                var position = new Vector2(marker.X, marker.Z);
+                var position = PositionFor(marker, layer, entry);
 
                 var go = new GameObject("QuestMarker", typeof(RectTransform));
                 var rect = (RectTransform)go.transform;
@@ -696,23 +754,41 @@ namespace QuestTree.UI
                 rect.sizeDelta = new Vector2(MarkerSize, MarkerSize);
                 panZoom.KeepConstantScale(rect);
 
-                // A glyph rather than an Image: it is round, and it takes the same outline the rest
-                // of the map text uses, which is what makes it readable over both the pale buildings
-                // and the dark ground.
-                var dot = go.AddComponent<TextMeshProUGUI>();
-                // A diamond for "the quest happens here", a dot for "the thing you need lies
-                // here". Hollow when it is on another floor, so the floor rides on the glyph and
-                // colour stays free to carry quest status.
-                dot.text = objective
-                    ? (onThisFloor ? "◆" : "◇")
-                    : (onThisFloor ? "●" : "○");
+                var pin = objective ? DynamicMapsLibrary.QuestPin : null;
 
-                dot.fontSize = objective ? MarkerSize + 3f : MarkerSize;
-                dot.color = colour;
-                dot.alignment = TextAlignmentOptions.Center;
-                dot.enableWordWrapping = false;
-                dot.raycastTarget = false;
-                GameStyle.ApplyOutlined(dot);
+                if (pin != null)
+                {
+                    // A real map pin for "the quest happens here", pivoted at its tip by the sprite
+                    // itself, so the rect's own position is the place being marked.
+                    var icon = go.AddComponent<Image>();
+                    icon.sprite = pin;
+                    icon.color = colour;
+                    icon.raycastTarget = false;
+                    icon.preserveAspect = true;
+
+                    rect.pivot = new Vector2(0.5f, 0f);
+                    rect.sizeDelta = new Vector2(PinSize * 0.72f, PinSize);
+                }
+                else
+                {
+                    // A glyph rather than an Image: it is round, and it takes the same outline the rest
+                    // of the map text uses, which is what makes it readable over both the pale buildings
+                    // and the dark ground.
+                    var dot = go.AddComponent<TextMeshProUGUI>();
+                    // A diamond for "the quest happens here", a dot for "the thing you need lies
+                    // here". Hollow when it is on another floor, so the floor rides on the glyph and
+                    // colour stays free to carry quest status.
+                    dot.text = objective
+                        ? (onThisFloor ? "◆" : "◇")
+                        : (onThisFloor ? "●" : "○");
+
+                    dot.fontSize = objective ? MarkerSize + 3f : MarkerSize;
+                    dot.color = colour;
+                    dot.alignment = TextAlignmentOptions.Center;
+                    dot.enableWordWrapping = false;
+                    dot.raycastTarget = false;
+                    GameStyle.ApplyOutlined(dot);
+                }
 
                 // The name is dropped where it would land on one already placed. The dot always
                 // stays, so nothing is hidden - a cluster reads as several spawns with one name
@@ -729,7 +805,9 @@ namespace QuestTree.UI
                 labelRect.SetParent(rect, worldPositionStays: false);
                 labelRect.anchorMin = labelRect.anchorMax = new Vector2(0.5f, 0.5f);
                 labelRect.pivot = new Vector2(0f, 0.5f);
-                labelRect.anchoredPosition = new Vector2(MarkerSize * 0.6f, 0f);
+                labelRect.anchoredPosition = objective && pin != null
+                    ? new Vector2(PinSize * 0.5f, PinSize * 0.75f)
+                    : new Vector2(MarkerSize * 0.6f, 0f);
                 labelRect.sizeDelta = new Vector2(LabelWidth, LabelHeight);
 
                 var label = labelGo.AddComponent<TextMeshProUGUI>();
@@ -781,11 +859,26 @@ namespace QuestTree.UI
         /// (tarkov.dev, via DynamicMaps) and their licence is only satisfied with attribution.</summary>
         private static void AddCredit(RectTransform parent, DynamicMapsLibrary.MapEntry entry, float x, float y)
         {
-            if (entry == null || string.IsNullOrEmpty(entry.Attribution)) return;
+            if (entry == null) return;
 
             var cursor = y;
-            AddAt(parent, $"<color=#FFFFFF60>Map: {entry.Attribution}, via DynamicMaps</color>",
-                x, ref cursor, 18f, 10);
+
+            if (!string.IsNullOrEmpty(entry.Attribution))
+            {
+                AddAt(parent, $"<color=#FFFFFF60>Map: {entry.Attribution}, via DynamicMaps</color>",
+                    x, ref cursor, 16f, 10);
+            }
+
+            // Both of these are required rather than courteous. The pin is game-icons.net art under
+            // CC BY 3.0, which only permits use with attribution, and the objective locations are
+            // someone else's collected work that this mod fetches rather than owns.
+            var pin = DynamicMapsLibrary.QuestPin != null
+                ? "  ·  Pin icon by Delapouite (game-icons.net), CC BY 3.0"
+                : "";
+
+            AddAt(parent,
+                $"<color=#FFFFFF60>Objective locations: TarkovTracker/tarkovdata{pin}</color>",
+                x, ref cursor, 16f, 10);
         }
 
         /// <summary>Places a line at an explicit x, which AuxLayout's full-width rows cannot do -

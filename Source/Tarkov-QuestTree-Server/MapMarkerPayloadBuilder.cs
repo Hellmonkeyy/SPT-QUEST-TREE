@@ -38,7 +38,8 @@ namespace QuestTreeServer
         TemplateTable templateTable,
         LocationTable locationTable,
         LocaleService localeService,
-        TarkovDevClient tarkovDev) : IOnLoad
+        TarkovDevClient tarkovDev,
+        ObjectiveGpsClient objectiveGps) : IOnLoad
     {
         /// <summary>
         /// Builds the markers while the server is starting rather than when the client first asks.
@@ -54,12 +55,16 @@ namespace QuestTreeServer
             // Awaited here so the network call happens during startup, where nothing is waiting on
             // it, rather than inside the synchronous request handler that serves the client.
             _objectiveLocations = await tarkovDev.GetLocationsAsync(cancellationToken);
+            _objectivePlaces = await objectiveGps.GetPlacesAsync(cancellationToken);
 
             GetPayloadJson();
         }
 
         private IReadOnlyList<TarkovDevClient.ObjectiveLocation> _objectiveLocations =
             new List<TarkovDevClient.ObjectiveLocation>();
+
+        private IReadOnlyDictionary<string, ObjectiveGpsClient.ObjectivePlace> _objectivePlaces =
+            new Dictionary<string, ObjectiveGpsClient.ObjectivePlace>();
 
         /// <summary>
         /// The one condition type that means "go and pick this up on this map".
@@ -164,6 +169,7 @@ namespace QuestTreeServer
                 }
 
                 markers.AddRange(ObjectiveMarkersFor(locationId!));
+                markers.AddRange(GpsMarkersFor(locationId!, localeService.GetLocaleDb()));
 
                 if (markers.Count == 0) continue;
 
@@ -278,6 +284,73 @@ namespace QuestTreeServer
             }
 
             return _questItems.Contains(template);
+        }
+
+        /// <summary>
+        /// Objective markers from tarkovdata, joined on the objective id.
+        ///
+        /// SPT puts an id on every quest condition and this source is keyed by the same ids, so the
+        /// join is exact rather than a name match: 218 of its 232 entries land on a condition in
+        /// this install's quest table, covering 92 quests.
+        ///
+        /// Positions are passed through as percentages. The conversion needs the map image's
+        /// rectangle and rotation, which live on the client with the rest of the map geometry, and
+        /// duplicating that here is how a second source of truth gets born.
+        /// </summary>
+        private List<MapMarkerDto> GpsMarkersFor(string locationId, Dictionary<string, string> locale)
+        {
+            var markers = new List<MapMarkerDto>();
+
+            if (_objectivePlaces.Count == 0) return markers;
+
+            var quests = templateTable.Quests;
+            if (quests == null) return markers;
+
+            foreach (var quest in quests.Values)
+            {
+                if (quest == null) continue;
+                if (!string.Equals(quest.Location, locationId, StringComparison.OrdinalIgnoreCase)) continue;
+
+                var questId = quest.Id.ToString();
+                var questName = QuestPayloadBuilder.ResolveQuestName(quest, questId, locale);
+
+                foreach (var condition in quest.Conditions?.AvailableForFinish ?? [])
+                {
+                    var conditionId = condition?.Id.ToString();
+
+                    if (string.IsNullOrEmpty(conditionId)) continue;
+                    if (!_objectivePlaces.TryGetValue(conditionId!, out var place)) continue;
+
+                    // The source states the map too. Trusting the quest's own location over it would
+                    // put a pin on the wrong map wherever the two disagree.
+                    if (!string.Equals(place.Map, locationId, StringComparison.OrdinalIgnoreCase)) continue;
+
+                    markers.Add(new MapMarkerDto
+                    {
+                        ItemName = DescribeObjective(condition!, questName, locale),
+                        Quests = new List<string> { questName },
+                        QuestIds = new List<string> { questId },
+                        Kind = ObjectiveKind,
+                        LeftPercent = place.LeftPercent,
+                        TopPercent = place.TopPercent,
+                        Floor = place.Floor ?? ""
+                    });
+                }
+            }
+
+            return markers;
+        }
+
+        /// <summary>What the pin says. The objective's own localized text where there is one, since
+        /// it reads as an instruction rather than a label, falling back to the quest's name.</summary>
+        private static string DescribeObjective(
+            QuestCondition condition, string questName, Dictionary<string, string> locale)
+        {
+            var id = condition.Id.ToString();
+
+            return locale.TryGetValue(id, out var text) && !string.IsNullOrWhiteSpace(text)
+                ? text
+                : questName;
         }
 
         private List<MapMarkerDto> CollectMarkers(

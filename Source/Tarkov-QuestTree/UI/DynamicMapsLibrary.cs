@@ -187,6 +187,70 @@ namespace QuestTree.UI
                 m.InternalNames.Any(n => string.Equals(n, locationKey, StringComparison.OrdinalIgnoreCase)));
         }
 
+        /// <summary>Where DynamicMaps keeps its marker icons.</summary>
+        private const string MarkersFolder = "Markers";
+
+        private static Sprite _questPin;
+        private static bool _questPinFailed;
+
+        /// <summary>
+        /// The teardrop map pin, from DynamicMaps' own marker set.
+        ///
+        /// A PNG rather than anything bundled, read in place like everything else here. It is the
+        /// game-icons.net "position marker" by Delapouite under CC BY 3.0, which is why the view
+        /// credits it. Null when DynamicMaps is not installed, and the view falls back to a glyph.
+        ///
+        /// Pivoted at the bottom centre so the pin's TIP marks the spot. A pin pivoted in the middle
+        /// points at nothing in particular.
+        /// </summary>
+        public static Sprite QuestPin
+        {
+            get
+            {
+                if (_questPin != null || _questPinFailed) return _questPin;
+                _questPinFailed = true;
+
+                try
+                {
+                    var folder = ModFolder;
+                    if (string.IsNullOrEmpty(folder)) return null;
+
+                    var path = Path.Combine(Path.Combine(folder, MarkersFolder), "quest.png");
+                    if (!File.Exists(path)) return null;
+
+                    var texture = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                    if (!texture.LoadImage(File.ReadAllBytes(path))) return null;
+
+                    texture.filterMode = FilterMode.Bilinear;
+
+                    _questPin = Sprite.Create(
+                        texture, new Rect(0f, 0f, texture.width, texture.height), new Vector2(0.5f, 0f));
+
+                    _questPinFailed = false;
+                    return _questPin;
+                }
+                catch (Exception ex)
+                {
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: could not load the quest pin icon ({ex.Message}) - using a glyph.");
+                    return null;
+                }
+            }
+        }
+
+        /// <summary>DynamicMaps' own folder, resolved from ours rather than hardcoded so it follows
+        /// a non-standard install.</summary>
+        private static string ModFolder
+        {
+            get
+            {
+                var plugins = Path.GetDirectoryName(
+                    Path.GetDirectoryName(typeof(DynamicMapsLibrary).Assembly.Location));
+
+                return string.IsNullOrEmpty(plugins) ? null : Path.Combine(plugins, MapsModFolder);
+            }
+        }
+
         private static List<MapEntry> Discover()
         {
             var maps = new List<MapEntry>();
