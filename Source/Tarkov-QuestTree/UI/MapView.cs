@@ -351,8 +351,8 @@ namespace QuestTree.UI
             {
                 BuildMapViewport(parent, entry, layer, sprite, left, y, mapWidth, graph, shownIds, onRepaint);
                 mapBottom = y + MapViewportHeight;
-                AddCredit(parent, entry, left, mapBottom + 4f);
-                mapBottom += 22f;
+                AddCredit(parent, entry, MarkerSetFor(entry), left, mapBottom + 4f);
+                mapBottom += 38f;
                 listLeft = left + mapWidth + AuxLayout.Padding;
             }
             else
@@ -1199,11 +1199,17 @@ namespace QuestTree.UI
 
         /// <summary>The map's own author credit, shown because the images are someone else's work
         /// (tarkov.dev, via DynamicMaps) and their licence is only satisfied with attribution.</summary>
-        private static void AddCredit(RectTransform parent, DynamicMapsLibrary.MapEntry entry, float x, float y)
+        private static void AddCredit(
+            RectTransform parent, DynamicMapsLibrary.MapEntry entry, MapMarkerSetDto set, float x, float y)
         {
             if (entry == null) return;
 
             var cursor = y;
+
+            // How much of this map the harvest has located. Said out loud because the alternative
+            // is pins silently missing, and the fix - one raid here - is not something anyone
+            // would guess.
+            AddAt(parent, $"<color=#FFFFFF60>{CoverageLine(set)}</color>", x, ref cursor, 16f, 10);
 
             if (!string.IsNullOrEmpty(entry.Attribution))
             {
@@ -1221,6 +1227,19 @@ namespace QuestTree.UI
             AddAt(parent,
                 $"<color=#FFFFFF60>Objective locations: TarkovTracker/tarkovdata{pin}</color>",
                 x, ref cursor, 16f, 10);
+        }
+
+        private static string CoverageLine(MapMarkerSetDto set)
+        {
+            if (set == null || string.IsNullOrEmpty(set.HarvestedAt))
+                return "Zones: not harvested yet - one raid on this map pins every objective on it";
+
+            if (set.ZonesWanted == 0)
+                return $"Zones: none needed on this map (harvested {set.HarvestedAt})";
+
+            return set.ZonesKnown < set.ZonesWanted
+                ? $"Zones located: {set.ZonesKnown}/{set.ZonesWanted} - raid this map again to find the rest"
+                : $"Zones located: {set.ZonesKnown}/{set.ZonesWanted} (harvested {set.HarvestedAt})";
         }
 
         /// <summary>

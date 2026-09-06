@@ -110,6 +110,11 @@ namespace QuestTree.QuestGraph
 
         [JsonProperty("count")]
         public int Count { get; set; }
+
+        /// <summary>The zone ids this objective happens in; empty when it has no place. Resolved
+        /// against harvested zones server-side - here it is only for saying which zone.</summary>
+        [JsonProperty("zoneIds")]
+        public List<string> ZoneIds { get; set; }
     }
 
     internal sealed class RewardDto
@@ -299,7 +304,7 @@ namespace QuestTree.QuestGraph
     /// can reference.</summary>
     internal sealed class MapMarkerPayloadDto
     {
-        public const int SupportedSchemaVersion = 1;
+        public const int SupportedSchemaVersion = 2;
 
         [JsonProperty("schemaVersion")]
         public int SchemaVersion { get; set; }
@@ -320,6 +325,18 @@ namespace QuestTree.QuestGraph
 
         [JsonProperty("markers")]
         public List<MapMarkerDto> Markers { get; set; }
+
+        /// <summary>Distinct zone ids this map's quests reference, and how many a harvest has
+        /// placed. What the "raid this map once" line is built from.</summary>
+        [JsonProperty("zonesWanted")]
+        public int ZonesWanted { get; set; }
+
+        [JsonProperty("zonesKnown")]
+        public int ZonesKnown { get; set; }
+
+        /// <summary>When this map was last harvested (UTC), or empty if never.</summary>
+        [JsonProperty("harvestedAt")]
+        public string HarvestedAt { get; set; }
     }
 
     internal sealed class MapMarkerDto

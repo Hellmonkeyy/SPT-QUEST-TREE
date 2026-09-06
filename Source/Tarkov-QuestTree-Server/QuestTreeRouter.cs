@@ -28,10 +28,14 @@ namespace QuestTreeServer
         public QuestTreeRouter(
             JsonUtil jsonUtil, ISptLogger<QuestTreeRouter> logger, QuestPayloadBuilder payloadBuilder,
             KappaPayloadBuilder kappaBuilder, ProfilePayloadBuilder profileBuilder,
-            MapMarkerPayloadBuilder markerBuilder)
-            : base(jsonUtil, BuildRoutes(logger, payloadBuilder, kappaBuilder, profileBuilder, markerBuilder))
+            MapMarkerPayloadBuilder markerBuilder, ZoneStore zoneStore)
+            : base(jsonUtil, BuildRoutes(logger, payloadBuilder, kappaBuilder, profileBuilder, markerBuilder, zoneStore))
         {
         }
+
+        /// <summary>A sanity ceiling on a harvest, not a real limit: Customs has a few hundred
+        /// triggers. Anything past this is not a raid, it is a bug or a prank.</summary>
+        private const int MaxHarvestEntries = 20_000;
 
         private static readonly JsonSerializerOptions FallbackOptions = new()
         {
@@ -41,9 +45,19 @@ namespace QuestTreeServer
         private static IEnumerable<RouteAction> BuildRoutes(
             ISptLogger<QuestTreeRouter> logger, QuestPayloadBuilder payloadBuilder,
             KappaPayloadBuilder kappaBuilder, ProfilePayloadBuilder profileBuilder,
-            MapMarkerPayloadBuilder markerBuilder) =>
+            MapMarkerPayloadBuilder markerBuilder, ZoneStore zoneStore) =>
             new List<RouteAction>
             {
+                // The one route with a body: the client's in-raid zone harvest (see ZoneHarvester
+                // in the client half). SPT deserializes the body into ZoneHarvestRequest for us.
+                // Rebuilding the markers here is deliberate - the client posts fire-and-forget,
+                // so this is the one request nobody is waiting on.
+                new RouteAction<ZoneHarvestRequest>(
+                    "/questtree/zones",
+                    (url, request, sessionId, output, cancellationToken) =>
+                        Guarded(logger, url, () => AcceptHarvest(logger, request, zoneStore, markerBuilder),
+                            () => new ZoneHarvestResponse { Ok = false, Message = "failed" })),
+
                 new RouteAction<EmptyRequestData>(
                     "/questtree/quests",
                     (url, info, sessionId, output, cancellationToken) =>
@@ -71,6 +85,36 @@ namespace QuestTreeServer
                         Guarded(logger, url, markerBuilder.GetPayloadJson,
                             () => new MapMarkerPayloadDto { Version = ModInfo.Version }))
             };
+
+        private static string AcceptHarvest(
+            ISptLogger<QuestTreeRouter> logger, ZoneHarvestRequest? request, ZoneStore zoneStore,
+            MapMarkerPayloadBuilder markerBuilder)
+        {
+            static string Reply(ZoneHarvestResponse r) => JsonSerializer.Serialize(r, FallbackOptions);
+
+            if (request == null)
+                return Reply(new ZoneHarvestResponse { Ok = false, Message = "no body" });
+
+            if (!ZoneStore.IsValidMapName(request.Map))
+                return Reply(new ZoneHarvestResponse { Ok = false, Message = "bad map name" });
+
+            var count = (request.Triggers?.Count ?? 0) + (request.QuestItems?.Count ?? 0);
+            if (count == 0)
+                return Reply(new ZoneHarvestResponse { Ok = false, Message = "nothing harvested" });
+            if (count > MaxHarvestEntries)
+                return Reply(new ZoneHarvestResponse { Ok = false, Message = "too many entries" });
+
+            var saved = zoneStore.Save(request);
+            markerBuilder.Rebuild();
+
+            return Reply(new ZoneHarvestResponse
+            {
+                Ok = true,
+                Zones = saved.Triggers.Count,
+                QuestItems = saved.QuestItems.Count,
+                Message = "saved"
+            });
+        }
 
         /// <summary>
         /// The builders guard their own loops, so a throw reaching here is one nobody predicted -

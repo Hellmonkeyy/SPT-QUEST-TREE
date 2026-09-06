@@ -8,7 +8,7 @@
     <LangVersion>latest</LangVersion>
     <!-- MSBuild cannot read the C# constant, so this is the one copy that has to be updated by
          hand: keep it equal to ModInfo.Version in ModInfo.cs, which everything else derives from. -->
-    <AssemblyVersion>1.2.0</AssemblyVersion>
+    <AssemblyVersion>1.3.0</AssemblyVersion>
     <FileVersion>$(AssemblyVersion)</FileVersion>
     <Version>$(AssemblyVersion)</Version>
     <Deterministic>true</Deterministic>
@@ -91,6 +91,11 @@
          button label back to invisible) lives here, not CoreModule. -->
     <Reference Include="UnityEngine.AnimationModule">
       <HintPath>$(ManagedPath)\UnityEngine.AnimationModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <!-- Collider, for the zone harvester's trigger extents. -->
+    <Reference Include="UnityEngine.PhysicsModule">
+      <HintPath>$(ManagedPath)\UnityEngine.PhysicsModule.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <!-- UnityEngine.Input (Escape-to-close in QuestTreePanel.Update) lives here, not CoreModule. -->

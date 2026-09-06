@@ -165,6 +165,15 @@ namespace QuestTree.QuestGraph
         private static MapMarkerPayloadDto _markers;
         private static bool _markersAttempted;
 
+        /// <summary>Drops the cached markers so the next Maps tab build re-fetches. Called by the
+        /// zone harvester once the server has accepted a raid's zones and rebuilt its markers -
+        /// the one event that changes them while the server is up.</summary>
+        public static void InvalidateMapMarkers()
+        {
+            _markers = null;
+            _markersAttempted = false;
+        }
+
         /// <summary>
         /// Quest-item spawn markers, keyed by map.
         ///

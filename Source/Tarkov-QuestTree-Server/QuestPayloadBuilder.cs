@@ -324,7 +324,8 @@ namespace QuestTreeServer
                     TargetItems = IsItemCondition(condition.ConditionType)
                         ? TargetIds(condition.Target).ToList()
                         : new List<string>(),
-                    Count = (int)(condition.Value ?? 0d)
+                    Count = (int)(condition.Value ?? 0d),
+                    ZoneIds = ZoneIdsOf(condition).Distinct(StringComparer.OrdinalIgnoreCase).ToList()
                 });
             }
 
@@ -395,6 +396,38 @@ namespace QuestTreeServer
             }
 
             if (target.Item != null) yield return target.Item;
+        }
+
+        /// <summary>
+        /// Every zone id a condition can point at. The shape follows DynamicMaps' own condition
+        /// walk (QuestUtils.GetPositionsForCondition), which is the one known to line up with what
+        /// the scene contains: the condition's own zoneId (LeaveItemAtLocation, PlaceBeacon), and
+        /// inside a CounterCreator each sub-condition's VisitPlace target or zoneIds list (InZone,
+        /// and the zoned Kills/Shots/LaunchFlare counters).
+        /// </summary>
+        internal static IEnumerable<string> ZoneIdsOf(QuestCondition condition)
+        {
+            if (!string.IsNullOrWhiteSpace(condition.ZoneId)) yield return condition.ZoneId!;
+
+            var counters = condition.Counter?.Conditions;
+            if (counters == null) yield break;
+
+            foreach (var sub in counters)
+            {
+                if (sub == null) continue;
+
+                if (string.Equals(sub.ConditionType, "VisitPlace", StringComparison.OrdinalIgnoreCase))
+                {
+                    foreach (var id in TargetIds(sub.Target))
+                        if (!string.IsNullOrWhiteSpace(id)) yield return id;
+                }
+
+                // The JSON field is "zoneIds"; SPT's model names the property Zones.
+                if (sub.Zones == null) continue;
+
+                foreach (var id in sub.Zones)
+                    if (!string.IsNullOrWhiteSpace(id)) yield return id;
+            }
         }
     }
 }

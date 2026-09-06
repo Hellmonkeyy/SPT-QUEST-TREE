@@ -37,6 +37,10 @@ namespace QuestTree
         public static ConfigEntry<bool> MirrorMapArtwork { get; private set; }
         public static ConfigEntry<int> MaxVisibleNodes { get; private set; }
 
+        /// <summary>Whether a raid reports the map's quest zones to the server half. The off
+        /// switch for the one thing this mod does during a raid.</summary>
+        public static ConfigEntry<bool> HarvestZones { get; private set; }
+
         /// <summary>Remembered rather than reset each time, because it is a working preference -
         /// someone who wants the graph wide wants it wide every time they open the tree.</summary>
         public static ConfigEntry<bool> DetailPanelCollapsed { get; private set; }
@@ -90,6 +94,13 @@ namespace QuestTree
                 "Draw smaller quest boxes packed more tightly together. Fits far more of the tree " +
                 "on screen at once, at the cost of the objective line on each box. Off restores " +
                 "the original, roomier layout exactly.");
+
+            HarvestZones = config.Bind(
+                "Behaviour", "Harvest quest zones in raid", true,
+                "A few seconds into a raid, read where every quest zone and quest item on the map " +
+                "is and send it to the Quest Tracker server mod, which uses it to pin objectives " +
+                "on the Maps tab. One raid per map is enough. Off means the map keeps only what " +
+                "it already has.");
 
             MaxVisibleNodes = config.Bind(
                 "Performance", "Max visible quests", 600,

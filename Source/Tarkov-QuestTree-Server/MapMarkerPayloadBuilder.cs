@@ -39,7 +39,8 @@ namespace QuestTreeServer
         LocationTable locationTable,
         LocaleService localeService,
         TarkovDevClient tarkovDev,
-        ObjectiveGpsClient objectiveGps) : IOnLoad
+        ObjectiveGpsClient objectiveGps,
+        ZoneStore zoneStore) : IOnLoad
     {
         /// <summary>
         /// Builds the markers while the server is starting rather than when the client first asks.
@@ -132,6 +133,14 @@ namespace QuestTreeServer
         private readonly object _buildLock = new();
         private string? _cachedJson;
 
+        /// <summary>Builds again now. Called by the zones route after a harvest lands, so the cost
+        /// is paid on the client's fire-and-forget POST and never on a GET.</summary>
+        public void Rebuild()
+        {
+            lock (_buildLock) _cachedJson = null;
+            GetPayloadJson();
+        }
+
         /// <summary>Cached like the quest list. The loot tables do not change while the server is
         /// up, and reading every map's forced spawns off disk is not work to repeat per request.</summary>
         public string GetPayloadJson()
@@ -190,15 +199,26 @@ namespace QuestTreeServer
                     continue;
 
                 var markers = new List<MapMarkerDto>();
+                wantedByLocation.TryGetValue(locationId, out var wanted);
+
+                // Harvested first: positions read from the loaded scene beat every other source,
+                // so a quest or item they cover is left out of the ones below.
+                var zones = zoneStore.TryGet(internalName!);
+                var harvested = HarvestedMarkersFor(locationId!, zones, questsByLocation, wanted, locale);
+                markers.AddRange(harvested.Markers);
 
                 // Item spawns need the map's loot table, so only maps with wanted items pay for
                 // reading one. The objective pins below do not, and must not be skipped with it:
                 // Factory and Labs have no find-item quests and used to lose every pin this way.
-                if (wantedByLocation.TryGetValue(locationId, out var wanted) && wanted.Count > 0)
+                var remainingWanted = wanted?
+                    .Where(kv => !harvested.CoveredTemplates.Contains(kv.Key))
+                    .ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.OrdinalIgnoreCase);
+
+                if (remainingWanted != null && remainingWanted.Count > 0)
                 {
                     try
                     {
-                        markers.AddRange(CollectMarkers(location!, wanted));
+                        markers.AddRange(CollectMarkers(location!, remainingWanted));
                     }
                     catch (Exception ex)
                     {
@@ -207,19 +227,130 @@ namespace QuestTreeServer
                     }
                 }
 
-                markers.AddRange(ObjectiveMarkersFor(objectivesByMap[locationId!]));
-                markers.AddRange(GpsMarkersFor(locationId!, questsByLocation, locale));
+                markers.AddRange(ObjectiveMarkersFor(
+                    objectivesByMap[locationId!].Where(o => !harvested.CoveredQuestIds.Contains(o.QuestId))));
+                markers.AddRange(GpsMarkersFor(locationId!, questsByLocation, locale, harvested.CoveredQuestIds));
 
-                if (markers.Count == 0) continue;
+                if (markers.Count == 0 && zones == null) continue;
 
                 payload.Maps.Add(new MapMarkerSetDto
                 {
                     LocationKey = internalName!,
-                    Markers = markers
+                    Markers = markers,
+                    ZonesWanted = harvested.ZonesWanted.Count,
+                    ZonesKnown = harvested.ZonesKnown.Count,
+                    HarvestedAt = zones?.HarvestedAt ?? ""
                 });
             }
 
             return payload;
+        }
+
+        /// <summary>What one map's harvest yielded, and what it therefore supersedes.</summary>
+        private sealed class HarvestResult
+        {
+            public readonly List<MapMarkerDto> Markers = new();
+            public readonly HashSet<string> CoveredQuestIds = new(StringComparer.OrdinalIgnoreCase);
+            public readonly HashSet<string> CoveredTemplates = new(StringComparer.OrdinalIgnoreCase);
+            public readonly HashSet<string> ZonesWanted = new(StringComparer.OrdinalIgnoreCase);
+            public readonly HashSet<string> ZonesKnown = new(StringComparer.OrdinalIgnoreCase);
+        }
+
+        /// <summary>
+        /// Markers from the zones a raid harvested: every zone-shaped objective of every quest on
+        /// this map, at the position the scene gave it, plus the actual spots of the quest items
+        /// the map's find-item quests want. World coordinates, which the client draws as they are.
+        ///
+        /// ZonesWanted is counted whether or not a harvest exists, so the client can say how much
+        /// of the map is still unlocated.
+        /// </summary>
+        private HarvestResult HarvestedMarkersFor(
+            string locationId, ZoneFile? zones, Dictionary<string, List<Quest>> questsByLocation,
+            Dictionary<string, WantedBy>? wanted, Dictionary<string, string> locale)
+        {
+            var result = new HarvestResult();
+
+            if (!questsByLocation.TryGetValue(locationId, out var quests)) return result;
+
+            var triggersById = zones?.Triggers
+                .Where(t => !string.IsNullOrWhiteSpace(t.Id))
+                .ToLookup(t => t.Id, StringComparer.OrdinalIgnoreCase);
+
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var quest in quests)
+            {
+                var questId = quest.Id.ToString();
+                var questName = QuestPayloadBuilder.ResolveQuestName(quest, questId, locale);
+
+                foreach (var condition in quest.Conditions?.AvailableForFinish ?? [])
+                {
+                    if (condition == null) continue;
+
+                    foreach (var zoneId in QuestPayloadBuilder.ZoneIdsOf(condition))
+                    {
+                        result.ZonesWanted.Add(zoneId);
+
+                        if (triggersById == null || !triggersById.Contains(zoneId)) continue;
+                        result.ZonesKnown.Add(zoneId);
+
+                        foreach (var trigger in triggersById[zoneId])
+                        {
+                            // A zone made of several volumes is one place per volume, but two
+                            // volumes a metre apart are one pin.
+                            if (!seen.Add($"{questId}|{trigger.X:F0}|{trigger.Z:F0}")) continue;
+
+                            result.Markers.Add(new MapMarkerDto
+                            {
+                                ItemName = DescribeObjective(condition, questName, locale),
+                                Quests = new List<string> { questName },
+                                QuestIds = new List<string> { questId },
+                                Kind = ObjectiveKind,
+                                X = trigger.X,
+                                Y = trigger.Y,
+                                Z = trigger.Z
+                            });
+
+                            result.CoveredQuestIds.Add(questId);
+                        }
+                    }
+                }
+            }
+
+            // Quest items: the harvest holds where they actually were, which beats the loot
+            // table's list of where they might be. Grouped by template the way CollectMarkers
+            // groups them, so several quests wanting one item share its pins.
+            if (zones != null && wanted != null && zones.QuestItems.Count > 0)
+            {
+                var itemsByTemplate = zones.QuestItems
+                    .Where(i => !string.IsNullOrWhiteSpace(i.TemplateId))
+                    .ToLookup(i => i.TemplateId, StringComparer.OrdinalIgnoreCase);
+
+                foreach (var (template, wanting) in wanted)
+                {
+                    if (!itemsByTemplate.Contains(template)) continue;
+
+                    var places = itemsByTemplate[template].ToList();
+                    result.CoveredTemplates.Add(template);
+
+                    foreach (var place in places)
+                    {
+                        result.Markers.Add(new MapMarkerDto
+                        {
+                            ItemName = ResolveItemName(template, locale),
+                            Quests = wanting.Names,
+                            QuestIds = wanting.Ids,
+                            Kind = ItemKind,
+                            Alternatives = places.Count,
+                            X = place.X,
+                            Y = place.Y,
+                            Z = place.Z
+                        });
+                    }
+                }
+            }
+
+            return result;
         }
 
         /// <summary>Location id -> the quests set there, for the per-map passes.</summary>
@@ -358,7 +489,8 @@ namespace QuestTreeServer
         /// duplicating that here is how a second source of truth gets born.
         /// </summary>
         private List<MapMarkerDto> GpsMarkersFor(
-            string locationId, Dictionary<string, List<Quest>> questsByLocation, Dictionary<string, string> locale)
+            string locationId, Dictionary<string, List<Quest>> questsByLocation, Dictionary<string, string> locale,
+            HashSet<string> skipQuestIds)
         {
             var markers = new List<MapMarkerDto>();
 
@@ -368,6 +500,9 @@ namespace QuestTreeServer
             foreach (var quest in quests)
             {
                 var questId = quest.Id.ToString();
+
+                // A quest the harvest placed keeps the harvest's pins only.
+                if (skipQuestIds.Contains(questId)) continue;
                 var questName = QuestPayloadBuilder.ResolveQuestName(quest, questId, locale);
 
                 foreach (var condition in quest.Conditions?.AvailableForFinish ?? [])

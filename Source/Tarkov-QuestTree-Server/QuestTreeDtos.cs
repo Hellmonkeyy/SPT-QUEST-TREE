@@ -102,6 +102,11 @@ namespace QuestTreeServer
 
         /// <summary>How many of the target item the objective needs.</summary>
         public int Count { get; set; }
+
+        /// <summary>The zone ids this objective happens in - the condition's own zoneId, or the
+        /// VisitPlace/InZone targets inside a CounterCreator. Empty for objectives with no place
+        /// (hand-ins, plain kill counts, skills). The map resolves these against harvested zones.</summary>
+        public List<string> ZoneIds { get; set; } = new();
     }
 
     public sealed class RewardDto
@@ -260,7 +265,8 @@ namespace QuestTreeServer
     /// positions come from the loot table rather than from the quests.</summary>
     public class MapMarkerPayloadDto
     {
-        public int SchemaVersion { get; set; } = 1;
+        /// <summary>2: per-map zone coverage fields on MapMarkerSetDto (1.3.0).</summary>
+        public int SchemaVersion { get; set; } = 2;
 
         public string Version { get; set; } = "";
         public List<MapMarkerSetDto> Maps { get; set; } = new();
@@ -272,6 +278,16 @@ namespace QuestTreeServer
         public string LocationKey { get; set; } = "";
 
         public List<MapMarkerDto> Markers { get; set; } = new();
+
+        /// <summary>How many distinct zone ids this map's quests reference, and how many of those a
+        /// harvest has placed. Lets the view say "raid this map once" instead of silently missing
+        /// pins. Both zero when no quest here has a zone-shaped objective.</summary>
+        public int ZonesWanted { get; set; }
+
+        public int ZonesKnown { get; set; }
+
+        /// <summary>When this map was last harvested (UTC), or empty if never.</summary>
+        public string HarvestedAt { get; set; } = "";
     }
 
     public class MapMarkerDto
