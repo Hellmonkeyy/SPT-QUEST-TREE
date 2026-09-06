@@ -122,11 +122,18 @@ namespace QuestTree
             MapArtworkRotation.SettingChanged += Raise;
             MirrorMapArtwork.SettingChanged += Raise;
             ShowMapGuides.SettingChanged += Raise;
+
+            // Last, so a throw anywhere above leaves this false. Testing the first entry instead
+            // reported ready after a partial Init, with every later entry still null - the exact
+            // case this exists to catch.
+            _ready = true;
         }
 
-        /// <summary>True once Init has run. Guards the panel against reading a null entry if the
-        /// plugin ever fails to initialise.</summary>
-        public static bool Ready => HideUnobtainable != null;
+        private static bool _ready;
+
+        /// <summary>True once Init has run to completion. Guards the panel against reading a null
+        /// entry if the plugin ever fails to initialise.</summary>
+        public static bool Ready => _ready;
 
         public static void NotifyChanged() => Changed?.Invoke();
 

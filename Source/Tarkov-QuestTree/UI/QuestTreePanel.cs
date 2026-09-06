@@ -80,13 +80,27 @@ namespace QuestTree.UI
         private string _tabBeforeSettings = AllTradersId;
         private string _selectedTraderId = AllTradersId;
         private bool _builtShell;
+
+        /// <summary>Set if BuildShell threw. The shell is then half-built, and Destroy is
+        /// end-of-frame so it cannot be cleanly torn down and retried in the same click - the
+        /// panel refuses to open instead of stacking a second shell on the first.</summary>
+        private bool _shellBroken;
         private float _tabCursorX;
 
         public void OnAwake()
         {
-            if (_builtShell) return;
-            _builtShell = true;
-            BuildShell();
+            if (_builtShell || _shellBroken) return;
+
+            try
+            {
+                BuildShell();
+                _builtShell = true; // only once the whole shell exists
+            }
+            catch
+            {
+                _shellBroken = true;
+                throw;
+            }
         }
 
         private void HandleSettingsChanged()
@@ -115,6 +129,13 @@ namespace QuestTree.UI
         public void Show(QuestController questController, IEftSession session)
         {
             OnAwake();
+
+            if (_shellBroken)
+            {
+                Plugin.LogSource?.LogWarning("QuestTree: the panel failed to build earlier and will not open - see the error above.");
+                return;
+            }
+
             ShowGameObject();
             GameStyle.PlaySound(EUISoundType.MenuInspectorWindowOpen);
 
@@ -144,12 +165,17 @@ namespace QuestTree.UI
             // this is not strictly "a new profile", and the refetch below fires in both cases.
             if (!ReferenceEquals(_questController, questController))
             {
+                // The new controller is adopted by RebuildGraphDeferred once the build has
+                // actually succeeded, not here. Hiding the panel deactivates its GameObject, which
+                // kills the coroutine for good - adopted up front, a panel hidden mid-load came
+                // back "already built" for this controller and sat on "Loading quests..." forever.
+                // Left unadopted, the next Show simply starts the build again.
+                //
+                // A second Show cannot race the pending build: the taskbar toggle only calls Show
+                // on a hidden panel, and hiding is what kills the build.
                 if (_questController != null)
                     _questController.OnConditionalStatusChanged -= HandleStatusChanged;
-
-                _questController = questController;
-                if (_questController != null)
-                    _questController.OnConditionalStatusChanged += HandleStatusChanged;
+                _questController = null;
 
                 // Anything fetched for the previous controller has to go. Those caches are static
                 // and were outliving the game session: connecting once to a server without the
@@ -168,19 +194,28 @@ namespace QuestTree.UI
                 // graph means fetching several MB, parsing it, and laying out thousands of quests,
                 // all on the UI thread - done inline it reads as the game having frozen.
                 ShowLoading(true);
-                StartCoroutine(RebuildGraphDeferred(session));
+                StartCoroutine(RebuildGraphDeferred(questController, session));
             }
         }
 
         /// <summary>Waits for the loading notice to render, then does the expensive build. Unity
         /// paints between frames, so a single yield is enough for the notice to be on screen before
         /// the thread is tied up.</summary>
-        private System.Collections.IEnumerator RebuildGraphDeferred(IEftSession session)
+        private System.Collections.IEnumerator RebuildGraphDeferred(
+            QuestController questController, IEftSession session)
         {
             yield return null;
             yield return null;
 
-            TryRebuildGraph(session);
+            // A failed build leaves the loading surface up: it is where the error message was just
+            // written, and hiding it showed an empty tree with no explanation.
+            if (!TryRebuildGraph(questController, session)) yield break;
+
+            // Adopted only now - see Show for why.
+            _questController = questController;
+            if (_questController != null)
+                _questController.OnConditionalStatusChanged += HandleStatusChanged;
+
             ShowLoading(false);
 
             // Only after the tree is actually up - showing the controls hint over a loading screen
@@ -191,17 +226,19 @@ namespace QuestTree.UI
         /// <summary>Separate from the coroutine because C# forbids yielding inside a try/catch that
         /// has a catch clause - and this call must not be allowed to throw into the taskbar button
         /// handler that started it.</summary>
-        private void TryRebuildGraph(IEftSession session)
+        private bool TryRebuildGraph(QuestController questController, IEftSession session)
         {
             try
             {
-                RebuildGraph(session);
+                RebuildGraph(questController, session);
+                return true;
             }
             catch (Exception ex)
             {
                 Plugin.LogSource?.LogError($"QuestTree: failed to build the quest tree: {ex}");
                 if (_loadingLabel != null)
                     _loadingLabel.text = "Could not build the quest tree - see the BepInEx log.";
+                return false;
             }
         }
 
@@ -564,9 +601,9 @@ namespace QuestTree.UI
         /// <summary>Rebuilds the graph DATA (called only when the QuestController instance
         /// changes) and the tab strip that depends on it, then renders whichever tab is
         /// selected - defaulting back to "All" for a fresh QuestController.</summary>
-        private void RebuildGraph(IEftSession session)
+        private void RebuildGraph(QuestController questController, IEftSession session)
         {
-            _graph.Build(_questController, session);
+            _graph.Build(questController, session);
             _selectedTraderId = AllTradersId;
             BuildTabs();
             RenderSelectedTab();

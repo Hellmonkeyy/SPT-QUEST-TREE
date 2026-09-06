@@ -57,8 +57,17 @@ namespace QuestTree.Patches
         [PatchPostfix]
         private static void Postfix(MenuTaskBar __instance)
         {
-            Plugin.LogSource?.LogInfo("QuestTree: MenuTaskBar.Awake fired, scheduling Quest Tracker button...");
-            __instance.StartCoroutine(AddQuestTreeButtonDeferred(__instance));
+            // Runs inside the game's own Awake. StartCoroutine throws on a disabled behaviour, and
+            // anything thrown here lands in MenuTaskBar, not in this mod - so it is caught here.
+            try
+            {
+                Plugin.LogSource?.LogInfo("QuestTree: MenuTaskBar.Awake fired, scheduling Quest Tracker button...");
+                __instance.StartCoroutine(AddQuestTreeButtonDeferred(__instance));
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogError($"QuestTree: could not schedule the Quest Tracker button: {ex}");
+            }
         }
 
         private static IEnumerator AddQuestTreeButtonDeferred(MenuTaskBar menuTaskBar)
@@ -179,14 +188,25 @@ namespace QuestTree.Patches
                     {
                         if (!isOn) return;
 
-                        if (panel.gameObject.activeSelf) panel.HideGameObject();
-                        else ShowPanel(panel);
-
-                        // Momentary trigger, not a real screen-select toggle like the vanilla
-                        // taskbar buttons - there is no persistent "Quest Tracker screen" for
-                        // MenuTaskBar to track. ToggleSilent rather than isOn, so resetting the
-                        // button cannot re-enter this handler.
-                        toggle.ToggleSilent(false);
+                        try
+                        {
+                            if (panel.gameObject.activeSelf) panel.HideGameObject();
+                            else ShowPanel(panel);
+                        }
+                        catch (Exception ex)
+                        {
+                            Plugin.LogSource?.LogError($"QuestTree: the Quest Tracker button failed: {ex}");
+                        }
+                        finally
+                        {
+                            // Momentary trigger, not a real screen-select toggle like the vanilla
+                            // taskbar buttons - there is no persistent "Quest Tracker screen" for
+                            // MenuTaskBar to track. ToggleSilent rather than isOn, so resetting the
+                            // button cannot re-enter this handler. In a finally because if the
+                            // reset is skipped the toggle stays latched on, and every later click
+                            // stops at the isOn check above - a dead button with no log line.
+                            toggle.ToggleSilent(false);
+                        }
                     });
                 }
                 else

@@ -33,6 +33,13 @@ namespace QuestTree.UI
     /// </summary>
     internal static class MapView
     {
+        // The map reads settings on every build, so the Ready guard the other views carry lives
+        // here once instead of at each read. Each fallback is the entry's own default.
+        private static bool StartedOnly => ModSettings.Ready && ModSettings.MarkStartedOnly.Value;
+        private static bool ShowGuides => ModSettings.Ready && ModSettings.ShowMapGuides.Value;
+        private static bool MirrorArtwork => ModSettings.Ready && ModSettings.MirrorMapArtwork.Value;
+        private static int ArtworkRotation => ModSettings.Ready ? ModSettings.MapArtworkRotation.Value : 0;
+
         private const string AnyLocation = "any";
         private const float PickerWidth = 300f;
         private const float FloorPickerWidth = 190f;
@@ -173,8 +180,8 @@ namespace QuestTree.UI
                 AuxLayout.Padding + PickerWidth + 10f + FloorPickerWidth + 10f,
                 AuxLayout.Padding,
                 "Accepted quests only",
-                ModSettings.MarkStartedOnly.Value,
-                value => ModSettings.MarkStartedOnly.Value = value);
+                StartedOnly,
+                value => { if (ModSettings.Ready) ModSettings.MarkStartedOnly.Value = value; });
 
             var labels = ordered.Select(LabelFor).ToList();
             var selectedIndex = ordered.FindIndex(m => m.Key == _selectedLocationKey);
@@ -321,7 +328,7 @@ namespace QuestTree.UI
             // Computed before the map is built because a marker click has to land on a quest the
             // list is actually showing - see ClickTargetFor.
             var visible = quests
-                .Where(q => !ModSettings.MarkStartedOnly.Value || q.Status == ENodeStatus.Active)
+                .Where(q => !StartedOnly || q.Status == ENodeStatus.Active)
                 .OrderBy(q => StatusRank(q.Status))
                 .ThenBy(q => q.TraderName, StringComparer.OrdinalIgnoreCase)
                 .ThenBy(q => q.Name, StringComparer.OrdinalIgnoreCase)
@@ -541,7 +548,7 @@ namespace QuestTree.UI
 
             PlaceArtwork(image, entry, layer, bounds);
 
-            if (ModSettings.ShowMapGuides.Value) BuildGuides(space, layer);
+            if (ShowGuides) BuildGuides(space, layer);
 
             var svg = imageGo.GetComponent<SVGImage>();
             svg.sprite = sprite;
@@ -621,7 +628,7 @@ namespace QuestTree.UI
             // rotating them too would move everything together and change nothing - which is why
             // this could never have been fixed by rotating the whole container.
             var rotation = entry != null ? entry.CoordinateRotation : 0;
-            rotation = ((rotation + ModSettings.MapArtworkRotation.Value) % 360 + 360) % 360;
+            rotation = ((rotation + ArtworkRotation) % 360 + 360) % 360;
 
             // At a quarter turn the rect has to swap its sides, or the picture is squeezed into the
             // wrong aspect - the same reason DynamicMaps sizes its own layer through a rotated
@@ -634,7 +641,7 @@ namespace QuestTree.UI
 
             // Mirroring is a negative x scale rather than another rotation, since a mirror is not a
             // rotation and the two together cover every way the art could be turned.
-            image.localScale = ModSettings.MirrorMapArtwork.Value
+            image.localScale = MirrorArtwork
                 ? new Vector3(-1f, 1f, 1f)
                 : Vector3.one;
         }
@@ -938,7 +945,7 @@ namespace QuestTree.UI
                         Active: status == ENodeStatus.Active,
                         Objective: string.Equals(m.Kind, ObjectiveKind, StringComparison.OrdinalIgnoreCase));
                 })
-                .Where(m => !ModSettings.MarkStartedOnly.Value || m.Active)
+                .Where(m => !StartedOnly || m.Active)
                 .OrderBy(m => m.Active ? 0 : 1)
                 .ThenBy(m => m.Objective ? 0 : 1)
                 .ThenBy(m => m.Owner == null || m.Owner == layer ? 0 : 1)

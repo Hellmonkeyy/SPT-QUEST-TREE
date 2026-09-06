@@ -16,7 +16,6 @@ namespace QuestTree
         private void Awake()
         {
             LogSource = Logger;
-            ModSettings.Init(Config);
 
             // A Fika headless client has no player, no UI, and no taskbar to add a button to.
             if (ModEnvironment.IsHeadlessClient)
@@ -27,6 +26,10 @@ namespace QuestTree
 
             try
             {
+                // Inside the guard: a config that fails to bind must not take the whole plugin
+                // down with an unhandled throw out of Awake. ModSettings.Ready stays false and the
+                // views fall back to their defaults.
+                ModSettings.Init(Config);
                 new MenuTaskBarAwakePatch().Enable();
             }
             catch (Exception ex)
