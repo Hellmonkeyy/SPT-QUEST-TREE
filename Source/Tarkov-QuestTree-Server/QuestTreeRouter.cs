@@ -1,5 +1,8 @@
+using System;
 using System.Collections.Generic;
+using System.Text.Json;
 using System.Threading.Tasks;
+using SPTarkov.Common.Models.Logging;
 using SPTarkov.DI.Annotations;
 using SPTarkov.Server.Core.DI;
 using SPTarkov.Server.Core.Models.Eft.Common;
@@ -23,42 +26,70 @@ namespace QuestTreeServer
     public class QuestTreeRouter : StaticRouter
     {
         public QuestTreeRouter(
-            JsonUtil jsonUtil, QuestPayloadBuilder payloadBuilder, KappaPayloadBuilder kappaBuilder,
-            ProfilePayloadBuilder profileBuilder, MapMarkerPayloadBuilder markerBuilder)
-            : base(jsonUtil, BuildRoutes(payloadBuilder, kappaBuilder, profileBuilder, markerBuilder))
+            JsonUtil jsonUtil, ISptLogger<QuestTreeRouter> logger, QuestPayloadBuilder payloadBuilder,
+            KappaPayloadBuilder kappaBuilder, ProfilePayloadBuilder profileBuilder,
+            MapMarkerPayloadBuilder markerBuilder)
+            : base(jsonUtil, BuildRoutes(logger, payloadBuilder, kappaBuilder, profileBuilder, markerBuilder))
         {
         }
 
+        private static readonly JsonSerializerOptions FallbackOptions = new()
+        {
+            PropertyNamingPolicy = JsonNamingPolicy.CamelCase
+        };
+
         private static IEnumerable<RouteAction> BuildRoutes(
-            QuestPayloadBuilder payloadBuilder, KappaPayloadBuilder kappaBuilder,
-            ProfilePayloadBuilder profileBuilder, MapMarkerPayloadBuilder markerBuilder) =>
+            ISptLogger<QuestTreeRouter> logger, QuestPayloadBuilder payloadBuilder,
+            KappaPayloadBuilder kappaBuilder, ProfilePayloadBuilder profileBuilder,
+            MapMarkerPayloadBuilder markerBuilder) =>
             new List<RouteAction>
             {
                 new RouteAction<EmptyRequestData>(
                     "/questtree/quests",
                     (url, info, sessionId, output, cancellationToken) =>
-                        new ValueTask<string>(payloadBuilder.GetPayloadJson())),
+                        Guarded(logger, url, payloadBuilder.GetPayloadJson, () => new QuestPayloadDto())),
 
                 // Profile-scoped and rebuilt per request - the stash changes every raid, so unlike
                 // the quest list there is nothing here worth caching.
                 new RouteAction<EmptyRequestData>(
                     "/questtree/kappa",
                     (url, info, sessionId, output, cancellationToken) =>
-                        new ValueTask<string>(kappaBuilder.GetPayloadJson(sessionId))),
+                        Guarded(logger, url, () => kappaBuilder.GetPayloadJson(sessionId), () => new KappaPayloadDto())),
 
                 // Also profile-scoped and per-request: level, loyalty and objective counters all
                 // move as the player plays, so there is nothing here worth caching server-side.
                 new RouteAction<EmptyRequestData>(
                     "/questtree/profile",
                     (url, info, sessionId, output, cancellationToken) =>
-                        new ValueTask<string>(profileBuilder.GetPayloadJson(sessionId))),
+                        Guarded(logger, url, () => profileBuilder.GetPayloadJson(sessionId), () => new ProfilePayloadDto())),
 
                 // Not profile-scoped: where an item spawns is a property of the map, the same for
                 // everyone, so this is built once and cached like the quest list.
                 new RouteAction<EmptyRequestData>(
                     "/questtree/mapmarkers",
                     (url, info, sessionId, output, cancellationToken) =>
-                        new ValueTask<string>(markerBuilder.GetPayloadJson()))
+                        Guarded(logger, url, markerBuilder.GetPayloadJson,
+                            () => new MapMarkerPayloadDto { Version = ModInfo.Version }))
             };
+
+        /// <summary>
+        /// The builders guard their own loops, so a throw reaching here is one nobody predicted -
+        /// and SPT's request pipeline has no guard of its own, so it would surface as an unhandled
+        /// error on the client's synchronous fetch. Answering with the route's empty-but-valid
+        /// shape instead lets the client degrade the way it already does for a missing server.
+        /// </summary>
+        private static ValueTask<string> Guarded<T>(
+            ISptLogger<QuestTreeRouter> logger, string route, Func<string> build, Func<T> fallback)
+        {
+            try
+            {
+                return new ValueTask<string>(build());
+            }
+            catch (Exception ex)
+            {
+                logger.Error($"Quest Tracker: {route} failed - answering with an empty payload: {ex}");
+                return new ValueTask<string>(JsonSerializer.Serialize(fallback(), FallbackOptions));
+            }
+        }
     }
 }

@@ -38,9 +38,20 @@ namespace QuestTreeServer
         private const string Endpoint = "https://api.tarkov.dev/graphql";
         private const string CacheFileName = "tarkovdev-quests.json";
 
-        /// <summary>Generous, because this runs during server startup where nothing is waiting on
-        /// it, and mean-spirited timeouts are how a slow connection turns into no data at all.</summary>
-        private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(45);
+        /// <summary>
+        /// This runs during server startup, and SPT waits for it - so the budget is what a player
+        /// with no internet pays on every boot, not just what a slow connection needs. Two tries of
+        /// seven seconds with a short pause is at most ~15s, and a refused or unresolvable
+        /// connection fails in well under one. It used to be a single 45s try, which offline was a
+        /// silent 45s stall (90s with the other fetch behind it in series).
+        /// </summary>
+        private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(7);
+        private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(1.5);
+        private const int Attempts = 2;
+
+        /// <summary>How much of an error body to put in the log. Enough to read the message
+        /// ("GraphQL server unavailable. Try again later."), not enough to flood it.</summary>
+        private const int LoggedBodyLength = 300;
 
         /// <summary>
         /// Only what is needed to place a pin: the task, its objectives, and each objective's zones
@@ -159,6 +170,24 @@ namespace QuestTreeServer
 
         private async Task<List<ObjectiveLocation>?> FetchAsync(CancellationToken cancellationToken)
         {
+            for (var attempt = 1; attempt <= Attempts; attempt++)
+            {
+                var (locations, retry) = await FetchOnceAsync(attempt, cancellationToken);
+                if (locations != null) return locations;
+                if (!retry || attempt == Attempts) break;
+
+                await Task.Delay(RetryDelay, cancellationToken);
+            }
+
+            logger.Info("Quest Tracker: no tarkov.dev data - the map will show item spawns only. It will try again next start.");
+            return null;
+        }
+
+        /// <summary>One try. The flag says whether another is worth making: an outage or a timeout
+        /// is, a rejected query is not.</summary>
+        private async Task<(List<ObjectiveLocation>? Locations, bool Retry)> FetchOnceAsync(
+            int attempt, CancellationToken cancellationToken)
+        {
             try
             {
                 using var http = new HttpClient { Timeout = Timeout };
@@ -171,37 +200,51 @@ namespace QuestTreeServer
                 using var content = new StringContent(body, Encoding.UTF8, "application/json");
 
                 var response = await http.PostAsync(Endpoint, content, cancellationToken);
+                var json = await response.Content.ReadAsStringAsync(cancellationToken);
 
                 if (!response.IsSuccessStatusCode)
                 {
+                    // The body is the diagnosis. A bare "422" once hid an upstream outage
+                    // ("GraphQL server unavailable") behind what looked like a bad query.
+                    var status = (int)response.StatusCode;
                     logger.Info(
-                        $"Quest Tracker: tarkov.dev returned {(int)response.StatusCode} - the map will " +
-                        "show item spawns only. It will try again next start.");
-                    return null;
+                        $"Quest Tracker: tarkov.dev returned {status} on attempt {attempt}/{Attempts}: " +
+                        Excerpt(json));
+
+                    return (null, IsTransient(status));
                 }
 
-                var json = await response.Content.ReadAsStringAsync(cancellationToken);
                 var locations = Parse(json);
 
                 if (locations.Count == 0)
                 {
                     logger.Info("Quest Tracker: tarkov.dev returned no objective locations.");
-                    return null;
+                    return (null, false);
                 }
 
                 logger.Info($"Quest Tracker: fetched {locations.Count} quest objective locations from tarkov.dev.");
                 WriteCache(locations);
 
-                return locations;
+                return (locations, false);
             }
             catch (Exception ex)
             {
                 // Offline is the normal case for a lot of SPT installs, so this is Info, not Warning.
                 logger.Info(
-                    $"Quest Tracker: could not reach tarkov.dev ({ex.Message}) - the map will show " +
-                    "item spawns only.");
-                return null;
+                    $"Quest Tracker: could not reach tarkov.dev on attempt {attempt}/{Attempts} ({ex.Message}).");
+                return (null, true);
             }
+        }
+
+        /// <summary>Server-side trouble and rate limiting pass; a client error is ours to fix and
+        /// a retry would only repeat it. 422 is included because tarkov.dev answers an outage with
+        /// it rather than a 5xx.</summary>
+        private static bool IsTransient(int status) => status >= 500 || status == 422 || status == 429;
+
+        private static string Excerpt(string body)
+        {
+            var text = body.Replace('\r', ' ').Replace('\n', ' ').Trim();
+            return text.Length <= LoggedBodyLength ? text : text[..LoggedBodyLength] + "...";
         }
 
         /// <summary>

@@ -299,6 +299,11 @@ namespace QuestTree.QuestGraph
     /// can reference.</summary>
     internal sealed class MapMarkerPayloadDto
     {
+        public const int SupportedSchemaVersion = 1;
+
+        [JsonProperty("schemaVersion")]
+        public int SchemaVersion { get; set; }
+
         [JsonProperty("version")]
         public string Version { get; set; }
 

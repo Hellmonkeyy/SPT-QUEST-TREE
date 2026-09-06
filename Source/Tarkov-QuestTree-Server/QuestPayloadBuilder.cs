@@ -3,8 +3,11 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using System.Threading;
+using System.Threading.Tasks;
 using SPTarkov.Common.Models.Logging;
 using SPTarkov.DI.Annotations;
+using SPTarkov.Server.Core.DI;
 using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Eft.Common.Tables;
 using SPTarkov.Server.Core.Models.Enums;
@@ -38,8 +41,17 @@ namespace QuestTreeServer
         LocaleService localeService,
         SeasonalEventService seasonalEventService,
         QuestConfig questConfig,
-        LocationTable locationTable)
+        LocationTable locationTable) : IOnLoad
     {
+        /// <summary>Built while the server starts, for the reason MapMarkerPayloadBuilder gives:
+        /// the client's request handler is synchronous on Unity's main thread, so paying for the
+        /// first build there froze the game on the first panel open.</summary>
+        public Task OnLoadAsync(CancellationToken cancellationToken)
+        {
+            GetPayloadJson();
+            return Task.CompletedTask;
+        }
+
         /// <summary>Condition type that names another quest as a prerequisite.</summary>
         private const string QuestConditionType = "Quest";
 
@@ -67,7 +79,23 @@ namespace QuestTreeServer
 
             lock (_buildLock)
             {
-                return _cachedJson ??= JsonSerializer.Serialize(Build(), SerializerOptions);
+                if (_cachedJson != null) return _cachedJson;
+
+                QuestPayloadDto payload;
+
+                try
+                {
+                    payload = Build();
+                }
+                catch (Exception ex)
+                {
+                    // Now built at startup, where a throw would abort SPT's boot. An empty list is a
+                    // valid payload the client already degrades on.
+                    logger.Error($"Quest Tracker: could not build the quest list - the tree will be empty: {ex}");
+                    payload = new QuestPayloadDto();
+                }
+
+                return _cachedJson = JsonSerializer.Serialize(payload, SerializerOptions);
             }
         }
 

@@ -150,6 +150,17 @@ namespace QuestTree.QuestGraph
 
                 _markers = JsonConvert.DeserializeObject<MapMarkerPayloadDto>(json);
 
+                if (_markers != null && _markers.SchemaVersion != MapMarkerPayloadDto.SupportedSchemaVersion)
+                {
+                    // Not fatal: the maps are the one feature this payload carries, and a version
+                    // that only differs in a field this client does not read still pins fine. Named
+                    // in the log so a mis-drawn map has a first place to look.
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: map marker payload schema v{_markers.SchemaVersion} but this client expects " +
+                        $"v{MapMarkerPayloadDto.SupportedSchemaVersion} (server mod {_markers.Version}). " +
+                        "Update both halves of the mod together.");
+                }
+
                 var count = 0;
                 if (_markers?.Maps != null)
                 {

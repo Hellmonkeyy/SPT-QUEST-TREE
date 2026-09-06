@@ -42,8 +42,12 @@ namespace QuestTreeServer
 
         private const string CacheFileName = "objective-gps.json";
 
-        /// <summary>Generous, because this runs during server startup where nothing waits on it.</summary>
-        private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(45);
+        /// <summary>Same budget as TarkovDevClient, for the same reason: SPT waits on this at boot,
+        /// so offline it is a stall on every start. Two tries of seven seconds, ~15s at most.</summary>
+        private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(7);
+        private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(1.5);
+        private const int Attempts = 2;
+        private const int LoggedBodyLength = 300;
 
         private static readonly JsonSerializerOptions Options = new()
         {
@@ -118,43 +122,67 @@ namespace QuestTreeServer
 
         private async Task<Dictionary<string, ObjectivePlace>?> FetchAsync(CancellationToken cancellationToken)
         {
+            for (var attempt = 1; attempt <= Attempts; attempt++)
+            {
+                var (places, retry) = await FetchOnceAsync(attempt, cancellationToken);
+                if (places != null) return places;
+                if (!retry || attempt == Attempts) break;
+
+                await Task.Delay(RetryDelay, cancellationToken);
+            }
+
+            logger.Info("Quest Tracker: no tarkovdata objective locations - the map will show what it can. It will try again next start.");
+            return null;
+        }
+
+        /// <summary>One try. The flag says whether another is worth making.</summary>
+        private async Task<(Dictionary<string, ObjectivePlace>? Places, bool Retry)> FetchOnceAsync(
+            int attempt, CancellationToken cancellationToken)
+        {
             try
             {
                 using var http = new HttpClient { Timeout = Timeout };
                 http.DefaultRequestHeaders.Add("User-Agent", $"SPT-QuestTree/{ModInfo.Version}");
 
                 var response = await http.GetAsync(Url, cancellationToken);
+                var json = await response.Content.ReadAsStringAsync(cancellationToken);
 
                 if (!response.IsSuccessStatusCode)
                 {
+                    var status = (int)response.StatusCode;
                     logger.Info(
-                        $"Quest Tracker: objective locations returned {(int)response.StatusCode} - the " +
-                        "map will show item spawns only, and will try again next start.");
-                    return null;
+                        $"Quest Tracker: objective locations returned {status} on attempt {attempt}/{Attempts}: " +
+                        Excerpt(json));
+
+                    return (null, status >= 500 || status == 429);
                 }
 
-                var json = await response.Content.ReadAsStringAsync(cancellationToken);
                 var places = Parse(json);
 
                 if (places == null || places.Count == 0)
                 {
                     logger.Info("Quest Tracker: the objective location file held nothing usable.");
-                    return null;
+                    return (null, false);
                 }
 
                 logger.Info($"Quest Tracker: fetched {places.Count} objective locations from tarkovdata.");
                 WriteCache(json);
 
-                return places;
+                return (places, false);
             }
             catch (Exception ex)
             {
                 // Offline is the normal case for a lot of SPT installs, so this is Info, not Warning.
                 logger.Info(
-                    $"Quest Tracker: could not fetch objective locations ({ex.Message}) - the map will " +
-                    "show item spawns only.");
-                return null;
+                    $"Quest Tracker: could not fetch objective locations on attempt {attempt}/{Attempts} ({ex.Message}).");
+                return (null, true);
             }
+        }
+
+        private static string Excerpt(string body)
+        {
+            var text = body.Replace('\r', ' ').Replace('\n', ' ').Trim();
+            return text.Length <= LoggedBodyLength ? text : text[..LoggedBodyLength] + "...";
         }
 
         /// <summary>Caches the file exactly as served, rather than a re-serialised copy, so what is

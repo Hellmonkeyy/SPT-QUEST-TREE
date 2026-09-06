@@ -260,6 +260,8 @@ namespace QuestTreeServer
     /// positions come from the loot table rather than from the quests.</summary>
     public class MapMarkerPayloadDto
     {
+        public int SchemaVersion { get; set; } = 1;
+
         public string Version { get; set; } = "";
         public List<MapMarkerSetDto> Maps { get; set; } = new();
     }

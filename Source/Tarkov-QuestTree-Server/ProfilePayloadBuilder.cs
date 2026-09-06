@@ -154,6 +154,14 @@ namespace QuestTreeServer
 
             var started = profile.Quests?.Select(q => q.QId).ToHashSet() ?? new HashSet<MongoId>();
 
+            // Built once here: every unstarted quest checks each prerequisite against the profile,
+            // and a scan of the profile's quest list per check was millions of comparisons per
+            // request on a large modded install.
+            var succeeded = profile.Quests?
+                .Where(q => q.Status == SPTarkov.Server.Core.Models.Enums.QuestStatusEnum.Success)
+                .Select(q => q.QId.ToString())
+                .ToHashSet() ?? new HashSet<string>();
+
             foreach (var quest in quests.Values)
             {
                 if (quest == null) continue;
@@ -161,7 +169,7 @@ namespace QuestTreeServer
 
                 try
                 {
-                    var reason = ResolveLockReason(quest, profile);
+                    var reason = ResolveLockReason(quest, profile, succeeded);
                     if (reason != null) payload.LockReasons[quest.Id.ToString()] = reason;
                 }
                 catch (Exception ex)
@@ -173,7 +181,7 @@ namespace QuestTreeServer
         }
 
         /// <summary>Null when nothing is blocking the quest.</summary>
-        private LockReasonDto? ResolveLockReason(Quest quest, PmcData profile)
+        private LockReasonDto? ResolveLockReason(Quest quest, PmcData profile, HashSet<string> succeeded)
         {
             if (questHelper.QuestIsForOtherSide(profile.Info?.Side, quest.Id))
                 return new LockReasonDto { Kind = "OtherFaction", Detail = "For the other faction" };
@@ -238,7 +246,7 @@ namespace QuestTreeServer
             var outstanding = conditions.GetQuestConditions()
                 .SelectMany(c => QuestPayloadBuilder.TargetIds(c.Target))
                 .Where(id => !string.IsNullOrWhiteSpace(id))
-                .Where(id => !IsQuestSatisfied(profile, id))
+                .Where(id => !succeeded.Contains(id))
                 .ToList();
 
             if (outstanding.Count > 0)
@@ -254,15 +262,6 @@ namespace QuestTreeServer
             }
 
             return null;
-        }
-
-        /// <summary>A prerequisite counts as met once the profile holds it as successful. Deliberately
-        /// simpler than GetClientQuests' full status-set check: the client draws the real edge from
-        /// the quest data, and this only needs to know whether it is still outstanding.</summary>
-        private static bool IsQuestSatisfied(PmcData profile, string questId)
-        {
-            var status = profile.Quests?.FirstOrDefault(q => q.QId == questId);
-            return status != null && status.Status == SPTarkov.Server.Core.Models.Enums.QuestStatusEnum.Success;
         }
 
         private static string ResolveConditionTrader(QuestCondition condition) =>

@@ -52,10 +52,27 @@ namespace QuestTreeServer
         /// </summary>
         public async Task OnLoadAsync(CancellationToken cancellationToken)
         {
-            // Awaited here so the network call happens during startup, where nothing is waiting on
-            // it, rather than inside the synchronous request handler that serves the client.
-            _objectiveLocations = await tarkovDev.GetLocationsAsync(cancellationToken);
-            _objectivePlaces = await objectiveGps.GetPlacesAsync(cancellationToken);
+            try
+            {
+                // Awaited here so the network calls happen during startup rather than inside the
+                // synchronous request handler that serves the client - but SPT does wait on this,
+                // so they run together and say so first: a quiet pause at boot with no line in the
+                // log reads as a hang.
+                logger.Info("Quest Tracker: fetching quest objective locations (tarkov.dev, tarkovdata)...");
+
+                var locations = tarkovDev.GetLocationsAsync(cancellationToken);
+                var places = objectiveGps.GetPlacesAsync(cancellationToken);
+                await Task.WhenAll(locations, places);
+
+                _objectiveLocations = locations.Result;
+                _objectivePlaces = places.Result;
+            }
+            catch (Exception ex)
+            {
+                // Both clients swallow their own failures, so this is for the unexpected - and an
+                // exception out of OnLoadAsync aborts SPT's boot.
+                logger.Error($"Quest Tracker: could not fetch objective locations: {ex}");
+            }
 
             GetPayloadJson();
         }
@@ -158,6 +175,12 @@ namespace QuestTreeServer
             var payload = new MapMarkerPayloadDto { Version = ModInfo.Version };
             var wantedByLocation = BuildWantedItems();
 
+            // Grouped once here rather than scanned once per map below: with a few thousand modded
+            // quests, thirteen maps each walking the whole table was the bulk of the build.
+            var questsByLocation = QuestsByLocation();
+            var objectivesByMap = _objectiveLocations.ToLookup(o => o.MapId, StringComparer.OrdinalIgnoreCase);
+            var locale = localeService.GetLocaleDb();
+
             foreach (var location in locationTable.GetDictionary().Values)
             {
                 var internalName = location?.Base?.Id;
@@ -184,8 +207,8 @@ namespace QuestTreeServer
                     }
                 }
 
-                markers.AddRange(ObjectiveMarkersFor(locationId!));
-                markers.AddRange(GpsMarkersFor(locationId!, localeService.GetLocaleDb()));
+                markers.AddRange(ObjectiveMarkersFor(objectivesByMap[locationId!]));
+                markers.AddRange(GpsMarkersFor(locationId!, questsByLocation, locale));
 
                 if (markers.Count == 0) continue;
 
@@ -197,6 +220,27 @@ namespace QuestTreeServer
             }
 
             return payload;
+        }
+
+        /// <summary>Location id -> the quests set there, for the per-map passes.</summary>
+        private Dictionary<string, List<Quest>> QuestsByLocation()
+        {
+            var byLocation = new Dictionary<string, List<Quest>>(StringComparer.OrdinalIgnoreCase);
+
+            var quests = templateTable.Quests;
+            if (quests == null) return byLocation;
+
+            foreach (var quest in quests.Values)
+            {
+                if (quest == null || string.IsNullOrWhiteSpace(quest.Location)) continue;
+
+                if (!byLocation.TryGetValue(quest.Location, out var list))
+                    byLocation[quest.Location] = list = new List<Quest>();
+
+                list.Add(quest);
+            }
+
+            return byLocation;
         }
 
         /// <summary>
@@ -313,20 +357,16 @@ namespace QuestTreeServer
         /// rectangle and rotation, which live on the client with the rest of the map geometry, and
         /// duplicating that here is how a second source of truth gets born.
         /// </summary>
-        private List<MapMarkerDto> GpsMarkersFor(string locationId, Dictionary<string, string> locale)
+        private List<MapMarkerDto> GpsMarkersFor(
+            string locationId, Dictionary<string, List<Quest>> questsByLocation, Dictionary<string, string> locale)
         {
             var markers = new List<MapMarkerDto>();
 
             if (_objectivePlaces.Count == 0) return markers;
+            if (!questsByLocation.TryGetValue(locationId, out var quests)) return markers;
 
-            var quests = templateTable.Quests;
-            if (quests == null) return markers;
-
-            foreach (var quest in quests.Values)
+            foreach (var quest in quests)
             {
-                if (quest == null) continue;
-                if (!string.Equals(quest.Location, locationId, StringComparison.OrdinalIgnoreCase)) continue;
-
                 var questId = quest.Id.ToString();
                 var questName = QuestPayloadBuilder.ResolveQuestName(quest, questId, locale);
 
@@ -474,16 +514,13 @@ namespace QuestTreeServer
         /// objective, so identical points are collapsed - otherwise a three-zone objective puts
         /// three pins on the same doorway.
         /// </summary>
-        private List<MapMarkerDto> ObjectiveMarkersFor(string locationId)
+        private static List<MapMarkerDto> ObjectiveMarkersFor(IEnumerable<TarkovDevClient.ObjectiveLocation> objectives)
         {
             var markers = new List<MapMarkerDto>();
             var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-            foreach (var objective in _objectiveLocations)
+            foreach (var objective in objectives)
             {
-                if (!string.Equals(objective.MapId, locationId, StringComparison.OrdinalIgnoreCase))
-                    continue;
-
                 // Rounded before de-duplicating: two zones a few centimetres apart are one pin as
                 // far as anybody reading the map is concerned.
                 var key = $"{objective.QuestId}|{objective.X:F0}|{objective.Z:F0}";
