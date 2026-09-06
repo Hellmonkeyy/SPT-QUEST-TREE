@@ -62,6 +62,20 @@ namespace QuestTree.UI
                 ModSettings.MarkStartedOnly.Value,
                 value => ModSettings.MarkStartedOnly.Value = value);
 
+            AuxLayout.AddStepper(parent, ref y, "Map artwork rotation",
+                ModSettings.MapArtworkRotation.Value, 90,
+                value => ModSettings.MapArtworkRotation.Value = ((value % 360) + 360) % 360);
+            AuxLayout.AddText(parent, ref y,
+                "<color=#FFFFFF80>Turns the map picture only, leaving the markers where they are. " +
+                "Use it with the guides below to find which way a map's art actually sits.</color>",
+                32f, 11);
+
+            AuxLayout.AddToggle(parent, ref y,
+                "Mirror map artwork",
+                "Mirrors the map picture left-to-right. Markers are not mirrored.",
+                ModSettings.MirrorMapArtwork.Value,
+                value => ModSettings.MirrorMapArtwork.Value = value);
+
             AuxLayout.AddToggle(parent, ref y,
                 "Show map alignment guides",
                 "Diagnostic: outline the area the map's coordinates cover, and mark its origin.",

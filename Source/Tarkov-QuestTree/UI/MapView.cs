@@ -430,8 +430,22 @@ namespace QuestTree.UI
         /// </summary>
         private static void PlaceArtwork(RectTransform image, DynamicMapsLibrary.MapLayer layer, Vector2 bounds)
         {
-            image.sizeDelta = bounds;
+            var rotation = ((ModSettings.MapArtworkRotation.Value % 360) + 360) % 360;
+
+            // At a quarter turn the rect has to swap its sides, or the picture is squeezed into the
+            // wrong aspect - the same reason DynamicMaps sizes its own layer through a rotated
+            // rectangle rather than the raw bounds.
+            var quarterTurned = rotation == 90 || rotation == 270;
+            image.sizeDelta = quarterTurned ? new Vector2(bounds.y, bounds.x) : bounds;
+
             image.anchoredPosition = layer.BoundsCentre;
+            image.localRotation = Quaternion.Euler(0f, 0f, rotation);
+
+            // Mirroring is a negative x scale rather than another rotation, since a mirror is not a
+            // rotation and the two together cover every way the art could be turned.
+            image.localScale = ModSettings.MirrorMapArtwork.Value
+                ? new Vector3(-1f, 1f, 1f)
+                : Vector3.one;
         }
 
 

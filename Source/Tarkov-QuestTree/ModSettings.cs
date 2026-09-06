@@ -26,6 +26,13 @@ namespace QuestTree
 
         /// <summary>Diagnostic: outline the rectangle the map's coordinates cover.</summary>
         public static ConfigEntry<bool> ShowMapGuides { get; private set; }
+
+        /// <summary>How the map PICTURE is turned relative to the coordinates everything else uses.
+        /// Deliberately adjustable rather than assumed: seven attempts at deducing it went wrong,
+        /// and one look at the right value settles what no amount of reasoning has.</summary>
+        public static ConfigEntry<int> MapArtworkRotation { get; private set; }
+
+        public static ConfigEntry<bool> MirrorMapArtwork { get; private set; }
         public static ConfigEntry<int> MaxVisibleNodes { get; private set; }
 
         /// <summary>Remembered rather than reset each time, because it is a working preference -
@@ -56,6 +63,16 @@ namespace QuestTree
                 "Display", "Only mark started quests", false,
                 "On the Maps view, show markers only for quests you have actually accepted. The " +
                 "shortest way from a map covered in pins to the few that matter today.");
+
+            MapArtworkRotation = config.Bind(
+                "Display", "Map artwork rotation", 0,
+                "Turns the map picture (not the markers) by this many degrees. Each map's own data " +
+                "declares a coordinate rotation, and this is here to find out whether that is what " +
+                "the picture needs. 0, 90, 180 or 270.");
+
+            MirrorMapArtwork = config.Bind(
+                "Display", "Mirror map artwork", false,
+                "Mirrors the map picture (not the markers) left-to-right.");
 
             ShowMapGuides = config.Bind(
                 "Display", "Show map alignment guides", false,

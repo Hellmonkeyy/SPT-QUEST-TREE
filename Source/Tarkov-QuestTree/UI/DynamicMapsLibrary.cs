@@ -131,6 +131,11 @@ namespace QuestTree.UI
 
             public int DefaultLevel;
 
+            /// <summary>The map's declared coordinate rotation. Read but not yet applied: it is the
+            /// prime suspect for how the artwork is turned relative to game coordinates, and the
+            /// artwork-rotation setting exists to confirm that before it is wired in.</summary>
+            public int CoordinateRotation;
+
             /// <summary>The floor to open on: the config's declared default where that exists, else
             /// the lowest one, so there is always something to draw.</summary>
             public MapLayer DefaultLayer =>
@@ -230,7 +235,8 @@ namespace QuestTree.UI
                 {
                     DisplayName = (string)root["DisplayName"] ?? Path.GetFileNameWithoutExtension(configPath),
                     Attribution = (string)root["Author"] ?? "",
-                    DefaultLevel = (int?)root["DefaultLevel"] ?? 0
+                    DefaultLevel = (int?)root["DefaultLevel"] ?? 0,
+                    CoordinateRotation = (int?)root["CoordinateRotation"] ?? 0
                 };
 
                 foreach (var name in root["MapInternalNames"] ?? Enumerable.Empty<JToken>())
