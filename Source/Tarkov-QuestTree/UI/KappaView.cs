@@ -185,7 +185,7 @@ namespace QuestTree.UI
                 return;
             }
 
-            var required = CollectPrerequisites(collector, graph);
+            var required = QuestRoute.Prerequisites(collector, graph);
             var complete = required.Count(n => n.Status == ENodeStatus.Completed);
 
             AuxLayout.AddHeading(parent, ref y, $"To unlock Collector      {complete} / {required.Count}");
@@ -205,32 +205,6 @@ namespace QuestTree.UI
                     $"{mark}  {node.Name}  <color=#FFFFFF60>{node.TraderName}</color>",
                     AuxLayout.RowHeight, 12, indent: 6f);
             }
-        }
-
-        /// <summary>Walks prerequisites breadth-first from Collector. The visited set doubles as the
-        /// cycle guard, so malformed or modded quest data cannot loop this forever.</summary>
-        private static List<QuestNode> CollectPrerequisites(QuestNode collector, QuestGraphBuilder graph)
-        {
-            var found = new List<QuestNode>();
-            var seen = new HashSet<string>();
-            var pending = new Queue<QuestNode>();
-            pending.Enqueue(collector);
-
-            while (pending.Count > 0)
-            {
-                var current = pending.Dequeue();
-
-                foreach (var prerequisiteId in current.PrerequisiteIds)
-                {
-                    if (!seen.Add(prerequisiteId)) continue;
-                    if (!graph.NodesById.TryGetValue(prerequisiteId, out var node)) continue;
-
-                    found.Add(node);
-                    pending.Enqueue(node);
-                }
-            }
-
-            return found;
         }
 
         // ------------------------------------------------------------------ curated list

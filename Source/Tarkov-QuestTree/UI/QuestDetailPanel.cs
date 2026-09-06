@@ -23,6 +23,11 @@ namespace QuestTree.UI
         private const float ExpandedWidth = 320f;
         private const float CollapsedWidth = 26f;
 
+        /// <summary>How many route steps to list before summarising the rest. The panel is a fixed
+        /// 320px column, and a route on a late Kappa quest can run to dozens - past this it stops
+        /// being a plan you can read and starts pushing the objectives off the bottom.</summary>
+        private const int RouteSteps = 12;
+
         private QuestGraphBuilder _graph;
         private RectTransform _detailPanel;
         private TMP_Text _detailText;
@@ -281,6 +286,8 @@ namespace QuestTree.UI
                 lines.Add("");
             }
 
+            AddRoute(lines, node);
+
             // Available for a locked quest too, not just an accepted one: the objective text
             // arrives with the companion mod's payload rather than being read off a live Quest
             // instance the game only creates once the quest is unlocked.
@@ -328,6 +335,49 @@ namespace QuestTree.UI
         /// <summary>
         /// The one gate blocking this quest, phrased as something to act on. Trader-scoped gates are
         /// named from the client's own trader list rather than the server guessing a display name,
+        /// <summary>
+        /// The full route to a locked quest: everything it transitively requires that is still
+        /// outstanding, in the order it can be done.
+        ///
+        /// This is the question "Requires" above cannot answer. That line names only the quest
+        /// immediately before this one, which on a deep chain is nearly useless - the real answer
+        /// is the twelve quests behind that one. Ordered by depth, so it reads top to bottom as a
+        /// plan rather than a set.
+        ///
+        /// Gated on the route itself being non-empty rather than on the quest reading as Locked.
+        /// Those are not the same test: a node is only Locked when the client has no live instance
+        /// for it, so on a profile where everything is unlocked at once nothing would ever qualify
+        /// and this section would silently never appear. Asking whether anything is outstanding
+        /// works on any profile - a normally-available quest has its prerequisites done, so the
+        /// route comes back empty and the section hides itself.
+        /// </summary>
+        private void AddRoute(List<string> lines, QuestNode node)
+        {
+            // A quest already handed in is not somewhere you are trying to get to.
+            if (node.Status == ENodeStatus.Completed) return;
+
+            var route = QuestRoute.Remaining(node, _graph);
+
+            // A single step is already spelled out by "Requires" directly above; repeating it as a
+            // one-item route would be noise.
+            if (route.Count < 2) return;
+
+            lines.Add($"<b>Route</b>  <color=#FFFFFF60>{route.Count} quests</color>");
+
+            foreach (var step in route.Take(RouteSteps))
+            {
+                var hex = ColorUtility.ToHtmlStringRGB(QuestNodeView.ColorFor(step.Status));
+
+                lines.Add($"<color=#{hex}>{QuestNodeView.GlyphFor(step.Status)}</color>  {step.Name}" +
+                          $"  <color=#FFFFFF60>{step.TraderName}</color>");
+            }
+
+            if (route.Count > RouteSteps)
+                lines.Add($"<color=#FFFFFF60>+{route.Count - RouteSteps} more</color>");
+
+            lines.Add("");
+        }
+
         /// and a prerequisite names the actual quest, since the client has the graph to resolve it.
         /// </summary>
         private string FormatLockReason(QuestNode node, ProfilePayloadDto profile)
