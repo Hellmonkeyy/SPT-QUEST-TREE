@@ -391,7 +391,7 @@ namespace QuestTree.UI
             image.anchorMin = image.anchorMax = new Vector2(0.5f, 0.5f);
             image.pivot = new Vector2(0.5f, 0.5f);
 
-            PlaceArtwork(image, layer, bounds);
+            PlaceArtwork(image, entry, layer, bounds);
 
             if (ModSettings.ShowMapGuides.Value) BuildGuides(space, layer);
 
@@ -428,9 +428,25 @@ namespace QuestTree.UI
         /// and there is nothing to convert. Everything this method used to do was compensating for
         /// a sprite that had been sized to its ink instead, and none of it was ever right.
         /// </summary>
-        private static void PlaceArtwork(RectTransform image, DynamicMapsLibrary.MapLayer layer, Vector2 bounds)
+        private static void PlaceArtwork(
+            RectTransform image, DynamicMapsLibrary.MapEntry entry,
+            DynamicMapsLibrary.MapLayer layer, Vector2 bounds)
         {
-            var rotation = ((ModSettings.MapArtworkRotation.Value % 360) + 360) % 360;
+            // The artwork is drawn in a frame turned by the map's own CoordinateRotation from the
+            // coordinates every marker and label uses - BSG does not point north the same way on
+            // every map, which is why the maps declare it. Turning the PICTURE by it brings the two
+            // into the same frame.
+            //
+            // Confirmed on Woods, which declares 180: ZB-016 sits at map (-397, 18) and USEC Camp's
+            // label at (290, -475), and reflecting the first through the bounds centre gives
+            // (288, -490). Those two are opposite ends of a half turn to within 15 units on a
+            // 1403-unit map, which is exactly what "ZB-016 and USEC Camp are flipped" describes.
+            //
+            // Only the image is turned. Markers, labels and guides stay in game coordinates, so
+            // rotating them too would move everything together and change nothing - which is why
+            // this could never have been fixed by rotating the whole container.
+            var rotation = entry != null ? entry.CoordinateRotation : 0;
+            rotation = ((rotation + ModSettings.MapArtworkRotation.Value) % 360 + 360) % 360;
 
             // At a quarter turn the rect has to swap its sides, or the picture is squeezed into the
             // wrong aspect - the same reason DynamicMaps sizes its own layer through a rotated

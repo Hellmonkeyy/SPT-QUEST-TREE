@@ -62,12 +62,12 @@ namespace QuestTree.UI
                 ModSettings.MarkStartedOnly.Value,
                 value => ModSettings.MarkStartedOnly.Value = value);
 
-            AuxLayout.AddStepper(parent, ref y, "Map artwork rotation",
+            AuxLayout.AddStepper(parent, ref y, "Extra map artwork rotation",
                 ModSettings.MapArtworkRotation.Value, 90,
                 value => ModSettings.MapArtworkRotation.Value = ((value % 360) + 360) % 360);
             AuxLayout.AddText(parent, ref y,
-                "<color=#FFFFFF80>Turns the map picture only, leaving the markers where they are. " +
-                "Use it with the guides below to find which way a map's art actually sits.</color>",
+                "<color=#FFFFFF80>Added to the rotation each map already declares. 0 is right for " +
+                "every shipped map - this is here in case one’s data is wrong.</color>",
                 32f, 11);
 
             AuxLayout.AddToggle(parent, ref y,

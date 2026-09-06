@@ -27,9 +27,9 @@ namespace QuestTree
         /// <summary>Diagnostic: outline the rectangle the map's coordinates cover.</summary>
         public static ConfigEntry<bool> ShowMapGuides { get; private set; }
 
-        /// <summary>How the map PICTURE is turned relative to the coordinates everything else uses.
-        /// Deliberately adjustable rather than assumed: seven attempts at deducing it went wrong,
-        /// and one look at the right value settles what no amount of reasoning has.</summary>
+        /// <summary>Extra turn applied to the map PICTURE on top of the rotation its own data
+        /// declares. Zero is correct for every shipped map; it exists so a map whose data is wrong
+        /// can be corrected without a code change.</summary>
         public static ConfigEntry<int> MapArtworkRotation { get; private set; }
 
         public static ConfigEntry<bool> MirrorMapArtwork { get; private set; }
@@ -65,10 +65,9 @@ namespace QuestTree
                 "shortest way from a map covered in pins to the few that matter today.");
 
             MapArtworkRotation = config.Bind(
-                "Display", "Map artwork rotation", 0,
-                "Turns the map picture (not the markers) by this many degrees. Each map's own data " +
-                "declares a coordinate rotation, and this is here to find out whether that is what " +
-                "the picture needs. 0, 90, 180 or 270.");
+                "Display", "Extra map artwork rotation", 0,
+                "Turns the map picture (not the markers) by this many degrees on top of the " +
+                "rotation the map's own data declares. Leave at 0 unless a map is drawn wrong.");
 
             MirrorMapArtwork = config.Bind(
                 "Display", "Mirror map artwork", false,
