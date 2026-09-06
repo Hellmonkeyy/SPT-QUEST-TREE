@@ -390,8 +390,8 @@ namespace QuestTree.UI
             image.SetParent(space, worldPositionStays: false);
             image.anchorMin = image.anchorMax = new Vector2(0.5f, 0.5f);
             image.pivot = new Vector2(0.5f, 0.5f);
-            image.sizeDelta = bounds;
-            image.anchoredPosition = layer.BoundsCentre;
+
+            PlaceArtwork(image, layer, bounds);
 
             var svg = imageGo.GetComponent<SVGImage>();
             svg.sprite = sprite;
@@ -416,6 +416,52 @@ namespace QuestTree.UI
 
             BuildPlaceLabels(space, entry, panZoom);
             BuildMarkers(space, entry, layer, panZoom, graph);
+        }
+
+        /// <summary>
+        /// Puts the picture where its own coordinates say, which is not the same as filling the
+        /// bounds rectangle.
+        ///
+        /// SVGImage stretches a sprite to whatever rect it is given, and BuildSprite sizes that
+        /// sprite to the artwork's INK - the bounding box of what is actually drawn. A layer's
+        /// ImageBounds describes its viewBox instead, and the two are rarely the same rectangle.
+        /// Measured across the shipped maps: Ground Zero's ground floor inks its viewBox exactly,
+        /// Woods overshoots by 6%, Customs' ground floor overshoots its height by 42% with extract
+        /// routes running off the page, and Customs' underground inks a third of it. Ground Zero's
+        /// third floor inks 11% - it draws only the buildings that have a third floor - and was
+        /// being blown up to fill the whole map, which is why floors never looked right.
+        ///
+        /// So the viewBox is mapped onto ImageBounds, and the picture is placed wherever its ink
+        /// falls under that same mapping. Ink outside the viewBox then correctly hangs past the map
+        /// instead of being squashed into it.
+        ///
+        /// Falls back to filling the bounds when a layer has no measured rectangles, so a map that
+        /// failed to parse loses its alignment rather than its picture.
+        /// </summary>
+        private static void PlaceArtwork(
+            RectTransform image, DynamicMapsLibrary.MapLayer layer, Vector2 bounds)
+        {
+            if (!layer.HasArtworkBounds)
+            {
+                image.sizeDelta = bounds;
+                image.anchoredPosition = layer.BoundsCentre;
+                return;
+            }
+
+            var viewport = layer.Viewport;
+            var ink = layer.Ink;
+
+            // SVG units to map units, per axis - the two are not the same scale.
+            var scaleX = bounds.x / viewport.width;
+            var scaleY = bounds.y / viewport.height;
+
+            image.sizeDelta = new Vector2(ink.width * scaleX, ink.height * scaleY);
+
+            // SVG y grows downward and map y grows upward, so the vertical term is measured from
+            // the top of the bounds rather than the bottom.
+            image.anchoredPosition = new Vector2(
+                layer.BoundsMin.x + (ink.center.x - viewport.x) * scaleX,
+                layer.BoundsMax.y - (ink.center.y - viewport.y) * scaleY);
         }
 
         /// <summary>

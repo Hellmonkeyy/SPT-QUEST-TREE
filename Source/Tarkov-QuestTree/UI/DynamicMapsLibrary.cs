@@ -75,6 +75,21 @@ namespace QuestTree.UI
             public Vector2 BoundsSize => BoundsMax - BoundsMin;
             public Vector2 BoundsCentre => (BoundsMin + BoundsMax) * 0.5f;
 
+            /// <summary>The SVG's viewBox, in SVG units. This is the rectangle the layer's
+            /// ImageBounds describes, and so the one that has to land on it.</summary>
+            public Rect Viewport;
+
+            /// <summary>The tessellated artwork's own bounding box, in the same SVG units - the
+            /// rectangle BuildSprite gives the sprite, and therefore what SVGImage stretches into
+            /// whatever rect it is given. It is NOT the viewBox: a floor layer only draws the
+            /// buildings that have that floor, so GroundZero's third floor inks 11% of its viewBox,
+            /// while Customs' ground floor overhangs its own by 42% in height with extract routes.
+            /// Placing the picture correctly needs both.</summary>
+            public Rect Ink;
+
+            public bool HasArtworkBounds =>
+                Viewport.width > 0f && Viewport.height > 0f && Ink.width > 0f && Ink.height > 0f;
+
             private Sprite _sprite;
             private bool _spriteFailed;
 
@@ -84,7 +99,7 @@ namespace QuestTree.UI
             {
                 if (_sprite != null || _spriteFailed) return _sprite;
 
-                _sprite = LoadSvgSprite(ImagePath);
+                _sprite = LoadSvgSprite(ImagePath, this);
                 _spriteFailed = _sprite == null;
                 return _sprite;
             }
@@ -351,7 +366,7 @@ namespace QuestTree.UI
         /// The sprite's own extent does not have to line up with anything, because the view stretches
         /// it to a rect sized in map units - which is exactly what DynamicMaps does with its own.
         /// </summary>
-        private static Sprite LoadSvgSprite(string path)
+        private static Sprite LoadSvgSprite(string path, MapLayer layer)
         {
             try
             {
@@ -373,6 +388,14 @@ namespace QuestTree.UI
 
                 var geometry = VectorUtils.TessellateScene(scene.Scene, options);
                 if (geometry == null || geometry.Count == 0) return null;
+
+                // Both rectangles are only knowable here, and the view needs both to put the
+                // picture where its coordinates say. Each geometry's vertices are in its own local
+                // space, so WorldTransform has to be applied before they can be compared with the
+                // viewBox - which is the space the layer's ImageBounds describes.
+                layer.Viewport = scene.SceneViewport;
+                layer.Ink = VectorUtils.Bounds(
+                    geometry.SelectMany(part => part.Vertices.Select(part.WorldTransform.MultiplyPoint)));
 
                 return VectorUtils.BuildSprite(geometry, 100f, VectorUtils.Alignment.Center, Vector2.zero, 128);
             }
