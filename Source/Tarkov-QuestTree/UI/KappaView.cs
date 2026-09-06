@@ -197,8 +197,14 @@ namespace QuestTree.UI
                          .OrderBy(n => n.TraderName, StringComparer.OrdinalIgnoreCase)
                          .ThenBy(n => n.Name, StringComparer.OrdinalIgnoreCase))
             {
+                // Taken from the shared status palette rather than a hardcoded green: this is a
+                // quest's completion state, so it has to say "completed" in the same colour the
+                // tree, the legend and every other list say it in.
+                var doneHex = ColorUtility.ToHtmlStringRGB(
+                    QuestNodeView.ColorFor(ENodeStatus.Completed));
+
                 var mark = node.Status == ENodeStatus.Completed
-                    ? "<color=#6FBF6F>[done]</color>"
+                    ? $"<color=#{doneHex}>[done]</color>"
                     : "<color=#FFFFFF40>[     ]</color>";
 
                 AuxLayout.AddText(parent, ref y,

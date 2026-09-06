@@ -50,6 +50,35 @@ namespace QuestTree.UI
             ApplyConstantScale(_content != null ? _content.localScale.x : 1f);
         }
 
+        /// <summary>
+        /// Centres <paramref name="contentPoint"/> - a position in the content's own coordinates -
+        /// in the viewport, at <paramref name="scale"/>.
+        ///
+        /// The `-point * scale` is only correct for content anchored AND pivoted at its centre,
+        /// which is how the map's space rect is built (see MapView.BuildMapViewport, which uses the
+        /// same expression to centre a map on first open). The quest graph's content is pivoted
+        /// top-left and needs the viewport's half-size added instead - QuestGraphView.FrameNodes
+        /// has that variant. Do not merge the two.
+        ///
+        /// Raises OnViewChanged like a real gesture would, so a caller persisting the view keeps
+        /// the framing across a rebuild.
+        /// </summary>
+        public void FocusOn(Vector2 contentPoint, float scale)
+        {
+            if (_content == null) return;
+
+            scale = Mathf.Clamp(scale, _minZoom, _maxZoom);
+
+            _content.localScale = new Vector3(scale, scale, 1f);
+            _content.anchoredPosition = -contentPoint * scale;
+
+            // Pins and place names are counter-scaled, and this changed the zoom without going
+            // through OnScroll - so they would keep the previous zoom's size without this.
+            ApplyConstantScale(scale);
+
+            OnViewChanged?.Invoke(scale, _content.anchoredPosition);
+        }
+
         private void ApplyConstantScale(float contentScale)
         {
             if (Mathf.Approximately(contentScale, 0f)) return;

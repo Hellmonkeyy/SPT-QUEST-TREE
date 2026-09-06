@@ -23,11 +23,6 @@ namespace QuestTree.UI
         private const float ExpandedWidth = 320f;
         private const float CollapsedWidth = 26f;
 
-        /// <summary>How many route steps to list before summarising the rest. The panel is a fixed
-        /// 320px column, and a route on a late Kappa quest can run to dozens - past this it stops
-        /// being a plan you can read and starts pushing the objectives off the bottom.</summary>
-        private const int RouteSteps = 12;
-
         private QuestGraphBuilder _graph;
         private RectTransform _detailPanel;
         private TMP_Text _detailText;
@@ -250,68 +245,9 @@ namespace QuestTree.UI
         {
             _detailNode = node;
 
-            // Read once per open rather than per line - it is a cached fetch, but this method reads
-            // it for the lock reason and again for every objective.
-            var profile = QuestDataClient.GetProfile();
-
-            var lines = new List<string>
-            {
-                $"<b>{node.Name}</b>",
-                node.TraderName,
-                node.Level > 0 ? $"Level {node.Level}" : null,
-                node.IsKappaRequired ? "<color=#D9A61A>Kappa required</color>" : null,
-                // Faction- and edition-locked quests are shown rather than hidden, so this is what
-                // stops one reading as a bug in the tree.
-                node.UnobtainableReason != null ? $"<color=#C86464>{node.UnobtainableReason}</color>" : null,
-                // The single gate actually stopping you, computed server-side against your level,
-                // loyalty and standing. Until this existed a locked quest was a grey box with no
-                // explanation of what to go and do about it.
-                FormatLockReason(node, profile),
-                ""
-            };
-
-            if (node.PrerequisiteIds.Count > 0)
-            {
-                // Named here rather than drawn as a line, since a prerequisite from another trader
-                // won't have a node in whatever tab is currently rendered (QuestGraphView.Render
-                // only draws edges within the current tab's node set) - this is the one place that
-                // relationship still surfaces when it crosses tabs.
-                lines.Add("<b>Requires</b>");
-                foreach (var prereqId in node.PrerequisiteIds)
-                {
-                    lines.Add(_graph.NodesById.TryGetValue(prereqId, out var prereq)
-                        ? $"{prereq.Name} ({prereq.TraderName})"
-                        : prereqId);
-                }
-                lines.Add("");
-            }
-
-            AddRoute(lines, node);
-
-            // Available for a locked quest too, not just an accepted one: the objective text
-            // arrives with the companion mod's payload rather than being read off a live Quest
-            // instance the game only creates once the quest is unlocked.
-            var objectives = node.NecessaryObjectives.Select(o => FormatObjective(o, profile)).ToList();
-            if (objectives.Count > 0)
-            {
-                lines.Add("<b>Objectives</b>");
-                lines.AddRange(objectives);
-                lines.Add("");
-            }
-
-            var rewards = node.Rewards.Select(FormatReward).Where(r => !string.IsNullOrEmpty(r)).ToList();
-            if (rewards.Count > 0)
-            {
-                lines.Add("<b>Rewards</b>");
-                lines.AddRange(rewards);
-                lines.Add("");
-            }
-
-            if (node.Unlocks.Count > 0)
-            {
-                lines.Add("<b>Unlocks</b>");
-                lines.AddRange(node.Unlocks.Select(u => u.TraderId == node.TraderId ? u.Name : $"{u.Name} ({u.TraderName})"));
-            }
+            // The lines themselves live in QuestSummary, shared with the Maps tab's quest list -
+            // the two screens say the same things about a quest and only lay them out differently.
+            var lines = QuestSummary.Lines(node, _graph, QuestDataClient.GetProfile());
 
             _detailText.text = string.Join("\n", lines.Where(l => l != null));
             _detailPanel.gameObject.SetActive(true);
@@ -330,140 +266,6 @@ namespace QuestTree.UI
         public void HideForTabSwitch()
         {
             if (_detailPanel != null) _detailPanel.gameObject.SetActive(false);
-        }
-
-        /// <summary>
-        /// The one gate blocking this quest, phrased as something to act on. Trader-scoped gates are
-        /// named from the client's own trader list rather than the server guessing a display name,
-        /// <summary>
-        /// The full route to a locked quest: everything it transitively requires that is still
-        /// outstanding, in the order it can be done.
-        ///
-        /// This is the question "Requires" above cannot answer. That line names only the quest
-        /// immediately before this one, which on a deep chain is nearly useless - the real answer
-        /// is the twelve quests behind that one. Ordered by depth, so it reads top to bottom as a
-        /// plan rather than a set.
-        ///
-        /// Gated on the route itself being non-empty rather than on the quest reading as Locked.
-        /// Those are not the same test: a node is only Locked when the client has no live instance
-        /// for it, so on a profile where everything is unlocked at once nothing would ever qualify
-        /// and this section would silently never appear. Asking whether anything is outstanding
-        /// works on any profile - a normally-available quest has its prerequisites done, so the
-        /// route comes back empty and the section hides itself.
-        /// </summary>
-        private void AddRoute(List<string> lines, QuestNode node)
-        {
-            // A quest already handed in is not somewhere you are trying to get to.
-            if (node.Status == ENodeStatus.Completed) return;
-
-            var route = QuestRoute.Remaining(node, _graph);
-
-            // A single step is already spelled out by "Requires" directly above; repeating it as a
-            // one-item route would be noise.
-            if (route.Count < 2) return;
-
-            lines.Add($"<b>Route</b>  <color=#FFFFFF60>{route.Count} quests</color>");
-
-            foreach (var step in route.Take(RouteSteps))
-            {
-                var hex = ColorUtility.ToHtmlStringRGB(QuestNodeView.ColorFor(step.Status));
-
-                lines.Add($"<color=#{hex}>{QuestNodeView.GlyphFor(step.Status)}</color>  {step.Name}" +
-                          $"  <color=#FFFFFF60>{step.TraderName}</color>");
-            }
-
-            if (route.Count > RouteSteps)
-                lines.Add($"<color=#FFFFFF60>+{route.Count - RouteSteps} more</color>");
-
-            lines.Add("");
-        }
-
-        /// and a prerequisite names the actual quest, since the client has the graph to resolve it.
-        /// </summary>
-        private string FormatLockReason(QuestNode node, ProfilePayloadDto profile)
-        {
-            if (profile?.LockReasons == null) return null;
-            if (!profile.LockReasons.TryGetValue(node.Id, out var reason) || reason == null) return null;
-
-            var detail = reason.Detail;
-
-            if (!string.IsNullOrEmpty(reason.TraderId) &&
-                _graph.TraderNames.TryGetValue(reason.TraderId, out var traderName))
-            {
-                detail = $"{traderName}: {detail}";
-            }
-
-            if (reason.Kind == "Level" && reason.CurrentValue > 0)
-                detail = $"{detail} (you are {reason.CurrentValue})";
-
-            if (reason.Kind == "Prerequisite" && reason.BlockingQuestIds != null)
-            {
-                var names = reason.BlockingQuestIds
-                    .Select(id => _graph.NodesById.TryGetValue(id, out var n) ? n.Name : null)
-                    .Where(n => !string.IsNullOrEmpty(n))
-                    .ToList();
-
-                if (names.Count > 0) detail = $"Requires: {string.Join(", ", names)}";
-            }
-
-            return $"<color=#D9A61A>Locked - {detail}</color>";
-        }
-
-        /// <summary>An objective with its live counter where the game is tracking one. Counters only
-        /// exist for quests actually in progress, so most objectives render unchanged.</summary>
-        private static string FormatObjective(ObjectiveDto objective, ProfilePayloadDto profile)
-        {
-            if (objective == null) return "";
-            if (profile?.ConditionProgress == null || string.IsNullOrEmpty(objective.Id)) return objective.Text;
-            if (!profile.ConditionProgress.TryGetValue(objective.Id, out var done)) return objective.Text;
-
-            var target = Mathf.Max(1, objective.Count);
-            var current = Mathf.Clamp((int)done, 0, target);
-
-            var color = current >= target ? "#6FBF6F" : "#FFFFFF80";
-            return $"{objective.Text}  <color={color}>{current}/{target}</color>";
-        }
-
-        /// <summary>Turns one payload reward into a display line. Trader-scoped rewards are named
-        /// from the live session's trader list rather than from the payload, so a modded trader
-        /// reads correctly without the server mod having to know about it.</summary>
-        private string FormatReward(RewardDto reward)
-        {
-            if (reward == null) return null;
-
-            var trader = !string.IsNullOrEmpty(reward.TraderId) &&
-                         _graph.TraderNames.TryGetValue(reward.TraderId, out var traderName)
-                ? traderName
-                : reward.TraderId;
-
-            switch (reward.Type)
-            {
-                case "Experience":
-                    return $"+{reward.Value:N0} XP";
-
-                case "TraderStanding":
-                    return string.IsNullOrEmpty(trader)
-                        ? $"Reputation {reward.Value:+0.00;-0.00}"
-                        : $"{trader} Rep {reward.Value:+0.00;-0.00}";
-
-                case "TraderUnlock":
-                    return string.IsNullOrEmpty(trader) ? "Unlocks a trader" : $"Unlocks {trader}";
-
-                case "Item":
-                    if (string.IsNullOrEmpty(reward.Name)) return null;
-                    return reward.Value >= 2 ? $"{reward.Value:N0}x {reward.Name}" : reward.Name;
-
-                case "Skill":
-                    return string.IsNullOrEmpty(reward.Name) ? null : $"{reward.Name} +{reward.Value:N0}";
-
-                case "AssortmentUnlock":
-                    return string.IsNullOrEmpty(trader) ? "Unlocks a new trader offer" : $"Unlocks a new {trader} offer";
-
-                default:
-                    // Unknown/rare reward types (StashRows, Achievement, ...) still say something
-                    // rather than silently vanishing, but only when there is a name worth showing.
-                    return string.IsNullOrEmpty(reward.Name) ? null : $"{reward.Type}: {reward.Name}";
-            }
         }
     }
 }

@@ -66,8 +66,13 @@ namespace QuestTree.UI
         /// <summary>Edge colours. Normal is the resting line; highlighted is a chain member;
         /// dimmed is everything outside the hovered chain.</summary>
         private static readonly Color EdgeColor = new(1f, 1f, 1f, 0.25f);
-        private static readonly Color EdgeHighlightColor = new(0.95f, 0.8f, 0.25f, 0.95f);
         private static readonly Color EdgeDimmedColor = new(1f, 1f, 1f, 0.06f);
+
+        /// <summary>Taken from the status palette rather than written out again: this used to be a
+        /// copy of the "active" colour, which silently stopped matching the moment that colour
+        /// changed. Reading it from <see cref="QuestNodeView.ColorFor"/> means the highlighted chain
+        /// always looks like the quest it leads to.</summary>
+        private static Color EdgeHighlightColor => QuestNodeView.ColorFor(ENodeStatus.Active);
 
         private readonly Dictionary<int, RectTransform> _edgeViews = new();
 

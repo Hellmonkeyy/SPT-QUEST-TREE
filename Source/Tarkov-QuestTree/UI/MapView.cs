@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using EFT.UI;
 using QuestTree.QuestGraph;
 using TMPro;
 using Unity.VectorGraphics;
@@ -67,11 +68,10 @@ namespace QuestTree.UI
         /// <summary>Marker kinds as the server tags them.</summary>
         private const string ObjectiveKind = "objective";
 
-        /// <summary>A quest you have started. Green because it is the one you can act on now.</summary>
-        private static readonly Color ActiveColor = new(0.42f, 0.80f, 0.42f);
-
-        /// <summary>Everything else - not started, locked, or already handed in.</summary>
-        private static readonly Color InactiveColor = new(0.62f, 0.62f, 0.60f, 0.55f);
+        /// <summary>A marker whose quests the graph does not hold, so no status can honestly be
+        /// claimed for it. Neutral grey rather than a guessed status colour. Status colours
+        /// themselves come from <see cref="QuestNodeView.ColorFor"/>, shared with the tree.</summary>
+        private static readonly Color UnknownMarkerColor = new(0.62f, 0.62f, 0.60f, 0.55f);
 
         /// <summary>Pan and zoom, kept across the rebuild that every dropdown click causes. Switching
         /// floor used to throw them away, which is useless when the whole point of switching floors
@@ -92,6 +92,47 @@ namespace QuestTree.UI
 
         private static bool _pickerOpen;
         private static bool _floorPickerOpen;
+
+        /// <summary>The quest whose row is expanded in the list, or null. Static for the same reason
+        /// as the pickers above: clicking a row repaints the whole aux panel, so anything that has
+        /// to outlive the click cannot be a local.</summary>
+        private static string _selectedQuestId;
+
+        /// <summary>Set alongside <see cref="_selectedQuestId"/> when the click should also move the
+        /// map, and cleared by the render that acts on it. Separate from the selection because
+        /// re-rendering for any other reason - a floor change, a settings change - must not yank the
+        /// view back to the pin the user has since panned away from.</summary>
+        private static string _pendingFocusQuestId;
+
+        /// <summary>How far in to zoom when flying to a quest's pin, as a multiple of the zoom that
+        /// fits the whole floor. Close enough to read the surroundings, still short of
+        /// <see cref="MaxZoom"/> so there is room to zoom further by hand.</summary>
+        private const float FocusZoom = 2f;
+
+        /// <summary>A quest whose row should be scrolled into view once the panel has been laid out,
+        /// and the y the row was actually placed at. Needed because the aux panel rewinds itself to
+        /// the top on every repaint, so clicking a pin for a quest far down the list would otherwise
+        /// expand it off screen.</summary>
+        private static string _pendingScrollQuestId;
+        private static float? _pendingScrollY;
+
+        /// <summary>
+        /// Where the aux panel should scroll to, consumed once.
+        ///
+        /// This cannot be applied by MapView itself: the panel only sets the scroll content's height
+        /// AFTER the view is built, so a scroll written during the build would be clamped against
+        /// the previous tab's height and then reset. QuestTreePanel calls this at the right moment
+        /// instead - see ShowAuxTab.
+        /// </summary>
+        public static bool TryConsumePendingScroll(out float y)
+        {
+            y = _pendingScrollY ?? 0f;
+
+            var has = _pendingScrollY.HasValue;
+            _pendingScrollY = null;
+
+            return has;
+        }
 
         public static float Build(RectTransform parent, QuestGraphBuilder graph, Action onRepaint)
         {
@@ -119,7 +160,21 @@ namespace QuestTree.UI
             // The map and list are built first and the dropdowns last, even though the dropdowns sit
             // above them on screen. Unity UI draws siblings in order, so an open list can only cover
             // the map if it is created after it.
-            var contentHeight = BuildSelectedMap(parent, selected, entry, layer, HeaderHeight, graph);
+            var contentHeight = BuildSelectedMap(parent, selected, entry, layer, HeaderHeight, graph, onRepaint);
+
+            // Beside the two pickers, and built before them for the same draw-order reason. Its x is
+            // fixed rather than measured from the floor picker, which is absent on single-floor maps
+            // - a control that moves between maps is harder to find than one that is always here.
+            //
+            // Setting the value is enough to repaint: ModSettings raises Changed for this entry and
+            // QuestTreePanel re-renders from it. Calling onRepaint as well would build the map twice.
+            AuxLayout.AddToggleAt(
+                parent,
+                AuxLayout.Padding + PickerWidth + 10f + FloorPickerWidth + 10f,
+                AuxLayout.Padding,
+                "Accepted quests only",
+                ModSettings.MarkStartedOnly.Value,
+                value => ModSettings.MarkStartedOnly.Value = value);
 
             var labels = ordered.Select(LabelFor).ToList();
             var selectedIndex = ordered.FindIndex(m => m.Key == _selectedLocationKey);
@@ -136,6 +191,12 @@ namespace QuestTree.UI
                 {
                     _selectedLocationKey = ordered[index].Key;
                     _pickerOpen = false;
+
+                    // A quest belongs to the map it is done on, so a selection never survives a map
+                    // change - carrying it would leave a highlight with no row to explain it.
+                    _selectedQuestId = null;
+                    _pendingFocusQuestId = null;
+
                     onRepaint();
                 },
                 width: PickerWidth);
@@ -235,7 +296,7 @@ namespace QuestTree.UI
 
         private static float BuildSelectedMap(
             RectTransform parent, List<QuestNode> quests, DynamicMapsLibrary.MapEntry entry,
-            DynamicMapsLibrary.MapLayer layer, float top, QuestGraphBuilder graph)
+            DynamicMapsLibrary.MapLayer layer, float top, QuestGraphBuilder graph, Action onRepaint)
         {
             var y = top;
             var left = AuxLayout.Padding;
@@ -251,9 +312,27 @@ namespace QuestTree.UI
             var listLeft = left;
             var mapBottom = y;
 
+            // The same filter the markers use, so the list and the map agree about what is on
+            // screen. Without this, turning the toggle on emptied the map but left a list of quests
+            // whose pins had just been hidden.
+            //
+            // In progress first, then startable, then locked: the order you would act on them.
+            //
+            // Computed before the map is built because a marker click has to land on a quest the
+            // list is actually showing - see ClickTargetFor.
+            var visible = quests
+                .Where(q => !ModSettings.MarkStartedOnly.Value || q.Status == ENodeStatus.Active)
+                .OrderBy(q => StatusRank(q.Status))
+                .ThenBy(q => q.TraderName, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(q => q.Name, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            var shownIds = new HashSet<string>(
+                visible.Take(MaxQuestRows).Select(q => q.Id), StringComparer.Ordinal);
+
             if (sprite != null)
             {
-                BuildMapViewport(parent, entry, layer, sprite, left, y, mapWidth, graph);
+                BuildMapViewport(parent, entry, layer, sprite, left, y, mapWidth, graph, shownIds, onRepaint);
                 mapBottom = y + MapViewportHeight;
                 AddCredit(parent, entry, left, mapBottom + 4f);
                 mapBottom += 22f;
@@ -261,9 +340,13 @@ namespace QuestTree.UI
             }
 
             // A card behind the list, so the text reads as a column rather than as words floating
-            // on the map's own background.
-            if (sprite != null)
-                AddCard(parent, listLeft - 10f, y - 8f, QuestListWidth + 20f, MapViewportHeight + 8f);
+            // on the map's own background. Sized once the list is built, since an expanded quest can
+            // run past the bottom of the map - it still has to be created here, before the rows, to
+            // end up behind them.
+            var cardTop = y - 8f;
+            var listCard = sprite != null
+                ? AddCard(parent, listLeft - 10f, cardTop, QuestListWidth + 20f, MapViewportHeight + 8f)
+                : null;
 
             var listY = y;
             AddAt(parent, $"<b>{mapName}</b>", listLeft, ref listY, 26f, 15, QuestListWidth);
@@ -300,28 +383,88 @@ namespace QuestTree.UI
 
             listY += 6f;
 
-            // In progress first, then startable, then locked: the order you would act on them.
-            foreach (var node in quests
-                         .OrderBy(q => StatusRank(q.Status))
-                         .ThenBy(q => q.TraderName, StringComparer.OrdinalIgnoreCase)
-                         .ThenBy(q => q.Name, StringComparer.OrdinalIgnoreCase)
-                         .Take(MaxQuestRows))
+            if (visible.Count == 0)
             {
-                var hex = ColorUtility.ToHtmlStringRGB(QuestNodeView.ColorFor(node.Status));
-
                 AddAt(parent,
-                    $"<color=#{hex}>{QuestNodeView.GlyphFor(node.Status)}</color>  {node.Name}" +
-                    $"  <color=#FFFFFF60>{node.TraderName}</color>",
-                    listLeft, ref listY, AuxLayout.RowHeight, 12, QuestListWidth);
+                    "<color=#FFFFFF60>No accepted quests on this map. Turn off “Accepted quests " +
+                    "only” to see the rest.</color>",
+                    listLeft, ref listY, 36f, 11, QuestListWidth);
             }
 
-            if (quests.Count > MaxQuestRows)
+            foreach (var node in visible.Take(MaxQuestRows))
             {
-                AddAt(parent, $"<color=#FFFFFF60>+{quests.Count - MaxQuestRows} more</color>",
+                var isSelected = node.Id == _selectedQuestId;
+
+                // Rows are laid out on a plain y cursor in the scroll content's own units, so the
+                // cursor IS the scroll offset that brings this row to the top - no rect maths.
+                if (node.Id == _pendingScrollQuestId)
+                {
+                    _pendingScrollY = Mathf.Max(0f, listY - AuxLayout.Padding);
+                    _pendingScrollQuestId = null;
+                }
+
+                AddQuestRow(parent, node, listLeft, ref listY, isSelected, () =>
+                {
+                    // Clicking the open quest again closes it, so a row is its own toggle.
+                    if (isSelected)
+                    {
+                        _selectedQuestId = null;
+                    }
+                    else
+                    {
+                        _selectedQuestId = node.Id;
+                        _pendingFocusQuestId = node.Id;
+                        _pendingScrollQuestId = node.Id;
+                        SelectFloorFor(node.Id, entry);
+                    }
+
+                    onRepaint();
+                });
+
+                if (!isSelected) continue;
+
+                // The same lines the tree view's detail panel shows, indented under the row that
+                // opened them. The column has no scroll view of its own - it does not need one,
+                // because the aux panel scrolls and Build reports the taller of the two columns.
+                //
+                // The profile is only fetched here: at most one row is ever open, and this view
+                // repaints on every dropdown click, so asking for it up front would be work done
+                // for nothing on the common path.
+                foreach (var line in QuestSummary.Lines(node, graph, QuestDataClient.GetProfile()))
+                    AddDetailLine(parent, line, listLeft + 12f, ref listY, QuestListWidth - 12f);
+
+                listY += 6f;
+            }
+
+            // Whether or not the row turned up - a quest can be filtered out or past the row cap -
+            // the request is spent. Leaving it set would scroll on some unrelated later render.
+            _pendingScrollQuestId = null;
+
+            if (visible.Count > MaxQuestRows)
+            {
+                AddAt(parent, $"<color=#FFFFFF60>+{visible.Count - MaxQuestRows} more</color>",
                     listLeft, ref listY, AuxLayout.RowHeight, 11, QuestListWidth);
             }
 
+            if (listCard != null)
+            {
+                listCard.sizeDelta = new Vector2(
+                    QuestListWidth + 20f, Mathf.Max(MapViewportHeight + 8f, listY - cardTop + 8f));
+            }
+
             return Mathf.Max(listY, mapBottom);
+        }
+
+        /// <summary>Switches the view to the floor the quest's pin is on, so the pin being flown to
+        /// is the solid one on the current storey rather than a dimmed off-floor ghost. Silently does
+        /// nothing when the quest has no marker or the map has no floors to choose between.</summary>
+        private static void SelectFloorFor(string questId, DynamicMapsLibrary.MapEntry entry)
+        {
+            var marker = FindMarkerFor(questId, entry);
+            if (marker == null) return;
+
+            var owner = OwnerFor(marker, entry);
+            if (owner != null) _selectedLevel = owner.Level;
         }
 
         /// <summary>
@@ -345,7 +488,8 @@ namespace QuestTree.UI
         /// </summary>
         private static void BuildMapViewport(
             RectTransform parent, DynamicMapsLibrary.MapEntry entry, DynamicMapsLibrary.MapLayer layer,
-            Sprite sprite, float x, float y, float width, QuestGraphBuilder graph)
+            Sprite sprite, float x, float y, float width, QuestGraphBuilder graph,
+            HashSet<string> shownIds, Action onRepaint)
         {
             var viewportGo = new GameObject(
                 "MapViewport", typeof(RectTransform), typeof(Image), typeof(RectMask2D));
@@ -421,7 +565,34 @@ namespace QuestTree.UI
             _savedPan = space.anchoredPosition;
 
             BuildPlaceLabels(space, entry, layer, panZoom);
-            BuildMarkers(space, entry, layer, panZoom, graph);
+            BuildMarkers(space, entry, layer, panZoom, graph, shownIds, onRepaint);
+
+            // Last, so it overrides the restored pan and zoom above - and after the markers, since
+            // FocusOn re-applies their counter-scale for the zoom it lands on.
+            FocusPendingQuest(entry, layer, panZoom, fit);
+        }
+
+        /// <summary>
+        /// Moves the view to the pin of the quest just clicked in the list, if there is one.
+        ///
+        /// Best-effort by design: a quest with no marker on this map - and every quest at all when
+        /// the companion server mod is absent - still selects and expands, it just does not move the
+        /// map. The request is cleared either way, so an unfindable quest cannot leave the view
+        /// snapping back on every later rebuild.
+        /// </summary>
+        private static void FocusPendingQuest(
+            DynamicMapsLibrary.MapEntry entry, DynamicMapsLibrary.MapLayer layer,
+            PanZoomHandler panZoom, float fit)
+        {
+            if (string.IsNullOrEmpty(_pendingFocusQuestId)) return;
+
+            var questId = _pendingFocusQuestId;
+            _pendingFocusQuestId = null;
+
+            var marker = FindMarkerFor(questId, entry);
+            if (marker == null) return;
+
+            panZoom.FocusOn(PositionFor(marker, layer, entry), fit * FocusZoom);
         }
 
         /// <summary>
@@ -690,49 +861,83 @@ namespace QuestTree.UI
             return entry.LayerFor(marker.X, marker.Z, marker.Y);
         }
 
-        /// <summary>Whether any quest wanting this item has been started. The payload carries the
-        /// quest ids, and the client already knows every quest's live status, so this is a lookup
-        /// rather than anything the server has to decide.</summary>
-        private static bool IsActive(MapMarkerDto marker, QuestGraphBuilder graph)
+        /// <summary>
+        /// The status a marker should be drawn as. One pin can serve several quests - an item three
+        /// quests want is one spawn - so it takes the most actionable of them, using the same
+        /// <see cref="StatusRank"/> ordering the quest list is sorted by rather than a second
+        /// opinion about what "most relevant" means.
+        ///
+        /// Null when no quest resolves, which is not the same as "locked": the payload can name a
+        /// quest the graph does not hold, and guessing a status for it would be a lie.
+        /// </summary>
+        private static ENodeStatus? StatusFor(MapMarkerDto marker, QuestGraphBuilder graph)
         {
-            if (marker.QuestIds == null) return false;
+            if (marker.QuestIds == null) return null;
+
+            ENodeStatus? best = null;
 
             foreach (var id in marker.QuestIds)
             {
-                if (id != null && graph.NodesById.TryGetValue(id, out var node) &&
-                    node.Status == ENodeStatus.Active)
-                {
-                    return true;
-                }
+                if (id == null || !graph.NodesById.TryGetValue(id, out var node)) continue;
+
+                if (best == null || StatusRank(node.Status) < StatusRank(best.Value))
+                    best = node.Status;
             }
 
-            return false;
+            return best;
+        }
+
+        /// <summary>The quest a click on this marker should open: the most actionable one it serves
+        /// that the list is actually showing. Restricted to <paramref name="shown"/> because the map
+        /// drops completed quests (see GroupByMap) while the graph still holds them - picking one of
+        /// those would select a row that never renders, and the click would look broken.</summary>
+        private static string ClickTargetFor(
+            MapMarkerDto marker, QuestGraphBuilder graph, HashSet<string> shown)
+        {
+            if (marker.QuestIds == null) return null;
+
+            string best = null;
+            var bestRank = int.MaxValue;
+
+            foreach (var id in marker.QuestIds)
+            {
+                if (id == null || !shown.Contains(id)) continue;
+                if (!graph.NodesById.TryGetValue(id, out var node)) continue;
+
+                var rank = StatusRank(node.Status);
+                if (rank >= bestRank) continue;
+
+                best = id;
+                bestRank = rank;
+            }
+
+            return best;
         }
 
         private static void BuildMarkers(
             RectTransform space, DynamicMapsLibrary.MapEntry entry,
-            DynamicMapsLibrary.MapLayer layer, PanZoomHandler panZoom, QuestGraphBuilder graph)
+            DynamicMapsLibrary.MapLayer layer, PanZoomHandler panZoom, QuestGraphBuilder graph,
+            HashSet<string> shownIds, Action onRepaint)
         {
             if (entry == null) return;
 
-            var payload = QuestDataClient.GetMapMarkers();
-            if (payload?.Maps == null) return;
-
-            var set = payload.Maps.FirstOrDefault(m =>
-                m?.LocationKey != null &&
-                entry.InternalNames.Any(n => string.Equals(n, m.LocationKey, StringComparison.OrdinalIgnoreCase)));
-
+            var set = MarkerSetFor(entry);
             if (set?.Markers == null) return;
 
             // Active quests first, then this floor: when two names collide, the one that survives
             // is the one you have started and could walk to right now.
             var ordered = set.Markers
                 .Where(m => m != null)
-                .Select(m => (
-                    Marker: m,
-                    Owner: OwnerFor(m, entry),
-                    Active: IsActive(m, graph),
-                    Objective: string.Equals(m.Kind, ObjectiveKind, StringComparison.OrdinalIgnoreCase)))
+                .Select(m =>
+                {
+                    var status = StatusFor(m, graph);
+                    return (
+                        Marker: m,
+                        Owner: OwnerFor(m, entry),
+                        Status: status,
+                        Active: status == ENodeStatus.Active,
+                        Objective: string.Equals(m.Kind, ObjectiveKind, StringComparison.OrdinalIgnoreCase));
+                })
                 .Where(m => !ModSettings.MarkStartedOnly.Value || m.Active)
                 .OrderBy(m => m.Active ? 0 : 1)
                 .ThenBy(m => m.Objective ? 0 : 1)
@@ -745,21 +950,46 @@ namespace QuestTree.UI
             var scale = space.localScale.x;
             var labelSpan = new Vector2(LabelWidth, LabelHeight) / Mathf.Max(0.0001f, scale);
 
-            foreach (var (marker, owner, active, objective) in ordered)
+            // Lifted above the other pins once they all exist - doing it as it is built would only
+            // put it above the markers created so far.
+            RectTransform selectedRect = null;
+
+            foreach (var (marker, owner, status, active, objective) in ordered)
             {
                 // A marker whose height matches no floor at all is treated as belonging to the one
                 // being shown rather than dropped: the bands do not tile the world exhaustively, and
                 // a real spawn is worth more than a tidy rule.
                 var onThisFloor = owner == null || owner == layer;
 
+                var isSelected = _selectedQuestId != null && marker.QuestIds != null &&
+                                 marker.QuestIds.Contains(_selectedQuestId);
+
                 // Colour carries quest status, which is the thing worth knowing at a glance. The
                 // floor is still distinguished, but by the filled/hollow glyph below, so the two
                 // facts do not have to compete for the same channel.
-                var colour = active ? ActiveColor : InactiveColor;
+                //
+                // Taken from the shared palette so a started quest is the same green here as in the
+                // tree and the legend. This used to be a private two-colour scheme - green for
+                // started, one flat grey for everything else - which disagreed with the tree AND
+                // made an available quest indistinguishable from a locked one.
+                var colour = status.HasValue ? QuestNodeView.ColorFor(status.Value) : UnknownMarkerColor;
+
+                // Everything you have not started is held back, so the pins you can act on now carry
+                // the map. The old flat grey did this with a baked-in 0.55 alpha; keeping it as a
+                // multiply preserves that weighting while letting the hue say which status it is.
+                if (!active) colour.a *= 0.6f;
 
                 if (!onThisFloor) colour.a *= 0.55f;
 
+                // The pin the list sent you to, at full strength whatever its status - having flown
+                // the map to it, the one thing it must not be is hard to pick out.
+                if (isSelected) colour = GameStyle.AccentColor;
+
                 var position = PositionFor(marker, layer, entry);
+
+                // Which quest this pin opens. Null when none of its quests has a row in the list,
+                // in which case the pin stays unclickable rather than selecting something invisible.
+                var clickTarget = ClickTargetFor(marker, graph, shownIds);
 
                 var go = new GameObject("QuestMarker", typeof(RectTransform));
                 var rect = (RectTransform)go.transform;
@@ -773,6 +1003,8 @@ namespace QuestTree.UI
                 rect.sizeDelta = new Vector2(MarkerSize, MarkerSize);
                 panZoom.KeepConstantScale(rect);
 
+                if (isSelected) selectedRect = rect;
+
                 var pin = objective ? DynamicMapsLibrary.QuestPin : null;
 
                 if (pin != null)
@@ -782,7 +1014,11 @@ namespace QuestTree.UI
                     var icon = go.AddComponent<Image>();
                     icon.sprite = pin;
                     icon.color = colour;
-                    icon.raycastTarget = false;
+
+                    // The pin is the click target, so unlike every other graphic on the map it has
+                    // to be hit-testable. Drag and scroll still reach the viewport - see
+                    // MapMarkerClick for why that is safe.
+                    icon.raycastTarget = clickTarget != null;
                     icon.preserveAspect = true;
 
                     rect.pivot = new Vector2(0.5f, 0f);
@@ -805,8 +1041,28 @@ namespace QuestTree.UI
                     dot.color = colour;
                     dot.alignment = TextAlignmentOptions.Center;
                     dot.enableWordWrapping = false;
-                    dot.raycastTarget = false;
+                    dot.raycastTarget = clickTarget != null;
                     GameStyle.ApplyOutlined(dot);
+                }
+
+                if (clickTarget != null)
+                {
+                    var wasSelected = clickTarget == _selectedQuestId;
+
+                    go.AddComponent<MapMarkerClick>().OnClicked = () =>
+                    {
+                        GameStyle.PlaySound(EUISoundType.ButtonClick);
+
+                        // Clicking the open quest's pin again closes it, matching the rows.
+                        _selectedQuestId = wasSelected ? null : clickTarget;
+
+                        // Deliberately NOT setting _pendingFocusQuestId or the floor: you clicked a
+                        // pin you can already see, so re-centring and jumping the zoom would throw
+                        // the view away for nothing. That is the row's job, not the pin's.
+                        if (!wasSelected) _pendingScrollQuestId = clickTarget;
+
+                        onRepaint();
+                    };
                 }
 
                 // The name is dropped where it would land on one already placed. The dot always
@@ -816,7 +1072,9 @@ namespace QuestTree.UI
                     position.x + labelSpan.x * 0.1f, position.y - labelSpan.y * 0.5f,
                     labelSpan.x, labelSpan.y);
 
-                if (claimed.Any(other => other.Overlaps(footprint))) continue;
+                // The selected quest keeps its name whatever it overlaps - it is the one the user
+                // just asked to be shown, so it is the one label that must not lose the collision.
+                if (!isSelected && claimed.Any(other => other.Overlaps(footprint))) continue;
                 claimed.Add(footprint);
 
                 var labelGo = new GameObject("Label", typeof(RectTransform));
@@ -839,26 +1097,48 @@ namespace QuestTree.UI
                 label.raycastTarget = false;
                 GameStyle.ApplyOutlined(label);
             }
+
+            selectedRect?.SetAsLastSibling();
+        }
+
+        /// <summary>This map's markers from the server payload, matched on any of the map's internal
+        /// names. Shared by everything that needs them so the lookup exists once.</summary>
+        private static MapMarkerSetDto MarkerSetFor(DynamicMapsLibrary.MapEntry entry)
+        {
+            if (entry == null) return null;
+
+            var payload = QuestDataClient.GetMapMarkers();
+            if (payload?.Maps == null) return null;
+
+            return payload.Maps.FirstOrDefault(m =>
+                m?.LocationKey != null &&
+                entry.InternalNames.Any(n => string.Equals(n, m.LocationKey, StringComparison.OrdinalIgnoreCase)));
+        }
+
+        /// <summary>Where a quest is on this map, or null if it has no marker here. An objective pin
+        /// is where the quest actually happens; an item marker is only somewhere one of the things it
+        /// asks for can spawn - so the objective wins when a quest has both.</summary>
+        private static MapMarkerDto FindMarkerFor(string questId, DynamicMapsLibrary.MapEntry entry)
+        {
+            if (string.IsNullOrEmpty(questId)) return null;
+
+            var set = MarkerSetFor(entry);
+            if (set?.Markers == null) return null;
+
+            return set.Markers
+                .Where(m => m?.QuestIds != null && m.QuestIds.Contains(questId))
+                .OrderBy(m => string.Equals(m.Kind, ObjectiveKind, StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+                .FirstOrDefault();
         }
 
         /// <summary>How many item spawns this map has markers for, for the line under the heading.</summary>
-        private static int MarkerCountFor(DynamicMapsLibrary.MapEntry entry)
-        {
-            if (entry == null) return 0;
-
-            var payload = QuestDataClient.GetMapMarkers();
-            if (payload?.Maps == null) return 0;
-
-            var set = payload.Maps.FirstOrDefault(m =>
-                m?.LocationKey != null &&
-                entry.InternalNames.Any(n => string.Equals(n, m.LocationKey, StringComparison.OrdinalIgnoreCase)));
-
-            return set?.Markers?.Count ?? 0;
-        }
+        private static int MarkerCountFor(DynamicMapsLibrary.MapEntry entry) =>
+            MarkerSetFor(entry)?.Markers?.Count ?? 0;
 
         /// <summary>A panel behind a column, so its text reads as a block rather than as words lying
         /// loose on whatever is behind them.</summary>
-        private static void AddCard(RectTransform parent, float x, float y, float width, float height)
+        private static RectTransform AddCard(
+            RectTransform parent, float x, float y, float width, float height)
         {
             var go = new GameObject("Card", typeof(RectTransform), typeof(Image));
             var rect = (RectTransform)go.transform;
@@ -872,6 +1152,8 @@ namespace QuestTree.UI
             image.color = new Color(1f, 1f, 1f, 0.04f);
             image.raycastTarget = false;
             GameStyle.ApplyPanel(image);
+
+            return rect;
         }
 
         /// <summary>The map's own author credit, shown because the images are someone else's work
@@ -898,6 +1180,106 @@ namespace QuestTree.UI
             AddAt(parent,
                 $"<color=#FFFFFF60>Objective locations: TarkovTracker/tarkovdata{pin}</color>",
                 x, ref cursor, 16f, 10);
+        }
+
+        /// <summary>
+        /// One clickable quest in the list.
+        ///
+        /// Built by hand rather than through <see cref="AddAt"/> because a bare TextMeshProUGUI has
+        /// no raycast target at all - which is exactly why these rows did nothing before. The Image
+        /// is what makes the row hit-testable; it is fully transparent when unselected, and Unity
+        /// still raycasts a zero-alpha Graphic, so nothing is drawn for it.
+        /// </summary>
+        private static void AddQuestRow(
+            RectTransform parent, QuestNode node, float x, ref float y, bool selected, Action onClick)
+        {
+            const float height = AuxLayout.RowHeight;
+
+            var go = new GameObject("QuestRow", typeof(RectTransform), typeof(Image), typeof(Button));
+            var rect = (RectTransform)go.transform;
+            rect.SetParent(parent, worldPositionStays: false);
+            rect.anchorMin = rect.anchorMax = new Vector2(0f, 1f);
+            rect.pivot = new Vector2(0f, 1f);
+            rect.anchoredPosition = new Vector2(x, -y);
+            rect.sizeDelta = new Vector2(QuestListWidth, height);
+
+            var background = go.GetComponent<Image>();
+            var accent = GameStyle.AccentColor;
+            background.color = selected
+                ? new Color(accent.r, accent.g, accent.b, 0.22f)
+                : Color.clear;
+
+            go.GetComponent<Button>().onClick.AddListener(() =>
+            {
+                GameStyle.PlaySound(EUISoundType.ButtonClick);
+                onClick();
+            });
+
+            var labelGo = new GameObject("Label", typeof(RectTransform));
+            var labelRect = (RectTransform)labelGo.transform;
+            labelRect.SetParent(rect, worldPositionStays: false);
+            labelRect.anchorMin = Vector2.zero;
+            labelRect.anchorMax = Vector2.one;
+            labelRect.offsetMin = new Vector2(4f, 0f);
+            labelRect.offsetMax = Vector2.zero;
+
+            var hex = ColorUtility.ToHtmlStringRGB(QuestNodeView.ColorFor(node.Status));
+
+            var label = labelGo.AddComponent<TextMeshProUGUI>();
+            label.text = $"<color=#{hex}>{QuestNodeView.GlyphFor(node.Status)}</color>  {node.Name}" +
+                         $"  <color=#FFFFFF60>{node.TraderName}</color>";
+            label.fontSize = 12;
+            label.color = Color.white;
+            label.alignment = TextAlignmentOptions.Left;
+            label.enableWordWrapping = false;
+            label.overflowMode = TextOverflowModes.Ellipsis;
+            label.raycastTarget = false;
+            GameStyle.Apply(label);
+
+            y += height;
+        }
+
+        /// <summary>
+        /// One line of an expanded quest's detail.
+        ///
+        /// Unlike the list rows this wraps, because objective and reward text is written as prose and
+        /// ellipsising it would lose the half that says what to do. Wrapped text has no height until
+        /// it is measured, so the row is sized from TMP's own preferred height at this width -
+        /// otherwise every line after a wrapped one is drawn on top of it.
+        /// </summary>
+        private static void AddDetailLine(
+            RectTransform parent, string text, float x, ref float y, float width)
+        {
+            if (text == null) return;
+
+            // QuestSummary separates its sections with empty strings; they are spacing, not content.
+            if (text.Length == 0)
+            {
+                y += 6f;
+                return;
+            }
+
+            var go = new GameObject("Detail", typeof(RectTransform));
+            var rect = (RectTransform)go.transform;
+            rect.SetParent(parent, worldPositionStays: false);
+            rect.anchorMin = rect.anchorMax = new Vector2(0f, 1f);
+            rect.pivot = new Vector2(0f, 1f);
+            rect.anchoredPosition = new Vector2(x, -y);
+
+            var label = go.AddComponent<TextMeshProUGUI>();
+            label.text = text;
+            label.fontSize = 12;
+            label.color = Color.white;
+            label.alignment = TextAlignmentOptions.TopLeft;
+            label.enableWordWrapping = true;
+            label.raycastTarget = false;
+            GameStyle.Apply(label);
+
+            // Measured after Apply, since the font it installs decides the height.
+            var height = Mathf.Max(16f, label.GetPreferredValues(text, width, 0f).y);
+            rect.sizeDelta = new Vector2(width, height);
+
+            y += height + 2f;
         }
 
         /// <summary>Places a line at an explicit x, which AuxLayout's full-width rows cannot do -

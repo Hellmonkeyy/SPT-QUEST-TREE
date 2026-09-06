@@ -24,12 +24,19 @@ namespace QuestTree.UI
         public static float Width => LayoutMetrics.NodeWidth;
         public static float Height => LayoutMetrics.NodeHeight;
 
-        // Matches the vanilla quest-status convention (Tasks screen): grey/white/amber/green,
-        // rather than the arbitrary blue "available" this started with.
+        // Grey / white / green / dark green. Departs from the vanilla Tasks screen's amber "active"
+        // deliberately: the one quest you are actually doing should be the brightest thing on the
+        // screen, and a vivid green reads that way against both the dark panel and the map.
         private static readonly Color LockedColor = new(0.35f, 0.35f, 0.35f, 0.9f);
         private static readonly Color AvailableColor = new(0.82f, 0.82f, 0.8f, 0.9f);
-        private static readonly Color ActiveColor = new(0.95f, 0.8f, 0.25f, 0.95f);
-        private static readonly Color CompletedColor = new(0.35f, 0.85f, 0.4f, 0.95f);
+        private static readonly Color ActiveColor = new(0.36f, 0.91f, 0.17f, 0.95f);
+
+        // Completed is also green - "done" is green by convention and that is worth keeping - so the
+        // two are separated by BRIGHTNESS rather than hue: this is 43% darker than Active. Hue alone
+        // does not survive the 11px glyphs in the legend and the lists, and it survives the 25%
+        // chain-dimming even less. Completed quests are the backdrop of a mature tree; they should
+        // recede, not compete.
+        private static readonly Color CompletedColor = new(0.24f, 0.52f, 0.3f, 0.95f);
 
         /// <summary>Shared with the legend so the two can never drift apart.</summary>
         public static Color ColorFor(ENodeStatus status) => status switch
@@ -183,12 +190,41 @@ namespace QuestTree.UI
             var color = ColorFor(Node.Status);
             _border.color = color;
 
+            // The status colour fills the whole box, so the text has to be picked against it rather
+            // than left on the harvested body colour - that colour is a muted tan taken off the
+            // game's own taskbar, which on a dark Locked node was barely readable and on a pale
+            // Available one was nearly invisible.
+            var ink = InkOn(color);
+
+            if (_title != null) _title.color = ink;
+            if (_subtitle != null) _subtitle.color = Fade(ink, 0.8f);
+            if (_objectivePreview != null) _objectivePreview.color = Fade(ink, 0.7f);
+
             if (_statusGlyph != null)
             {
                 _statusGlyph.text = GlyphFor(Node.Status);
-                _statusGlyph.color = color;
+
+                // Not the status colour: that is what the box behind it is already painted, so the
+                // glyph used to be the same colour as its own background and survived only on its
+                // outline. The SHAPE carries the status here; the colour just has to be readable.
+                _statusGlyph.color = ink;
             }
         }
+
+        /// <summary>Near-black or near-white, whichever the given fill can actually be read against.
+        /// Rec. 709 luminance, so it tracks perceived brightness rather than raw channel sums - the
+        /// palette's greens are bright at 0.91 but their red and blue are almost nothing.</summary>
+        private static Color InkOn(Color fill)
+        {
+            var luminance = 0.2126f * fill.r + 0.7152f * fill.g + 0.0722f * fill.b;
+
+            return luminance > 0.5f
+                ? new Color(0.06f, 0.07f, 0.05f)
+                : new Color(0.96f, 0.96f, 0.94f);
+        }
+
+        private static Color Fade(Color color, float alpha) =>
+            new(color.r, color.g, color.b, alpha);
 
         private void RefreshDetails()
         {

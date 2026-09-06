@@ -882,6 +882,16 @@ namespace QuestTree.UI
 
             _auxContent.sizeDelta = new Vector2(0f, height);
 
+            // Only now that the content has its real height can a scroll be clamped correctly - the
+            // rewind to the top above happens before the view is even built. The Maps tab uses this
+            // to keep a quest opened from its map pin on screen, which it would otherwise not be
+            // whenever the quest sits far enough down the list.
+            if (_selectedTraderId == MapsTabId && MapView.TryConsumePendingScroll(out var scrollTo))
+            {
+                var maxScroll = Mathf.Max(0f, height - _auxPanel.rect.height);
+                _auxContent.anchoredPosition = new Vector2(0f, Mathf.Clamp(scrollTo, 0f, maxScroll));
+            }
+
             _toolbar.SetNotice(NoticeForView(_selectedTraderId));
 
             _detail.HideForTabSwitch();

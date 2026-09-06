@@ -113,6 +113,15 @@ namespace QuestTree
             DrawEdges.SettingChanged += Raise;
             CompactLayout.SettingChanged += Raise;
             MaxVisibleNodes.SettingChanged += Raise;
+
+            // The Maps settings were bound but never hooked up, so changing one from the F12 menu
+            // raised nothing and the map kept its old markers until something else forced a
+            // re-render. The in-panel controls happened to work only because they repaint the view
+            // themselves.
+            MarkStartedOnly.SettingChanged += Raise;
+            MapArtworkRotation.SettingChanged += Raise;
+            MirrorMapArtwork.SettingChanged += Raise;
+            ShowMapGuides.SettingChanged += Raise;
         }
 
         /// <summary>True once Init has run. Guards the panel against reading a null entry if the

@@ -66,14 +66,49 @@ namespace QuestTree.UI
         {
             var height = string.IsNullOrEmpty(description) ? 30f : 46f;
 
+            // Stretched to the full width of the column, inset by the padding on both sides -
+            // hence the anchor at x=1 and the negative width, which is an inset, not a size.
+            BuildToggle(parent, label, description, value, onChanged,
+                new Vector2(Padding, -y), new Vector2(-(Padding * 2f), height), stretchWidth: true);
+
+            y += height;
+            return height;
+        }
+
+        /// <summary>The same control placed at an absolute position instead of on the running
+        /// <c>y</c> cursor, for a header laid out in columns rather than as a stack - the Maps tab
+        /// sits its toggle beside the map and floor dropdowns, which are placed the same way
+        /// (see <see cref="AddDropdown"/>).</summary>
+        public static float AddToggleAt(
+            RectTransform parent, float x, float top, string label, bool value,
+            System.Action<bool> onChanged, float width = 240f)
+        {
+            const float height = DropdownHeight;
+
+            BuildToggle(parent, label, description: null, value: value, onChanged: onChanged,
+                position: new Vector2(x, -top), size: new Vector2(width, height), stretchWidth: false);
+
+            return height;
+        }
+
+        /// <summary>Shared construction for both toggle placements. A Button plus a box that fills
+        /// when on, rather than Unity's Toggle component, so there is no toggle-group or
+        /// graphic-swap behaviour to configure - it is one click handler and one colour.
+        ///
+        /// <paramref name="stretchWidth"/> decides how <paramref name="size"/>'s x is read: stretched
+        /// it is an inset from the parent's right edge (so it is negative), fixed it is a width.</summary>
+        private static void BuildToggle(
+            RectTransform parent, string label, string description, bool value,
+            System.Action<bool> onChanged, Vector2 position, Vector2 size, bool stretchWidth)
+        {
             var go = new GameObject("Toggle", typeof(RectTransform), typeof(Button));
             var rect = (RectTransform)go.transform;
             rect.SetParent(parent, worldPositionStays: false);
             rect.anchorMin = new Vector2(0f, 1f);
-            rect.anchorMax = new Vector2(1f, 1f);
+            rect.anchorMax = new Vector2(stretchWidth ? 1f : 0f, 1f);
             rect.pivot = new Vector2(0f, 1f);
-            rect.anchoredPosition = new Vector2(Padding, -y);
-            rect.sizeDelta = new Vector2(-(Padding * 2f), height);
+            rect.anchoredPosition = position;
+            rect.sizeDelta = size;
 
             var boxGo = new GameObject("Box", typeof(RectTransform), typeof(Image));
             var boxRect = (RectTransform)boxGo.transform;
@@ -111,9 +146,6 @@ namespace QuestTree.UI
                 box.color = current ? new Color(0.85f, 0.65f, 0.1f) : new Color(1f, 1f, 1f, 0.15f);
                 onChanged(current);
             });
-
-            y += height;
-            return height;
         }
 
         public static float AddButton(RectTransform parent, ref float y, string label, System.Action onClick)
