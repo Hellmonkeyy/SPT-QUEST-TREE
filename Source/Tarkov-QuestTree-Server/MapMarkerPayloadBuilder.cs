@@ -8,6 +8,9 @@ using SPTarkov.DI.Annotations;
 using SPTarkov.Server.Core.Models.Eft.Common;
 using SPTarkov.Server.Core.Models.Eft.Common.Tables;
 using SPTarkov.Server.Core.Models.Spt.Tables;
+using SPTarkov.Server.Core.DI;
+using System.Threading;
+using System.Threading.Tasks;
 using SPTarkov.Server.Core.Services.Locales;
 
 namespace QuestTreeServer
@@ -34,8 +37,23 @@ namespace QuestTreeServer
         ISptLogger<MapMarkerPayloadBuilder> logger,
         TemplateTable templateTable,
         LocationTable locationTable,
-        LocaleService localeService)
+        LocaleService localeService) : IOnLoad
     {
+        /// <summary>
+        /// Builds the markers while the server is starting rather than when the client first asks.
+        ///
+        /// This is the difference between a working Maps tab and a frozen game. The first build
+        /// reads every map's loose-loot table off disk - 42MB for Customs alone - and takes several
+        /// seconds; SPT's client request handler is synchronous and runs on Unity's main thread, so
+        /// paying that on the first request froze the whole game for the duration. Paid here it
+        /// costs the server a few seconds of its own startup, where there is nothing to block.
+        /// </summary>
+        public Task OnLoadAsync(CancellationToken cancellationToken)
+        {
+            GetPayloadJson();
+            return Task.CompletedTask;
+        }
+
         /// <summary>Objective types that mean "go and pick this up". A hand-in condition also names
         /// target items, but where you find those is not this map, and pinning them would be a
         /// confident lie.</summary>

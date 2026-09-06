@@ -240,6 +240,11 @@ namespace QuestTree.UI
 
                 if (scene.Scene?.Root == null) return null;
 
+                // The viewBox, which is the rectangle the map's own coordinate bounds describe -
+                // verified against the files: Customs declares a 1062x535 viewBox and bounds
+                // 1070x541, the same space to within a rounding.
+                var viewport = scene.SceneViewport;
+
                 // Step sizes govern how finely curves are subdivided. These are deliberately coarse:
                 // the map is shown at panel size, not zoomed into, and a finer tessellation on a
                 // 100KB SVG costs noticeably more time for detail nobody can see here.
@@ -254,7 +259,17 @@ namespace QuestTree.UI
                 var geometry = VectorUtils.TessellateScene(scene.Scene, options);
                 if (geometry == null || geometry.Count == 0) return null;
 
-                return VectorUtils.BuildSprite(geometry, 100f, VectorUtils.Alignment.Center, Vector2.zero, 128);
+                // Pinned to the viewBox rather than letting BuildSprite size the sprite to the
+                // geometry. Those are not the same rectangle: these maps draw extract routes as
+                // dashed lines that run off the edge of the viewBox, so the geometry bounding box
+                // is wider than the map. Sizing to it drew the picture smaller and off-centre
+                // inside its rect while the markers stayed at their true fractions of the rect -
+                // which is exactly how the first attempt put items in the sea.
+                return viewport.width > 0f && viewport.height > 0f
+                    ? VectorUtils.BuildSprite(
+                        geometry, viewport, 100f, VectorUtils.Alignment.Center, Vector2.zero, 128, false)
+                    : VectorUtils.BuildSprite(
+                        geometry, 100f, VectorUtils.Alignment.Center, Vector2.zero, 128);
             }
             catch (Exception ex)
             {
