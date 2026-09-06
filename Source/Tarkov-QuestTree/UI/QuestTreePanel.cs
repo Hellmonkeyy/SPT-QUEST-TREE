@@ -198,6 +198,17 @@ namespace QuestTree.UI
                 ShowLoading(true);
                 StartCoroutine(RebuildGraphDeferred(questController, session));
             }
+            else if (!_graph.HasFullQuestList)
+            {
+                // Same controller, but the tree was built without the server half. That may have
+                // been one unlucky fetch - the server still starting - so each reopen is another
+                // chance at the full list; and even without one, the client's own list has grown
+                // by whatever was unlocked meanwhile. Cheap in the failing case: a refused or
+                // unregistered route answers at once.
+                QuestDataClient.RetryFailedFetches();
+                ShowLoading(true);
+                StartCoroutine(RebuildGraphDeferred(questController, session));
+            }
         }
 
         /// <summary>Waits for the loading notice to render, then does the expensive build. Unity
@@ -213,10 +224,14 @@ namespace QuestTree.UI
             // written, and hiding it showed an empty tree with no explanation.
             if (!TryRebuildGraph(questController, session)) yield break;
 
-            // Adopted only now - see Show for why.
+            // Adopted only now - see Show for why. Unsubscribed first: a rebuild for a controller
+            // already adopted (the fallback-tree path in Show) must not add a second handler.
             _questController = questController;
             if (_questController != null)
+            {
+                _questController.OnConditionalStatusChanged -= HandleStatusChanged;
                 _questController.OnConditionalStatusChanged += HandleStatusChanged;
+            }
 
             ShowLoading(false);
 
@@ -323,8 +338,21 @@ namespace QuestTree.UI
                 QuestDataClient.InvalidateKappa();
                 QuestDataClient.InvalidateProfile();
 
-                _graph.RefreshStatuses();
-                _graphView.RefreshNodeStatuses();
+                if (_graph.HasFullQuestList)
+                {
+                    _graph.RefreshStatuses();
+                    _graphView.RefreshNodeStatuses();
+                }
+                else if (gameObject.activeInHierarchy)
+                {
+                    // Without the server half the graph holds only what the client had unlocked
+                    // when it was built, and a refresh only recolours what is there - so a quest
+                    // this hand-in just unlocked would never appear. Rebuild instead. A hidden
+                    // panel is left alone; it rebuilds on Show (see there).
+                    _graph.Build(_questController, _session);
+                    BuildTabs();
+                    RenderSelectedTab();
+                }
             }
             catch (Exception ex)
             {

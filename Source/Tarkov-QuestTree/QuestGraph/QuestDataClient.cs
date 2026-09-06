@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Runtime.ExceptionServices;
+using System.Threading.Tasks;
 using Newtonsoft.Json;
 using SPT.Common.Http;
 
@@ -24,6 +26,46 @@ namespace QuestTree.QuestGraph
         private const string ProfileRoute = "/questtree/profile";
         private const string MapMarkerRoute = "/questtree/mapmarkers";
 
+        /// <summary>
+        /// How long a request may hold the game. Every fetch here is synchronous on Unity's main
+        /// thread - by design, see TryFetchAll - and SPT's own GetJson has no limit of its own, so
+        /// a server that accepted the connection and then hung froze the game with no frames and
+        /// no way out. This is a cap, not a cure: the thread is still blocked until it fires.
+        /// </summary>
+        private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(15);
+
+        /// <summary>RequestHandler.GetJson with a deadline. Same mechanism SPT uses (the async call
+        /// on a pool thread, waited on here), plus the wait having a limit.</summary>
+        private static string GetJson(string route)
+        {
+            var task = Task.Run(() => RequestHandler.GetJsonAsync(route));
+
+            try
+            {
+                if (!task.Wait(RequestTimeout))
+                    throw new TimeoutException($"no answer within {RequestTimeout.TotalSeconds:0}s");
+            }
+            catch (AggregateException ex) when (ex.InnerException != null)
+            {
+                // The real failure, not "One or more errors occurred" - it goes into a log line.
+                ExceptionDispatchInfo.Capture(ex.InnerException).Throw();
+            }
+
+            return task.Result;
+        }
+
+        /// <summary>
+        /// Lets a fetch that failed be tried again. Failures are cached on purpose (see GetKappa for
+        /// the retry storm that caching prevents), but cached for the whole session they made one
+        /// unlucky fetch at startup - the server still coming up, say - a degraded tree until the
+        /// game was restarted. Called when the panel is reopened; a success is never retried.
+        /// </summary>
+        public static void RetryFailedFetches()
+        {
+            if (_attempted && _cached == null) _attempted = false;
+            if (_markersAttempted && _markers == null) _markersAttempted = false;
+        }
+
         private static List<QuestDto> _cached;
         private static bool _attempted;
 
@@ -40,7 +82,7 @@ namespace QuestTree.QuestGraph
             {
                 // Synchronous by design: this is called from the panel's own open path, once, and
                 // the tree cannot be drawn before the data arrives anyway.
-                var json = RequestHandler.GetJson(Route);
+                var json = GetJson(Route);
 
                 if (string.IsNullOrEmpty(json))
                 {
@@ -93,7 +135,7 @@ namespace QuestTree.QuestGraph
 
             try
             {
-                var json = RequestHandler.GetJson(ProfileRoute);
+                var json = GetJson(ProfileRoute);
                 if (string.IsNullOrEmpty(json))
                 {
                     Plugin.LogSource?.LogWarning(
@@ -138,7 +180,7 @@ namespace QuestTree.QuestGraph
 
             try
             {
-                var json = RequestHandler.GetJson(MapMarkerRoute);
+                var json = GetJson(MapMarkerRoute);
 
                 if (string.IsNullOrEmpty(json))
                 {
@@ -238,7 +280,7 @@ namespace QuestTree.QuestGraph
         {
             try
             {
-                var json = RequestHandler.GetJson(KappaRoute);
+                var json = GetJson(KappaRoute);
 
                 // SPT answers a route no mod registered by logging [UNHANDLED] and returning an
                 // empty body, so "empty" is how a missing or outdated server half presents itself.

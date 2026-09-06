@@ -155,14 +155,18 @@ namespace QuestTree.UI
                             Template = template,
                             Name = ItemNameFrom(objective.Text, template),
                             OwnedFoundInRaid = held?.FoundInRaid ?? 0,
-                            OwnedTotal = held?.Total ?? 0,
-                            NeedsFoundInRaid = MentionsFoundInRaid(objective.Text)
+                            OwnedTotal = held?.Total ?? 0
                         };
 
                         byTemplate[template] = watched;
                     }
 
                     watched.Required += Mathf.Max(1, objective.Count);
+
+                    // Accumulated like Required, not fixed by whichever quest came first: an item
+                    // one quest takes plain and another wants found-in-raid showed a green [have]
+                    // for stock the second quest would reject.
+                    watched.NeedsFoundInRaid |= MentionsFoundInRaid(objective.Text);
 
                     if (!watched.Quests.Contains(node.Name)) watched.Quests.Add(node.Name);
                 }
