@@ -1,7 +1,9 @@
 # Quest Tracker
 
-An in-game quest progression tree for SPT — every quest in the game laid out as a branching tree,
-coloured by your progress, with per-trader tabs, search, quest details, and Kappa container tracking.
+An in-game quest planner for SPT. Every quest in the game — including the ones you have not
+unlocked — laid out as a branching tree coloured by your progress, plus the things a wiki cannot
+tell you: what your quests will ask you not to sell, what you can do on the map you are about to
+load into, why a quest is locked, and how far you are from Kappa.
 
 **Built for SPT 4.1.4.**
 
@@ -52,22 +54,47 @@ checklist, and reads the Kappa quest list out of the quest database.
 | `Esc` | Close the hint, then the quest detail, then the tree |
 | `?` | Show the controls hint again |
 
-Click a quest for its objectives, rewards, prerequisites and a link to its wiki page. The detail
-panel can be collapsed with the chevron to give the graph its space back while keeping the quest
-selected.
+Zoom is anchored to the cursor, so the quest you are pointing at stays put.
 
-## Tabs
+**Hover a quest** and it lights up along with everything it requires and everything it unlocks,
+while the rest of the tree dims — the quickest way to read a chain.
 
-- **All** — every quest. On a quest-modded install this is thousands of quests, so search or a
-  trader tab is usually the faster way in.
-- **One tab per trader**, each showing your completion count. The row scrolls.
+**Click a quest** for its objectives, rewards, prerequisites, why it is locked, and a link to its
+wiki page. Objectives show live progress where the game is tracking it. The detail panel collapses
+with the chevron to give the graph its space back while keeping the quest selected; the X clears the
+selection outright.
+
+## The quest tabs
+
+Along the top, and the row scrolls — wheel or drag it.
+
+- **All** — every quest in the game, including ones you have not unlocked. On a quest-modded install
+  this is thousands, so search or a trader tab is usually the faster way in.
+- **One tab per trader**, each showing your completion count.
+
+## The views
+
+Grouped together at the **top right**, next to Close. These are whole screens rather than a slice of
+the quest graph. Click one again to go back to the tree.
+
+- **Do next** — every unfinished quest, ranked by how close you are to finishing it: in progress
+  first, then ones you already hold every item for, then partial holdings, then the rest by nearest
+  gate. It ranks rather than filters, so it stays useful whatever state your profile is in.
+- **Maps** — unfinished quests grouped by the map they happen on. The answer to "I am loading into
+  Customs, what can I do there". Quests that can be done anywhere are left out on purpose, so they
+  do not bury the ones that change what you do with the raid.
+- **Items** — every item an unfinished quest will ask for, how many you hold, whether found-in-raid
+  is required, and which quests want it. **This is the "do not sell that" list.** It deliberately
+  includes items for quests you have not unlocked yet, because that is exactly when you would
+  otherwise vendor them.
 - **Kappa** — the Collector hand-in checklist with what is in your stash (and whether it is
-  found-in-raid, which is what Collector actually requires), plus the Kappa quest list and your
+  found-in-raid, which is what Collector actually requires), plus the full Kappa quest list and your
   progress through it.
+- **Settings** — below.
 
 ## Settings
 
-Next to the Close button, and also in BepInEx's F12 menu — they are the same values.
+In the view buttons at the top right, and also in BepInEx's F12 menu — they are the same values.
 
 - **Hide unobtainable / completed / traderless quests** — filters, applied before layout so they
   genuinely make the tree smaller.

@@ -49,6 +49,7 @@ namespace QuestTree.UI
         private const string KappaTabId = "__kappa__";
         private const string ItemsTabId = "__items__";
         private const string MapsTabId = "__maps__";
+        private const string DoNextTabId = "__donext__";
         private const string SettingsTabId = "__settings__";
 
         private static readonly Color SelectedTabColor = new(0.35f, 0.35f, 0.2f, 0.95f);
@@ -314,7 +315,7 @@ namespace QuestTree.UI
             _introPanel.SetParent(root, worldPositionStays: false);
             _introPanel.anchorMin = _introPanel.anchorMax = new Vector2(0.5f, 0.5f);
             _introPanel.pivot = new Vector2(0.5f, 0.5f);
-            _introPanel.sizeDelta = new Vector2(420f, 230f);
+            _introPanel.sizeDelta = new Vector2(470f, 320f);
             _introPanel.anchoredPosition = Vector2.zero;
 
             var background = panelGo.GetComponent<Image>();
@@ -330,6 +331,17 @@ namespace QuestTree.UI
             AuxLayout.AddText(_introPanel, ref y, "<b>M</b>  jump to the quests you can work on", 20f, 12);
             AuxLayout.AddText(_introPanel, ref y, "<b>/</b>  search quests and traders", 20f, 12);
             AuxLayout.AddText(_introPanel, ref y, "<b>Esc</b>  close the quest detail, then the tree", 20f, 12);
+            AuxLayout.AddSpacer(ref y, 8f);
+
+            // The views are the least discoverable thing here - they are buttons in the corner, and
+            // nothing about the tree suggests an item watchlist exists at all.
+            AuxLayout.AddText(_introPanel, ref y,
+                "<b>Top right:</b> Do next, Maps, Items, Kappa, Settings", 20f, 12);
+            AuxLayout.AddText(_introPanel, ref y,
+                "<color=#FFFFFF80>Do next ranks what you are closest to finishing;</color>", 18f, 11);
+            AuxLayout.AddText(_introPanel, ref y,
+                "<color=#FFFFFF80>Items is the \"do not sell that\" list</color>", 18f, 11);
+
             AuxLayout.AddSpacer(ref y, 10f);
             AuxLayout.AddButton(_introPanel, ref y, "Got it", () => ShowIntro(false));
 
@@ -542,6 +554,11 @@ namespace QuestTree.UI
 
             CreateTabButton("All", AllTradersId);
 
+            // Loyalty comes from the profile payload, which the client was fetching and ignoring.
+            // It is what makes a "requires LL3" lock reason mean something - LL3 is meaningless
+            // without knowing you are LL2.
+            var loyalty = BuildLoyaltyLookup();
+
             foreach (var traderId in OrderedTraderIds(_graph.Nodes))
             {
                 var label = _graph.TraderNames.TryGetValue(traderId, out var name) ? name : traderId;
@@ -557,7 +574,11 @@ namespace QuestTree.UI
                     if (node.Status == ENodeStatus.Completed) done++;
                 }
 
-                CreateTabButton($"{label}  {done}/{total}", traderId);
+                var loyaltySuffix = loyalty.TryGetValue(traderId, out var level) && level > 0
+                    ? $"  LL{level}"
+                    : "";
+
+                CreateTabButton($"{label}  {done}/{total}{loyaltySuffix}", traderId);
             }
 
             // Maps / Items / Kappa / Settings are NOT here - they are whole views rather than a
@@ -571,6 +592,24 @@ namespace QuestTree.UI
             _tabContent.anchoredPosition = Vector2.zero;
 
             UpdateTabHighlight();
+        }
+
+        /// <summary>Trader id -> loyalty level, or empty when the server half is unavailable. Built
+        /// once per tab rebuild rather than per trader, since it is one cached fetch either way.</summary>
+        private static Dictionary<string, int> BuildLoyaltyLookup()
+        {
+            var lookup = new Dictionary<string, int>();
+
+            var profile = QuestDataClient.GetProfile();
+            if (profile?.Traders == null) return lookup;
+
+            foreach (var trader in profile.Traders)
+            {
+                if (trader == null || string.IsNullOrEmpty(trader.Id)) continue;
+                lookup[trader.Id] = trader.LoyaltyLevel;
+            }
+
+            return lookup;
         }
 
         /// <summary>Distinct trader ids from `nodes`, ordered by display name - shared by BuildTabs
@@ -683,10 +722,11 @@ namespace QuestTree.UI
         /// sits innermost because it is the one you open most often.</summary>
         private static readonly (string TabId, string Label)[] ViewButtons =
         {
+            (SettingsTabId, "Settings"),
             (KappaTabId, "Kappa"),
             (ItemsTabId, "Items"),
             (MapsTabId, "Maps"),
-            (SettingsTabId, "Settings")
+            (DoNextTabId, "Do next")
         };
 
         /// <summary>Selecting a whole view toggles: clicking the one you are already on returns you
@@ -695,7 +735,8 @@ namespace QuestTree.UI
             SelectTab(_selectedTraderId == tabId ? _tabBeforeSettings : tabId);
 
         private static bool IsAuxTab(string tabId) =>
-            tabId == KappaTabId || tabId == SettingsTabId || tabId == ItemsTabId || tabId == MapsTabId;
+            tabId == KappaTabId || tabId == SettingsTabId || tabId == ItemsTabId ||
+            tabId == MapsTabId || tabId == DoNextTabId;
 
         private void SelectTab(string traderId)
         {
@@ -711,7 +752,9 @@ namespace QuestTree.UI
 
             // The watchlist reads the stash, which moves every raid, so entering it re-reads rather
             // than showing whatever was cached when the panel opened.
-            if (traderId == ItemsTabId) QuestDataClient.InvalidateProfile();
+            // Both read the stash, which moves every raid, so entering them re-reads rather than
+            // showing whatever was cached when the panel opened.
+            if (traderId == ItemsTabId || traderId == DoNextTabId) QuestDataClient.InvalidateProfile();
 
             // Tabs are hand-built rather than cloned, so they play the game's click sound
             // explicitly - otherwise half this screen would be silent and half would not.
@@ -777,7 +820,13 @@ namespace QuestTree.UI
             foreach (Transform child in _auxContent)
                 Destroy(child.gameObject);
 
-            var height = _selectedTraderId == MapsTabId
+            var height = _selectedTraderId == DoNextTabId
+                ? DoNextView.Build(_auxContent, _graph, () =>
+                {
+                    QuestDataClient.InvalidateProfile();
+                    RenderSelectedTab();
+                })
+                : _selectedTraderId == MapsTabId
                 ? MapView.Build(_auxContent, _graph)
                 : _selectedTraderId == ItemsTabId
                 ? ItemWatchlistView.Build(_auxContent, _graph, () =>
