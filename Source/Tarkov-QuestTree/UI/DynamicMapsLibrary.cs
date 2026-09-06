@@ -24,6 +24,11 @@ namespace QuestTree.UI
     /// the files are read in place from the user's own install, and the map's own author credit
     /// travels with it in <see cref="MapEntry.Attribution"/> so it can be shown.
     ///
+    /// COORDINATE SPACE, because getting this wrong cost three attempts. A map position is
+    /// (game.x, game.z), and its height is game.y - the swap DynamicMaps' own MathUtils performs as
+    /// `new Vector3(pos.x, pos.z, pos.y)`. Every Bounds, ImageBounds, GameBounds and Label position
+    /// in these configs is in that space, which is why a GameBounds box's "z" is a HEIGHT band.
+    ///
     /// Everything degrades: no DynamicMaps, no unreadable config and no failed SVG parse may stop
     /// the Maps view rendering its list.
     /// </summary>
@@ -33,7 +38,77 @@ namespace QuestTree.UI
         /// than hardcoded, so it follows a non-standard SPT install.</summary>
         private const string MapsModFolder = "mpstark-dynamicmaps";
 
-        /// <summary>One map DynamicMaps ships: which game maps it covers, and where its image is.</summary>
+        /// <summary>A volume of the world a floor applies over: x and y are the ground position,
+        /// z the height - see the class remarks.</summary>
+        internal readonly struct GameBox
+        {
+            public readonly Vector3 Min;
+            public readonly Vector3 Max;
+
+            public GameBox(Vector3 min, Vector3 max)
+            {
+                Min = min;
+                Max = max;
+            }
+
+            public bool Contains(float x, float y, float height) =>
+                x >= Min.x && x <= Max.x &&
+                y >= Min.y && y <= Max.y &&
+                height >= Min.z && height <= Max.z;
+        }
+
+        /// <summary>One floor of one map: its picture, the world rectangle that picture covers, and
+        /// the volumes of the world it is the right floor for.</summary>
+        internal sealed class MapLayer
+        {
+            public string Name = "";
+            public int Level;
+            public string ImagePath = "";
+
+            public Vector2 BoundsMin;
+            public Vector2 BoundsMax;
+
+            public readonly List<GameBox> GameBounds = new();
+
+            public bool HasBounds => BoundsMax.x > BoundsMin.x && BoundsMax.y > BoundsMin.y;
+
+            public Vector2 BoundsSize => BoundsMax - BoundsMin;
+            public Vector2 BoundsCentre => (BoundsMin + BoundsMax) * 0.5f;
+
+            private Sprite _sprite;
+            private bool _spriteFailed;
+
+            /// <summary>Rasterised on first use and kept - tessellating a 340KB SVG is not something
+            /// to repeat every time a floor is switched back to.</summary>
+            public Sprite GetSprite()
+            {
+                if (_sprite != null || _spriteFailed) return _sprite;
+
+                _sprite = LoadSvgSprite(ImagePath);
+                _spriteFailed = _sprite == null;
+                return _sprite;
+            }
+
+            public bool Covers(float x, float y, float height)
+            {
+                foreach (var box in GameBounds)
+                {
+                    if (box.Contains(x, y, height)) return true;
+                }
+
+                return false;
+            }
+        }
+
+        /// <summary>A place name the map config carries. The SVGs contain no text at all, so without
+        /// these the picture is unlabelled.</summary>
+        internal sealed class MapLabel
+        {
+            public string Text = "";
+            public Vector2 Position;
+        }
+
+        /// <summary>One map DynamicMaps ships: which game maps it covers, and its floors.</summary>
         internal sealed class MapEntry
         {
             public string DisplayName = "";
@@ -43,50 +118,33 @@ namespace QuestTree.UI
             /// LocationKey. A map can cover several - Factory has a day and a night id.</summary>
             public readonly List<string> InternalNames = new();
 
-            /// <summary>The layer chosen to display: ground level where one is marked, else the
-            /// first. Showing every layer would need a layer picker; ground level is the one that
-            /// answers "where is this on the map".</summary>
-            public string ImagePath = "";
+            /// <summary>Floors, lowest first. Never empty for an entry that is returned.</summary>
+            public readonly List<MapLayer> Layers = new();
 
-            /// <summary>The world-coordinate rectangle the image covers, as (minX, minZ) to
-            /// (maxX, maxZ). This is what turns a spawn position into a point on the picture.
-            /// Zero-sized when the config did not declare Bounds, which is the signal not to draw
-            /// markers rather than to draw them somewhere invented.</summary>
-            public Vector2 BoundsMin;
-            public Vector2 BoundsMax;
+            public readonly List<MapLabel> Labels = new();
 
-            public bool HasBounds => BoundsMax.x > BoundsMin.x && BoundsMax.y > BoundsMin.y;
+            public int DefaultLevel;
 
-            /// <summary>Where a world position lands on the image, as 0-1 across and up. Verified
-            /// against the DynamicMaps source rather than guessed: its rotation is applied to the
-            /// map CONTAINER's transform, and markers are placed in unrotated world (x, z) against
-            /// these bounds - which is also what the data says, since the declared rotation puts
-            /// only a quarter of Sandbox's markers inside its bounds and none of Labs', while no
-            /// rotation puts every marker on every map inside.</summary>
-            public Vector2 Normalize(float worldX, float worldZ) => new(
-                (worldX - BoundsMin.x) / (BoundsMax.x - BoundsMin.x),
-                (worldZ - BoundsMin.y) / (BoundsMax.y - BoundsMin.y));
+            /// <summary>The floor to open on: the config's declared default where that exists, else
+            /// the lowest one, so there is always something to draw.</summary>
+            public MapLayer DefaultLayer =>
+                Layers.FirstOrDefault(layer => layer.Level == DefaultLevel) ?? Layers.FirstOrDefault();
 
-            /// <summary>Width divided by height of the area the image covers. The map rect is built
-            /// to this so the picture fills it exactly - with letterboxing the drawn rectangle would
-            /// be unknown, and every marker would sit at the wrong place by the size of the bars.</summary>
-            public float AspectRatio =>
-                (BoundsMax.y - BoundsMin.y) <= 0f
-                    ? 1f
-                    : (BoundsMax.x - BoundsMin.x) / (BoundsMax.y - BoundsMin.y);
-
-            private Sprite _sprite;
-            private bool _spriteFailed;
-
-            /// <summary>Rasterised on first use and kept - tessellating a 100KB SVG is not something
-            /// to repeat every time the tab is opened.</summary>
-            public Sprite GetSprite()
+            /// <summary>The floor a point belongs to: the highest one whose declared volumes contain
+            /// it, or null when none does. Highest wins because the bands overlap - Customs' ground
+            /// floor claims everything from -100 to 100, so a point on the 2nd floor is inside both
+            /// and the more specific answer is the useful one.</summary>
+            public MapLayer LayerFor(float x, float y, float height)
             {
-                if (_sprite != null || _spriteFailed) return _sprite;
+                MapLayer best = null;
 
-                _sprite = LoadSvgSprite(ImagePath);
-                _spriteFailed = _sprite == null;
-                return _sprite;
+                foreach (var layer in Layers)
+                {
+                    if (!layer.Covers(x, y, height)) continue;
+                    if (best == null || layer.Level > best.Level) best = layer;
+                }
+
+                return best;
             }
         }
 
@@ -137,7 +195,9 @@ namespace QuestTree.UI
                     if (entry != null) maps.Add(entry);
                 }
 
-                Plugin.LogSource?.LogInfo($"QuestTree: found {maps.Count} DynamicMaps maps to draw from.");
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: found {maps.Count} DynamicMaps maps " +
+                    $"({maps.Sum(m => m.Layers.Count)} floors) to draw from.");
             }
             catch (Exception ex)
             {
@@ -150,7 +210,8 @@ namespace QuestTree.UI
 
         /// <summary>
         /// Parses one map config. The files are .jsonc - JSON with // comments and trailing commas -
-        /// so they are read through a reader with both allowed rather than with a strict parser.
+        /// so they are read through a reader that allows both rather than with a strict parser. A
+        /// naive comment strip would also eat the // inside the AuthorLink URL.
         /// </summary>
         private static MapEntry ParseConfig(string configPath, string mapsRoot)
         {
@@ -162,7 +223,8 @@ namespace QuestTree.UI
                 var entry = new MapEntry
                 {
                     DisplayName = (string)root["DisplayName"] ?? Path.GetFileNameWithoutExtension(configPath),
-                    Attribution = (string)root["Author"] ?? ""
+                    Attribution = (string)root["Author"] ?? "",
+                    DefaultLevel = (int?)root["DefaultLevel"] ?? 0
                 };
 
                 foreach (var name in root["MapInternalNames"] ?? Enumerable.Empty<JToken>())
@@ -171,10 +233,13 @@ namespace QuestTree.UI
                     if (!string.IsNullOrEmpty(value)) entry.InternalNames.Add(value);
                 }
 
-                entry.ImagePath = ResolveImagePath(root["Layers"] as JObject, mapsRoot);
-                ReadBounds(root["Bounds"] as JObject, entry);
+                // The top-level Bounds is the fallback for a layer that declares none of its own.
+                ReadVector2Pair(root["Bounds"] as JObject, out var mapMin, out var mapMax);
 
-                return string.IsNullOrEmpty(entry.ImagePath) ? null : entry;
+                ReadLayers(root["Layers"] as JObject, mapsRoot, mapMin, mapMax, entry);
+                ReadLabels(root["Labels"] as JArray, entry);
+
+                return entry.Layers.Count == 0 ? null : entry;
             }
             catch (Exception ex)
             {
@@ -184,52 +249,107 @@ namespace QuestTree.UI
             }
         }
 
-        /// <summary>Reads the world rectangle the image covers. Left zero-sized when absent, which
-        /// the marker code reads as "do not place markers on this map".</summary>
-        private static void ReadBounds(JObject bounds, MapEntry entry)
+        /// <summary>Every floor, lowest first. All of them rather than only ground level - a quest
+        /// item underground needs the underground picture for its marker to mean anything.</summary>
+        private static void ReadLayers(
+            JObject layers, string mapsRoot, Vector2 mapMin, Vector2 mapMax, MapEntry entry)
         {
-            if (bounds == null) return;
-
-            var min = bounds["Min"];
-            var max = bounds["Max"];
-            if (min == null || max == null) return;
-
-            entry.BoundsMin = new Vector2((float?)min["x"] ?? 0f, (float?)min["y"] ?? 0f);
-            entry.BoundsMax = new Vector2((float?)max["x"] ?? 0f, (float?)max["y"] ?? 0f);
-        }
-
-        /// <summary>Picks the layer to show: the one at level 0 where there is one, else the first.
-        /// Level 0 is ground level, which is what someone means by "the map".</summary>
-        private static string ResolveImagePath(JObject layers, string mapsRoot)
-        {
-            if (layers == null) return "";
+            if (layers == null) return;
 
             // The paths in the config are relative to the DynamicMaps folder, not to Maps/.
             var modRoot = Path.GetDirectoryName(mapsRoot);
 
-            string first = null;
-
-            foreach (var layer in layers.Properties())
+            foreach (var property in layers.Properties())
             {
-                var path = (string)layer.Value["ImagePath"];
+                var value = property.Value;
+                var path = (string)value["ImagePath"];
+
                 if (string.IsNullOrEmpty(path)) continue;
 
                 var full = Path.Combine(modRoot, path.Replace('/', Path.DirectorySeparatorChar));
                 if (!File.Exists(full)) continue;
 
-                first ??= full;
+                var layer = new MapLayer
+                {
+                    Name = property.Name,
+                    Level = (int?)value["Level"] ?? 0,
+                    ImagePath = full,
+                    BoundsMin = mapMin,
+                    BoundsMax = mapMax
+                };
 
-                var level = layer.Value["Level"];
-                if (level != null && (int)level == 0) return full;
+                if (ReadVector2Pair(value["ImageBounds"] as JObject, out var layerMin, out var layerMax))
+                {
+                    layer.BoundsMin = layerMin;
+                    layer.BoundsMax = layerMax;
+                }
+
+                foreach (var box in value["GameBounds"] ?? Enumerable.Empty<JToken>())
+                {
+                    if (ReadVector3Pair(box as JObject, out var boxMin, out var boxMax))
+                        layer.GameBounds.Add(new GameBox(boxMin, boxMax));
+                }
+
+                if (layer.HasBounds) entry.Layers.Add(layer);
             }
 
-            return first ?? "";
+            entry.Layers.Sort((a, b) => a.Level.CompareTo(b.Level));
+        }
+
+        private static void ReadLabels(JArray labels, MapEntry entry)
+        {
+            if (labels == null) return;
+
+            foreach (var label in labels)
+            {
+                var text = (string)label["Text"];
+                var position = label["Position"];
+
+                if (string.IsNullOrEmpty(text) || position == null) continue;
+
+                entry.Labels.Add(new MapLabel
+                {
+                    Text = text,
+                    Position = new Vector2((float?)position["x"] ?? 0f, (float?)position["y"] ?? 0f)
+                });
+            }
+        }
+
+        private static bool ReadVector2Pair(JObject node, out Vector2 min, out Vector2 max)
+        {
+            min = default;
+            max = default;
+
+            var minNode = node?["Min"];
+            var maxNode = node?["Max"];
+            if (minNode == null || maxNode == null) return false;
+
+            min = new Vector2((float?)minNode["x"] ?? 0f, (float?)minNode["y"] ?? 0f);
+            max = new Vector2((float?)maxNode["x"] ?? 0f, (float?)maxNode["y"] ?? 0f);
+            return true;
+        }
+
+        private static bool ReadVector3Pair(JObject node, out Vector3 min, out Vector3 max)
+        {
+            min = default;
+            max = default;
+
+            var minNode = node?["Min"];
+            var maxNode = node?["Max"];
+            if (minNode == null || maxNode == null) return false;
+
+            min = new Vector3((float?)minNode["x"] ?? 0f, (float?)minNode["y"] ?? 0f, (float?)minNode["z"] ?? 0f);
+            max = new Vector3((float?)maxNode["x"] ?? 0f, (float?)maxNode["y"] ?? 0f, (float?)maxNode["z"] ?? 0f);
+            return true;
         }
 
         /// <summary>
         /// Turns an SVG into a Sprite using Unity's own vector graphics package, which the game
         /// already ships (Unity.VectorGraphics.dll in EscapeFromTarkov_Data/Managed) - the same API
         /// DynamicMaps itself uses. No third-party rasteriser and no bundled assets.
+        ///
+        /// The sprite's own extent does not have to line up with anything, because the view stretches
+        /// it to a rect sized in map units - which is exactly what DynamicMaps does with its own.
         /// </summary>
         private static Sprite LoadSvgSprite(string path)
         {
@@ -240,14 +360,9 @@ namespace QuestTree.UI
 
                 if (scene.Scene?.Root == null) return null;
 
-                // The viewBox, which is the rectangle the map's own coordinate bounds describe -
-                // verified against the files: Customs declares a 1062x535 viewBox and bounds
-                // 1070x541, the same space to within a rounding.
-                var viewport = scene.SceneViewport;
-
                 // Step sizes govern how finely curves are subdivided. These are deliberately coarse:
-                // the map is shown at panel size, not zoomed into, and a finer tessellation on a
-                // 100KB SVG costs noticeably more time for detail nobody can see here.
+                // the map is shown at panel size, and a finer tessellation on a 340KB SVG costs
+                // noticeably more time for detail nobody can see here.
                 var options = new VectorUtils.TessellationOptions
                 {
                     StepDistance = 10f,
@@ -259,17 +374,7 @@ namespace QuestTree.UI
                 var geometry = VectorUtils.TessellateScene(scene.Scene, options);
                 if (geometry == null || geometry.Count == 0) return null;
 
-                // Pinned to the viewBox rather than letting BuildSprite size the sprite to the
-                // geometry. Those are not the same rectangle: these maps draw extract routes as
-                // dashed lines that run off the edge of the viewBox, so the geometry bounding box
-                // is wider than the map. Sizing to it drew the picture smaller and off-centre
-                // inside its rect while the markers stayed at their true fractions of the rect -
-                // which is exactly how the first attempt put items in the sea.
-                return viewport.width > 0f && viewport.height > 0f
-                    ? VectorUtils.BuildSprite(
-                        geometry, viewport, 100f, VectorUtils.Alignment.Center, Vector2.zero, 128, false)
-                    : VectorUtils.BuildSprite(
-                        geometry, 100f, VectorUtils.Alignment.Center, Vector2.zero, 128);
+                return VectorUtils.BuildSprite(geometry, 100f, VectorUtils.Alignment.Center, Vector2.zero, 128);
             }
             catch (Exception ex)
             {

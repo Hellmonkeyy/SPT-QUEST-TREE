@@ -279,9 +279,11 @@ namespace QuestTreeServer
         /// <summary>The quests that want this item, by display name.</summary>
         public List<string> Quests { get; set; } = new();
 
-        /// <summary>World coordinates. Y is deliberately absent - the map is a top-down projection,
-        /// so height would only be needed to pick a floor, and only ground level is drawn.</summary>
+        /// <summary>World coordinates. Y is the height, which is what decides the floor: a map's
+        /// layers each declare the height band they cover.</summary>
         public float X { get; set; }
+
+        public float Y { get; set; }
 
         public float Z { get; set; }
     }

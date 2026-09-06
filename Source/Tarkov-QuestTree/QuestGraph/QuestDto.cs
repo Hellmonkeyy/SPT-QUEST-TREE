@@ -326,10 +326,13 @@ namespace QuestTree.QuestGraph
         [JsonProperty("quests")]
         public List<string> Quests { get; set; }
 
-        /// <summary>World coordinates. Y is absent on purpose: the map is a top-down projection, so
-        /// height would only pick a floor, and only ground level is drawn.</summary>
+        /// <summary>World coordinates. Y is the height, which is what decides the floor: a map's
+        /// layers each declare the height band they cover.</summary>
         [JsonProperty("x")]
         public float X { get; set; }
+
+        [JsonProperty("y")]
+        public float Y { get; set; }
 
         [JsonProperty("z")]
         public float Z { get; set; }

@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using UnityEngine;
 using UnityEngine.EventSystems;
 
@@ -22,12 +23,39 @@ namespace QuestTree.UI
         private float _maxZoom;
         private float _zoomSpeed;
 
+        /// <summary>Children to hold at a constant on-screen size, whatever the content is zoomed
+        /// to. Map markers and place names use it: magnifying a pin along with the map defeats the
+        /// point of zooming in, which is to separate pins that overlap when zoomed out.</summary>
+        private readonly List<RectTransform> _constantScale = new();
+
         public void Init(RectTransform content, float minZoom, float maxZoom, float zoomSpeed)
         {
             _content = content;
             _minZoom = minZoom;
             _maxZoom = maxZoom;
             _zoomSpeed = zoomSpeed;
+        }
+
+        /// <summary>Registers a child to be kept at a constant on-screen size. Applied immediately as
+        /// well as on every zoom, so a child added before the first scroll is already correct.</summary>
+        public void KeepConstantScale(RectTransform child)
+        {
+            if (child == null) return;
+
+            _constantScale.Add(child);
+            ApplyConstantScale(_content != null ? _content.localScale.x : 1f);
+        }
+
+        private void ApplyConstantScale(float contentScale)
+        {
+            if (Mathf.Approximately(contentScale, 0f)) return;
+
+            var inverse = 1f / contentScale;
+
+            foreach (var child in _constantScale)
+            {
+                if (child != null) child.localScale = new Vector3(inverse, inverse, 1f);
+            }
         }
 
         public void OnDrag(PointerEventData eventData)
@@ -90,6 +118,8 @@ namespace QuestTree.UI
             // The delta is in content-local units; anchoredPosition is in parent units, hence
             // the scale factor.
             _content.anchoredPosition += (after - before) * scale;
+
+            ApplyConstantScale(scale);
         }
 
         /// <summary>The camera to interpret a screen point against. Null is CORRECT for a

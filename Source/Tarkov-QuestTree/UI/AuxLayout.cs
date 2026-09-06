@@ -240,7 +240,8 @@ namespace QuestTree.UI
         /// </summary>
         public static float AddDropdown(
             RectTransform parent, float top, IReadOnlyList<string> options, int selectedIndex,
-            bool open, System.Action toggleOpen, System.Action<int> onSelect, float width = 300f)
+            bool open, System.Action toggleOpen, System.Action<int> onSelect, float width = 300f,
+            float x = Padding)
         {
             var selectedLabel = selectedIndex >= 0 && selectedIndex < options.Count
                 ? options[selectedIndex]
@@ -250,7 +251,7 @@ namespace QuestTree.UI
                 parent, $"{selectedLabel}   {(open ? "▲" : "▼")}", toggleOpen);
             header.anchorMin = header.anchorMax = new Vector2(0f, 1f);
             header.pivot = new Vector2(0f, 1f);
-            header.anchoredPosition = new Vector2(Padding, -top);
+            header.anchoredPosition = new Vector2(x, -top);
             header.sizeDelta = new Vector2(width, DropdownHeight);
 
             if (!open) return 0f;
@@ -264,7 +265,7 @@ namespace QuestTree.UI
             plate.SetParent(parent, worldPositionStays: false);
             plate.anchorMin = plate.anchorMax = new Vector2(0f, 1f);
             plate.pivot = new Vector2(0f, 1f);
-            plate.anchoredPosition = new Vector2(Padding, -listTop);
+            plate.anchoredPosition = new Vector2(x, -listTop);
             plate.sizeDelta = new Vector2(width, options.Count * DropdownRowHeight);
 
             var plateImage = plateGo.GetComponent<Image>();
@@ -278,7 +279,7 @@ namespace QuestTree.UI
                 var row = GameStyle.CreateButton(parent, options[i], () => onSelect(index));
                 row.anchorMin = row.anchorMax = new Vector2(0f, 1f);
                 row.pivot = new Vector2(0f, 1f);
-                row.anchoredPosition = new Vector2(Padding, -(listTop + i * DropdownRowHeight));
+                row.anchoredPosition = new Vector2(x, -(listTop + i * DropdownRowHeight));
                 row.sizeDelta = new Vector2(width, DropdownRowHeight);
 
                 if (index == selectedIndex)

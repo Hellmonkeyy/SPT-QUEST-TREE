@@ -12,14 +12,20 @@ namespace QuestTree.UI
     /// <summary>
     /// "I'm going to Customs - what can I do there?"
     ///
-    /// A map picker down the left, the map image in the middle, and that map's outstanding quests on
-    /// the right. The image comes from the DynamicMaps mod when it is installed (see
-    /// <see cref="DynamicMapsLibrary"/>); without it, the quest list is shown on its own and nothing
-    /// else changes.
+    /// A map picker and a floor picker along the top, the map itself filling most of the width, and
+    /// that map's outstanding quests down the right. The pictures come from the DynamicMaps mod when
+    /// it is installed (see <see cref="DynamicMapsLibrary"/>); without it the quest list is shown on
+    /// its own and nothing else changes.
     ///
-    /// There are deliberately no quest pins. The game's quest data carries no coordinates - of
-    /// roughly 10,600 objectives only 246 name a zone at all, and the rest say nothing beyond which
-    /// map - so any pin would be invented. The map is here as orientation; the list is the content.
+    /// The map is drawn in MAP SPACE: the container's local units are the map's own coordinates, the
+    /// picture is a rect sized to the floor's ImageBounds, and a marker is placed at its raw
+    /// coordinates with no arithmetic in between. That is how DynamicMaps does it, and it is the
+    /// third attempt here - the two before both normalised positions into fractions of a rect, and
+    /// both were subtly wrong in different ways. There is now no conversion left to get wrong.
+    ///
+    /// Markers are quest ITEM spawns, from the server's map-marker route, which reads them out of
+    /// each map's forced loot spawns. Objectives themselves carry no coordinates at all, so nothing
+    /// else can be pinned honestly.
     ///
     /// Quests that can be done anywhere are left out entirely: listing them under every map would
     /// bury the ones that actually change what you do with the raid you are about to load into.
@@ -28,6 +34,7 @@ namespace QuestTree.UI
     {
         private const string AnyLocation = "any";
         private const float PickerWidth = 300f;
+        private const float FloorPickerWidth = 190f;
 
         /// <summary>The quest list's column on the right. Everything left of it is map - the map is
         /// the thing you are here to read, and the list is the caption.</summary>
@@ -43,8 +50,9 @@ namespace QuestTree.UI
         private const float MaxZoom = 8f;
         private const float ZoomSpeed = 0.25f;
 
-        /// <summary>Marker dot size in pixels, unscaled by zoom - so zooming in separates
-        /// spawns that sit on top of each other when zoomed out.</summary>
+        /// <summary>Marker dot size in screen pixels. Markers counter-scale against the map's zoom so
+        /// this stays constant, which is what lets zooming separate spawns that overlap when zoomed
+        /// out instead of magnifying the whole pile.</summary>
         private const float MarkerSize = 9f;
 
         /// <summary>Which map the view is showing. Static so it survives a re-render - switching map
@@ -52,9 +60,12 @@ namespace QuestTree.UI
         /// picker unusable.</summary>
         private static string _selectedLocationKey;
 
-        /// <summary>Whether the map dropdown is open. Static for the same reason as the selection:
-        /// clicking the header rebuilds the view, so a local would close it again immediately.</summary>
+        /// <summary>Which floor, by its level number. Static for the same reason, and by level rather
+        /// than by index so it carries across maps that have the same floor.</summary>
+        private static int? _selectedLevel;
+
         private static bool _pickerOpen;
+        private static bool _floorPickerOpen;
 
         public static float Build(RectTransform parent, QuestGraphBuilder graph, Action onRepaint)
         {
@@ -76,11 +87,13 @@ namespace QuestTree.UI
                 _selectedLocationKey = ordered[0].Key;
 
             var selected = byMap[_selectedLocationKey];
+            var entry = DynamicMapsLibrary.FindByLocationKey(selected[0].LocationKey);
+            var layer = ResolveLayer(entry);
 
-            // The map and list are built first and the dropdown last, even though the dropdown sits
-            // above them on screen. Unity UI draws siblings in order, so the open list can only
-            // cover the map if it is created after it.
-            var contentHeight = BuildSelectedMap(parent, selected, HeaderHeight);
+            // The map and list are built first and the dropdowns last, even though the dropdowns sit
+            // above them on screen. Unity UI draws siblings in order, so an open list can only cover
+            // the map if it is created after it.
+            var contentHeight = BuildSelectedMap(parent, selected, entry, layer, HeaderHeight);
 
             var labels = ordered.Select(LabelFor).ToList();
             var selectedIndex = ordered.FindIndex(m => m.Key == _selectedLocationKey);
@@ -90,6 +103,7 @@ namespace QuestTree.UI
                 toggleOpen: () =>
                 {
                     _pickerOpen = !_pickerOpen;
+                    _floorPickerOpen = false;
                     onRepaint();
                 },
                 onSelect: index =>
@@ -100,9 +114,55 @@ namespace QuestTree.UI
                 },
                 width: PickerWidth);
 
-            // The open list is an overlay and so contributes no layout height of its own - but the
+            popupBottom = Mathf.Max(popupBottom, BuildFloorPicker(parent, entry, layer, onRepaint));
+
+            // An open list is an overlay and so contributes no layout height of its own - but the
             // panel still has to be tall enough to scroll to the bottom of it.
             return Mathf.Max(contentHeight, popupBottom) + AuxLayout.Padding;
+        }
+
+        /// <summary>The floor dropdown, beside the map one. Absent for a map with a single floor,
+        /// which is most of them - a picker with one entry is furniture.</summary>
+        private static float BuildFloorPicker(
+            RectTransform parent, DynamicMapsLibrary.MapEntry entry,
+            DynamicMapsLibrary.MapLayer layer, Action onRepaint)
+        {
+            if (entry == null || entry.Layers.Count < 2) return 0f;
+
+            var names = entry.Layers.Select(l => l.Name).ToList();
+            var index = entry.Layers.IndexOf(layer);
+
+            return AuxLayout.AddDropdown(
+                parent, AuxLayout.Padding, names, index, _floorPickerOpen,
+                toggleOpen: () =>
+                {
+                    _floorPickerOpen = !_floorPickerOpen;
+                    _pickerOpen = false;
+                    onRepaint();
+                },
+                onSelect: chosen =>
+                {
+                    _selectedLevel = entry.Layers[chosen].Level;
+                    _floorPickerOpen = false;
+                    onRepaint();
+                },
+                width: FloorPickerWidth,
+                x: AuxLayout.Padding + PickerWidth + 10f);
+        }
+
+        /// <summary>The floor to show: the one last chosen if this map has it, else the map's own
+        /// default. Falling back matters because floor levels are not shared between maps.</summary>
+        private static DynamicMapsLibrary.MapLayer ResolveLayer(DynamicMapsLibrary.MapEntry entry)
+        {
+            if (entry == null || entry.Layers.Count == 0) return null;
+
+            if (_selectedLevel.HasValue)
+            {
+                var match = entry.Layers.FirstOrDefault(l => l.Level == _selectedLevel.Value);
+                if (match != null) return match;
+            }
+
+            return entry.DefaultLayer;
         }
 
         /// <summary>Map name plus what is outstanding on it, so the dropdown still carries the
@@ -143,18 +203,19 @@ namespace QuestTree.UI
             return byMap;
         }
 
-        /// <summary>Height of the dropdown header plus its breathing room - the map and list start
-        /// below it, since the header is drawn separately and last.</summary>
+        /// <summary>Height of the dropdown row plus its breathing room - the map and list start below
+        /// it, since the dropdowns are drawn separately and last.</summary>
         private const float HeaderHeight = AuxLayout.Padding + AuxLayout.DropdownHeight + 12f;
 
-        private static float BuildSelectedMap(RectTransform parent, List<QuestNode> quests, float top)
+        private static float BuildSelectedMap(
+            RectTransform parent, List<QuestNode> quests, DynamicMapsLibrary.MapEntry entry,
+            DynamicMapsLibrary.MapLayer layer, float top)
         {
             var y = top;
             var left = AuxLayout.Padding;
 
             var mapName = quests[0].LocationId;
-            var entry = DynamicMapsLibrary.FindByLocationKey(quests[0].LocationKey);
-            var sprite = entry?.GetSprite();
+            var sprite = layer?.GetSprite();
 
             // Everything that is not the quest list is map. Measured off the panel rather than
             // fixed, so it fills an ultrawide the same way it fills 1080p.
@@ -166,7 +227,7 @@ namespace QuestTree.UI
 
             if (sprite != null)
             {
-                BuildMapViewport(parent, entry, sprite, left, y, mapWidth);
+                BuildMapViewport(parent, entry, layer, sprite, left, y, mapWidth);
                 mapBottom = y + MapViewportHeight;
                 AddCredit(parent, entry, left, mapBottom + 4f);
                 mapBottom += 22f;
@@ -222,22 +283,25 @@ namespace QuestTree.UI
         /// <summary>
         /// The map, in a viewport you can drag and zoom.
         ///
-        /// Drawn with <see cref="SVGImage"/> rather than a plain <see cref="Image"/>, which is the
-        /// difference between a map and a blank rectangle: VectorUtils.BuildSprite returns a sprite
-        /// backed by tessellated geometry with no texture behind it, and Image draws a sprite by
-        /// texturing a quad, so it drew nothing at all - while the attribution line beside it still
-        /// appeared, making it look as though the image had merely failed to position. SVGImage is
-        /// the renderer that package ships for these sprites, and being a Graphic it takes its
-        /// material from the canvas rather than needing a vector shader found by name at runtime.
+        /// Inside the viewport is a container whose local units ARE the map's coordinates. The
+        /// picture is a rect sized to the floor's ImageBounds and centred on its midpoint, and
+        /// everything drawn on top is placed at its raw map coordinates. That is lifted from how
+        /// DynamicMaps builds its own layers, and it is deliberate: it removes the coordinate
+        /// conversion that two previous attempts each got wrong in a different way. Fitting the map
+        /// to the viewport is then one localScale on the container, which cannot desynchronise the
+        /// picture from what is drawn on it because it moves both.
+        ///
+        /// Drawn with <see cref="SVGImage"/> rather than a plain <see cref="Image"/>: BuildSprite
+        /// returns a sprite backed by tessellated geometry with no texture behind it, and Image
+        /// draws a sprite by texturing a quad, so it drew nothing at all.
         ///
         /// The viewport carries <see cref="PanZoomHandler"/>, the same component the quest graph
         /// uses. Handling drag and scroll there is also what stops the surrounding aux ScrollRect
-        /// stealing the gesture: Unity delivers to the first handler it finds walking up, so
-        /// scrolling over the map zooms it instead of scrolling the panel.
+        /// stealing the gesture: Unity delivers to the first handler it finds walking up.
         /// </summary>
         private static void BuildMapViewport(
-            RectTransform parent, DynamicMapsLibrary.MapEntry entry, Sprite sprite,
-            float x, float y, float width)
+            RectTransform parent, DynamicMapsLibrary.MapEntry entry, DynamicMapsLibrary.MapLayer layer,
+            Sprite sprite, float x, float y, float width)
         {
             var viewportGo = new GameObject(
                 "MapViewport", typeof(RectTransform), typeof(Image), typeof(RectMask2D));
@@ -254,61 +318,102 @@ namespace QuestTree.UI
             backing.color = new Color(0f, 0f, 0f, 0.25f);
             GameStyle.ApplyPanel(backing);
 
-            // The content rect is built to the map's own aspect rather than the viewport's, and
-            // preserveAspect is then off. That is what makes markers land in the right place: with
-            // letterboxing the drawn rectangle is smaller than the rect by bars of unknown size,
-            // and every marker would be off by them. Sized to the aspect, picture and rect coincide.
-            var aspect = entry != null && entry.HasBounds ? entry.AspectRatio : 1f;
+            var bounds = layer.BoundsSize;
 
-            var contentWidth = width;
-            var contentHeight = width / Mathf.Max(0.01f, aspect);
+            // Map space: pivoted and anchored at the viewport's centre, so a child at map (0,0) is
+            // at the middle and the picture's own offset from the origin is preserved.
+            var spaceGo = new GameObject("MapSpace", typeof(RectTransform));
+            var space = (RectTransform)spaceGo.transform;
+            space.SetParent(viewport, worldPositionStays: false);
+            space.anchorMin = space.anchorMax = new Vector2(0.5f, 0.5f);
+            space.pivot = new Vector2(0.5f, 0.5f);
+            space.sizeDelta = bounds;
 
-            if (contentHeight > MapViewportHeight)
+            // Fit the floor into the viewport, then shift so the bounds' centre sits in the middle.
+            var fit = Mathf.Min(width / bounds.x, MapViewportHeight / bounds.y);
+            space.localScale = new Vector3(fit, fit, 1f);
+            space.anchoredPosition = -layer.BoundsCentre * fit;
+
+            var imageGo = new GameObject("MapImage", typeof(RectTransform), typeof(SVGImage));
+            var image = (RectTransform)imageGo.transform;
+            image.SetParent(space, worldPositionStays: false);
+            image.anchorMin = image.anchorMax = new Vector2(0.5f, 0.5f);
+            image.pivot = new Vector2(0.5f, 0.5f);
+            image.sizeDelta = bounds;
+            image.anchoredPosition = layer.BoundsCentre;
+
+            var svg = imageGo.GetComponent<SVGImage>();
+            svg.sprite = sprite;
+            svg.preserveAspect = false;
+            svg.raycastTarget = false;
+
+            // The handler is created before the overlays because they register with it to be held
+            // at a constant on-screen size. Zoom limits and step are scaled by the fit, since the
+            // container already sits at that scale.
+            var panZoom = viewportGo.AddComponent<PanZoomHandler>();
+            panZoom.Init(space, MinZoom * fit, MaxZoom * fit, ZoomSpeed * fit);
+
+            BuildPlaceLabels(space, entry, panZoom);
+            BuildMarkers(space, entry, layer, panZoom);
+        }
+
+        /// <summary>
+        /// The map's own place names, which the config carries and the SVGs do not - the pictures
+        /// contain no text whatsoever, so without these the map is unlabelled.
+        ///
+        /// They also calibrate everything else. Names and quest markers go through the same
+        /// placement, so if "Dorms" sits on the dorms then the markers are right too; if it does not,
+        /// the error is visible and measurable rather than something to reason about.
+        /// </summary>
+        private static void BuildPlaceLabels(
+            RectTransform space, DynamicMapsLibrary.MapEntry entry, PanZoomHandler panZoom)
+        {
+            if (entry == null) return;
+
+            foreach (var label in entry.Labels)
             {
-                contentHeight = MapViewportHeight;
-                contentWidth = contentHeight * aspect;
+                var go = new GameObject("PlaceLabel", typeof(RectTransform));
+                var rect = (RectTransform)go.transform;
+                rect.SetParent(space, worldPositionStays: false);
+                rect.anchorMin = rect.anchorMax = new Vector2(0.5f, 0.5f);
+                rect.pivot = new Vector2(0.5f, 0.5f);
+                rect.anchoredPosition = label.Position;
+                rect.sizeDelta = new Vector2(160f, 18f);
+                panZoom.KeepConstantScale(rect);
+
+                var text = go.AddComponent<TextMeshProUGUI>();
+                text.text = label.Text;
+                text.fontSize = 12;
+                text.color = new Color(1f, 1f, 1f, 0.65f);
+                text.alignment = TextAlignmentOptions.Center;
+                text.enableWordWrapping = false;
+                text.raycastTarget = false;
+                GameStyle.ApplyOutlined(text);
             }
-
-            var contentGo = new GameObject("MapContent", typeof(RectTransform), typeof(SVGImage));
-            var content = (RectTransform)contentGo.transform;
-            content.SetParent(viewport, worldPositionStays: false);
-            content.anchorMin = content.anchorMax = new Vector2(0f, 1f);
-            content.pivot = new Vector2(0f, 1f);
-            content.anchoredPosition = new Vector2(
-                (width - contentWidth) * 0.5f, -(MapViewportHeight - contentHeight) * 0.5f);
-            content.sizeDelta = new Vector2(contentWidth, contentHeight);
-
-            var image = contentGo.GetComponent<SVGImage>();
-            image.sprite = sprite;
-            image.preserveAspect = false;
-            image.raycastTarget = false;
-
-            BuildMarkers(content, entry, contentWidth, contentHeight);
-
-            viewportGo.AddComponent<PanZoomHandler>().Init(content, MinZoom, MaxZoom, ZoomSpeed);
         }
 
         /// <summary>
         /// Pins where the items your quests want actually spawn.
         ///
-        /// The positions come from the server's map-marker route, which reads them out of each
-        /// map's forced loot spawns - see MapMarkerPayloadBuilder for why that is the only honest
-        /// source. They are parented to the map content, so they pan and zoom with it and stay put
-        /// relative to the ground underneath.
+        /// Positions come from the server's map-marker route, which reads them out of each map's
+        /// forced loot spawns - see MapMarkerPayloadBuilder for why that is the only honest source.
         ///
-        /// Markers are drawn at a fixed pixel size and are NOT counter-scaled as you zoom, so
-        /// zooming in genuinely separates two spawns that overlap when zoomed out.
+        /// A marker on another floor is dimmed rather than hidden, and keeps its name, so an item
+        /// never silently vanishes just because you are looking at the wrong level - you can see it
+        /// is there and which floor to switch to.
         /// </summary>
         private static void BuildMarkers(
-            RectTransform content, DynamicMapsLibrary.MapEntry entry, float width, float height)
+            RectTransform space, DynamicMapsLibrary.MapEntry entry,
+            DynamicMapsLibrary.MapLayer layer, PanZoomHandler panZoom)
         {
-            if (entry == null || !entry.HasBounds) return;
+            if (entry == null) return;
 
             var payload = QuestDataClient.GetMapMarkers();
             if (payload?.Maps == null) return;
 
             var set = payload.Maps.FirstOrDefault(m =>
-                m != null && string.Equals(m.LocationKey, MatchedKey(entry), StringComparison.OrdinalIgnoreCase));
+                m?.LocationKey != null &&
+                entry.InternalNames.Any(n => string.Equals(n, m.LocationKey, StringComparison.OrdinalIgnoreCase)));
 
             if (set?.Markers == null) return;
 
@@ -316,28 +421,34 @@ namespace QuestTree.UI
             {
                 if (marker == null) continue;
 
-                var normalized = entry.Normalize(marker.X, marker.Z);
+                // Map space is (game.x, game.z) with game.y as the height - see DynamicMapsLibrary.
+                var owner = entry.LayerFor(marker.X, marker.Z, marker.Y);
 
-                // Off the edge of the picture means the marker is not describable on this image;
-                // clamping it to the border would be a confident lie about where the item is.
-                if (normalized.x < 0f || normalized.x > 1f || normalized.y < 0f || normalized.y > 1f)
-                    continue;
+                // A marker whose height matches no floor at all is treated as belonging to the one
+                // being shown rather than dropped: the bands do not tile the world exhaustively, and
+                // a real spawn is worth more than a tidy rule.
+                var onThisFloor = owner == null || owner == layer;
+
+                var colour = onThisFloor
+                    ? GameStyle.AccentColor
+                    : new Color(GameStyle.AccentColor.r, GameStyle.AccentColor.g, GameStyle.AccentColor.b, 0.35f);
 
                 var go = new GameObject("QuestMarker", typeof(RectTransform), typeof(Image));
                 var rect = (RectTransform)go.transform;
-                rect.SetParent(content, worldPositionStays: false);
-                rect.anchorMin = rect.anchorMax = new Vector2(0f, 0f);
+                rect.SetParent(space, worldPositionStays: false);
+                rect.anchorMin = rect.anchorMax = new Vector2(0.5f, 0.5f);
                 rect.pivot = new Vector2(0.5f, 0.5f);
+                rect.anchoredPosition = new Vector2(marker.X, marker.Z);
+
+                // Held at a constant on-screen size however far the map is zoomed - otherwise
+                // zooming in magnifies the pile instead of separating it.
                 rect.sizeDelta = new Vector2(MarkerSize, MarkerSize);
-                rect.anchoredPosition = new Vector2(normalized.x * width, normalized.y * height);
+                panZoom.KeepConstantScale(rect);
 
                 var dot = go.GetComponent<Image>();
-                dot.color = GameStyle.AccentColor;
+                dot.color = colour;
                 dot.raycastTarget = false;
 
-                // The item and the quests that want it, as a label beside the dot. No hover: the
-                // aux panel has no tooltip layer, and a marker you have to hover to identify is no
-                // better than no marker when you are deciding which one to walk to.
                 var labelGo = new GameObject("Label", typeof(RectTransform));
                 var labelRect = (RectTransform)labelGo.transform;
                 labelRect.SetParent(rect, worldPositionStays: false);
@@ -347,9 +458,11 @@ namespace QuestTree.UI
                 labelRect.sizeDelta = new Vector2(190f, 16f);
 
                 var label = labelGo.AddComponent<TextMeshProUGUI>();
-                label.text = marker.ItemName;
+                label.text = onThisFloor || owner == null
+                    ? marker.ItemName
+                    : $"{marker.ItemName}  ({owner.Name})";
                 label.fontSize = 10;
-                label.color = GameStyle.AccentColor;
+                label.color = colour;
                 label.alignment = TextAlignmentOptions.Left;
                 label.enableWordWrapping = false;
                 label.overflowMode = TextOverflowModes.Ellipsis;
@@ -358,31 +471,11 @@ namespace QuestTree.UI
             }
         }
 
-        /// <summary>The internal name the server keyed this map's markers under. A DynamicMaps entry
-        /// can cover several (Factory is day and night), and the marker set is per game location, so
-        /// the first of its names that the payload actually has is the right one.</summary>
-        private static string MatchedKey(DynamicMapsLibrary.MapEntry entry)
-        {
-            var payload = QuestDataClient.GetMapMarkers();
-            if (payload?.Maps == null) return entry.InternalNames.FirstOrDefault() ?? "";
-
-            foreach (var name in entry.InternalNames)
-            {
-                if (payload.Maps.Any(m =>
-                        m != null && string.Equals(m.LocationKey, name, StringComparison.OrdinalIgnoreCase)))
-                {
-                    return name;
-                }
-            }
-
-            return entry.InternalNames.FirstOrDefault() ?? "";
-        }
-
         /// <summary>The map's own author credit, shown because the images are someone else's work
         /// (tarkov.dev, via DynamicMaps) and their licence is only satisfied with attribution.</summary>
         private static void AddCredit(RectTransform parent, DynamicMapsLibrary.MapEntry entry, float x, float y)
         {
-            if (string.IsNullOrEmpty(entry.Attribution)) return;
+            if (entry == null || string.IsNullOrEmpty(entry.Attribution)) return;
 
             var cursor = y;
             AddAt(parent, $"<color=#FFFFFF60>Map: {entry.Attribution}, via DynamicMaps</color>",

@@ -230,6 +230,7 @@ namespace QuestTreeServer
                         ItemName = ResolveItemName(tpl!, locale),
                         Quests = wanting,
                         X = position.Value.X,
+                        Y = position.Value.Y,
                         Z = position.Value.Z
                     });
                 }
