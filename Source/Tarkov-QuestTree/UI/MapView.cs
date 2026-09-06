@@ -655,17 +655,36 @@ namespace QuestTree.UI
                 offset.x * sin + offset.y * cos);
         }
 
-        /// <summary>Which floor a marker belongs to. Objective markers name their floor outright, so
-        /// that is taken over the height-band test - the source knows, and a name is not a guess.</summary>
+        /// <summary>
+        /// Which floor a marker belongs to.
+        ///
+        /// A marker that names its floor is matched against the layer's FloorName - the name the
+        /// artwork's own filename uses - because that is the vocabulary the two sides share. The
+        /// config's display key is not: matching on it put 171 of 232 objective pins on no layer at
+        /// all, and Interchange's "First_Floor" is Level 1 rather than the ground, which a name-free
+        /// ordinal guess gets backwards.
+        ///
+        /// The comparison is exact rather than a substring, because "Underground_Level" contains
+        /// "Ground_Level" and a loose match would put underground pins on the ground floor.
+        ///
+        /// Null means "no idea", which the caller draws on whatever floor is being viewed. That is
+        /// the honest answer for a marker with no coordinates: the height-band test below only
+        /// applies to item spawns, which have real ones. Asking it about a marker whose position is
+        /// (0, 0, 0) returned whichever layer covers the map origin - an answer, but a fictional one.
+        /// </summary>
         private static DynamicMapsLibrary.MapLayer OwnerFor(
             MapMarkerDto marker, DynamicMapsLibrary.MapEntry entry)
         {
             if (!string.IsNullOrEmpty(marker.Floor))
             {
                 var named = entry.Layers.FirstOrDefault(l =>
-                    string.Equals(l.Name.Replace(" ", "_"), marker.Floor, StringComparison.OrdinalIgnoreCase));
+                    string.Equals(l.FloorName, marker.Floor, StringComparison.OrdinalIgnoreCase));
 
                 if (named != null) return named;
+
+                // A map drawn as a single image names no floor in its filename, so any floor the
+                // data gives is that one map.
+                return entry.Layers.Count == 1 ? entry.Layers[0] : null;
             }
 
             return entry.LayerFor(marker.X, marker.Z, marker.Y);

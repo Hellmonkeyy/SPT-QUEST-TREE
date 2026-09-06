@@ -65,6 +65,19 @@ namespace QuestTree.UI
             public int Level;
             public string ImagePath = "";
 
+            /// <summary>
+            /// The floor's name as the map ARTWORK calls it - the part of the image filename after
+            /// the map's own name, so "Interchange-First_Floor.svg" gives "First_Floor". Empty for a
+            /// map whose image carries no suffix, as Lighthouse's plain "Lighthouse.svg" does not.
+            ///
+            /// This exists because it is the only vocabulary the outside quest data shares. The
+            /// config's display key for that same layer is "2nd Floor", and matching on it fails for
+            /// 171 of the 232 objective locations; matching on the filename resolves all 232. It
+            /// also settles a question a sensible guess gets backwards - Interchange's "First_Floor"
+            /// is Level 1, the storey above the ground, not level 0.
+            /// </summary>
+            public string FloorName = "";
+
             public Vector2 BoundsMin;
             public Vector2 BoundsMax;
 
@@ -356,11 +369,15 @@ namespace QuestTree.UI
                 var full = Path.Combine(modRoot, path.Replace('/', Path.DirectorySeparatorChar));
                 if (!File.Exists(full)) continue;
 
+                var stem = Path.GetFileNameWithoutExtension(full) ?? "";
+                var dash = stem.IndexOf('-');
+
                 var layer = new MapLayer
                 {
                     Name = property.Name,
                     Level = (int?)value["Level"] ?? 0,
                     ImagePath = full,
+                    FloorName = dash >= 0 ? stem.Substring(dash + 1) : "",
                     BoundsMin = mapMin,
                     BoundsMax = mapMax
                 };
