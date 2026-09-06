@@ -79,16 +79,7 @@ namespace QuestTree.UI
             /// ImageBounds describes, and so the one that has to land on it.</summary>
             public Rect Viewport;
 
-            /// <summary>The tessellated artwork's own bounding box, in the same SVG units - the
-            /// rectangle BuildSprite gives the sprite, and therefore what SVGImage stretches into
-            /// whatever rect it is given. It is NOT the viewBox: a floor layer only draws the
-            /// buildings that have that floor, so GroundZero's third floor inks 11% of its viewBox,
-            /// while Customs' ground floor overhangs its own by 42% in height with extract routes.
-            /// Placing the picture correctly needs both.</summary>
-            public Rect Ink;
-
-            public bool HasArtworkBounds =>
-                Viewport.width > 0f && Viewport.height > 0f && Ink.width > 0f && Ink.height > 0f;
+            public bool HasArtworkBounds => Viewport.width > 0f && Viewport.height > 0f;
 
             private Sprite _sprite;
             private bool _spriteFailed;
@@ -369,30 +360,22 @@ namespace QuestTree.UI
         /// Only the head of the file is scanned: the tag is the first element, and these run to
         /// 340KB.
         /// </summary>
-        private static Rect ReadViewBox(string path)
+        private static Rect ReadViewBox(string text)
         {
-            try
-            {
-                var head = new char[2048];
-                using var reader = new StreamReader(path);
-                var read = reader.Read(head, 0, head.Length);
+            var match = System.Text.RegularExpressions.Regex.Match(
+                text, @"<svg[^>]*\sviewBox\s*=\s*[""']([^""']+)[""']",
+                System.Text.RegularExpressions.RegexOptions.IgnoreCase);
 
-                var match = System.Text.RegularExpressions.Regex.Match(
-                    new string(head, 0, read),
-                    @"viewBox\s*=\s*[""']\s*([-\d.eE+]+)[\s,]+([-\d.eE+]+)[\s,]+([-\d.eE+]+)[\s,]+([-\d.eE+]+)");
+            if (!match.Success) return default;
 
-                if (!match.Success) return default;
+            var parts = match.Groups[1].Value.Split(
+                new[] { ' ', ',', '\t', '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
 
-                return new Rect(
-                    ParseFloat(match.Groups[1].Value), ParseFloat(match.Groups[2].Value),
-                    ParseFloat(match.Groups[3].Value), ParseFloat(match.Groups[4].Value));
-            }
-            catch (Exception ex)
-            {
-                Plugin.LogSource?.LogWarning(
-                    $"QuestTree: could not read the viewBox of '{Path.GetFileName(path)}' ({ex.Message}).");
-                return default;
-            }
+            if (parts.Length < 4) return default;
+
+            return new Rect(
+                ParseFloat(parts[0]), ParseFloat(parts[1]),
+                ParseFloat(parts[2]), ParseFloat(parts[3]));
         }
 
         /// <summary>Invariant culture, because an SVG's numbers use a dot whatever the machine's
@@ -423,7 +406,6 @@ namespace QuestTree.UI
             Plugin.LogSource?.LogInfo(
                 $"QuestTree map geometry [{layer.Name}] " +
                 $"viewBox={Describe(layer.Viewport)} " +
-                $"ink={Describe(layer.Ink)} " +
                 $"spriteRect={Describe(sprite.rect)} " +
                 $"spriteBounds={Describe(sprite.bounds)} " +
                 $"pivot=({sprite.pivot.x:F1},{sprite.pivot.y:F1}) " +
@@ -439,57 +421,83 @@ namespace QuestTree.UI
         private static string Describe(Bounds b) =>
             $"[c({b.center.x:F2},{b.center.y:F2}) s({b.size.x:F2},{b.size.y:F2})]";
 
+        /// <summary>Tessellation presets, coarsening in order. Lifted from DynamicMaps, which
+        /// walks them until the mesh fits Unity's index budget - a 340KB map can otherwise blow past
+        /// it and produce a broken mesh rather than a coarse one.</summary>
+        private static readonly VectorUtils.TessellationOptions[] TessellationPresets =
+        {
+            new() { StepDistance = 1.5f, MaxCordDeviation = 0.2f, MaxTanAngleDeviation = 0.2f, SamplingStepSize = 0.04f },
+            new() { StepDistance = 2f, MaxCordDeviation = 0.3f, MaxTanAngleDeviation = 0.25f, SamplingStepSize = 0.05f },
+            new() { StepDistance = 4f, MaxCordDeviation = 0.4f, MaxTanAngleDeviation = 0.3f, SamplingStepSize = 0.06f },
+            new() { StepDistance = 6f, MaxCordDeviation = 0.5f, MaxTanAngleDeviation = 0.4f, SamplingStepSize = 0.07f },
+            new() { StepDistance = 8f, MaxCordDeviation = 0.6f, MaxTanAngleDeviation = 0.5f, SamplingStepSize = 0.08f }
+        };
+
+        /// <summary>Unity meshes index vertices with 16 bits, so this is the ceiling a tessellation
+        /// has to come in under.</summary>
+        private const int VertexBudget = 65500;
+
         /// <summary>
-        /// Turns an SVG into a Sprite using Unity's own vector graphics package, which the game
-        /// already ships (Unity.VectorGraphics.dll in EscapeFromTarkov_Data/Managed) - the same API
-        /// DynamicMaps itself uses. No third-party rasteriser and no bundled assets.
+        /// Turns an SVG into a Sprite, the way DynamicMaps does it.
         ///
-        /// The sprite's own extent does not have to line up with anything, because the view stretches
-        /// it to a rect sized in map units - which is exactly what DynamicMaps does with its own.
+        /// This is a faithful copy of its SvgUtils.LoadSvgFromPath rather than something derived
+        /// from first principles, and deliberately so: six attempts at aligning this map were spent
+        /// reverse-engineering a transform from screenshots, when the mod that already renders these
+        /// exact files correctly ships its loader in a readable assembly. Every argument here was
+        /// wrong before, and the one that mattered was the rect.
+        ///
+        /// Passing the viewBox to BuildSprite is the whole alignment fix. Without it the sprite is
+        /// sized to the artwork's ink - the bounding box of what happens to be drawn - which is a
+        /// different rectangle on every layer and bears no relation to the ImageBounds the map's
+        /// coordinates use. A floor that draws only the few buildings having that floor inks a
+        /// fraction of its viewBox, and was being stretched to fill the whole map.
+        ///
+        /// ViewportOptions.OnlyApplyRootViewBox is what puts the geometry in viewBox space to begin
+        /// with, and flipYAxis reconciles SVG's downward y with Unity's upward y.
         /// </summary>
         private static Sprite LoadSvgSprite(string path, MapLayer layer)
         {
             try
             {
-                using var stream = new StreamReader(path);
-                var scene = SVGParser.ImportSVG(stream);
+                var text = File.ReadAllText(path);
+
+                // Read from the text, not from SceneInfo.SceneViewport: the parser the game ships
+                // leaves that zero-sized for every one of these files. DynamicMaps parses the
+                // attribute itself for the same reason, and rejects the layer when it is missing.
+                layer.Viewport = ReadViewBox(text);
+                if (layer.Viewport.width <= 0f || layer.Viewport.height <= 0f)
+                {
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: '{Path.GetFileName(path)}' has no viewBox, so it cannot be placed.");
+                    return null;
+                }
+
+                using var reader = new StringReader(text);
+                var scene = SVGParser.ImportSVG(
+                    reader, ViewportOptions.OnlyApplyRootViewBox, 0f, 1f, 0, 0);
 
                 if (scene.Scene?.Root == null) return null;
 
-                // Step sizes govern how finely curves are subdivided. These are deliberately coarse:
-                // the map is shown at panel size, and a finer tessellation on a 340KB SVG costs
-                // noticeably more time for detail nobody can see here.
-                var options = new VectorUtils.TessellationOptions
+                foreach (var preset in TessellationPresets)
                 {
-                    StepDistance = 10f,
-                    MaxCordDeviation = 0.5f,
-                    MaxTanAngleDeviation = 0.1f,
-                    SamplingStepSize = 0.01f
-                };
+                    var geometry = VectorUtils.TessellateScene(scene.Scene, preset, scene.NodeOpacity);
+                    if (geometry == null || geometry.Count == 0) return null;
 
-                var geometry = VectorUtils.TessellateScene(scene.Scene, options);
-                if (geometry == null || geometry.Count == 0) return null;
+                    if (OverBudget(geometry)) continue;
 
-                // The viewBox is read out of the file rather than taken from SceneViewport, which
-                // this version of the parser leaves empty - logged as w0.0 h0.0 for every map, which
-                // is what silently disabled the previous attempt at this and sent it down its
-                // fallback path.
-                layer.Viewport = ReadViewBox(path);
+                    var sprite = VectorUtils.BuildSprite(
+                        geometry, layer.Viewport, 1f, VectorUtils.Alignment.Center,
+                        Vector2.zero, 32, true);
 
-                // The artwork's own extent. Each geometry's vertices are in its own local space, so
-                // WorldTransform has to be applied before they can be compared with the viewBox.
-                // Confirmed against the running game: Woods tessellates to y -30.9 height 1490.8,
-                // matching the file to a decimal, so the ink shares the viewBox's y-down space and
-                // there is no flip to undo.
-                layer.Ink = VectorUtils.Bounds(
-                    geometry.SelectMany(part => part.Vertices.Select(part.WorldTransform.MultiplyPoint)));
+                    LogArtworkGeometry(layer, sprite);
+                    return sprite;
+                }
 
-                var sprite = VectorUtils.BuildSprite(
-                    geometry, 100f, VectorUtils.Alignment.Center, Vector2.zero, 128);
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: '{Path.GetFileName(path)}' is too dense to tessellate within " +
+                    $"{VertexBudget} vertices at any preset.");
 
-                LogArtworkGeometry(layer, sprite);
-
-                return sprite;
+                return null;
             }
             catch (Exception ex)
             {
@@ -497,6 +505,19 @@ namespace QuestTree.UI
                     $"QuestTree: could not render map image '{Path.GetFileName(path)}' ({ex.Message}).");
                 return null;
             }
+        }
+
+        private static bool OverBudget(List<VectorUtils.Geometry> geometry)
+        {
+            var vertices = 0;
+
+            foreach (var part in geometry)
+            {
+                vertices += part.Vertices?.Length ?? 0;
+                if (vertices > VertexBudget) return true;
+            }
+
+            return false;
         }
     }
 }

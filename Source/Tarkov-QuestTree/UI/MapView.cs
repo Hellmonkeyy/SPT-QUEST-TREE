@@ -391,7 +391,7 @@ namespace QuestTree.UI
             image.anchorMin = image.anchorMax = new Vector2(0.5f, 0.5f);
             image.pivot = new Vector2(0.5f, 0.5f);
 
-            PlaceArtwork(image, layer, sprite, bounds);
+            PlaceArtwork(image, layer, bounds);
 
             if (ModSettings.ShowMapGuides.Value) BuildGuides(space, layer);
 
@@ -421,63 +421,19 @@ namespace QuestTree.UI
         }
 
         /// <summary>
-        /// Puts the picture where its own coordinates say, which is not the same as filling the
-        /// bounds rectangle.
+        /// Lays the picture over the rectangle the map's coordinates describe.
         ///
-        /// SVGImage stretches a sprite to whatever rect it is given, and BuildSprite sizes that
-        /// sprite to the artwork's INK - the bounding box of what is actually drawn. A layer's
-        /// ImageBounds describes its viewBox instead, and the two are rarely the same rectangle.
-        /// Measured across the shipped maps: Ground Zero's ground floor inks its viewBox exactly,
-        /// Woods overshoots by 6%, Customs' ground floor overshoots its height by 42% with extract
-        /// routes running off the page, and Customs' underground inks a third of it. Ground Zero's
-        /// third floor inks 11% - it draws only the buildings that have a third floor - and was
-        /// being blown up to fill the whole map, which is why floors never looked right.
-        ///
-        /// So the viewBox is mapped onto ImageBounds, and the picture is placed wherever its ink
-        /// falls under that same mapping. Ink outside the viewBox then correctly hangs past the map
-        /// instead of being squashed into it.
-        ///
-        /// Falls back to filling the bounds when a layer has no measured rectangles, so a map that
-        /// failed to parse loses its alignment rather than its picture.
+        /// This is one line because the sprite is now built against the SVG's viewBox - see
+        /// DynamicMapsLibrary.LoadSvgSprite - so the sprite IS the rectangle ImageBounds describes
+        /// and there is nothing to convert. Everything this method used to do was compensating for
+        /// a sprite that had been sized to its ink instead, and none of it was ever right.
         /// </summary>
-        private static void PlaceArtwork(
-            RectTransform image, DynamicMapsLibrary.MapLayer layer, Sprite sprite, Vector2 bounds)
+        private static void PlaceArtwork(RectTransform image, DynamicMapsLibrary.MapLayer layer, Vector2 bounds)
         {
-            // The clean case: the sprite was built against the viewBox, so its rect IS the
-            // rectangle ImageBounds describes and the picture simply lies over the bounds. No ink,
-            // no per-axis scale, no y-flip term - nothing left to get wrong.
-            if (IsViewBoxPinned(layer, sprite) || !layer.HasArtworkBounds)
-            {
-                image.sizeDelta = bounds;
-                image.anchoredPosition = layer.BoundsCentre;
-                return;
-            }
-
-            var viewport = layer.Viewport;
-            var ink = layer.Ink;
-
-            // SVG units to map units, per axis - the two are not the same scale.
-            var scaleX = bounds.x / viewport.width;
-            var scaleY = bounds.y / viewport.height;
-
-            image.sizeDelta = new Vector2(ink.width * scaleX, ink.height * scaleY);
-
-            // SVG y grows downward and map y grows upward, so the vertical term is measured from
-            // the top of the bounds rather than the bottom.
-            image.anchoredPosition = new Vector2(
-                layer.BoundsMin.x + (ink.center.x - viewport.x) * scaleX,
-                layer.BoundsMax.y - (ink.center.y - viewport.y) * scaleY);
+            image.sizeDelta = bounds;
+            image.anchoredPosition = layer.BoundsCentre;
         }
 
-        /// <summary>Whether the sprite came back sized to the SVG's viewBox rather than to its own
-        /// ink. When it did, placing the picture is exact by construction.</summary>
-        private static bool IsViewBoxPinned(DynamicMapsLibrary.MapLayer layer, Sprite sprite)
-        {
-            if (sprite == null || !layer.HasArtworkBounds) return false;
-
-            return Mathf.Abs(sprite.rect.width - layer.Viewport.width) < 1f &&
-                   Mathf.Abs(sprite.rect.height - layer.Viewport.height) < 1f;
-        }
 
         /// <summary>
         /// Draws the rectangle the map's coordinates claim to cover, plus a crosshair on the map
