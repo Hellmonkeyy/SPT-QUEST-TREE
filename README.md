@@ -60,7 +60,8 @@ Zoom is anchored to the cursor, so the quest you are pointing at stays put.
 while the rest of the tree dims — the quickest way to read a chain.
 
 **Click a quest** for its objectives, rewards, prerequisites, why it is locked, and a link to its
-wiki page. Objectives show live progress where the game is tracking it. The detail panel collapses
+wiki page. If it is still out of reach you also get **Route** — the whole chain of quests standing
+between you and it, in the order you can do them, rather than just the one immediately before it. Objectives show live progress where the game is tracking it. The detail panel collapses
 with the chevron to give the graph its space back while keeping the quest selected; the X clears the
 selection outright.
 
