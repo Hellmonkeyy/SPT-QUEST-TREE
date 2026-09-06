@@ -738,6 +738,18 @@ namespace QuestTree.UI
             tabId == KappaTabId || tabId == SettingsTabId || tabId == ItemsTabId ||
             tabId == MapsTabId || tabId == DoNextTabId;
 
+        /// <summary>What the toolbar says while a view is open. Previously this was a two-way test
+        /// that labelled everything that was not Kappa as "Settings" - which was three of the five
+        /// views.</summary>
+        private static string NoticeForView(string tabId) => tabId switch
+        {
+            KappaTabId => "Kappa container progress",
+            ItemsTabId => "Items your quests still want",
+            MapsTabId => "What you can do on each map",
+            DoNextTabId => "Closest to finishing first",
+            _ => "Settings"
+        };
+
         private void SelectTab(string traderId)
         {
             if (_selectedTraderId == traderId) return;
@@ -778,11 +790,15 @@ namespace QuestTree.UI
         /// "All" passes every node, a specific trader tab passes that trader's subset, and the same
         /// layout code handles both.
         ///
-        /// The Kappa and Settings tabs are not graphs at all, so they short-circuit to the aux panel.
+        /// The views are not graphs at all, so they short-circuit to the aux panel. That test asks
+        /// IsAuxTab rather than naming ids: it used to name Kappa and Settings directly, and when
+        /// Do next, Maps and Items were added nobody updated it - so selecting one of them rendered
+        /// a graph filtered to a trader id no quest has, and drew an empty panel. One predicate, so
+        /// a sixth view cannot bring that back.
         /// </summary>
         private void RenderSelectedTab()
         {
-            if (_selectedTraderId == KappaTabId || _selectedTraderId == SettingsTabId)
+            if (IsAuxTab(_selectedTraderId))
             {
                 ShowAuxTab();
                 return;
@@ -817,8 +833,18 @@ namespace QuestTree.UI
             _auxPanel.gameObject.SetActive(true);
             _auxContent.anchoredPosition = Vector2.zero;
 
-            foreach (Transform child in _auxContent)
+            // Detached before destroying, not just destroyed: Destroy is deferred to the end of the
+            // frame, so the outgoing rows would otherwise draw over the incoming ones for a frame.
+            // That was invisible when this ran once per tab click, but the Maps dropdown rebuilds
+            // the view on every open, close and select, where the ghost frame reads as flicker.
+            // Walked backwards by index rather than with foreach: detaching a child shifts every
+            // later sibling down, so enumerating forwards would skip every other row.
+            for (var i = _auxContent.childCount - 1; i >= 0; i--)
+            {
+                var child = _auxContent.GetChild(i);
+                child.SetParent(null);
                 Destroy(child.gameObject);
+            }
 
             var height = _selectedTraderId == DoNextTabId
                 ? DoNextView.Build(_auxContent, _graph, () =>
@@ -851,7 +877,7 @@ namespace QuestTree.UI
 
             _auxContent.sizeDelta = new Vector2(0f, height);
 
-            _toolbar.SetNotice(_selectedTraderId == KappaTabId ? "Kappa container progress" : "Settings");
+            _toolbar.SetNotice(NoticeForView(_selectedTraderId));
 
             _detail.HideForTabSwitch();
         }

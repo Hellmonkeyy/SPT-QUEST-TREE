@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using QuestTree.QuestGraph;
 using TMPro;
+using Unity.VectorGraphics;
 using UnityEngine;
 using UnityEngine.UI;
 
@@ -26,14 +27,18 @@ namespace QuestTree.UI
     internal static class MapView
     {
         private const string AnyLocation = "any";
-        private const float PickerWidth = 150f;
-        private const float MapSize = 420f;
+        private const float PickerWidth = 300f;
+        private const float MapSize = 520f;
         private const int MaxQuestRows = 40;
 
         /// <summary>Which map the view is showing. Static so it survives a re-render - switching map
         /// rebuilds the whole aux panel, and resetting to the first map each time would make the
         /// picker unusable.</summary>
         private static string _selectedLocationKey;
+
+        /// <summary>Whether the map dropdown is open. Static for the same reason as the selection:
+        /// clicking the header rebuilds the view, so a local would close it again immediately.</summary>
+        private static bool _pickerOpen;
 
         public static float Build(RectTransform parent, QuestGraphBuilder graph, Action onRepaint)
         {
@@ -54,11 +59,44 @@ namespace QuestTree.UI
             if (_selectedLocationKey == null || !byMap.ContainsKey(_selectedLocationKey))
                 _selectedLocationKey = ordered[0].Key;
 
-            var pickerHeight = BuildPicker(parent, ordered, onRepaint);
             var selected = byMap[_selectedLocationKey];
-            var contentHeight = BuildSelectedMap(parent, selected);
 
-            return Mathf.Max(pickerHeight, contentHeight) + AuxLayout.Padding;
+            // The map and list are built first and the dropdown last, even though the dropdown sits
+            // above them on screen. Unity UI draws siblings in order, so the open list can only
+            // cover the map if it is created after it.
+            var contentHeight = BuildSelectedMap(parent, selected, HeaderHeight);
+
+            var labels = ordered.Select(LabelFor).ToList();
+            var selectedIndex = ordered.FindIndex(m => m.Key == _selectedLocationKey);
+
+            var popupBottom = AuxLayout.AddDropdown(
+                parent, AuxLayout.Padding, labels, selectedIndex, _pickerOpen,
+                toggleOpen: () =>
+                {
+                    _pickerOpen = !_pickerOpen;
+                    onRepaint();
+                },
+                onSelect: index =>
+                {
+                    _selectedLocationKey = ordered[index].Key;
+                    _pickerOpen = false;
+                    onRepaint();
+                },
+                width: PickerWidth);
+
+            // The open list is an overlay and so contributes no layout height of its own - but the
+            // panel still has to be tall enough to scroll to the bottom of it.
+            return Mathf.Max(contentHeight, popupBottom) + AuxLayout.Padding;
+        }
+
+        /// <summary>Map name plus what is outstanding on it, so the dropdown still carries the
+        /// counts the old button column showed.</summary>
+        private static string LabelFor(KeyValuePair<string, List<QuestNode>> map)
+        {
+            var quests = map.Value;
+            var actionable = quests.Count(q => q.Status == ENodeStatus.Active || q.Status == ENodeStatus.Available);
+
+            return $"{quests[0].LocationId}   {actionable}/{quests.Count}";
         }
 
         /// <summary>Quests grouped by map, keyed on the raw location id so it can be matched against
@@ -89,42 +127,14 @@ namespace QuestTree.UI
             return byMap;
         }
 
-        private static float BuildPicker(
-            RectTransform parent, List<KeyValuePair<string, List<QuestNode>>> maps, Action onRepaint)
+        /// <summary>Height of the dropdown header plus its breathing room - the map and list start
+        /// below it, since the header is drawn separately and last.</summary>
+        private const float HeaderHeight = AuxLayout.Padding + AuxLayout.DropdownHeight + 12f;
+
+        private static float BuildSelectedMap(RectTransform parent, List<QuestNode> quests, float top)
         {
-            var y = AuxLayout.Padding;
-
-            foreach (var (key, quests) in maps)
-            {
-                var name = quests[0].LocationId;
-                var actionable = quests.Count(q => q.Status == ENodeStatus.Active || q.Status == ENodeStatus.Available);
-                var selected = key == _selectedLocationKey;
-
-                var button = GameStyle.CreateButton(parent, $"{name}  {actionable}/{quests.Count}", () =>
-                {
-                    _selectedLocationKey = key;
-                    onRepaint();
-                });
-
-                button.anchorMin = button.anchorMax = new Vector2(0f, 1f);
-                button.pivot = new Vector2(0f, 1f);
-                button.anchoredPosition = new Vector2(AuxLayout.Padding, -y);
-                button.sizeDelta = new Vector2(PickerWidth, 26f);
-
-                // Only the hand-built button has a background of ours to tint for the selected state.
-                var background = button.GetComponent<Image>();
-                if (background != null && selected) background.color = GameStyle.AccentColor;
-
-                y += 30f;
-            }
-
-            return y;
-        }
-
-        private static float BuildSelectedMap(RectTransform parent, List<QuestNode> quests)
-        {
-            var y = AuxLayout.Padding;
-            var left = AuxLayout.Padding + PickerWidth + 12f;
+            var y = top;
+            var left = AuxLayout.Padding;
 
             var mapName = quests[0].LocationId;
             var entry = DynamicMapsLibrary.FindByLocationKey(quests[0].LocationKey);
@@ -180,9 +190,20 @@ namespace QuestTree.UI
             return Mathf.Max(listY, sprite != null ? y + MapSize + 28f : listY);
         }
 
+        /// <summary>
+        /// Draws the map with <see cref="SVGImage"/> rather than a plain <see cref="Image"/>.
+        ///
+        /// That is the difference between a map and a blank rectangle. VectorUtils.BuildSprite
+        /// returns a sprite backed by tessellated geometry with no texture behind it, and Image
+        /// draws a sprite by texturing a quad - so it drew nothing at all, while the attribution
+        /// line beside it still appeared and made it look as though the image had merely failed to
+        /// position. SVGImage is the renderer that package ships for exactly this kind of sprite,
+        /// and being a Graphic it gets its material from the canvas rather than needing a vector
+        /// shader looked up by name at runtime.
+        /// </summary>
         private static void BuildMapImage(RectTransform parent, Sprite sprite, float x, float y)
         {
-            var go = new GameObject("MapImage", typeof(RectTransform), typeof(Image));
+            var go = new GameObject("MapImage", typeof(RectTransform), typeof(SVGImage));
             var rect = (RectTransform)go.transform;
             rect.SetParent(parent, worldPositionStays: false);
             rect.anchorMin = rect.anchorMax = new Vector2(0f, 1f);
@@ -190,7 +211,7 @@ namespace QuestTree.UI
             rect.anchoredPosition = new Vector2(x, -y);
             rect.sizeDelta = new Vector2(MapSize, MapSize);
 
-            var image = go.GetComponent<Image>();
+            var image = go.GetComponent<SVGImage>();
             image.sprite = sprite;
             // Maps are not square; preserveAspect letterboxes rather than stretching the geometry.
             image.preserveAspect = true;

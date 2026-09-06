@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
@@ -213,6 +214,81 @@ namespace QuestTree.UI
         {
             y += height;
             return height;
+        }
+
+        public const float DropdownHeight = 28f;
+        public const float DropdownRowHeight = 26f;
+
+        /// <summary>
+        /// A dropdown: a header showing the current choice, and - when open - the options drawn
+        /// over whatever is beneath it.
+        ///
+        /// The open state and the selection both belong to the caller rather than to this method.
+        /// Every aux view is rebuilt from scratch on each render, so anything held here would be
+        /// discarded the moment the list was clicked; the caller keeps it in a static the same way
+        /// MapView already keeps its selected map.
+        ///
+        /// Positioned at an explicit <paramref name="top"/> rather than off a running cursor, so it
+        /// can be built *last* while still appearing at the top of the view. That ordering is the
+        /// whole trick: Unity UI draws siblings in order, so an overlay has to be created after the
+        /// content it covers. Returns the bottom of the open list so the caller can size its panel
+        /// to reach it.
+        ///
+        /// Not TMP_Dropdown: that needs a runtime-built template hierarchy and would have to escape
+        /// the aux panel's RectMask2D to overlay properly. Hand-built matches every other control
+        /// here, and cloning the game's own UI has gone badly in this project before.
+        /// </summary>
+        public static float AddDropdown(
+            RectTransform parent, float top, IReadOnlyList<string> options, int selectedIndex,
+            bool open, System.Action toggleOpen, System.Action<int> onSelect, float width = 300f)
+        {
+            var selectedLabel = selectedIndex >= 0 && selectedIndex < options.Count
+                ? options[selectedIndex]
+                : "Select";
+
+            var header = GameStyle.CreateButton(
+                parent, $"{selectedLabel}   {(open ? "▲" : "▼")}", toggleOpen);
+            header.anchorMin = header.anchorMax = new Vector2(0f, 1f);
+            header.pivot = new Vector2(0f, 1f);
+            header.anchoredPosition = new Vector2(Padding, -top);
+            header.sizeDelta = new Vector2(width, DropdownHeight);
+
+            if (!open) return 0f;
+
+            var listTop = top + DropdownHeight;
+
+            // A backing plate behind the rows, so the map underneath cannot show between them.
+            // Created before the rows so that it draws behind them.
+            var plateGo = new GameObject("DropdownPlate", typeof(RectTransform), typeof(Image));
+            var plate = (RectTransform)plateGo.transform;
+            plate.SetParent(parent, worldPositionStays: false);
+            plate.anchorMin = plate.anchorMax = new Vector2(0f, 1f);
+            plate.pivot = new Vector2(0f, 1f);
+            plate.anchoredPosition = new Vector2(Padding, -listTop);
+            plate.sizeDelta = new Vector2(width, options.Count * DropdownRowHeight);
+
+            var plateImage = plateGo.GetComponent<Image>();
+            plateImage.color = GameStyle.ScreenColor;
+            GameStyle.ApplyPanel(plateImage);
+
+            for (var i = 0; i < options.Count; i++)
+            {
+                var index = i;
+
+                var row = GameStyle.CreateButton(parent, options[i], () => onSelect(index));
+                row.anchorMin = row.anchorMax = new Vector2(0f, 1f);
+                row.pivot = new Vector2(0f, 1f);
+                row.anchoredPosition = new Vector2(Padding, -(listTop + i * DropdownRowHeight));
+                row.sizeDelta = new Vector2(width, DropdownRowHeight);
+
+                if (index == selectedIndex)
+                {
+                    var background = row.GetComponent<Image>();
+                    if (background != null) background.color = GameStyle.AccentColor;
+                }
+            }
+
+            return listTop + options.Count * DropdownRowHeight + Padding;
         }
     }
 }
