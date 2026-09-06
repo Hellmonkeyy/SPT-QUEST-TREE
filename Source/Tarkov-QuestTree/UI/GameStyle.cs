@@ -28,6 +28,9 @@ namespace QuestTree.UI
         private static Sprite _panelSprite;
         private static Image.Type _panelSpriteType = Image.Type.Sliced;
 
+        /// <summary>Our own outlined copy of the harvested font material - see ApplyOutlined.</summary>
+        private static Material _outlinedFontMaterial;
+
         // Defaults chosen to match EFT's menu palette, and overridden by whatever the harvested
         // donor turns out to use. Named rather than inlined so no call site hardcodes a colour.
         public static Color TextColor { get; private set; } = new(0.78f, 0.76f, 0.71f);
@@ -35,6 +38,11 @@ namespace QuestTree.UI
         public static Color AccentColor { get; private set; } = new(0.78f, 0.65f, 0.35f);
         public static Color ScreenColor { get; private set; } = new(0.055f, 0.055f, 0.05f, 0.97f);
         public static Color PanelColor { get; private set; } = new(1f, 1f, 1f, 0.05f);
+
+        /// <summary>Outline for node text. Black at a modest width - enough to separate glyphs from
+        /// whatever is behind them without the text starting to look bold.</summary>
+        private static readonly Color OutlineColor = new(0f, 0f, 0f, 0.9f);
+        private const float OutlineWidth = 0.2f;
 
         /// <summary>Called from MenuTaskBarPatch with the taskbar entry it clones from, before that
         /// clone's own label is overwritten - a real, always-available donor.</summary>
@@ -70,6 +78,56 @@ namespace QuestTree.UI
             // Only recolour text still sitting on the plain white default - callers that chose a
             // deliberate colour (status greens, warning reds) keep it.
             if (text.color == Color.white) text.color = TextColor;
+        }
+
+        /// <summary>
+        /// Like <see cref="Apply"/>, but with a dark outline behind the glyphs. Used for text on the
+        /// quest nodes, which sits over status-coloured borders and whatever the game is drawing
+        /// behind the panel - an outline is what keeps pale text legible on a pale node and dark
+        /// text legible on a dark one.
+        ///
+        /// Two things here are deliberate:
+        ///
+        /// The harvested material is COPIED, never modified. It belongs to the game - it came off a
+        /// live taskbar label - so setting outline properties on it would put an outline on EFT's
+        /// own UI text as a side effect.
+        ///
+        /// The copy is assigned as the SHARED material rather than through TMP_Text.outlineWidth or
+        /// .fontMaterial, both of which instance a material per text object. With up to several
+        /// hundred nodes on screen, each carrying three or four labels, that would be hundreds of
+        /// materials and a broken batch; one shared material keeps them drawing together.
+        /// </summary>
+        public static void ApplyOutlined(TMP_Text text)
+        {
+            Apply(text);
+
+            var material = GetOutlinedFontMaterial();
+            if (material != null) text.fontSharedMaterial = material;
+        }
+
+        private static Material GetOutlinedFontMaterial()
+        {
+            if (_outlinedFontMaterial != null) return _outlinedFontMaterial;
+            if (_fontMaterial == null) return null; // nothing harvested yet; plain text is the fallback
+
+            try
+            {
+                var material = new Material(_fontMaterial);
+                material.EnableKeyword(ShaderUtilities.Keyword_Outline);
+                material.SetColor(ShaderUtilities.ID_OutlineColor, OutlineColor);
+                material.SetFloat(ShaderUtilities.ID_OutlineWidth, OutlineWidth);
+
+                _outlinedFontMaterial = material;
+                return _outlinedFontMaterial;
+            }
+            catch (Exception ex)
+            {
+                // A font whose shader has no outline pass would land here. Plain text is a perfectly
+                // acceptable outcome; an unreadable panel is not.
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: could not build an outlined font material ({ex.Message}) - using plain text.");
+                return null;
+            }
         }
 
         public static void ApplyPanel(Image image)

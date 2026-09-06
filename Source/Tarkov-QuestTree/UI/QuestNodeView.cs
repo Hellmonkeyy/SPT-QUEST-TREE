@@ -151,7 +151,10 @@ namespace QuestTree.UI
             text.fontStyle = style;
             text.color = Color.white;
             text.overflowMode = TextOverflowModes.Ellipsis;
-            GameStyle.Apply(text);
+
+            // Outlined rather than plain: node labels sit over status-coloured borders and whatever
+            // the game draws behind the panel, so they need separating from the background.
+            GameStyle.ApplyOutlined(text);
             return text;
         }
 

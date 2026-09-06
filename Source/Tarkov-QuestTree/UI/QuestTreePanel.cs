@@ -290,8 +290,8 @@ namespace QuestTree.UI
                 onSearchChanged: RenderSelectedTab,
                 frameMyQuests: _graphView.FrameMyQuests,
                 frameContent: _graphView.FrameContent,
-                toggleSettings: () =>
-                    SelectTab(_selectedTraderId == SettingsTabId ? _tabBeforeSettings : SettingsTabId),
+                viewButtons: ViewButtons,
+                onViewSelected: SelectView,
                 closeTree: CloseTree,
                 showIntro: () => ShowIntro(true));
 
@@ -560,12 +560,9 @@ namespace QuestTree.UI
                 CreateTabButton($"{label}  {done}/{total}", traderId);
             }
 
-            // Appended after the traders, not next to "All": Kappa is a destination of its own
-            // rather than another slice of the same tree. Settings is NOT here - it sits in the
-            // toolbar beside Close, since it is not quest data at all.
-            CreateTabButton("Maps", MapsTabId);
-            CreateTabButton("Items", ItemsTabId);
-            CreateTabButton("Kappa", KappaTabId);
+            // Maps / Items / Kappa / Settings are NOT here - they are whole views rather than a
+            // slice of the quest graph, so they live together in the toolbar beside Close. The tab
+            // row is only ever "which quests am I looking at".
 
             // Size the scrollable width to what was actually laid out, with a trailing margin
             // matching the 8px the cursor started at, and rewind to the left so a rebuild never
@@ -682,6 +679,21 @@ namespace QuestTree.UI
         }
 
         /// <summary>The tabs that are not the quest graph, and so ignore search and filters.</summary>
+        /// <summary>The non-graph views, in the order they appear right-to-left from Close. Kappa
+        /// sits innermost because it is the one you open most often.</summary>
+        private static readonly (string TabId, string Label)[] ViewButtons =
+        {
+            (KappaTabId, "Kappa"),
+            (ItemsTabId, "Items"),
+            (MapsTabId, "Maps"),
+            (SettingsTabId, "Settings")
+        };
+
+        /// <summary>Selecting a whole view toggles: clicking the one you are already on returns you
+        /// to the tree tab you came from, rather than stranding you with no way back.</summary>
+        private void SelectView(string tabId) =>
+            SelectTab(_selectedTraderId == tabId ? _tabBeforeSettings : tabId);
+
         private static bool IsAuxTab(string tabId) =>
             tabId == KappaTabId || tabId == SettingsTabId || tabId == ItemsTabId || tabId == MapsTabId;
 
@@ -689,8 +701,8 @@ namespace QuestTree.UI
         {
             if (_selectedTraderId == traderId) return;
 
-            // Remember the tree tab we came from so the Settings button can toggle back to it.
-            if (traderId == SettingsTabId && _selectedTraderId != SettingsTabId)
+            // Remember the tree tab we came from so toggling a view button off returns there.
+            if (IsAuxTab(traderId) && !IsAuxTab(_selectedTraderId))
                 _tabBeforeSettings = _selectedTraderId;
 
             // Opening the Kappa tab is one of the few moments the checklist can genuinely have
@@ -715,8 +727,7 @@ namespace QuestTree.UI
             foreach (var (traderId, background) in _tabBackgrounds)
                 background.color = traderId == _selectedTraderId ? SelectedTabColor : UnselectedTabColor;
 
-            _toolbar.SetSettingsHighlight(
-                _selectedTraderId == SettingsTabId ? SelectedTabColor : UnselectedTabColor);
+            _toolbar.SetViewHighlight(_selectedTraderId, SelectedTabColor, UnselectedTabColor);
         }
 
         /// <summary>

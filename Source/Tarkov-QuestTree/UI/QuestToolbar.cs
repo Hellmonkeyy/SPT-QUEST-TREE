@@ -1,3 +1,4 @@
+using System.Collections.Generic;
 using System;
 using QuestTree.QuestGraph;
 using TMPro;
@@ -32,13 +33,15 @@ namespace QuestTree.UI
         private QuestGraphBuilder _graph;
         private TMP_InputField _searchField;
         private TMP_Text _renderNotice;
-        private Image _settingsButtonBackground;
+        /// <summary>Backgrounds of the non-graph view buttons, keyed by the tab id they select, so
+        /// the selected one can be lit the same way a trader tab is.</summary>
+        private readonly Dictionary<string, Image> _viewButtonBackgrounds = new();
 
         private string _searchFilter = "";
 
         /// <summary>Toggles the Settings tab on and off - supplied by the panel, which owns tab
         /// selection.</summary>
-        private Action _toggleSettings;
+        private Action<string> _onViewSelected;
 
         /// <summary>
         /// Positions every child by hand (an x-cursor, incremented as each is placed) rather than a
@@ -54,12 +57,13 @@ namespace QuestTree.UI
             Action onSearchChanged,
             Action frameMyQuests,
             Action frameContent,
-            Action toggleSettings,
+            IReadOnlyList<(string TabId, string Label)> viewButtons,
+            Action<string> onViewSelected,
             Action closeTree,
             Action showIntro)
         {
             _graph = graph;
-            _toggleSettings = toggleSettings;
+            _onViewSelected = onViewSelected;
 
             var toolbarGo = new GameObject("Toolbar", typeof(RectTransform), typeof(Image));
             var toolbar = (RectTransform)toolbarGo.transform;
@@ -143,32 +147,40 @@ namespace QuestTree.UI
             // get it back.
             navX += BuildToolbarAction(toolbar, "?", navX, itemY, itemHeight, 30f, showIntro);
 
-            BuildRenderNotice(toolbar, itemY, itemHeight, navX + 8f);
             BuildCloseButton(toolbar, itemY, itemHeight, padding, closeTree);
 
-            // Settings sits in the toolbar beside Close rather than in the tab row: it is not a
-            // slice of the quest data the way every other tab is, and with 20 trader tabs it was
-            // one of the entries falling off the scrollable end.
-            BuildSettingsButton(toolbar, itemY, itemHeight, padding + CloseButtonWidth + 6f);
+            // Maps / Items / Kappa / Settings live together at the right, next to Close: they are
+            // whole views rather than a slice of the quest graph, so grouping them apart from the
+            // trader tabs says which is which. Laid out right-to-left from Close so the cluster
+            // stays put whatever the window width.
+            var rightOffset = padding + CloseButtonWidth + 6f;
+            foreach (var (tabId, label) in viewButtons)
+            {
+                rightOffset += BuildViewButton(toolbar, tabId, label, rightOffset, itemY, itemHeight);
+            }
+
+            // Stretched between the nav buttons and that cluster rather than given a fixed width,
+            // so it cannot collide with them on a narrow window.
+            BuildRenderNotice(toolbar, itemY, itemHeight, navX + 8f, rightOffset + 8f);
         }
 
-        /// <summary>The Settings entry point. Still drives the same selected-tab state as a tab
-        /// would, so the aux panel and highlight logic need no special case - only its highlight is
-        /// tracked separately, since it is no longer inside the tab row's backgrounds.</summary>
-        private void BuildSettingsButton(RectTransform toolbar, float itemY, float itemHeight, float rightOffset)
+        /// <summary>One of the non-graph views. Returns the width consumed so the caller can keep
+        /// walking leftwards from Close.</summary>
+        private float BuildViewButton(
+            RectTransform toolbar, string tabId, string label, float rightOffset, float itemY, float itemHeight)
         {
-            const float width = 90f;
+            var width = Mathf.Clamp(label.Length * 8f + 24f, 70f, 110f);
 
-            var buttonRect = GameStyle.CreateButton(toolbar, "Settings", () => _toggleSettings());
+            var buttonRect = GameStyle.CreateButton(toolbar, label, () => _onViewSelected(tabId));
             buttonRect.anchorMin = buttonRect.anchorMax = new Vector2(1f, 1f);
             buttonRect.pivot = new Vector2(1f, 1f);
             buttonRect.anchoredPosition = new Vector2(-rightOffset, itemY);
             buttonRect.sizeDelta = new Vector2(width, itemHeight);
 
-            // A cloned native button brings its own background; only the fallback rectangle has one
-            // of ours to tint for the selected state.
-            _settingsButtonBackground = buttonRect.GetComponent<Image>();
+            var background = buttonRect.GetComponent<Image>();
+            if (background != null) _viewButtonBackgrounds[tabId] = background;
 
+            return width + 6f;
         }
 
         /// <summary>One toolbar action button. Returns the width it consumed so the caller can keep
@@ -189,15 +201,19 @@ namespace QuestTree.UI
         /// <summary>The "showing N of M" line, sitting immediately right of the search box on the
         /// same manual x-cursor. Placed here rather than over the graph so a truncated tab is
         /// stated up front instead of being something you have to notice.</summary>
-        private void BuildRenderNotice(RectTransform toolbar, float itemY, float itemHeight, float x)
+        private void BuildRenderNotice(
+            RectTransform toolbar, float itemY, float itemHeight, float x, float rightInset)
         {
             var noticeGo = new GameObject("RenderNotice", typeof(RectTransform));
             var noticeRect = (RectTransform)noticeGo.transform;
             noticeRect.SetParent(toolbar, worldPositionStays: false);
-            noticeRect.anchorMin = noticeRect.anchorMax = new Vector2(0f, 1f);
+            noticeRect.anchorMin = new Vector2(0f, 1f);
+            noticeRect.anchorMax = new Vector2(1f, 1f);
             noticeRect.pivot = new Vector2(0f, 1f);
             noticeRect.anchoredPosition = new Vector2(x, itemY);
-            noticeRect.sizeDelta = new Vector2(640f, itemHeight);
+            // Stretched: width follows the window, so the notice yields to the button cluster
+            // instead of running underneath it on a narrow screen.
+            noticeRect.sizeDelta = new Vector2(-(x + rightInset), itemHeight);
 
             _renderNotice = noticeGo.AddComponent<TextMeshProUGUI>();
             _renderNotice.fontSize = 12;
@@ -282,13 +298,16 @@ namespace QuestTree.UI
 
         /// <summary>Tints the Settings button for the selected state. The panel supplies the colour
         /// because it owns the same pair the tab row is highlighted with.</summary>
-        public void SetSettingsHighlight(Color color)
+        /// <summary>Lights whichever view button is selected. These are not part of the tab row's
+        /// backgrounds - that collection is cleared and rebuilt with the tab row, whereas these are
+        /// built once with the toolbar and outlive it.</summary>
+        public void SetViewHighlight(string selectedTabId, Color selected, Color unselected)
         {
-            // Not part of the tab row's backgrounds - that collection is cleared and rebuilt with
-            // the tab row, whereas the Settings button is built once with the toolbar and outlives
-            // it.
-            if (_settingsButtonBackground != null)
-                _settingsButtonBackground.color = color;
+            foreach (var (tabId, background) in _viewButtonBackgrounds)
+            {
+                if (background != null)
+                    background.color = tabId == selectedTabId ? selected : unselected;
+            }
         }
 
         /// <summary>Whether a node survives the current search box contents. Matched against the
