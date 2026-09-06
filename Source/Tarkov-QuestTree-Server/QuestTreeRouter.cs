@@ -23,13 +23,15 @@ namespace QuestTreeServer
     public class QuestTreeRouter : StaticRouter
     {
         public QuestTreeRouter(
-            JsonUtil jsonUtil, QuestPayloadBuilder payloadBuilder, KappaPayloadBuilder kappaBuilder)
-            : base(jsonUtil, BuildRoutes(payloadBuilder, kappaBuilder))
+            JsonUtil jsonUtil, QuestPayloadBuilder payloadBuilder, KappaPayloadBuilder kappaBuilder,
+            ProfilePayloadBuilder profileBuilder)
+            : base(jsonUtil, BuildRoutes(payloadBuilder, kappaBuilder, profileBuilder))
         {
         }
 
         private static IEnumerable<RouteAction> BuildRoutes(
-            QuestPayloadBuilder payloadBuilder, KappaPayloadBuilder kappaBuilder) =>
+            QuestPayloadBuilder payloadBuilder, KappaPayloadBuilder kappaBuilder,
+            ProfilePayloadBuilder profileBuilder) =>
             new List<RouteAction>
             {
                 new RouteAction<EmptyRequestData>(
@@ -42,7 +44,14 @@ namespace QuestTreeServer
                 new RouteAction<EmptyRequestData>(
                     "/questtree/kappa",
                     (url, info, sessionId, output, cancellationToken) =>
-                        new ValueTask<string>(kappaBuilder.GetPayloadJson(sessionId)))
+                        new ValueTask<string>(kappaBuilder.GetPayloadJson(sessionId))),
+
+                // Also profile-scoped and per-request: level, loyalty and objective counters all
+                // move as the player plays, so there is nothing here worth caching server-side.
+                new RouteAction<EmptyRequestData>(
+                    "/questtree/profile",
+                    (url, info, sessionId, output, cancellationToken) =>
+                        new ValueTask<string>(profileBuilder.GetPayloadJson(sessionId)))
             };
     }
 }

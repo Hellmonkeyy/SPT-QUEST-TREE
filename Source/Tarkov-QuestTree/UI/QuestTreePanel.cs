@@ -129,7 +129,9 @@ namespace QuestTree.UI
             ModSettings.Changed -= HandleSettingsChanged;
             ModSettings.Changed += HandleSettingsChanged;
 
+            // Both are profile-scoped and both can have moved while the panel was shut.
             QuestDataClient.InvalidateKappa();
+            QuestDataClient.InvalidateProfile();
             _session = session; // kept for trader-avatar lookups on tab icons, independent of a graph rebuild
 
             // Reads as "a different QuestController OR the first Show after a full teardown":
@@ -255,8 +257,10 @@ namespace QuestTree.UI
 
         private void HandleStatusChanged()
         {
-            // A quest turning in can hand over Collector items, so the cached checklist is stale.
+            // A quest turning in can hand over Collector items, and it also moves level, trader
+            // standing, objective counters and what is still locked - so both caches are stale.
             QuestDataClient.InvalidateKappa();
+            QuestDataClient.InvalidateProfile();
 
             _graph.RefreshStatuses();
             _graphView.RefreshNodeStatuses();
@@ -757,6 +761,7 @@ namespace QuestTree.UI
                 ? KappaView.Build(_auxContent, _graph, () =>
                 {
                     QuestDataClient.InvalidateKappa();
+                    QuestDataClient.InvalidateProfile();
                     RenderSelectedTab();
                 })
                 : SettingsView.Build(_auxContent, () =>

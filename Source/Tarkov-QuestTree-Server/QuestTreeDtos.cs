@@ -173,4 +173,68 @@ namespace QuestTreeServer
 
         public bool HandedIn { get; set; }
     }
+
+    /// <summary>What the client needs to reason about THIS player: level, faction, trader state,
+    /// live objective counters, and why each locked quest is locked. Rebuilt per request - all of
+    /// it moves as you play.</summary>
+    public sealed class ProfilePayloadDto
+    {
+        public int SchemaVersion { get; set; } = 1;
+
+        public string ModVersion { get; set; } = ModInfo.Version;
+
+        /// <summary>False for an out-of-game request, where there is no profile to read. The shape
+        /// is still valid so the client degrades instead of failing.</summary>
+        public bool HasProfile { get; set; }
+
+        public int Level { get; set; }
+
+        public string Side { get; set; } = "";
+
+        public string GameVersion { get; set; } = "";
+
+        public List<TraderStateDto> Traders { get; set; } = new();
+
+        /// <summary>Condition id -> current count. Keyed to match ObjectiveDto.Id, so the client can
+        /// pair "eliminate 15 Scavs" with "you have 7".</summary>
+        public Dictionary<string, double> ConditionProgress { get; set; } = new();
+
+        /// <summary>Quest id -> the single gate currently blocking it. Absent means not blocked (or
+        /// already started).</summary>
+        public Dictionary<string, LockReasonDto> LockReasons { get; set; } = new();
+    }
+
+    public sealed class TraderStateDto
+    {
+        public string Id { get; set; } = "";
+
+        public int LoyaltyLevel { get; set; }
+
+        public double Standing { get; set; }
+
+        public bool Unlocked { get; set; }
+    }
+
+    /// <summary>Why a quest cannot be started. Only the first blocker is reported - a list of five
+    /// reasons is no more useful than the one thing to go and do.</summary>
+    public sealed class LockReasonDto
+    {
+        /// <summary>OtherFaction | Edition | Event | Level | Loyalty | Standing | Prerequisite</summary>
+        public string Kind { get; set; } = "";
+
+        /// <summary>A short player-facing phrase, e.g. "Requires level 15".</summary>
+        public string Detail { get; set; } = "";
+
+        public int RequiredValue { get; set; }
+
+        public int CurrentValue { get; set; }
+
+        /// <summary>Set for trader-scoped gates so the client can name the trader from its own
+        /// session data rather than the server guessing at a display name.</summary>
+        public string TraderId { get; set; } = "";
+
+        /// <summary>Set for Prerequisite: the outstanding quests, which the client can already name
+        /// from its own graph.</summary>
+        public List<string> BlockingQuestIds { get; set; } = new();
+    }
 }

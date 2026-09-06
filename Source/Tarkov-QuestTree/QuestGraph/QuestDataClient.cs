@@ -21,6 +21,7 @@ namespace QuestTree.QuestGraph
     {
         private const string Route = "/questtree/quests";
         private const string KappaRoute = "/questtree/kappa";
+        private const string ProfileRoute = "/questtree/profile";
 
         private static List<QuestDto> _cached;
         private static bool _attempted;
@@ -73,6 +74,59 @@ namespace QuestTree.QuestGraph
             }
         }
 
+        private static ProfilePayloadDto _profile;
+        private static bool _profileAttempted;
+
+        /// <summary>
+        /// This player's level, trader state, objective counters and lock reasons - or null when the
+        /// server half is unavailable, in which case everything built on it simply is not shown.
+        ///
+        /// Cached with the same discipline as the Kappa payload, failure included: it is read on
+        /// every panel render, so an uncached fetch would repeat the whole-database lock-reason
+        /// sweep on every keystroke.
+        /// </summary>
+        public static ProfilePayloadDto GetProfile()
+        {
+            if (_profileAttempted) return _profile;
+            _profileAttempted = true;
+
+            try
+            {
+                var json = RequestHandler.GetJson(ProfileRoute);
+                if (string.IsNullOrEmpty(json))
+                {
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: {ProfileRoute} returned nothing - the server half is missing or predates this route.");
+                    return null;
+                }
+
+                var payload = JsonConvert.DeserializeObject<ProfilePayloadDto>(json);
+
+                if (payload != null && payload.SchemaVersion != ProfilePayloadDto.SupportedSchemaVersion)
+                {
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: profile payload schema v{payload.SchemaVersion} but this client expects " +
+                        $"v{ProfilePayloadDto.SupportedSchemaVersion} (server mod {payload.ModVersion}).");
+                }
+
+                _profile = payload;
+                return _profile;
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning($"QuestTree: could not reach {ProfileRoute} ({ex.Message}).");
+                return null;
+            }
+        }
+
+        /// <summary>Drops the cached profile so the next GetProfile re-fetches. Paired with
+        /// InvalidateKappa - the same events move both.</summary>
+        public static void InvalidateProfile()
+        {
+            _profile = null;
+            _profileAttempted = false;
+        }
+
         private static KappaFetchResult _kappaResult;
 
         /// <summary>
@@ -115,6 +169,8 @@ namespace QuestTree.QuestGraph
             _cached = null;
             _attempted = false;
             _kappaResult = null;
+            _profile = null;
+            _profileAttempted = false;
         }
 
         private static KappaFetchResult FetchKappa()

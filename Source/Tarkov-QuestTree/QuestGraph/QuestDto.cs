@@ -194,4 +194,82 @@ namespace QuestTree.QuestGraph
         /// <summary>True when this item is done as far as Collector is concerned.</summary>
         public bool IsSatisfied => HandedIn || OwnedFoundInRaid >= Required;
     }
+
+    /// <summary>Mirror of the server's ProfilePayloadDto - what this player is, rather than what the
+    /// quest database says. Re-fetched whenever it can have moved (panel open, quest status change),
+    /// because level, loyalty and objective counters all change as you play.</summary>
+    internal sealed class ProfilePayloadDto
+    {
+        public const int SupportedSchemaVersion = 1;
+
+        [JsonProperty("schemaVersion")]
+        public int SchemaVersion { get; set; }
+
+        [JsonProperty("modVersion")]
+        public string ModVersion { get; set; }
+
+        /// <summary>False when the server had no profile to read (an out-of-game request).</summary>
+        [JsonProperty("hasProfile")]
+        public bool HasProfile { get; set; }
+
+        [JsonProperty("level")]
+        public int Level { get; set; }
+
+        [JsonProperty("side")]
+        public string Side { get; set; }
+
+        [JsonProperty("gameVersion")]
+        public string GameVersion { get; set; }
+
+        [JsonProperty("traders")]
+        public List<TraderStateDto> Traders { get; set; }
+
+        /// <summary>Condition id -> current count, keyed to match ObjectiveDto.Id.</summary>
+        [JsonProperty("conditionProgress")]
+        public Dictionary<string, double> ConditionProgress { get; set; }
+
+        /// <summary>Quest id -> the single gate blocking it. Absent means not blocked.</summary>
+        [JsonProperty("lockReasons")]
+        public Dictionary<string, LockReasonDto> LockReasons { get; set; }
+    }
+
+    internal sealed class TraderStateDto
+    {
+        [JsonProperty("id")]
+        public string Id { get; set; }
+
+        [JsonProperty("loyaltyLevel")]
+        public int LoyaltyLevel { get; set; }
+
+        [JsonProperty("standing")]
+        public double Standing { get; set; }
+
+        [JsonProperty("unlocked")]
+        public bool Unlocked { get; set; }
+    }
+
+    internal sealed class LockReasonDto
+    {
+        /// <summary>OtherFaction | Edition | Event | Level | Loyalty | Standing | Prerequisite</summary>
+        [JsonProperty("kind")]
+        public string Kind { get; set; }
+
+        [JsonProperty("detail")]
+        public string Detail { get; set; }
+
+        [JsonProperty("requiredValue")]
+        public int RequiredValue { get; set; }
+
+        [JsonProperty("currentValue")]
+        public int CurrentValue { get; set; }
+
+        /// <summary>Set for trader-scoped gates; the client names the trader from its own session
+        /// data rather than the server guessing at a display name.</summary>
+        [JsonProperty("traderId")]
+        public string TraderId { get; set; }
+
+        /// <summary>Set for Prerequisite - the client can name these from its own graph.</summary>
+        [JsonProperty("blockingQuestIds")]
+        public List<string> BlockingQuestIds { get; set; }
+    }
 }
