@@ -57,6 +57,12 @@ namespace QuestTree.UI
                 value => ModSettings.CompactLayout.Value = value);
 
             AuxLayout.AddToggle(parent, ref y,
+                "Only mark started quests",
+                "Maps view: pin only quests you have accepted, not every one on the map.",
+                ModSettings.MarkStartedOnly.Value,
+                value => ModSettings.MarkStartedOnly.Value = value);
+
+            AuxLayout.AddToggle(parent, ref y,
                 "Draw prerequisite lines",
                 "Turning this off is a noticeable speed-up on very dense trader chains.",
                 ModSettings.DrawEdges.Value,

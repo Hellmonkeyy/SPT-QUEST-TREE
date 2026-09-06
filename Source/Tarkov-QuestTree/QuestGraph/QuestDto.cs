@@ -335,6 +335,10 @@ namespace QuestTree.QuestGraph
         [JsonProperty("kind")]
         public string Kind { get; set; }
 
+        /// <summary>How many separate places this item can spawn on this map.</summary>
+        [JsonProperty("alternatives")]
+        public int Alternatives { get; set; }
+
         /// <summary>World coordinates. Y is the height, which is what decides the floor: a map's
         /// layers each declare the height band they cover.</summary>
         [JsonProperty("x")]

@@ -20,6 +20,9 @@ namespace QuestTree
         public static ConfigEntry<bool> HideTraderless { get; private set; }
         public static ConfigEntry<bool> DrawEdges { get; private set; }
         public static ConfigEntry<bool> CompactLayout { get; private set; }
+
+        /// <summary>Whether the Maps view pins only quests you have accepted.</summary>
+        public static ConfigEntry<bool> MarkStartedOnly { get; private set; }
         public static ConfigEntry<int> MaxVisibleNodes { get; private set; }
 
         /// <summary>Remembered rather than reset each time, because it is a working preference -
@@ -45,6 +48,11 @@ namespace QuestTree
                 "Filters", "Hide quests with no trader", false,
                 "Hide quests that are not attached to any trader. These are usually scripted or " +
                 "leftover entries rather than anything you can pick up.");
+
+            MarkStartedOnly = config.Bind(
+                "Display", "Only mark started quests", false,
+                "On the Maps view, show markers only for quests you have actually accepted. The " +
+                "shortest way from a map covered in pins to the few that matter today.");
 
             DrawEdges = config.Bind(
                 "Display", "Draw prerequisite lines", true,

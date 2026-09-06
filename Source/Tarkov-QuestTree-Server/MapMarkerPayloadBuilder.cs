@@ -61,19 +61,26 @@ namespace QuestTreeServer
         private IReadOnlyList<TarkovDevClient.ObjectiveLocation> _objectiveLocations =
             new List<TarkovDevClient.ObjectiveLocation>();
 
-        /// <summary>Objective types that mean "go and pick this up". A hand-in condition also names
-        /// target items, but where you find those is not this map, and pinning them would be a
-        /// confident lie.</summary>
-        private static readonly HashSet<string> FindConditions = new(StringComparer.OrdinalIgnoreCase)
-        {
-            "FindItem",
-            "LeaveItemAtLocation",
-            "PlaceBeacon"
-        };
+        /// <summary>
+        /// The one condition type that means "go and pick this up on this map".
+        ///
+        /// LeaveItemAtLocation and PlaceBeacon used to be here and were wrong. Their target is an
+        /// item you BRING, not one you find: all 96 PlaceBeacon targets are the MS2000 Marker, which
+        /// you buy from a trader and which a dozen quests share, so pinning where one happens to
+        /// spawn as loot said nothing about any of them. Where those objectives actually happen is
+        /// their zoneId, which no offline data resolves - that is what the tarkov.dev markers are
+        /// for.
+        /// </summary>
+        private const string FindItemCondition = "FindItem";
 
-        /// <summary>Most markers for any one item. A few templates have dozens of forced spawns,
-        /// which would paint the map rather than mark it.</summary>
-        private const int MaxSpawnsPerItem = 12;
+        /// <summary>Most distinct places to show for any one item, after nearby spawns have been
+        /// merged. A cap on top of the merge, for the rare item scattered across a whole map.</summary>
+        private const int MaxSpawnsPerItem = 8;
+
+        /// <summary>Spawns of the same item closer together than this are one place. The loot table
+        /// lists every candidate position, including several within one room, and a room is one
+        /// place to go and look.</summary>
+        private const float MergeRadius = 25f;
 
         /// <summary>Marker kinds, so the view can tell "the thing you need spawns here" from "the
         /// objective happens here" - they warrant different weight on screen.</summary>
@@ -184,6 +191,8 @@ namespace QuestTreeServer
             var quests = templateTable.Quests;
             if (quests == null) return byLocation;
 
+            var skipped = 0;
+
             var locale = localeService.GetLocaleDb();
 
             foreach (var quest in quests.Values)
@@ -200,11 +209,25 @@ namespace QuestTreeServer
                 foreach (var condition in conditions)
                 {
                     if (condition == null) continue;
-                    if (!FindConditions.Contains(condition.ConditionType ?? "")) continue;
+                    if (!string.Equals(condition.ConditionType, FindItemCondition,
+                            StringComparison.OrdinalIgnoreCase))
+                    {
+                        continue;
+                    }
 
                     foreach (var target in QuestPayloadBuilder.TargetIds(condition.Target))
                     {
                         if (string.IsNullOrWhiteSpace(target)) continue;
+
+                        // Only true quest items. Over half of what FindItem names is ordinary loot -
+                        // Hindsight 20/20 alone lists about sixty ammo packs, Gratitude lists
+                        // sunglasses, The Survivalist Path lists bottles of water. Marking where
+                        // ammo and water spawn is not a quest location, it is noise on top of one.
+                        if (!IsQuestItem(target))
+                        {
+                            skipped++;
+                            continue;
+                        }
 
                         if (!byLocation.TryGetValue(location!, out var wanted))
                         {
@@ -223,14 +246,45 @@ namespace QuestTreeServer
                 }
             }
 
+            if (skipped > 0)
+            {
+                logger.Debug(
+                    $"Quest Tracker: ignored {skipped} find-item targets that are ordinary loot " +
+                    "rather than quest items.");
+            }
+
             return byLocation;
+        }
+
+        /// <summary>Every template flagged as a quest item, built once. A set rather than a lookup
+        /// per target: the item table has tens of thousands of entries and this is asked several
+        /// hundred times.</summary>
+        private HashSet<string>? _questItems;
+
+        /// <summary>Whether a template is a real quest item - the flag the game itself uses for the
+        /// documents, samples and packages that exist only to be fetched.</summary>
+        private bool IsQuestItem(string template)
+        {
+            if (_questItems == null)
+            {
+                _questItems = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                foreach (var (id, item) in templateTable.Items ?? [])
+                {
+                    if (item?.Properties?.QuestItem == true) _questItems.Add(id.ToString());
+                }
+
+                logger.Debug($"Quest Tracker: {_questItems.Count} templates are flagged as quest items.");
+            }
+
+            return _questItems.Contains(template);
         }
 
         private List<MapMarkerDto> CollectMarkers(
             Location location, Dictionary<string, WantedBy> wanted)
         {
             var markers = new List<MapMarkerDto>();
-            var perItem = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            var spawnsByItem = new Dictionary<string, List<Vector3>>(StringComparer.OrdinalIgnoreCase);
             var locale = localeService.GetLocaleDb();
 
             // LazyLoad, so this is where the map's loot table is actually read off disk. Only the
@@ -253,24 +307,74 @@ namespace QuestTreeServer
                     if (string.IsNullOrWhiteSpace(tpl)) continue;
                     if (!wanted.TryGetValue(tpl!, out var wanting)) continue;
 
-                    perItem.TryGetValue(tpl!, out var used);
-                    if (used >= MaxSpawnsPerItem) continue;
-                    perItem[tpl!] = used + 1;
+                    if (!spawnsByItem.TryGetValue(tpl!, out var spots))
+                    {
+                        spots = new List<Vector3>();
+                        spawnsByItem[tpl!] = spots;
+                    }
 
+                    spots.Add(position.Value);
+                }
+            }
+
+            // Merged only now that every spawn is known, because merging needs to see them all.
+            foreach (var (tpl, spots) in spawnsByItem)
+            {
+                if (!wanted.TryGetValue(tpl, out var wanting)) continue;
+
+                var places = Merge(spots);
+
+                foreach (var place in places.Take(MaxSpawnsPerItem))
+                {
                     markers.Add(new MapMarkerDto
                     {
-                        ItemName = ResolveItemName(tpl!, locale),
+                        ItemName = ResolveItemName(tpl, locale),
                         Quests = wanting.Names,
                         QuestIds = wanting.Ids,
                         Kind = ItemKind,
-                        X = position.Value.X,
-                        Y = position.Value.Y,
-                        Z = position.Value.Z
+                        Alternatives = places.Count,
+                        X = place.X,
+                        Y = place.Y,
+                        Z = place.Z
                     });
                 }
             }
 
             return markers;
+        }
+
+        /// <summary>
+        /// Collapses spawn points that sit on top of each other into one place each.
+        ///
+        /// This is what stops the map being painted rather than marked. The loot table lists every
+        /// candidate position an item can take, and the item takes exactly ONE of them per raid -
+        /// on Streets that meant ten pins for a single chemical container and ten more for one
+        /// guitar pick, of which nine each were wrong in any given raid. Merging by proximity turns
+        /// a scatter of positions inside one room into the one room you would go and search.
+        /// </summary>
+        private static List<Vector3> Merge(List<Vector3> spots)
+        {
+            var places = new List<Vector3>();
+
+            foreach (var spot in spots)
+            {
+                var merged = false;
+
+                foreach (var place in places)
+                {
+                    var dx = place.X - spot.X;
+                    var dz = place.Z - spot.Z;
+
+                    if (dx * dx + dz * dz > MergeRadius * MergeRadius) continue;
+
+                    merged = true;
+                    break;
+                }
+
+                if (!merged) places.Add(spot);
+            }
+
+            return places;
         }
 
         /// <summary>

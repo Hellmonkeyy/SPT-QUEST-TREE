@@ -57,7 +57,7 @@ namespace QuestTree.UI
 
         /// <summary>Roughly how much screen space a marker's name takes. Used to keep names from
         /// stacking into an unreadable block where several spawns sit close together.</summary>
-        private const float LabelWidth = 165f;
+        private const float LabelWidth = 260f;
         private const float LabelHeight = 18f;
 
         /// <summary>Marker kinds as the server tags them.</summary>
@@ -463,6 +463,37 @@ namespace QuestTree.UI
         /// never silently vanishes just because you are looking at the wrong level - you can see it
         /// is there and which floor to switch to.
         /// </summary>
+        /// <summary>
+        /// What a marker says: the item, the quest that wants it, the floor if it is not this one,
+        /// and how many places the item can turn up.
+        ///
+        /// That last part matters. The loot table lists every position an item may take and it
+        /// takes exactly one of them per raid, so a pin is a place to look rather than a place the
+        /// item is. Saying "1 of 4" is the difference between a map that is wrong three times out
+        /// of four and one that told you the odds.
+        /// </summary>
+        private static string LabelFor(
+            MapMarkerDto marker, DynamicMapsLibrary.MapLayer owner, bool onThisFloor)
+        {
+            var text = marker.ItemName;
+
+            var quest = marker.Quests != null && marker.Quests.Count > 0 ? marker.Quests[0] : null;
+
+            if (!string.IsNullOrEmpty(quest) && quest != marker.ItemName)
+            {
+                var more = marker.Quests.Count > 1 ? $" +{marker.Quests.Count - 1}" : "";
+                text += $"  <color=#FFFFFF70>{quest}{more}</color>";
+            }
+
+            if (marker.Alternatives > 1)
+                text += $"  <color=#FFFFFF50>(1 of {marker.Alternatives})</color>";
+
+            if (!onThisFloor && owner != null)
+                text += $"  <color=#FFFFFF50>({owner.Name})</color>";
+
+            return text;
+        }
+
         /// <summary>Whether any quest wanting this item has been started. The payload carries the
         /// quest ids, and the client already knows every quest's live status, so this is a lookup
         /// rather than anything the server has to decide.</summary>
@@ -506,6 +537,7 @@ namespace QuestTree.UI
                     Owner: entry.LayerFor(m.X, m.Z, m.Y),
                     Active: IsActive(m, graph),
                     Objective: string.Equals(m.Kind, ObjectiveKind, StringComparison.OrdinalIgnoreCase)))
+                .Where(m => !ModSettings.MarkStartedOnly.Value || m.Active)
                 .OrderBy(m => m.Active ? 0 : 1)
                 .ThenBy(m => m.Objective ? 0 : 1)
                 .ThenBy(m => m.Owner == null || m.Owner == layer ? 0 : 1)
@@ -583,9 +615,7 @@ namespace QuestTree.UI
                 labelRect.sizeDelta = new Vector2(LabelWidth, LabelHeight);
 
                 var label = labelGo.AddComponent<TextMeshProUGUI>();
-                label.text = onThisFloor || owner == null
-                    ? marker.ItemName
-                    : $"{marker.ItemName}  <color=#FFFFFF50>({owner.Name})</color>";
+                label.text = LabelFor(marker, owner, onThisFloor);
                 label.fontSize = 13;
                 label.color = colour;
                 label.alignment = TextAlignmentOptions.Left;

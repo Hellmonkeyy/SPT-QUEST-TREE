@@ -288,6 +288,11 @@ namespace QuestTreeServer
         /// itself happens. See MapMarkerPayloadBuilder for where each comes from.</summary>
         public string Kind { get; set; } = "";
 
+        /// <summary>How many separate places this item can spawn on this map. More than one means
+        /// the item is at ONE of them per raid, and the view says so rather than implying every
+        /// pin holds a copy.</summary>
+        public int Alternatives { get; set; }
+
         /// <summary>World coordinates. Y is the height, which is what decides the floor: a map's
         /// layers each declare the height band they cover.</summary>
         public float X { get; set; }
