@@ -80,9 +80,11 @@ the quest graph. Click one again to go back to the tree.
 - **Do next** — every unfinished quest, ranked by how close you are to finishing it: in progress
   first, then ones you already hold every item for, then partial holdings, then the rest by nearest
   gate. It ranks rather than filters, so it stays useful whatever state your profile is in.
-- **Maps** — unfinished quests grouped by the map they happen on. The answer to "I am loading into
-  Customs, what can I do there". Quests that can be done anywhere are left out on purpose, so they
-  do not bury the ones that change what you do with the raid.
+- **Maps** — pick a map, get that map's unfinished quests. The answer to "I am loading into Customs,
+  what can I do there". If you have [DynamicMaps](https://github.com/mpstark/DynamicMaps) installed
+  the map itself is drawn beside the list; without it you get the list alone and nothing else
+  changes. Quests that can be done anywhere are left out on purpose, so they do not bury the ones
+  that change what you do with the raid.
 - **Items** — every item an unfinished quest will ask for, how many you hold, whether found-in-raid
   is required, and which quests want it. **This is the "do not sell that" list.** It deliberately
   includes items for quests you have not unlocked yet, because that is exactly when you would
@@ -111,6 +113,9 @@ In the view buttons at the top right, and also in BepInEx's F12 menu — they ar
 - **Kappa list** comes from the Collector quest's own requirements in the quest database. If a mod
   has changed Collector on your install, the Kappa tab says so and still shows the real list. To
   track your own list instead, put quest names in `kappa-quests.json` and hit Reload in Settings.
+- **Map images** are read from DynamicMaps' own map folder when you have it — nothing is bundled,
+  copied, or redistributed, and each map's author is credited in the view. There are no quest pins:
+  the game's quest data carries no coordinates, so any pin would be invented.
 - **Not a cheat.** It only displays quest data you would otherwise look up on a wiki.
 
 ## Troubleshooting
@@ -120,6 +125,8 @@ In the view buttons at the top right, and also in BepInEx's F12 menu — they ar
   server that does not have it. See "Both halves are required" above.
 - **Server refuses to load the mod** — the server half must match your SPT version. This build
   targets SPT 4.1.4.
+- **A map has no image** — that map has no DynamicMaps image, which is expected for a few of them.
+  The quest list still works.
 
 ## Uninstalling
 
