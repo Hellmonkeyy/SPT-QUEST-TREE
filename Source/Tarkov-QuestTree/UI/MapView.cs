@@ -53,7 +53,12 @@ namespace QuestTree.UI
         /// <summary>Marker dot size in screen pixels. Markers counter-scale against the map's zoom so
         /// this stays constant, which is what lets zooming separate spawns that overlap when zoomed
         /// out instead of magnifying the whole pile.</summary>
-        private const float MarkerSize = 9f;
+        private const float MarkerSize = 14f;
+
+        /// <summary>Roughly how much screen space a marker's name takes. Used to keep names from
+        /// stacking into an unreadable block where several spawns sit close together.</summary>
+        private const float LabelWidth = 150f;
+        private const float LabelHeight = 15f;
 
         /// <summary>Which map the view is showing. Static so it survives a re-render - switching map
         /// rebuilds the whole aux panel, and resetting to the first map each time would make the
@@ -234,6 +239,11 @@ namespace QuestTree.UI
                 listLeft = left + mapWidth + AuxLayout.Padding;
             }
 
+            // A card behind the list, so the text reads as a column rather than as words floating
+            // on the map's own background.
+            if (sprite != null)
+                AddCard(parent, listLeft - 10f, y - 8f, QuestListWidth + 20f, MapViewportHeight + 8f);
+
             var listY = y;
             AddAt(parent, $"<b>{mapName}</b>", listLeft, ref listY, 26f, 15, QuestListWidth);
 
@@ -250,8 +260,21 @@ namespace QuestTree.UI
             }
             else
             {
-                AddAt(parent, "<color=#FFFFFF60>Drag to pan, wheel to zoom</color>",
-                    listLeft, ref listY, 20f, 11, QuestListWidth);
+                var spawns = MarkerCountFor(entry);
+                var floors = entry != null && entry.Layers.Count > 1
+                    ? $"  ·  {entry.Layers.Count} floors"
+                    : "";
+
+                AddAt(parent,
+                    $"<color=#FFFFFF60>Drag to pan, wheel to zoom{floors}</color>",
+                    listLeft, ref listY, 18f, 11, QuestListWidth);
+
+                if (spawns > 0)
+                {
+                    AddAt(parent,
+                        $"<color=#FFFFFF60>{spawns} quest item spawn{(spawns == 1 ? "" : "s")} marked</color>",
+                        listLeft, ref listY, 18f, 11, QuestListWidth);
+                }
             }
 
             listY += 6f;
@@ -417,13 +440,22 @@ namespace QuestTree.UI
 
             if (set?.Markers == null) return;
 
-            foreach (var marker in set.Markers)
+            // Markers on the floor being shown are placed first, so that when two names would
+            // collide it is the one you can actually walk to that keeps its label.
+            var ordered = set.Markers
+                .Where(m => m != null)
+                .Select(m => (Marker: m, Owner: entry.LayerFor(m.X, m.Z, m.Y)))
+                .OrderBy(m => m.Owner == null || m.Owner == layer ? 0 : 1)
+                .ToList();
+
+            // Label footprints already claimed, in map units. Names are held at a constant screen
+            // size, so their size in map units is the screen size divided by the current fit.
+            var claimed = new List<Rect>();
+            var scale = space.localScale.x;
+            var labelSpan = new Vector2(LabelWidth, LabelHeight) / Mathf.Max(0.0001f, scale);
+
+            foreach (var (marker, owner) in ordered)
             {
-                if (marker == null) continue;
-
-                // Map space is (game.x, game.z) with game.y as the height - see DynamicMapsLibrary.
-                var owner = entry.LayerFor(marker.X, marker.Z, marker.Y);
-
                 // A marker whose height matches no floor at all is treated as belonging to the one
                 // being shown rather than dropped: the bands do not tile the world exhaustively, and
                 // a real spawn is worth more than a tidy rule.
@@ -431,36 +463,57 @@ namespace QuestTree.UI
 
                 var colour = onThisFloor
                     ? GameStyle.AccentColor
-                    : new Color(GameStyle.AccentColor.r, GameStyle.AccentColor.g, GameStyle.AccentColor.b, 0.35f);
+                    : new Color(GameStyle.AccentColor.r, GameStyle.AccentColor.g, GameStyle.AccentColor.b, 0.4f);
 
-                var go = new GameObject("QuestMarker", typeof(RectTransform), typeof(Image));
+                // Map space is (game.x, game.z) with game.y as the height - see DynamicMapsLibrary.
+                var position = new Vector2(marker.X, marker.Z);
+
+                var go = new GameObject("QuestMarker", typeof(RectTransform));
                 var rect = (RectTransform)go.transform;
                 rect.SetParent(space, worldPositionStays: false);
                 rect.anchorMin = rect.anchorMax = new Vector2(0.5f, 0.5f);
                 rect.pivot = new Vector2(0.5f, 0.5f);
-                rect.anchoredPosition = new Vector2(marker.X, marker.Z);
+                rect.anchoredPosition = position;
 
                 // Held at a constant on-screen size however far the map is zoomed - otherwise
                 // zooming in magnifies the pile instead of separating it.
                 rect.sizeDelta = new Vector2(MarkerSize, MarkerSize);
                 panZoom.KeepConstantScale(rect);
 
-                var dot = go.GetComponent<Image>();
+                // A glyph rather than an Image: it is round, and it takes the same outline the rest
+                // of the map text uses, which is what makes it readable over both the pale buildings
+                // and the dark ground.
+                var dot = go.AddComponent<TextMeshProUGUI>();
+                dot.text = onThisFloor ? "\u25CF" : "\u25CB";
+                dot.fontSize = MarkerSize;
                 dot.color = colour;
+                dot.alignment = TextAlignmentOptions.Center;
+                dot.enableWordWrapping = false;
                 dot.raycastTarget = false;
+                GameStyle.ApplyOutlined(dot);
+
+                // The name is dropped where it would land on one already placed. The dot always
+                // stays, so nothing is hidden - a cluster reads as several spawns with one name
+                // rather than as a block of overlapping text, which is what it did before.
+                var footprint = new Rect(
+                    position.x + labelSpan.x * 0.1f, position.y - labelSpan.y * 0.5f,
+                    labelSpan.x, labelSpan.y);
+
+                if (claimed.Any(other => other.Overlaps(footprint))) continue;
+                claimed.Add(footprint);
 
                 var labelGo = new GameObject("Label", typeof(RectTransform));
                 var labelRect = (RectTransform)labelGo.transform;
                 labelRect.SetParent(rect, worldPositionStays: false);
                 labelRect.anchorMin = labelRect.anchorMax = new Vector2(0.5f, 0.5f);
                 labelRect.pivot = new Vector2(0f, 0.5f);
-                labelRect.anchoredPosition = new Vector2(MarkerSize, 0f);
-                labelRect.sizeDelta = new Vector2(190f, 16f);
+                labelRect.anchoredPosition = new Vector2(MarkerSize * 0.6f, 0f);
+                labelRect.sizeDelta = new Vector2(LabelWidth, LabelHeight);
 
                 var label = labelGo.AddComponent<TextMeshProUGUI>();
                 label.text = onThisFloor || owner == null
                     ? marker.ItemName
-                    : $"{marker.ItemName}  ({owner.Name})";
+                    : $"{marker.ItemName}  <color=#FFFFFF50>({owner.Name})</color>";
                 label.fontSize = 10;
                 label.color = colour;
                 label.alignment = TextAlignmentOptions.Left;
@@ -469,6 +522,39 @@ namespace QuestTree.UI
                 label.raycastTarget = false;
                 GameStyle.ApplyOutlined(label);
             }
+        }
+
+        /// <summary>How many item spawns this map has markers for, for the line under the heading.</summary>
+        private static int MarkerCountFor(DynamicMapsLibrary.MapEntry entry)
+        {
+            if (entry == null) return 0;
+
+            var payload = QuestDataClient.GetMapMarkers();
+            if (payload?.Maps == null) return 0;
+
+            var set = payload.Maps.FirstOrDefault(m =>
+                m?.LocationKey != null &&
+                entry.InternalNames.Any(n => string.Equals(n, m.LocationKey, StringComparison.OrdinalIgnoreCase)));
+
+            return set?.Markers?.Count ?? 0;
+        }
+
+        /// <summary>A panel behind a column, so its text reads as a block rather than as words lying
+        /// loose on whatever is behind them.</summary>
+        private static void AddCard(RectTransform parent, float x, float y, float width, float height)
+        {
+            var go = new GameObject("Card", typeof(RectTransform), typeof(Image));
+            var rect = (RectTransform)go.transform;
+            rect.SetParent(parent, worldPositionStays: false);
+            rect.anchorMin = rect.anchorMax = new Vector2(0f, 1f);
+            rect.pivot = new Vector2(0f, 1f);
+            rect.anchoredPosition = new Vector2(x, -y);
+            rect.sizeDelta = new Vector2(width, height);
+
+            var image = go.GetComponent<Image>();
+            image.color = new Color(1f, 1f, 1f, 0.04f);
+            image.raycastTarget = false;
+            GameStyle.ApplyPanel(image);
         }
 
         /// <summary>The map's own author credit, shown because the images are someone else's work

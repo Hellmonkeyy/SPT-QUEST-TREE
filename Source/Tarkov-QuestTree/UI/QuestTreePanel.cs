@@ -406,7 +406,12 @@ namespace QuestTree.UI
             _auxPanel.anchorMax = Vector2.one;
             _auxPanel.offsetMin = Vector2.zero;
             _auxPanel.offsetMax = new Vector2(0f, -(QuestToolbar.Height + TabRowHeight));
-            panelGo.GetComponent<Image>().color = new Color(0f, 0f, 0f, 0.25f);
+            // Opaque, not the 25% black the graph viewport uses. ShowAuxTab hides the graph, so
+            // there is nothing behind this but the game's own stash screen - at a quarter alpha the
+            // inventory grid and weight readout showed straight through the map.
+            var panelBackground = panelGo.GetComponent<Image>();
+            panelBackground.color = GameStyle.ScreenColor;
+            GameStyle.ApplyPanel(panelBackground);
 
             var contentGo = new GameObject("AuxContent", typeof(RectTransform));
             _auxContent = (RectTransform)contentGo.transform;
