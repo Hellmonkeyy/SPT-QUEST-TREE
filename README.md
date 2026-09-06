@@ -5,7 +5,7 @@ unlocked — laid out as a branching tree coloured by your progress, plus the th
 tell you: what your quests will ask you not to sell, what you can do on the map you are about to
 load into, why a quest is locked, and how far you are from Kappa.
 
-**Built for SPT 4.1.4.**
+**Built for SPT 4.1.5.**
 
 ---
 
@@ -125,7 +125,7 @@ In the view buttons at the top right, and also in BepInEx's F12 menu — they ar
 - **Tree only shows unlocked quests** — the server half is missing, or you are on someone else's
   server that does not have it. See "Both halves are required" above.
 - **Server refuses to load the mod** — the server half must match your SPT version. This build
-  targets SPT 4.1.4.
+  targets SPT 4.1.5.
 - **A map has no image** — that map has no DynamicMaps image, which is expected for a few of them.
   The quest list still works.
 

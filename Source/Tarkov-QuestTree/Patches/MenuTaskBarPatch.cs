@@ -230,7 +230,7 @@ namespace QuestTree.Patches
 
         /// <summary>The vanilla Hideout entry, taken from MenuTaskBar's own public
         /// Dictionary&lt;EMenuType, AnimatedToggle&gt; rather than by searching for a GameObject by
-        /// name - it is a real typed field in 4.1.3, so this cannot silently miss the way a lookup
+        /// name - it is a real typed field in 4.1.5, so this cannot silently miss the way a lookup
         /// by string name can. Walks up from the toggle to whichever ancestor is a direct child of
         /// "Tabs", which is the object representing one whole taskbar entry.</summary>
         private static Transform FindVanillaTaskBarEntry(MenuTaskBar menuTaskBar)
