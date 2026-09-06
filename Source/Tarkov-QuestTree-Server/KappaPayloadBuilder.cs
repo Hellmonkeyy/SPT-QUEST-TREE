@@ -103,7 +103,7 @@ namespace QuestTreeServer
 
             // A missing profile is not fatal - the checklist itself is still worth returning, just
             // with nothing owned.
-            var owned = CountOwnedItems(profile);
+            var owned = ProfileInventory.CountByTemplate(profile);
             var completedConditions = GetCompletedConditions(profile, collector.Id);
             payload.CollectorStatus = GetQuestStatus(profile, collector.Id);
 
@@ -290,35 +290,6 @@ namespace QuestTreeServer
                 string.Equals(q.QuestName, CollectorQuestName, StringComparison.OrdinalIgnoreCase));
         }
 
-        /// <summary>Counts every item in the profile by template, splitting found-in-raid from the
-        /// rest. Collector only accepts found-in-raid items, so conflating the two would report
-        /// progress the player does not actually have.</summary>
-        private static Dictionary<string, (int FoundInRaid, int Total)> CountOwnedItems(BotBase? profile)
-        {
-            var owned = new Dictionary<string, (int FoundInRaid, int Total)>();
-
-            var items = profile?.Inventory?.Items;
-            if (items == null) return owned;
-
-            foreach (var item in items)
-            {
-                if (item == null) continue;
-
-                var template = item.Template.ToString();
-                if (string.IsNullOrEmpty(template)) continue;
-
-                // A stack of one carries no StackObjectsCount, so absent means one.
-                var count = (int)(item.Upd?.StackObjectsCount ?? 1d);
-                if (count < 1) count = 1;
-
-                var foundInRaid = item.Upd?.SpawnedInSession == true ? count : 0;
-
-                owned.TryGetValue(template, out var existing);
-                owned[template] = (existing.FoundInRaid + foundInRaid, existing.Total + count);
-            }
-
-            return owned;
-        }
 
         /// <summary>Condition ids the player has already satisfied on the Collector quest. Empty
         /// when the quest has not been accepted, which is the normal case for most of a wipe.</summary>

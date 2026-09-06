@@ -231,6 +231,22 @@ namespace QuestTree.QuestGraph
         /// <summary>Quest id -> the single gate blocking it. Absent means not blocked.</summary>
         [JsonProperty("lockReasons")]
         public Dictionary<string, LockReasonDto> LockReasons { get; set; }
+
+        /// <summary>Item template -> how many the profile holds, for items some quest asks for.
+        /// Absent means none held.</summary>
+        [JsonProperty("itemsOwned")]
+        public Dictionary<string, HeldItemDto> ItemsOwned { get; set; }
+    }
+
+    /// <summary>How many of an item the profile holds. Found-in-raid is tracked separately because
+    /// most quest hand-ins only accept found-in-raid copies.</summary>
+    internal sealed class HeldItemDto
+    {
+        [JsonProperty("foundInRaid")]
+        public int FoundInRaid { get; set; }
+
+        [JsonProperty("total")]
+        public int Total { get; set; }
     }
 
     internal sealed class TraderStateDto

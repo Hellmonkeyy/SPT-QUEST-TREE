@@ -202,6 +202,19 @@ namespace QuestTreeServer
         /// <summary>Quest id -> the single gate currently blocking it. Absent means not blocked (or
         /// already started).</summary>
         public Dictionary<string, LockReasonDto> LockReasons { get; set; } = new();
+
+        /// <summary>Item template -> how many the profile holds, for items some quest asks for.
+        /// Absent means none held.</summary>
+        public Dictionary<string, HeldItemDto> ItemsOwned { get; set; } = new();
+    }
+
+    /// <summary>How many of an item the profile holds. Found-in-raid is separate because most
+    /// quest hand-ins only accept found-in-raid copies.</summary>
+    public sealed class HeldItemDto
+    {
+        public int FoundInRaid { get; set; }
+
+        public int Total { get; set; }
     }
 
     public sealed class TraderStateDto

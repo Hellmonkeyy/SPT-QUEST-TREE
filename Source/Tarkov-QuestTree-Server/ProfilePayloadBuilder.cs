@@ -89,12 +89,54 @@ namespace QuestTreeServer
             }
 
             BuildLockReasons(profile, payload);
+            BuildQuestItemOwnership(profile, payload);
 
             logger.Info(
                 $"Quest Tracker: profile payload - level {payload.Level}, {payload.Traders.Count} traders, " +
                 $"{payload.ConditionProgress.Count} counters, {payload.LockReasons.Count} locked quests explained.");
 
             return payload;
+        }
+
+        /// <summary>
+        /// How many of each quest-required item the profile holds.
+        ///
+        /// Scoped to templates some quest actually asks for, rather than the whole stash: that is
+        /// the only part the client can do anything with, and it keeps the payload proportional to
+        /// the quest database rather than to how much the player hoards.
+        /// </summary>
+        private void BuildQuestItemOwnership(PmcData profile, ProfilePayloadDto payload)
+        {
+            var quests = templateTable.Quests;
+            if (quests == null) return;
+
+            var owned = ProfileInventory.CountByTemplate(profile);
+            if (owned.Count == 0) return;
+
+            foreach (var quest in quests.Values)
+            {
+                var conditions = quest?.Conditions?.AvailableForFinish;
+                if (conditions == null) continue;
+
+                foreach (var condition in conditions)
+                {
+                    if (condition == null) continue;
+                    if (!QuestPayloadBuilder.IsItemCondition(condition.ConditionType)) continue;
+
+                    foreach (var template in QuestPayloadBuilder.TargetIds(condition.Target))
+                    {
+                        if (string.IsNullOrWhiteSpace(template)) continue;
+                        if (payload.ItemsOwned.ContainsKey(template)) continue;
+                        if (!owned.TryGetValue(template, out var held)) continue;
+
+                        payload.ItemsOwned[template] = new HeldItemDto
+                        {
+                            FoundInRaid = held.FoundInRaid,
+                            Total = held.Total
+                        };
+                    }
+                }
+            }
         }
 
         /// <summary>

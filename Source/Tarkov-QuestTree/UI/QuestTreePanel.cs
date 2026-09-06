@@ -47,6 +47,7 @@ namespace QuestTree.UI
         /// <summary>Sentinels for the two non-graph tabs, appended after the traders. Prefixed the
         /// same way QuestNode.NoTraderId is so they can never collide with a real trader id.</summary>
         private const string KappaTabId = "__kappa__";
+        private const string ItemsTabId = "__items__";
         private const string SettingsTabId = "__settings__";
 
         private static readonly Color SelectedTabColor = new(0.35f, 0.35f, 0.2f, 0.95f);
@@ -561,6 +562,7 @@ namespace QuestTree.UI
             // Appended after the traders, not next to "All": Kappa is a destination of its own
             // rather than another slice of the same tree. Settings is NOT here - it sits in the
             // toolbar beside Close, since it is not quest data at all.
+            CreateTabButton("Items", ItemsTabId);
             CreateTabButton("Kappa", KappaTabId);
 
             // Size the scrollable width to what was actually laid out, with a trailing margin
@@ -584,7 +586,7 @@ namespace QuestTree.UI
         {
             // Only real trader tabs get a portrait - "All", Kappa and Settings have no trader to
             // draw, and reserving the icon gutter for them would just leave their label off-centre.
-            var hasIcon = traderId != AllTradersId && traderId != KappaTabId && traderId != SettingsTabId;
+            var hasIcon = traderId != AllTradersId && !IsAuxTab(traderId);
             // Upper bound raised from 180 once tabs started carrying "done/total" counts - at 180
             // the longest trader names ellipsized their own count away. The row scrolls, so extra
             // width costs nothing but a little more scrolling.
@@ -678,7 +680,8 @@ namespace QuestTree.UI
         }
 
         /// <summary>The tabs that are not the quest graph, and so ignore search and filters.</summary>
-        private static bool IsAuxTab(string tabId) => tabId == KappaTabId || tabId == SettingsTabId;
+        private static bool IsAuxTab(string tabId) =>
+            tabId == KappaTabId || tabId == SettingsTabId || tabId == ItemsTabId;
 
         private void SelectTab(string traderId)
         {
@@ -691,6 +694,10 @@ namespace QuestTree.UI
             // Opening the Kappa tab is one of the few moments the checklist can genuinely have
             // changed since it was last read, so this is where it gets re-fetched.
             if (traderId == KappaTabId) QuestDataClient.InvalidateKappa();
+
+            // The watchlist reads the stash, which moves every raid, so entering it re-reads rather
+            // than showing whatever was cached when the panel opened.
+            if (traderId == ItemsTabId) QuestDataClient.InvalidateProfile();
 
             // Tabs are hand-built rather than cloned, so they play the game's click sound
             // explicitly - otherwise half this screen would be silent and half would not.
@@ -757,7 +764,13 @@ namespace QuestTree.UI
             foreach (Transform child in _auxContent)
                 Destroy(child.gameObject);
 
-            var height = _selectedTraderId == KappaTabId
+            var height = _selectedTraderId == ItemsTabId
+                ? ItemWatchlistView.Build(_auxContent, _graph, () =>
+                {
+                    QuestDataClient.InvalidateProfile();
+                    RenderSelectedTab();
+                })
+                : _selectedTraderId == KappaTabId
                 ? KappaView.Build(_auxContent, _graph, () =>
                 {
                     QuestDataClient.InvalidateKappa();
