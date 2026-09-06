@@ -23,6 +23,10 @@ namespace QuestTree.UI
         private float _maxZoom;
         private float _zoomSpeed;
 
+        /// <summary>Raised whenever the view moves, with the content's scale and pan. Lets a caller
+        /// that rebuilds its UI put the view back where the user left it.</summary>
+        public System.Action<float, Vector2> OnViewChanged;
+
         /// <summary>Children to hold at a constant on-screen size, whatever the content is zoomed
         /// to. Map markers and place names use it: magnifying a pin along with the map defeats the
         /// point of zooming in, which is to separate pins that overlap when zoomed out.</summary>
@@ -88,6 +92,8 @@ namespace QuestTree.UI
             }
 
             _content.anchoredPosition += current - previous;
+
+            OnViewChanged?.Invoke(_content.localScale.x, _content.anchoredPosition);
         }
 
         public void OnScroll(PointerEventData eventData)
@@ -120,6 +126,8 @@ namespace QuestTree.UI
             _content.anchoredPosition += (after - before) * scale;
 
             ApplyConstantScale(scale);
+
+            OnViewChanged?.Invoke(scale, _content.anchoredPosition);
         }
 
         /// <summary>The camera to interpret a screen point against. Null is CORRECT for a

@@ -279,6 +279,15 @@ namespace QuestTreeServer
         /// <summary>The quests that want this item, by display name.</summary>
         public List<string> Quests { get; set; } = new();
 
+        /// <summary>The same quests by id, so the client can look up each one's live status in its
+        /// own graph - which is where status belongs, since the server does not track what the
+        /// player has started.</summary>
+        public List<string> QuestIds { get; set; } = new();
+
+        /// <summary>"item" for a place the thing you need spawns, "objective" for a place the quest
+        /// itself happens. See MapMarkerPayloadBuilder for where each comes from.</summary>
+        public string Kind { get; set; } = "";
+
         /// <summary>World coordinates. Y is the height, which is what decides the floor: a map's
         /// layers each declare the height band they cover.</summary>
         public float X { get; set; }

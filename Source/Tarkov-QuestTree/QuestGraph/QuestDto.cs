@@ -326,6 +326,15 @@ namespace QuestTree.QuestGraph
         [JsonProperty("quests")]
         public List<string> Quests { get; set; }
 
+        /// <summary>The same quests by id, for looking their live status up in the graph.</summary>
+        [JsonProperty("questIds")]
+        public List<string> QuestIds { get; set; }
+
+        /// <summary>"item" for a place the thing you need spawns, "objective" for a place the quest
+        /// itself happens.</summary>
+        [JsonProperty("kind")]
+        public string Kind { get; set; }
+
         /// <summary>World coordinates. Y is the height, which is what decides the floor: a map's
         /// layers each declare the height band they cover.</summary>
         [JsonProperty("x")]

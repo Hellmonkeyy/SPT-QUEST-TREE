@@ -37,7 +37,8 @@ namespace QuestTreeServer
         ISptLogger<MapMarkerPayloadBuilder> logger,
         TemplateTable templateTable,
         LocationTable locationTable,
-        LocaleService localeService) : IOnLoad
+        LocaleService localeService,
+        TarkovDevClient tarkovDev) : IOnLoad
     {
         /// <summary>
         /// Builds the markers while the server is starting rather than when the client first asks.
@@ -48,11 +49,17 @@ namespace QuestTreeServer
         /// paying that on the first request froze the whole game for the duration. Paid here it
         /// costs the server a few seconds of its own startup, where there is nothing to block.
         /// </summary>
-        public Task OnLoadAsync(CancellationToken cancellationToken)
+        public async Task OnLoadAsync(CancellationToken cancellationToken)
         {
+            // Awaited here so the network call happens during startup, where nothing is waiting on
+            // it, rather than inside the synchronous request handler that serves the client.
+            _objectiveLocations = await tarkovDev.GetLocationsAsync(cancellationToken);
+
             GetPayloadJson();
-            return Task.CompletedTask;
         }
+
+        private IReadOnlyList<TarkovDevClient.ObjectiveLocation> _objectiveLocations =
+            new List<TarkovDevClient.ObjectiveLocation>();
 
         /// <summary>Objective types that mean "go and pick this up". A hand-in condition also names
         /// target items, but where you find those is not this map, and pinning them would be a
@@ -67,6 +74,25 @@ namespace QuestTreeServer
         /// <summary>Most markers for any one item. A few templates have dozens of forced spawns,
         /// which would paint the map rather than mark it.</summary>
         private const int MaxSpawnsPerItem = 12;
+
+        /// <summary>Marker kinds, so the view can tell "the thing you need spawns here" from "the
+        /// objective happens here" - they warrant different weight on screen.</summary>
+        public const string ItemKind = "item";
+        public const string ObjectiveKind = "objective";
+
+        /// <summary>The quests wanting one item on one map: names to show, ids so the client can
+        /// look their live status up in its own graph.</summary>
+        private sealed class WantedBy
+        {
+            public readonly List<string> Names = new();
+            public readonly List<string> Ids = new();
+
+            public void Add(string name, string id)
+            {
+                if (!Names.Contains(name)) Names.Add(name);
+                if (!Ids.Contains(id)) Ids.Add(id);
+            }
+        }
 
         private static readonly JsonSerializerOptions SerializerOptions = new()
         {
@@ -90,8 +116,11 @@ namespace QuestTreeServer
                 var payload = Build();
                 _cachedJson = JsonSerializer.Serialize(payload, SerializerOptions);
 
+                var items = payload.Maps.Sum(m => m.Markers.Count(x => x.Kind == ItemKind));
+                var objectives = payload.Maps.Sum(m => m.Markers.Count(x => x.Kind == ObjectiveKind));
+
                 logger.Info(
-                    $"Quest Tracker: built {payload.Maps.Sum(m => m.Markers.Count)} quest-item markers " +
+                    $"Quest Tracker: built {items} item-spawn and {objectives} objective markers " +
                     $"across {payload.Maps.Count} maps.");
 
                 return _cachedJson;
@@ -127,6 +156,8 @@ namespace QuestTreeServer
                     continue;
                 }
 
+                markers.AddRange(ObjectiveMarkersFor(locationId!));
+
                 if (markers.Count == 0) continue;
 
                 payload.Maps.Add(new MapMarkerSetDto
@@ -145,9 +176,9 @@ namespace QuestTreeServer
         /// Grouped by map because the same item is wanted by quests on several maps, and a marker
         /// only means anything on the map whose own loot table placed that item.
         /// </summary>
-        private Dictionary<string, Dictionary<string, List<string>>> BuildWantedItems()
+        private Dictionary<string, Dictionary<string, WantedBy>> BuildWantedItems()
         {
-            var byLocation = new Dictionary<string, Dictionary<string, List<string>>>(
+            var byLocation = new Dictionary<string, Dictionary<string, WantedBy>>(
                 StringComparer.OrdinalIgnoreCase);
 
             var quests = templateTable.Quests;
@@ -163,7 +194,8 @@ namespace QuestTreeServer
                 var conditions = quest.Conditions?.AvailableForFinish;
                 if (conditions == null) continue;
 
-                var name = QuestPayloadBuilder.ResolveQuestName(quest, quest.Id.ToString(), locale);
+                var id = quest.Id.ToString();
+                var name = QuestPayloadBuilder.ResolveQuestName(quest, id, locale);
 
                 foreach (var condition in conditions)
                 {
@@ -176,17 +208,17 @@ namespace QuestTreeServer
 
                         if (!byLocation.TryGetValue(location!, out var wanted))
                         {
-                            wanted = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+                            wanted = new Dictionary<string, WantedBy>(StringComparer.OrdinalIgnoreCase);
                             byLocation[location!] = wanted;
                         }
 
                         if (!wanted.TryGetValue(target, out var wanting))
                         {
-                            wanting = new List<string>();
+                            wanting = new WantedBy();
                             wanted[target] = wanting;
                         }
 
-                        if (!wanting.Contains(name)) wanting.Add(name);
+                        wanting.Add(name, id);
                     }
                 }
             }
@@ -195,7 +227,7 @@ namespace QuestTreeServer
         }
 
         private List<MapMarkerDto> CollectMarkers(
-            Location location, Dictionary<string, List<string>> wanted)
+            Location location, Dictionary<string, WantedBy> wanted)
         {
             var markers = new List<MapMarkerDto>();
             var perItem = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
@@ -228,12 +260,54 @@ namespace QuestTreeServer
                     markers.Add(new MapMarkerDto
                     {
                         ItemName = ResolveItemName(tpl!, locale),
-                        Quests = wanting,
+                        Quests = wanting.Names,
+                        QuestIds = wanting.Ids,
+                        Kind = ItemKind,
                         X = position.Value.X,
                         Y = position.Value.Y,
                         Z = position.Value.Z
                     });
                 }
+            }
+
+            return markers;
+        }
+
+        /// <summary>
+        /// Objective locations for one map, from tarkov.dev.
+        ///
+        /// Matched on the map's own id, which tarkov.dev keys on the same BSG location id SPT does.
+        /// Several objectives of one quest can share a spot and several zones can belong to one
+        /// objective, so identical points are collapsed - otherwise a three-zone objective puts
+        /// three pins on the same doorway.
+        /// </summary>
+        private List<MapMarkerDto> ObjectiveMarkersFor(string locationId)
+        {
+            var markers = new List<MapMarkerDto>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var objective in _objectiveLocations)
+            {
+                if (!string.Equals(objective.MapId, locationId, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                // Rounded before de-duplicating: two zones a few centimetres apart are one pin as
+                // far as anybody reading the map is concerned.
+                var key = $"{objective.QuestId}|{objective.X:F0}|{objective.Z:F0}";
+                if (!seen.Add(key)) continue;
+
+                markers.Add(new MapMarkerDto
+                {
+                    ItemName = string.IsNullOrWhiteSpace(objective.Description)
+                        ? objective.QuestName
+                        : objective.Description,
+                    Quests = new List<string> { objective.QuestName },
+                    QuestIds = new List<string> { objective.QuestId },
+                    Kind = ObjectiveKind,
+                    X = objective.X,
+                    Y = objective.Y,
+                    Z = objective.Z
+                });
             }
 
             return markers;

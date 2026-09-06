@@ -57,8 +57,25 @@ namespace QuestTree.UI
 
         /// <summary>Roughly how much screen space a marker's name takes. Used to keep names from
         /// stacking into an unreadable block where several spawns sit close together.</summary>
-        private const float LabelWidth = 150f;
-        private const float LabelHeight = 15f;
+        private const float LabelWidth = 165f;
+        private const float LabelHeight = 18f;
+
+        /// <summary>Marker kinds as the server tags them.</summary>
+        private const string ObjectiveKind = "objective";
+
+        /// <summary>A quest you have started. Green because it is the one you can act on now.</summary>
+        private static readonly Color ActiveColor = new(0.42f, 0.80f, 0.42f);
+
+        /// <summary>Everything else - not started, locked, or already handed in.</summary>
+        private static readonly Color InactiveColor = new(0.62f, 0.62f, 0.60f, 0.55f);
+
+        /// <summary>Pan and zoom, kept across the rebuild that every dropdown click causes. Switching
+        /// floor used to throw them away, which is useless when the whole point of switching floors
+        /// is to look at the same place one storey up. Reset when the MAP changes, since a different
+        /// map is a different coordinate space and the old view means nothing in it.</summary>
+        private static string _viewStateKey;
+        private static float _savedScale;
+        private static Vector2 _savedPan;
 
         /// <summary>Which map the view is showing. Static so it survives a re-render - switching map
         /// rebuilds the whole aux panel, and resetting to the first map each time would make the
@@ -98,7 +115,7 @@ namespace QuestTree.UI
             // The map and list are built first and the dropdowns last, even though the dropdowns sit
             // above them on screen. Unity UI draws siblings in order, so an open list can only cover
             // the map if it is created after it.
-            var contentHeight = BuildSelectedMap(parent, selected, entry, layer, HeaderHeight);
+            var contentHeight = BuildSelectedMap(parent, selected, entry, layer, HeaderHeight, graph);
 
             var labels = ordered.Select(LabelFor).ToList();
             var selectedIndex = ordered.FindIndex(m => m.Key == _selectedLocationKey);
@@ -214,7 +231,7 @@ namespace QuestTree.UI
 
         private static float BuildSelectedMap(
             RectTransform parent, List<QuestNode> quests, DynamicMapsLibrary.MapEntry entry,
-            DynamicMapsLibrary.MapLayer layer, float top)
+            DynamicMapsLibrary.MapLayer layer, float top, QuestGraphBuilder graph)
         {
             var y = top;
             var left = AuxLayout.Padding;
@@ -232,7 +249,7 @@ namespace QuestTree.UI
 
             if (sprite != null)
             {
-                BuildMapViewport(parent, entry, layer, sprite, left, y, mapWidth);
+                BuildMapViewport(parent, entry, layer, sprite, left, y, mapWidth, graph);
                 mapBottom = y + MapViewportHeight;
                 AddCredit(parent, entry, left, mapBottom + 4f);
                 mapBottom += 22f;
@@ -324,7 +341,7 @@ namespace QuestTree.UI
         /// </summary>
         private static void BuildMapViewport(
             RectTransform parent, DynamicMapsLibrary.MapEntry entry, DynamicMapsLibrary.MapLayer layer,
-            Sprite sprite, float x, float y, float width)
+            Sprite sprite, float x, float y, float width, QuestGraphBuilder graph)
         {
             var viewportGo = new GameObject(
                 "MapViewport", typeof(RectTransform), typeof(Image), typeof(RectMask2D));
@@ -354,8 +371,19 @@ namespace QuestTree.UI
 
             // Fit the floor into the viewport, then shift so the bounds' centre sits in the middle.
             var fit = Mathf.Min(width / bounds.x, MapViewportHeight / bounds.y);
-            space.localScale = new Vector3(fit, fit, 1f);
-            space.anchoredPosition = -layer.BoundsCentre * fit;
+
+            // Restore the previous view when this is the same map as last time - a floor change
+            // rebuilds everything, and losing pan and zoom there defeats the purpose of the switch.
+            var stateKey = entry != null ? string.Join(",", entry.InternalNames) : "";
+            var sameMap = stateKey == _viewStateKey && _savedScale > 0f;
+
+            space.localScale = sameMap
+                ? new Vector3(_savedScale, _savedScale, 1f)
+                : new Vector3(fit, fit, 1f);
+
+            space.anchoredPosition = sameMap ? _savedPan : -layer.BoundsCentre * fit;
+
+            _viewStateKey = stateKey;
 
             var imageGo = new GameObject("MapImage", typeof(RectTransform), typeof(SVGImage));
             var image = (RectTransform)imageGo.transform;
@@ -376,8 +404,18 @@ namespace QuestTree.UI
             var panZoom = viewportGo.AddComponent<PanZoomHandler>();
             panZoom.Init(space, MinZoom * fit, MaxZoom * fit, ZoomSpeed * fit);
 
+            // Recorded as it moves, so the next rebuild can pick it back up.
+            panZoom.OnViewChanged = (scale, pan) =>
+            {
+                _savedScale = scale;
+                _savedPan = pan;
+            };
+
+            _savedScale = space.localScale.x;
+            _savedPan = space.anchoredPosition;
+
             BuildPlaceLabels(space, entry, panZoom);
-            BuildMarkers(space, entry, layer, panZoom);
+            BuildMarkers(space, entry, layer, panZoom, graph);
         }
 
         /// <summary>
@@ -406,8 +444,8 @@ namespace QuestTree.UI
 
                 var text = go.AddComponent<TextMeshProUGUI>();
                 text.text = label.Text;
-                text.fontSize = 12;
-                text.color = new Color(1f, 1f, 1f, 0.65f);
+                text.fontSize = 14;
+                text.color = new Color(1f, 1f, 1f, 0.75f);
                 text.alignment = TextAlignmentOptions.Center;
                 text.enableWordWrapping = false;
                 text.raycastTarget = false;
@@ -425,9 +463,28 @@ namespace QuestTree.UI
         /// never silently vanishes just because you are looking at the wrong level - you can see it
         /// is there and which floor to switch to.
         /// </summary>
+        /// <summary>Whether any quest wanting this item has been started. The payload carries the
+        /// quest ids, and the client already knows every quest's live status, so this is a lookup
+        /// rather than anything the server has to decide.</summary>
+        private static bool IsActive(MapMarkerDto marker, QuestGraphBuilder graph)
+        {
+            if (marker.QuestIds == null) return false;
+
+            foreach (var id in marker.QuestIds)
+            {
+                if (id != null && graph.NodesById.TryGetValue(id, out var node) &&
+                    node.Status == ENodeStatus.Active)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         private static void BuildMarkers(
             RectTransform space, DynamicMapsLibrary.MapEntry entry,
-            DynamicMapsLibrary.MapLayer layer, PanZoomHandler panZoom)
+            DynamicMapsLibrary.MapLayer layer, PanZoomHandler panZoom, QuestGraphBuilder graph)
         {
             if (entry == null) return;
 
@@ -440,12 +497,18 @@ namespace QuestTree.UI
 
             if (set?.Markers == null) return;
 
-            // Markers on the floor being shown are placed first, so that when two names would
-            // collide it is the one you can actually walk to that keeps its label.
+            // Active quests first, then this floor: when two names collide, the one that survives
+            // is the one you have started and could walk to right now.
             var ordered = set.Markers
                 .Where(m => m != null)
-                .Select(m => (Marker: m, Owner: entry.LayerFor(m.X, m.Z, m.Y)))
-                .OrderBy(m => m.Owner == null || m.Owner == layer ? 0 : 1)
+                .Select(m => (
+                    Marker: m,
+                    Owner: entry.LayerFor(m.X, m.Z, m.Y),
+                    Active: IsActive(m, graph),
+                    Objective: string.Equals(m.Kind, ObjectiveKind, StringComparison.OrdinalIgnoreCase)))
+                .OrderBy(m => m.Active ? 0 : 1)
+                .ThenBy(m => m.Objective ? 0 : 1)
+                .ThenBy(m => m.Owner == null || m.Owner == layer ? 0 : 1)
                 .ToList();
 
             // Label footprints already claimed, in map units. Names are held at a constant screen
@@ -454,16 +517,19 @@ namespace QuestTree.UI
             var scale = space.localScale.x;
             var labelSpan = new Vector2(LabelWidth, LabelHeight) / Mathf.Max(0.0001f, scale);
 
-            foreach (var (marker, owner) in ordered)
+            foreach (var (marker, owner, active, objective) in ordered)
             {
                 // A marker whose height matches no floor at all is treated as belonging to the one
                 // being shown rather than dropped: the bands do not tile the world exhaustively, and
                 // a real spawn is worth more than a tidy rule.
                 var onThisFloor = owner == null || owner == layer;
 
-                var colour = onThisFloor
-                    ? GameStyle.AccentColor
-                    : new Color(GameStyle.AccentColor.r, GameStyle.AccentColor.g, GameStyle.AccentColor.b, 0.4f);
+                // Colour carries quest status, which is the thing worth knowing at a glance. The
+                // floor is still distinguished, but by the filled/hollow glyph below, so the two
+                // facts do not have to compete for the same channel.
+                var colour = active ? ActiveColor : InactiveColor;
+
+                if (!onThisFloor) colour.a *= 0.55f;
 
                 // Map space is (game.x, game.z) with game.y as the height - see DynamicMapsLibrary.
                 var position = new Vector2(marker.X, marker.Z);
@@ -484,8 +550,14 @@ namespace QuestTree.UI
                 // of the map text uses, which is what makes it readable over both the pale buildings
                 // and the dark ground.
                 var dot = go.AddComponent<TextMeshProUGUI>();
-                dot.text = onThisFloor ? "\u25CF" : "\u25CB";
-                dot.fontSize = MarkerSize;
+                // A diamond for "the quest happens here", a dot for "the thing you need lies
+                // here". Hollow when it is on another floor, so the floor rides on the glyph and
+                // colour stays free to carry quest status.
+                dot.text = objective
+                    ? (onThisFloor ? "◆" : "◇")
+                    : (onThisFloor ? "●" : "○");
+
+                dot.fontSize = objective ? MarkerSize + 3f : MarkerSize;
                 dot.color = colour;
                 dot.alignment = TextAlignmentOptions.Center;
                 dot.enableWordWrapping = false;
@@ -514,7 +586,7 @@ namespace QuestTree.UI
                 label.text = onThisFloor || owner == null
                     ? marker.ItemName
                     : $"{marker.ItemName}  <color=#FFFFFF50>({owner.Name})</color>";
-                label.fontSize = 10;
+                label.fontSize = 13;
                 label.color = colour;
                 label.alignment = TextAlignmentOptions.Left;
                 label.enableWordWrapping = false;
