@@ -416,7 +416,7 @@ namespace QuestTree.UI
             _savedScale = space.localScale.x;
             _savedPan = space.anchoredPosition;
 
-            BuildPlaceLabels(space, entry, panZoom);
+            BuildPlaceLabels(space, entry, layer, panZoom);
             BuildMarkers(space, entry, layer, panZoom, graph);
         }
 
@@ -518,12 +518,20 @@ namespace QuestTree.UI
         /// the error is visible and measurable rather than something to reason about.
         /// </summary>
         private static void BuildPlaceLabels(
-            RectTransform space, DynamicMapsLibrary.MapEntry entry, PanZoomHandler panZoom)
+            RectTransform space, DynamicMapsLibrary.MapEntry entry,
+            DynamicMapsLibrary.MapLayer layer, PanZoomHandler panZoom)
         {
             if (entry == null) return;
 
             foreach (var label in entry.Labels)
             {
+                // Which floor the place is on, by the same height-band test the markers use. A name
+                // whose height matches no band is treated as being on the floor you are looking at,
+                // rather than dropped - the bands do not tile the world, and a real place name is
+                // worth more than a tidy rule.
+                var owner = entry.LayerFor(label.Position.x, label.Position.y, label.Height);
+                var onThisFloor = owner == null || owner == layer;
+
                 var go = new GameObject("PlaceLabel", typeof(RectTransform));
                 var rect = (RectTransform)go.transform;
                 rect.SetParent(space, worldPositionStays: false);
@@ -531,6 +539,15 @@ namespace QuestTree.UI
                 rect.pivot = new Vector2(0.5f, 0.5f);
                 rect.anchoredPosition = label.Position;
                 rect.sizeDelta = new Vector2(160f, 18f);
+
+                // Negated because these angles are clockwise-positive, as screen and SVG angles are,
+                // while Unity's Z rotation is counter-clockwise - the same negation DynamicMaps
+                // applies when it hands a rotation to its own labels. Not combined with the map's
+                // CoordinateRotation: a label's position is unambiguously in game coordinates, so
+                // its angle is read the same way rather than in the artwork's frame.
+                if (Mathf.Abs(label.Rotation) > 0.01f)
+                    rect.localRotation = Quaternion.Euler(0f, 0f, -label.Rotation);
+
                 panZoom.KeepConstantScale(rect);
 
                 var text = go.AddComponent<TextMeshProUGUI>();
@@ -542,8 +559,10 @@ namespace QuestTree.UI
                 // material already carries does the rest of the work. White rather than a hue on
                 // purpose - the markers own green and grey, and place names should not compete with
                 // them for meaning.
-                text.color = Color.white;
-                text.fontStyle = FontStyles.Bold;
+                // Names on another floor recede rather than disappear. Hiding them would strip 63
+                // of Interchange's 77 off its ground floor and take the sense of place with them.
+                text.color = onThisFloor ? Color.white : new Color(1f, 1f, 1f, 0.45f);
+                text.fontStyle = onThisFloor ? FontStyles.Bold : FontStyles.Normal;
 
                 text.alignment = TextAlignmentOptions.Center;
                 text.enableWordWrapping = false;

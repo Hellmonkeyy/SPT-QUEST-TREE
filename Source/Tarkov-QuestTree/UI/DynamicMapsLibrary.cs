@@ -112,6 +112,17 @@ namespace QuestTree.UI
         {
             public string Text = "";
             public Vector2 Position;
+
+            /// <summary>How high off the ground the place is, from the label's own Position.z - the
+            /// same quantity the layers' GameBounds bands are in, so a name can be put on a floor
+            /// exactly the way a quest marker is. Mostly 0, but 63 of Interchange's 77 names sit on
+            /// the mall's upper storeys.</summary>
+            public float Height;
+
+            /// <summary>The angle the name is meant to be written at, for places that run along
+            /// something rather than sitting on a point. All 22 of Reserve's names are set to 14.5
+            /// to follow the base's grid; eight of Streets' run from -90 to 10.</summary>
+            public float Rotation;
         }
 
         /// <summary>One map DynamicMaps ships: which game maps it covers, and its floors.</summary>
@@ -322,7 +333,9 @@ namespace QuestTree.UI
                 entry.Labels.Add(new MapLabel
                 {
                     Text = text,
-                    Position = new Vector2((float?)position["x"] ?? 0f, (float?)position["y"] ?? 0f)
+                    Position = new Vector2((float?)position["x"] ?? 0f, (float?)position["y"] ?? 0f),
+                    Height = (float?)position["z"] ?? 0f,
+                    Rotation = (float?)label["DegreesRotation"] ?? 0f
                 });
             }
         }
