@@ -261,22 +261,49 @@ namespace QuestTree.UI
 
             for (var index = 0; index < ids.Count; index++)
             {
-                var node = nodes[index];
+                if (nodes[index] != null) continue;
 
-                if (node == null)
-                {
-                    // Listed by id rather than dropped silently - a Kappa quest missing from the
-                    // loaded set is itself worth seeing.
-                    AuxLayout.AddText(parent, ref y,
-                        $"<color=#FFFFFF40>[     ]</color>  <color=#C86464>{ids[index]} (not in the loaded quest set)</color>",
-                        AuxLayout.RowHeight, 12, indent: 6f);
-                    continue;
-                }
+                // Listed by id rather than dropped silently - a Kappa quest missing from the
+                // loaded set is itself worth seeing.
+                AuxLayout.AddText(parent, ref y,
+                    $"<color=#FFFFFF40>[     ]</color>  <color=#C86464>{ids[index]} (not in the loaded quest set)</color>",
+                    AuxLayout.RowHeight, 12, indent: 6f);
+            }
 
-                if (node.Status == ENodeStatus.Completed) continue;
+            // Ordered by depth rather than by the order Collector happens to list its conditions,
+            // which is arbitrary. Depth is one past a quest's deepest prerequisite, so this reads
+            // top-to-bottom as the order the remaining quests can actually be done in - the
+            // difference between a checklist and a plan. Same rule as QuestRoute.Remaining.
+            var outstanding = nodes
+                .Where(node => node != null && node.Status != ENodeStatus.Completed)
+                .OrderBy(node => node.Depth)
+                .ThenBy(node => node.TraderName, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(node => node.Name, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            var startable = outstanding.Count(
+                node => node.Status == ENodeStatus.Active || node.Status == ENodeStatus.Available);
+
+            if (outstanding.Count > 0)
+            {
+                AuxLayout.AddText(parent, ref y,
+                    startable > 0
+                        ? $"<color=#FFFFFF80>{startable} of the {outstanding.Count} left can be worked on now, " +
+                          "listed first.</color>"
+                        : $"<color=#FFFFFF80>{outstanding.Count} left, in the order they unlock.</color>",
+                    26f, 11);
+            }
+
+            foreach (var node in outstanding)
+            {
+                // The status glyph replaces a uniform empty checkbox, which said only "not done" -
+                // true of every row and so worth nothing. This distinguishes what is in progress
+                // and startable from what is still gated.
+                var hex = ColorUtility.ToHtmlStringRGB(QuestNodeView.ColorFor(node.Status));
 
                 AuxLayout.AddText(parent, ref y,
-                    $"<color=#FFFFFF40>[     ]</color>  {node.Name}  <color=#FFFFFF60>{node.TraderName}</color>",
+                    $"<color=#{hex}>{QuestNodeView.GlyphFor(node.Status)}</color>  {node.Name}" +
+                    $"  <color=#FFFFFF60>{node.TraderName}</color>",
                     AuxLayout.RowHeight, 12, indent: 6f);
             }
         }

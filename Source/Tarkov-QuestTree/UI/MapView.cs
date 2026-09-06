@@ -28,8 +28,20 @@ namespace QuestTree.UI
     {
         private const string AnyLocation = "any";
         private const float PickerWidth = 300f;
-        private const float MapSize = 520f;
+
+        /// <summary>The quest list's column on the right. Everything left of it is map - the map is
+        /// the thing you are here to read, and the list is the caption.</summary>
+        private const float QuestListWidth = 400f;
+
+        /// <summary>How tall the map viewport is. Fixed rather than filling the panel, because the
+        /// aux surface is a scroll view whose height is not reliable at build time.</summary>
+        private const float MapViewportHeight = 700f;
+
         private const int MaxQuestRows = 40;
+
+        private const float MinZoom = 0.5f;
+        private const float MaxZoom = 8f;
+        private const float ZoomSpeed = 0.25f;
 
         /// <summary>Which map the view is showing. Static so it survives a re-render - switching map
         /// rebuilds the whole aux panel, and resetting to the first map each time would make the
@@ -140,28 +152,41 @@ namespace QuestTree.UI
             var entry = DynamicMapsLibrary.FindByLocationKey(quests[0].LocationKey);
             var sprite = entry?.GetSprite();
 
+            // Everything that is not the quest list is map. Measured off the panel rather than
+            // fixed, so it fills an ultrawide the same way it fills 1080p.
+            var available = parent.rect.width > 1f ? parent.rect.width : 1600f;
+            var mapWidth = Mathf.Max(360f, available - QuestListWidth - AuxLayout.Padding * 3f);
+
             var listLeft = left;
+            var mapBottom = y;
 
             if (sprite != null)
             {
-                BuildMapImage(parent, sprite, left, y);
-                AddCredit(parent, entry, left, y + MapSize + 4f);
-                listLeft = left + MapSize + 16f;
+                BuildMapViewport(parent, sprite, left, y, mapWidth);
+                mapBottom = y + MapViewportHeight;
+                AddCredit(parent, entry, left, mapBottom + 4f);
+                mapBottom += 22f;
+                listLeft = left + mapWidth + AuxLayout.Padding;
             }
 
             var listY = y;
-            AddAt(parent, $"<b>{mapName}</b>", listLeft, ref listY, 26f, 15);
+            AddAt(parent, $"<b>{mapName}</b>", listLeft, ref listY, 26f, 15, QuestListWidth);
 
             if (sprite == null && DynamicMapsLibrary.Available)
             {
                 AddAt(parent, "<color=#FFFFFF60>No map image for this location.</color>",
-                    listLeft, ref listY, 20f, 11);
+                    listLeft, ref listY, 20f, 11, QuestListWidth);
             }
             else if (!DynamicMapsLibrary.Available)
             {
                 AddAt(parent,
                     "<color=#FFFFFF60>Install the DynamicMaps mod to see map images here.</color>",
-                    listLeft, ref listY, 20f, 11);
+                    listLeft, ref listY, 20f, 11, QuestListWidth);
+            }
+            else
+            {
+                AddAt(parent, "<color=#FFFFFF60>Drag to pan, wheel to zoom</color>",
+                    listLeft, ref listY, 20f, 11, QuestListWidth);
             }
 
             listY += 6f;
@@ -178,44 +203,67 @@ namespace QuestTree.UI
                 AddAt(parent,
                     $"<color=#{hex}>{QuestNodeView.GlyphFor(node.Status)}</color>  {node.Name}" +
                     $"  <color=#FFFFFF60>{node.TraderName}</color>",
-                    listLeft, ref listY, AuxLayout.RowHeight, 12);
+                    listLeft, ref listY, AuxLayout.RowHeight, 12, QuestListWidth);
             }
 
             if (quests.Count > MaxQuestRows)
             {
                 AddAt(parent, $"<color=#FFFFFF60>+{quests.Count - MaxQuestRows} more</color>",
-                    listLeft, ref listY, AuxLayout.RowHeight, 11);
+                    listLeft, ref listY, AuxLayout.RowHeight, 11, QuestListWidth);
             }
 
-            return Mathf.Max(listY, sprite != null ? y + MapSize + 28f : listY);
+            return Mathf.Max(listY, mapBottom);
         }
 
         /// <summary>
-        /// Draws the map with <see cref="SVGImage"/> rather than a plain <see cref="Image"/>.
+        /// The map, in a viewport you can drag and zoom.
         ///
-        /// That is the difference between a map and a blank rectangle. VectorUtils.BuildSprite
-        /// returns a sprite backed by tessellated geometry with no texture behind it, and Image
-        /// draws a sprite by texturing a quad - so it drew nothing at all, while the attribution
-        /// line beside it still appeared and made it look as though the image had merely failed to
-        /// position. SVGImage is the renderer that package ships for exactly this kind of sprite,
-        /// and being a Graphic it gets its material from the canvas rather than needing a vector
-        /// shader looked up by name at runtime.
+        /// Drawn with <see cref="SVGImage"/> rather than a plain <see cref="Image"/>, which is the
+        /// difference between a map and a blank rectangle: VectorUtils.BuildSprite returns a sprite
+        /// backed by tessellated geometry with no texture behind it, and Image draws a sprite by
+        /// texturing a quad, so it drew nothing at all - while the attribution line beside it still
+        /// appeared, making it look as though the image had merely failed to position. SVGImage is
+        /// the renderer that package ships for these sprites, and being a Graphic it takes its
+        /// material from the canvas rather than needing a vector shader found by name at runtime.
+        ///
+        /// The viewport carries <see cref="PanZoomHandler"/>, the same component the quest graph
+        /// uses. Handling drag and scroll there is also what stops the surrounding aux ScrollRect
+        /// stealing the gesture: Unity delivers to the first handler it finds walking up, so
+        /// scrolling over the map zooms it instead of scrolling the panel.
         /// </summary>
-        private static void BuildMapImage(RectTransform parent, Sprite sprite, float x, float y)
+        private static void BuildMapViewport(
+            RectTransform parent, Sprite sprite, float x, float y, float width)
         {
-            var go = new GameObject("MapImage", typeof(RectTransform), typeof(SVGImage));
-            var rect = (RectTransform)go.transform;
-            rect.SetParent(parent, worldPositionStays: false);
-            rect.anchorMin = rect.anchorMax = new Vector2(0f, 1f);
-            rect.pivot = new Vector2(0f, 1f);
-            rect.anchoredPosition = new Vector2(x, -y);
-            rect.sizeDelta = new Vector2(MapSize, MapSize);
+            var viewportGo = new GameObject(
+                "MapViewport", typeof(RectTransform), typeof(Image), typeof(RectMask2D));
+            var viewport = (RectTransform)viewportGo.transform;
+            viewport.SetParent(parent, worldPositionStays: false);
+            viewport.anchorMin = viewport.anchorMax = new Vector2(0f, 1f);
+            viewport.pivot = new Vector2(0f, 1f);
+            viewport.anchoredPosition = new Vector2(x, -y);
+            viewport.sizeDelta = new Vector2(width, MapViewportHeight);
 
-            var image = go.GetComponent<SVGImage>();
+            // A visible backing plate, which also gives the viewport a raycast target - without a
+            // Graphic here the drag and scroll handlers would never receive anything.
+            var backing = viewportGo.GetComponent<Image>();
+            backing.color = new Color(0f, 0f, 0f, 0.25f);
+            GameStyle.ApplyPanel(backing);
+
+            var contentGo = new GameObject("MapContent", typeof(RectTransform), typeof(SVGImage));
+            var content = (RectTransform)contentGo.transform;
+            content.SetParent(viewport, worldPositionStays: false);
+            content.anchorMin = content.anchorMax = new Vector2(0f, 1f);
+            content.pivot = new Vector2(0f, 1f);
+            content.anchoredPosition = Vector2.zero;
+            content.sizeDelta = new Vector2(width, MapViewportHeight);
+
+            var image = contentGo.GetComponent<SVGImage>();
             image.sprite = sprite;
             // Maps are not square; preserveAspect letterboxes rather than stretching the geometry.
             image.preserveAspect = true;
             image.raycastTarget = false;
+
+            viewportGo.AddComponent<PanZoomHandler>().Init(content, MinZoom, MaxZoom, ZoomSpeed);
         }
 
         /// <summary>The map's own author credit, shown because the images are someone else's work
@@ -232,16 +280,29 @@ namespace QuestTree.UI
         /// <summary>Places a line at an explicit x, which AuxLayout's full-width rows cannot do -
         /// this view is the only one with side-by-side columns.</summary>
         private static void AddAt(
-            RectTransform parent, string text, float x, ref float y, float height, int fontSize)
+            RectTransform parent, string text, float x, ref float y, float height, int fontSize,
+            float fixedWidth = 0f)
         {
             var go = new GameObject("Row", typeof(RectTransform));
             var rect = (RectTransform)go.transform;
             rect.SetParent(parent, worldPositionStays: false);
-            rect.anchorMin = new Vector2(0f, 1f);
-            rect.anchorMax = new Vector2(1f, 1f);
             rect.pivot = new Vector2(0f, 1f);
+
+            if (fixedWidth > 0f)
+            {
+                // Pinned to the top-left corner at a set width, so a long quest name is ellipsised
+                // inside the list column instead of stretching to the panel edge.
+                rect.anchorMin = rect.anchorMax = new Vector2(0f, 1f);
+                rect.sizeDelta = new Vector2(fixedWidth, height);
+            }
+            else
+            {
+                rect.anchorMin = new Vector2(0f, 1f);
+                rect.anchorMax = new Vector2(1f, 1f);
+                rect.sizeDelta = new Vector2(-(x + AuxLayout.Padding), height);
+            }
+
             rect.anchoredPosition = new Vector2(x, -y);
-            rect.sizeDelta = new Vector2(-(x + AuxLayout.Padding), height);
 
             var label = go.AddComponent<TextMeshProUGUI>();
             label.text = text;
