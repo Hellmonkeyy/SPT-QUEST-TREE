@@ -359,6 +359,51 @@ namespace QuestTree.UI
         }
 
         /// <summary>
+        /// The SVG's viewBox, straight out of the file's opening tag.
+        ///
+        /// SVGParser exposes this as SceneInfo.SceneViewport, but the version the game ships leaves
+        /// it zero-sized for every one of these files. Reading the attribute is two lines and cannot
+        /// be quietly empty, and this is the rectangle the layer's ImageBounds describes, so
+        /// everything drawn on the map depends on getting it.
+        ///
+        /// Only the head of the file is scanned: the tag is the first element, and these run to
+        /// 340KB.
+        /// </summary>
+        private static Rect ReadViewBox(string path)
+        {
+            try
+            {
+                var head = new char[2048];
+                using var reader = new StreamReader(path);
+                var read = reader.Read(head, 0, head.Length);
+
+                var match = System.Text.RegularExpressions.Regex.Match(
+                    new string(head, 0, read),
+                    @"viewBox\s*=\s*[""']\s*([-\d.eE+]+)[\s,]+([-\d.eE+]+)[\s,]+([-\d.eE+]+)[\s,]+([-\d.eE+]+)");
+
+                if (!match.Success) return default;
+
+                return new Rect(
+                    ParseFloat(match.Groups[1].Value), ParseFloat(match.Groups[2].Value),
+                    ParseFloat(match.Groups[3].Value), ParseFloat(match.Groups[4].Value));
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: could not read the viewBox of '{Path.GetFileName(path)}' ({ex.Message}).");
+                return default;
+            }
+        }
+
+        /// <summary>Invariant culture, because an SVG's numbers use a dot whatever the machine's
+        /// locale says and a comma-decimal machine would otherwise read 1470.3 as 14703.</summary>
+        private static float ParseFloat(string value) =>
+            float.TryParse(value, System.Globalization.NumberStyles.Float,
+                System.Globalization.CultureInfo.InvariantCulture, out var parsed)
+                ? parsed
+                : 0f;
+
+        /// <summary>
         /// Reports the rectangles the placement depends on, once per layer.
         ///
         /// This exists because four attempts at aligning the map were each reasoned from pixel
@@ -425,23 +470,22 @@ namespace QuestTree.UI
                 var geometry = VectorUtils.TessellateScene(scene.Scene, options);
                 if (geometry == null || geometry.Count == 0) return null;
 
-                // Both rectangles are only knowable here. Each geometry's vertices are in its own
-                // local space, so WorldTransform has to be applied before they can be compared with
-                // the viewBox - which is the space the layer's ImageBounds describes.
-                layer.Viewport = scene.SceneViewport;
+                // The viewBox is read out of the file rather than taken from SceneViewport, which
+                // this version of the parser leaves empty - logged as w0.0 h0.0 for every map, which
+                // is what silently disabled the previous attempt at this and sent it down its
+                // fallback path.
+                layer.Viewport = ReadViewBox(path);
+
+                // The artwork's own extent. Each geometry's vertices are in its own local space, so
+                // WorldTransform has to be applied before they can be compared with the viewBox.
+                // Confirmed against the running game: Woods tessellates to y -30.9 height 1490.8,
+                // matching the file to a decimal, so the ink shares the viewBox's y-down space and
+                // there is no flip to undo.
                 layer.Ink = VectorUtils.Bounds(
                     geometry.SelectMany(part => part.Vertices.Select(part.WorldTransform.MultiplyPoint)));
 
-                // Built against the viewBox with the SVG's own origin, rather than letting the
-                // sprite be sized and centred on its ink. When this works the sprite's rect IS the
-                // viewBox, so the view can simply lay it over ImageBounds and there is no ink
-                // arithmetic left to get wrong - which is where the last four attempts went.
-                var sprite = layer.HasArtworkBounds
-                    ? VectorUtils.BuildSprite(
-                        geometry, layer.Viewport, 100f, VectorUtils.Alignment.SVGOrigin,
-                        Vector2.zero, 128, false)
-                    : VectorUtils.BuildSprite(
-                        geometry, 100f, VectorUtils.Alignment.Center, Vector2.zero, 128);
+                var sprite = VectorUtils.BuildSprite(
+                    geometry, 100f, VectorUtils.Alignment.Center, Vector2.zero, 128);
 
                 LogArtworkGeometry(layer, sprite);
 
