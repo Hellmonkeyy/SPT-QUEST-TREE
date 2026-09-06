@@ -37,7 +37,8 @@ namespace QuestTreeServer
         TemplateTable templateTable,
         LocaleService localeService,
         SeasonalEventService seasonalEventService,
-        QuestConfig questConfig)
+        QuestConfig questConfig,
+        LocationTable locationTable)
     {
         /// <summary>Condition type that names another quest as a prerequisite.</summary>
         private const string QuestConditionType = "Quest";
@@ -162,12 +163,17 @@ namespace QuestTreeServer
         }
 
         /// <summary>
-        /// The map's internal name ("bigmap", "Woods"), which is what other map tools key on.
+        /// The map's internal name ("bigmap", "Labyrinth"), which is what map tools key on.
         ///
-        /// Quest.Location is the location's MongoId, not its internal name, so this inverts SPT's
-        /// own quest.json locationIdMap rather than guessing at a mapping - the config exists
-        /// precisely because quests reference locations by id. Built once and cached; falls back to
-        /// the raw id, which is at least stable, when a modded location is not in the map.
+        /// Quest.Location is the location's MongoId, not its internal name, so the two never match
+        /// without this. The locations table is the authority on the pairing - every location
+        /// carries both forms, IdField being the MongoId a quest cites and Id the internal name -
+        /// so it is read directly rather than inverting questConfig.LocationIdMap. That config was
+        /// the obvious source and is the wrong one: it has no Labyrinth entry, so the Labyrinth
+        /// quests resolved to a bare MongoId and matched nothing.
+        ///
+        /// Built once and cached. Falls back to the raw id, which is at least stable, for a
+        /// location that is not in the table at all.
         /// </summary>
         private string ResolveLocationKey(Quest quest)
         {
@@ -183,11 +189,14 @@ namespace QuestTreeServer
         {
             var lookup = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
 
-            if (questConfig.LocationIdMap == null) return lookup;
-
-            foreach (var (internalName, locationId) in questConfig.LocationIdMap)
+            foreach (var location in locationTable.GetDictionary().Values)
             {
-                if (string.IsNullOrWhiteSpace(locationId)) continue;
+                var internalName = location?.Base?.Id;
+                var locationId = location?.Base?.IdField.ToString();
+
+                if (string.IsNullOrWhiteSpace(internalName) || string.IsNullOrWhiteSpace(locationId))
+                    continue;
+
                 lookup[locationId] = internalName;
             }
 
