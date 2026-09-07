@@ -63,10 +63,20 @@ namespace QuestTree.UI
             Array.Empty<(QuestNode, QuestNode, Vector2, Vector2)>();
 
         /// <summary>Edges currently on screen, keyed by their layout index.</summary>
-        /// <summary>Edge colours. Normal is the resting line; highlighted is a chain member;
-        /// dimmed is everything outside the hovered chain.</summary>
-        private static readonly Color EdgeColor = new(1f, 1f, 1f, 0.25f);
-        private static readonly Color EdgeDimmedColor = new(1f, 1f, 1f, 0.06f);
+        /// <summary>
+        /// Edge colours. The resting line is quiet - at 0.25 alpha, a few hundred of them were the
+        /// loudest thing on the screen - and an edge into a quest you can act on is drawn heavier
+        /// and in that quest's colour (see <see cref="EdgeStyleFor"/>), so the lines that lead
+        /// somewhere are the ones you see. Dimmed is everything outside the hovered chain.
+        /// </summary>
+        private static readonly Color EdgeColor = new(1f, 1f, 1f, 0.14f);
+        private static readonly Color EdgeToLockedColor = new(1f, 1f, 1f, 0.08f);
+        private static readonly Color EdgeDimmedColor = new(1f, 1f, 1f, 0.04f);
+        private const float EdgeThickness = 2f;
+        private const float EdgeToLockedThickness = 1f;
+
+        /// <summary>Level of detail the built views are currently drawn at (QuestNodeView.SetDetailLevel).</summary>
+        private int _detailLevel;
 
         /// <summary>Taken from the status palette rather than written out again: this used to be a
         /// copy of the "active" colour, which silently stopped matching the moment that colour
@@ -74,7 +84,7 @@ namespace QuestTree.UI
         /// always looks like the quest it leads to.</summary>
         private static Color EdgeHighlightColor => QuestNodeView.ColorFor(ENodeStatus.Active);
 
-        private readonly Dictionary<int, RectTransform> _edgeViews = new();
+        private readonly Dictionary<int, RectTransform[]> _edgeViews = new();
 
         /// <summary>The hovered quest's chain. Held so ClearHighlight can no-op when nothing is
         /// highlighted rather than sweeping every built view on every pointer exit.</summary>
@@ -83,7 +93,7 @@ namespace QuestTree.UI
         // Released views are deactivated and kept rather than destroyed - panning across a large
         // tree otherwise means a constant churn of Instantiate/Destroy, which is the expensive part.
         private readonly Stack<QuestNodeView> _nodePool = new();
-        private readonly Stack<RectTransform> _edgePool = new();
+        private readonly Stack<RectTransform[]> _edgePool = new();
 
         // Scratch collections reused by the visibility sweep so it allocates nothing per frame.
         private readonly List<QuestNode> _nodesToRelease = new();
@@ -214,9 +224,12 @@ namespace QuestTree.UI
 
             // Filters and search are applied BEFORE layout, not by hiding views after the fact, so
             // they genuinely reduce the work rather than just the result.
-            var matching = candidates.Where(PassesFilters).Where(_toolbar.MatchesSearch).ToList();
-
-            _toolbar.UpdateRenderNotice(matching.Count, candidates.Count);
+            var frontier = ModSettings.Ready && ModSettings.FocusFrontier.Value ? FrontierOf(candidates) : null;
+            var matching = candidates
+                .Where(node => PassesFilters(node) && (frontier == null || frontier.Contains(node)))
+                .Where(_toolbar.MatchesSearch)
+                .ToList();
+            _toolbar.UpdateRenderNotice(matching.Count, candidates.Count, frontier != null);
 
             if (matching.Count == 0)
             {
@@ -293,6 +306,15 @@ namespace QuestTree.UI
             var visible = GetVisibleContentRect();
             var budget = ModSettings.Ready ? ModSettings.MaxVisibleNodes.Value : DefaultMaxVisibleNodes;
 
+            // Zoom crossed the readability line: every built view switches detail level. Views
+            // bound below pick the level up in Bind.
+            var level = _content.localScale.x < LayoutMetrics.DetailLevelZoom ? 1 : 0;
+            if (level != _detailLevel)
+            {
+                _detailLevel = level;
+                foreach (var built in _views.Values) built.SetDetailLevel(level);
+            }
+
             // --- nodes ---
             _nodesToRelease.Clear();
             foreach (var (node, view) in _views)
@@ -315,6 +337,7 @@ namespace QuestTree.UI
                 var view = AcquireNodeView();
                 ((RectTransform)view.transform).anchoredPosition = _layout[node];
                 view.Bind(node, _onNodeClicked, HighlightChain, _ => ClearHighlight());
+                view.SetDetailLevel(_detailLevel);
                 _views[node] = view;
             }
 
@@ -336,8 +359,7 @@ namespace QuestTree.UI
                 if (_edgeViews.ContainsKey(index)) continue;
                 if (!IsEdgeVisible(index, visible)) continue;
 
-                var edge = _edgeLayout[index];
-                _edgeViews[index] = AcquireEdge(edge.FromPoint, edge.ToPoint);
+                _edgeViews[index] = AcquireEdge(index);
             }
 
             // The guarantee that you can never get lost: if this tab has quests laid out but not one
@@ -399,7 +421,7 @@ namespace QuestTree.UI
 
                 var edge = _edgeLayout[index];
                 var inChain = _highlighted.Contains(edge.From) && _highlighted.Contains(edge.To);
-                SetEdgeColor(line, inChain ? EdgeHighlightColor : EdgeDimmedColor);
+                UILineConnector.SetColor(line, inChain ? EdgeHighlightColor : EdgeDimmedColor);
             }
         }
 
@@ -412,8 +434,8 @@ namespace QuestTree.UI
             foreach (var view in _views.Values)
                 view.SetDimmed(false);
 
-            foreach (var line in _edgeViews.Values)
-                SetEdgeColor(line, EdgeColor);
+            foreach (var (index, line) in _edgeViews)
+                UILineConnector.SetColor(line, EdgeStyleFor(index).Color);
         }
 
         private void SnapToNearestNode(Vector2 target)
@@ -587,32 +609,50 @@ namespace QuestTree.UI
             _nodePool.Push(view);
         }
 
-        private RectTransform AcquireEdge(Vector2 from, Vector2 to)
+        /// <summary>How an edge is drawn at rest, by where it leads. A line into a quest you can
+        /// act on is heavier and in that quest's colour; a line into a locked quest is a hairline.
+        /// The eye then follows the lines that go somewhere.</summary>
+        private (Color Color, float Thickness) EdgeStyleFor(int index)
         {
-            if (_edgePool.Count == 0) return UILineConnector.Create(_content, from, to, EdgeColor, 2f);
+            if (index < 0 || index >= _edgeLayout.Length) return (EdgeColor, EdgeThickness);
+
+            var target = _edgeLayout[index].To;
+
+            return target.Status switch
+            {
+                ENodeStatus.Active => (WithAlpha(QuestNodeView.ColorFor(ENodeStatus.Active), 0.45f), EdgeThickness),
+                ENodeStatus.Available => (WithAlpha(QuestNodeView.ColorFor(ENodeStatus.Available), 0.4f), EdgeThickness),
+                ENodeStatus.Completed => (EdgeColor, EdgeThickness),
+                _ => (EdgeToLockedColor, EdgeToLockedThickness)
+            };
+        }
+
+        private static Color WithAlpha(Color color, float alpha) => new(color.r, color.g, color.b, alpha);
+
+        private RectTransform[] AcquireEdge(int index)
+        {
+            var edge = _edgeLayout[index];
+            var style = EdgeStyleFor(index);
+
+            if (_edgePool.Count == 0)
+                return UILineConnector.Create(_content, edge.FromPoint, edge.ToPoint, style.Color, style.Thickness);
 
             var line = _edgePool.Pop();
-            line.gameObject.SetActive(true);
-            UILineConnector.Apply(line, from, to, 2f);
+            UILineConnector.SetActive(line, true);
+            UILineConnector.Apply(line, edge.FromPoint, edge.ToPoint, style.Thickness);
 
-            // Reset the colour on EVERY acquire, not just on create. UILineConnector.Apply only
-            // re-aims the line, so a pooled edge keeps whatever colour it last had - and once the
-            // chain highlight started recolouring edges, that meant highlight colours leaking onto
-            // unrelated edges as soon as one was recycled.
-            SetEdgeColor(line, EdgeColor);
+            // Reset the colour on EVERY acquire, not just on create. Apply only re-aims the line,
+            // so a pooled edge keeps whatever colour it last had - and once the chain highlight
+            // started recolouring edges, that meant highlight colours leaking onto unrelated edges
+            // as soon as one was recycled.
+            UILineConnector.SetColor(line, style.Color);
             return line;
         }
 
-        private static void SetEdgeColor(RectTransform line, Color color)
-        {
-            var image = line != null ? line.GetComponent<Image>() : null;
-            if (image != null) image.color = color;
-        }
-
-        private void ReleaseEdge(RectTransform line)
+        private void ReleaseEdge(RectTransform[] line)
         {
             if (line == null) return;
-            line.gameObject.SetActive(false);
+            UILineConnector.SetActive(line, false);
             _edgePool.Push(line);
         }
 
@@ -634,7 +674,10 @@ namespace QuestTree.UI
             while (_edgePool.Count > 0)
             {
                 var line = _edgePool.Pop();
-                if (line != null) UnityEngine.Object.Destroy(line.gameObject);
+                if (line == null) continue;
+
+                foreach (var part in line)
+                    if (part != null) UnityEngine.Object.Destroy(part.gameObject);
             }
         }
 
@@ -655,6 +698,31 @@ namespace QuestTree.UI
             // The hovered set refers to nodes from the tab being torn down; keeping it would leave
             // ClearHighlight sweeping views that no longer relate to it.
             _highlighted.Clear();
+        }
+
+        /// <summary>
+        /// The frontier: every quest in progress or available to start, plus what each one directly
+        /// requires and directly unlocks. With Focus on, this is the whole tree. It is a set build
+        /// over the tab's candidates rather than a graph walk, so it costs nothing noticeable even
+        /// on the "All" tab.
+        /// </summary>
+        private HashSet<QuestNode> FrontierOf(IReadOnlyList<QuestNode> candidates)
+        {
+            var frontier = new HashSet<QuestNode>();
+
+            foreach (var node in candidates)
+            {
+                if (node.Status != ENodeStatus.Active && node.Status != ENodeStatus.Available) continue;
+
+                frontier.Add(node);
+
+                foreach (var unlocked in node.Unlocks) frontier.Add(unlocked);
+
+                foreach (var prerequisiteId in node.PrerequisiteIds)
+                    if (_graph.NodesById.TryGetValue(prerequisiteId, out var prerequisite)) frontier.Add(prerequisite);
+            }
+
+            return frontier;
         }
 
         /// <summary>The Settings-tab filters. Applied before layout so hiding a category actually

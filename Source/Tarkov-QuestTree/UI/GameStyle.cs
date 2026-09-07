@@ -36,7 +36,10 @@ namespace QuestTree.UI
         public static Color TextColor { get; private set; } = new(0.78f, 0.76f, 0.71f);
         public static Color DimTextColor { get; private set; } = new(0.78f, 0.76f, 0.71f, 0.55f);
         public static Color AccentColor { get; private set; } = new(0.78f, 0.65f, 0.35f);
-        public static Color ScreenColor { get; private set; } = new(0.055f, 0.055f, 0.05f, 0.97f);
+        /// <summary>Fully opaque. It was 97%, and 3% of the main menu's white headings showing
+        /// through a black panel is exactly the ghost of "ESCAPE FROM TARKOV / CHARACTER / TRADING"
+        /// that made the tree look busier than it was.</summary>
+        public static Color ScreenColor { get; private set; } = new(0.055f, 0.055f, 0.05f, 1f);
         public static Color PanelColor { get; private set; } = new(1f, 1f, 1f, 0.05f);
 
         /// <summary>Outline for node text. Black at a modest width - enough to separate glyphs from
@@ -63,7 +66,87 @@ namespace QuestTree.UI
                 _panelSprite = donorPanel.sprite;
                 _panelSpriteType = donorPanel.type;
             }
+
+            ProbeNativeIngredients();
         }
+
+        private static bool _probed;
+
+        /// <summary>
+        /// Diagnostic for the native-look work (UI overhaul phases 2-3): says whether the Tasks
+        /// screen's row prefab and the game's standard button are in memory at menu time, and what
+        /// the row's status palette is. Two log lines, once. Remove once those phases have decided.
+        /// </summary>
+        private static void ProbeNativeIngredients()
+        {
+            if (_probed) return;
+            _probed = true;
+
+            try
+            {
+                var rows = Resources.FindObjectsOfTypeAll<NotesTask>();
+                var palette = "(no row found)";
+
+                if (rows != null && rows.Length > 0 && rows[0]._colorMap?._items != null)
+                {
+                    var parts = new System.Collections.Generic.List<string>();
+                    foreach (var item in rows[0]._colorMap._items)
+                        if (item != null) parts.Add($"{item.Id}=#{ColorUtility.ToHtmlStringRGBA(item.Item)}");
+                    palette = string.Join(" ", parts);
+                }
+
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree probe: NotesTask rows in memory = {rows?.Length ?? 0}; palette: {palette}");
+
+                var buttons = Resources.FindObjectsOfTypeAll<DefaultUIButton>();
+                var sample = buttons != null && buttons.Length > 0 ? buttons[0] : null;
+                var rect = sample != null ? (RectTransform)sample.transform : null;
+
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree probe: DefaultUIButton in memory = {buttons?.Length ?? 0}" +
+                    (sample != null
+                        ? $"; first '{sample.name}' fontSize={sample._fontSize} size={rect.rect.width:0}x{rect.rect.height:0} label={(sample._headerLabel != null ? "yes" : "no")}"
+                        : ""));
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogInfo($"QuestTree probe: could not inspect native UI ({ex.Message}).");
+            }
+        }
+
+        /// <summary>
+        /// The game's own tooltip on hover. HoverTooltipArea finds the tooltip itself in Awake
+        /// (ItemUiContext.Instance.Tooltip), so all this adds is the component and the text - but
+        /// only when that context exists, because Unity swallows an exception in Awake and the
+        /// component would then throw on every hover instead. Null when unavailable; callers must
+        /// cope, and the UI is complete without tooltips.
+        /// </summary>
+        public static HoverTooltipArea AddTooltip(GameObject target, string text)
+        {
+            if (target == null) return null;
+
+            try
+            {
+                if (ItemUiContext.Instance == null || ItemUiContext.Instance.Tooltip == null) return null;
+
+                var area = target.AddComponent<HoverTooltipArea>();
+                area._delay = 0.35f;
+                area.SetMessageText(text ?? "", rawText: true);
+                return area;
+            }
+            catch (Exception ex)
+            {
+                if (!_tooltipWarned)
+                {
+                    _tooltipWarned = true;
+                    Plugin.LogSource?.LogInfo($"QuestTree: native tooltips unavailable ({ex.Message}).");
+                }
+
+                return null;
+            }
+        }
+
+        private static bool _tooltipWarned;
 
         public static void Apply(TMP_Text text)
         {

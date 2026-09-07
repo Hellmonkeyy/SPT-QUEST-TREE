@@ -33,6 +33,7 @@ namespace QuestTree.UI
         private QuestGraphBuilder _graph;
         private TMP_InputField _searchField;
         private TMP_Text _renderNotice;
+        private Image _focusBackground;
         /// <summary>Backgrounds of the non-graph view buttons, keyed by the tab id they select, so
         /// the selected one can be lit the same way a trader tab is.</summary>
         private readonly Dictionary<string, Image> _viewButtonBackgrounds = new();
@@ -139,13 +140,25 @@ namespace QuestTree.UI
 
             // Placed between the search box and the notice, on the same manual x-cursor.
             var navX = padding + searchWidth + 10f;
-            navX += BuildToolbarAction(toolbar, "My quests (M)", navX, itemY, itemHeight, 110f, frameMyQuests);
-            navX += BuildToolbarAction(toolbar, "Fit (F)", navX, itemY, itemHeight, 70f, frameContent);
+            navX += BuildToolbarAction(toolbar, "My quests (M)", navX, itemY, itemHeight, 110f, frameMyQuests,
+                "Jump to the quests you can work on now");
+            navX += BuildToolbarAction(toolbar, "Fit (F)", navX, itemY, itemHeight, 70f, frameContent,
+                "Fit the whole tab on screen");
+
+            // Focus is a toggle, so its background says whether it is on - the tree itself looking
+            // sparse is not enough of a clue.
+            navX += BuildToolbarAction(toolbar, "Focus (X)", navX, itemY, itemHeight, 90f, ToggleFocus,
+                "Show only what you can work on, plus what it needs and unlocks", out _focusBackground);
+            RefreshFocusState();
 
             // The controls hint is shown once and then never again on its own, which would make it
             // useless to anyone who dismissed it before they knew what it was for. This is how you
             // get it back.
-            navX += BuildToolbarAction(toolbar, "?", navX, itemY, itemHeight, 30f, showIntro);
+            navX += BuildToolbarAction(toolbar, "?", navX, itemY, itemHeight, 30f, showIntro, "Controls");
+
+            // The legend lives here, in the bar, as the same bar-and-name the nodes wear - it used
+            // to be a box in the corner of the graph, over whatever was drawn there.
+            navX += BuildLegendChips(toolbar, navX + 6f, itemY, itemHeight);
 
             BuildCloseButton(toolbar, itemY, itemHeight, padding, closeTree);
 
@@ -187,15 +200,93 @@ namespace QuestTree.UI
         /// advancing its cursor - zoom and framing are otherwise invisible features you have to
         /// already know the wheel and keyboard do.</summary>
         private float BuildToolbarAction(
-            RectTransform toolbar, string label, float x, float itemY, float itemHeight, float width, Action onClick)
+            RectTransform toolbar, string label, float x, float itemY, float itemHeight, float width, Action onClick,
+            string tooltip = null)
+        {
+            return BuildToolbarAction(toolbar, label, x, itemY, itemHeight, width, onClick, tooltip, out _);
+        }
+
+        private float BuildToolbarAction(
+            RectTransform toolbar, string label, float x, float itemY, float itemHeight, float width, Action onClick,
+            string tooltip, out Image background)
         {
             var rect = GameStyle.CreateButton(toolbar, label, onClick);
             rect.anchorMin = rect.anchorMax = new Vector2(0f, 1f);
             rect.pivot = new Vector2(0f, 1f);
             rect.anchoredPosition = new Vector2(x, itemY);
             rect.sizeDelta = new Vector2(width, itemHeight);
+            background = rect.GetComponent<Image>();
+
+            if (!string.IsNullOrEmpty(tooltip)) GameStyle.AddTooltip(rect.gameObject, tooltip);
 
             return width + 6f;
+        }
+
+        /// <summary>The Focus toggle. The setting is the state; flipping it raises
+        /// ModSettings.Changed, which is what re-renders the tree.</summary>
+        public void ToggleFocus()
+        {
+            if (!ModSettings.Ready) return;
+            ModSettings.FocusFrontier.Value = !ModSettings.FocusFrontier.Value;
+            RefreshFocusState();
+        }
+
+        private void RefreshFocusState()
+        {
+            if (_focusBackground == null) return;
+
+            var on = ModSettings.Ready && ModSettings.FocusFrontier.Value;
+            _focusBackground.color = on
+                ? new Color(GameStyle.AccentColor.r, GameStyle.AccentColor.g, GameStyle.AccentColor.b, 0.35f)
+                : GameStyle.PanelColor;
+        }
+
+        /// <summary>The four statuses as they look on a node - a bar in the status colour and the
+        /// name - laid out inline. Returns the width consumed.</summary>
+        private static float BuildLegendChips(RectTransform toolbar, float x, float itemY, float itemHeight)
+        {
+            var statuses = new[]
+            {
+                ENodeStatus.Active, ENodeStatus.Available, ENodeStatus.Completed, ENodeStatus.Locked
+            };
+
+            var cursor = x;
+
+            foreach (var status in statuses)
+            {
+                var barGo = new GameObject($"Legend_{status}", typeof(RectTransform), typeof(Image));
+                var barRect = (RectTransform)barGo.transform;
+                barRect.SetParent(toolbar, worldPositionStays: false);
+                barRect.anchorMin = barRect.anchorMax = new Vector2(0f, 1f);
+                barRect.pivot = new Vector2(0f, 1f);
+                barRect.anchoredPosition = new Vector2(cursor, itemY - (itemHeight - 14f) / 2f);
+                barRect.sizeDelta = new Vector2(LayoutMetrics.StatusBarWidth, 14f);
+                var bar = barGo.GetComponent<Image>();
+                bar.color = QuestNodeView.ColorFor(status);
+                bar.raycastTarget = false;
+
+                var name = QuestNodeView.NameFor(status);
+                var width = name.Length * 6.5f + 8f;
+
+                var textGo = new GameObject("Label", typeof(RectTransform));
+                var textRect = (RectTransform)textGo.transform;
+                textRect.SetParent(toolbar, worldPositionStays: false);
+                textRect.anchorMin = textRect.anchorMax = new Vector2(0f, 1f);
+                textRect.pivot = new Vector2(0f, 1f);
+                textRect.anchoredPosition = new Vector2(cursor + LayoutMetrics.StatusBarWidth + 4f, itemY);
+                textRect.sizeDelta = new Vector2(width, itemHeight);
+                var text = textGo.AddComponent<TextMeshProUGUI>();
+                text.text = name;
+                text.fontSize = 11;
+                text.alignment = TextAlignmentOptions.Left;
+                text.color = GameStyle.DimTextColor;
+                text.raycastTarget = false;
+                GameStyle.Apply(text);
+
+                cursor += LayoutMetrics.StatusBarWidth + 4f + width + 10f;
+            }
+
+            return cursor - x;
         }
 
         /// <summary>The "showing N of M" line, sitting immediately right of the search box on the
@@ -251,51 +342,6 @@ namespace QuestTree.UI
         ///
         /// Colours and glyphs come from QuestNodeView so the legend can never drift from the nodes.
         /// </summary>
-        public void BuildLegend(RectTransform viewport)
-        {
-            const float rowHeight = 18f;
-            var statuses = new[]
-            {
-                ENodeStatus.Completed, ENodeStatus.Active, ENodeStatus.Available, ENodeStatus.Locked
-            };
-
-            var legendGo = new GameObject("Legend", typeof(RectTransform), typeof(Image));
-            var legend = (RectTransform)legendGo.transform;
-            legend.SetParent(viewport, worldPositionStays: false);
-            legend.anchorMin = legend.anchorMax = new Vector2(0f, 0f);
-            legend.pivot = new Vector2(0f, 0f);
-            legend.anchoredPosition = new Vector2(10f, 10f);
-            legend.sizeDelta = new Vector2(150f, rowHeight * statuses.Length + 12f);
-
-            var background = legendGo.GetComponent<Image>();
-            background.color = new Color(0f, 0f, 0f, 0.55f);
-            GameStyle.ApplyPanel(background);
-            background.raycastTarget = false; // must never eat a drag meant for panning
-
-            for (var index = 0; index < statuses.Length; index++)
-            {
-                var status = statuses[index];
-
-                var rowGo = new GameObject($"Legend_{status}", typeof(RectTransform));
-                var rowRect = (RectTransform)rowGo.transform;
-                rowRect.SetParent(legend, worldPositionStays: false);
-                rowRect.anchorMin = new Vector2(0f, 1f);
-                rowRect.anchorMax = new Vector2(1f, 1f);
-                rowRect.pivot = new Vector2(0f, 1f);
-                rowRect.anchoredPosition = new Vector2(8f, -(6f + index * rowHeight));
-                rowRect.sizeDelta = new Vector2(-16f, rowHeight);
-
-                var text = rowGo.AddComponent<TextMeshProUGUI>();
-                var hex = ColorUtility.ToHtmlStringRGB(QuestNodeView.ColorFor(status));
-                text.text = $"<color=#{hex}>{QuestNodeView.GlyphFor(status)}</color>  {QuestNodeView.NameFor(status)}";
-                text.fontSize = 11;
-                text.alignment = TextAlignmentOptions.Left;
-                text.color = Color.white;
-                text.raycastTarget = false;
-                GameStyle.Apply(text);
-            }
-        }
-
         /// <summary>Tints the Settings button for the selected state. The panel supplies the colour
         /// because it owns the same pair the tab row is highlighted with.</summary>
         /// <summary>Lights whichever view button is selected. These are not part of the tab row's
@@ -325,8 +371,10 @@ namespace QuestTree.UI
         /// <summary>Reports how much of the tab the current filters and search are showing. Since
         /// virtualization removed the render cap this is a plain count rather than a truncation
         /// warning - what is laid out is what you can reach by panning.</summary>
-        public void UpdateRenderNotice(int matchingCount, int tabTotal)
+        public void UpdateRenderNotice(int matchingCount, int tabTotal, bool focused = false)
         {
+            RefreshFocusState();
+
             if (_renderNotice == null) return;
 
             // Says so in the UI, not just the log: without the companion server mod the tree can
@@ -341,21 +389,23 @@ namespace QuestTree.UI
                 return;
             }
 
-            var filtered = matchingCount < tabTotal
-                ? $"{matchingCount:N0} of {tabTotal:N0} quests"
-                : $"{matchingCount:N0} quest{(matchingCount == 1 ? "" : "s")}";
-
-            // Overall progress across the whole game, not just this tab - the one number most
-            // people actually want from a quest tracker.
+            // One sentence, not two numbers side by side: "787 of 812 quests   5 / 812 completed"
+            // read as a contradiction. Overall progress is across the whole game, not just this
+            // tab - the one number most people actually want from a quest tracker.
             var completed = 0;
             foreach (var node in _graph.Nodes)
                 if (node.Status == ENodeStatus.Completed) completed++;
 
+            var shown = matchingCount < tabTotal
+                ? $"{matchingCount:N0} of {tabTotal:N0} shown"
+                : $"{matchingCount:N0} shown";
+
+            var prefix = focused ? "<color=#FFFFFF80>Focus:</color> " : "";
             var overall = _graph.Nodes.Count > 0
-                ? $"   <color=#FFFFFF80>{completed:N0} / {_graph.Nodes.Count:N0} completed overall</color>"
+                ? $"  <color=#FFFFFF80>·  {completed:N0} of {_graph.Nodes.Count:N0} completed</color>"
                 : "";
 
-            _renderNotice.text = filtered + overall + source;
+            _renderNotice.text = prefix + shown + overall + source;
         }
 
         /// <summary>Puts an arbitrary line in the notice - the aux tabs and the "nothing to frame"

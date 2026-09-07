@@ -27,8 +27,18 @@ namespace QuestTree.UI
         public static float ColumnSpacing => Compact ? 195f : 260f;
         public static float RowSpacing => Compact ? 62f : 100f;
 
+        // --- the status bar down the left edge, and where text starts to its right ---
+        public static float StatusBarWidth => 6f;
+        public static float TextInsetX => StatusBarWidth + 8f;
+
+        /// <summary>Below this zoom the subtitle and objective are hidden and the title grows -
+        /// see QuestNodeView.SetDetailLevel. 0.55 is where a 15px title stops being readable.</summary>
+        public static float DetailLevelZoom => 0.55f;
+
         // --- text inside a node ---
-        public static int TitleFontSize => Compact ? 11 : 14;
+        public static int TitleFontSize => Compact ? 12 : 15;
+        public static int ZoomedOutTitleFontSize => Compact ? 16 : 20;
+        public static int GlyphFontSize => Compact ? 10 : 12;
         public static int SubtitleFontSize => Compact ? 9 : 10;
         public static int ObjectiveFontSize => Compact ? 8 : 9;
 

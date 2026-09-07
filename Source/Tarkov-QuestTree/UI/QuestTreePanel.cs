@@ -290,6 +290,7 @@ namespace QuestTree.UI
             {
                 if (Input.GetKeyDown(KeyCode.F)) _graphView.FrameContent();
                 if (Input.GetKeyDown(KeyCode.M)) _graphView.FrameMyQuests();
+                if (Input.GetKeyDown(KeyCode.X)) _toolbar.ToggleFocus();
                 if (Input.GetKeyDown(KeyCode.Slash)) _toolbar.FocusSearch();
             }
 
@@ -370,7 +371,6 @@ namespace QuestTree.UI
             // graph first, then the aux and loading surfaces over it, then the chrome, and the
             // detail panel last of all.
             _graphView.Build(root, QuestToolbar.Height + TabRowHeight, _graph, _toolbar, _detail.Show);
-            _toolbar.BuildLegend(_graphView.Viewport);
 
             BuildAuxPanel(root);
             BuildLoadingPanel(root);
@@ -406,7 +406,7 @@ namespace QuestTree.UI
             _introPanel.SetParent(root, worldPositionStays: false);
             _introPanel.anchorMin = _introPanel.anchorMax = new Vector2(0.5f, 0.5f);
             _introPanel.pivot = new Vector2(0.5f, 0.5f);
-            _introPanel.sizeDelta = new Vector2(470f, 320f);
+            _introPanel.sizeDelta = new Vector2(470f, 340f);
             _introPanel.anchoredPosition = Vector2.zero;
 
             var background = panelGo.GetComponent<Image>();
@@ -420,6 +420,7 @@ namespace QuestTree.UI
             AuxLayout.AddSpacer(ref y, 8f);
             AuxLayout.AddText(_introPanel, ref y, "<b>F</b>  fit the whole tab on screen", 20f, 12);
             AuxLayout.AddText(_introPanel, ref y, "<b>M</b>  jump to the quests you can work on", 20f, 12);
+            AuxLayout.AddText(_introPanel, ref y, "<b>X</b>  focus: hide everything you cannot work on yet", 20f, 12);
             AuxLayout.AddText(_introPanel, ref y, "<b>/</b>  search quests and traders", 20f, 12);
             AuxLayout.AddText(_introPanel, ref y, "<b>Esc</b>  close the quest detail, then the tree", 20f, 12);
             AuxLayout.AddSpacer(ref y, 8f);

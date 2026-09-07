@@ -21,6 +21,10 @@ namespace QuestTree
         public static ConfigEntry<bool> HideCompleted { get; private set; }
         public static ConfigEntry<bool> HideTraderless { get; private set; }
         public static ConfigEntry<bool> DrawEdges { get; private set; }
+
+        /// <summary>Show only the frontier: quests in progress or available, plus what they need
+        /// and what they unlock. The tree with the 700 locked boxes taken out of the way.</summary>
+        public static ConfigEntry<bool> FocusFrontier { get; private set; }
         public static ConfigEntry<bool> CompactLayout { get; private set; }
 
         /// <summary>Whether the Maps view pins only quests you have accepted.</summary>
@@ -84,6 +88,11 @@ namespace QuestTree
                 "Diagnostic. Outlines the area the map's coordinates cover and marks the map " +
                 "origin, so a misaligned map picture is visible rather than a matter of opinion.");
 
+            FocusFrontier = config.Bind(
+                "Display", "Focus on what you can work on", false,
+                "Show only quests in progress or available to start, plus what each one needs and " +
+                "what it unlocks. Toggle with X in the tree, or the Focus button.");
+
             DrawEdges = config.Bind(
                 "Display", "Draw prerequisite lines", true,
                 "Draw the lines between a quest and what it unlocks. Turning this off is a " +
@@ -123,6 +132,7 @@ namespace QuestTree
             HideUnobtainable.SettingChanged += Raise;
             HideCompleted.SettingChanged += Raise;
             HideTraderless.SettingChanged += Raise;
+            FocusFrontier.SettingChanged += Raise;
             DrawEdges.SettingChanged += Raise;
             CompactLayout.SettingChanged += Raise;
             MaxVisibleNodes.SettingChanged += Raise;
