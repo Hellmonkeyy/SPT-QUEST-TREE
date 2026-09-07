@@ -231,7 +231,9 @@ namespace QuestTreeServer
                     objectivesByMap[locationId!].Where(o => !harvested.CoveredQuestIds.Contains(o.QuestId))));
                 markers.AddRange(GpsMarkersFor(locationId!, questsByLocation, locale, harvested.CoveredQuestIds));
 
-                if (markers.Count == 0 && zones == null) continue;
+                // A map with nothing to pin and nothing to locate stays out - a harvest file alone
+                // (Ground Zero's other variant, aliased) is not a reason to list it.
+                if (markers.Count == 0 && harvested.ZonesWanted.Count == 0) continue;
 
                 payload.Maps.Add(new MapMarkerSetDto
                 {

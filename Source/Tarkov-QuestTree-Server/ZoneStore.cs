@@ -12,9 +12,12 @@ namespace QuestTreeServer
     /// user/mods/QuestTree/zones/. This is what makes an objective's zone id - which the quest
     /// data has always carried - into a place on the map, without asking any website.
     ///
-    /// A file is a snapshot of one raid's scene and is replaced whole by the next harvest of that
-    /// map: zones do not accumulate across game versions, they move. Shipped seed files are read
-    /// exactly like harvested ones, so a release can carry them and a later raid still wins.
+    /// Harvests of one map are unioned by zone: Factory day and night share a file but not a
+    /// scene (the night scene has zones the day one lacks, and mods spawn zones per variant), so
+    /// a replace-whole file lost whichever variant was raided first. A zone seen again at a new
+    /// position keeps both entries until the file is deleted - a moved zone after a game update
+    /// is rare and visible; a lost zone was neither. Shipped seed files are read exactly like
+    /// harvested ones, so a release can carry them and a later raid still adds to them.
     /// </summary>
     [Injectable(InjectionType.Singleton)]
     public class ZoneStore(ISptLogger<ZoneStore> logger)
@@ -67,22 +70,35 @@ namespace QuestTreeServer
             }
         }
 
-        /// <summary>Replaces the map's file with this harvest. Returns what was written.</summary>
+        /// <summary>Unions this harvest into the map's file. Returns what was written.</summary>
         public ZoneFile Save(ZoneHarvestRequest request)
         {
             var key = Canonical(request.Map);
 
-            var file = new ZoneFile
-            {
-                Map = key,
-                HarvestedAt = DateTime.UtcNow.ToString("u"),
-                ClientVersion = request.ClientVersion ?? "",
-                Triggers = request.Triggers ?? new List<HarvestedTrigger>(),
-                QuestItems = request.QuestItems ?? new List<HarvestedQuestItem>()
-            };
-
             lock (_lock)
             {
+                if (!_cache.TryGetValue(key, out var existing))
+                    existing = Read(key);
+
+                var triggers = new Dictionary<string, HarvestedTrigger>(StringComparer.Ordinal);
+                var items = new Dictionary<string, HarvestedQuestItem>(StringComparer.Ordinal);
+
+                foreach (var t in existing?.Triggers ?? new List<HarvestedTrigger>()) triggers[TriggerKey(t)] = t;
+                foreach (var i in existing?.QuestItems ?? new List<HarvestedQuestItem>()) items[ItemKey(i)] = i;
+
+                // Newest wins on an exact match; anything new is added.
+                foreach (var t in request.Triggers ?? new List<HarvestedTrigger>()) triggers[TriggerKey(t)] = t;
+                foreach (var i in request.QuestItems ?? new List<HarvestedQuestItem>()) items[ItemKey(i)] = i;
+
+                var file = new ZoneFile
+                {
+                    Map = key,
+                    HarvestedAt = DateTime.UtcNow.ToString("u"),
+                    ClientVersion = request.ClientVersion ?? "",
+                    Triggers = new List<HarvestedTrigger>(triggers.Values),
+                    QuestItems = new List<HarvestedQuestItem>(items.Values)
+                };
+
                 try
                 {
                     System.IO.Directory.CreateDirectory(Folder);
@@ -96,14 +112,23 @@ namespace QuestTreeServer
                 }
 
                 _cache[key] = file;
+
+                var added = file.Triggers.Count - (existing?.Triggers.Count ?? 0);
+                logger.Info(
+                    $"Quest Tracker: {file.Triggers.Count} zones and {file.QuestItems.Count} quest items " +
+                    $"harvested on '{key}'" + (request.Map != key ? $" (as '{request.Map}')" : "") +
+                    (existing != null ? $", {added} new" : "") + ".");
+
+                return file;
             }
-
-            logger.Info(
-                $"Quest Tracker: {file.Triggers.Count} zones and {file.QuestItems.Count} quest items " +
-                $"harvested on '{key}'" + (request.Map != key ? $" (as '{request.Map}')" : "") + ".");
-
-            return file;
         }
+
+        /// <summary>The same keys the client de-duplicates with, so the two sides agree on what
+        /// "the same zone" means: id plus rounded position, since one zone can be several volumes.</summary>
+        private static string TriggerKey(HarvestedTrigger t) => $"{t.Id}|{t.X:F0}|{t.Y:F0}|{t.Z:F0}";
+
+        private static string ItemKey(HarvestedQuestItem i) =>
+            string.IsNullOrEmpty(i.ItemId) ? $"{i.TemplateId}|{i.X:F0}|{i.Y:F0}|{i.Z:F0}" : i.ItemId;
 
         private static string PathFor(string key) => System.IO.Path.Combine(Folder, key + ".json");
 
