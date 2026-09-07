@@ -338,6 +338,13 @@ namespace QuestTree
             Tooltips.SettingChanged += Raise;
             HoverSounds.SettingChanged += Raise;
 
+            // The three Behaviour entries that were bound and never hooked up - the same gap the
+            // Maps settings had above. Nothing on screen reads them live, so the miss was
+            // invisible from the panel; from the F12 menu it left the in-panel toggle stale.
+            OpenOnMap.SettingChanged += Raise;
+            HarvestZones.SettingChanged += Raise;
+            RememberLastView.SettingChanged += Raise;
+
             // Last, so a throw anywhere above leaves this false. Testing the first entry instead
             // reported ready after a partial Init, with every later entry still null - the exact
             // case this exists to catch.

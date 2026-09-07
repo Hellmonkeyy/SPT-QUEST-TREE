@@ -132,7 +132,7 @@ namespace QuestTree.UI
                 "Turning this off is a noticeable speed-up on very dense trader chains.",
                 ModSettings.DrawEdges);
             Toggle(column, ref y, "Focus on what you can work on",
-                "Show only quests in progress or available, plus what they need and unlock. Also X.",
+                "Show only quests in progress or available, plus what they need and unlock. Shortcut: X on the tree.",
                 ModSettings.FocusFrontier);
             Toggle(column, ref y, "Hide unobtainable quests",
                 "Other faction, seasonal event, and other-edition quests.",
@@ -145,11 +145,14 @@ namespace QuestTree.UI
                 ModSettings.HideTraderless);
 
             AuxLayout.AddSpacer(ref y, 6f);
-            Stepper(column, ref y, "Prerequisite line opacity %", ModSettings.EdgeOpacity, 2, 0, 60);
+            Stepper(column, ref y, "Prerequisite line opacity %", ModSettings.EdgeOpacity, 2, 0, 60,
+                "How visible the lines are at rest. Lines into a quest you can act on are drawn stronger regardless.");
             Stepper(column, ref y, "Hover dimming strength %", ModSettings.HoverDimStrength, 10, 0, 200,
                 "How far the rest of the tree fades around a hovered quest. 0 is off.");
-            Stepper(column, ref y, "Title-only below zoom %", ModSettings.TitleOnlyBelowZoom, 5, 30, 80);
-            Stepper(column, ref y, "Code-only below zoom %", ModSettings.CodesBelowZoom, 5, 15, 60);
+            Stepper(column, ref y, "Title-only below zoom %", ModSettings.TitleOnlyBelowZoom, 5, 30, 80,
+                "Zoomed out past this, a box shows only its title, larger.");
+            Stepper(column, ref y, "Code-only below zoom %", ModSettings.CodesBelowZoom, 5, 15, 60,
+                "Zoomed out past this, a box shows only its status bar and a short code such as GUN-3.");
             Stepper(column, ref y, "Max visible quests", ModSettings.MaxVisibleNodes, 100, 100, 2000,
                 "Ceiling on how many quest boxes exist at once. Only reachable when zoomed right out.");
 
@@ -227,8 +230,8 @@ namespace QuestTree.UI
                 ModSettings.ShowMapGuides);
 
             AuxLayout.AddSpacer(ref y, 6f);
-            Stepper(column, ref y, "Do next rows", ModSettings.DoNextRows, 1, 0, 20,
-                "How many quests the sidebar's 'Do next here' lists. 0 hides the section.");
+            Stepper(column, ref y, "Do next here rows", ModSettings.DoNextRows, 1, 0, 20,
+                "How many quests the map sidebar's 'Do next here' section lists. 0 hides it. The Do next view itself is not limited by this.");
             Stepper(column, ref y, "Extra map artwork rotation", ModSettings.MapArtworkRotation, 90, -270, 270,
                 "Added to the rotation each map already declares. 0 is right for every shipped map.");
 
