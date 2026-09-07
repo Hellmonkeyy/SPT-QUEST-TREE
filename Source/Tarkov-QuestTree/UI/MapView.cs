@@ -652,7 +652,7 @@ namespace QuestTree.UI
                     AddQuestRow(content, node, listX, ref y, node.Id == _selectedQuestId,
                         () => SelectQuest(node, entry, onRepaint));
 
-                    var reason = DoNextView.Reason(ranking, profile);
+                    var reason = DoNextView.Reason(ranking, profile, graph);
                     if (!string.IsNullOrEmpty(reason))
                         AddAt(content, $"<color=#FFFFFF60>{reason}</color>", listX + 22f, ref y, 16f, 11, inner - 22f);
                 }

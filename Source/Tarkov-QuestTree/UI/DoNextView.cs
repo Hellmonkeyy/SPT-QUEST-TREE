@@ -102,7 +102,7 @@ namespace QuestTree.UI
                     $"<color=#{hex}>{QuestNodeView.GlyphFor(node.Status)}</color>  {node.Name}  <color=#FFFFFF60>{node.TraderName}</color>",
                     x, ref y, width, false, () => onQuestSelected?.Invoke(captured));
 
-                var reason = Reason(entry, profile);
+                var reason = Reason(entry, profile, graph);
                 if (!string.IsNullOrEmpty(reason))
                     AuxLayout.AddLabelAt(parent, $"<color=#FFFFFF60>{reason}</color>", x + 22f, ref y, 16f, 11, width - 22f);
             }
@@ -137,22 +137,25 @@ namespace QuestTree.UI
 
         /// <summary>The one extra fact worth showing per row - what is left, or what is blocking.
         /// Shared with the map's sidebar, which ranks the same way for one map.</summary>
-        internal static string Reason(Ranked entry, ProfilePayloadDto profile) =>
-            Detail(entry, profile).TrimStart(' ', '·');
+        internal static string Reason(Ranked entry, ProfilePayloadDto profile, QuestGraphBuilder graph) =>
+            Detail(entry, profile, graph).TrimStart(' ', '·');
 
-        private static string Detail(Ranked entry, ProfilePayloadDto profile)
+        private static string Detail(Ranked entry, ProfilePayloadDto profile, QuestGraphBuilder graph)
         {
+            // A quest already accepted has no lock reason, so it fell through to "level 12" -
+            // the requirement of a quest you are already doing. What it is is objective progress.
+            if (entry.Bucket == Bucket.InProgress)
+                return $"  ·  {QuestSummary.ObjectiveProgress(entry.Node, profile)}";
+
             if (entry.Bucket == Bucket.ReadyToHandIn) return "  ·  all items held";
 
             if (entry.Bucket == Bucket.PartlyHeld)
                 return $"  ·  {Mathf.RoundToInt(entry.ItemProgress * 100f)}% of items";
 
-            if (profile?.LockReasons != null &&
-                profile.LockReasons.TryGetValue(entry.Node.Id, out var reason) &&
-                reason != null)
-            {
-                return $"  ·  {reason.Detail}";
-            }
+            // The same wording as the detail panel: trader named, "(you are N)" added,
+            // prerequisites resolved to quest names.
+            var locked = QuestSummary.LockReasonDetail(entry.Node, graph, profile);
+            if (locked != null) return $"  ·  {locked}";
 
             if (entry.Node.Level > 0) return $"  ·  level {entry.Node.Level}";
             return "";

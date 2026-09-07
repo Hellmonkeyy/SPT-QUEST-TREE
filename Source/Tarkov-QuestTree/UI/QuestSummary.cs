@@ -153,6 +153,16 @@ namespace QuestTree.UI
         internal static string FormatLockReason(
             QuestNode node, QuestGraphBuilder graph, ProfilePayloadDto profile)
         {
+            var detail = LockReasonDetail(node, graph, profile);
+            return detail == null ? null : $"<color=#D9A61A>Locked - {detail}</color>";
+        }
+
+        /// <summary>The gate as plain text, for a row that has its own colour and prefix - the
+        /// Do next reason line used to show the server's raw detail here, without the trader's
+        /// name or the "(you are N)" the detail panel adds.</summary>
+        internal static string LockReasonDetail(
+            QuestNode node, QuestGraphBuilder graph, ProfilePayloadDto profile)
+        {
             if (profile?.LockReasons == null) return null;
             if (!profile.LockReasons.TryGetValue(node.Id, out var reason) || reason == null) return null;
 
@@ -167,6 +177,15 @@ namespace QuestTree.UI
             if (reason.Kind == "Level" && reason.CurrentValue > 0)
                 detail = $"{detail} (you are {reason.CurrentValue})";
 
+            // The profile carries every trader's loyalty level; "requires loyalty level 3" was
+            // shown without the "you are LL2" that says how far off that is.
+            if (reason.Kind == "Loyalty" && !string.IsNullOrEmpty(reason.TraderId) && profile.Traders != null)
+            {
+                var trader = profile.Traders.FirstOrDefault(t => t != null && t.Id == reason.TraderId);
+                if (trader != null && trader.LoyaltyLevel > 0)
+                    detail = $"{detail} (you are LL{trader.LoyaltyLevel})";
+            }
+
             if (reason.Kind == "Prerequisite" && reason.BlockingQuestIds != null && graph != null)
             {
                 var names = reason.BlockingQuestIds
@@ -177,7 +196,40 @@ namespace QuestTree.UI
                 if (names.Count > 0) detail = $"Requires: {string.Join(", ", names)}";
             }
 
-            return $"<color=#D9A61A>Locked - {detail}</color>";
+            return detail;
+        }
+
+        /// <summary>A quest in progress in one line: objectives done of total, and the live count
+        /// of the one counter still moving when there is exactly one - "1/3 objectives · 7/15".
+        /// An objective the game keeps no counter for reads as not done, which is what it is.</summary>
+        internal static string ObjectiveProgress(QuestNode node, ProfilePayloadDto profile)
+        {
+            var objectives = node?.Dto?.Objectives;
+            if (objectives == null || objectives.Count == 0) return "in progress";
+
+            var total = 0;
+            var done = 0;
+            var moving = 0;
+            string counter = null;
+
+            foreach (var objective in objectives)
+            {
+                if (objective == null) continue;
+                total++;
+
+                if (!TryProgress(objective, profile, out var current, out var target)) continue;
+                if (current >= target)
+                {
+                    done++;
+                    continue;
+                }
+
+                moving++;
+                counter = $"{current}/{target}";
+            }
+
+            var text = $"{done}/{total} objectives";
+            return moving == 1 ? $"{text}  ·  {counter}" : text;
         }
 
         /// <summary>An objective with its live counter where the game is tracking one. Counters only
