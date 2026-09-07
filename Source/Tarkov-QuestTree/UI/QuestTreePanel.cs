@@ -67,6 +67,15 @@ namespace QuestTree.UI
         /// not boxes.</summary>
         private readonly Dictionary<string, (Image Underline, TMP_Text Text)> _tabStyles = new();
 
+        /// <summary>Trader id -> loyalty level as of the last tab build. Kept so a label refresh
+        /// inside the game's status event can rewrite the tabs without a fetch.</summary>
+        private Dictionary<string, int> _loyaltyByTrader = new();
+
+        /// <summary>Set by a status change; cleared by the refresh that acts on it. A hidden panel
+        /// cannot run the deferred refresh (no coroutines on an inactive GameObject), so Show
+        /// checks this and refreshes on the spot.</summary>
+        private bool _statusDirty;
+
         // The three pieces this shell coordinates. All plain classes rather than MonoBehaviours -
         // see each one's class comment for why - so they are created with the panel and wired up in
         // BuildShell. Each guards its own not-yet-built state, which is what lets Update call into
@@ -248,11 +257,13 @@ namespace QuestTree.UI
                 ShowLoading(true);
                 StartCoroutine(RebuildGraphDeferred(questController, session));
             }
-            else if (raidChanged)
+            else
             {
-                // Nothing to rebuild, so the panel comes back exactly as it was left - except that
-                // the player has since picked a raid, which is the one thing worth turning to.
-                PreselectRaidMap(raidLocation, showNow: true);
+                // Nothing to rebuild, so the panel comes back exactly as it was left - except for
+                // a hand-in made while it was shut (the flag is the deferred refresh's message to
+                // this path), and a raid picked since, which is the one thing worth turning to.
+                if (_statusDirty) RefreshAfterStatusChange();
+                if (raidChanged) PreselectRaidMap(raidLocation, showNow: true);
             }
         }
 
@@ -426,6 +437,12 @@ namespace QuestTree.UI
                 {
                     _graph.RefreshStatuses();
                     _graphView.RefreshNodeStatuses();
+
+                    // The rest - the open detail, the tab counts, the toolbar total, the filters
+                    // that depend on status - a frame later, outside the game's invocation list;
+                    // or on the next Show when the panel is hidden (see _statusDirty).
+                    _statusDirty = true;
+                    if (gameObject.activeInHierarchy) StartCoroutine(RefreshAfterStatusChangeDeferred());
                 }
                 else if (gameObject.activeInHierarchy)
                 {
@@ -441,6 +458,44 @@ namespace QuestTree.UI
             catch (Exception ex)
             {
                 Plugin.LogSource?.LogError($"QuestTree: failed to refresh quest statuses: {ex}");
+            }
+        }
+
+        private System.Collections.IEnumerator RefreshAfterStatusChangeDeferred()
+        {
+            yield return null;
+            RefreshAfterStatusChange();
+        }
+
+        /// <summary>Everything a status change moves besides the box colours. A list view is
+        /// rebuilt outright (they read the profile as they build); under a status-dependent
+        /// filter the tree is laid out again with the camera kept; otherwise only the labels,
+        /// the toolbar total and the open detail are rewritten.</summary>
+        private void RefreshAfterStatusChange()
+        {
+            if (!_statusDirty) return;
+            _statusDirty = false;
+            if (_graph == null || !_graph.HasFullQuestList) return;
+
+            try
+            {
+                if (IsAuxTab(_selectedTraderId))
+                {
+                    RenderSelectedTab();
+                    return;
+                }
+
+                var statusDecidesTheSet = ModSettings.Ready &&
+                                          (ModSettings.HideCompleted.Value || ModSettings.FocusFrontier.Value);
+                if (statusDecidesTheSet) RenderSelectedTab(frame: false);
+                else _graphView.RefreshNotice();
+
+                RefreshTabLabels();
+                _detail.Refresh();
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogError($"QuestTree: failed to refresh after a status change: {ex}");
             }
         }
 
@@ -786,29 +841,10 @@ namespace QuestTree.UI
             // Loyalty comes from the profile payload, which the client was fetching and ignoring.
             // It is what makes a "requires LL3" lock reason mean something - LL3 is meaningless
             // without knowing you are LL2.
-            var loyalty = BuildLoyaltyLookup();
+            _loyaltyByTrader = BuildLoyaltyLookup();
 
             foreach (var traderId in OrderedTraderIds(_graph.Nodes))
-            {
-                var label = _graph.TraderNames.TryGetValue(traderId, out var name) ? name : traderId;
-
-                // Completion per trader, so the row itself says where there is work left rather
-                // than requiring a click into each one.
-                var total = 0;
-                var done = 0;
-                foreach (var node in _graph.Nodes)
-                {
-                    if (node.TraderId != traderId) continue;
-                    total++;
-                    if (node.Status == ENodeStatus.Completed) done++;
-                }
-
-                var loyaltySuffix = loyalty.TryGetValue(traderId, out var level) && level > 0
-                    ? $"  LL{level}"
-                    : "";
-
-                CreateTabButton(label, $"{done}/{total}{loyaltySuffix}", traderId);
-            }
+                CreateTabButton(TraderLabel(traderId), TraderSuffix(traderId), traderId);
 
             // Maps / Items / Kappa / Settings are NOT here - they are whole views rather than a
             // slice of the quest graph, so they live together in the toolbar beside Close. The tab
@@ -822,6 +858,45 @@ namespace QuestTree.UI
 
             UpdateTabHighlight();
         }
+
+        private string TraderLabel(string traderId) =>
+            _graph.TraderNames.TryGetValue(traderId, out var name) ? name : traderId;
+
+        /// <summary>Completion per trader, so the row itself says where there is work left rather
+        /// than requiring a click into each one - plus the loyalty level when known.</summary>
+        private string TraderSuffix(string traderId)
+        {
+            var total = 0;
+            var done = 0;
+            foreach (var node in _graph.Nodes)
+            {
+                if (node.TraderId != traderId) continue;
+                total++;
+                if (node.Status == ENodeStatus.Completed) done++;
+            }
+
+            var loyaltySuffix = _loyaltyByTrader.TryGetValue(traderId, out var level) && level > 0
+                ? $"  LL{level}"
+                : "";
+
+            return $"{done}/{total}{loyaltySuffix}";
+        }
+
+        /// <summary>Rewrites the trader tabs' done/total in place - what a hand-in changes -
+        /// without rebuilding the tab objects. Loyalty is the lookup BuildTabs made, not a fresh
+        /// fetch: this runs a frame after the game's own status event, where a blocking request
+        /// has no place.</summary>
+        private void RefreshTabLabels()
+        {
+            foreach (var (traderId, style) in _tabStyles)
+            {
+                if (traderId == AllTradersId || style.Text == null) continue;
+                style.Text.text = TabLabel(TraderLabel(traderId), TraderSuffix(traderId));
+            }
+        }
+
+        private static string TabLabel(string name, string suffix) =>
+            string.IsNullOrEmpty(suffix) ? name : $"{name}  <color=#FFFFFF60>{suffix}</color>";
 
         /// <summary>Trader id -> loyalty level, or empty when the server half is unavailable. Built
         /// once per tab rebuild rather than per trader, since it is one cached fetch either way.</summary>
@@ -902,7 +977,7 @@ namespace QuestTree.UI
             text.alignment = TextAlignmentOptions.Left;
             text.enableWordWrapping = false;
             text.overflowMode = TextOverflowModes.Ellipsis;
-            text.text = string.IsNullOrEmpty(suffix) ? name : $"{name}  <color=#FFFFFF60>{suffix}</color>";
+            text.text = TabLabel(name, suffix);
             text.raycastTarget = false;
             GameStyle.Apply(text);
 
@@ -1160,7 +1235,9 @@ namespace QuestTree.UI
         /// a graph filtered to a trader id no quest has, and drew an empty panel. One predicate, so
         /// a sixth view cannot bring that back.
         /// </summary>
-        private void RenderSelectedTab()
+        private void RenderSelectedTab() => RenderSelectedTab(frame: true);
+
+        private void RenderSelectedTab(bool frame)
         {
             var aux = IsAuxTab(_selectedTraderId);
             _toolbar.SetTreeControlsVisible(!aux);
@@ -1178,7 +1255,7 @@ namespace QuestTree.UI
                 ? _graph.Nodes
                 : _graph.Nodes.Where(n => n.TraderId == _selectedTraderId).ToList();
 
-            _graphView.Render(candidates);
+            _graphView.Render(candidates, frame);
         }
 
         /// <summary>Swaps the graph viewport in and the Kappa/Settings surface out.</summary>

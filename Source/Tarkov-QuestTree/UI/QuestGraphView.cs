@@ -285,7 +285,11 @@ namespace QuestTree.UI
         /// browsable rather than truncated. <see cref="RefreshVisibleNodes"/> builds what is on
         /// screen.
         /// </summary>
-        public void Render(IReadOnlyList<QuestNode> candidates)
+        public void Render(IReadOnlyList<QuestNode> candidates) => Render(candidates, frame: true);
+
+        /// <summary>As above; with <paramref name="frame"/> off the camera stays where it is,
+        /// for a re-layout the player did not ask for (a status change under a filter).</summary>
+        public void Render(IReadOnlyList<QuestNode> candidates, bool frame)
         {
             ClearGraphViews();
 
@@ -296,6 +300,8 @@ namespace QuestTree.UI
                 .Where(node => PassesFilters(node) && (frontier == null || frontier.Contains(node)))
                 .Where(_toolbar.MatchesSearch)
                 .ToList();
+            _lastCandidateCount = candidates.Count;
+            _lastFocused = frontier != null;
             _toolbar.UpdateRenderNotice(matching.Count, candidates.Count, frontier != null);
 
             if (matching.Count == 0)
@@ -319,7 +325,7 @@ namespace QuestTree.UI
             // Put the camera on the content that was just laid out. Without this the view keeps
             // whatever position it had, so searching while panned to a far corner of a 5,000-quest
             // tree showed an empty screen even though the search had matched.
-            FrameContent();
+            if (frame) FrameContent();
 
             // Force the first sweep: the content transform has not moved, so Tick would not fire.
             _lastContentPosition = _content.anchoredPosition;
@@ -636,6 +642,16 @@ namespace QuestTree.UI
         /// not built yet at this moment.
         /// </summary>
         public void FrameContent() => FrameNodes(_layoutOrder, reserveDetail: true);
+
+        /// <summary>What the last Render told the toolbar, so the counts can be re-issued when
+        /// statuses move underneath them without laying anything out again.</summary>
+        private int _lastCandidateCount;
+        private bool _lastFocused;
+
+        /// <summary>Re-issues the toolbar's "N shown · C of T completed" line from the last
+        /// render - the completed total is what a hand-in changes.</summary>
+        public void RefreshNotice() =>
+            _toolbar?.UpdateRenderNotice(_layoutOrder.Length, _lastCandidateCount, _lastFocused);
 
         /// <summary>The first quest in layout order - the top of the first column, which is the
         /// earliest match in the chain - or null when nothing is laid out.</summary>

@@ -494,6 +494,15 @@ namespace QuestTree.UI
             }
         }
 
+        /// <summary>Rebuilds the open detail from current data - a hand-in moves the counters,
+        /// the status chip and the lock reason, and the panel used to keep the old ones until it
+        /// was closed and reopened. Nothing to do while closed; a panel hidden for a view switch
+        /// is rebuilt when it is next shown anyway.</summary>
+        public void Refresh()
+        {
+            if (IsOpen && _detailNode != null) Show(_detailNode);
+        }
+
         public void Hide()
         {
             _detailNode = null;
