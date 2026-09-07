@@ -78,14 +78,20 @@ namespace QuestTree.UI
         /// <summary>
         /// The hover dimming falls off with distance from the hovered quest, radially, rather than
         /// switching every other node to one flat alpha: the boxes around the one you are reading
-        /// stay legible, and the far tree recedes further than a flat dim ever could. Distances are
-        /// in layout units - a column is 260, a row 112 - so the inner radius is roughly the
-        /// neighbouring columns and the outer one about five columns out.
+        /// stay legible, and the far tree recedes further than a flat dim ever could.
+        ///
+        /// The radii are SCREEN pixels, converted to layout units by the zoom when applied. That is
+        /// what ties the effect to how far in you are: zoomed in, a 260px ring is a couple of
+        /// neighbours and everything else drops away; zoomed out, the same ring spans half the
+        /// tree and the overview stays readable. The dim itself also hardens with zoom - see
+        /// <see cref="DimAlphas"/>.
         /// </summary>
-        private const float HighlightInnerRadius = 320f;
-        private const float HighlightOuterRadius = 1500f;
-        private const float NearDimAlpha = 0.6f;
-        private const float FarDimAlpha = 0.1f;
+        private const float HighlightInnerScreenRadius = 260f;
+        private const float HighlightOuterScreenRadius = 1100f;
+
+        /// <summary>The quest whose chain is lit, kept so a zoom during the hover can re-apply the
+        /// falloff at the new scale.</summary>
+        private QuestNode _hoveredNode;
 
         /// <summary>Level of detail the built views are currently drawn at (QuestNodeView.SetDetailLevel).</summary>
         private int _detailLevel;
@@ -341,7 +347,8 @@ namespace QuestTree.UI
 
             // Edges are drawn in content space, so a 1px hairline at a quarter zoom is a quarter
             // of a screen pixel - nothing. Re-aim the built ones with a thickness that holds on
-            // screen whenever the zoom moves.
+            // screen whenever the zoom moves - and, if a quest is hovered, repaint its falloff,
+            // whose radii are screen pixels too.
             if (!Mathf.Approximately(zoom, _edgeZoom))
             {
                 _edgeZoom = zoom;
@@ -351,6 +358,8 @@ namespace QuestTree.UI
                     var edge = _edgeLayout[index];
                     UILineConnector.Apply(line, edge.FromPoint, edge.ToPoint, ScreenThickness(EdgeStyleFor(index).Thickness));
                 }
+
+                if (_hoveredNode != null) ApplyHighlightFalloff();
             }
 
             // --- nodes ---
@@ -438,6 +447,7 @@ namespace QuestTree.UI
 
             _highlighted.Clear();
             _highlighted.Add(node);
+            _hoveredNode = node;
 
             foreach (var prerequisiteId in node.PrerequisiteIds)
             {
@@ -448,7 +458,24 @@ namespace QuestTree.UI
             foreach (var unlocked in node.Unlocks)
                 _highlighted.Add(unlocked);
 
-            var origin = _layout.TryGetValue(node, out var centre)
+            ApplyHighlightFalloff();
+        }
+
+        /// <summary>
+        /// Paints the hover dimming for the current zoom: chain members at full strength, every
+        /// other built box and edge faded by its screen distance from the hovered quest. Called by
+        /// HighlightChain, and again from the visibility sweep when the zoom moves mid-hover.
+        /// </summary>
+        private void ApplyHighlightFalloff()
+        {
+            if (_hoveredNode == null || _content == null) return;
+
+            var zoom = Mathf.Max(0.05f, _content.localScale.x);
+            var inner = HighlightInnerScreenRadius / zoom;
+            var outer = HighlightOuterScreenRadius / zoom;
+            var (near, far) = DimAlphas(zoom);
+
+            var origin = _layout.TryGetValue(_hoveredNode, out var centre)
                 ? centre + new Vector2(QuestNodeView.Width * 0.5f, 0f)
                 : Vector2.zero;
 
@@ -461,7 +488,7 @@ namespace QuestTree.UI
                 }
 
                 var position = _layout.TryGetValue(built, out var at) ? at + new Vector2(QuestNodeView.Width * 0.5f, 0f) : origin;
-                view.SetDimAlpha(FalloffAlpha(Vector2.Distance(position, origin), NearDimAlpha, FarDimAlpha));
+                view.SetDimAlpha(FalloffAlpha(Vector2.Distance(position, origin), inner, outer, near, far));
             }
 
             // An edge only counts as part of the chain when BOTH of its ends are in it, otherwise
@@ -481,17 +508,26 @@ namespace QuestTree.UI
                 }
 
                 var midpoint = (edge.FromPoint + edge.ToPoint) * 0.5f;
-                var alpha = FalloffAlpha(Vector2.Distance(midpoint, origin), 0.12f, 0.03f);
+                var alpha = FalloffAlpha(Vector2.Distance(midpoint, origin), inner, outer, near * 0.2f, far * 0.3f);
                 UILineConnector.SetColor(line, new Color(1f, 1f, 1f, alpha));
             }
+        }
+
+        /// <summary>How hard the dim bites at this zoom. Close in, the rest of the tree is context
+        /// you asked to look past, so it drops to almost nothing; zoomed out, it is the overview
+        /// you are navigating by, so it only softens.</summary>
+        private static (float Near, float Far) DimAlphas(float zoom)
+        {
+            var t = Mathf.InverseLerp(MinZoom, MaxZoom, zoom);
+            return (Mathf.Lerp(0.8f, 0.5f, t), Mathf.Lerp(0.4f, 0.06f, t));
         }
 
         /// <summary>Alpha for something <paramref name="distance"/> layout units from the hovered
         /// quest: <paramref name="near"/> inside the inner radius, <paramref name="far"/> beyond
         /// the outer one, eased between.</summary>
-        private static float FalloffAlpha(float distance, float near, float far)
+        private static float FalloffAlpha(float distance, float inner, float outer, float near, float far)
         {
-            var t = Mathf.InverseLerp(HighlightInnerRadius, HighlightOuterRadius, distance);
+            var t = Mathf.InverseLerp(inner, outer, distance);
             t = t * t * (3f - 2f * t); // smoothstep - a linear ramp reads as a hard ring
             return Mathf.Lerp(near, far, t);
         }
@@ -501,6 +537,7 @@ namespace QuestTree.UI
         {
             if (_highlighted.Count == 0) return;
             _highlighted.Clear();
+            _hoveredNode = null;
 
             foreach (var view in _views.Values)
                 view.SetDimmed(false);
