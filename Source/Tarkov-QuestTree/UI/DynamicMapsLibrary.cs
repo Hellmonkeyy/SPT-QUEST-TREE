@@ -155,9 +155,9 @@ namespace QuestTree.UI
 
             public int DefaultLevel;
 
-            /// <summary>The map's declared coordinate rotation. Read but not yet applied: it is the
-            /// prime suspect for how the artwork is turned relative to game coordinates, and the
-            /// artwork-rotation setting exists to confirm that before it is wired in.</summary>
+            /// <summary>The map's declared coordinate rotation, applied to the artwork
+            /// (MapView.PlaceArtwork) and to percentage-placed objective pins (MapView.PositionFor).
+            /// The artwork-rotation setting adds to it for a map whose data is wrong.</summary>
             public int CoordinateRotation;
 
             /// <summary>The floor to open on: the config's declared default where that exists, else

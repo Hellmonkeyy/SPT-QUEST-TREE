@@ -1521,25 +1521,6 @@ namespace QuestTree.UI
 
         /// <summary>A panel behind a column, so its text reads as a block rather than as words lying
         /// loose on whatever is behind them.</summary>
-        private static RectTransform AddCard(
-            RectTransform parent, float x, float y, float width, float height)
-        {
-            var go = new GameObject("Card", typeof(RectTransform), typeof(Image));
-            var rect = (RectTransform)go.transform;
-            rect.SetParent(parent, worldPositionStays: false);
-            rect.anchorMin = rect.anchorMax = new Vector2(0f, 1f);
-            rect.pivot = new Vector2(0f, 1f);
-            rect.anchoredPosition = new Vector2(x, -y);
-            rect.sizeDelta = new Vector2(width, height);
-
-            var image = go.GetComponent<Image>();
-            image.color = new Color(1f, 1f, 1f, 0.04f);
-            image.raycastTarget = false;
-            GameStyle.ApplyPanel(image);
-
-            return rect;
-        }
-
         /// <summary>The map's own author credit, shown because the images are someone else's work
         /// (tarkov.dev, via DynamicMaps) and their licence is only satisfied with attribution.</summary>
         private static void AddCredit(
