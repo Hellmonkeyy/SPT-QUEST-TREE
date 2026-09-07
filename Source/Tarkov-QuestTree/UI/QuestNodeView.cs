@@ -331,8 +331,12 @@ namespace QuestTree.UI
 
             if (code.Length < 2)
             {
-                // One short word, or all stopwords: the first letters of the word itself.
-                var word = head.Replace("'", "");
+                // One meaningful word ("The Punisher", "Ambulance"): the first letters of THAT
+                // word, not of the article in front of it - "THE-3" nine times over told nobody
+                // anything.
+                var word = head.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries)
+                    .Select(w => w.Trim('(', ')', '"', ',', '.').Replace("'", ""))
+                    .FirstOrDefault(w => w.Length > 0 && !Stopwords.Contains(w)) ?? head.Replace("'", "");
                 code = word.Length <= 3 ? word.ToUpperInvariant() : word.Substring(0, 3).ToUpperInvariant();
             }
 
