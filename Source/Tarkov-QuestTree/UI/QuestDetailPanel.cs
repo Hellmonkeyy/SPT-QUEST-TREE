@@ -335,7 +335,7 @@ namespace QuestTree.UI
                 foreach (var prereqId in node.PrerequisiteIds)
                 {
                     if (_graph != null && _graph.NodesById.TryGetValue(prereqId, out var prereq))
-                        AddQuestLink(prereq, width, ref y);
+                        AddQuestLink(prereq, width, ref y, QuestSummary.PrerequisiteNote(node, prereqId));
                     else
                         AuxLayout.AddLabelAt(_content, prereqId, 0f, ref y, AuxLayout.RowHeight, 12, width);
                 }
@@ -415,15 +415,17 @@ namespace QuestTree.UI
         }
 
         /// <summary>A quest named as a row you can click to go to it: glyph and name in the status
-        /// colour, the trader beside it when it is a different one.</summary>
-        private void AddQuestLink(QuestNode target, float width, ref float y)
+        /// colour, the trader beside it when it is a different one, and a dim note after that
+        /// when the caller has one (a prerequisite's terms).</summary>
+        private void AddQuestLink(QuestNode target, float width, ref float y, string note = null)
         {
             var hex = QuestNodeView.HexFor(target.Status);
             var trader = _detailNode != null && target.TraderId == _detailNode.TraderId
                 ? ""
                 : $"  <color=#FFFFFF60>{target.TraderName}</color>";
+            var suffix = note == null ? "" : $"  <color=#FFFFFF60>{note}</color>";
 
-            var text = $"<color=#{hex}>{QuestNodeView.GlyphFor(target.Status)}</color>  {target.Name}{trader}";
+            var text = $"<color=#{hex}>{QuestNodeView.GlyphFor(target.Status)}</color>  {target.Name}{trader}{suffix}";
             var captured = target;
 
             AuxLayout.AddClickableRow(_content, text, _left, ref y, width, false,

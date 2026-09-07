@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using QuestTree.QuestGraph;
@@ -60,9 +61,11 @@ namespace QuestTree.UI
                 lines.Add("<b>Requires</b>");
                 foreach (var prereqId in node.PrerequisiteIds)
                 {
+                    var note = PrerequisiteNote(node, prereqId);
+                    var suffix = note == null ? "" : $"  <color=#FFFFFF60>{note}</color>";
                     lines.Add(graph != null && graph.NodesById.TryGetValue(prereqId, out var prereq)
-                        ? $"{prereq.Name} ({prereq.TraderName})"
-                        : prereqId);
+                        ? $"{prereq.Name} ({prereq.TraderName}){suffix}"
+                        : prereqId + suffix);
                 }
                 lines.Add("");
             }
@@ -198,6 +201,32 @@ namespace QuestTree.UI
 
             return detail;
         }
+
+        /// <summary>What a prerequisite actually asks for, when it is not the usual "complete
+        /// it": "(started is enough)" for a chain that opens on accepting the earlier quest, and
+        /// "(N h after)" for a timed gate. Both were in the payload from the start and never
+        /// shown, so a time-gated quest read as flatly locked. The gate is in seconds - the SPT
+        /// wiki's quest sheet says so, whatever the server DTO's old comment said.</summary>
+        internal static string PrerequisiteNote(QuestNode node, string prerequisiteId)
+        {
+            var dto = node?.Dto?.Prerequisites?.FirstOrDefault(p => p != null && p.Target == prerequisiteId);
+            if (dto == null) return null;
+
+            var notes = new List<string>();
+
+            if (dto.Status != null && dto.Status.Count > 0 &&
+                !dto.Status.Any(s => string.Equals(s, "Success", StringComparison.OrdinalIgnoreCase)))
+            {
+                notes.Add("started is enough");
+            }
+
+            if (dto.AvailableAfter > 0) notes.Add($"{Duration(dto.AvailableAfter)} after");
+
+            return notes.Count == 0 ? null : $"({string.Join(", ", notes)})";
+        }
+
+        private static string Duration(int seconds) =>
+            seconds >= 3600 ? $"{seconds / 3600} h" : $"{Math.Max(1, seconds / 60)} min";
 
         /// <summary>A quest in progress in one line: objectives done of total, and the live count
         /// of the one counter still moving when there is exactly one - "1/3 objectives · 7/15".
