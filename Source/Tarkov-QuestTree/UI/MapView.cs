@@ -1213,7 +1213,9 @@ namespace QuestTree.UI
                         ? opened.Name
                         : null);
                 label.fontSize = 13;
-                label.color = isSelected ? colour : new Color(0.96f, 0.96f, 0.94f, 1f);
+                // The pin's own colour, so the name says the status the pin does. Full alpha: a
+                // dimmed off-floor pin is a hint, but its name has to be readable when asked for.
+                label.color = new Color(colour.r, colour.g, colour.b, 1f);
                 label.alignment = TextAlignmentOptions.Left;
                 label.enableWordWrapping = false;
                 label.overflowMode = TextOverflowModes.Ellipsis;
