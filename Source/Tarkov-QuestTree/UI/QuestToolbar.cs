@@ -198,7 +198,9 @@ namespace QuestTree.UI
             var background = buttonRect.GetComponent<Image>();
             if (background != null) _viewButtonBackgrounds[tabId] = background;
 
-            return width + 6f;
+            // Adjacent, not spaced: the views are one control with one selection, and a row of
+            // touching segments says that where six separate buttons did not.
+            return width + 1f;
         }
 
         /// <summary>One toolbar action button. Returns the width it consumed so the caller can keep

@@ -62,6 +62,11 @@ namespace QuestTree.UI
         private readonly QuestGraphBuilder _graph = new();
         private readonly Dictionary<string, Image> _tabBackgrounds = new();
 
+        /// <summary>What a tab changes when selected: its underline and its text colour. The
+        /// background stays clear either way - the Tasks screen's tabs are text with an underline,
+        /// not boxes.</summary>
+        private readonly Dictionary<string, (Image Underline, TMP_Text Text)> _tabStyles = new();
+
         // The three pieces this shell coordinates. All plain classes rather than MonoBehaviours -
         // see each one's class comment for why - so they are created with the panel and wired up in
         // BuildShell. Each guards its own not-yet-built state, which is what lets Update call into
@@ -392,7 +397,7 @@ namespace QuestTree.UI
                 showIntro: () => ShowIntro(true));
 
             BuildTabRow(root);
-            _detail.Build(root, _graph);
+            _detail.Build(root, _graph, FocusNode, ShowOnMap, () => _session);
             BuildIntroPanel(root);
         }
 
@@ -410,7 +415,7 @@ namespace QuestTree.UI
             _introPanel.SetParent(root, worldPositionStays: false);
             _introPanel.anchorMin = _introPanel.anchorMax = new Vector2(0.5f, 0.5f);
             _introPanel.pivot = new Vector2(0.5f, 0.5f);
-            _introPanel.sizeDelta = new Vector2(470f, 340f);
+            _introPanel.sizeDelta = new Vector2(470f, 360f);
             _introPanel.anchoredPosition = Vector2.zero;
 
             var background = panelGo.GetComponent<Image>();
@@ -432,7 +437,9 @@ namespace QuestTree.UI
             // The views are the least discoverable thing here - they are buttons in the corner, and
             // nothing about the tree suggests an item watchlist exists at all.
             AuxLayout.AddText(_introPanel, ref y,
-                "<b>Top right:</b> Do next, Maps, Items, Kappa, Settings", 20f, 12);
+                "<b>Top right:</b> Tree, Maps, Do next, Items, Kappa, Settings", 20f, 12);
+            AuxLayout.AddText(_introPanel, ref y,
+                "<color=#FFFFFF80>The tracker opens on the map; Tree is the full quest graph.</color>", 18f, 11);
             AuxLayout.AddText(_introPanel, ref y,
                 "<color=#FFFFFF80>Do next ranks what you are closest to finishing;</color>", 18f, 11);
             AuxLayout.AddText(_introPanel, ref y,
@@ -657,9 +664,10 @@ namespace QuestTree.UI
             foreach (Transform child in _tabContent)
                 Destroy(child.gameObject);
             _tabBackgrounds.Clear();
+            _tabStyles.Clear();
             _tabCursorX = 8f;
 
-            CreateTabButton("All", AllTradersId);
+            CreateTabButton("All", "", AllTradersId);
 
             // Loyalty comes from the profile payload, which the client was fetching and ignoring.
             // It is what makes a "requires LL3" lock reason mean something - LL3 is meaningless
@@ -685,7 +693,7 @@ namespace QuestTree.UI
                     ? $"  LL{level}"
                     : "";
 
-                CreateTabButton($"{label}  {done}/{total}{loyaltySuffix}", traderId);
+                CreateTabButton(label, $"{done}/{total}{loyaltySuffix}", traderId);
             }
 
             // Maps / Items / Kappa / Settings are NOT here - they are whole views rather than a
@@ -721,23 +729,37 @@ namespace QuestTree.UI
 
         /// <summary>Distinct trader ids from `nodes`, ordered by display name - shared by BuildTabs
         /// and RenderSelectedTab's "All" branch so the two can't drift out of sync.</summary>
-        private List<string> OrderedTraderIds(IEnumerable<QuestNode> nodes) =>
-            nodes.Select(n => n.TraderId)
-                .Distinct()
-                .OrderBy(id => _graph.TraderNames.TryGetValue(id, out var name) ? name : id, StringComparer.OrdinalIgnoreCase)
-                .ToList();
-
-        private void CreateTabButton(string label, string traderId)
+        /// <summary>Traders with something to do first, so the useful tabs are on screen without
+        /// scrolling the row; alphabetical within that.</summary>
+        private List<string> OrderedTraderIds(IEnumerable<QuestNode> nodes)
         {
-            // Only real trader tabs get a portrait - "All", Kappa and Settings have no trader to
-            // draw, and reserving the icon gutter for them would just leave their label off-centre.
-            var hasIcon = traderId != AllTradersId && !IsAuxTab(traderId);
-            // Upper bound raised from 180 once tabs started carrying "done/total" counts - at 180
-            // the longest trader names ellipsized their own count away. The row scrolls, so extra
-            // width costs nothing but a little more scrolling.
-            var width = Mathf.Clamp(label.Length * 8f + 24f + (hasIcon ? 20f : 0f), 70f, 240f);
+            var list = nodes.ToList();
+            var actionable = new Dictionary<string, int>();
 
-            var tabGo = new GameObject($"Tab_{(traderId == AllTradersId ? "All" : label)}", typeof(RectTransform), typeof(Image), typeof(Button));
+            foreach (var node in list)
+            {
+                if (node.Status != ENodeStatus.Active && node.Status != ENodeStatus.Available) continue;
+                actionable.TryGetValue(node.TraderId, out var count);
+                actionable[node.TraderId] = count + 1;
+            }
+
+            return list.Select(n => n.TraderId)
+                .Distinct()
+                .OrderByDescending(id => actionable.TryGetValue(id, out var count) ? count : 0)
+                .ThenBy(id => _graph.TraderNames.TryGetValue(id, out var name) ? name : id, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+
+        /// <summary>One tab: the trader's portrait, their name as written, and the count in a
+        /// quieter colour. Selected is an accent underline and full-strength text; unselected is
+        /// dim text on nothing - the Tasks screen's own tab treatment, and far more legible than
+        /// the boxed uppercase-11px this replaced.</summary>
+        private void CreateTabButton(string name, string suffix, string traderId)
+        {
+            var hasIcon = traderId != AllTradersId && !IsAuxTab(traderId);
+            var width = Mathf.Clamp(name.Length * 7f + suffix.Length * 6f + 28f + (hasIcon ? 24f : 0f), 60f, 260f);
+
+            var tabGo = new GameObject($"Tab_{(traderId == AllTradersId ? "All" : name)}", typeof(RectTransform), typeof(Image), typeof(Button));
             var tabRect = (RectTransform)tabGo.transform;
             tabRect.SetParent(_tabContent, worldPositionStays: false);
             tabRect.anchorMin = tabRect.anchorMax = new Vector2(0f, 1f);
@@ -746,8 +768,9 @@ namespace QuestTree.UI
             tabRect.sizeDelta = new Vector2(width, TabHeight);
             _tabCursorX += width + 4f;
 
+            // Clear, but still a raycast target so the Button receives the click.
             var background = tabGo.GetComponent<Image>();
-            GameStyle.ApplyPanel(background);
+            background.color = Color.clear;
             _tabBackgrounds[traderId] = background;
 
             if (hasIcon) CreateTabIcon(tabRect, traderId);
@@ -757,25 +780,39 @@ namespace QuestTree.UI
             textRect.SetParent(tabRect, worldPositionStays: false);
             textRect.anchorMin = Vector2.zero;
             textRect.anchorMax = Vector2.one;
-            textRect.offsetMin = new Vector2(hasIcon ? 22f : 0f, 0f);
-            // Both offsets must be set on a stretched rect: offsetMax would otherwise keep the
-            // RectTransform's default sizeDelta and leave the label ~100px taller than this 28px
-            // tab, floating it above the row instead of sitting beside the trader portrait.
-            textRect.offsetMax = Vector2.zero;
+            textRect.offsetMin = new Vector2(hasIcon ? 30f : 8f, 0f);
+            textRect.offsetMax = new Vector2(-6f, 0f);
+
             var text = textGo.AddComponent<TextMeshProUGUI>();
-            text.fontSize = 11;
-            text.alignment = TextAlignmentOptions.Center;
-            text.text = label.ToUpperInvariant();
+            text.fontSize = 12;
+            text.alignment = TextAlignmentOptions.Left;
+            text.enableWordWrapping = false;
+            text.overflowMode = TextOverflowModes.Ellipsis;
+            text.text = string.IsNullOrEmpty(suffix) ? name : $"{name}  <color=#FFFFFF60>{suffix}</color>";
+            text.raycastTarget = false;
             GameStyle.Apply(text);
+
+            var underlineGo = new GameObject("Underline", typeof(RectTransform), typeof(Image));
+            var underline = (RectTransform)underlineGo.transform;
+            underline.SetParent(tabRect, worldPositionStays: false);
+            underline.anchorMin = new Vector2(0f, 0f);
+            underline.anchorMax = new Vector2(1f, 0f);
+            underline.pivot = new Vector2(0.5f, 0f);
+            underline.anchoredPosition = Vector2.zero;
+            underline.sizeDelta = new Vector2(-8f, 2f);
+            var underlineImage = underlineGo.GetComponent<Image>();
+            underlineImage.color = GameStyle.AccentColor;
+            underlineImage.raycastTarget = false;
+            underlineGo.SetActive(false);
+
+            _tabStyles[traderId] = (underlineImage, text);
 
             var button = tabGo.GetComponent<Button>();
             button.targetGraphic = background;
             button.onClick.AddListener(() => SelectTab(traderId));
+            GameStyle.AddHoverFeedback(tabGo, background);
         }
 
-        /// <summary>Puts a real trader portrait next to the tab label, matching eft.monster's
-        /// per-trader row treatment - Trader.GetAndAssignAvatar is the same call the game's own
-        /// trader-card UI uses, so this needs no image fetching/caching of its own.</summary>
         private void CreateTabIcon(RectTransform tabRect, string traderId)
         {
             var trader = _session?.Traders?.FirstOrDefault(t => t.Id == traderId);
@@ -827,6 +864,30 @@ namespace QuestTree.UI
         /// <summary>The tabs that are not the quest graph, and so ignore search and filters.</summary>
         /// <summary>The non-graph views, in the order they appear right-to-left from Close. Kappa
         /// sits innermost because it is the one you open most often.</summary>
+        /// <summary>Selects and frames a quest in the graph, switching to a tab that contains it
+        /// first if the current one does not - a prerequisite from another trader is not in that
+        /// trader's tab, and the map is not a tab at all.</summary>
+        private void FocusNode(QuestNode node)
+        {
+            if (node == null) return;
+
+            if (IsAuxTab(_selectedTraderId) || (_selectedTraderId != AllTradersId && node.TraderId != _selectedTraderId))
+                SelectTab(AllTradersId);
+
+            _graphView.FocusNode(node);
+        }
+
+        /// <summary>Opens the map on a quest: the detail panel's "show on the map" row.</summary>
+        private void ShowOnMap(QuestNode node)
+        {
+            if (node == null) return;
+
+            MapView.ShowQuest(node);
+
+            if (_selectedTraderId == MapsTabId) RenderSelectedTab();
+            else SelectTab(MapsTabId);
+        }
+
         private static readonly (string TabId, string Label)[] ViewButtons =
         {
             (SettingsTabId, "Settings"),
@@ -893,8 +954,12 @@ namespace QuestTree.UI
 
         private void UpdateTabHighlight()
         {
-            foreach (var (traderId, background) in _tabBackgrounds)
-                background.color = traderId == _selectedTraderId ? SelectedTabColor : UnselectedTabColor;
+            foreach (var (traderId, style) in _tabStyles)
+            {
+                var selected = traderId == _selectedTraderId;
+                if (style.Underline != null) style.Underline.gameObject.SetActive(selected);
+                if (style.Text != null) style.Text.color = selected ? GameStyle.TextColor : GameStyle.DimTextColor;
+            }
 
             // The Tree button lights whenever a graph tab is up, whichever trader it is.
             _toolbar.SetViewHighlight(

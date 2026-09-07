@@ -511,6 +511,22 @@ namespace QuestTree.UI
         /// </summary>
         public void FrameContent() => FrameNodes(_layoutOrder);
 
+        /// <summary>Frames a quest with its immediate neighbours and opens its detail - what a
+        /// clickable prerequisite or unlock row in the detail panel does. Framing the neighbourhood
+        /// rather than the one box keeps the zoom sane and shows what it connects to.</summary>
+        public void FocusNode(QuestNode node)
+        {
+            if (node == null || _graph == null) return;
+
+            var chain = new List<QuestNode> { node };
+            foreach (var prerequisiteId in node.PrerequisiteIds)
+                if (_graph.NodesById.TryGetValue(prerequisiteId, out var prerequisite)) chain.Add(prerequisite);
+            chain.AddRange(node.Unlocks);
+
+            FrameNodes(chain);
+            _onNodeClicked?.Invoke(node);
+        }
+
         /// <summary>Frames a subset of the laid-out nodes. Used both for "fit everything" and for
         /// "show me the quests I can actually work on".</summary>
         private void FrameNodes(System.Collections.Generic.IEnumerable<QuestNode> nodes)

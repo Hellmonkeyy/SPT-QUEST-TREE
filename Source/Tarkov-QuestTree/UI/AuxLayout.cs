@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using EFT.UI;
 using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
@@ -283,6 +284,190 @@ namespace QuestTree.UI
             var button = go.GetComponent<Button>();
             button.targetGraphic = background;
             button.onClick.AddListener(() => onClick());
+        }
+
+        /// <summary>A single line at an explicit x and width, ellipsised - a label, not prose.</summary>
+        public static TMP_Text AddLabelAt(
+            RectTransform parent, string text, float x, ref float y, float height, int fontSize, float width)
+        {
+            var go = new GameObject("Row", typeof(RectTransform));
+            var rect = (RectTransform)go.transform;
+            rect.SetParent(parent, worldPositionStays: false);
+            rect.anchorMin = rect.anchorMax = new Vector2(0f, 1f);
+            rect.pivot = new Vector2(0f, 1f);
+            rect.anchoredPosition = new Vector2(x, -y);
+            rect.sizeDelta = new Vector2(width, height);
+
+            var label = go.AddComponent<TextMeshProUGUI>();
+            label.text = text;
+            label.fontSize = fontSize;
+            label.color = Color.white;
+            label.alignment = TextAlignmentOptions.Left;
+            label.enableWordWrapping = false;
+            label.overflowMode = TextOverflowModes.Ellipsis;
+            label.raycastTarget = false;
+            GameStyle.Apply(label);
+
+            y += height;
+            return label;
+        }
+
+        /// <summary>Prose: wraps at the width, and takes the height it needs. Sized from TMP's own
+        /// preferred height, because wrapped text has no height until measured - otherwise every
+        /// line after a wrapped one is drawn on top of it. Empty text is spacing.</summary>
+        public static void AddWrapped(
+            RectTransform parent, string text, float x, ref float y, float width, int fontSize = 12)
+        {
+            if (text == null) return;
+
+            if (text.Length == 0)
+            {
+                y += 6f;
+                return;
+            }
+
+            var go = new GameObject("Detail", typeof(RectTransform));
+            var rect = (RectTransform)go.transform;
+            rect.SetParent(parent, worldPositionStays: false);
+            rect.anchorMin = rect.anchorMax = new Vector2(0f, 1f);
+            rect.pivot = new Vector2(0f, 1f);
+            rect.anchoredPosition = new Vector2(x, -y);
+
+            var label = go.AddComponent<TextMeshProUGUI>();
+            label.text = text;
+            label.fontSize = fontSize;
+            label.color = Color.white;
+            label.alignment = TextAlignmentOptions.TopLeft;
+            label.enableWordWrapping = true;
+            label.raycastTarget = false;
+            GameStyle.Apply(label);
+
+            var height = Mathf.Max(16f, label.GetPreferredValues(text, width, 0f).y);
+            rect.sizeDelta = new Vector2(width, height);
+            y += height + 2f;
+        }
+
+        /// <summary>
+        /// One clickable line. Built by hand rather than as text alone because a bare TextMeshProUGUI
+        /// has no raycast target at all; the Image is what makes the row hit-testable. It is fully
+        /// transparent when unselected, and Unity still raycasts a zero-alpha Graphic.
+        /// </summary>
+        public static RectTransform AddClickableRow(
+            RectTransform parent, string text, float x, ref float y, float width, bool selected,
+            System.Action onClick, float height = RowHeight)
+        {
+            var go = new GameObject("ClickRow", typeof(RectTransform), typeof(Image), typeof(Button));
+            var rect = (RectTransform)go.transform;
+            rect.SetParent(parent, worldPositionStays: false);
+            rect.anchorMin = rect.anchorMax = new Vector2(0f, 1f);
+            rect.pivot = new Vector2(0f, 1f);
+            rect.anchoredPosition = new Vector2(x, -y);
+            rect.sizeDelta = new Vector2(width, height);
+
+            var background = go.GetComponent<Image>();
+            var accent = GameStyle.AccentColor;
+            background.color = selected ? new Color(accent.r, accent.g, accent.b, 0.22f) : Color.clear;
+
+            var button = go.GetComponent<Button>();
+            button.targetGraphic = background;
+            button.onClick.AddListener(() =>
+            {
+                GameStyle.PlaySound(EUISoundType.ButtonClick);
+                onClick?.Invoke();
+            });
+            GameStyle.AddHoverFeedback(go, background);
+
+            var labelGo = new GameObject("Label", typeof(RectTransform));
+            var labelRect = (RectTransform)labelGo.transform;
+            labelRect.SetParent(rect, worldPositionStays: false);
+            labelRect.anchorMin = Vector2.zero;
+            labelRect.anchorMax = Vector2.one;
+            labelRect.offsetMin = new Vector2(4f, 0f);
+            labelRect.offsetMax = Vector2.zero;
+
+            var label = labelGo.AddComponent<TextMeshProUGUI>();
+            label.text = text;
+            label.fontSize = 12;
+            label.color = Color.white;
+            label.alignment = TextAlignmentOptions.Left;
+            label.enableWordWrapping = false;
+            label.overflowMode = TextOverflowModes.Ellipsis;
+            label.raycastTarget = false;
+            GameStyle.Apply(label);
+
+            y += height;
+            return rect;
+        }
+
+        /// <summary>A small tag - status, level, map - tinted with its colour. Advances x.</summary>
+        public static void AddChip(RectTransform parent, string text, Color color, ref float x, float y, float height = 18f)
+        {
+            var width = text.Length * 6.5f + 14f;
+
+            var go = new GameObject("Chip", typeof(RectTransform), typeof(Image));
+            var rect = (RectTransform)go.transform;
+            rect.SetParent(parent, worldPositionStays: false);
+            rect.anchorMin = rect.anchorMax = new Vector2(0f, 1f);
+            rect.pivot = new Vector2(0f, 1f);
+            rect.anchoredPosition = new Vector2(x, -y);
+            rect.sizeDelta = new Vector2(width, height);
+
+            var background = go.GetComponent<Image>();
+            background.color = new Color(color.r, color.g, color.b, 0.18f);
+            background.raycastTarget = false;
+            GameStyle.ApplyPanel(background);
+
+            var labelGo = new GameObject("Label", typeof(RectTransform));
+            var labelRect = (RectTransform)labelGo.transform;
+            labelRect.SetParent(rect, worldPositionStays: false);
+            labelRect.anchorMin = Vector2.zero;
+            labelRect.anchorMax = Vector2.one;
+            labelRect.offsetMin = Vector2.zero;
+            labelRect.offsetMax = Vector2.zero;
+
+            var label = labelGo.AddComponent<TextMeshProUGUI>();
+            label.text = text;
+            label.fontSize = 10;
+            label.fontStyle = FontStyles.Bold;
+            label.alignment = TextAlignmentOptions.Center;
+            label.enableWordWrapping = false;
+            label.raycastTarget = false;
+            GameStyle.Apply(label);
+            label.color = new Color(color.r, color.g, color.b, 1f);
+
+            x += width + 6f;
+        }
+
+        /// <summary>A thin bar showing a fraction done - an objective's counter, say.</summary>
+        public static void AddProgressBar(RectTransform parent, float fraction, float x, ref float y, float width, Color fill)
+        {
+            const float height = 4f;
+            fraction = Mathf.Clamp01(fraction);
+
+            var trackGo = new GameObject("Track", typeof(RectTransform), typeof(Image));
+            var track = (RectTransform)trackGo.transform;
+            track.SetParent(parent, worldPositionStays: false);
+            track.anchorMin = track.anchorMax = new Vector2(0f, 1f);
+            track.pivot = new Vector2(0f, 1f);
+            track.anchoredPosition = new Vector2(x, -y);
+            track.sizeDelta = new Vector2(width, height);
+            var trackImage = trackGo.GetComponent<Image>();
+            trackImage.color = new Color(1f, 1f, 1f, 0.12f);
+            trackImage.raycastTarget = false;
+
+            var fillGo = new GameObject("Fill", typeof(RectTransform), typeof(Image));
+            var fillRect = (RectTransform)fillGo.transform;
+            fillRect.SetParent(track, worldPositionStays: false);
+            fillRect.anchorMin = new Vector2(0f, 0f);
+            fillRect.anchorMax = new Vector2(0f, 1f);
+            fillRect.pivot = new Vector2(0f, 0.5f);
+            fillRect.anchoredPosition = Vector2.zero;
+            fillRect.sizeDelta = new Vector2(width * fraction, 0f);
+            var fillImage = fillGo.GetComponent<Image>();
+            fillImage.color = fill;
+            fillImage.raycastTarget = false;
+
+            y += height + 6f;
         }
 
         public static float AddSpacer(ref float y, float height = 12f)

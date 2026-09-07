@@ -1,47 +1,72 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
+using System.Threading.Tasks;
+using EFT;
 using QuestTree.QuestGraph;
 using TMPro;
 using UnityEngine;
 using UnityEngine.UI;
 
 namespace QuestTree.UI
+
 {
     /// <summary>
-    /// The side panel that opens when a quest node is clicked: prerequisites, objectives, rewards,
-    /// what the quest unlocks, and a link to its wiki page.
+    /// The side panel that opens when a quest node is clicked: who gives it, what gates it, what it
+    /// asks for and how far along that is, what it pays, and what it opens up - laid out as rows a
+    /// player can act on rather than one block of text. Prerequisite, route and unlock rows select
+    /// that quest in the graph; an objective with a place has a "show on map" row.
     ///
     /// A plain class, not a MonoBehaviour: it has no per-frame work and no Unity lifecycle of its
     /// own. It is opened by a node's click callback and closed by its own X button or by Escape,
     /// which the panel's Update forwards - see QuestTreePanel.Update.
+    ///
+    /// Rows are built on a y cursor into a scroll view, the way the map's sidebar is. Same
+    /// primitives (AuxLayout), same section headers, so the two read as one design.
     /// </summary>
     internal sealed class QuestDetailPanel
     {
         /// <summary>Width when expanded, and the sliver left behind when collapsed - just enough
         /// to keep the chevron on screen so the panel can be brought back.</summary>
-        private const float ExpandedWidth = 320f;
+        private const float ExpandedWidth = 360f;
         private const float CollapsedWidth = 26f;
 
+        private const float Inset = 12f;
+
+        /// <summary>Room above the content for the close and collapse buttons.</summary>
+        private const float TopChrome = 34f;
+
+        private const int RouteSteps = 12;
+
         private QuestGraphBuilder _graph;
+        private Action<QuestNode> _focusNode;
+        private Action<QuestNode> _showOnMap;
+        private Func<IEftSession> _session;
+
         private RectTransform _detailPanel;
-        private TMP_Text _detailText;
+        private RectTransform _content;
         private QuestNode _detailNode;
 
-        /// <summary>Everything except the collapse chevron, so collapsing hides the content without
-        /// having to reach for each piece individually.</summary>
-        /// <summary>The children hidden when collapsed - everything except the chevron itself.
-        /// Tracked as they are built rather than reparented under a container, because moving the
-        /// existing children would change sibling/draw order for no benefit.</summary>
-        private readonly System.Collections.Generic.List<GameObject> _collapsible = new();
-
+        /// <summary>The children hidden when collapsed - everything except the chevron itself.</summary>
+        private readonly List<GameObject> _collapsible = new();
         private TMP_Text _collapseGlyph;
 
         public bool IsOpen => _detailPanel != null && _detailPanel.gameObject.activeSelf;
 
-        public void Build(RectTransform root, QuestGraphBuilder graph)
+        /// <param name="focusNode">Selects and frames a quest in the graph - what a prerequisite,
+        /// route or unlock row does when clicked.</param>
+        /// <param name="showOnMap">Switches to the map with this quest selected.</param>
+        /// <param name="session">The live session, for the trader's portrait. A function, since the
+        /// session arrives with Show and the panel is built before it.</param>
+        public void Build(
+            RectTransform root, QuestGraphBuilder graph, Action<QuestNode> focusNode,
+            Action<QuestNode> showOnMap, Func<IEftSession> session)
         {
             _graph = graph;
+            _focusNode = focusNode;
+            _showOnMap = showOnMap;
+            _session = session;
 
             var panelGo = new GameObject("DetailPanel", typeof(RectTransform), typeof(Image));
             _detailPanel = (RectTransform)panelGo.transform;
@@ -51,29 +76,43 @@ namespace QuestTree.UI
             _detailPanel.pivot = new Vector2(1f, 0.5f);
             _detailPanel.sizeDelta = new Vector2(ExpandedWidth, -40f);
             _detailPanel.anchoredPosition = new Vector2(0f, -20f);
+
             var detailBackground = panelGo.GetComponent<Image>();
             detailBackground.color = GameStyle.ScreenColor;
             GameStyle.ApplyPanel(detailBackground);
 
-            const float wikiButtonHeight = 32f;
+            // The content scrolls: a locked quest deep in a chain has a route, prerequisites and
+            // rewards that together run past any screen. Its Image is clear but still hit-testable,
+            // which is what lets the wheel reach the ScrollRect.
+            var scrollGo = new GameObject(
+                "DetailScroll", typeof(RectTransform), typeof(Image), typeof(RectMask2D), typeof(ScrollRect));
+            var scrollRect = (RectTransform)scrollGo.transform;
+            scrollRect.SetParent(_detailPanel, worldPositionStays: false);
+            scrollRect.anchorMin = Vector2.zero;
+            scrollRect.anchorMax = Vector2.one;
+            scrollRect.offsetMin = new Vector2(Inset, Inset);
+            scrollRect.offsetMax = new Vector2(-Inset, -TopChrome);
+            scrollGo.GetComponent<Image>().color = Color.clear;
+            _collapsible.Add(scrollGo);
 
-            var textGo = new GameObject("Text", typeof(RectTransform));
-            var textRect = (RectTransform)textGo.transform;
-            textRect.SetParent(_detailPanel, worldPositionStays: false);
-            textRect.anchorMin = Vector2.zero;
-            textRect.anchorMax = Vector2.one;
-            textRect.offsetMin = new Vector2(12f, 12f + wikiButtonHeight + 8f); // leaves room for the wiki button below
-            textRect.offsetMax = new Vector2(-12f, -12f);
+            var contentGo = new GameObject("DetailContent", typeof(RectTransform));
+            _content = (RectTransform)contentGo.transform;
+            _content.SetParent(scrollRect, worldPositionStays: false);
+            _content.anchorMin = new Vector2(0f, 1f);
+            _content.anchorMax = new Vector2(1f, 1f);
+            _content.pivot = new Vector2(0f, 1f);
+            _content.anchoredPosition = Vector2.zero;
+            _content.sizeDelta = Vector2.zero;
 
-            _detailText = textGo.AddComponent<TextMeshProUGUI>();
-            _detailText.fontSize = 13;
-            _detailText.color = Color.white;
-            _detailText.enableWordWrapping = true;
-            GameStyle.Apply(_detailText);
-            _collapsible.Add(textGo);
+            var scroll = scrollGo.GetComponent<ScrollRect>();
+            scroll.content = _content;
+            scroll.viewport = scrollRect;
+            scroll.horizontal = false;
+            scroll.vertical = true;
+            scroll.movementType = ScrollRect.MovementType.Clamped;
+            scroll.scrollSensitivity = 30f;
 
             BuildDetailCloseButton();
-            BuildWikiButton(wikiButtonHeight);
             BuildCollapseButton();
 
             // Restore whatever collapse state was left from last session before the panel is ever
@@ -83,11 +122,11 @@ namespace QuestTree.UI
             _detailPanel.gameObject.SetActive(false);
         }
 
-        /// <summary>
-        /// Collapses the panel to a sliver instead of dismissing it. Distinct from the X on purpose:
-        /// X clears the selected quest, this keeps it and just gives the graph its 320px back, so
-        /// you can look at the tree and come straight back to the same quest.
-        /// </summary>
+        // ------------------------------------------------------------------ chrome
+
+        /// <summary>Collapses the panel to a sliver instead of dismissing it. Distinct from the X on
+        /// purpose: X clears the selected quest, this keeps it and just gives the graph its width
+        /// back, so you can look at the tree and come straight back to the same quest.</summary>
         private void BuildCollapseButton()
         {
             const float size = 22f;
@@ -104,19 +143,7 @@ namespace QuestTree.UI
             background.color = new Color(1f, 1f, 1f, 0.1f);
             GameStyle.ApplyPanel(background);
 
-            var labelGo = new GameObject("Text", typeof(RectTransform));
-            var labelRect = (RectTransform)labelGo.transform;
-            labelRect.SetParent(rect, worldPositionStays: false);
-            labelRect.anchorMin = Vector2.zero;
-            labelRect.anchorMax = Vector2.one;
-            labelRect.offsetMin = Vector2.zero;
-            labelRect.offsetMax = Vector2.zero;
-
-            _collapseGlyph = labelGo.AddComponent<TextMeshProUGUI>();
-            _collapseGlyph.fontSize = 12;
-            _collapseGlyph.alignment = TextAlignmentOptions.Center;
-            _collapseGlyph.color = Color.white;
-            GameStyle.Apply(_collapseGlyph);
+            _collapseGlyph = CreateCentredLabel(rect, "", 12);
 
             var button = go.GetComponent<Button>();
             button.targetGraphic = background;
@@ -126,7 +153,6 @@ namespace QuestTree.UI
         private void ToggleCollapsed()
         {
             var collapsed = !(ModSettings.Ready && ModSettings.DetailPanelCollapsed.Value);
-
             if (ModSettings.Ready) ModSettings.DetailPanelCollapsed.Value = collapsed;
             ApplyCollapsed(collapsed);
         }
@@ -145,11 +171,6 @@ namespace QuestTree.UI
             if (_collapseGlyph != null) _collapseGlyph.text = collapsed ? "<" : ">";
         }
 
-        /// <summary>
-        /// Dismisses the detail panel. Until this existed the panel could only ever be opened -
-        /// clicking one quest cost 320px of graph for the rest of the session, which is the single
-        /// most obviously unfinished thing about the UI.
-        /// </summary>
         private void BuildDetailCloseButton()
         {
             const float size = 22f;
@@ -161,96 +182,281 @@ namespace QuestTree.UI
             closeRect.pivot = new Vector2(1f, 1f);
             closeRect.anchoredPosition = new Vector2(-6f, -6f);
             closeRect.sizeDelta = new Vector2(size, size);
-
             _collapsible.Add(closeGo);
 
             var background = closeGo.GetComponent<Image>();
             background.color = new Color(1f, 1f, 1f, 0.1f);
             GameStyle.ApplyPanel(background);
 
-            var labelGo = new GameObject("Text", typeof(RectTransform));
-            var labelRect = (RectTransform)labelGo.transform;
-            labelRect.SetParent(closeRect, worldPositionStays: false);
-            labelRect.anchorMin = Vector2.zero;
-            labelRect.anchorMax = Vector2.one;
-            labelRect.offsetMin = Vector2.zero;
-            labelRect.offsetMax = Vector2.zero;
-
-            var label = labelGo.AddComponent<TextMeshProUGUI>();
-            label.text = "X";
-            label.fontSize = 12;
-            label.alignment = TextAlignmentOptions.Center;
-            label.color = Color.white;
-            GameStyle.Apply(label);
+            CreateCentredLabel(closeRect, "X", 12);
 
             var button = closeGo.GetComponent<Button>();
             button.targetGraphic = background;
             button.onClick.AddListener(Hide);
         }
 
-        /// <summary>Opens the quest's page on the official EFT wiki - the same Application.OpenURL
-        /// call Raid Review itself uses for its own external link. URL pattern
-        /// (https://escapefromtarkov.fandom.com/wiki/&lt;Name_With_Underscores&gt;) confirmed against
-        /// real wiki pages, not guessed; a handful of quest names won't map exactly (disambiguation
-        /// pages, punctuation) without a full id-to-slug table, which isn't worth building for this.</summary>
-        private void BuildWikiButton(float height)
+        private static TMP_Text CreateCentredLabel(RectTransform parent, string text, int fontSize)
         {
-            var buttonGo = new GameObject("WikiButton", typeof(RectTransform), typeof(Image), typeof(Button));
-            var buttonRect = (RectTransform)buttonGo.transform;
-            buttonRect.SetParent(_detailPanel, worldPositionStays: false);
-            buttonRect.anchorMin = new Vector2(0f, 0f);
-            buttonRect.anchorMax = new Vector2(1f, 0f);
-            buttonRect.pivot = new Vector2(0.5f, 0f);
-            buttonRect.anchoredPosition = new Vector2(0f, 12f);
-            buttonRect.sizeDelta = new Vector2(-24f, height);
-            _collapsible.Add(buttonGo);
-
-            var background = buttonGo.GetComponent<Image>();
-            background.color = new Color(0.2f, 0.35f, 0.45f, 0.9f);
-            GameStyle.ApplyPanel(background);
-
             var labelGo = new GameObject("Text", typeof(RectTransform));
             var labelRect = (RectTransform)labelGo.transform;
-            labelRect.SetParent(buttonRect, worldPositionStays: false);
+            labelRect.SetParent(parent, worldPositionStays: false);
             labelRect.anchorMin = Vector2.zero;
             labelRect.anchorMax = Vector2.one;
             labelRect.offsetMin = Vector2.zero;
             labelRect.offsetMax = Vector2.zero;
+
             var label = labelGo.AddComponent<TextMeshProUGUI>();
-            label.text = "Open Wiki Page";
-            label.fontSize = 12;
+            label.text = text;
+            label.fontSize = fontSize;
             label.alignment = TextAlignmentOptions.Center;
             label.color = Color.white;
+            label.raycastTarget = false;
             GameStyle.Apply(label);
-
-            var button = buttonGo.GetComponent<Button>();
-            button.targetGraphic = background;
-            button.onClick.AddListener(() =>
-            {
-                if (_detailNode == null) return;
-
-                try
-                {
-                    var slug = Uri.EscapeDataString(_detailNode.Name.Replace(' ', '_'));
-                    Application.OpenURL($"https://escapefromtarkov.fandom.com/wiki/{slug}");
-                }
-                catch (Exception ex)
-                {
-                    Plugin.LogSource?.LogWarning($"QuestTree: failed to open wiki page: {ex.Message}");
-                }
-            });
+            return label;
         }
+
+        // ------------------------------------------------------------------ content
 
         public void Show(QuestNode node)
         {
+            if (node == null || _content == null) return;
+
             _detailNode = node;
 
-            // The lines themselves live in QuestSummary, shared with the Maps tab's quest list -
-            // the two screens say the same things about a quest and only lay them out differently.
-            var lines = QuestSummary.Lines(node, _graph, QuestDataClient.GetProfile());
+            // Detached before destroying: Destroy is deferred to the end of the frame, and the old
+            // rows would otherwise draw over the new ones for a frame.
+            for (var i = _content.childCount - 1; i >= 0; i--)
+            {
+                var child = _content.GetChild(i);
+                child.SetParent(null);
+                UnityEngine.Object.Destroy(child.gameObject);
+            }
 
-            _detailText.text = string.Join("\n", lines.Where(l => l != null));
+            var profile = QuestDataClient.GetProfile();
+            var width = ExpandedWidth - Inset * 2f;
+            var y = 0f;
+
+            try
+            {
+                BuildHeader(node, profile, width, ref y);
+                BuildSections(node, profile, width, ref y);
+            }
+            catch (Exception ex)
+            {
+                // A malformed modded quest must not leave the panel empty and silent.
+                Plugin.LogSource?.LogWarning($"QuestTree: could not lay out the detail for '{node.Name}': {ex.Message}");
+                AuxLayout.AddWrapped(_content, "<color=#C86464>Could not show this quest - see the BepInEx log.</color>", 0f, ref y, width);
+            }
+
+            _content.sizeDelta = new Vector2(0f, y + Inset);
+            _content.anchoredPosition = Vector2.zero;
             _detailPanel.gameObject.SetActive(true);
+        }
+
+        private void BuildHeader(QuestNode node, ProfilePayloadDto profile, float width, ref float y)
+        {
+            const float avatar = 36f;
+            var textX = avatar + 10f;
+
+            AddAvatar(node, avatar, y);
+
+            var nameY = y;
+            AuxLayout.AddWrapped(_content, $"<b>{node.Name}</b>", textX, ref nameY, width - textX, 16);
+            AuxLayout.AddLabelAt(_content, $"<color=#FFFFFF80>{node.TraderName}</color>", textX, ref nameY, 16f, 11, width - textX);
+            y = Mathf.Max(nameY, y + avatar) + 6f;
+
+            // Chips: the facts that gate the quest, at a glance and in the palette the tree uses.
+            var chipX = 0f;
+            AuxLayout.AddChip(_content, QuestNodeView.NameFor(node.Status), QuestNodeView.ColorFor(node.Status), ref chipX, y);
+            if (node.Level > 0) AuxLayout.AddChip(_content, $"Lv {node.Level}", GameStyle.TextColor, ref chipX, y);
+            if (!string.IsNullOrEmpty(node.LocationId) && !node.LocationId.Equals("any", StringComparison.OrdinalIgnoreCase))
+                AuxLayout.AddChip(_content, node.LocationId, GameStyle.TextColor, ref chipX, y);
+            if (node.IsKappaRequired) AuxLayout.AddChip(_content, "Kappa", new Color(0.85f, 0.65f, 0.1f), ref chipX, y);
+            y += 26f;
+
+            // Faction- and edition-locked quests are shown rather than hidden, so this is what stops
+            // one reading as a bug in the tree.
+            if (node.UnobtainableReason != null)
+                AuxLayout.AddWrapped(_content, $"<color=#C86464>{node.UnobtainableReason}</color>", 0f, ref y, width);
+
+            // The single gate actually stopping you, computed server-side against your level,
+            // loyalty and standing.
+            var lockReason = QuestSummary.FormatLockReason(node, _graph, profile);
+            if (!string.IsNullOrEmpty(lockReason))
+                AuxLayout.AddWrapped(_content, lockReason, 0f, ref y, width);
+
+            AuxLayout.AddClickableRow(_content, "<color=#FFFFFF80>Open the wiki page  ↗</color>", 0f, ref y, width, false, OpenWiki, 20f);
+            y += 6f;
+        }
+
+        private void BuildSections(QuestNode node, ProfilePayloadDto profile, float width, ref float y)
+        {
+            // Requires - named here rather than drawn as a line, since a prerequisite from another
+            // trader has no node in a single-trader tab. Clicking one selects it in the graph.
+            if (node.PrerequisiteIds.Count > 0)
+            {
+                AuxLayout.AddSectionHeader(_content, ref y, "Requires", 0f, width);
+
+                foreach (var prereqId in node.PrerequisiteIds)
+                {
+                    if (_graph != null && _graph.NodesById.TryGetValue(prereqId, out var prereq))
+                        AddQuestLink(prereq, width, ref y);
+                    else
+                        AuxLayout.AddLabelAt(_content, prereqId, 0f, ref y, AuxLayout.RowHeight, 12, width);
+                }
+
+                y += 8f;
+            }
+
+            // Route - the chain still to walk to reach a locked quest.
+            if (node.Status != ENodeStatus.Completed && _graph != null)
+            {
+                var route = QuestRoute.Remaining(node, _graph);
+
+                // A single step is already spelled out by Requires; a one-item route is noise.
+                if (route.Count >= 2)
+                {
+                    AuxLayout.AddSectionHeader(_content, ref y, $"Route  ·  {route.Count} quests", 0f, width);
+
+                    foreach (var step in route.Take(RouteSteps))
+                        AddQuestLink(step, width, ref y);
+
+                    if (route.Count > RouteSteps)
+                        AuxLayout.AddLabelAt(_content, $"<color=#FFFFFF60>+{route.Count - RouteSteps} more</color>", 0f, ref y, AuxLayout.RowHeight, 11, width);
+
+                    y += 8f;
+                }
+            }
+
+            // Objectives - with the live counter as a bar where the profile has one, and the way to
+            // the map when the quest happens somewhere.
+            var objectives = node.NecessaryObjectives.ToList();
+            if (objectives.Count > 0)
+            {
+                AuxLayout.AddSectionHeader(_content, ref y, "Objectives", 0f, width);
+
+                foreach (var objective in objectives)
+                {
+                    AuxLayout.AddWrapped(_content, QuestSummary.FormatObjective(objective, profile), 0f, ref y, width);
+
+                    if (QuestSummary.TryProgress(objective, profile, out var current, out var target) && target > 0)
+                        AuxLayout.AddProgressBar(_content, (float)current / target, 0f, ref y, width, QuestNodeView.ColorFor(ENodeStatus.Completed));
+                }
+
+                var hasPlace = !string.IsNullOrEmpty(node.LocationKey) &&
+                               !node.LocationKey.Equals("any", StringComparison.OrdinalIgnoreCase);
+                if (hasPlace && _showOnMap != null)
+                {
+                    y += 2f;
+                    AuxLayout.AddClickableRow(_content, $"<color=#{ColorUtility.ToHtmlStringRGB(GameStyle.AccentColor)}>◎  Show on the map</color>",
+                        0f, ref y, width, false, () => _showOnMap(node), 22f);
+                }
+
+                y += 8f;
+            }
+
+            var rewards = node.Rewards
+                .Select(r => QuestSummary.FormatReward(r, _graph))
+                .Where(r => !string.IsNullOrEmpty(r))
+                .ToList();
+
+            if (rewards.Count > 0)
+            {
+                AuxLayout.AddSectionHeader(_content, ref y, "Rewards", 0f, width);
+
+                foreach (var reward in rewards)
+                    AuxLayout.AddWrapped(_content, reward, 0f, ref y, width);
+
+                y += 8f;
+            }
+
+            if (node.Unlocks.Count > 0)
+            {
+                AuxLayout.AddSectionHeader(_content, ref y, "Unlocks", 0f, width);
+
+                foreach (var unlocked in node.Unlocks)
+                    AddQuestLink(unlocked, width, ref y);
+            }
+        }
+
+        /// <summary>A quest named as a row you can click to go to it: glyph and name in the status
+        /// colour, the trader beside it when it is a different one.</summary>
+        private void AddQuestLink(QuestNode target, float width, ref float y)
+        {
+            var hex = QuestNodeView.HexFor(target.Status);
+            var trader = _detailNode != null && target.TraderId == _detailNode.TraderId
+                ? ""
+                : $"  <color=#FFFFFF60>{target.TraderName}</color>";
+
+            var text = $"<color=#{hex}>{QuestNodeView.GlyphFor(target.Status)}</color>  {target.Name}{trader}";
+            var captured = target;
+
+            AuxLayout.AddClickableRow(_content, text, 0f, ref y, width, false,
+                () => _focusNode?.Invoke(captured));
+        }
+
+        /// <summary>The trader's portrait, from the game's own avatar loader - the same call the
+        /// trader cards use, so there is no image fetching of our own. Silently absent when the
+        /// session has no such trader (a modded quest with no trader, say).</summary>
+        private void AddAvatar(QuestNode node, float size, float y)
+        {
+            var session = _session?.Invoke();
+            var trader = session?.Traders?.FirstOrDefault(t => t.Id == node.TraderId);
+            if (trader == null) return;
+
+            var iconGo = new GameObject("Avatar", typeof(RectTransform), typeof(Image));
+            var iconRect = (RectTransform)iconGo.transform;
+            iconRect.SetParent(_content, worldPositionStays: false);
+            iconRect.anchorMin = iconRect.anchorMax = new Vector2(0f, 1f);
+            iconRect.pivot = new Vector2(0f, 1f);
+            iconRect.anchoredPosition = new Vector2(0f, -y);
+            iconRect.sizeDelta = new Vector2(size, size);
+            iconGo.GetComponent<Image>().raycastTarget = false;
+
+            var cancel = iconGo.AddComponent<CancelOnDestroy>();
+
+            try
+            {
+                trader.GetAndAssignAvatar(iconGo.GetComponent<Image>(), cancel.Token)
+                    .ContinueWith(
+                        t => Plugin.LogSource?.LogWarning($"QuestTree: trader avatar load failed for '{node.TraderId}': {t.Exception?.GetBaseException().Message}"),
+                        TaskContinuationOptions.OnlyOnFaulted);
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning($"QuestTree: failed to load trader avatar for '{node.TraderId}': {ex.Message}");
+            }
+        }
+
+        /// <summary>The avatar load is async and the rows are destroyed on every Show; this ties
+        /// the load's lifetime to the row's so a late result never lands on a dead Image.</summary>
+        private sealed class CancelOnDestroy : MonoBehaviour
+        {
+            private readonly CancellationTokenSource _cts = new();
+            public CancellationToken Token => _cts.Token;
+
+            public void OnDestroy()
+            {
+                _cts.Cancel();
+                _cts.Dispose();
+            }
+        }
+
+        /// <summary>Opens the quest's page on the official EFT wiki. URL pattern confirmed against
+        /// real wiki pages; a handful of names won't map exactly (disambiguation, punctuation).</summary>
+        private void OpenWiki()
+        {
+            if (_detailNode == null) return;
+
+            try
+            {
+                var slug = Uri.EscapeDataString(_detailNode.Name.Replace(' ', '_'));
+                Application.OpenURL($"https://escapefromtarkov.fandom.com/wiki/{slug}");
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning($"QuestTree: failed to open wiki page: {ex.Message}");
+            }
         }
 
         public void Hide()
@@ -260,9 +466,8 @@ namespace QuestTree.UI
         }
 
         /// <summary>Takes the panel off screen without forgetting which quest it was showing -
-        /// exactly what switching to a Kappa/Settings tab did inline before this class existed.
-        /// Kept distinct from <see cref="Hide"/>, which also clears the remembered node, so the
-        /// split changes no behaviour.</summary>
+        /// what switching to a whole-screen view does. Kept distinct from <see cref="Hide"/>, which
+        /// also clears the remembered node.</summary>
         public void HideForTabSwitch()
         {
             if (_detailPanel != null) _detailPanel.gameObject.SetActive(false);

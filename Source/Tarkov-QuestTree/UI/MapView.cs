@@ -136,6 +136,27 @@ namespace QuestTree.UI
         private static string _pendingScrollQuestId;
         private static float? _pendingScrollY;
 
+        /// <summary>Prepares the view to open on a quest: its map, its floor, its row expanded and
+        /// its pin flown to. The caller switches to the Maps view afterwards; the next Build does
+        /// the rest. If the accepted-only filter would hide the quest, the filter is lifted - it
+        /// makes no sense to be sent to a pin that is then not drawn.</summary>
+        public static void ShowQuest(QuestNode node)
+        {
+            if (node == null || string.IsNullOrEmpty(node.LocationKey)) return;
+
+            _selectedLocationKey = node.LocationKey;
+            _selectedQuestId = node.Id;
+            _pendingFocusQuestId = node.Id;
+            _pendingScrollQuestId = node.Id;
+            _pickerOpen = false;
+            _floorPickerOpen = false;
+
+            SelectFloorFor(node.Id, DynamicMapsLibrary.FindByLocationKey(node.LocationKey));
+
+            if (StartedOnly && node.Status != ENodeStatus.Active && ModSettings.Ready)
+                ModSettings.MarkStartedOnly.Value = false;
+        }
+
         /// <summary>
         /// The map view, filling <paramref name="panelSize"/>: the control row along the top, the
         /// map below it on the left, the sidebar on the right. The map is the point of the whole

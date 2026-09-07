@@ -147,7 +147,7 @@ namespace QuestTree.UI
         /// named from the client's own trader list rather than the server guessing a display name,
         /// and a prerequisite names the actual quest, since the client has the graph to resolve it.
         /// </summary>
-        private static string FormatLockReason(
+        internal static string FormatLockReason(
             QuestNode node, QuestGraphBuilder graph, ProfilePayloadDto profile)
         {
             if (profile?.LockReasons == null) return null;
@@ -179,7 +179,21 @@ namespace QuestTree.UI
 
         /// <summary>An objective with its live counter where the game is tracking one. Counters only
         /// exist for quests actually in progress, so most objectives render unchanged.</summary>
-        private static string FormatObjective(ObjectiveDto objective, ProfilePayloadDto profile)
+        /// <summary>The live counter behind an objective, when the profile payload has one.</summary>
+        internal static bool TryProgress(ObjectiveDto objective, ProfilePayloadDto profile, out int current, out int target)
+        {
+            current = 0;
+            target = 0;
+
+            if (objective == null || profile?.ConditionProgress == null || string.IsNullOrEmpty(objective.Id)) return false;
+            if (!profile.ConditionProgress.TryGetValue(objective.Id, out var done)) return false;
+
+            target = Mathf.Max(1, objective.Count);
+            current = Mathf.Clamp((int)done, 0, target);
+            return true;
+        }
+
+        internal static string FormatObjective(ObjectiveDto objective, ProfilePayloadDto profile)
         {
             if (objective == null) return "";
             if (profile?.ConditionProgress == null || string.IsNullOrEmpty(objective.Id)) return objective.Text;
@@ -195,7 +209,7 @@ namespace QuestTree.UI
         /// <summary>Turns one payload reward into a display line. Trader-scoped rewards are named
         /// from the live session's trader list rather than from the payload, so a modded trader
         /// reads correctly without the server mod having to know about it.</summary>
-        private static string FormatReward(RewardDto reward, QuestGraphBuilder graph)
+        internal static string FormatReward(RewardDto reward, QuestGraphBuilder graph)
         {
             if (reward == null) return null;
 

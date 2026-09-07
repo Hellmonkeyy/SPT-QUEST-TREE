@@ -3,6 +3,7 @@ using Comfort.Common;
 using EFT.UI;
 using TMPro;
 using UnityEngine;
+using UnityEngine.EventSystems;
 using UnityEngine.UI;
 
 namespace QuestTree.UI
@@ -67,51 +68,6 @@ namespace QuestTree.UI
                 _panelSpriteType = donorPanel.type;
             }
 
-            ProbeNativeIngredients();
-        }
-
-        private static bool _probed;
-
-        /// <summary>
-        /// Diagnostic for the native-look work (UI overhaul phases 2-3): says whether the Tasks
-        /// screen's row prefab and the game's standard button are in memory at menu time, and what
-        /// the row's status palette is. Two log lines, once. Remove once those phases have decided.
-        /// </summary>
-        private static void ProbeNativeIngredients()
-        {
-            if (_probed) return;
-            _probed = true;
-
-            try
-            {
-                var rows = Resources.FindObjectsOfTypeAll<NotesTask>();
-                var palette = "(no row found)";
-
-                if (rows != null && rows.Length > 0 && rows[0]._colorMap?._items != null)
-                {
-                    var parts = new System.Collections.Generic.List<string>();
-                    foreach (var item in rows[0]._colorMap._items)
-                        if (item != null) parts.Add($"{item.Id}=#{ColorUtility.ToHtmlStringRGBA(item.Item)}");
-                    palette = string.Join(" ", parts);
-                }
-
-                Plugin.LogSource?.LogInfo(
-                    $"QuestTree probe: NotesTask rows in memory = {rows?.Length ?? 0}; palette: {palette}");
-
-                var buttons = Resources.FindObjectsOfTypeAll<DefaultUIButton>();
-                var sample = buttons != null && buttons.Length > 0 ? buttons[0] : null;
-                var rect = sample != null ? (RectTransform)sample.transform : null;
-
-                Plugin.LogSource?.LogInfo(
-                    $"QuestTree probe: DefaultUIButton in memory = {buttons?.Length ?? 0}" +
-                    (sample != null
-                        ? $"; first '{sample.name}' fontSize={sample._fontSize} size={rect.rect.width:0}x{rect.rect.height:0} label={(sample._headerLabel != null ? "yes" : "no")}"
-                        : ""));
-            }
-            catch (Exception ex)
-            {
-                Plugin.LogSource?.LogInfo($"QuestTree probe: could not inspect native UI ({ex.Message}).");
-            }
         }
 
         /// <summary>
@@ -283,7 +239,64 @@ namespace QuestTree.UI
                 onClick();
             });
 
+            AddHoverFeedback(go, background);
             return rect;
+        }
+
+        /// <summary>
+        /// Hover and press feedback the way the game's own buttons give it - a brighter face under
+        /// the pointer, the hover sound, a dip while pressed - without cloning the game's button.
+        /// Harvesting the sound and painting the states ourselves is the ingredient-not-furniture
+        /// rule this class is built on (see CreateButton). The colour is restored to whatever it was
+        /// when the pointer arrived, so a background the panel recolours (a selected view, Focus
+        /// on) keeps its meaning.
+        /// </summary>
+        public static void AddHoverFeedback(GameObject target, Image background)
+        {
+            if (target == null || background == null) return;
+            var feedback = target.AddComponent<ButtonHover>();
+            feedback.Background = background;
+        }
+
+        private sealed class ButtonHover : MonoBehaviour, IPointerEnterHandler, IPointerExitHandler, IPointerDownHandler, IPointerUpHandler
+        {
+            public Image Background;
+            private Color _resting;
+            private bool _hovering;
+
+            public void OnPointerEnter(PointerEventData eventData)
+            {
+                if (Background == null) return;
+                _resting = Background.color;
+                _hovering = true;
+                Background.color = Lift(_resting, 0.12f);
+                PlaySound(EUISoundType.ButtonOver);
+            }
+
+            public void OnPointerExit(PointerEventData eventData)
+            {
+                if (Background == null || !_hovering) return;
+                _hovering = false;
+                Background.color = _resting;
+            }
+
+            public void OnPointerDown(PointerEventData eventData)
+            {
+                if (Background == null || !_hovering) return;
+                Background.color = Lift(_resting, 0.22f);
+            }
+
+            public void OnPointerUp(PointerEventData eventData)
+            {
+                if (Background == null || !_hovering) return;
+                Background.color = Lift(_resting, 0.12f);
+            }
+
+            /// <summary>Brighter and more opaque: most of these faces are a 5% white wash, where a
+            /// multiplied tint would be invisible.</summary>
+            private static Color Lift(Color color, float amount) =>
+                new(Mathf.Min(1f, color.r + amount), Mathf.Min(1f, color.g + amount),
+                    Mathf.Min(1f, color.b + amount * 0.8f), Mathf.Min(1f, color.a + amount));
         }
     }
 }
