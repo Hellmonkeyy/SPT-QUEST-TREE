@@ -87,10 +87,13 @@ namespace QuestTree.QuestGraph
 
             if (dto.Prerequisites == null) return;
 
+            // Deduplicated: a quest can list the same prerequisite twice (once per condition
+            // type), and each copy used to draw its own line on top of the other.
             foreach (var prerequisite in dto.Prerequisites)
             {
-                if (!string.IsNullOrEmpty(prerequisite?.Target))
-                    PrerequisiteIds.Add(prerequisite.Target);
+                var target = prerequisite?.Target;
+                if (!string.IsNullOrEmpty(target) && !PrerequisiteIds.Contains(target))
+                    PrerequisiteIds.Add(target);
             }
         }
 
