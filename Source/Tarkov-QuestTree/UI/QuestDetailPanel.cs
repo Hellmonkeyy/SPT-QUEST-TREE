@@ -29,7 +29,7 @@ namespace QuestTree.UI
     {
         /// <summary>Width when expanded, and the sliver left behind when collapsed - just enough
         /// to keep the chevron on screen so the panel can be brought back.</summary>
-        private const float ExpandedWidth = 360f;
+        public const float ExpandedWidth = 360f;
         private const float CollapsedWidth = 26f;
 
         private const float Inset = 12f;
@@ -56,6 +56,12 @@ namespace QuestTree.UI
         private TMP_Text _collapseGlyph;
 
         public bool IsOpen => _detailPanel != null && _detailPanel.gameObject.activeSelf;
+
+        /// <summary>How much of the viewport's right edge the panel covers when it is up: the
+        /// full width, or nothing while it is collapsed to its sliver. The graph subtracts this
+        /// when framing so a focused quest is not centred underneath the panel.</summary>
+        public float CoveredWidth =>
+            ModSettings.Ready && ModSettings.DetailPanelCollapsed.Value ? 0f : ExpandedWidth;
 
         /// <summary>Raised when the panel is dismissed outright (X, Escape) - not when a view
         /// switch merely takes it off screen. The tree unmarks its selected box from this.</summary>

@@ -205,6 +205,14 @@ namespace QuestTree.UI
         /// re-applied to whichever view next binds the node (see RefreshVisibleNodes).</summary>
         private QuestNode _selectedNode;
 
+        /// <summary>How much of the viewport's right edge is covered by the detail panel right
+        /// now, or 0 when it is closed. Asked at framing time rather than stored, since the panel
+        /// opens and collapses independently of the graph.</summary>
+        public Func<float> CoveredWidth;
+
+        /// <summary>Whether the detail panel is on screen at all.</summary>
+        public Func<bool> DetailOpen;
+
         /// <summary>Marks a box as the one the detail panel is about, or none.</summary>
         public void SetSelectedNode(QuestNode node)
         {
@@ -627,7 +635,7 @@ namespace QuestTree.UI
         /// the layout rather than from any built views - the whole point being that most nodes are
         /// not built yet at this moment.
         /// </summary>
-        public void FrameContent() => FrameNodes(_layoutOrder);
+        public void FrameContent() => FrameNodes(_layoutOrder, reserveDetail: true);
 
         /// <summary>Frames a quest with its immediate neighbours and opens its detail - what a
         /// clickable prerequisite or unlock row in the detail panel does. Framing the neighbourhood
@@ -641,13 +649,20 @@ namespace QuestTree.UI
                 if (_graph.NodesById.TryGetValue(prerequisiteId, out var prerequisite)) chain.Add(prerequisite);
             chain.AddRange(node.Unlocks);
 
-            FrameNodes(chain);
+            // The detail opens on the next line, so it is reserved for unconditionally: asking
+            // whether it is open yet would answer no.
+            FrameNodes(chain, reserveDetail: true, detailOpening: true);
             _onNodeClicked?.Invoke(node);
         }
 
         /// <summary>Frames a subset of the laid-out nodes. Used both for "fit everything" and for
-        /// "show me the quests I can actually work on".</summary>
-        private void FrameNodes(System.Collections.Generic.IEnumerable<QuestNode> nodes)
+        /// "show me the quests I can actually work on". With <paramref name="reserveDetail"/> the
+        /// strip the detail panel covers is left out of the frame, so what is framed lands beside
+        /// the panel rather than under it; <paramref name="detailOpening"/> says the panel is
+        /// about to open even though it is not up yet.</summary>
+        private void FrameNodes(
+            System.Collections.Generic.IEnumerable<QuestNode> nodes,
+            bool reserveDetail = false, bool detailOpening = false)
         {
             if (nodes == null || _viewport == null || _layoutOrder.Length == 0) return;
 
@@ -668,6 +683,15 @@ namespace QuestTree.UI
 
             var viewportSize = _viewport.rect.size;
             if (viewportSize.x <= 1f || viewportSize.y <= 1f) return;
+
+            // The panel sits over the viewport's right edge, so the usable width is what is left
+            // of it. Only when there is still a sensible amount left: on a narrow window the
+            // whole viewport is better than a sliver.
+            if (reserveDetail && (detailOpening || (DetailOpen?.Invoke() ?? false)))
+            {
+                var covered = CoveredWidth?.Invoke() ?? 0f;
+                if (viewportSize.x - covered >= 400f) viewportSize.x -= covered;
+            }
 
             const float margin = 60f;
             var contentWidth = Mathf.Max(1f, maxX - minX + margin * 2f);
@@ -1009,7 +1033,7 @@ namespace QuestTree.UI
 
             if (mine.Count > 0)
             {
-                FrameNodes(mine);
+                FrameNodes(mine, reserveDetail: true);
                 return;
             }
 
