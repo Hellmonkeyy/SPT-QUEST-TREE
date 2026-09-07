@@ -339,6 +339,10 @@ namespace QuestTree.UI
             _renderNotice = noticeGo.AddComponent<TextMeshProUGUI>();
             _renderNotice.fontSize = 12;
             _renderNotice.alignment = TextAlignmentOptions.Left;
+            // Ellipsised: in a window too narrow for the whole line it used to wrap under the
+            // buttons, or vanish when the stretch went negative.
+            _renderNotice.enableWordWrapping = false;
+            _renderNotice.overflowMode = TextOverflowModes.Ellipsis;
             _renderNotice.color = new Color(1f, 1f, 1f, 0.7f);
             GameStyle.Apply(_renderNotice);
         }

@@ -46,7 +46,6 @@ namespace QuestTree.UI
 
         /// <summary>The quest list's column on the right. Everything left of it is map - the map is
         /// the thing you are here to read, and the list is the caption.</summary>
-        private static float QuestListWidth => SidebarWidth - SidebarInset * 2f;
 
         /// <summary>The column beside the map: its own scroll view, since the map is fixed and the
         /// list is not. Everything that is not the sidebar is map. Width from Settings.</summary>
@@ -310,7 +309,9 @@ namespace QuestTree.UI
             //
             // Setting the value is enough to repaint: ModSettings raises Changed for this entry and
             // QuestTreePanel re-renders from it. Calling onRepaint as well would build the map twice.
-            var toggleX = AuxLayout.Padding + PickerWidth + 10f + FloorPickerWidth + 10f;
+            // Capped so the toggle stays on screen in a narrow window, where it used to run off
+            // the right edge; the fixed position holds whenever there is room for it.
+            var toggleX = Mathf.Min(AuxLayout.Padding + PickerWidth + 10f + FloorPickerWidth + 10f, panelSize.x - 230f);
             AuxLayout.AddToggleAt(
                 parent,
                 toggleX,
@@ -321,9 +322,14 @@ namespace QuestTree.UI
 
             // How much of this map is located, beside the toggle - said out loud because the
             // alternative is pins silently missing, and the fix (one raid here) is not guessable.
+            // Dropped rather than clipped when the row is too narrow for it: half a sentence
+            // about zones says less than nothing.
             var coverageY = AuxLayout.Padding + 5f;
-            AddAt(parent, $"<color=#FFFFFF60>{CoverageLine(MarkerSetFor(entry))}</color>",
-                toggleX + 210f, ref coverageY, 18f, 11);
+            if (toggleX + 210f + 180f <= panelSize.x)
+            {
+                AddAt(parent, $"<color=#FFFFFF60>{CoverageLine(MarkerSetFor(entry))}</color>",
+                    toggleX + 210f, ref coverageY, 18f, 11);
+            }
 
             var labels = ordered.Select(LabelFor).ToList();
             var selectedIndex = ordered.FindIndex(m => m.Key == _selectedLocationKey);
@@ -469,8 +475,11 @@ namespace QuestTree.UI
             var left = AuxLayout.Padding;
             var sprite = layer?.GetSprite();
 
-            // The map takes everything the sidebar does not, in both directions.
-            var mapWidth = Mathf.Max(360f, panelSize.x - SidebarWidth - AuxLayout.Padding * 3f);
+            // The map takes everything the sidebar does not, in both directions. The sidebar
+            // yields first: on a narrow panel the setting's width is cut back so the map keeps
+            // 360px, where the two used to overlap.
+            var sidebarWidth = Mathf.Clamp(SidebarWidth, 260f, Mathf.Max(260f, panelSize.x - 360f - AuxLayout.Padding * 3f));
+            var mapWidth = Mathf.Max(360f, panelSize.x - sidebarWidth - AuxLayout.Padding * 3f);
             var height = Mathf.Max(300f, panelSize.y - top - AuxLayout.Padding);
 
             // The same filter the markers use, so the list and the map agree about what is on
@@ -512,9 +521,9 @@ namespace QuestTree.UI
             }
 
             var sidebarX = sprite != null ? left + mapWidth + AuxLayout.Padding : left;
-            var sidebarWidth = sprite != null ? SidebarWidth : Mathf.Max(SidebarWidth, panelSize.x - AuxLayout.Padding * 2f);
+            var sidebarSpan = sprite != null ? sidebarWidth : Mathf.Max(sidebarWidth, panelSize.x - AuxLayout.Padding * 2f);
 
-            BuildSidebar(parent, sidebarX, top, sidebarWidth, height, quests, visible, entry, layer, graph, onRepaint, onRefresh);
+            BuildSidebar(parent, sidebarX, top, sidebarSpan, height, quests, visible, entry, layer, graph, onRepaint, onRefresh);
 
             return top + height + AuxLayout.Padding;
         }
@@ -657,7 +666,7 @@ namespace QuestTree.UI
                 foreach (var ranking in ranked)
                 {
                     var node = ranking.Node;
-                    AddQuestRow(content, node, listX, ref y, node.Id == _selectedQuestId,
+                    AddQuestRow(content, node, listX, ref y, inner, node.Id == _selectedQuestId,
                         () => SelectQuest(node, entry, onRepaint));
 
                     var reason = DoNextView.Reason(ranking, profile, graph);
@@ -695,7 +704,7 @@ namespace QuestTree.UI
                     _pendingScrollQuestId = null;
                 }
 
-                AddQuestRow(content, node, listX, ref y, isSelected, () => SelectQuest(node, entry, onRepaint));
+                AddQuestRow(content, node, listX, ref y, inner, isSelected, () => SelectQuest(node, entry, onRepaint));
 
                 if (!isSelected) continue;
 
@@ -1577,7 +1586,7 @@ namespace QuestTree.UI
         /// still raycasts a zero-alpha Graphic, so nothing is drawn for it.
         /// </summary>
         private static void AddQuestRow(
-            RectTransform parent, QuestNode node, float x, ref float y, bool selected, Action onClick)
+            RectTransform parent, QuestNode node, float x, ref float y, float width, bool selected, Action onClick)
         {
             const float height = AuxLayout.RowHeight;
 
@@ -1587,7 +1596,7 @@ namespace QuestTree.UI
             rect.anchorMin = rect.anchorMax = new Vector2(0f, 1f);
             rect.pivot = new Vector2(0f, 1f);
             rect.anchoredPosition = new Vector2(x, -y);
-            rect.sizeDelta = new Vector2(QuestListWidth, height);
+            rect.sizeDelta = new Vector2(width, height);
 
             var background = go.GetComponent<Image>();
             var accent = GameStyle.AccentColor;
