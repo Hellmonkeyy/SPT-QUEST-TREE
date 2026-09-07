@@ -136,6 +136,11 @@ namespace QuestTree.UI
         private static string _pendingScrollQuestId;
         private static float? _pendingScrollY;
 
+        /// <summary>One sentence for the next sidebar about something the map could not do - a
+        /// quest with no pin to fly to, a pin whose quest has no row. Drawn once and forgotten,
+        /// so a later repaint for any other reason does not keep repeating it.</summary>
+        private static string _notice;
+
         /// <summary>Maps that load the same scene, in either direction. Mirrors ZoneStore.Aliases
         /// on the server, and is only consulted when DynamicMaps is not installed to answer the
         /// same question from its own MapInternalNames.</summary>
@@ -597,6 +602,12 @@ namespace QuestTree.UI
                     listX, ref y, 18f, 11, inner);
             }
 
+            if (_notice != null)
+            {
+                AddDetailLine(content, $"<color=#D9A61A>{_notice}</color>", listX, ref y, inner, 11);
+                _notice = null;
+            }
+
             if (sprite == null && DynamicMapsLibrary.Available)
             {
                 AddAt(content, "<color=#FFFFFF60>No map image for this location.</color>", listX, ref y, 18f, 11, inner);
@@ -916,7 +927,12 @@ namespace QuestTree.UI
             _pendingFocusQuestId = null;
 
             var marker = FindMarkerFor(questId, entry);
-            if (marker == null) return;
+            if (marker == null)
+            {
+                // The row opened but the map did not move, and nothing said why.
+                _notice = "No known location for this quest on this map.";
+                return;
+            }
 
             panZoom.FocusOn(PositionFor(marker, layer, entry), fit * FocusZoom);
         }
@@ -1205,15 +1221,17 @@ namespace QuestTree.UI
         /// them, and opening one would select a row that never renders. The selected quest wins
         /// outright when the pin serves it: the pin is painted as selected because of it, so a
         /// second click has to close IT, not switch to whichever other quest ranks higher. Null
-        /// when none of its quests has a row; the pin still names itself on hover.
+        /// when none of its quests has a row; the pin still names itself on hover, and Fallback
+        /// is then its best quest in the graph, so a click can at least say why there is no row.
         /// </summary>
-        private static (string ClickId, ENodeStatus? Status) BestQuestFor(
+        private static (string ClickId, ENodeStatus? Status, QuestNode Fallback) BestQuestFor(
             MapMarkerDto marker, QuestGraphBuilder graph, HashSet<string> shown)
         {
-            if (marker.QuestIds == null) return (null, null);
+            if (marker.QuestIds == null) return (null, null, null);
 
             ENodeStatus? status = null;
             string clickId = null;
+            QuestNode fallback = null;
             var clickRank = int.MaxValue;
 
             foreach (var id in marker.QuestIds)
@@ -1221,7 +1239,11 @@ namespace QuestTree.UI
                 if (id == null || !graph.NodesById.TryGetValue(id, out var node)) continue;
 
                 var rank = StatusRank(node.Status);
-                if (status == null || rank < StatusRank(status.Value)) status = node.Status;
+                if (status == null || rank < StatusRank(status.Value))
+                {
+                    status = node.Status;
+                    fallback = node;
+                }
 
                 if (shown.Contains(id) && rank < clickRank)
                 {
@@ -1233,7 +1255,7 @@ namespace QuestTree.UI
             if (_selectedQuestId != null && shown.Contains(_selectedQuestId) && marker.QuestIds.Contains(_selectedQuestId))
                 clickId = _selectedQuestId;
 
-            return (clickId, status);
+            return (clickId, status, clickId == null ? fallback : null);
         }
 
         private static void BuildMarkers(
@@ -1252,12 +1274,13 @@ namespace QuestTree.UI
                 .Where(m => m != null)
                 .Select(m =>
                 {
-                    var (clickId, status) = BestQuestFor(m, graph, shownIds);
+                    var (clickId, status, fallback) = BestQuestFor(m, graph, shownIds);
                     return (
                         Marker: m,
                         Owner: OwnerFor(m, entry),
                         Status: status,
                         ClickId: clickId,
+                        Fallback: fallback,
                         Active: status == ENodeStatus.Active,
                         Objective: string.Equals(m.Kind, ObjectiveKind, StringComparison.OrdinalIgnoreCase));
                 })
@@ -1277,7 +1300,7 @@ namespace QuestTree.UI
             var claimed = new List<Rect>();
             var labelSpan = new Vector2(LabelWidth, LabelHeight) / Mathf.Max(0.0001f, space.localScale.x);
 
-            foreach (var (marker, owner, status, clickId, active, objective) in ordered)
+            foreach (var (marker, owner, status, clickId, fallback, active, objective) in ordered)
             {
                 // A marker whose height matches no floor at all is treated as belonging to the one
                 // being shown rather than dropped: the bands do not tile the world exhaustively, and
@@ -1423,6 +1446,20 @@ namespace QuestTree.UI
                         // the view away for nothing. That is the row's job, not the pin's.
                         if (!wasSelected) _pendingScrollQuestId = clickTarget;
 
+                        onRepaint();
+                    };
+                }
+                else if (fallback != null)
+                {
+                    // A pin with no row used to swallow the click without a sound. It still opens
+                    // nothing - there is no row to open - but it says which quest it is and why.
+                    var unlisted = fallback;
+                    click.OnClicked = () =>
+                    {
+                        GameStyle.PlaySound(EUISoundType.ButtonClick);
+                        _notice = unlisted.Status == ENodeStatus.Completed
+                            ? $"{unlisted.Name} is complete - nothing left to do here."
+                            : $"{unlisted.Name} is not among the {MaxQuestRows} quests listed here.";
                         onRepaint();
                     };
                 }
