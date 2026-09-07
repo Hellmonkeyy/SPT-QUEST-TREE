@@ -520,7 +520,13 @@ namespace QuestTree.UI
             if (_canvasGroup != null) _canvasGroup.alpha = Mathf.Clamp01(alpha);
         }
 
-        public void OnPointerClick(PointerEventData eventData) => OnClicked?.Invoke(Node);
+        public void OnPointerClick(PointerEventData eventData)
+        {
+            // The boxes are hand-built like the tabs and rows, which all play this themselves;
+            // without it the one control the screen is made of was the only silent one.
+            GameStyle.PlaySound(EUISoundType.ButtonClick);
+            OnClicked?.Invoke(Node);
+        }
         public void OnPointerEnter(PointerEventData eventData) => OnHoverEnter?.Invoke(Node);
         public void OnPointerExit(PointerEventData eventData) => OnHoverExit?.Invoke(Node);
     }
