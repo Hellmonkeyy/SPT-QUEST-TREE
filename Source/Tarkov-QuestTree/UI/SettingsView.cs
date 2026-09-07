@@ -42,6 +42,12 @@ namespace QuestTree.UI
                 value => ModSettings.HideCompleted.Value = value);
 
             AuxLayout.AddToggle(parent, ref y,
+                "Open on the map",
+                "Start on the Maps view; the tree is one button away either way.",
+                ModSettings.OpenOnMap.Value,
+                value => ModSettings.OpenOnMap.Value = value);
+
+            AuxLayout.AddToggle(parent, ref y,
                 "Hide quests with no trader",
                 "Usually scripted or leftover entries rather than anything you can pick up.",
                 ModSettings.HideTraderless.Value,

@@ -45,6 +45,9 @@ namespace QuestTree
         /// switch for the one thing this mod does during a raid.</summary>
         public static ConfigEntry<bool> HarvestZones { get; private set; }
 
+        /// <summary>Whether the panel opens on the map rather than the tree.</summary>
+        public static ConfigEntry<bool> OpenOnMap { get; private set; }
+
         /// <summary>Remembered rather than reset each time, because it is a working preference -
         /// someone who wants the graph wide wants it wide every time they open the tree.</summary>
         public static ConfigEntry<bool> DetailPanelCollapsed { get; private set; }
@@ -103,6 +106,11 @@ namespace QuestTree
                 "Draw smaller quest boxes packed more tightly together. Fits far more of the tree " +
                 "on screen at once, at the cost of the objective line on each box. Off restores " +
                 "the original, roomier layout exactly.");
+
+            OpenOnMap = config.Bind(
+                "Behaviour", "Open on the map", true,
+                "Open the tracker on the Maps view. Off opens it on the quest tree. Either way the " +
+                "other is one button away.");
 
             HarvestZones = config.Bind(
                 "Behaviour", "Harvest quest zones in raid", true,

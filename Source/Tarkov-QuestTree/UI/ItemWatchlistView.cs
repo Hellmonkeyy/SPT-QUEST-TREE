@@ -37,7 +37,7 @@ namespace QuestTree.UI
         private const int MaxRows = 150;
 
         /// <summary>One item, aggregated across every quest that wants it.</summary>
-        private sealed class WatchedItem
+        internal sealed class WatchedItem
         {
             public string Template = "";
             public string Name = "";
@@ -126,7 +126,7 @@ namespace QuestTree.UI
         /// quests that are still locked: knowing an item matters BEFORE the quest unlocks is the
         /// entire point, since that is when you would otherwise sell it.
         /// </summary>
-        private static List<WatchedItem> Collect(QuestGraphBuilder graph, ProfilePayloadDto profile)
+        internal static List<WatchedItem> Collect(QuestGraphBuilder graph, ProfilePayloadDto profile)
         {
             var byTemplate = new Dictionary<string, WatchedItem>();
             var owned = profile.ItemsOwned ?? new Dictionary<string, HeldItemDto>();
@@ -195,7 +195,7 @@ namespace QuestTree.UI
             !string.IsNullOrEmpty(objectiveText) &&
             objectiveText.IndexOf("found in raid", StringComparison.OrdinalIgnoreCase) >= 0;
 
-        private static string Format(WatchedItem item)
+        internal static string Format(WatchedItem item)
         {
             var held = item.NeedsFoundInRaid ? item.OwnedFoundInRaid : item.OwnedTotal;
             var fir = item.NeedsFoundInRaid ? " <color=#FFFFFF60>(FiR)</color>" : "";

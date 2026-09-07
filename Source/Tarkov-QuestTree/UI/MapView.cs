@@ -46,11 +46,22 @@ namespace QuestTree.UI
 
         /// <summary>The quest list's column on the right. Everything left of it is map - the map is
         /// the thing you are here to read, and the list is the caption.</summary>
-        private const float QuestListWidth = 400f;
+        private const float QuestListWidth = SidebarWidth - SidebarInset * 2f;
 
-        /// <summary>How tall the map viewport is. Fixed rather than filling the panel, because the
-        /// aux surface is a scroll view whose height is not reliable at build time.</summary>
-        private const float MapViewportHeight = 700f;
+        /// <summary>The column beside the map: its own scroll view, since the map is fixed and the
+        /// list is not. Everything that is not the sidebar is map.</summary>
+        private const float SidebarWidth = 440f;
+        private const float SidebarInset = 12f;
+
+        /// <summary>The map's own control row - pickers, the accepted-only toggle, coverage -
+        /// directly under the toolbar.</summary>
+        private const float ControlRowHeight = AuxLayout.Padding + AuxLayout.DropdownHeight + 10f;
+
+        /// <summary>How many "do next" rows the sidebar shows before the full list takes over.</summary>
+        private const int MaxDoNextRows = 8;
+
+        private const string ItemKind = "item";
+
 
         private const int MaxQuestRows = 40;
 
@@ -126,24 +137,11 @@ namespace QuestTree.UI
         private static float? _pendingScrollY;
 
         /// <summary>
-        /// Where the aux panel should scroll to, consumed once.
-        ///
-        /// This cannot be applied by MapView itself: the panel only sets the scroll content's height
-        /// AFTER the view is built, so a scroll written during the build would be clamped against
-        /// the previous tab's height and then reset. QuestTreePanel calls this at the right moment
-        /// instead - see ShowAuxTab.
+        /// The map view, filling <paramref name="panelSize"/>: the control row along the top, the
+        /// map below it on the left, the sidebar on the right. The map is the point of the whole
+        /// panel, so it takes every pixel the sidebar does not.
         /// </summary>
-        public static bool TryConsumePendingScroll(out float rowY)
-        {
-            rowY = _pendingScrollY ?? 0f;
-
-            var has = _pendingScrollY.HasValue;
-            _pendingScrollY = null;
-
-            return has;
-        }
-
-        public static float Build(RectTransform parent, QuestGraphBuilder graph, Action onRepaint)
+        public static float Build(RectTransform parent, QuestGraphBuilder graph, Action onRepaint, Vector2 panelSize)
         {
             var byMap = GroupByMap(graph);
 
@@ -169,7 +167,7 @@ namespace QuestTree.UI
             // The map and list are built first and the dropdowns last, even though the dropdowns sit
             // above them on screen. Unity UI draws siblings in order, so an open list can only cover
             // the map if it is created after it.
-            var contentHeight = BuildSelectedMap(parent, selected, entry, layer, HeaderHeight, graph, onRepaint);
+            var contentHeight = BuildSelectedMap(parent, selected, entry, layer, ControlRowHeight, graph, onRepaint, panelSize);
 
             // Beside the two pickers, and built before them for the same draw-order reason. Its x is
             // fixed rather than measured from the floor picker, which is absent on single-floor maps
@@ -177,13 +175,20 @@ namespace QuestTree.UI
             //
             // Setting the value is enough to repaint: ModSettings raises Changed for this entry and
             // QuestTreePanel re-renders from it. Calling onRepaint as well would build the map twice.
+            var toggleX = AuxLayout.Padding + PickerWidth + 10f + FloorPickerWidth + 10f;
             AuxLayout.AddToggleAt(
                 parent,
-                AuxLayout.Padding + PickerWidth + 10f + FloorPickerWidth + 10f,
+                toggleX,
                 AuxLayout.Padding,
                 "Accepted quests only",
                 StartedOnly,
                 value => { if (ModSettings.Ready) ModSettings.MarkStartedOnly.Value = value; });
+
+            // How much of this map is located, beside the toggle - said out loud because the
+            // alternative is pins silently missing, and the fix (one raid here) is not guessable.
+            var coverageY = AuxLayout.Padding + 5f;
+            AddAt(parent, $"<color=#FFFFFF60>{CoverageLine(MarkerSetFor(entry))}</color>",
+                toggleX + 210f, ref coverageY, 18f, 11);
 
             var labels = ordered.Select(LabelFor).ToList();
             var selectedIndex = ordered.FindIndex(m => m.Key == _selectedLocationKey);
@@ -214,7 +219,7 @@ namespace QuestTree.UI
 
             // An open list is an overlay and so contributes no layout height of its own - but the
             // panel still has to be tall enough to scroll to the bottom of it.
-            return Mathf.Max(contentHeight, popupBottom) + AuxLayout.Padding;
+            return Mathf.Max(contentHeight, popupBottom);
         }
 
         /// <summary>The floor dropdown, beside the map one. Absent for a map with a single floor,
@@ -299,27 +304,18 @@ namespace QuestTree.UI
             return byMap;
         }
 
-        /// <summary>Height of the dropdown row plus its breathing room - the map and list start below
-        /// it, since the dropdowns are drawn separately and last.</summary>
-        private const float HeaderHeight = AuxLayout.Padding + AuxLayout.DropdownHeight + 12f;
 
         private static float BuildSelectedMap(
             RectTransform parent, List<QuestNode> quests, DynamicMapsLibrary.MapEntry entry,
-            DynamicMapsLibrary.MapLayer layer, float top, QuestGraphBuilder graph, Action onRepaint)
+            DynamicMapsLibrary.MapLayer layer, float top, QuestGraphBuilder graph, Action onRepaint,
+            Vector2 panelSize)
         {
-            var y = top;
             var left = AuxLayout.Padding;
-
-            var mapName = quests[0].LocationId;
             var sprite = layer?.GetSprite();
 
-            // Everything that is not the quest list is map. Measured off the panel rather than
-            // fixed, so it fills an ultrawide the same way it fills 1080p.
-            var available = parent.rect.width > 1f ? parent.rect.width : 1600f;
-            var mapWidth = Mathf.Max(360f, available - QuestListWidth - AuxLayout.Padding * 3f);
-
-            var listLeft = left;
-            var mapBottom = y;
+            // The map takes everything the sidebar does not, in both directions.
+            var mapWidth = Mathf.Max(360f, panelSize.x - SidebarWidth - AuxLayout.Padding * 3f);
+            var height = Mathf.Max(300f, panelSize.y - top - AuxLayout.Padding);
 
             // The same filter the markers use, so the list and the map agree about what is on
             // screen. Without this, turning the toggle on emptied the map but left a list of quests
@@ -349,11 +345,7 @@ namespace QuestTree.UI
 
             if (sprite != null)
             {
-                BuildMapViewport(parent, entry, layer, sprite, left, y, mapWidth, graph, shownIds, onRepaint);
-                mapBottom = y + MapViewportHeight;
-                AddCredit(parent, entry, MarkerSetFor(entry), left, mapBottom + 4f);
-                mapBottom += 38f;
-                listLeft = left + mapWidth + AuxLayout.Padding;
+                BuildMapViewport(parent, entry, layer, sprite, left, top, mapWidth, height, graph, shownIds, onRepaint);
             }
             else
             {
@@ -363,105 +355,174 @@ namespace QuestTree.UI
                 _pendingFocusQuestId = null;
             }
 
-            // A card behind the list, so the text reads as a column rather than as words floating
-            // on the map's own background. Sized once the list is built, since an expanded quest can
-            // run past the bottom of the map - it still has to be created here, before the rows, to
-            // end up behind them.
-            var cardTop = y - 8f;
-            var listCard = sprite != null
-                ? AddCard(parent, listLeft - 10f, cardTop, QuestListWidth + 20f, MapViewportHeight + 8f)
-                : null;
+            var sidebarX = sprite != null ? left + mapWidth + AuxLayout.Padding : left;
+            var sidebarWidth = sprite != null ? SidebarWidth : Mathf.Max(SidebarWidth, panelSize.x - AuxLayout.Padding * 2f);
 
-            var listY = y;
-            AddAt(parent, $"<b>{mapName}</b>", listLeft, ref listY, 26f, 15, QuestListWidth);
+            BuildSidebar(parent, sidebarX, top, sidebarWidth, height, quests, visible, entry, layer, graph, onRepaint);
 
-            if (sprite == null && DynamicMapsLibrary.Available)
+            return top + height + AuxLayout.Padding;
+        }
+
+        /// <summary>Row-click semantics shared by every clickable quest row in the sidebar: the open
+        /// quest closes again, anything else opens, flies the map to its pin and switches to its
+        /// floor.</summary>
+        private static void SelectQuest(QuestNode node, DynamicMapsLibrary.MapEntry entry, Action onRepaint)
+        {
+            if (node.Id == _selectedQuestId)
             {
-                AddAt(parent, "<color=#FFFFFF60>No map image for this location.</color>",
-                    listLeft, ref listY, 20f, 11, QuestListWidth);
-            }
-            else if (!DynamicMapsLibrary.Available)
-            {
-                AddAt(parent,
-                    "<color=#FFFFFF60>Install the DynamicMaps mod to see map images here.</color>",
-                    listLeft, ref listY, 20f, 11, QuestListWidth);
+                _selectedQuestId = null;
             }
             else
             {
-                var spawns = MarkerCountFor(entry);
-                var floors = entry != null && entry.Layers.Count > 1
-                    ? $"  ·  {entry.Layers.Count} floors"
-                    : "";
-
-                AddAt(parent,
-                    $"<color=#FFFFFF60>Drag to pan, wheel to zoom{floors}</color>",
-                    listLeft, ref listY, 18f, 11, QuestListWidth);
-
-                if (spawns > 0)
-                {
-                    AddAt(parent,
-                        $"<color=#FFFFFF60>{spawns} quest item spawn{(spawns == 1 ? "" : "s")} marked</color>",
-                        listLeft, ref listY, 18f, 11, QuestListWidth);
-                }
+                _selectedQuestId = node.Id;
+                _pendingFocusQuestId = node.Id;
+                _pendingScrollQuestId = node.Id;
+                SelectFloorFor(node.Id, entry);
             }
 
-            listY += 6f;
+            onRepaint();
+        }
+
+        /// <summary>
+        /// The column beside the map. Its own scroll view, because the map is fixed and this is
+        /// not: a quest expanded near the bottom of a long list has to be reachable without the
+        /// map scrolling away with it. Three sections - what to do next here, every quest on the
+        /// map, the items to look for - and the credits.
+        ///
+        /// Built directly into the content with the same y-cursor helpers the old list used; the
+        /// content's height is set once everything is placed, and the pending scroll (a quest
+        /// opened from its pin) is applied right after, against the real height.
+        /// </summary>
+        private static void BuildSidebar(
+            RectTransform parent, float x, float top, float width, float height,
+            List<QuestNode> quests, List<QuestNode> visible, DynamicMapsLibrary.MapEntry entry,
+            DynamicMapsLibrary.MapLayer layer, QuestGraphBuilder graph, Action onRepaint)
+        {
+            var mapName = quests[0].LocationId;
+            var set = MarkerSetFor(entry);
+            var sprite = layer?.GetSprite();
+
+            var sidebarGo = new GameObject(
+                "Sidebar", typeof(RectTransform), typeof(Image), typeof(RectMask2D), typeof(ScrollRect));
+            var sidebar = (RectTransform)sidebarGo.transform;
+            sidebar.SetParent(parent, worldPositionStays: false);
+            sidebar.anchorMin = sidebar.anchorMax = new Vector2(0f, 1f);
+            sidebar.pivot = new Vector2(0f, 1f);
+            sidebar.anchoredPosition = new Vector2(x, -top);
+            sidebar.sizeDelta = new Vector2(width, height);
+
+            var card = sidebarGo.GetComponent<Image>();
+            card.color = new Color(1f, 1f, 1f, 0.04f);
+            GameStyle.ApplyPanel(card);
+
+            var contentGo = new GameObject("SidebarContent", typeof(RectTransform));
+            var content = (RectTransform)contentGo.transform;
+            content.SetParent(sidebar, worldPositionStays: false);
+            content.anchorMin = new Vector2(0f, 1f);
+            content.anchorMax = new Vector2(1f, 1f);
+            content.pivot = new Vector2(0f, 1f);
+            content.anchoredPosition = Vector2.zero;
+            content.sizeDelta = Vector2.zero;
+
+            var scroll = sidebarGo.GetComponent<ScrollRect>();
+            scroll.content = content;
+            scroll.viewport = sidebar;
+            scroll.horizontal = false;
+            scroll.vertical = true;
+            scroll.movementType = ScrollRect.MovementType.Clamped;
+            scroll.scrollSensitivity = 30f;
+
+            var inner = width - SidebarInset * 2f;
+            var listX = SidebarInset;
+            var y = SidebarInset;
+
+            // ---- header
+            AddAt(content, $"<b>{mapName}</b>", listX, ref y, 26f, 16, inner);
+
+            if (sprite == null && DynamicMapsLibrary.Available)
+            {
+                AddAt(content, "<color=#FFFFFF60>No map image for this location.</color>", listX, ref y, 18f, 11, inner);
+            }
+            else if (!DynamicMapsLibrary.Available)
+            {
+                AddAt(content, "<color=#FFFFFF60>Install the DynamicMaps mod to see map images here.</color>",
+                    listX, ref y, 18f, 11, inner);
+            }
+            else
+            {
+                var facts = new List<string> { "Drag to pan, wheel to zoom" };
+                if (entry != null && entry.Layers.Count > 1) facts.Add($"{entry.Layers.Count} floors");
+                var spawns = MarkerCountFor(entry);
+                if (spawns > 0) facts.Add($"{spawns} pins");
+                AddAt(content, $"<color=#FFFFFF60>{string.Join("  ·  ", facts)}</color>", listX, ref y, 18f, 11, inner);
+            }
+
+            y += 6f;
+
+            // ---- do next here: the global ranking, cut to this map
+            var profile = QuestDataClient.GetProfile();
+            var here = new HashSet<string>(quests.Select(q => q.Id), StringComparer.Ordinal);
+            var ranked = DoNextView.Rank(graph, profile)
+                .Where(r => here.Contains(r.Node.Id))
+                .Where(r => !StartedOnly || r.Node.Status == ENodeStatus.Active)
+                .Take(MaxDoNextRows)
+                .ToList();
+
+            if (ranked.Count > 0)
+            {
+                AuxLayout.AddSectionHeader(content, ref y, "Do next here", listX, inner);
+
+                foreach (var ranking in ranked)
+                {
+                    var node = ranking.Node;
+                    AddQuestRow(content, node, listX, ref y, node.Id == _selectedQuestId,
+                        () => SelectQuest(node, entry, onRepaint));
+
+                    var reason = DoNextView.Reason(ranking, profile);
+                    if (!string.IsNullOrEmpty(reason))
+                        AddAt(content, $"<color=#FFFFFF60>{reason}</color>", listX + 22f, ref y, 16f, 11, inner - 22f);
+                }
+
+                y += 10f;
+            }
+
+            // ---- every quest on this map
+            AuxLayout.AddSectionHeader(content, ref y, $"Quests on {mapName}  ({visible.Count})", listX, inner);
 
             if (visible.Count == 0)
             {
                 // AddDetailLine rather than AddAt: this is a sentence, not a label, and AddAt
                 // ellipsises at the column edge - which cut off the part saying how to get the
                 // list back.
-                AddDetailLine(parent,
-                    "<color=#FFFFFF60>No accepted quests on this map. Turn off “Accepted quests " +
-                    "only” to see the rest.</color>",
-                    listLeft, ref listY, QuestListWidth);
-                listY += 6f;
+                AddDetailLine(content,
+                    "<color=#FFFFFF60>No accepted quests on this map. Turn off \u201cAccepted quests " +
+                    "only\u201d to see the rest.</color>",
+                    listX, ref y, inner);
+                y += 6f;
             }
 
             foreach (var node in visible.Take(MaxQuestRows))
             {
                 var isSelected = node.Id == _selectedQuestId;
 
-                // Rows are laid out on a plain y cursor in the scroll content's own units, so the
-                // cursor IS the scroll offset that brings this row to the top - no rect maths.
+                // Rows are laid out on a plain y cursor in the content's own units, so the cursor
+                // IS the scroll offset that brings this row to the top - no rect maths.
                 if (node.Id == _pendingScrollQuestId)
                 {
-                    _pendingScrollY = Mathf.Max(0f, listY - AuxLayout.Padding);
+                    _pendingScrollY = Mathf.Max(0f, y - SidebarInset);
                     _pendingScrollQuestId = null;
                 }
 
-                AddQuestRow(parent, node, listLeft, ref listY, isSelected, () =>
-                {
-                    // Clicking the open quest again closes it, so a row is its own toggle.
-                    if (isSelected)
-                    {
-                        _selectedQuestId = null;
-                    }
-                    else
-                    {
-                        _selectedQuestId = node.Id;
-                        _pendingFocusQuestId = node.Id;
-                        _pendingScrollQuestId = node.Id;
-                        SelectFloorFor(node.Id, entry);
-                    }
-
-                    onRepaint();
-                });
+                AddQuestRow(content, node, listX, ref y, isSelected, () => SelectQuest(node, entry, onRepaint));
 
                 if (!isSelected) continue;
 
                 // The same lines the tree view's detail panel shows, indented under the row that
-                // opened them. The column has no scroll view of its own - it does not need one,
-                // because the aux panel scrolls and Build reports the taller of the two columns.
-                //
-                // The profile is only fetched here: at most one row is ever open, and this view
-                // repaints on every dropdown click, so asking for it up front would be work done
-                // for nothing on the common path.
+                // opened them. The profile is only fetched here: at most one row is ever open.
                 foreach (var line in QuestSummary.Lines(node, graph, QuestDataClient.GetProfile()))
-                    AddDetailLine(parent, line, listLeft + 12f, ref listY, QuestListWidth - 12f);
+                    AddDetailLine(content, line, listX + 12f, ref y, inner - 12f);
 
-                listY += 6f;
+                y += 6f;
             }
 
             // Whether or not the row turned up - a quest can be filtered out or past the row cap -
@@ -470,17 +531,69 @@ namespace QuestTree.UI
 
             if (visible.Count > MaxQuestRows)
             {
-                AddAt(parent, $"<color=#FFFFFF60>+{visible.Count - MaxQuestRows} more</color>",
-                    listLeft, ref listY, AuxLayout.RowHeight, 11, QuestListWidth);
+                AddAt(content, $"<color=#FFFFFF60>+{visible.Count - MaxQuestRows} more</color>",
+                    listX, ref y, AuxLayout.RowHeight, 11, inner);
             }
 
-            if (listCard != null)
+            // ---- items to look for here
+            var items = ItemsHere(set, graph, profile);
+            if (items.Count > 0)
             {
-                listCard.sizeDelta = new Vector2(
-                    QuestListWidth + 20f, Mathf.Max(MapViewportHeight + 8f, listY - cardTop + 8f));
+                y += 10f;
+                AuxLayout.AddSectionHeader(content, ref y, "Items to find here", listX, inner);
+
+                foreach (var item in items)
+                    AddAt(content, ItemWatchlistView.Format(item), listX, ref y, AuxLayout.RowHeight, 12, inner);
             }
 
-            return Mathf.Max(listY, mapBottom);
+            // ---- credits
+            y += 12f;
+            AddCredit(content, entry, listX, ref y, inner);
+            y += SidebarInset;
+
+            content.sizeDelta = new Vector2(0f, y);
+
+            // A quest opened from its pin may sit far down the column: scroll it into view, but
+            // only if it is off screen, and then only far enough to show it with room for its
+            // detail beneath - never to the top, which would hide everything above it.
+            if (_pendingScrollY.HasValue)
+            {
+                var rowY = _pendingScrollY.Value;
+                _pendingScrollY = null;
+
+                var reveal = height * 0.4f;
+                if (rowY + reveal > height)
+                {
+                    var maxScroll = Mathf.Max(0f, y - height);
+                    content.anchoredPosition = new Vector2(0f, Mathf.Clamp(rowY - reveal, 0f, maxScroll));
+                }
+            }
+        }
+
+        /// <summary>The quest items that spawn on this map, with what the stash already holds.
+        /// Joined on the marker's template id, which is what the server sends the pin with. Empty
+        /// without the profile payload, since have/need is the point of the section.</summary>
+        private static List<ItemWatchlistView.WatchedItem> ItemsHere(
+            MapMarkerSetDto set, QuestGraphBuilder graph, ProfilePayloadDto profile)
+        {
+            var result = new List<ItemWatchlistView.WatchedItem>();
+            if (set?.Markers == null || profile == null) return result;
+
+            var templates = new HashSet<string>(
+                set.Markers
+                    .Where(m => m != null && !string.IsNullOrEmpty(m.Template) &&
+                                string.Equals(m.Kind, ItemKind, StringComparison.OrdinalIgnoreCase))
+                    .Select(m => m.Template),
+                StringComparer.Ordinal);
+
+            if (templates.Count == 0) return result;
+
+            return ItemWatchlistView.Collect(graph, profile)
+                .Where(i => templates.Contains(i.Template))
+                .OrderBy(i => i.Outstanding == 0 ? 1 : 0)
+                .ThenBy(i => i.Outstanding)
+                .ThenBy(i => i.Name, StringComparer.OrdinalIgnoreCase)
+                .ToList();
         }
 
         /// <summary>Switches the view to the floor the quest's pin is on, so the pin being flown to
@@ -516,7 +629,7 @@ namespace QuestTree.UI
         /// </summary>
         private static void BuildMapViewport(
             RectTransform parent, DynamicMapsLibrary.MapEntry entry, DynamicMapsLibrary.MapLayer layer,
-            Sprite sprite, float x, float y, float width, QuestGraphBuilder graph,
+            Sprite sprite, float x, float y, float width, float height, QuestGraphBuilder graph,
             HashSet<string> shownIds, Action onRepaint)
         {
             var viewportGo = new GameObject(
@@ -526,7 +639,7 @@ namespace QuestTree.UI
             viewport.anchorMin = viewport.anchorMax = new Vector2(0f, 1f);
             viewport.pivot = new Vector2(0f, 1f);
             viewport.anchoredPosition = new Vector2(x, -y);
-            viewport.sizeDelta = new Vector2(width, MapViewportHeight);
+            viewport.sizeDelta = new Vector2(width, height);
 
             // A visible backing plate, which also gives the viewport a raycast target - without a
             // Graphic here the drag and scroll handlers would never receive anything.
@@ -546,7 +659,7 @@ namespace QuestTree.UI
             space.sizeDelta = bounds;
 
             // Fit the floor into the viewport, then shift so the bounds' centre sits in the middle.
-            var fit = Mathf.Min(width / bounds.x, MapViewportHeight / bounds.y);
+            var fit = Mathf.Min(width / bounds.x, height / bounds.y);
 
             // Restore the previous view when this is the same map as last time - a floor change
             // rebuilds everything, and losing pan and zoom there defeats the purpose of the switch.
@@ -962,8 +1075,8 @@ namespace QuestTree.UI
             var set = MarkerSetFor(entry);
             if (set?.Markers == null) return;
 
-            // Active quests first, then this floor: when two names collide, the one that survives
-            // is the one you have started and could walk to right now.
+            // Active quests first, then this floor, so the pin that draws on top of a pile is the
+            // one you have started and could walk to right now.
             var ordered = set.Markers
                 .Where(m => m != null)
                 .Select(m =>
@@ -982,12 +1095,6 @@ namespace QuestTree.UI
                 .ThenBy(m => m.Owner == null || m.Owner == layer ? 0 : 1)
                 .ToList();
 
-            // Label footprints already claimed, in map units. Names are held at a constant screen
-            // size, so their size in map units is the screen size divided by the current fit.
-            var claimed = new List<Rect>();
-            var scale = space.localScale.x;
-            var labelSpan = new Vector2(LabelWidth, LabelHeight) / Mathf.Max(0.0001f, scale);
-
             // Lifted above the other pins once they all exist - doing it as it is built would only
             // put it above the markers created so far.
             RectTransform selectedRect = null;
@@ -1002,21 +1109,11 @@ namespace QuestTree.UI
                 var isSelected = _selectedQuestId != null && marker.QuestIds != null &&
                                  marker.QuestIds.Contains(_selectedQuestId);
 
-                // Colour carries quest status, which is the thing worth knowing at a glance. The
-                // floor is still distinguished, but by the filled/hollow glyph below, so the two
-                // facts do not have to compete for the same channel.
-                //
-                // Taken from the shared palette so a started quest is the same green here as in the
-                // tree and the legend. This used to be a private two-colour scheme - green for
-                // started, one flat grey for everything else - which disagreed with the tree AND
-                // made an available quest indistinguishable from a locked one.
+                // Colour carries quest status - taken from the shared palette so a started quest is
+                // the same green here as in the tree and the legend. Everything you have not
+                // started is held back, so the pins you can act on now carry the map.
                 var colour = status.HasValue ? QuestNodeView.ColorFor(status.Value) : UnknownMarkerColor;
-
-                // Everything you have not started is held back, so the pins you can act on now carry
-                // the map. The old flat grey did this with a baked-in 0.55 alpha; keeping it as a
-                // multiply preserves that weighting while letting the hue say which status it is.
                 if (!active) colour.a *= 0.6f;
-
                 if (!onThisFloor) colour.a *= 0.55f;
 
                 // The pin the list sent you to, at full strength whatever its status - having flown
@@ -1026,7 +1123,7 @@ namespace QuestTree.UI
                 var position = PositionFor(marker, layer, entry);
 
                 // Which quest this pin opens. Null when none of its quests has a row in the list,
-                // in which case the pin stays unclickable rather than selecting something invisible.
+                // in which case the pin still names itself on hover but selects nothing.
                 var clickTarget = ClickTargetFor(marker, graph, shownIds);
 
                 var go = new GameObject("QuestMarker", typeof(RectTransform));
@@ -1048,73 +1145,36 @@ namespace QuestTree.UI
                 if (pin != null)
                 {
                     // A real map pin for "the quest happens here", pivoted at its tip by the sprite
-                    // itself, so the rect's own position is the place being marked.
+                    // itself, so the rect's own position is the place being marked. Hit-testable so
+                    // it can be hovered and clicked; drag and scroll still reach the viewport - see
+                    // MapMarkerClick for why that is safe.
                     var icon = go.AddComponent<Image>();
                     icon.sprite = pin;
                     icon.color = colour;
-
-                    // The pin is the click target, so unlike every other graphic on the map it has
-                    // to be hit-testable. Drag and scroll still reach the viewport - see
-                    // MapMarkerClick for why that is safe.
-                    icon.raycastTarget = clickTarget != null;
+                    icon.raycastTarget = true;
                     icon.preserveAspect = true;
-
                     rect.pivot = new Vector2(0.5f, 0f);
                     rect.sizeDelta = new Vector2(PinSize * 0.72f, PinSize);
                 }
                 else
                 {
-                    // A glyph rather than an Image: it is round, and it takes the same outline the rest
-                    // of the map text uses, which is what makes it readable over both the pale buildings
-                    // and the dark ground.
+                    // A glyph rather than an Image: it is round, and it takes the same outline the
+                    // rest of the map text uses. A diamond for "the quest happens here", a dot for
+                    // "the thing you need lies here". Hollow when it is on another floor.
                     var dot = go.AddComponent<TextMeshProUGUI>();
-                    // A diamond for "the quest happens here", a dot for "the thing you need lies
-                    // here". Hollow when it is on another floor, so the floor rides on the glyph and
-                    // colour stays free to carry quest status.
                     dot.text = objective
-                        ? (onThisFloor ? "◆" : "◇")
-                        : (onThisFloor ? "●" : "○");
-
+                        ? (onThisFloor ? "\u25c6" : "\u25c7")
+                        : (onThisFloor ? "\u25cf" : "\u25cb");
                     dot.fontSize = objective ? MarkerSize + 3f : MarkerSize;
                     dot.color = colour;
                     dot.alignment = TextAlignmentOptions.Center;
                     dot.enableWordWrapping = false;
-                    dot.raycastTarget = clickTarget != null;
+                    dot.raycastTarget = true;
                     GameStyle.ApplyOutlined(dot);
                 }
 
-                if (clickTarget != null)
-                {
-                    var wasSelected = clickTarget == _selectedQuestId;
-
-                    go.AddComponent<MapMarkerClick>().OnClicked = () =>
-                    {
-                        GameStyle.PlaySound(EUISoundType.ButtonClick);
-
-                        // Clicking the open quest's pin again closes it, matching the rows.
-                        _selectedQuestId = wasSelected ? null : clickTarget;
-
-                        // Deliberately NOT setting _pendingFocusQuestId or the floor: you clicked a
-                        // pin you can already see, so re-centring and jumping the zoom would throw
-                        // the view away for nothing. That is the row's job, not the pin's.
-                        if (!wasSelected) _pendingScrollQuestId = clickTarget;
-
-                        onRepaint();
-                    };
-                }
-
-                // The name is dropped where it would land on one already placed. The dot always
-                // stays, so nothing is hidden - a cluster reads as several spawns with one name
-                // rather than as a block of overlapping text, which is what it did before.
-                var footprint = new Rect(
-                    position.x + labelSpan.x * 0.1f, position.y - labelSpan.y * 0.5f,
-                    labelSpan.x, labelSpan.y);
-
-                // The selected quest keeps its name whatever it overlaps - it is the one the user
-                // just asked to be shown, so it is the one label that must not lose the collision.
-                if (!isSelected && claimed.Any(other => other.Overlaps(footprint))) continue;
-                claimed.Add(footprint);
-
+                // The name, shown only for the hovered pin and the selected quest's pins. Drawing
+                // every name at once turned any cluster of objectives into a block of text.
                 var labelGo = new GameObject("Label", typeof(RectTransform));
                 var labelRect = (RectTransform)labelGo.transform;
                 labelRect.SetParent(rect, worldPositionStays: false);
@@ -1131,12 +1191,43 @@ namespace QuestTree.UI
                         ? opened.Name
                         : null);
                 label.fontSize = 13;
-                label.color = colour;
+                label.color = isSelected ? colour : new Color(0.96f, 0.96f, 0.94f, 1f);
                 label.alignment = TextAlignmentOptions.Left;
                 label.enableWordWrapping = false;
                 label.overflowMode = TextOverflowModes.Ellipsis;
                 label.raycastTarget = false;
                 GameStyle.ApplyOutlined(label);
+                labelGo.SetActive(isSelected);
+
+                var click = go.AddComponent<MapMarkerClick>();
+
+                click.OnHover = hovering =>
+                {
+                    if (labelGo == null) return;
+                    labelGo.SetActive(hovering || isSelected);
+                    // Above its neighbours while hovered, so the name is not under the next pin.
+                    if (hovering && rect != null) rect.SetAsLastSibling();
+                };
+
+                if (clickTarget != null)
+                {
+                    var wasSelected = clickTarget == _selectedQuestId;
+
+                    click.OnClicked = () =>
+                    {
+                        GameStyle.PlaySound(EUISoundType.ButtonClick);
+
+                        // Clicking the open quest's pin again closes it, matching the rows.
+                        _selectedQuestId = wasSelected ? null : clickTarget;
+
+                        // Deliberately NOT setting _pendingFocusQuestId or the floor: you clicked a
+                        // pin you can already see, so re-centring and jumping the zoom would throw
+                        // the view away for nothing. That is the row's job, not the pin's.
+                        if (!wasSelected) _pendingScrollQuestId = clickTarget;
+
+                        onRepaint();
+                    };
+                }
             }
 
             selectedRect?.SetAsLastSibling();
@@ -1200,21 +1291,14 @@ namespace QuestTree.UI
         /// <summary>The map's own author credit, shown because the images are someone else's work
         /// (tarkov.dev, via DynamicMaps) and their licence is only satisfied with attribution.</summary>
         private static void AddCredit(
-            RectTransform parent, DynamicMapsLibrary.MapEntry entry, MapMarkerSetDto set, float x, float y)
+            RectTransform parent, DynamicMapsLibrary.MapEntry entry, float x, ref float y, float width)
         {
             if (entry == null) return;
 
-            var cursor = y;
-
-            // How much of this map the harvest has located. Said out loud because the alternative
-            // is pins silently missing, and the fix - one raid here - is not something anyone
-            // would guess.
-            AddAt(parent, $"<color=#FFFFFF60>{CoverageLine(set)}</color>", x, ref cursor, 16f, 10);
-
             if (!string.IsNullOrEmpty(entry.Attribution))
             {
-                AddAt(parent, $"<color=#FFFFFF60>Map: {entry.Attribution}, via DynamicMaps</color>",
-                    x, ref cursor, 16f, 10);
+                AddAt(parent, $"<color=#FFFFFF50>Map: {entry.Attribution}, via DynamicMaps</color>",
+                    x, ref y, 15f, 10, width);
             }
 
             // Both of these are required rather than courteous. The pin is game-icons.net art under
@@ -1224,9 +1308,8 @@ namespace QuestTree.UI
                 ? "  ·  Pin icon by Delapouite (game-icons.net), CC BY 3.0"
                 : "";
 
-            AddAt(parent,
-                $"<color=#FFFFFF60>Objective locations: TarkovTracker/tarkovdata{pin}</color>",
-                x, ref cursor, 16f, 10);
+            AddAt(parent, $"<color=#FFFFFF50>Objective locations: TarkovTracker/tarkovdata{pin}</color>",
+                x, ref y, 15f, 10, width);
         }
 
         private static string CoverageLine(MapMarkerSetDto set)

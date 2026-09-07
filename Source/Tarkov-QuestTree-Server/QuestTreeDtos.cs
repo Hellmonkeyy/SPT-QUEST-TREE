@@ -265,8 +265,9 @@ namespace QuestTreeServer
     /// positions come from the loot table rather than from the quests.</summary>
     public class MapMarkerPayloadDto
     {
-        /// <summary>2: per-map zone coverage fields on MapMarkerSetDto (1.3.0).</summary>
-        public int SchemaVersion { get; set; } = 2;
+        /// <summary>2: per-map zone coverage fields on MapMarkerSetDto (1.3.0). 3: Template on
+        /// item markers (1.5.0).</summary>
+        public int SchemaVersion { get; set; } = 3;
 
         public string Version { get; set; } = "";
         public List<MapMarkerSetDto> Maps { get; set; } = new();
@@ -310,6 +311,10 @@ namespace QuestTreeServer
         /// the item is at ONE of them per raid, and the view says so rather than implying every
         /// pin holds a copy.</summary>
         public int Alternatives { get; set; }
+
+        /// <summary>Item markers only: the item's template id, so the client can join a pin to the
+        /// stash count it already has for that item. Empty for objective markers.</summary>
+        public string Template { get; set; } = "";
 
         /// <summary>Objective markers only: where the point sits as a percentage across and down the
         /// map image. Sent instead of world coordinates because that is how the source states it,

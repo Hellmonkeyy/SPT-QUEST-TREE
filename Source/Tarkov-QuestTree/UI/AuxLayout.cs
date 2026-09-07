@@ -28,6 +28,49 @@ namespace QuestTree.UI
             return HeadingHeight;
         }
 
+        /// <summary>A section title the way the game's own screens draw them: small capitals in the
+        /// accent colour with a hairline under. Positioned at an explicit x and width rather than
+        /// stretched to the parent, so it works inside a column as well as a page.</summary>
+        public static float AddSectionHeader(RectTransform parent, ref float y, string text, float x, float width)
+        {
+            const float height = 24f;
+
+            var go = new GameObject("SectionHeader", typeof(RectTransform));
+            var rect = (RectTransform)go.transform;
+            rect.SetParent(parent, worldPositionStays: false);
+            rect.anchorMin = rect.anchorMax = new Vector2(0f, 1f);
+            rect.pivot = new Vector2(0f, 1f);
+            rect.anchoredPosition = new Vector2(x, -y);
+            rect.sizeDelta = new Vector2(width, height);
+
+            var label = go.AddComponent<TextMeshProUGUI>();
+            label.text = text.ToUpperInvariant();
+            label.fontSize = 11;
+            label.fontStyle = FontStyles.Bold;
+            label.characterSpacing = 4f;
+            label.color = GameStyle.AccentColor;
+            label.alignment = TextAlignmentOptions.BottomLeft;
+            label.enableWordWrapping = false;
+            label.overflowMode = TextOverflowModes.Ellipsis;
+            label.raycastTarget = false;
+            GameStyle.Apply(label);
+            label.color = GameStyle.AccentColor;
+
+            var ruleGo = new GameObject("Rule", typeof(RectTransform), typeof(Image));
+            var rule = (RectTransform)ruleGo.transform;
+            rule.SetParent(parent, worldPositionStays: false);
+            rule.anchorMin = rule.anchorMax = new Vector2(0f, 1f);
+            rule.pivot = new Vector2(0f, 1f);
+            rule.anchoredPosition = new Vector2(x, -(y + height + 2f));
+            rule.sizeDelta = new Vector2(width, 1f);
+            var ruleImage = ruleGo.GetComponent<Image>();
+            ruleImage.color = new Color(GameStyle.AccentColor.r, GameStyle.AccentColor.g, GameStyle.AccentColor.b, 0.35f);
+            ruleImage.raycastTarget = false;
+
+            y += height + 8f;
+            return height + 8f;
+        }
+
         public static TMP_Text AddText(
             RectTransform parent, ref float y, string text, float height = RowHeight,
             int fontSize = 13, FontStyles style = FontStyles.Normal, float indent = 0f)

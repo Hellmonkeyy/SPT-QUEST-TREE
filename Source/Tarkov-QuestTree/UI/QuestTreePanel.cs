@@ -52,6 +52,10 @@ namespace QuestTree.UI
         private const string DoNextTabId = "__donext__";
         private const string SettingsTabId = "__settings__";
 
+        /// <summary>The view button that returns to the graph. Not a tab: it stands for whichever
+        /// trader tab was last selected.</summary>
+        private const string TreeTabId = "__tree__";
+
         private static readonly Color SelectedTabColor = new(0.35f, 0.35f, 0.2f, 0.95f);
         private static readonly Color UnselectedTabColor = new(1f, 1f, 1f, 0.08f);
 
@@ -635,9 +639,15 @@ namespace QuestTree.UI
         private void RebuildGraph(QuestController questController, IEftSession session)
         {
             _graph.Build(questController, session);
-            _selectedTraderId = AllTradersId;
+
+            // Land on the map by default: it is the view most opens are for. The graph is the Tree
+            // button away, and "All" is where that button goes.
+            _tabBeforeSettings = AllTradersId;
+            _selectedTraderId = ModSettings.Ready && ModSettings.OpenOnMap.Value ? MapsTabId : AllTradersId;
+
             BuildTabs();
             RenderSelectedTab();
+            UpdateTabHighlight();
         }
 
         private void BuildTabs()
@@ -822,14 +832,21 @@ namespace QuestTree.UI
             (SettingsTabId, "Settings"),
             (KappaTabId, "Kappa"),
             (ItemsTabId, "Items"),
+            (DoNextTabId, "Do next"),
             (MapsTabId, "Maps"),
-            (DoNextTabId, "Do next")
+            (TreeTabId, "Tree")
         };
 
-        /// <summary>Selecting a whole view toggles: clicking the one you are already on returns you
-        /// to the tree tab you came from, rather than stranding you with no way back.</summary>
-        private void SelectView(string tabId) =>
+        private void SelectView(string tabId)
+        {
+            if (tabId == TreeTabId)
+            {
+                SelectTab(IsAuxTab(_tabBeforeSettings) ? AllTradersId : _tabBeforeSettings);
+                return;
+            }
+
             SelectTab(_selectedTraderId == tabId ? _tabBeforeSettings : tabId);
+        }
 
         private static bool IsAuxTab(string tabId) =>
             tabId == KappaTabId || tabId == SettingsTabId || tabId == ItemsTabId ||
@@ -879,7 +896,33 @@ namespace QuestTree.UI
             foreach (var (traderId, background) in _tabBackgrounds)
                 background.color = traderId == _selectedTraderId ? SelectedTabColor : UnselectedTabColor;
 
-            _toolbar.SetViewHighlight(_selectedTraderId, SelectedTabColor, UnselectedTabColor);
+            // The Tree button lights whenever a graph tab is up, whichever trader it is.
+            _toolbar.SetViewHighlight(
+                IsAuxTab(_selectedTraderId) ? _selectedTraderId : TreeTabId, SelectedTabColor, UnselectedTabColor);
+        }
+
+        /// <summary>
+        /// The trader tab row only means something over the graph. On the map and the lists it is
+        /// hidden and the view takes its space - the map in particular wants every pixel.
+        /// </summary>
+        private void SetTabRowVisible(bool visible)
+        {
+            if (_tabRow != null) _tabRow.gameObject.SetActive(visible);
+            if (_auxPanel != null)
+                _auxPanel.offsetMax = new Vector2(0f, -(QuestToolbar.Height + (visible ? TabRowHeight : 0f)));
+        }
+
+        /// <summary>The area a whole-screen view may fill, in the aux panel's own units. Falls back
+        /// to the panel's rect when the aux panel has not been laid out yet (first open).</summary>
+        private Vector2 AuxViewportSize()
+        {
+            var rect = _auxPanel != null ? _auxPanel.rect : Rect.zero;
+            if (rect.width > 100f && rect.height > 100f) return rect.size;
+
+            var own = ((RectTransform)transform).rect;
+            var width = own.width > 100f ? own.width : Screen.width;
+            var height = (own.height > 100f ? own.height : Screen.height) - QuestToolbar.Height;
+            return new Vector2(width, height);
         }
 
         /// <summary>
@@ -895,7 +938,11 @@ namespace QuestTree.UI
         /// </summary>
         private void RenderSelectedTab()
         {
-            if (IsAuxTab(_selectedTraderId))
+            var aux = IsAuxTab(_selectedTraderId);
+            _toolbar.SetTreeControlsVisible(!aux);
+            SetTabRowVisible(!aux);
+
+            if (aux)
             {
                 ShowAuxTab();
                 return;
@@ -950,7 +997,7 @@ namespace QuestTree.UI
                     RenderSelectedTab();
                 })
                 : _selectedTraderId == MapsTabId
-                ? MapView.Build(_auxContent, _graph, RenderSelectedTab)
+                ? MapView.Build(_auxContent, _graph, RenderSelectedTab, AuxViewportSize())
                 : _selectedTraderId == ItemsTabId
                 ? ItemWatchlistView.Build(_auxContent, _graph, () =>
                 {
@@ -973,26 +1020,6 @@ namespace QuestTree.UI
                 });
 
             _auxContent.sizeDelta = new Vector2(0f, height);
-
-            // Only now that the content has its real height can a scroll be clamped correctly - the
-            // rewind to the top above happens before the view is even built. The Maps tab uses this
-            // to keep a quest opened from its map pin on screen, which it would otherwise not be
-            // whenever the quest sits far enough down the list.
-            if (_selectedTraderId == MapsTabId && MapView.TryConsumePendingScroll(out var rowY))
-            {
-                // Only if the row is actually off screen, and then only far enough to show it with
-                // room for its detail beneath. Always scrolling the row to the top pushed the map -
-                // and the pin the map had just flown to - off the top of the panel for any row
-                // past the first dozen.
-                var viewport = _auxPanel.rect.height;
-                var reveal = viewport * 0.4f;
-
-                if (rowY + reveal > viewport)
-                {
-                    var maxScroll = Mathf.Max(0f, height - viewport);
-                    _auxContent.anchoredPosition = new Vector2(0f, Mathf.Clamp(rowY - reveal, 0f, maxScroll));
-                }
-            }
 
             _toolbar.SetNotice(NoticeForView(_selectedTraderId));
 

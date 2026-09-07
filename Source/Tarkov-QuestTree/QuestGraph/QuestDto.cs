@@ -304,7 +304,7 @@ namespace QuestTree.QuestGraph
     /// can reference.</summary>
     internal sealed class MapMarkerPayloadDto
     {
-        public const int SupportedSchemaVersion = 2;
+        public const int SupportedSchemaVersion = 3;
 
         [JsonProperty("schemaVersion")]
         public int SchemaVersion { get; set; }
@@ -360,6 +360,10 @@ namespace QuestTree.QuestGraph
         /// <summary>How many separate places this item can spawn on this map.</summary>
         [JsonProperty("alternatives")]
         public int Alternatives { get; set; }
+
+        /// <summary>Item markers only: the item's template id, to join the pin to the stash.</summary>
+        [JsonProperty("template")]
+        public string Template { get; set; }
 
         /// <summary>Objective markers only: position as a percentage across and down the map image,
         /// which the view turns into map coordinates using the layer's own bounds.</summary>

@@ -34,6 +34,10 @@ namespace QuestTree.UI
         private TMP_InputField _searchField;
         private TMP_Text _renderNotice;
         private Image _focusBackground;
+
+        /// <summary>Everything that only means something over the quest graph - search, framing,
+        /// Focus, the legend - hidden while a whole-screen view (map, lists, settings) is up.</summary>
+        private readonly List<GameObject> _treeOnly = new();
         /// <summary>Backgrounds of the non-graph view buttons, keyed by the tab id they select, so
         /// the selected one can be lit the same way a trader tab is.</summary>
         private readonly Dictionary<string, Image> _viewButtonBackgrounds = new();
@@ -81,6 +85,7 @@ namespace QuestTree.UI
             var itemY = -(Height - itemHeight) / 2f; // vertically centered within the bar
 
             var searchGo = new GameObject("Search", typeof(RectTransform), typeof(Image), typeof(TMP_InputField));
+            _treeOnly.Add(searchGo);
             var searchRect = (RectTransform)searchGo.transform;
             searchRect.SetParent(toolbar, worldPositionStays: false);
             searchRect.anchorMin = searchRect.anchorMax = new Vector2(0f, 1f);
@@ -141,14 +146,14 @@ namespace QuestTree.UI
             // Placed between the search box and the notice, on the same manual x-cursor.
             var navX = padding + searchWidth + 10f;
             navX += BuildToolbarAction(toolbar, "My quests (M)", navX, itemY, itemHeight, 110f, frameMyQuests,
-                "Jump to the quests you can work on now");
+                "Jump to the quests you can work on now", treeOnly: true);
             navX += BuildToolbarAction(toolbar, "Fit (F)", navX, itemY, itemHeight, 70f, frameContent,
-                "Fit the whole tab on screen");
+                "Fit the whole tab on screen", treeOnly: true);
 
             // Focus is a toggle, so its background says whether it is on - the tree itself looking
             // sparse is not enough of a clue.
             navX += BuildToolbarAction(toolbar, "Focus (X)", navX, itemY, itemHeight, 90f, ToggleFocus,
-                "Show only what you can work on, plus what it needs and unlocks", out _focusBackground);
+                "Show only what you can work on, plus what it needs and unlocks", out _focusBackground, treeOnly: true);
             RefreshFocusState();
 
             // The controls hint is shown once and then never again on its own, which would make it
@@ -201,14 +206,14 @@ namespace QuestTree.UI
         /// already know the wheel and keyboard do.</summary>
         private float BuildToolbarAction(
             RectTransform toolbar, string label, float x, float itemY, float itemHeight, float width, Action onClick,
-            string tooltip = null)
+            string tooltip = null, bool treeOnly = false)
         {
-            return BuildToolbarAction(toolbar, label, x, itemY, itemHeight, width, onClick, tooltip, out _);
+            return BuildToolbarAction(toolbar, label, x, itemY, itemHeight, width, onClick, tooltip, out _, treeOnly);
         }
 
         private float BuildToolbarAction(
             RectTransform toolbar, string label, float x, float itemY, float itemHeight, float width, Action onClick,
-            string tooltip, out Image background)
+            string tooltip, out Image background, bool treeOnly = false)
         {
             var rect = GameStyle.CreateButton(toolbar, label, onClick);
             rect.anchorMin = rect.anchorMax = new Vector2(0f, 1f);
@@ -218,8 +223,16 @@ namespace QuestTree.UI
             background = rect.GetComponent<Image>();
 
             if (!string.IsNullOrEmpty(tooltip)) GameStyle.AddTooltip(rect.gameObject, tooltip);
+            if (treeOnly) _treeOnly.Add(rect.gameObject);
 
             return width + 6f;
+        }
+
+        /// <summary>Shows or hides the graph-only controls. The panel calls this as views change.</summary>
+        public void SetTreeControlsVisible(bool visible)
+        {
+            foreach (var go in _treeOnly)
+                if (go != null) go.SetActive(visible);
         }
 
         /// <summary>The Focus toggle. The setting is the state; flipping it raises
@@ -243,7 +256,7 @@ namespace QuestTree.UI
 
         /// <summary>The four statuses as they look on a node - a bar in the status colour and the
         /// name - laid out inline. Returns the width consumed.</summary>
-        private static float BuildLegendChips(RectTransform toolbar, float x, float itemY, float itemHeight)
+        private float BuildLegendChips(RectTransform toolbar, float x, float itemY, float itemHeight)
         {
             var statuses = new[]
             {
@@ -264,6 +277,7 @@ namespace QuestTree.UI
                 var bar = barGo.GetComponent<Image>();
                 bar.color = QuestNodeView.ColorFor(status);
                 bar.raycastTarget = false;
+                _treeOnly.Add(barGo);
 
                 var name = QuestNodeView.NameFor(status);
                 var width = name.Length * 6.5f + 8f;
@@ -282,6 +296,7 @@ namespace QuestTree.UI
                 text.color = GameStyle.DimTextColor;
                 text.raycastTarget = false;
                 GameStyle.Apply(text);
+                _treeOnly.Add(textGo);
 
                 cursor += LayoutMetrics.StatusBarWidth + 4f + width + 10f;
             }

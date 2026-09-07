@@ -26,7 +26,7 @@ namespace QuestTree.UI
     {
         private const int MaxRows = 40;
 
-        private enum Bucket
+        internal enum Bucket
         {
             InProgress = 0,
             ReadyToHandIn = 1,
@@ -34,7 +34,7 @@ namespace QuestTree.UI
             Other = 3
         }
 
-        private sealed class Ranked
+        internal sealed class Ranked
         {
             public QuestNode Node;
             public Bucket Bucket;
@@ -118,6 +118,11 @@ namespace QuestTree.UI
         };
 
         /// <summary>The one extra fact worth showing per row - what is left, or what is blocking.</summary>
+        /// <summary>The one extra fact worth showing per row - what is left, or what is blocking.
+        /// Shared with the map's sidebar, which ranks the same way for one map.</summary>
+        internal static string Reason(Ranked entry, ProfilePayloadDto profile) =>
+            Detail(entry, profile).TrimStart(' ', '\u00b7');
+
         private static string Detail(Ranked entry, ProfilePayloadDto profile)
         {
             if (entry.Bucket == Bucket.ReadyToHandIn) return "  ·  all items held";
@@ -137,7 +142,7 @@ namespace QuestTree.UI
             return "";
         }
 
-        private static List<Ranked> Rank(QuestGraphBuilder graph, ProfilePayloadDto profile)
+        internal static List<Ranked> Rank(QuestGraphBuilder graph, ProfilePayloadDto profile)
         {
             var owned = profile?.ItemsOwned ?? new Dictionary<string, HeldItemDto>();
             var playerLevel = profile?.Level ?? 0;

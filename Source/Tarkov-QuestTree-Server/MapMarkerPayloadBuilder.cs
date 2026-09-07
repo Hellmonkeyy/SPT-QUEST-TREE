@@ -340,6 +340,7 @@ namespace QuestTreeServer
                         result.Markers.Add(new MapMarkerDto
                         {
                             ItemName = ResolveItemName(template, locale),
+                            Template = template,
                             Quests = wanting.Names,
                             QuestIds = wanting.Ids,
                             Kind = ItemKind,
@@ -595,6 +596,7 @@ namespace QuestTreeServer
                     markers.Add(new MapMarkerDto
                     {
                         ItemName = ResolveItemName(tpl, locale),
+                        Template = tpl!,
                         Quests = wanting.Names,
                         QuestIds = wanting.Ids,
                         Kind = ItemKind,
