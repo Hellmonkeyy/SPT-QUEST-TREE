@@ -27,7 +27,14 @@ namespace QuestTree
 
             if (!Cache.TryGetValue(key, out var field))
             {
-                field = owner.GetFields(Flags).FirstOrDefault(f => typeof(T).IsAssignableFrom(f.FieldType));
+                // Base classes too: GetFields with NonPublic returns a class's OWN privates only,
+                // and the field wanted may be declared on the class the game type derives from.
+                for (var type = owner; type != null && field == null; type = type.BaseType)
+                {
+                    field = type.GetFields(Flags | BindingFlags.DeclaredOnly)
+                        .FirstOrDefault(f => typeof(T).IsAssignableFrom(f.FieldType));
+                }
+
                 Cache[key] = field;
 
                 if (field == null)
