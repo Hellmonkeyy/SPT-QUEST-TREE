@@ -275,7 +275,8 @@ namespace QuestTree.UI
         /// map below it on the left, the sidebar on the right. The map is the point of the whole
         /// panel, so it takes every pixel the sidebar does not.
         /// </summary>
-        public static float Build(RectTransform parent, QuestGraphBuilder graph, Action onRepaint, Vector2 panelSize)
+        public static float Build(
+            RectTransform parent, QuestGraphBuilder graph, Action onRepaint, Action onRefresh, Vector2 panelSize)
         {
             var byMap = GroupByMap(graph);
 
@@ -301,7 +302,7 @@ namespace QuestTree.UI
             // The map and list are built first and the dropdowns last, even though the dropdowns sit
             // above them on screen. Unity UI draws siblings in order, so an open list can only cover
             // the map if it is created after it.
-            var contentHeight = BuildSelectedMap(parent, selected, entry, layer, ControlRowHeight, graph, onRepaint, panelSize);
+            var contentHeight = BuildSelectedMap(parent, selected, entry, layer, ControlRowHeight, graph, onRepaint, onRefresh, panelSize);
 
             // Beside the two pickers, and built before them for the same draw-order reason. Its x is
             // fixed rather than measured from the floor picker, which is absent on single-floor maps
@@ -463,7 +464,7 @@ namespace QuestTree.UI
         private static float BuildSelectedMap(
             RectTransform parent, List<QuestNode> quests, DynamicMapsLibrary.MapEntry entry,
             DynamicMapsLibrary.MapLayer layer, float top, QuestGraphBuilder graph, Action onRepaint,
-            Vector2 panelSize)
+            Action onRefresh, Vector2 panelSize)
         {
             var left = AuxLayout.Padding;
             var sprite = layer?.GetSprite();
@@ -513,7 +514,7 @@ namespace QuestTree.UI
             var sidebarX = sprite != null ? left + mapWidth + AuxLayout.Padding : left;
             var sidebarWidth = sprite != null ? SidebarWidth : Mathf.Max(SidebarWidth, panelSize.x - AuxLayout.Padding * 2f);
 
-            BuildSidebar(parent, sidebarX, top, sidebarWidth, height, quests, visible, entry, layer, graph, onRepaint);
+            BuildSidebar(parent, sidebarX, top, sidebarWidth, height, quests, visible, entry, layer, graph, onRepaint, onRefresh);
 
             return top + height + AuxLayout.Padding;
         }
@@ -551,7 +552,7 @@ namespace QuestTree.UI
         private static void BuildSidebar(
             RectTransform parent, float x, float top, float width, float height,
             List<QuestNode> quests, List<QuestNode> visible, DynamicMapsLibrary.MapEntry entry,
-            DynamicMapsLibrary.MapLayer layer, QuestGraphBuilder graph, Action onRepaint)
+            DynamicMapsLibrary.MapLayer layer, QuestGraphBuilder graph, Action onRepaint, Action onRefresh)
         {
             var mapName = quests[0].LocationId;
             var set = MarkerSetFor(entry);
@@ -593,6 +594,13 @@ namespace QuestTree.UI
 
             // ---- header
             AddAt(content, $"<b>{mapName}</b>", listX, ref y, 26f, 16, inner);
+
+            // The other list views carry this; the map's "items to find here" reads the same
+            // stash and had no way to re-read it short of leaving the view. On the header line,
+            // placed by hand: DoNextView.RefreshLink assumes a section header's geometry.
+            var linkY = y - 26f + 3f;
+            AuxLayout.AddClickableRow(content, "<color=#FFFFFF80>Refresh  ⟳</color>",
+                listX + inner - 90f, ref linkY, 90f, false, onRefresh, 20f);
 
             // Said once, here, rather than by retitling the header: the map name is what the rest
             // of the sidebar refers back to ("Quests on Customs").

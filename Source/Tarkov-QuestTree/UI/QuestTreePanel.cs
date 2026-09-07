@@ -1170,11 +1170,11 @@ namespace QuestTree.UI
             // changed since it was last read, so this is where it gets re-fetched.
             if (traderId == KappaTabId) QuestDataClient.InvalidateKappa();
 
-            // The watchlist reads the stash, which moves every raid, so entering it re-reads rather
-            // than showing whatever was cached when the panel opened.
-            // Both read the stash, which moves every raid, so entering them re-reads rather than
-            // showing whatever was cached when the panel opened.
-            if (traderId == ItemsTabId || traderId == DoNextTabId) QuestDataClient.InvalidateProfile();
+            // All three read the stash, which moves every raid, so entering them re-reads rather
+            // than showing whatever was cached when the panel opened. The map's "items to find
+            // here" counts were the one place still showing the stale copy.
+            if (traderId == ItemsTabId || traderId == DoNextTabId || traderId == MapsTabId)
+                QuestDataClient.InvalidateProfile();
 
             // Tabs are hand-built rather than cloned, so they play the game's click sound
             // explicitly - otherwise half this screen would be silent and half would not.
@@ -1300,7 +1300,11 @@ namespace QuestTree.UI
                     RenderSelectedTab();
                 })
                 : _selectedTraderId == MapsTabId
-                ? MapView.Build(_auxContent, _graph, RenderSelectedTab, size)
+                ? MapView.Build(_auxContent, _graph, RenderSelectedTab, () =>
+                {
+                    QuestDataClient.InvalidateProfile();
+                    RenderSelectedTab();
+                }, size)
                 : _selectedTraderId == ItemsTabId
                 ? ItemWatchlistView.Build(_auxContent, _graph, size, FocusNode, () =>
                 {
