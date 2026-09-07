@@ -99,8 +99,13 @@ namespace QuestTree.UI
         /// A CanvasGroup is one component and one float, versus recolouring every child graphic.</summary>
         private CanvasGroup _canvasGroup;
 
-        /// <summary>0 = everything; 1 = title only, larger. See <see cref="SetDetailLevel"/>.</summary>
+        /// <summary>0 = everything; 1 = title only, larger; 2 = bar and glyph only. See
+        /// <see cref="SetDetailLevel"/>.</summary>
         private int _detailLevel;
+
+        /// <summary>Whether this quest's title needs two lines, in which case the box is taller
+        /// and the rows below it move down. Decided per Bind by measuring the title.</summary>
+        private bool _tall;
 
         public QuestNode Node { get; private set; }
         public Action<QuestNode> OnClicked;
@@ -229,9 +234,28 @@ namespace QuestTree.UI
 
             _title.text = node.Name;
             _kappaBadge.SetActive(node.IsKappaRequired);
+
+            // Size to the title, not the other way round: a name like "The Survivalist Path -
+            // Unprotected but Dangerous" was an ellipsis at one line, and three lines over the
+            // subtitle when allowed to wrap. Two lines and a taller box is the honest middle.
+            _title.fontSize = LayoutMetrics.TitleFontSize;
+            _tall = LayoutMetrics.AllowTallNodes && TitleNeedsTwoLines(node.Name);
+            ((RectTransform)transform).sizeDelta = new Vector2(Width, Height + (_tall ? LayoutMetrics.TallNodeExtraHeight : 0f));
+
             RefreshStatus();
             RefreshDetails();
             ApplyDetailLevel();
+        }
+
+        /// <summary>Whether the title overflows one line of the box, measured with the real font.
+        /// The glyph and Kappa badge sit in the top-right corner, so that width is not available.</summary>
+        private bool TitleNeedsTwoLines(string title)
+        {
+            if (_title == null || string.IsNullOrEmpty(title)) return false;
+
+            var available = Width - LayoutMetrics.TextInsetX - 44f;
+            var preferred = _title.GetPreferredValues(title, 10000f, 100f);
+            return preferred.x > available;
         }
 
         /// <summary>Re-reads only the status colours - cheap enough to call on every node whenever
@@ -309,11 +333,18 @@ namespace QuestTree.UI
         private void ApplyDetailLevel()
         {
             var zoomedOut = _detailLevel > 0;
+            var barOnly = _detailLevel > 1;
 
             if (_subtitle != null) _subtitle.gameObject.SetActive(!zoomedOut);
             if (_objectivePreview != null) _objectivePreview.gameObject.SetActive(!zoomedOut);
+            if (_kappaBadge != null && Node != null) _kappaBadge.SetActive(Node.IsKappaRequired && !barOnly);
 
             if (_title == null) return;
+
+            // Past the point where even a large title is a smear, the box says what it can with
+            // its bar and glyph alone - a wrapped 5px title only adds noise.
+            _title.gameObject.SetActive(!barOnly);
+            if (barOnly) return;
 
             var titleRect = (RectTransform)_title.transform;
 
@@ -326,16 +357,34 @@ namespace QuestTree.UI
                 titleRect.sizeDelta = new Vector2(-(LayoutMetrics.TextInsetX + 24f), 0f);
                 _title.alignment = TextAlignmentOptions.Left;
                 _title.enableWordWrapping = true;
+                _title.maxVisibleLines = 3;
             }
             else
             {
+                var lines = _tall ? 2 : 1;
+                var extra = _tall ? LayoutMetrics.TallNodeExtraHeight : 0f;
+
                 _title.fontSize = LayoutMetrics.TitleFontSize;
                 titleRect.anchorMin = new Vector2(0f, 1f);
                 titleRect.anchorMax = new Vector2(1f, 1f);
                 titleRect.anchoredPosition = new Vector2(LayoutMetrics.TextInsetX, LayoutMetrics.TitleOffsetY);
-                titleRect.sizeDelta = new Vector2(-(LayoutMetrics.TextInsetX + 6f), 16f);
+                titleRect.sizeDelta = new Vector2(-(LayoutMetrics.TextInsetX + 30f), 16f * lines);
                 _title.alignment = TextAlignmentOptions.TopLeft;
-                _title.enableWordWrapping = false;
+                _title.enableWordWrapping = _tall;
+
+                // The hard stop. Turning wrapping off was not enough on its own: the title still
+                // broke onto the subtitle's line. As many lines as the box was sized for, ellipsis
+                // for the rest.
+                _title.maxVisibleLines = lines;
+
+                // The rows beneath move down by the extra line, so a two-line title never sits on
+                // its own subtitle.
+                if (_subtitle != null)
+                    ((RectTransform)_subtitle.transform).anchoredPosition =
+                        new Vector2(LayoutMetrics.TextInsetX, LayoutMetrics.SubtitleOffsetY - extra);
+                if (_objectivePreview != null)
+                    ((RectTransform)_objectivePreview.transform).anchoredPosition =
+                        new Vector2(LayoutMetrics.TextInsetX, LayoutMetrics.ObjectiveOffsetY - extra);
             }
         }
 

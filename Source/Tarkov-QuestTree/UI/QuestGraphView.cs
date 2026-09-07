@@ -78,6 +78,17 @@ namespace QuestTree.UI
         /// <summary>Level of detail the built views are currently drawn at (QuestNodeView.SetDetailLevel).</summary>
         private int _detailLevel;
 
+        /// <summary>The zoom the built edges were last aimed at - see RefreshVisibleNodes.</summary>
+        private float _edgeZoom = 1f;
+
+        /// <summary>A content-space thickness that is never less than a screen pixel, and never
+        /// a slab: divided by zoom, clamped so a 2px line zoomed to 0.25 draws 2px, not 8.</summary>
+        private float ScreenThickness(float thickness)
+        {
+            var zoom = Mathf.Max(_content != null ? _content.localScale.x : 1f, 0.05f);
+            return Mathf.Clamp(thickness / zoom, thickness, 8f);
+        }
+
         /// <summary>Taken from the status palette rather than written out again: this used to be a
         /// copy of the "active" colour, which silently stopped matching the moment that colour
         /// changed. Reading it from <see cref="QuestNodeView.ColorFor"/> means the highlighted chain
@@ -306,13 +317,28 @@ namespace QuestTree.UI
             var visible = GetVisibleContentRect();
             var budget = ModSettings.Ready ? ModSettings.MaxVisibleNodes.Value : DefaultMaxVisibleNodes;
 
-            // Zoom crossed the readability line: every built view switches detail level. Views
+            // Zoom crossed a readability line: every built view switches detail level. Views
             // bound below pick the level up in Bind.
-            var level = _content.localScale.x < LayoutMetrics.DetailLevelZoom ? 1 : 0;
+            var zoom = _content.localScale.x;
+            var level = zoom < LayoutMetrics.BarOnlyZoom ? 2 : zoom < LayoutMetrics.DetailLevelZoom ? 1 : 0;
             if (level != _detailLevel)
             {
                 _detailLevel = level;
                 foreach (var built in _views.Values) built.SetDetailLevel(level);
+            }
+
+            // Edges are drawn in content space, so a 1px hairline at a quarter zoom is a quarter
+            // of a screen pixel - nothing. Re-aim the built ones with a thickness that holds on
+            // screen whenever the zoom moves.
+            if (!Mathf.Approximately(zoom, _edgeZoom))
+            {
+                _edgeZoom = zoom;
+                foreach (var (index, line) in _edgeViews)
+                {
+                    if (index < 0 || index >= _edgeLayout.Length) continue;
+                    var edge = _edgeLayout[index];
+                    UILineConnector.Apply(line, edge.FromPoint, edge.ToPoint, ScreenThickness(EdgeStyleFor(index).Thickness));
+                }
             }
 
             // --- nodes ---
@@ -634,12 +660,14 @@ namespace QuestTree.UI
             var edge = _edgeLayout[index];
             var style = EdgeStyleFor(index);
 
+            var thickness = ScreenThickness(style.Thickness);
+
             if (_edgePool.Count == 0)
-                return UILineConnector.Create(_content, edge.FromPoint, edge.ToPoint, style.Color, style.Thickness);
+                return UILineConnector.Create(_content, edge.FromPoint, edge.ToPoint, style.Color, thickness);
 
             var line = _edgePool.Pop();
             UILineConnector.SetActive(line, true);
-            UILineConnector.Apply(line, edge.FromPoint, edge.ToPoint, style.Thickness);
+            UILineConnector.Apply(line, edge.FromPoint, edge.ToPoint, thickness);
 
             // Reset the colour on EVERY acquire, not just on create. Apply only re-aims the line,
             // so a pooled edge keeps whatever colour it last had - and once the chain highlight

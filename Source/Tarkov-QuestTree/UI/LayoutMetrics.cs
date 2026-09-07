@@ -25,7 +25,12 @@ namespace QuestTree.UI
         // Row spacing must stay above NodeHeight or rows touch; the gap is deliberately smaller in
         // compact mode because that vertical space is what dominates the canvas height.
         public static float ColumnSpacing => Compact ? 195f : 260f;
-        public static float RowSpacing => Compact ? 62f : 100f;
+        public static float RowSpacing => Compact ? 62f : 112f;
+
+        /// <summary>A node whose title needs two lines grows by this much (comfortable layout
+        /// only - compact has no room). RowSpacing leaves a gap for it: 84 + 16 = 100 &lt; 112.</summary>
+        public static float TallNodeExtraHeight => 16f;
+        public static bool AllowTallNodes => !Compact;
 
         // --- the status bar down the left edge, and where text starts to its right ---
         public static float StatusBarWidth => 6f;
@@ -34,6 +39,9 @@ namespace QuestTree.UI
         /// <summary>Below this zoom the subtitle and objective are hidden and the title grows -
         /// see QuestNodeView.SetDetailLevel. 0.55 is where a 15px title stops being readable.</summary>
         public static float DetailLevelZoom => 0.55f;
+
+        /// <summary>Below this zoom the title goes too: a 20px title at a quarter scale is 5px.</summary>
+        public static float BarOnlyZoom => 0.35f;
 
         // --- text inside a node ---
         public static int TitleFontSize => Compact ? 12 : 15;
