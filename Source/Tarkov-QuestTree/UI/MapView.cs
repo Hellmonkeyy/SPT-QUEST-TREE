@@ -588,8 +588,24 @@ namespace QuestTree.UI
 
             if (templates.Count == 0) return result;
 
-            return ItemWatchlistView.Collect(graph, profile)
+            // The pin carries the item's real name from the game's locale; the watchlist only has
+            // what it could parse out of the objective sentence, which for "Locate and obtain the
+            // golden Zibbo lighter on Customs" is the whole sentence.
+            var names = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var marker in set.Markers)
+            {
+                if (marker == null || string.IsNullOrEmpty(marker.Template) || string.IsNullOrEmpty(marker.ItemName)) continue;
+                if (!names.ContainsKey(marker.Template)) names[marker.Template] = marker.ItemName;
+            }
+
+            var items = ItemWatchlistView.Collect(graph, profile)
                 .Where(i => templates.Contains(i.Template))
+                .ToList();
+
+            foreach (var item in items)
+                if (names.TryGetValue(item.Template, out var name)) item.Name = name;
+
+            return items
                 .OrderBy(i => i.Outstanding == 0 ? 1 : 0)
                 .ThenBy(i => i.Outstanding)
                 .ThenBy(i => i.Name, StringComparer.OrdinalIgnoreCase)
@@ -1099,6 +1115,12 @@ namespace QuestTree.UI
             // put it above the markers created so far.
             RectTransform selectedRect = null;
 
+            // Footprints of the labels shown at rest (the selected quest's), in map units, so two
+            // of its pins a few metres apart do not stack their names. Names are held at a constant
+            // screen size, so their size in map units is the screen size divided by the fit.
+            var claimed = new List<Rect>();
+            var labelSpan = new Vector2(LabelWidth, LabelHeight) / Mathf.Max(0.0001f, space.localScale.x);
+
             foreach (var (marker, owner, status, active, objective) in ordered)
             {
                 // A marker whose height matches no floor at all is treated as belonging to the one
@@ -1197,14 +1219,27 @@ namespace QuestTree.UI
                 label.overflowMode = TextOverflowModes.Ellipsis;
                 label.raycastTarget = false;
                 GameStyle.ApplyOutlined(label);
-                labelGo.SetActive(isSelected);
+
+                // Shown at rest only for the selected quest, and then only where it does not land
+                // on one of its own other labels. Hover shows it regardless.
+                var shownAtRest = isSelected;
+                if (shownAtRest)
+                {
+                    var footprint = new Rect(
+                        position.x + labelSpan.x * 0.1f, position.y - labelSpan.y * 0.5f,
+                        labelSpan.x, labelSpan.y);
+                    if (claimed.Any(other => other.Overlaps(footprint))) shownAtRest = false;
+                    else claimed.Add(footprint);
+                }
+
+                labelGo.SetActive(shownAtRest);
 
                 var click = go.AddComponent<MapMarkerClick>();
 
                 click.OnHover = hovering =>
                 {
                     if (labelGo == null) return;
-                    labelGo.SetActive(hovering || isSelected);
+                    labelGo.SetActive(hovering || shownAtRest);
                     // Above its neighbours while hovered, so the name is not under the next pin.
                     if (hovering && rect != null) rect.SetAsLastSibling();
                 };
