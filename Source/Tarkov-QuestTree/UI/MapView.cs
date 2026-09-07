@@ -214,6 +214,36 @@ namespace QuestTree.UI
             return null;
         }
 
+        /// <summary>Forgets the saved pan and zoom, so the next build fits the floor the way it
+        /// was first shown - the F key on the map, matching F on the tree. A pending fly-to is
+        /// dropped with it: fitting and then flying would undo the fit.</summary>
+        public static void ResetView()
+        {
+            _viewStateKey = null;
+            _pendingFocusQuestId = null;
+        }
+
+        /// <summary>Moves one floor up (+1) or down (-1) from the one showing. False at either end
+        /// and on a map with one floor, so the caller knows whether there is anything to redraw.</summary>
+        public static bool StepFloor(int direction)
+        {
+            var entry = DynamicMapsLibrary.FindByLocationKey(_selectedLocationKey);
+            if (entry == null || entry.Layers.Count < 2) return false;
+
+            // By level, not config order: "up" has to mean the storey above.
+            var floors = entry.Layers.OrderBy(l => l.Level).ToList();
+            var index = floors.IndexOf(ResolveLayer(entry));
+            if (index < 0) return false;
+
+            var next = index + direction;
+            if (next < 0 || next >= floors.Count) return false;
+
+            _selectedLevel = floors[next].Level;
+            _pickerOpen = false;
+            _floorPickerOpen = false;
+            return true;
+        }
+
         /// <summary>Prepares the view to open on a quest: its map, its floor, its row expanded and
         /// its pin flown to. The caller switches to the Maps view afterwards; the next Build does
         /// the rest. If the accepted-only filter would hide the quest, the filter is lifted - it

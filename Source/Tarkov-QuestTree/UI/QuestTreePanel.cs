@@ -353,13 +353,28 @@ namespace QuestTree.UI
             }
 
             // Shortcuts. Deliberately only while the panel has focus and the search box does not -
-            // typing "f" into search must not re-frame the view.
+            // typing "f" into search must not re-frame the view. Split by view: on the map, F fits
+            // the map and the brackets change floor; the tree's keys used to fire there too, where
+            // F and M did nothing visible and X silently flipped a tree-only setting.
             if (!_toolbar.IsSearchFocused())
             {
-                if (Input.GetKeyDown(KeyCode.F)) _graphView.FrameContent();
-                if (Input.GetKeyDown(KeyCode.M)) _graphView.FrameMyQuests();
-                if (Input.GetKeyDown(KeyCode.X)) _toolbar.ToggleFocus();
-                if (Input.GetKeyDown(KeyCode.Slash)) _toolbar.FocusSearch();
+                if (_selectedTraderId == MapsTabId)
+                {
+                    if (Input.GetKeyDown(KeyCode.F))
+                    {
+                        MapView.ResetView();
+                        RenderSelectedTab();
+                    }
+                    if (Input.GetKeyDown(KeyCode.RightBracket) && MapView.StepFloor(+1)) RenderSelectedTab();
+                    if (Input.GetKeyDown(KeyCode.LeftBracket) && MapView.StepFloor(-1)) RenderSelectedTab();
+                }
+                else if (!IsAuxTab(_selectedTraderId))
+                {
+                    if (Input.GetKeyDown(KeyCode.F)) _graphView.FrameContent();
+                    if (Input.GetKeyDown(KeyCode.M)) _graphView.FrameMyQuests();
+                    if (Input.GetKeyDown(KeyCode.X)) _toolbar.ToggleFocus();
+                    if (Input.GetKeyDown(KeyCode.Slash)) _toolbar.FocusSearch();
+                }
             }
 
             // Virtualization is driven from this Update rather than from the graph view's own
