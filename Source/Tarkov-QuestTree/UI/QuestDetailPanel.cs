@@ -57,6 +57,14 @@ namespace QuestTree.UI
 
         public bool IsOpen => _detailPanel != null && _detailPanel.gameObject.activeSelf;
 
+        /// <summary>The quest being shown, kept across a view switch (see HideForTabSwitch).</summary>
+        public QuestNode CurrentNode => _detailNode;
+
+        /// <summary>Whether there is somewhere to go back to, and how - supplied by the panel,
+        /// which keeps the history. The row is only drawn when the first says yes.</summary>
+        public Func<bool> CanGoBack;
+        public Action GoBack;
+
         /// <summary>How much of the viewport's right edge the panel covers when it is up: the
         /// full width, or nothing while it is collapsed to its sliver. The graph subtracts this
         /// when framing so a focused quest is not centred underneath the panel.</summary>
@@ -281,6 +289,15 @@ namespace QuestTree.UI
             AuxLayout.AddWrapped(_content, $"<b>{node.Name}</b>", textX, ref nameY, width - textX, 16);
             AuxLayout.AddLabelAt(_content, $"<color=#FFFFFF80>{node.TraderName}</color>", textX, ref nameY, 16f, 11, width - textX);
             y = Mathf.Max(nameY, y + avatar) + 6f;
+
+            // Walking Requires and Unlocks links is how the panel is mostly used, and there was no
+            // way back along them except finding the quest again by hand.
+            if (CanGoBack?.Invoke() == true)
+            {
+                AuxLayout.AddClickableRow(_content, "<color=#FFFFFF80>←  Back</color>", left, ref y, width, false,
+                    () => GoBack?.Invoke(), 20f);
+                y += 4f;
+            }
 
             // Chips: the facts that gate the quest, at a glance and in the palette the tree uses.
             var chipX = left;

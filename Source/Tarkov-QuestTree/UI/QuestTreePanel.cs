@@ -88,6 +88,14 @@ namespace QuestTree.UI
         /// <summary>Which tree tab to return to when Settings is toggled back off.</summary>
         private string _tabBeforeSettings = AllTradersId;
 
+        /// <summary>Where each detail-link jump came from - the tab and the quest whose detail was
+        /// open - so the Back row can retrace them. An aux tab is recorded with whatever node the
+        /// hidden detail still held, which GoBack ignores: returning to Do next means the list,
+        /// not a quest. Bounded so a long session cannot grow it without limit; nobody walks back
+        /// two dozen links.</summary>
+        private readonly List<(string TabId, QuestNode Node)> _history = new();
+        private const int HistoryDepth = 24;
+
         /// <summary>The view the panel was last on, kept across opens for the "remember last view"
         /// setting. Static: the panel itself is torn down with the menu after a raid.</summary>
         private static string _lastView;
@@ -441,6 +449,8 @@ namespace QuestTree.UI
             BuildTabRow(root);
             _detail.Build(root, _graph, FocusNode, ShowOnMap, () => _session);
             _detail.OnHidden = () => _graphView.SetSelectedNode(null);
+            _detail.CanGoBack = () => _history.Count > 0;
+            _detail.GoBack = GoBack;
             _graphView.DetailOpen = () => _detail.IsOpen;
             _graphView.CoveredWidth = () => _detail.CoveredWidth;
             BuildIntroPanel(root);
@@ -692,6 +702,9 @@ namespace QuestTree.UI
         {
             _graph.Build(questController, session);
 
+            // The nodes the history pointed at belong to the graph just replaced.
+            _history.Clear();
+
             // The tab below is chosen by setting; this only decides which map that tab shows.
             if (_pendingRaidLocation != null)
             {
@@ -925,15 +938,59 @@ namespace QuestTree.UI
         /// sits innermost because it is the one you open most often.</summary>
         /// <summary>Selects and frames a quest in the graph, switching to a tab that contains it
         /// first if the current one does not - a prerequisite from another trader is not in that
-        /// trader's tab, and the map is not a tab at all.</summary>
-        private void FocusNode(QuestNode node)
+        /// trader's tab, and the map is not a tab at all. The tab chosen is the narrowest that
+        /// holds the quest: from a trader tab, the other trader's tab rather than All, so a
+        /// trader-by-trader reading of the tree survives following a link out of it.</summary>
+        private void FocusNode(QuestNode node) => FocusNode(node, pushHistory: true);
+
+        private void FocusNode(QuestNode node, bool pushHistory)
         {
             if (node == null) return;
 
-            if (IsAuxTab(_selectedTraderId) || (_selectedTraderId != AllTradersId && node.TraderId != _selectedTraderId))
-                SelectTab(AllTradersId);
+            if (pushHistory) PushHistory();
+
+            if (IsAuxTab(_selectedTraderId))
+                SelectTab(TabHolding(node, _tabBeforeSettings));
+            else if (_selectedTraderId != AllTradersId && node.TraderId != _selectedTraderId)
+                SelectTab(TabHolding(node, node.TraderId));
 
             _graphView.FocusNode(node);
+        }
+
+        /// <summary>The preferred tree tab when it is a trader tab that holds the quest, else All.</summary>
+        private string TabHolding(QuestNode node, string preferred) =>
+            preferred != null && preferred == node.TraderId && _tabStyles.ContainsKey(preferred)
+                ? preferred
+                : AllTradersId;
+
+        /// <summary>Records where a jump is leaving from, when there is anything to come back to:
+        /// a tree tab with no detail open is where the session started, not a place.</summary>
+        private void PushHistory()
+        {
+            var current = _detail.CurrentNode;
+            if (current == null && !IsAuxTab(_selectedTraderId)) return;
+
+            _history.Add((_selectedTraderId, current));
+            if (_history.Count > HistoryDepth) _history.RemoveAt(0);
+        }
+
+        /// <summary>The Back row: the previous tab, and the previous quest's detail if that tab is
+        /// the tree. Focusing does not push, or Back would undo itself.</summary>
+        private void GoBack()
+        {
+            if (_history.Count == 0) return;
+
+            var (tabId, node) = _history[_history.Count - 1];
+            _history.RemoveAt(_history.Count - 1);
+
+            if (IsAuxTab(tabId) || (tabId != AllTradersId && !_tabStyles.ContainsKey(tabId)))
+            {
+                SelectTab(IsAuxTab(tabId) ? tabId : AllTradersId);
+                return;
+            }
+
+            SelectTab(tabId);
+            if (node != null) FocusNode(node, pushHistory: false);
         }
 
         /// <summary>Opens the map on a quest: the detail panel's "show on the map" row.</summary>
