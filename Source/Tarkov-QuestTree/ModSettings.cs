@@ -102,19 +102,30 @@ namespace QuestTree
             return ColorUtility.TryParseHtmlString(entry.Value.Trim(), out var color) ? color : fallback;
         }
 
-        /// <summary>Puts every entry in a section back to its default, then re-renders once.</summary>
+        /// <summary>Puts every entry in a config-file section back to its default, then
+        /// re-renders once.</summary>
         public static void ResetSection(string section)
         {
-            if (!Ready) return;
+            var matching = new List<ConfigEntryBase>();
+            foreach (var entry in Entries)
+                if (string.Equals(entry.Definition.Section, section, StringComparison.Ordinal)) matching.Add(entry);
+
+            ResetEntries(matching.ToArray());
+        }
+
+        /// <summary>Puts the given entries back to their defaults, then re-renders once. The
+        /// Settings page groups entries by what they affect, which is not the config file's
+        /// sections - "Compact layout" is filed under Display in the file but sits in the Tree
+        /// column - so a column's reset names its entries rather than a section.</summary>
+        public static void ResetEntries(params ConfigEntryBase[] entries)
+        {
+            if (!Ready || entries == null) return;
 
             _resetting = true;
             try
             {
-                foreach (var entry in Entries)
-                {
-                    if (!string.Equals(entry.Definition.Section, section, StringComparison.Ordinal)) continue;
-                    entry.BoxedValue = entry.DefaultValue;
-                }
+                foreach (var entry in entries)
+                    if (entry != null) entry.BoxedValue = entry.DefaultValue;
             }
             finally
             {

@@ -88,12 +88,15 @@ namespace QuestTree.UI
             AuxLayout.AddSectionHeader(column, ref y, title, AuxLayout.Padding, width - AuxLayout.Padding * 2f);
         }
 
-        private static void ResetLink(RectTransform column, ref float y, string section, float width)
+        /// <summary>One reset per column, naming exactly the entries the column shows. The
+        /// config file's sections do not match these columns, and resetting by section used to
+        /// miss some rows (Compact layout, Max visible quests) and reach into the other column.</summary>
+        private static void ResetLink(RectTransform column, ref float y, float width, params ConfigEntryBase[] entries)
         {
             y += 4f;
             AuxLayout.AddClickableRow(column, "<color=#FFFFFF60>Reset this section to defaults</color>",
                 AuxLayout.Padding, ref y, width - AuxLayout.Padding * 2f, false,
-                () => ModSettings.ResetSection(section), 20f);
+                () => ModSettings.ResetEntries(entries), 20f);
         }
 
         private static void Toggle(RectTransform column, ref float y, string label, string description, ConfigEntry<bool> entry)
@@ -150,8 +153,12 @@ namespace QuestTree.UI
             Stepper(column, ref y, "Max visible quests", ModSettings.MaxVisibleNodes, 100, 100, 2000,
                 "Ceiling on how many quest boxes exist at once. Only reachable when zoomed right out.");
 
-            ResetLink(column, ref y, "Tree", width);
-            ResetLink(column, ref y, "Filters", width);
+            ResetLink(column, ref y, width,
+                ModSettings.CompactLayout, ModSettings.TallTitles, ModSettings.AbbreviateWhenZoomedOut,
+                ModSettings.DrawEdges, ModSettings.FocusFrontier, ModSettings.HideUnobtainable,
+                ModSettings.HideCompleted, ModSettings.HideTraderless, ModSettings.EdgeOpacity,
+                ModSettings.HoverDimStrength, ModSettings.TitleOnlyBelowZoom, ModSettings.CodesBelowZoom,
+                ModSettings.MaxVisibleNodes);
         }
 
         // ------------------------------------------------------------------ Behaviour
@@ -192,7 +199,9 @@ namespace QuestTree.UI
                 onKappaListReloaded();
             });
 
-            ResetLink(column, ref y, "Behaviour", width);
+            ResetLink(column, ref y, width,
+                ModSettings.OpenOnMap, ModSettings.RememberLastView, ModSettings.Tooltips,
+                ModSettings.HoverSounds, ModSettings.HarvestZones);
         }
 
         // ------------------------------------------------------------------ Map
@@ -234,8 +243,10 @@ namespace QuestTree.UI
                 ModSettings.SidebarWidth.Value <= 380 ? 0 : ModSettings.SidebarWidth.Value >= 520 ? 2 : 1,
                 index => ModSettings.SidebarWidth.Value = index == 0 ? 380 : index == 2 ? 520 : 440);
 
-            ResetLink(column, ref y, "Map", width);
-            ResetLink(column, ref y, "Display", width);
+            ResetLink(column, ref y, width,
+                ModSettings.MarkStartedOnly, ModSettings.ShowItemsSection, ModSettings.ShowCredits,
+                ModSettings.MirrorMapArtwork, ModSettings.ShowMapGuides, ModSettings.DoNextRows,
+                ModSettings.MapArtworkRotation, ModSettings.PinLabels, ModSettings.SidebarWidth);
         }
 
         /// <summary>A labelled dropdown. The list itself is built later (deferred) at the y reserved
@@ -285,7 +296,9 @@ namespace QuestTree.UI
             ColourRow(column, ref y, width, "Locked", ModSettings.ColorLocked, QuestNodeView.ColorFor(ENodeStatus.Locked));
             ColourRow(column, ref y, width, "Accent", ModSettings.ColorAccent, GameStyle.AccentColor);
 
-            ResetLink(column, ref y, "Colours", width);
+            ResetLink(column, ref y, width,
+                ModSettings.ColorActive, ModSettings.ColorAvailable, ModSettings.ColorCompleted,
+                ModSettings.ColorLocked, ModSettings.ColorAccent);
         }
 
         /// <summary>One colour: a swatch of the current value, its name, and the preset chips.</summary>
