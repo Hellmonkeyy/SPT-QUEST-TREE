@@ -1050,62 +1050,48 @@ namespace QuestTree.UI
         }
 
         /// <summary>
-        /// The status a marker should be drawn as. One pin can serve several quests - an item three
-        /// quests want is one spawn - so it takes the most actionable of them, using the same
-        /// <see cref="StatusRank"/> ordering the quest list is sorted by rather than a second
-        /// opinion about what "most relevant" means.
+        /// What a pin is, and what it opens, in one walk over the quests it serves.
         ///
-        /// Null when no quest resolves, which is not the same as "locked": the payload can name a
-        /// quest the graph does not hold, and guessing a status for it would be a lie.
+        /// Status is the most actionable status among ALL its quests - Active over Available over
+        /// Locked over Completed, the same <see cref="StatusRank"/> the quest list is sorted by
+        /// rather than a second opinion about what "most relevant" means. Null when no quest
+        /// resolves, which is not the same as "locked": the payload can name a quest the graph does
+        /// not hold, and guessing a status for it would be a lie.
+        ///
+        /// The click target is the most actionable of its quests that the list is actually
+        /// SHOWING - the map drops completed quests (see GroupByMap) while the graph still holds
+        /// them, and opening one would select a row that never renders. The selected quest wins
+        /// outright when the pin serves it: the pin is painted as selected because of it, so a
+        /// second click has to close IT, not switch to whichever other quest ranks higher. Null
+        /// when none of its quests has a row; the pin still names itself on hover.
         /// </summary>
-        private static ENodeStatus? StatusFor(MapMarkerDto marker, QuestGraphBuilder graph)
+        private static (string ClickId, ENodeStatus? Status) BestQuestFor(
+            MapMarkerDto marker, QuestGraphBuilder graph, HashSet<string> shown)
         {
-            if (marker.QuestIds == null) return null;
+            if (marker.QuestIds == null) return (null, null);
 
-            ENodeStatus? best = null;
+            ENodeStatus? status = null;
+            string clickId = null;
+            var clickRank = int.MaxValue;
 
             foreach (var id in marker.QuestIds)
             {
                 if (id == null || !graph.NodesById.TryGetValue(id, out var node)) continue;
 
-                if (best == null || StatusRank(node.Status) < StatusRank(best.Value))
-                    best = node.Status;
-            }
-
-            return best;
-        }
-
-        /// <summary>The quest a click on this marker should open: the most actionable one it serves
-        /// that the list is actually showing. Restricted to <paramref name="shown"/> because the map
-        /// drops completed quests (see GroupByMap) while the graph still holds them - picking one of
-        /// those would select a row that never renders, and the click would look broken.</summary>
-        private static string ClickTargetFor(
-            MapMarkerDto marker, QuestGraphBuilder graph, HashSet<string> shown)
-        {
-            if (marker.QuestIds == null) return null;
-
-            // The selected quest wins outright when the pin serves it: the pin is painted as
-            // selected because of it, so a second click has to close IT - not silently switch to
-            // whichever of the pin's other quests ranks higher.
-            if (_selectedQuestId != null && shown.Contains(_selectedQuestId) && marker.QuestIds.Contains(_selectedQuestId))
-                return _selectedQuestId;
-
-            string best = null;
-            var bestRank = int.MaxValue;
-
-            foreach (var id in marker.QuestIds)
-            {
-                if (id == null || !shown.Contains(id)) continue;
-                if (!graph.NodesById.TryGetValue(id, out var node)) continue;
-
                 var rank = StatusRank(node.Status);
-                if (rank >= bestRank) continue;
+                if (status == null || rank < StatusRank(status.Value)) status = node.Status;
 
-                best = id;
-                bestRank = rank;
+                if (shown.Contains(id) && rank < clickRank)
+                {
+                    clickId = id;
+                    clickRank = rank;
+                }
             }
 
-            return best;
+            if (_selectedQuestId != null && shown.Contains(_selectedQuestId) && marker.QuestIds.Contains(_selectedQuestId))
+                clickId = _selectedQuestId;
+
+            return (clickId, status);
         }
 
         private static void BuildMarkers(
@@ -1124,11 +1110,12 @@ namespace QuestTree.UI
                 .Where(m => m != null)
                 .Select(m =>
                 {
-                    var status = StatusFor(m, graph);
+                    var (clickId, status) = BestQuestFor(m, graph, shownIds);
                     return (
                         Marker: m,
                         Owner: OwnerFor(m, entry),
                         Status: status,
+                        ClickId: clickId,
                         Active: status == ENodeStatus.Active,
                         Objective: string.Equals(m.Kind, ObjectiveKind, StringComparison.OrdinalIgnoreCase));
                 })
@@ -1148,7 +1135,7 @@ namespace QuestTree.UI
             var claimed = new List<Rect>();
             var labelSpan = new Vector2(LabelWidth, LabelHeight) / Mathf.Max(0.0001f, space.localScale.x);
 
-            foreach (var (marker, owner, status, active, objective) in ordered)
+            foreach (var (marker, owner, status, clickId, active, objective) in ordered)
             {
                 // A marker whose height matches no floor at all is treated as belonging to the one
                 // being shown rather than dropped: the bands do not tile the world exhaustively, and
@@ -1171,9 +1158,8 @@ namespace QuestTree.UI
 
                 var position = PositionFor(marker, layer, entry);
 
-                // Which quest this pin opens. Null when none of its quests has a row in the list,
-                // in which case the pin still names itself on hover but selects nothing.
-                var clickTarget = ClickTargetFor(marker, graph, shownIds);
+                // Which quest this pin opens - see BestQuestFor. Null selects nothing.
+                var clickTarget = clickId;
 
                 var go = new GameObject("QuestMarker", typeof(RectTransform));
                 var rect = (RectTransform)go.transform;
