@@ -87,6 +87,10 @@ namespace QuestTree.UI
 
         /// <summary>Which tree tab to return to when Settings is toggled back off.</summary>
         private string _tabBeforeSettings = AllTradersId;
+
+        /// <summary>The view the panel was last on, kept across opens for the "remember last view"
+        /// setting. Static: the panel itself is torn down with the menu after a raid.</summary>
+        private static string _lastView;
         private string _selectedTraderId = AllTradersId;
         private bool _builtShell;
 
@@ -648,9 +652,16 @@ namespace QuestTree.UI
             _graph.Build(questController, session);
 
             // Land on the map by default: it is the view most opens are for. The graph is the Tree
-            // button away, and "All" is where that button goes.
+            // button away, and "All" is where that button goes. Or, by setting, wherever the
+            // panel was last - if that is still a real tab.
             _tabBeforeSettings = AllTradersId;
             _selectedTraderId = ModSettings.Ready && ModSettings.OpenOnMap.Value ? MapsTabId : AllTradersId;
+
+            if (ModSettings.Ready && ModSettings.RememberLastView.Value && _lastView != null &&
+                (IsAuxTab(_lastView) || _lastView == AllTradersId || _graph.TraderNames.ContainsKey(_lastView)))
+            {
+                _selectedTraderId = _lastView;
+            }
 
             BuildTabs();
             RenderSelectedTab();
@@ -948,6 +959,7 @@ namespace QuestTree.UI
             GameStyle.PlaySound(EUISoundType.ButtonClick);
 
             _selectedTraderId = traderId;
+            _lastView = traderId;
             RenderSelectedTab();
             UpdateTabHighlight();
         }
@@ -1055,28 +1067,30 @@ namespace QuestTree.UI
                 Destroy(child.gameObject);
             }
 
+            var size = AuxViewportSize();
+
             var height = _selectedTraderId == DoNextTabId
-                ? DoNextView.Build(_auxContent, _graph, () =>
+                ? DoNextView.Build(_auxContent, _graph, size, FocusNode, () =>
                 {
                     QuestDataClient.InvalidateProfile();
                     RenderSelectedTab();
                 })
                 : _selectedTraderId == MapsTabId
-                ? MapView.Build(_auxContent, _graph, RenderSelectedTab, AuxViewportSize())
+                ? MapView.Build(_auxContent, _graph, RenderSelectedTab, size)
                 : _selectedTraderId == ItemsTabId
-                ? ItemWatchlistView.Build(_auxContent, _graph, () =>
+                ? ItemWatchlistView.Build(_auxContent, _graph, size, FocusNode, () =>
                 {
                     QuestDataClient.InvalidateProfile();
                     RenderSelectedTab();
                 })
                 : _selectedTraderId == KappaTabId
-                ? KappaView.Build(_auxContent, _graph, () =>
+                ? KappaView.Build(_auxContent, _graph, size, FocusNode, () =>
                 {
                     QuestDataClient.InvalidateKappa();
                     QuestDataClient.InvalidateProfile();
                     RenderSelectedTab();
                 })
-                : SettingsView.Build(_auxContent, () =>
+                : SettingsView.Build(_auxContent, size, () => ShowIntro(true), () =>
                 {
                     // SettingsView has already re-read the file; the flag is baked into each node
                     // at build time, so the graph needs telling before anything is redrawn.

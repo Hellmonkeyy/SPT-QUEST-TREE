@@ -1,3 +1,5 @@
+using UnityEngine;
+
 namespace QuestTree.UI
 {
     /// <summary>
@@ -30,7 +32,7 @@ namespace QuestTree.UI
         /// <summary>A node whose title needs two lines grows by this much (comfortable layout
         /// only - compact has no room). RowSpacing leaves a gap for it: 84 + 16 = 100 &lt; 112.</summary>
         public static float TallNodeExtraHeight => 16f;
-        public static bool AllowTallNodes => !Compact;
+        public static bool AllowTallNodes => !Compact && (!ModSettings.Ready || ModSettings.TallTitles.Value);
 
         // --- the status bar down the left edge, and where text starts to its right ---
         public static float StatusBarWidth => 6f;
@@ -38,10 +40,12 @@ namespace QuestTree.UI
 
         /// <summary>Below this zoom the subtitle and objective are hidden and the title grows -
         /// see QuestNodeView.SetDetailLevel. 0.55 is where a 15px title stops being readable.</summary>
-        public static float DetailLevelZoom => 0.55f;
+        public static float DetailLevelZoom =>
+            ModSettings.Ready ? ModSettings.TitleOnlyBelowZoom.Value / 100f : 0.55f;
 
         /// <summary>Below this zoom the title goes too: a 20px title at a quarter scale is 5px.</summary>
-        public static float BarOnlyZoom => 0.35f;
+        public static float BarOnlyZoom =>
+            ModSettings.Ready ? Mathf.Min(ModSettings.CodesBelowZoom.Value / 100f, DetailLevelZoom - 0.05f) : 0.35f;
 
         // --- text inside a node ---
         public static int TitleFontSize => Compact ? 12 : 15;

@@ -69,9 +69,13 @@ namespace QuestTree.UI
         /// and in that quest's colour (see <see cref="EdgeStyleFor"/>), so the lines that lead
         /// somewhere are the ones you see. Dimmed is everything outside the hovered chain.
         /// </summary>
-        private static readonly Color EdgeColor = new(1f, 1f, 1f, 0.14f);
-        private static readonly Color EdgeToLockedColor = new(1f, 1f, 1f, 0.08f);
-        private static readonly Color EdgeDimmedColor = new(1f, 1f, 1f, 0.04f);
+        private static Color EdgeColor => new(1f, 1f, 1f, EdgeOpacityScale * 0.14f);
+        private static Color EdgeToLockedColor => new(1f, 1f, 1f, EdgeOpacityScale * 0.08f);
+        private static Color EdgeDimmedColor => new(1f, 1f, 1f, EdgeOpacityScale * 0.04f);
+
+        /// <summary>The Settings opacity as a multiplier on the resting alphas (14% is 1.0).</summary>
+        private static float EdgeOpacityScale =>
+            ModSettings.Ready ? ModSettings.EdgeOpacity.Value / 14f : 1f;
         private const float EdgeThickness = 2f;
         private const float EdgeToLockedThickness = 1f;
 
@@ -519,7 +523,12 @@ namespace QuestTree.UI
         private static (float Near, float Far) DimAlphas(float zoom)
         {
             var t = Mathf.InverseLerp(MinZoom, MaxZoom, zoom);
-            return (Mathf.Lerp(0.8f, 0.5f, t), Mathf.Lerp(0.4f, 0.06f, t));
+            var near = Mathf.Lerp(0.8f, 0.5f, t);
+            var far = Mathf.Lerp(0.4f, 0.06f, t);
+
+            // Settings scale how far below full the dim goes: 0 = no dimming, 200 = twice as deep.
+            var strength = ModSettings.Ready ? ModSettings.HoverDimStrength.Value / 100f : 1f;
+            return (1f - (1f - near) * strength, Mathf.Clamp01(1f - (1f - far) * strength));
         }
 
         /// <summary>Alpha for something <paramref name="distance"/> layout units from the hovered
@@ -744,8 +753,8 @@ namespace QuestTree.UI
 
             return target.Status switch
             {
-                ENodeStatus.Active => (WithAlpha(QuestNodeView.ColorFor(ENodeStatus.Active), 0.45f), EdgeThickness),
-                ENodeStatus.Available => (WithAlpha(QuestNodeView.ColorFor(ENodeStatus.Available), 0.4f), EdgeThickness),
+                ENodeStatus.Active => (WithAlpha(QuestNodeView.ColorFor(ENodeStatus.Active), Mathf.Min(1f, 0.45f * EdgeOpacityScale)), EdgeThickness),
+                ENodeStatus.Available => (WithAlpha(QuestNodeView.ColorFor(ENodeStatus.Available), Mathf.Min(1f, 0.4f * EdgeOpacityScale)), EdgeThickness),
                 ENodeStatus.Completed => (EdgeColor, EdgeThickness),
                 _ => (EdgeToLockedColor, EdgeToLockedThickness)
             };

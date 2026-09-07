@@ -25,28 +25,40 @@ namespace QuestTree.UI
         /// <summary>Builds the whole tab into <paramref name="parent"/> and returns its height.
         /// Reads the cached fetch result rather than requesting - see QuestDataClient.GetKappa for
         /// why this must not hit the server on every render.</summary>
-        public static float Build(RectTransform parent, QuestGraphBuilder graph, Action onRefresh)
+        /// <summary>Rows stop stretching past this.</summary>
+        private const float MaxContentWidth = 960f;
+
+        /// <summary>Layout for the current build: the x every section draws at, and its width.
+        /// Static so the section helpers keep their signatures; the page is built in one call.</summary>
+        private static float _x;
+        private static float _width;
+        private static Action<QuestNode> _onQuestSelected;
+
+        public static float Build(
+            RectTransform parent, QuestGraphBuilder graph, Vector2 panelSize, Action<QuestNode> onQuestSelected,
+            Action onRefresh)
         {
+            _x = AuxLayout.Padding;
+            _width = Mathf.Min(MaxContentWidth, panelSize.x - AuxLayout.Padding * 2f);
+            _onQuestSelected = onQuestSelected;
+
             var y = AuxLayout.Padding;
 
-            // The checklist reflects your stash, and the mod deliberately does not poll for that -
-            // so there is an explicit way to re-read it after a raid without reopening the panel.
-            AuxLayout.AddButton(parent, ref y, "Refresh from server", onRefresh);
-            AuxLayout.AddSpacer(ref y, 8f);
-
             var result = QuestDataClient.GetKappa();
-
             if (!result.IsOk)
             {
                 BuildUnavailableSection(parent, ref y, result);
+                DoNextView.RefreshLink(parent, AuxLayout.Padding + 32f, _x, _width, onRefresh);
                 return y + AuxLayout.Padding;
             }
 
             var payload = result.Payload;
 
             BuildItemSection(parent, ref y, payload);
+            // The checklist reflects your stash, and the mod deliberately does not poll for that -
+            // so there is an explicit way to re-read it after a raid without reopening the panel.
+            DoNextView.RefreshLink(parent, AuxLayout.Padding + 32f, _x, _width, onRefresh);
             AuxLayout.AddSpacer(ref y, 18f);
-
             BuildKappaQuestSection(parent, ref y, graph, payload);
             AuxLayout.AddSpacer(ref y, 18f);
 
@@ -69,7 +81,7 @@ namespace QuestTree.UI
         /// </summary>
         private static void BuildUnavailableSection(RectTransform parent, ref float y, KappaFetchResult result)
         {
-            AuxLayout.AddHeading(parent, ref y, "Kappa progress unavailable");
+            Section(parent, ref y, "Kappa progress unavailable");
             AuxLayout.AddText(parent, ref y,
                 $"<color=#C86464>{Explain(result)}</color>", 72f, 12);
             AuxLayout.AddSpacer(ref y, 8f);
@@ -108,7 +120,7 @@ namespace QuestTree.UI
         {
             if (payload == null)
             {
-                AuxLayout.AddHeading(parent, ref y, "Collector items");
+                Section(parent, ref y, "Collector items");
                 AuxLayout.AddText(parent, ref y,
                     "<color=#C86464>The server half of the mod did not answer.</color> " +
                     "The item checklist is read from your profile by QuestTreeServer " +
@@ -118,7 +130,7 @@ namespace QuestTree.UI
 
             if (!payload.CollectorFound || payload.Items == null || payload.Items.Count == 0)
             {
-                AuxLayout.AddHeading(parent, ref y, "Collector items");
+                Section(parent, ref y, "Collector items");
                 AuxLayout.AddText(parent, ref y,
                     "No Collector quest found in this install, so there is no item list to track.", 40f);
                 return;
@@ -127,7 +139,7 @@ namespace QuestTree.UI
             var items = payload.Items.OrderBy(i => i.Name, StringComparer.OrdinalIgnoreCase).ToList();
             var done = items.Count(i => i.IsSatisfied);
 
-            AuxLayout.AddHeading(parent, ref y, $"Collector items      {done} / {items.Count}");
+            Section(parent, ref y, $"Collector items      {done} / {items.Count}");
 
             var status = payload.CollectorStatus;
             if (!string.Equals(status, "Started", StringComparison.OrdinalIgnoreCase) &&
@@ -184,7 +196,7 @@ namespace QuestTree.UI
 
             if (string.IsNullOrEmpty(collectorId) || !graph.NodesById.TryGetValue(collectorId, out var collector))
             {
-                AuxLayout.AddHeading(parent, ref y, "To unlock Collector");
+                Section(parent, ref y, "To unlock Collector");
                 AuxLayout.AddText(parent, ref y, "Collector is not in the loaded quest set.", 20f, 12);
                 return;
             }
@@ -192,7 +204,7 @@ namespace QuestTree.UI
             var required = QuestRoute.Prerequisites(collector, graph);
             var complete = required.Count(n => n.Status == ENodeStatus.Completed);
 
-            AuxLayout.AddHeading(parent, ref y, $"To unlock Collector      {complete} / {required.Count}");
+            Section(parent, ref y, $"To unlock Collector      {complete} / {required.Count}");
             AuxLayout.AddText(parent, ref y,
                 "<color=#FFFFFF80>What Collector actually requires on this install right now, after " +
                 "mods. Shown because it differs from the canonical Kappa list above.</color>", 32f, 11);
@@ -211,9 +223,7 @@ namespace QuestTree.UI
                     ? $"<color=#{doneHex}>[done]</color>"
                     : "<color=#FFFFFF40>[     ]</color>";
 
-                AuxLayout.AddText(parent, ref y,
-                    $"{mark}  {node.Name}  <color=#FFFFFF60>{node.TraderName}</color>",
-                    AuxLayout.RowHeight, 12, indent: 6f);
+                QuestRow(parent, ref y, node, $"{mark}  {node.Name}  <color=#FFFFFF60>{node.TraderName}</color>");
             }
         }
 
@@ -243,7 +253,7 @@ namespace QuestTree.UI
             var ids = payload?.KappaQuestIds;
             if (ids == null || ids.Count == 0)
             {
-                AuxLayout.AddHeading(parent, ref y, "Kappa quests");
+                Section(parent, ref y, "Kappa quests");
                 AuxLayout.AddText(parent, ref y,
                     "<color=#C86464>The server half of the mod did not supply the Kappa quest list.</color> " +
                     "It is read from Collector's start conditions by QuestTreeServer.", 40f, 12);
@@ -256,7 +266,7 @@ namespace QuestTree.UI
 
             var complete = nodes.Count(n => n != null && n.Status == ENodeStatus.Completed);
 
-            AuxLayout.AddHeading(parent, ref y, $"Kappa quests      {complete} / {ids.Count}");
+            Section(parent, ref y, $"Kappa quests      {complete} / {ids.Count}");
 
             // The whole reason for reading the database rather than the live table: if the two
             // disagree, a mod has changed what Kappa costs on this install, and the player should
@@ -311,10 +321,9 @@ namespace QuestTree.UI
                 // and startable from what is still gated.
                 var hex = ColorUtility.ToHtmlStringRGB(QuestNodeView.ColorFor(node.Status));
 
-                AuxLayout.AddText(parent, ref y,
+                QuestRow(parent, ref y, node,
                     $"<color=#{hex}>{QuestNodeView.GlyphFor(node.Status)}</color>  {node.Name}" +
-                    $"  <color=#FFFFFF60>{node.TraderName}</color>",
-                    AuxLayout.RowHeight, 12, indent: 6f);
+                    $"  <color=#FFFFFF60>{node.TraderName}</color>");
             }
         }
 
@@ -324,7 +333,7 @@ namespace QuestTree.UI
             var kappaNodes = graph.Nodes.Where(n => n.IsKappaRequired).ToList();
             var complete = kappaNodes.Count(n => n.Status == ENodeStatus.Completed);
 
-            AuxLayout.AddHeading(parent, ref y, $"Kappa quests      {complete} / {kappaNodes.Count}");
+            Section(parent, ref y, $"Kappa quests      {complete} / {kappaNodes.Count}");
             AuxLayout.AddText(parent, ref y,
                 $"<color=#FFFFFF80>Using your own list from kappa-quests.json ({KappaQuests.Count} names). " +
                 "Empty that file to go back to the list derived from Collector.</color>", 32f, 11);
@@ -334,10 +343,21 @@ namespace QuestTree.UI
                          .OrderBy(n => n.TraderName, StringComparer.OrdinalIgnoreCase)
                          .ThenBy(n => n.Name, StringComparer.OrdinalIgnoreCase))
             {
-                AuxLayout.AddText(parent, ref y,
-                    $"<color=#FFFFFF40>[     ]</color>  {node.Name}  <color=#FFFFFF60>{node.TraderName}</color>",
-                    AuxLayout.RowHeight, 12, indent: 6f);
+                QuestRow(parent, ref y, node,
+                    $"<color=#FFFFFF40>[     ]</color>  {node.Name}  <color=#FFFFFF60>{node.TraderName}</color>");
             }
+        }
+        // ------------------------------------------------------------------ rows
+
+        private static void Section(RectTransform parent, ref float y, string title) =>
+            AuxLayout.AddSectionHeader(parent, ref y, title, _x, _width);
+
+        /// <summary>A quest line that opens the quest - its detail, and the tree framed on it.</summary>
+        private static void QuestRow(RectTransform parent, ref float y, QuestNode node, string text)
+        {
+            var captured = node;
+            AuxLayout.AddClickableRow(parent, text, _x, ref y, _width, false,
+                () => _onQuestSelected?.Invoke(captured));
         }
     }
 }

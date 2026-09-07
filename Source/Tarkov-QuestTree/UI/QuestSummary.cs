@@ -28,14 +28,17 @@ namespace QuestTree.UI
         /// them in one pass and a caller that renders them individually can too - see the
         /// <c>Where(l =&gt; l != null)</c> at both call sites.
         /// </summary>
-        public static List<string> Lines(QuestNode node, QuestGraphBuilder graph, ProfilePayloadDto profile)
+        public static List<string> Lines(
+            QuestNode node, QuestGraphBuilder graph, ProfilePayloadDto profile, bool includeHeader = true)
         {
             if (node == null) return new List<string>();
 
+            // The header is for a surface that shows nothing else about the quest; a row that
+            // was just clicked already says its name and trader.
             var lines = new List<string>
             {
-                $"<b>{node.Name}</b>",
-                node.TraderName,
+                includeHeader ? $"<b>{node.Name}</b>" : null,
+                includeHeader ? node.TraderName : null,
                 node.Level > 0 ? $"Level {node.Level}" : null,
                 node.IsKappaRequired ? "<color=#D9A61A>Kappa required</color>" : null,
                 // Faction- and edition-locked quests are shown rather than hidden, so this is what

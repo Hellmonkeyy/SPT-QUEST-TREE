@@ -1,5 +1,7 @@
 using System;
+using System.Collections.Generic;
 using BepInEx.Configuration;
+using UnityEngine;
 
 namespace QuestTree
 {
@@ -47,6 +49,80 @@ namespace QuestTree
 
         /// <summary>Whether the panel opens on the map rather than the tree.</summary>
         public static ConfigEntry<bool> OpenOnMap { get; private set; }
+
+        // --- Tree look ---
+        public static ConfigEntry<int> EdgeOpacity { get; private set; }
+        public static ConfigEntry<int> HoverDimStrength { get; private set; }
+        public static ConfigEntry<bool> TallTitles { get; private set; }
+        public static ConfigEntry<bool> AbbreviateWhenZoomedOut { get; private set; }
+        public static ConfigEntry<int> TitleOnlyBelowZoom { get; private set; }
+        public static ConfigEntry<int> CodesBelowZoom { get; private set; }
+
+        // --- Map look ---
+        public static ConfigEntry<int> SidebarWidth { get; private set; }
+        public static ConfigEntry<int> DoNextRows { get; private set; }
+        public static ConfigEntry<bool> ShowItemsSection { get; private set; }
+        public static ConfigEntry<bool> ShowCredits { get; private set; }
+        public static ConfigEntry<PinLabelMode> PinLabels { get; private set; }
+
+        // --- Colours, as hex strings: BepInEx has no built-in converter for UnityEngine.Color ---
+        public static ConfigEntry<string> ColorActive { get; private set; }
+        public static ConfigEntry<string> ColorAvailable { get; private set; }
+        public static ConfigEntry<string> ColorCompleted { get; private set; }
+        public static ConfigEntry<string> ColorLocked { get; private set; }
+        public static ConfigEntry<string> ColorAccent { get; private set; }
+
+        // --- Behaviour ---
+        public static ConfigEntry<bool> Tooltips { get; private set; }
+        public static ConfigEntry<bool> HoverSounds { get; private set; }
+        public static ConfigEntry<bool> RememberLastView { get; private set; }
+
+        /// <summary>Which map pins carry their name at rest. Hover always shows a name.</summary>
+        public enum PinLabelMode
+        {
+            HoverOnly,
+            Actionable,
+            All
+        }
+
+        /// <summary>Every entry, in bind order, so a section can be reset to its defaults.</summary>
+        private static readonly List<ConfigEntryBase> Entries = new();
+
+        /// <summary>Set while a whole section is being reset, so the per-entry change events do
+        /// not each re-render the panel; one Changed follows.</summary>
+        private static bool _resetting;
+
+        /// <summary>Asks the panel to redraw without any setting having changed - the Settings page
+        /// uses it to open and close its dropdowns, which are part of the page it rebuilds.</summary>
+        public static void RequestRepaint() => Changed?.Invoke(false);
+
+        public static Color ParseColor(ConfigEntry<string> entry, Color fallback)
+        {
+            if (entry == null || string.IsNullOrWhiteSpace(entry.Value)) return fallback;
+            return ColorUtility.TryParseHtmlString(entry.Value.Trim(), out var color) ? color : fallback;
+        }
+
+        /// <summary>Puts every entry in a section back to its default, then re-renders once.</summary>
+        public static void ResetSection(string section)
+        {
+            if (!Ready) return;
+
+            _resetting = true;
+            try
+            {
+                foreach (var entry in Entries)
+                {
+                    if (!string.Equals(entry.Definition.Section, section, StringComparison.Ordinal)) continue;
+                    entry.BoxedValue = entry.DefaultValue;
+                }
+            }
+            finally
+            {
+                _resetting = false;
+            }
+
+            Changed?.Invoke(true);
+        }
 
         /// <summary>Remembered rather than reset each time, because it is a working preference -
         /// someone who wants the graph wide wants it wide every time they open the tree.</summary>
@@ -135,6 +211,84 @@ namespace QuestTree
                 "State", "Intro shown", false,
                 "Set once the first-run controls hint has been dismissed. Clear it to see the hint again.");
 
+            EdgeOpacity = config.Bind(
+                "Tree", "Prerequisite line opacity", 14,
+                new ConfigDescription("How visible the lines between quests are at rest, in percent. Lines into a quest you can act on are drawn stronger than this regardless.",
+                    new AcceptableValueRange<int>(0, 60)));
+
+            HoverDimStrength = config.Bind(
+                "Tree", "Hover dimming strength", 100,
+                new ConfigDescription("How far the rest of the tree fades when a quest is hovered, in percent of the default. 0 turns the effect off.",
+                    new AcceptableValueRange<int>(0, 200)));
+
+            TallTitles = config.Bind(
+                "Tree", "Two-line titles", true,
+                "Let a quest box grow a line so a series/episode title (\"Gunsmith - Part 3\") shows both parts instead of an ellipsis.");
+
+            AbbreviateWhenZoomedOut = config.Bind(
+                "Tree", "Codes when zoomed right out", true,
+                "Show a short code (EM-4, GUN-3) in each box when zoomed too far out to read a title. Off shows the title only, however small.");
+
+            TitleOnlyBelowZoom = config.Bind(
+                "Tree", "Title-only below zoom", 55,
+                new ConfigDescription("Below this zoom (percent) a box shows only its title, larger.",
+                    new AcceptableValueRange<int>(30, 80)));
+
+            CodesBelowZoom = config.Bind(
+                "Tree", "Code-only below zoom", 35,
+                new ConfigDescription("Below this zoom (percent) a box shows only its status bar and code.",
+                    new AcceptableValueRange<int>(15, 60)));
+
+            SidebarWidth = config.Bind(
+                "Map", "Sidebar width", 440,
+                new ConfigDescription("Width of the quest column beside the map, in pixels.",
+                    new AcceptableValueRange<int>(380, 520)));
+
+            DoNextRows = config.Bind(
+                "Map", "Do next rows", 8,
+                new ConfigDescription("How many quests the map sidebar's 'Do next here' section lists. 0 hides the section.",
+                    new AcceptableValueRange<int>(0, 20)));
+
+            ShowItemsSection = config.Bind(
+                "Map", "Show items to find", true,
+                "Show the sidebar section listing the quest items that spawn on the map and whether you already have them.");
+
+            ShowCredits = config.Bind(
+                "Map", "Show map credits", true,
+                "Show the map and pin-icon attributions at the bottom of the sidebar.");
+
+            PinLabels = config.Bind(
+                "Map", "Pin labels", PinLabelMode.HoverOnly,
+                "Which pins carry their name at rest. Hovering a pin always shows its name. HoverOnly keeps clusters readable; Actionable names in-progress and available quests; All names every pin.");
+
+            ColorActive = config.Bind("Colours", "In progress", "#5CE82B", "Hex colour for quests you have accepted. The F12 menu has a picker; the in-game Settings tab has presets.");
+            ColorAvailable = config.Bind("Colours", "Available", "#D9A847", "Hex colour for quests you can accept now.");
+            ColorCompleted = config.Bind("Colours", "Completed", "#3D854D", "Hex colour for quests handed in.");
+            ColorLocked = config.Bind("Colours", "Locked", "#6B6B66", "Hex colour for quests still gated.");
+            ColorAccent = config.Bind("Colours", "Accent", "#C7A659", "Hex colour for selection, headers and highlights.");
+
+            Tooltips = config.Bind(
+                "Behaviour", "Tooltips", true,
+                "Show the game's tooltip when hovering quest boxes and toolbar buttons.");
+
+            HoverSounds = config.Bind(
+                "Behaviour", "Hover sounds", true,
+                "Play the game's hover sound over buttons and rows.");
+
+            RememberLastView = config.Bind(
+                "Behaviour", "Remember last view", false,
+                "Open the tracker on whichever view it was closed on, instead of always the map (or the tree).");
+
+            Entries.AddRange(new ConfigEntryBase[]
+            {
+                HideUnobtainable, HideCompleted, HideTraderless, MarkStartedOnly, MapArtworkRotation,
+                MirrorMapArtwork, ShowMapGuides, DrawEdges, FocusFrontier, CompactLayout, MaxVisibleNodes,
+                OpenOnMap, HarvestZones, EdgeOpacity, HoverDimStrength, TallTitles, AbbreviateWhenZoomedOut,
+                TitleOnlyBelowZoom, CodesBelowZoom, SidebarWidth, DoNextRows, ShowItemsSection, ShowCredits,
+                PinLabels, ColorActive, ColorAvailable, ColorCompleted, ColorLocked, ColorAccent, Tooltips,
+                HoverSounds, RememberLastView
+            });
+
             // One handler per entry rather than a single global hook, so this only fires for
             // settings this mod actually owns.
             HideUnobtainable.SettingChanged += Raise;
@@ -154,6 +308,25 @@ namespace QuestTree
             MirrorMapArtwork.SettingChanged += Raise;
             ShowMapGuides.SettingChanged += Raise;
 
+            EdgeOpacity.SettingChanged += Raise;
+            HoverDimStrength.SettingChanged += Raise;
+            TallTitles.SettingChanged += Raise;
+            AbbreviateWhenZoomedOut.SettingChanged += Raise;
+            TitleOnlyBelowZoom.SettingChanged += Raise;
+            CodesBelowZoom.SettingChanged += Raise;
+            SidebarWidth.SettingChanged += Raise;
+            DoNextRows.SettingChanged += Raise;
+            ShowItemsSection.SettingChanged += Raise;
+            ShowCredits.SettingChanged += Raise;
+            PinLabels.SettingChanged += Raise;
+            ColorActive.SettingChanged += Raise;
+            ColorAvailable.SettingChanged += Raise;
+            ColorCompleted.SettingChanged += Raise;
+            ColorLocked.SettingChanged += Raise;
+            ColorAccent.SettingChanged += Raise;
+            Tooltips.SettingChanged += Raise;
+            HoverSounds.SettingChanged += Raise;
+
             // Last, so a throw anywhere above leaves this false. Testing the first entry instead
             // reported ready after a partial Init, with every later entry still null - the exact
             // case this exists to catch.
@@ -166,7 +339,15 @@ namespace QuestTree
         /// entry if the plugin ever fails to initialise.</summary>
         public static bool Ready => _ready;
 
-        private static void Raise(object sender, EventArgs e) =>
-            Changed?.Invoke(ReferenceEquals(sender, CompactLayout) || ReferenceEquals(sender, MaxVisibleNodes));
+        private static void Raise(object sender, EventArgs e)
+        {
+            if (_resetting) return;
+
+            // Node geometry changes with density, the node budget, and whether titles may take
+            // two lines; those need the pooled views thrown away. Everything else is a repaint.
+            var layout = ReferenceEquals(sender, CompactLayout) || ReferenceEquals(sender, MaxVisibleNodes) ||
+                         ReferenceEquals(sender, TallTitles);
+            Changed?.Invoke(layout);
+        }
     }
 }

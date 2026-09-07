@@ -36,7 +36,11 @@ namespace QuestTree.UI
         // donor turns out to use. Named rather than inlined so no call site hardcodes a colour.
         public static Color TextColor { get; private set; } = new(0.78f, 0.76f, 0.71f);
         public static Color DimTextColor { get; private set; } = new(0.78f, 0.76f, 0.71f, 0.55f);
-        public static Color AccentColor { get; private set; } = new(0.78f, 0.65f, 0.35f);
+        private static readonly Color DefaultAccentColor = new(0.78f, 0.65f, 0.35f);
+
+        /// <summary>Selection, headers, highlights. From Settings when set; EFT's own bronze otherwise.</summary>
+        public static Color AccentColor =>
+            ModSettings.Ready ? ModSettings.ParseColor(ModSettings.ColorAccent, DefaultAccentColor) : DefaultAccentColor;
         /// <summary>Fully opaque. It was 97%, and 3% of the main menu's white headings showing
         /// through a black panel is exactly the ghost of "ESCAPE FROM TARKOV / CHARACTER / TRADING"
         /// that made the tree look busier than it was.</summary>
@@ -80,6 +84,7 @@ namespace QuestTree.UI
         public static HoverTooltipArea AddTooltip(GameObject target, string text)
         {
             if (target == null) return null;
+            if (ModSettings.Ready && !ModSettings.Tooltips.Value) return null;
 
             try
             {
@@ -270,7 +275,7 @@ namespace QuestTree.UI
                 _resting = Background.color;
                 _hovering = true;
                 Background.color = Lift(_resting, 0.12f);
-                PlaySound(EUISoundType.ButtonOver);
+                if (!ModSettings.Ready || ModSettings.HoverSounds.Value) PlaySound(EUISoundType.ButtonOver);
             }
 
             public void OnPointerExit(PointerEventData eventData)

@@ -47,25 +47,33 @@ namespace QuestTree.UI
             public bool NeedsFoundInRaid;
             public readonly List<string> Quests = new();
 
+            /// <summary>The same quests by id, so a row can open one.</summary>
+            public readonly List<string> QuestIds = new();
+
             /// <summary>Sort key: things you still need, and are closest to having, first.</summary>
             public int Outstanding => Mathf.Max(0, Required - (NeedsFoundInRaid ? OwnedFoundInRaid : OwnedTotal));
         }
 
-        public static float Build(RectTransform parent, QuestGraphBuilder graph, Action onRefresh)
-        {
-            var y = AuxLayout.Padding;
+        /// <summary>Rows stop stretching past this: an item and its quests do not need 1900px.</summary>
+        private const float MaxContentWidth = 960f;
 
-            AuxLayout.AddButton(parent, ref y, "Refresh from server", onRefresh);
-            AuxLayout.AddSpacer(ref y, 8f);
+        public static float Build(
+            RectTransform parent, QuestGraphBuilder graph, Vector2 panelSize, Action<QuestNode> onQuestSelected,
+            Action onRefresh)
+        {
+            var x = AuxLayout.Padding;
+            var width = Mathf.Min(MaxContentWidth, panelSize.x - AuxLayout.Padding * 2f);
+            var y = AuxLayout.Padding;
 
             var profile = QuestDataClient.GetProfile();
 
             if (profile == null || !profile.HasProfile)
             {
-                AuxLayout.AddHeading(parent, ref y, "Quest items");
-                AuxLayout.AddText(parent, ref y,
+                AuxLayout.AddSectionHeader(parent, ref y, "Quest items", x, width);
+                DoNextView.RefreshLink(parent, y, x, width, onRefresh);
+                AuxLayout.AddWrapped(parent,
                     "<color=#C86464>Needs the server half of the mod.</color> It reads which items your " +
-                    "quests want and what is in your stash - the client cannot see either.", 44f, 12);
+                    "quests want and what is in your stash - the client cannot see either.", x, ref y, width);
                 return y + AuxLayout.Padding;
             }
 
@@ -73,18 +81,20 @@ namespace QuestTree.UI
 
             if (items.Count == 0)
             {
-                AuxLayout.AddHeading(parent, ref y, "Quest items");
-                AuxLayout.AddText(parent, ref y,
-                    "<color=#FFFFFF80>No outstanding quest items - nothing you are carrying is spoken " +
-                    "for.</color>", 24f, 12);
+                AuxLayout.AddSectionHeader(parent, ref y, "Quest items", x, width);
+                DoNextView.RefreshLink(parent, y, x, width, onRefresh);
+                AuxLayout.AddWrapped(parent,
+                    "<color=#FFFFFF80>No outstanding quest items - nothing you are carrying is spoken for.</color>",
+                    x, ref y, width);
                 return y + AuxLayout.Padding;
             }
 
             var needed = items.Count(i => i.Outstanding > 0);
-            AuxLayout.AddHeading(parent, ref y, $"Quest items      {items.Count - needed} / {items.Count} covered");
-            AuxLayout.AddText(parent, ref y,
-                "<color=#FFFFFF80>Items your unfinished quests will ask for. Do not sell these.</color>",
-                22f, 11);
+            AuxLayout.AddSectionHeader(parent, ref y, $"Quest items  ·  {items.Count - needed} / {items.Count} covered", x, width);
+            DoNextView.RefreshLink(parent, y, x, width, onRefresh);
+            AuxLayout.AddLabelAt(parent,
+                "<color=#FFFFFF80>Items your unfinished quests will ask for. Do not sell these. Click one to open its quest.</color>",
+                x, ref y, 20f, 11, width);
             AuxLayout.AddSpacer(ref y, 6f);
 
             // Still-needed first, then closest to done, so the top of the list is what to look for
@@ -97,23 +107,25 @@ namespace QuestTree.UI
 
             if (ordered.Count > MaxRows)
             {
-                AuxLayout.AddText(parent, ref y,
-                    $"<color=#D9A61A>Showing the first {MaxRows} of {ordered.Count} - the rest are " +
-                    "items you already have covered or quests far off.</color>", 22f, 11);
+                AuxLayout.AddLabelAt(parent,
+                    $"<color=#D9A61A>Showing the first {MaxRows} of {ordered.Count} - the rest are items you already have covered or quests far off.</color>",
+                    x, ref y, 20f, 11, width);
                 ordered = ordered.Take(MaxRows).ToList();
             }
 
             foreach (var item in ordered)
             {
-                AuxLayout.AddText(parent, ref y, Format(item), AuxLayout.RowHeight, 12, indent: 6f);
+                var firstId = item.QuestIds.Count > 0 ? item.QuestIds[0] : null;
+                var target = firstId != null && graph.NodesById.TryGetValue(firstId, out var node) ? node : null;
+
+                AuxLayout.AddClickableRow(parent, Format(item), x, ref y, width, false,
+                    () => { if (target != null) onQuestSelected?.Invoke(target); });
 
                 // Naming the quest is what makes the line actionable rather than a shopping list.
                 var wanted = item.Quests.Count <= 2
                     ? string.Join(", ", item.Quests)
                     : $"{item.Quests[0]}, {item.Quests[1]} +{item.Quests.Count - 2} more";
-
-                AuxLayout.AddText(parent, ref y,
-                    $"<color=#FFFFFF60>{wanted}</color>", 18f, 10, indent: 22f);
+                AuxLayout.AddLabelAt(parent, $"<color=#FFFFFF60>{wanted}</color>", x + 22f, ref y, 16f, 10, width - 22f);
             }
 
             return y + AuxLayout.Padding;
@@ -168,7 +180,11 @@ namespace QuestTree.UI
                     // for stock the second quest would reject.
                     watched.NeedsFoundInRaid |= MentionsFoundInRaid(objective.Text);
 
-                    if (!watched.Quests.Contains(node.Name)) watched.Quests.Add(node.Name);
+                    if (!watched.Quests.Contains(node.Name))
+                    {
+                        watched.Quests.Add(node.Name);
+                        watched.QuestIds.Add(node.Id);
+                    }
                 }
             }
 

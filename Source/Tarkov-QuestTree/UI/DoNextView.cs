@@ -21,10 +21,15 @@ namespace QuestTree.UI
     ///   2. ready to hand in - every item held, found-in-raid where the objective demands it
     ///   3. partly held - closest to complete first
     ///   4. everything else - nearest gate first
+    ///
+    /// Every row opens the quest: its detail, and the tree framed on it.
     /// </summary>
     internal static class DoNextView
     {
         private const int MaxRows = 40;
+
+        /// <summary>Rows stop stretching past this: a name and a reason do not need 1900px.</summary>
+        private const float MaxContentWidth = 960f;
 
         internal enum Bucket
         {
@@ -48,31 +53,31 @@ namespace QuestTree.UI
             public int GateDistance;
         }
 
-        public static float Build(RectTransform parent, QuestGraphBuilder graph, Action onRefresh)
+        public static float Build(
+            RectTransform parent, QuestGraphBuilder graph, Vector2 panelSize, Action<QuestNode> onQuestSelected,
+            Action onRefresh)
         {
+            var x = AuxLayout.Padding;
+            var width = Mathf.Min(MaxContentWidth, panelSize.x - AuxLayout.Padding * 2f);
             var y = AuxLayout.Padding;
-
-            AuxLayout.AddButton(parent, ref y, "Refresh from server", onRefresh);
-            AuxLayout.AddSpacer(ref y, 8f);
 
             var profile = QuestDataClient.GetProfile();
             var ranked = Rank(graph, profile);
 
+            AuxLayout.AddSectionHeader(parent, ref y, "Do next", x, width);
+            RefreshLink(parent, y, x, width, onRefresh);
+
             if (ranked.Count == 0)
             {
-                AuxLayout.AddHeading(parent, ref y, "Do next");
-                AuxLayout.AddText(parent, ref y,
-                    "<color=#FFFFFF80>Nothing outstanding - every quest is complete.</color>", 24f, 12);
+                AuxLayout.AddWrapped(parent, "<color=#FFFFFF80>Nothing outstanding - every quest is complete.</color>", x, ref y, width);
                 return y + AuxLayout.Padding;
             }
 
-            AuxLayout.AddHeading(parent, ref y, "Do next");
-
             if (profile == null || !profile.HasProfile)
             {
-                AuxLayout.AddText(parent, ref y,
-                    "<color=#D9A61A>Without the server half this can only order by quest status - " +
-                    "it cannot see your stash or your level.</color>", 32f, 11);
+                AuxLayout.AddWrapped(parent,
+                    "<color=#D9A61A>Without the server half this can only order by quest status - it cannot see your stash or your level.</color>",
+                    x, ref y, width, 11);
             }
 
             var shown = ranked.Take(MaxRows).ToList();
@@ -84,29 +89,42 @@ namespace QuestTree.UI
                 // arbitrary.
                 if (lastBucket != entry.Bucket)
                 {
-                    AuxLayout.AddSpacer(ref y, 8f);
-                    AuxLayout.AddHeading(parent, ref y, BucketHeading(entry.Bucket));
+                    AuxLayout.AddSpacer(ref y, lastBucket == null ? 4f : 12f);
+                    AuxLayout.AddSectionHeader(parent, ref y, BucketHeading(entry.Bucket), x, width);
                     lastBucket = entry.Bucket;
                 }
 
                 var node = entry.Node;
-                var hex = ColorUtility.ToHtmlStringRGB(QuestNodeView.ColorFor(node.Status));
+                var hex = QuestNodeView.HexFor(node.Status);
+                var captured = node;
 
-                AuxLayout.AddText(parent, ref y,
-                    $"<color=#{hex}>{QuestNodeView.GlyphFor(node.Status)}</color>  {node.Name}" +
-                    $"  <color=#FFFFFF60>{node.TraderName}{Detail(entry, profile)}</color>",
-                    AuxLayout.RowHeight, 12, indent: 6f);
+                AuxLayout.AddClickableRow(parent,
+                    $"<color=#{hex}>{QuestNodeView.GlyphFor(node.Status)}</color>  {node.Name}  <color=#FFFFFF60>{node.TraderName}</color>",
+                    x, ref y, width, false, () => onQuestSelected?.Invoke(captured));
+
+                var reason = Reason(entry, profile);
+                if (!string.IsNullOrEmpty(reason))
+                    AuxLayout.AddLabelAt(parent, $"<color=#FFFFFF60>{reason}</color>", x + 22f, ref y, 16f, 11, width - 22f);
             }
 
             if (ranked.Count > shown.Count)
             {
                 AuxLayout.AddSpacer(ref y, 6f);
-                AuxLayout.AddText(parent, ref y,
-                    $"<color=#FFFFFF60>+{ranked.Count - shown.Count} more outstanding quests</color>",
-                    AuxLayout.RowHeight, 11, indent: 6f);
+                AuxLayout.AddLabelAt(parent, $"<color=#FFFFFF60>+{ranked.Count - shown.Count} more outstanding quests</color>",
+                    x, ref y, AuxLayout.RowHeight, 11, width);
             }
 
             return y + AuxLayout.Padding;
+        }
+
+        /// <summary>The "Refresh from server" link, at the right end of the first header line. The
+        /// checklists reflect your stash and the mod deliberately does not poll for that.</summary>
+        internal static void RefreshLink(RectTransform parent, float headerY, float x, float width, Action onRefresh)
+        {
+            const float linkWidth = 150f;
+            var linkY = headerY - 30f;
+            AuxLayout.AddClickableRow(parent, "<color=#FFFFFF80>Refresh from server  ⟳</color>",
+                x + width - linkWidth, ref linkY, linkWidth, false, onRefresh, 20f);
         }
 
         private static string BucketHeading(Bucket bucket) => bucket switch
@@ -117,11 +135,10 @@ namespace QuestTree.UI
             _ => "Everything else"
         };
 
-        /// <summary>The one extra fact worth showing per row - what is left, or what is blocking.</summary>
         /// <summary>The one extra fact worth showing per row - what is left, or what is blocking.
         /// Shared with the map's sidebar, which ranks the same way for one map.</summary>
         internal static string Reason(Ranked entry, ProfilePayloadDto profile) =>
-            Detail(entry, profile).TrimStart(' ', '\u00b7');
+            Detail(entry, profile).TrimStart(' ', '·');
 
         private static string Detail(Ranked entry, ProfilePayloadDto profile)
         {
@@ -138,7 +155,6 @@ namespace QuestTree.UI
             }
 
             if (entry.Node.Level > 0) return $"  ·  level {entry.Node.Level}";
-
             return "";
         }
 
@@ -186,9 +202,6 @@ namespace QuestTree.UI
             node.Dto?.Objectives != null &&
             node.Dto.Objectives.Any(o => o?.TargetItems != null && o.TargetItems.Count > 0);
 
-        /// <summary>How much of this quest's item requirement the stash already covers, 0-1.
-        /// Found-in-raid is respected where the objective asks for it, since a bought copy will not
-        /// be accepted and counting it would put the quest in the wrong bucket entirely.</summary>
         private static float ItemProgress(QuestNode node, Dictionary<string, HeldItemDto> owned)
         {
             if (node.Dto?.Objectives == null) return 0f;
@@ -219,8 +232,6 @@ namespace QuestTree.UI
             !string.IsNullOrEmpty(text) &&
             text.IndexOf("found in raid", StringComparison.OrdinalIgnoreCase) >= 0;
 
-        /// <summary>Levels short of the requirement, so "two levels away" sorts above "thirty".
-        /// Zero when the gate is not a level or is already met.</summary>
         private static int GateDistance(QuestNode node, int playerLevel)
         {
             if (node.Level <= 0 || playerLevel <= 0) return 0;

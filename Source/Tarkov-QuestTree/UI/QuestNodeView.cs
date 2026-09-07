@@ -61,14 +61,18 @@ namespace QuestTree.UI
         /// alpha.</summary>
         public static string HexFor(ENodeStatus status) => ColorUtility.ToHtmlStringRGB(ColorFor(status));
 
-        /// <summary>Shared with the legend, the lists and the map so they can never drift apart.</summary>
+        /// <summary>Shared with the legend, the lists and the map so they can never drift apart.
+        /// The user's colours from Settings when there are any; the palette above otherwise.</summary>
         public static Color ColorFor(ENodeStatus status) => status switch
         {
-            ENodeStatus.Completed => CompletedColor,
-            ENodeStatus.Active => ActiveColor,
-            ENodeStatus.Available => AvailableColor,
-            _ => LockedColor
+            ENodeStatus.Completed => FromSettings(ModSettings.ColorCompleted, CompletedColor),
+            ENodeStatus.Active => FromSettings(ModSettings.ColorActive, ActiveColor),
+            ENodeStatus.Available => FromSettings(ModSettings.ColorAvailable, AvailableColor),
+            _ => FromSettings(ModSettings.ColorLocked, LockedColor)
         };
+
+        private static Color FromSettings(BepInEx.Configuration.ConfigEntry<string> entry, Color fallback) =>
+            ModSettings.Ready ? ModSettings.ParseColor(entry, fallback) : fallback;
 
         /// <summary>A glyph per status, so state is not carried by colour alone.</summary>
         public static string GlyphFor(ENodeStatus status) => status switch
@@ -266,7 +270,16 @@ namespace QuestTree.UI
 
             ((RectTransform)transform).sizeDelta = new Vector2(Width, Height + (_tall ? LayoutMetrics.TallNodeExtraHeight : 0f));
 
-            if (_abbreviation != null) _abbreviation.text = Abbreviate(node.Name);
+            if (_abbreviation != null)
+            {
+                // With codes off, the zoomed-right-out box shows its title instead - the user's
+                // call; a title at that size is a smear, but some would rather have the smear.
+                var codes = !ModSettings.Ready || ModSettings.AbbreviateWhenZoomedOut.Value;
+                _abbreviation.text = codes ? Abbreviate(node.Name) : node.Name;
+                _abbreviation.fontSize = codes ? LayoutMetrics.AbbreviationFontSize : LayoutMetrics.ZoomedOutTitleFontSize;
+                _abbreviation.enableWordWrapping = !codes;
+                _abbreviation.overflowMode = codes ? TextOverflowModes.Overflow : TextOverflowModes.Ellipsis;
+            }
 
             RefreshStatus();
             RefreshDetails();

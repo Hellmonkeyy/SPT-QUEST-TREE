@@ -46,11 +46,11 @@ namespace QuestTree.UI
 
         /// <summary>The quest list's column on the right. Everything left of it is map - the map is
         /// the thing you are here to read, and the list is the caption.</summary>
-        private const float QuestListWidth = SidebarWidth - SidebarInset * 2f;
+        private static float QuestListWidth => SidebarWidth - SidebarInset * 2f;
 
         /// <summary>The column beside the map: its own scroll view, since the map is fixed and the
-        /// list is not. Everything that is not the sidebar is map.</summary>
-        private const float SidebarWidth = 440f;
+        /// list is not. Everything that is not the sidebar is map. Width from Settings.</summary>
+        private static float SidebarWidth => ModSettings.Ready ? ModSettings.SidebarWidth.Value : 440f;
         private const float SidebarInset = 12f;
 
         /// <summary>The map's own control row - pickers, the accepted-only toggle, coverage -
@@ -58,7 +58,7 @@ namespace QuestTree.UI
         private const float ControlRowHeight = AuxLayout.Padding + AuxLayout.DropdownHeight + 10f;
 
         /// <summary>How many "do next" rows the sidebar shows before the full list takes over.</summary>
-        private const int MaxDoNextRows = 8;
+        private static int MaxDoNextRows => ModSettings.Ready ? ModSettings.DoNextRows.Value : 8;
 
         private const string ItemKind = "item";
 
@@ -540,7 +540,7 @@ namespace QuestTree.UI
 
                 // The same lines the tree view's detail panel shows, indented under the row that
                 // opened them. The profile is only fetched here: at most one row is ever open.
-                foreach (var line in QuestSummary.Lines(node, graph, QuestDataClient.GetProfile()))
+                foreach (var line in QuestSummary.Lines(node, graph, QuestDataClient.GetProfile(), includeHeader: false))
                     AddDetailLine(content, line, listX + 12f, ref y, inner - 12f);
 
                 y += 6f;
@@ -557,7 +557,9 @@ namespace QuestTree.UI
             }
 
             // ---- items to look for here
-            var items = ItemsHere(set, graph, profile);
+            var items = !ModSettings.Ready || ModSettings.ShowItemsSection.Value
+                ? ItemsHere(set, graph, profile)
+                : new List<ItemWatchlistView.WatchedItem>();
             if (items.Count > 0)
             {
                 y += 10f;
@@ -568,8 +570,12 @@ namespace QuestTree.UI
             }
 
             // ---- credits
-            y += 12f;
-            AddCredit(content, entry, listX, ref y, inner);
+            if (!ModSettings.Ready || ModSettings.ShowCredits.Value)
+            {
+                y += 12f;
+                AddCredit(content, entry, listX, ref y, inner);
+            }
+
             y += SidebarInset;
 
             content.sizeDelta = new Vector2(0f, y);
@@ -1243,15 +1249,21 @@ namespace QuestTree.UI
                 label.raycastTarget = false;
                 GameStyle.ApplyOutlined(label);
 
-                // Shown at rest only for the selected quest, and then only where it does not land
-                // on one of its own other labels. Hover shows it regardless.
-                var shownAtRest = isSelected;
+                // Shown at rest for the selected quest, and beyond that for whichever pins the
+                // Settings say - never where it would land on a label already placed, except the
+                // selected quest's, which is the one name that must not lose the collision. Hover
+                // shows any name regardless.
+                var mode = ModSettings.Ready ? ModSettings.PinLabels.Value : ModSettings.PinLabelMode.HoverOnly;
+                var actionable = status == ENodeStatus.Active || status == ENodeStatus.Available;
+                var shownAtRest = isSelected ||
+                                  mode == ModSettings.PinLabelMode.All ||
+                                  (mode == ModSettings.PinLabelMode.Actionable && actionable);
                 if (shownAtRest)
                 {
                     var footprint = new Rect(
                         position.x + labelSpan.x * 0.1f, position.y - labelSpan.y * 0.5f,
                         labelSpan.x, labelSpan.y);
-                    if (claimed.Any(other => other.Overlaps(footprint))) shownAtRest = false;
+                    if (!isSelected && claimed.Any(other => other.Overlaps(footprint))) shownAtRest = false;
                     else claimed.Add(footprint);
                 }
 
