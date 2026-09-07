@@ -724,6 +724,17 @@ namespace QuestTree.UI
 
         // ------------------------------------------------------------------ graph
 
+        /// <summary>Badges the nodes with the server's Kappa list. One blocking fetch per graph
+        /// build - Show has just invalidated the Kappa cache, and a missing route answers at
+        /// once - and never from a render or a keystroke. Without the server half the nodes
+        /// simply carry no badge, which the Kappa tab already explains in words.</summary>
+        private void ApplyServerKappaList()
+        {
+            var result = QuestDataClient.GetKappa();
+            if (result != null && result.IsOk && result.Payload?.KappaQuestIds != null)
+                _graph.ApplyServerKappaIds(result.Payload.KappaQuestIds);
+        }
+
         /// <summary>Rebuilds the graph DATA (called only when the QuestController instance
         /// changes) and the tab strip that depends on it, then renders whichever tab is
         /// selected - defaulting back to "All" for a fresh QuestController.</summary>
@@ -733,6 +744,8 @@ namespace QuestTree.UI
 
             // The nodes the history pointed at belong to the graph just replaced.
             _history.Clear();
+
+            ApplyServerKappaList();
 
             // The tab below is chosen by setting; this only decides which map that tab shows.
             if (_pendingRaidLocation != null)

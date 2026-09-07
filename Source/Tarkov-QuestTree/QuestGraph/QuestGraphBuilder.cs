@@ -79,8 +79,7 @@ namespace QuestTree.QuestGraph
             foreach (var node in _byId.Values)
                 node.Depth = ComputeDepth(node, _byId, depthMemo, new HashSet<string>());
 
-            foreach (var node in _byId.Values)
-                node.IsKappaRequired = KappaQuests.IsKappaRequired(node.Name);
+            RefreshKappaFlags();
 
             // Seeded here rather than special-cased wherever a trader name is displayed (tab
             // labels, node subtitles, the detail panel), so every one of those gets a friendly
@@ -205,13 +204,35 @@ namespace QuestTree.QuestGraph
             }
         }
 
-        /// <summary>Re-applies the curated Kappa list to every node. Needed after the user edits
-        /// and reloads kappa-quests.json, since the flag is baked into each node at build time
+        /// <summary>Quest ids the server read out of Collector's own start conditions - the list
+        /// the Kappa tab shows. Until 1.8.0 the nodes were badged only from kappa-quests.json,
+        /// which ships empty, so on a default install no box or detail ever said "Kappa".</summary>
+        private readonly HashSet<string> _serverKappaIds = new(StringComparer.Ordinal);
+
+        /// <summary>Takes the server's Kappa list and re-badges the nodes from it.</summary>
+        public void ApplyServerKappaIds(IEnumerable<string> ids)
+        {
+            _serverKappaIds.Clear();
+            if (ids != null)
+                foreach (var id in ids)
+                    if (!string.IsNullOrEmpty(id)) _serverKappaIds.Add(id);
+
+            RefreshKappaFlags();
+        }
+
+        /// <summary>The one rule for the badge: the player's own list by name while
+        /// kappa-quests.json has any (a name there is "track this instead", as the Kappa tab
+        /// already reads it), else the server's list by id. Re-run after a Reload in Settings and
+        /// when the server list arrives, since the flag is baked into each node at build time
         /// rather than looked up per draw.</summary>
         public void RefreshKappaFlags()
         {
+            var ownList = KappaQuests.Count > 0;
+
             foreach (var node in _byId.Values)
-                node.IsKappaRequired = KappaQuests.IsKappaRequired(node.Name);
+                node.IsKappaRequired = ownList
+                    ? KappaQuests.IsKappaRequired(node.Name)
+                    : _serverKappaIds.Contains(node.Id);
         }
 
         /// <summary>Recolors every node from its live Quest.QuestStatus (or Locked, if the game
