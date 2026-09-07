@@ -91,7 +91,9 @@ namespace QuestTreeServer
             BuildLockReasons(profile, payload);
             BuildQuestItemOwnership(profile, payload);
 
-            logger.Info(
+            // Debug: this runs on every panel open, and at Info it was the loudest thing in the
+            // server console during a session.
+            logger.Debug(
                 $"Quest Tracker: profile payload - level {payload.Level}, {payload.Traders.Count} traders, " +
                 $"{payload.ConditionProgress.Count} counters, {payload.LockReasons.Count} locked quests explained.");
 

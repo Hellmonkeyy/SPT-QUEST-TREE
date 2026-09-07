@@ -142,7 +142,7 @@ namespace QuestTreeServer
                 });
             }
 
-            logger.Info(
+            logger.Debug(
                 $"Quest Tracker: Kappa checklist built - {payload.Items.Count} items, " +
                 $"{payload.Items.Count(i => i.HandedIn)} already handed in.");
 
