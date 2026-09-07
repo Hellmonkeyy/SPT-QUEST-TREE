@@ -27,6 +27,11 @@ namespace QuestTree.UI
         /// rebuilt on every click.</summary>
         private static string _openDropdown;
 
+        /// <summary>What the last Reload found, shown once under the button by the rebuild it
+        /// causes and then forgotten. Without it a reload that found the same file looked
+        /// exactly like no click at all.</summary>
+        private static string _kappaReloadResult;
+
         private static readonly (string Name, string Hex)[] ColourPresets =
         {
             ("Green", "#5CE82B"), ("Amber", "#D9A847"), ("Blue", "#75B9DE"), ("Red", "#E7191C"),
@@ -199,8 +204,17 @@ namespace QuestTree.UI
             AuxLayout.AddButton(column, ref y, "Reload kappa-quests.json", () =>
             {
                 KappaQuests.Reload();
+                _kappaReloadResult = KappaQuests.Count == 0
+                    ? "Reloaded - the file is empty, so the server's Kappa list is in use."
+                    : $"Reloaded - {KappaQuests.Count} quest names, badged by name.";
                 onKappaListReloaded();
             });
+
+            if (_kappaReloadResult != null)
+            {
+                AuxLayout.AddText(column, ref y, $"<color=#D9A61A>{_kappaReloadResult}</color>", 20f, 11);
+                _kappaReloadResult = null;
+            }
 
             ResetLink(column, ref y, width,
                 ModSettings.OpenOnMap, ModSettings.RememberLastView, ModSettings.Tooltips,
