@@ -1,7 +1,7 @@
 # Quest Tracker
 
-An in-game quest planner for SPT. It opens on a map of the raid you are about to load into, with
-every quest you can do there pinned where it happens, and behind that sits the whole quest
+An in-game quest planner for SPT. It opens on a map of the raid you have picked in the matchmaker,
+with every quest you can do there pinned where it happens, and behind that sits the whole quest
 progression - every quest in the game, including the ones you have not unlocked - as a branching
 tree coloured by your progress. Plus the things a wiki cannot tell you: what your quests will ask
 you not to sell, why a quest is locked, what to do next, and how far you are from Kappa.
@@ -47,8 +47,9 @@ checklists, reads the Kappa quest list out of the quest database, and keeps the 
 
 ## The map
 
-The tracker opens on **Maps**. Pick a map and a floor at the top; the map fills the panel and a
-column on the right lists what you can do there:
+The tracker opens on **Maps**, on the map you have picked in the matchmaker when you have picked
+one (the sidebar says "Your next raid"), otherwise on the busiest map. Pick a map and a floor at the
+top; the map fills the panel and a column on the right lists what you can do there:
 
 - **Do next here** - the map's unfinished quests ranked the way you would act on them (in
   progress, then ready to hand in, then closest to complete), with the one fact that matters per
@@ -56,6 +57,8 @@ column on the right lists what you can do there:
 - **Quests on the map** - every quest with an objective or item on this map, one row each. Click a
   row for its objectives and rewards inline, and the map flies to its pins.
 - **Items to find here** - quest items that spawn on this map, and whether you already hold them.
+  **Refresh** on the header line re-reads your stash.
+- A legend under the map name says what the pin shapes and colours mean.
 - Credits for the map image and the pin icons.
 
 **Pins are real.** Objective zones are read from the map itself the first time anyone on the server
@@ -85,9 +88,12 @@ run through the column gaps to what it unlocks.
   on. The row scrolls.
 
 **Click a quest** for its detail: status, level and trader chips, why it is locked, the wiki page,
-then **Requires**, **Route** (the whole chain between you and it, in the order you can do it),
-**Objectives** with live progress and a "Show on the map" link where there is a pin, **Rewards**
-and **Unlocks**. Every quest named in there is a link. The panel collapses with the chevron.
+then **Requires** (with "started is enough" or "N h after" where a prerequisite asks for that),
+**Route** (the whole chain between you and it, in the order you can do it), **Objectives** with
+live progress and a "Show on the map" link where there is a pin, **Rewards** and **Unlocks**. Every
+quest named in there is a link; **Back** at the top retraces them, and returns to the list you came
+from. The box the panel is about is outlined in the accent colour. The panel collapses with the
+chevron.
 
 ## The other views
 
@@ -111,10 +117,11 @@ around it.
 | --- | --- |
 | Drag | Pan the tree or the map |
 | Mouse wheel | Zoom, anchored to the cursor (and scroll the tab row) |
-| `F` | Fit the current tab on screen |
+| `F` | Fit the current tab on screen; on the map, fit the floor |
 | `M` | Jump to the quests you can work on |
 | `X` | Focus: only what you can work on, and its neighbours |
-| `/` | Focus the search box |
+| `/` | Focus the search box; `Enter` opens the first match, `Esc` leaves the box |
+| `[` `]` | On the map, the floor below or above |
 | `Esc` | Close the hint, then the quest detail, then the tracker |
 | `?` | Show the controls hint again |
 
@@ -139,9 +146,10 @@ The Settings view, in four sections, and the same values in BepInEx's F12 menu. 
 - **Quest mods are supported.** Everything is read from live server data, so modded traders,
   quests and maps appear automatically; a modded map gets its pins the first time it is raided.
 - **Large installs stay responsive** - only the quests actually on screen are built.
-- **Kappa list** comes from the Collector quest's own requirements in the quest database. If a mod
-  has changed Collector on your install, the Kappa tab says so and still shows the real list. To
-  track your own list instead, put quest names in `kappa-quests.json` and hit Reload in Settings.
+- **Kappa list** comes from the Collector quest's own requirements in the quest database, and is
+  what badges quests "Kappa" in the tree and the detail. If a mod has changed Collector on your
+  install, the Kappa tab says so and still shows the real list. To track your own list instead, put
+  quest names in `kappa-quests.json` and hit Reload in Settings.
 - **Zone harvesting** reads the map's quest trigger volumes a few seconds into a raid and sends
   them to the server once. It touches nothing in the raid and can be turned off in Settings.
 - **Not a cheat.** It only displays quest data you would otherwise look up on a wiki, and pins the
@@ -150,7 +158,7 @@ The Settings view, in four sections, and the same values in BepInEx's F12 menu. 
 ## Troubleshooting
 
 - **No taskbar button** - check `BepInEx\LogOutput.log` for lines starting `QuestTree`. The load
-  line carries the build stamp (`QuestTree 1.7.1+abc1234: loaded.`), which is what to quote.
+  line carries the build stamp (`QuestTree 1.8.0+abc1234: loaded.`), which is what to quote.
 - **Tree only shows unlocked quests, no pins** - the server half is missing, or you are on someone
   else's server that does not have it. See "Both halves are required" above.
 - **`Http response status code: NotFound` on `/questtree/...`** - same cause: the server you are on
