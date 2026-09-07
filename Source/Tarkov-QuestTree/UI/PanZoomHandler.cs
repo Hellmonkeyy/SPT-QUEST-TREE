@@ -47,7 +47,12 @@ namespace QuestTree.UI
             if (child == null) return;
 
             _constantScale.Add(child);
-            ApplyConstantScale(_content != null ? _content.localScale.x : 1f);
+
+            // Only the newcomer needs scaling; the rest were done when they registered or on the
+            // last zoom. Re-walking the list here made a map build quadratic in its pin count.
+            var contentScale = _content != null ? _content.localScale.x : 1f;
+            if (Mathf.Approximately(contentScale, 0f)) return;
+            child.localScale = new Vector3(1f / contentScale, 1f / contentScale, 1f);
         }
 
         /// <summary>
