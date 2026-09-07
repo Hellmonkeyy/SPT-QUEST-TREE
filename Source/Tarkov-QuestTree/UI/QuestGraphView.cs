@@ -637,6 +637,10 @@ namespace QuestTree.UI
         /// </summary>
         public void FrameContent() => FrameNodes(_layoutOrder, reserveDetail: true);
 
+        /// <summary>The first quest in layout order - the top of the first column, which is the
+        /// earliest match in the chain - or null when nothing is laid out.</summary>
+        public QuestNode FirstMatch() => _layoutOrder.Length > 0 ? _layoutOrder[0] : null;
+
         /// <summary>Frames a quest with its immediate neighbours and opens its detail - what a
         /// clickable prerequisite or unlock row in the detail panel does. Framing the neighbourhood
         /// rather than the one box keeps the zoom sane and shows what it connects to.</summary>

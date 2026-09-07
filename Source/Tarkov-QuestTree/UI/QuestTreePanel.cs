@@ -335,6 +335,15 @@ namespace QuestTree.UI
         {
             if (Input.GetKeyDown(KeyCode.Escape))
             {
+                // While typing, Escape leaves the search box - it used to fall through to the
+                // layers below and close the detail or the whole panel mid-search. The blur-frame
+                // test covers TMP having already taken focus away on this same press.
+                if (_toolbar.IsSearchFocused() || _toolbar.SearchBlurredThisFrame)
+                {
+                    _toolbar.ClearAndBlurSearch();
+                    return;
+                }
+
                 // Layered, outermost last: the controls hint sits over everything, then the quest
                 // detail, then the tree itself. Each press peels off one layer.
                 if (_introPanel != null && _introPanel.gameObject.activeSelf) ShowIntro(false);
@@ -439,6 +448,11 @@ namespace QuestTree.UI
                 _graph,
                 isAuxTabSelected: () => IsAuxTab(_selectedTraderId),
                 onSearchChanged: RenderSelectedTab,
+                onSearchSubmitted: () =>
+                {
+                    var first = _graphView.FirstMatch();
+                    if (first != null) FocusNode(first);
+                },
                 frameMyQuests: _graphView.FrameMyQuests,
                 frameContent: _graphView.FrameContent,
                 viewButtons: ViewButtons,

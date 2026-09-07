@@ -60,6 +60,7 @@ namespace QuestTree.UI
             QuestGraphBuilder graph,
             Func<bool> isAuxTabSelected,
             Action onSearchChanged,
+            Action onSearchSubmitted,
             Action frameMyQuests,
             Action frameContent,
             IReadOnlyList<(string TabId, string Label)> viewButtons,
@@ -142,6 +143,18 @@ namespace QuestTree.UI
                 // multi-thousand-quest tab affordable.
                 onSearchChanged();
             });
+
+            // Enter goes to the first match - typing a name and pressing Enter is what a search
+            // box is for, and until now Enter did nothing at all.
+            _searchField.onSubmit.AddListener(_ =>
+            {
+                if (isAuxTabSelected() || _searchFilter.Trim().Length == 0) return;
+                onSearchSubmitted();
+            });
+
+            // Stamped so the panel can tell an Escape that TMP has already used to leave the box
+            // from one meant for the panel - see QuestTreePanel.Update.
+            _searchField.onEndEdit.AddListener(_ => _searchBlurFrame = Time.frameCount);
 
             // Placed between the search box and the notice, on the same manual x-cursor.
             var navX = padding + searchWidth + 10f;
@@ -434,6 +447,22 @@ namespace QuestTree.UI
         }
 
         public bool IsSearchFocused() => _searchField != null && _searchField.isFocused;
+
+        /// <summary>The frame on which the search box last lost focus. TMP_InputField handles
+        /// Escape itself by deactivating, and whether that runs before or after the panel's
+        /// Update on the same frame is script-order luck - so the panel treats an Escape on the
+        /// frame the box blurred as the box's, not the panel's.</summary>
+        private int _searchBlurFrame = -1;
+        public bool SearchBlurredThisFrame => _searchBlurFrame == Time.frameCount;
+
+        /// <summary>Empties the box and takes focus off it - what Escape means while typing.
+        /// Setting the text re-renders through onValueChanged like any other edit.</summary>
+        public void ClearAndBlurSearch()
+        {
+            if (_searchField == null) return;
+            _searchField.text = "";
+            _searchField.DeactivateInputField();
+        }
 
         public void FocusSearch()
         {
