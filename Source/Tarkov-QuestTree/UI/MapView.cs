@@ -136,6 +136,84 @@ namespace QuestTree.UI
         private static string _pendingScrollQuestId;
         private static float? _pendingScrollY;
 
+        /// <summary>Maps that load the same scene, in either direction. Mirrors ZoneStore.Aliases
+        /// on the server, and is only consulted when DynamicMaps is not installed to answer the
+        /// same question from its own MapInternalNames.</summary>
+        private static readonly (string A, string B)[] SceneAliases =
+        {
+            ("factory4_night", "factory4_day"),
+            ("Sandbox_high", "Sandbox")
+        };
+
+        /// <summary>The map key the matchmaker's pick last resolved to, or null when it resolved to
+        /// nothing (no map picked, or a map with nothing to do on it). Static like the selection:
+        /// the sidebar says "your next raid" from it on every rebuild.</summary>
+        private static string _raidLocationKey;
+
+        /// <summary>True while the map on screen is the one the player is about to load into.</summary>
+        public static bool IsShowingRaidMap =>
+            _raidLocationKey != null &&
+            string.Equals(_selectedLocationKey, _raidLocationKey, StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>Points the view at the map the matchmaker has picked, by the location's internal
+        /// name. Returns false, and leaves the selection alone, when no map with outstanding quests
+        /// answers to that name - the caller decides whether that is worth trying again later. The
+        /// selected quest is dropped with the map, as it is on a manual map change.</summary>
+        public static bool PreselectLocation(string internalName, QuestGraphBuilder graph)
+        {
+            if (string.IsNullOrEmpty(internalName) || graph == null) return false;
+
+            var key = ResolveMapKey(internalName, GroupByMap(graph).Keys);
+            _raidLocationKey = key;
+            if (key == null) return false;
+
+            _selectedLocationKey = key;
+            _selectedQuestId = null;
+            _pendingFocusQuestId = null;
+            _pendingScrollQuestId = null;
+            _pickerOpen = false;
+            _floorPickerOpen = false;
+            return true;
+        }
+
+        /// <summary>The map key for a location's internal name: the name itself when the quest data
+        /// keys a map by it, else a key that DynamicMaps lists as the same map (Factory has a day
+        /// and a night id, Ground Zero a low- and a high-level one), else the same pairs from
+        /// <see cref="SceneAliases"/> for an install without DynamicMaps.</summary>
+        private static string ResolveMapKey(string internalName, IEnumerable<string> keys)
+        {
+            var known = keys.ToList();
+
+            string Find(string name) =>
+                known.FirstOrDefault(k => string.Equals(k, name, StringComparison.OrdinalIgnoreCase));
+
+            var exact = Find(internalName);
+            if (exact != null) return exact;
+
+            var entry = DynamicMapsLibrary.FindByLocationKey(internalName);
+            if (entry != null)
+            {
+                foreach (var name in entry.InternalNames)
+                {
+                    var shared = Find(name);
+                    if (shared != null) return shared;
+                }
+            }
+
+            foreach (var (a, b) in SceneAliases)
+            {
+                var other = string.Equals(a, internalName, StringComparison.OrdinalIgnoreCase) ? b
+                    : string.Equals(b, internalName, StringComparison.OrdinalIgnoreCase) ? a
+                    : null;
+                if (other == null) continue;
+
+                var aliased = Find(other);
+                if (aliased != null) return aliased;
+            }
+
+            return null;
+        }
+
         /// <summary>Prepares the view to open on a quest: its map, its floor, its row expanded and
         /// its pin flown to. The caller switches to the Maps view afterwards; the next Build does
         /// the rest. If the accepted-only filter would hide the quest, the filter is lifted - it
@@ -294,7 +372,12 @@ namespace QuestTree.UI
             var quests = map.Value;
             var actionable = quests.Count(q => q.Status == ENodeStatus.Active || q.Status == ENodeStatus.Available);
 
-            return $"{quests[0].LocationId}   {actionable}/{quests.Count}";
+            var raid = _raidLocationKey != null &&
+                       string.Equals(map.Key, _raidLocationKey, StringComparison.OrdinalIgnoreCase)
+                ? "  ·  next raid"
+                : "";
+
+            return $"{quests[0].LocationId}   {actionable}/{quests.Count}{raid}";
         }
 
         /// <summary>Quests grouped by map, keyed on the raw location id so it can be matched against
@@ -459,6 +542,14 @@ namespace QuestTree.UI
 
             // ---- header
             AddAt(content, $"<b>{mapName}</b>", listX, ref y, 26f, 16, inner);
+
+            // Said once, here, rather than by retitling the header: the map name is what the rest
+            // of the sidebar refers back to ("Quests on Customs").
+            if (IsShowingRaidMap)
+            {
+                AddAt(content, $"<color=#{ColorUtility.ToHtmlStringRGB(GameStyle.AccentColor)}>Your next raid</color>",
+                    listX, ref y, 18f, 11, inner);
+            }
 
             if (sprite == null && DynamicMapsLibrary.Available)
             {

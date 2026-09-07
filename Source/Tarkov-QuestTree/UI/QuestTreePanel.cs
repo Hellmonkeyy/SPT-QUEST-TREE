@@ -91,6 +91,18 @@ namespace QuestTree.UI
         /// <summary>The view the panel was last on, kept across opens for the "remember last view"
         /// setting. Static: the panel itself is torn down with the menu after a raid.</summary>
         private static string _lastView;
+
+        /// <summary>The raid location the map was last pointed at. Per raid rather than per open:
+        /// the map is turned to the matchmaker's pick once, and a map the player then chooses by
+        /// hand stays chosen until the matchmaker says something different. Static for the same
+        /// reason as <see cref="_lastView"/>. Latched only when the pick resolved to a map with
+        /// quests on it, so a map with nothing to do is tried again next time rather than
+        /// remembered as done.</summary>
+        private static string _lastRaidPreselect;
+
+        /// <summary>A raid location waiting for the graph to exist. Set by Show when a rebuild is
+        /// about to happen and consumed by RebuildGraph once the nodes are there to look in.</summary>
+        private string _pendingRaidLocation;
         private string _selectedTraderId = AllTradersId;
         private bool _builtShell;
 
@@ -141,7 +153,7 @@ namespace QuestTree.UI
         /// Patches/MenuTaskBarPatch.cs) every time the Quest Tree button is used to open the panel.
         /// Cheap to call repeatedly - the graph is only rebuilt from scratch when the
         /// QuestController instance actually changes (e.g. a fresh session).</summary>
-        public void Show(QuestController questController, IEftSession session)
+        public void Show(QuestController questController, IEftSession session, string raidLocation = null)
         {
             OnAwake();
 
@@ -172,6 +184,10 @@ namespace QuestTree.UI
             QuestDataClient.InvalidateKappa();
             QuestDataClient.InvalidateProfile();
             _session = session; // kept for trader-avatar lookups on tab icons, independent of a graph rebuild
+
+            // The matchmaker's pick, when there is one and it is not the one already acted on.
+            var raidChanged = !string.IsNullOrEmpty(raidLocation) &&
+                              !string.Equals(raidLocation, _lastRaidPreselect, StringComparison.OrdinalIgnoreCase);
 
             // Reads as "a different QuestController OR the first Show after a full teardown":
             // Close nulls _questController, so this is also true the next time the panel is opened
@@ -208,6 +224,7 @@ namespace QuestTree.UI
                 // Deferred by a frame so the loading notice actually paints first. Building the
                 // graph means fetching several MB, parsing it, and laying out thousands of quests,
                 // all on the UI thread - done inline it reads as the game having frozen.
+                _pendingRaidLocation = raidChanged ? raidLocation : null;
                 ShowLoading(true);
                 StartCoroutine(RebuildGraphDeferred(questController, session));
             }
@@ -219,9 +236,30 @@ namespace QuestTree.UI
                 // by whatever was unlocked meanwhile. Cheap in the failing case: a refused or
                 // unregistered route answers at once.
                 QuestDataClient.RetryFailedFetches();
+                _pendingRaidLocation = raidChanged ? raidLocation : null;
                 ShowLoading(true);
                 StartCoroutine(RebuildGraphDeferred(questController, session));
             }
+            else if (raidChanged)
+            {
+                // Nothing to rebuild, so the panel comes back exactly as it was left - except that
+                // the player has since picked a raid, which is the one thing worth turning to.
+                PreselectRaidMap(raidLocation, showNow: true);
+            }
+        }
+
+        /// <summary>Turns the map view to the raid's map. With <paramref name="showNow"/> the map
+        /// is also brought on screen if the panel would open on it anyway (the open-on-map
+        /// setting); a panel deliberately left on the tree keeps the tree, with the map ready
+        /// underneath for when it is opened.</summary>
+        private void PreselectRaidMap(string raidLocation, bool showNow)
+        {
+            if (!MapView.PreselectLocation(raidLocation, _graph)) return;
+            _lastRaidPreselect = raidLocation;
+
+            if (!showNow) return;
+            if (_selectedTraderId == MapsTabId) RenderSelectedTab();
+            else if (ModSettings.Ready && ModSettings.OpenOnMap.Value) SelectTab(MapsTabId);
         }
 
         /// <summary>Waits for the loading notice to render, then does the expensive build. Unity
@@ -650,6 +688,13 @@ namespace QuestTree.UI
         private void RebuildGraph(QuestController questController, IEftSession session)
         {
             _graph.Build(questController, session);
+
+            // The tab below is chosen by setting; this only decides which map that tab shows.
+            if (_pendingRaidLocation != null)
+            {
+                PreselectRaidMap(_pendingRaidLocation, showNow: false);
+                _pendingRaidLocation = null;
+            }
 
             // Land on the map by default: it is the view most opens are for. The graph is the Tree
             // button away, and "All" is where that button goes. Or, by setting, wherever the

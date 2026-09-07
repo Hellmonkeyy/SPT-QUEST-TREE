@@ -406,9 +406,35 @@ namespace QuestTree.Patches
                 return;
             }
 
-            panel.Show(mainMenu.QuestController, mainMenu.iEftSession);
+            // Caught here, not inside RaidLocationOf: a member that a game update has renamed
+            // fails when the method that names it is JIT-compiled, i.e. at the call, so a try
+            // inside that method would never see it. The cue is the only thing at stake.
+            string raidLocation = null;
+            try
+            {
+                raidLocation = RaidLocationOf(app);
+            }
+            catch (Exception ex)
+            {
+                if (!_raidLocationWarned)
+                {
+                    _raidLocationWarned = true;
+                    Plugin.LogSource?.LogInfo($"QuestTree: could not read the selected raid location ({ex.GetType().Name}: {ex.Message}).");
+                }
+            }
+
+            panel.Show(mainMenu.QuestController, mainMenu.iEftSession, raidLocation);
             panel.transform.SetAsLastSibling();
         }
+
+        private static bool _raidLocationWarned;
+
+        /// <summary>The map picked on the matchmaker screen, by its internal name ("bigmap",
+        /// "factory4_night"), or null from the main menu before one is picked. The taskbar stays
+        /// up through the matchmaker, so opening the tracker from there is exactly the "what can
+        /// I do on the map I am about to load" case the map view exists for.</summary>
+        private static string RaidLocationOf(TarkovApplication app) =>
+            app?.CurrentRaidSettings?.SelectedLocation?.Id;
 
         /// <summary>The pieces of the built button that the deferred heal/placement passes need to
         /// keep hold of, so neither has to re-find anything by name after the fact.</summary>
