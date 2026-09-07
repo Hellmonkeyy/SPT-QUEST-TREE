@@ -554,7 +554,7 @@ namespace QuestTree.UI
             _introPanel.SetParent(root, worldPositionStays: false);
             _introPanel.anchorMin = _introPanel.anchorMax = new Vector2(0.5f, 0.5f);
             _introPanel.pivot = new Vector2(0.5f, 0.5f);
-            _introPanel.sizeDelta = new Vector2(470f, 360f);
+            _introPanel.sizeDelta = new Vector2(470f, 410f);
             _introPanel.anchoredPosition = Vector2.zero;
 
             var background = panelGo.GetComponent<Image>();
@@ -565,11 +565,13 @@ namespace QuestTree.UI
             AuxLayout.AddHeading(_introPanel, ref y, "Getting around");
             AuxLayout.AddText(_introPanel, ref y, "Drag to pan  ·  mouse wheel to zoom", 20f, 12);
             AuxLayout.AddText(_introPanel, ref y, "The trader tabs scroll - wheel or drag them too", 20f, 12);
+            AuxLayout.AddText(_introPanel, ref y, "Click a quest for its detail; its links walk the chain, Back retraces", 20f, 12);
             AuxLayout.AddSpacer(ref y, 8f);
-            AuxLayout.AddText(_introPanel, ref y, "<b>F</b>  fit the whole tab on screen", 20f, 12);
+            AuxLayout.AddText(_introPanel, ref y, "<b>F</b>  fit the whole tab on screen (on the map: fit the floor)", 20f, 12);
             AuxLayout.AddText(_introPanel, ref y, "<b>M</b>  jump to the quests you can work on", 20f, 12);
             AuxLayout.AddText(_introPanel, ref y, "<b>X</b>  focus: hide everything you cannot work on yet", 20f, 12);
-            AuxLayout.AddText(_introPanel, ref y, "<b>/</b>  search quests and traders", 20f, 12);
+            AuxLayout.AddText(_introPanel, ref y, "<b>/</b>  search - Enter opens the first match, Esc leaves the box", 20f, 12);
+            AuxLayout.AddText(_introPanel, ref y, "<b>[ ]</b>  on the map: the floor below or above", 20f, 12);
             AuxLayout.AddText(_introPanel, ref y, "<b>Esc</b>  close the quest detail, then the tree", 20f, 12);
             AuxLayout.AddSpacer(ref y, 8f);
 
