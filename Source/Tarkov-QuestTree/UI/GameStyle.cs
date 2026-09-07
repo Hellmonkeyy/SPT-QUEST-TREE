@@ -59,7 +59,9 @@ namespace QuestTree.UI
             if (_font == null && donorText != null && donorText.font != null)
             {
                 _font = donorText.font;
-                _fontMaterial = donorText.fontMaterial;
+                // fontSharedMaterial, not fontMaterial: the latter's getter instances a material
+                // on the donor - EFT's own taskbar label - as a side effect of reading it.
+                _fontMaterial = donorText.fontSharedMaterial;
 
                 // The taskbar label is the game telling us what its own body text looks like.
                 TextColor = donorText.color;
@@ -116,7 +118,9 @@ namespace QuestTree.UI
             if (_font != null)
             {
                 text.font = _font;
-                if (_fontMaterial != null) text.fontMaterial = _fontMaterial;
+                // Shared, for the same reason ApplyOutlined gives: assigning fontMaterial would
+                // instance one material per label, and there are hundreds.
+                if (_fontMaterial != null) text.fontSharedMaterial = _fontMaterial;
             }
 
             // Only recolour text still sitting on the plain white default - callers that chose a
