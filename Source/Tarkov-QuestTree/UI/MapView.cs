@@ -395,6 +395,22 @@ namespace QuestTree.UI
             return entry.DefaultLayer;
         }
 
+        /// <summary>What the pins mean, in the colours they are drawn in.</summary>
+        private static string Legend()
+        {
+            var active = QuestNodeView.HexFor(ENodeStatus.Active);
+            var grey = ColorUtility.ToHtmlStringRGB(UnknownMarkerColor);
+            var accent = ColorUtility.ToHtmlStringRGB(GameStyle.AccentColor);
+
+            var statuses = string.Join("  ", new[] { ENodeStatus.Active, ENodeStatus.Available, ENodeStatus.Completed, ENodeStatus.Locked }
+                .Select(s => $"<color=#{QuestNodeView.HexFor(s)}>\u25a0</color> {QuestNodeView.NameFor(s).ToLowerInvariant()}"));
+
+            return "<color=#FFFFFF60>" +
+                   $"<color=#{active}>\u25c6</color> objective   <color=#{active}>\u25cf</color> item   \u25c7 \u25cb other floor\n" +
+                   $"{statuses}  <color=#{grey}>\u25a0</color> not in your tree  <color=#{accent}>\u25a0</color> selected" +
+                   "</color>";
+        }
+
         /// <summary>Map name plus what is outstanding on it, so the dropdown still carries the
         /// counts the old button column showed.</summary>
         private static string LabelFor(KeyValuePair<string, List<QuestNode>> map)
@@ -597,6 +613,11 @@ namespace QuestTree.UI
                 var spawns = MarkerCountFor(entry);
                 if (spawns > 0) facts.Add($"{spawns} pins");
                 AddAt(content, $"<color=#FFFFFF60>{string.Join("  ·  ", facts)}</color>", listX, ref y, 18f, 11, inner);
+
+                // The pins encode two more things than the tree's legend covers - what kind of
+                // place, and whether it is on this floor - and the tree's legend is hidden here
+                // anyway. Text glyphs stand in for the pin sprite; the colours are the real ones.
+                if (spawns > 0) AddDetailLine(content, Legend(), listX, ref y, inner, 11);
             }
 
             y += 6f;
@@ -1529,11 +1550,17 @@ namespace QuestTree.UI
                 ? new Color(accent.r, accent.g, accent.b, 0.22f)
                 : Color.clear;
 
-            go.GetComponent<Button>().onClick.AddListener(() =>
+            var button = go.GetComponent<Button>();
+            button.targetGraphic = background;
+            button.onClick.AddListener(() =>
             {
                 GameStyle.PlaySound(EUISoundType.ButtonClick);
                 onClick();
             });
+
+            // The same lift and sound the Do next and Items rows have - these were the only rows
+            // in the mod that gave nothing back under the pointer.
+            GameStyle.AddHoverFeedback(go, background);
 
             var labelGo = new GameObject("Label", typeof(RectTransform));
             var labelRect = (RectTransform)labelGo.transform;
@@ -1568,7 +1595,7 @@ namespace QuestTree.UI
         /// otherwise every line after a wrapped one is drawn on top of it.
         /// </summary>
         private static void AddDetailLine(
-            RectTransform parent, string text, float x, ref float y, float width)
+            RectTransform parent, string text, float x, ref float y, float width, int fontSize = 12)
         {
             if (text == null) return;
 
@@ -1588,7 +1615,7 @@ namespace QuestTree.UI
 
             var label = go.AddComponent<TextMeshProUGUI>();
             label.text = text;
-            label.fontSize = 12;
+            label.fontSize = fontSize;
             label.color = Color.white;
             label.alignment = TextAlignmentOptions.TopLeft;
             label.enableWordWrapping = true;
