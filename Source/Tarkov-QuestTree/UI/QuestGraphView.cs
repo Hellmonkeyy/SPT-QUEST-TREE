@@ -75,6 +75,18 @@ namespace QuestTree.UI
         private const float EdgeThickness = 2f;
         private const float EdgeToLockedThickness = 1f;
 
+        /// <summary>
+        /// The hover dimming falls off with distance from the hovered quest, radially, rather than
+        /// switching every other node to one flat alpha: the boxes around the one you are reading
+        /// stay legible, and the far tree recedes further than a flat dim ever could. Distances are
+        /// in layout units - a column is 260, a row 112 - so the inner radius is roughly the
+        /// neighbouring columns and the outer one about five columns out.
+        /// </summary>
+        private const float HighlightInnerRadius = 320f;
+        private const float HighlightOuterRadius = 1500f;
+        private const float NearDimAlpha = 0.6f;
+        private const float FarDimAlpha = 0.1f;
+
         /// <summary>Level of detail the built views are currently drawn at (QuestNodeView.SetDetailLevel).</summary>
         private int _detailLevel;
 
@@ -436,19 +448,52 @@ namespace QuestTree.UI
             foreach (var unlocked in node.Unlocks)
                 _highlighted.Add(unlocked);
 
+            var origin = _layout.TryGetValue(node, out var centre)
+                ? centre + new Vector2(QuestNodeView.Width * 0.5f, 0f)
+                : Vector2.zero;
+
             foreach (var (built, view) in _views)
-                view.SetDimmed(!_highlighted.Contains(built));
+            {
+                if (_highlighted.Contains(built))
+                {
+                    view.SetDimAlpha(1f);
+                    continue;
+                }
+
+                var position = _layout.TryGetValue(built, out var at) ? at + new Vector2(QuestNodeView.Width * 0.5f, 0f) : origin;
+                view.SetDimAlpha(FalloffAlpha(Vector2.Distance(position, origin), NearDimAlpha, FarDimAlpha));
+            }
 
             // An edge only counts as part of the chain when BOTH of its ends are in it, otherwise
-            // every line leaving a neighbour would light up too and the chain would not read.
+            // every line leaving a neighbour would light up too and the chain would not read. The
+            // rest fade with the same falloff as the boxes, measured at the line's midpoint.
             foreach (var (index, line) in _edgeViews)
             {
                 if (index < 0 || index >= _edgeLayout.Length) continue;
 
                 var edge = _edgeLayout[index];
                 var inChain = _highlighted.Contains(edge.From) && _highlighted.Contains(edge.To);
-                UILineConnector.SetColor(line, inChain ? EdgeHighlightColor : EdgeDimmedColor);
+
+                if (inChain)
+                {
+                    UILineConnector.SetColor(line, EdgeHighlightColor);
+                    continue;
+                }
+
+                var midpoint = (edge.FromPoint + edge.ToPoint) * 0.5f;
+                var alpha = FalloffAlpha(Vector2.Distance(midpoint, origin), 0.12f, 0.03f);
+                UILineConnector.SetColor(line, new Color(1f, 1f, 1f, alpha));
             }
+        }
+
+        /// <summary>Alpha for something <paramref name="distance"/> layout units from the hovered
+        /// quest: <paramref name="near"/> inside the inner radius, <paramref name="far"/> beyond
+        /// the outer one, eased between.</summary>
+        private static float FalloffAlpha(float distance, float near, float far)
+        {
+            var t = Mathf.InverseLerp(HighlightInnerRadius, HighlightOuterRadius, distance);
+            t = t * t * (3f - 2f * t); // smoothstep - a linear ramp reads as a hard ring
+            return Mathf.Lerp(near, far, t);
         }
 
         /// <summary>Restores every built node and edge to its normal appearance.</summary>

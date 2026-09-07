@@ -499,9 +499,12 @@ namespace QuestTree.UI
 
         /// <summary>Dim state for the chain highlight. Alpha only - the node keeps its layout,
         /// its position and its ability to be clicked.</summary>
-        public void SetDimmed(bool dimmed)
+        public void SetDimmed(bool dimmed) => SetDimAlpha(dimmed ? DimmedAlpha : 1f);
+
+        /// <summary>A specific alpha, for the distance-based dimming around a hovered quest.</summary>
+        public void SetDimAlpha(float alpha)
         {
-            if (_canvasGroup != null) _canvasGroup.alpha = dimmed ? DimmedAlpha : 1f;
+            if (_canvasGroup != null) _canvasGroup.alpha = Mathf.Clamp01(alpha);
         }
 
         public void OnPointerClick(PointerEventData eventData) => OnClicked?.Invoke(Node);

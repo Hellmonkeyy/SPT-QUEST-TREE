@@ -46,6 +46,9 @@ namespace QuestTree.UI
 
         private RectTransform _detailPanel;
         private RectTransform _content;
+
+        /// <summary>The inner margin the section builders draw at - see Show.</summary>
+        private float _left;
         private QuestNode _detailNode;
 
         /// <summary>The children hidden when collapsed - everything except the chevron itself.</summary>
@@ -233,13 +236,17 @@ namespace QuestTree.UI
             }
 
             var profile = QuestDataClient.GetProfile();
-            var width = ExpandedWidth - Inset * 2f;
-            var y = 0f;
+
+            // Rows start a few pixels in from the mask's edge: glyphs overhang their rect slightly
+            // and the first stroke of every line was being shaved off.
+            const float leftPad = 5f;
+            var width = ExpandedWidth - Inset * 2f - leftPad;
+            var y = 2f;
 
             try
             {
-                BuildHeader(node, profile, width, ref y);
-                BuildSections(node, profile, width, ref y);
+                BuildHeader(node, profile, width, leftPad, ref y);
+                BuildSections(node, profile, width, leftPad, ref y);
             }
             catch (Exception ex)
             {
@@ -253,12 +260,12 @@ namespace QuestTree.UI
             _detailPanel.gameObject.SetActive(true);
         }
 
-        private void BuildHeader(QuestNode node, ProfilePayloadDto profile, float width, ref float y)
+        private void BuildHeader(QuestNode node, ProfilePayloadDto profile, float width, float left, ref float y)
         {
             const float avatar = 36f;
-            var textX = avatar + 10f;
+            var textX = left + avatar + 10f;
 
-            AddAvatar(node, avatar, y);
+            AddAvatar(node, avatar, left, y);
 
             var nameY = y;
             AuxLayout.AddWrapped(_content, $"<b>{node.Name}</b>", textX, ref nameY, width - textX, 16);
@@ -266,7 +273,7 @@ namespace QuestTree.UI
             y = Mathf.Max(nameY, y + avatar) + 6f;
 
             // Chips: the facts that gate the quest, at a glance and in the palette the tree uses.
-            var chipX = 0f;
+            var chipX = left;
             AuxLayout.AddChip(_content, QuestNodeView.NameFor(node.Status), QuestNodeView.ColorFor(node.Status), ref chipX, y);
             if (node.Level > 0) AuxLayout.AddChip(_content, $"Lv {node.Level}", GameStyle.TextColor, ref chipX, y);
             if (!string.IsNullOrEmpty(node.LocationId) && !node.LocationId.Equals("any", StringComparison.OrdinalIgnoreCase))
@@ -277,25 +284,26 @@ namespace QuestTree.UI
             // Faction- and edition-locked quests are shown rather than hidden, so this is what stops
             // one reading as a bug in the tree.
             if (node.UnobtainableReason != null)
-                AuxLayout.AddWrapped(_content, $"<color=#C86464>{node.UnobtainableReason}</color>", 0f, ref y, width);
+                AuxLayout.AddWrapped(_content, $"<color=#C86464>{node.UnobtainableReason}</color>", left, ref y, width);
 
             // The single gate actually stopping you, computed server-side against your level,
             // loyalty and standing.
             var lockReason = QuestSummary.FormatLockReason(node, _graph, profile);
             if (!string.IsNullOrEmpty(lockReason))
-                AuxLayout.AddWrapped(_content, lockReason, 0f, ref y, width);
+                AuxLayout.AddWrapped(_content, lockReason, left, ref y, width);
 
-            AuxLayout.AddClickableRow(_content, "<color=#FFFFFF80>Open the wiki page  ↗</color>", 0f, ref y, width, false, OpenWiki, 20f);
+            AuxLayout.AddClickableRow(_content, "<color=#FFFFFF80>Open the wiki page  ↗</color>", left, ref y, width, false, OpenWiki, 20f);
             y += 6f;
         }
 
-        private void BuildSections(QuestNode node, ProfilePayloadDto profile, float width, ref float y)
+        private void BuildSections(QuestNode node, ProfilePayloadDto profile, float width, float left, ref float y)
         {
+            _left = left;
             // Requires - named here rather than drawn as a line, since a prerequisite from another
             // trader has no node in a single-trader tab. Clicking one selects it in the graph.
             if (node.PrerequisiteIds.Count > 0)
             {
-                AuxLayout.AddSectionHeader(_content, ref y, "Requires", 0f, width);
+                AuxLayout.AddSectionHeader(_content, ref y, "Requires", _left, width);
 
                 foreach (var prereqId in node.PrerequisiteIds)
                 {
@@ -316,7 +324,7 @@ namespace QuestTree.UI
                 // A single step is already spelled out by Requires; a one-item route is noise.
                 if (route.Count >= 2)
                 {
-                    AuxLayout.AddSectionHeader(_content, ref y, $"Route  ·  {route.Count} quests", 0f, width);
+                    AuxLayout.AddSectionHeader(_content, ref y, $"Route  ·  {route.Count} quests", _left, width);
 
                     foreach (var step in route.Take(RouteSteps))
                         AddQuestLink(step, width, ref y);
@@ -333,14 +341,14 @@ namespace QuestTree.UI
             var objectives = node.NecessaryObjectives.ToList();
             if (objectives.Count > 0)
             {
-                AuxLayout.AddSectionHeader(_content, ref y, "Objectives", 0f, width);
+                AuxLayout.AddSectionHeader(_content, ref y, "Objectives", _left, width);
 
                 foreach (var objective in objectives)
                 {
-                    AuxLayout.AddWrapped(_content, QuestSummary.FormatObjective(objective, profile), 0f, ref y, width);
+                    AuxLayout.AddWrapped(_content, QuestSummary.FormatObjective(objective, profile), _left, ref y, width);
 
                     if (QuestSummary.TryProgress(objective, profile, out var current, out var target) && target > 0)
-                        AuxLayout.AddProgressBar(_content, (float)current / target, 0f, ref y, width, QuestNodeView.ColorFor(ENodeStatus.Completed));
+                        AuxLayout.AddProgressBar(_content, (float)current / target, _left, ref y, width, QuestNodeView.ColorFor(ENodeStatus.Completed));
                 }
 
                 var hasPlace = !string.IsNullOrEmpty(node.LocationKey) &&
@@ -362,17 +370,17 @@ namespace QuestTree.UI
 
             if (rewards.Count > 0)
             {
-                AuxLayout.AddSectionHeader(_content, ref y, "Rewards", 0f, width);
+                AuxLayout.AddSectionHeader(_content, ref y, "Rewards", _left, width);
 
                 foreach (var reward in rewards)
-                    AuxLayout.AddWrapped(_content, reward, 0f, ref y, width);
+                    AuxLayout.AddWrapped(_content, reward, _left, ref y, width);
 
                 y += 8f;
             }
 
             if (node.Unlocks.Count > 0)
             {
-                AuxLayout.AddSectionHeader(_content, ref y, "Unlocks", 0f, width);
+                AuxLayout.AddSectionHeader(_content, ref y, "Unlocks", _left, width);
 
                 foreach (var unlocked in node.Unlocks)
                     AddQuestLink(unlocked, width, ref y);
@@ -391,14 +399,14 @@ namespace QuestTree.UI
             var text = $"<color=#{hex}>{QuestNodeView.GlyphFor(target.Status)}</color>  {target.Name}{trader}";
             var captured = target;
 
-            AuxLayout.AddClickableRow(_content, text, 0f, ref y, width, false,
+            AuxLayout.AddClickableRow(_content, text, _left, ref y, width, false,
                 () => _focusNode?.Invoke(captured));
         }
 
         /// <summary>The trader's portrait, from the game's own avatar loader - the same call the
         /// trader cards use, so there is no image fetching of our own. Silently absent when the
         /// session has no such trader (a modded quest with no trader, say).</summary>
-        private void AddAvatar(QuestNode node, float size, float y)
+        private void AddAvatar(QuestNode node, float size, float x, float y)
         {
             var session = _session?.Invoke();
             var trader = session?.Traders?.FirstOrDefault(t => t.Id == node.TraderId);
@@ -409,7 +417,7 @@ namespace QuestTree.UI
             iconRect.SetParent(_content, worldPositionStays: false);
             iconRect.anchorMin = iconRect.anchorMax = new Vector2(0f, 1f);
             iconRect.pivot = new Vector2(0f, 1f);
-            iconRect.anchoredPosition = new Vector2(0f, -y);
+            iconRect.anchoredPosition = new Vector2(x, -y);
             iconRect.sizeDelta = new Vector2(size, size);
             iconGo.GetComponent<Image>().raycastTarget = false;
 
