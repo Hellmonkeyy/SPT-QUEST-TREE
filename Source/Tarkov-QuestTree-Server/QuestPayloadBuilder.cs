@@ -325,6 +325,7 @@ namespace QuestTreeServer
                         ? TargetIds(condition.Target).ToList()
                         : new List<string>(),
                     Count = (int)(condition.Value ?? 0d),
+                    FoundInRaid = condition.OnlyFoundInRaid ?? false,
                     ZoneIds = ZoneIdsOf(condition).Distinct(StringComparer.OrdinalIgnoreCase).ToList()
                 });
             }

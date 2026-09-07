@@ -224,7 +224,9 @@ namespace QuestTree.UI
 
                 if (!owned.TryGetValue(template, out var have) || have == null) continue;
 
-                var usable = MentionsFoundInRaid(objective.Text) ? have.FoundInRaid : have.Total;
+                // The condition's own flag when the server is new enough to send it; the sentence
+                // as the fallback for an older server and for wordings the sentence test misses.
+                var usable = objective.FoundInRaid || MentionsFoundInRaid(objective.Text) ? have.FoundInRaid : have.Total;
                 held += Mathf.Min(need, usable);
             }
 

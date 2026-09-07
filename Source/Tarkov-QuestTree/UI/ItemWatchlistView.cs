@@ -178,7 +178,9 @@ namespace QuestTree.UI
                     // Accumulated like Required, not fixed by whichever quest came first: an item
                     // one quest takes plain and another wants found-in-raid showed a green [have]
                     // for stock the second quest would reject.
-                    watched.NeedsFoundInRaid |= MentionsFoundInRaid(objective.Text);
+                    // The condition's own flag when the server sends one (schema v2); the
+                    // sentence as the fallback for an older server.
+                    watched.NeedsFoundInRaid |= objective.FoundInRaid || MentionsFoundInRaid(objective.Text);
 
                     if (!watched.Quests.Contains(node.Name))
                     {

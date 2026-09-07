@@ -19,8 +19,10 @@ namespace QuestTree.QuestGraph
     /// </summary>
     internal sealed class QuestPayloadDto
     {
-        /// <summary>Schema this client understands. Compared against the server's on fetch.</summary>
-        public const int SupportedSchemaVersion = 1;
+        /// <summary>Schema this client understands. Compared against the server's on fetch. A
+        /// mismatch is a logged warning, not a refusal: v1 (1.7.1) payloads only lack
+        /// ObjectiveDto.FoundInRaid, which the readers fall back from.</summary>
+        public const int SupportedSchemaVersion = 2;
 
         [JsonProperty("schemaVersion")]
         public int SchemaVersion { get; set; }
@@ -110,6 +112,11 @@ namespace QuestTree.QuestGraph
 
         [JsonProperty("count")]
         public int Count { get; set; }
+
+        /// <summary>The condition's own found-in-raid flag (schema v2). False from a 1.7.1
+        /// server, where the readers fall back to the objective sentence.</summary>
+        [JsonProperty("foundInRaid")]
+        public bool FoundInRaid { get; set; }
 
         /// <summary>The zone ids this objective happens in; empty when it has no place. Resolved
         /// against harvested zones server-side - here it is only for saying which zone.</summary>

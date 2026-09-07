@@ -16,8 +16,9 @@ namespace QuestTreeServer
     public sealed class QuestPayloadDto
     {
         /// <summary>Bumped whenever the shape below changes, so an old client paired with a new
-        /// server (or the reverse) can say so plainly instead of silently mis-parsing.</summary>
-        public int SchemaVersion { get; set; } = 1;
+        /// server (or the reverse) can say so plainly instead of silently mis-parsing.
+        /// v2 (1.8.0): ObjectiveDto.FoundInRaid.</summary>
+        public int SchemaVersion { get; set; } = 2;
 
         public List<QuestDto> Quests { get; set; } = new();
     }
@@ -77,8 +78,9 @@ namespace QuestTreeServer
         /// (Success, Started, ...).</summary>
         public List<string> Status { get; set; } = new();
 
-        /// <summary>Hours that must pass after the prerequisite before this quest unlocks. 0 for
-        /// the overwhelming majority.</summary>
+        /// <summary>Seconds that must pass after the prerequisite before this quest unlocks
+        /// (the wiki's quest sheet: "seconds that must have passed since completing the quest
+        /// target"). 0 for the overwhelming majority. An earlier comment here said hours.</summary>
         public int AvailableAfter { get; set; }
     }
 
@@ -102,6 +104,11 @@ namespace QuestTreeServer
 
         /// <summary>How many of the target item the objective needs.</summary>
         public int Count { get; set; }
+
+        /// <summary>Whether the items must be found in raid - the condition's own flag. The
+        /// client used to infer this from the English objective sentence, which a localised
+        /// install or a modded quest can word any way it likes.</summary>
+        public bool FoundInRaid { get; set; }
 
         /// <summary>The zone ids this objective happens in - the condition's own zoneId, or the
         /// VisitPlace/InZone targets inside a CounterCreator. Empty for objectives with no place
