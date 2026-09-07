@@ -93,6 +93,10 @@ namespace QuestTree.UI
 
         private Image _fill;
         private Outline _outline;
+
+        /// <summary>Whether this is the box the detail panel is about. Cleared on Bind, because a
+        /// pooled view arrives wearing whatever it last showed.</summary>
+        private bool _selected;
         private Image _statusBar;
         private TMP_Text _statusGlyph;
         private TMP_Text _title;
@@ -250,6 +254,7 @@ namespace QuestTree.UI
             // Views are pooled, so a recycled one arrives carrying whatever dim the highlight left
             // on it. Reset here for the same reason RefreshStatus resets the colours.
             SetDimmed(false);
+            _selected = false;
 
             _kappaBadge.SetActive(node.IsKappaRequired);
 
@@ -390,9 +395,20 @@ namespace QuestTree.UI
 
             if (_outline != null)
             {
-                // Active gets the full edge; everything else a quieter one, so the quest you are on
-                // is boxed in its own colour and the rest merely tinted.
-                _outline.effectColor = Fade(color, status == ENodeStatus.Active ? 0.9f : 0.45f);
+                if (_selected)
+                {
+                    // The box the detail panel is about: the accent at full strength on a heavier
+                    // edge, so it reads as chosen rather than as a fifth status colour.
+                    _outline.effectColor = GameStyle.AccentColor;
+                    _outline.effectDistance = new Vector2(2f, -2f);
+                }
+                else
+                {
+                    // Active gets the full edge; everything else a quieter one, so the quest you
+                    // are on is boxed in its own colour and the rest merely tinted.
+                    _outline.effectColor = Fade(color, status == ENodeStatus.Active ? 0.9f : 0.45f);
+                    _outline.effectDistance = new Vector2(1f, -1f);
+                }
             }
 
             // Body text is the game's own colour on a dark box, whatever the status; only Locked
@@ -512,6 +528,16 @@ namespace QuestTree.UI
 
         /// <summary>Dim state for the chain highlight. Alpha only - the node keeps its layout,
         /// its position and its ability to be clicked.</summary>
+        /// <summary>Marks or unmarks this box as the one the detail panel is showing. Goes through
+        /// RefreshStatus so the outline has exactly one writer and a status change cannot paint
+        /// over the selection.</summary>
+        public void SetSelected(bool selected)
+        {
+            if (_selected == selected) return;
+            _selected = selected;
+            RefreshStatus();
+        }
+
         public void SetDimmed(bool dimmed) => SetDimAlpha(dimmed ? DimmedAlpha : 1f);
 
         /// <summary>A specific alpha, for the distance-based dimming around a hovered quest.</summary>

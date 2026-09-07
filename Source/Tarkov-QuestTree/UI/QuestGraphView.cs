@@ -163,7 +163,14 @@ namespace QuestTree.UI
         {
             _graph = graph;
             _toolbar = toolbar;
-            _onNodeClicked = onNodeClicked;
+
+            // Selection is recorded here, ahead of whatever the click opens, so a box clicked
+            // directly and one focused from a detail-panel link are marked the same way.
+            _onNodeClicked = node =>
+            {
+                SetSelectedNode(node);
+                onNodeClicked(node);
+            };
 
             var viewportGo = new GameObject("Viewport", typeof(RectTransform), typeof(Image), typeof(RectMask2D));
             _viewport = (RectTransform)viewportGo.transform;
@@ -191,6 +198,25 @@ namespace QuestTree.UI
         public void SetVisible(bool visible)
         {
             if (_viewport != null) _viewport.gameObject.SetActive(visible);
+        }
+
+        /// <summary>The quest whose detail is open, kept as the node rather than the view: views
+        /// are pooled and the box may not be built while it is scrolled off screen, so the mark is
+        /// re-applied to whichever view next binds the node (see RefreshVisibleNodes).</summary>
+        private QuestNode _selectedNode;
+
+        /// <summary>Marks a box as the one the detail panel is about, or none.</summary>
+        public void SetSelectedNode(QuestNode node)
+        {
+            if (ReferenceEquals(_selectedNode, node)) return;
+
+            if (_selectedNode != null && _views.TryGetValue(_selectedNode, out var previous))
+                previous.SetSelected(false);
+
+            _selectedNode = node;
+
+            if (node != null && _views.TryGetValue(node, out var view))
+                view.SetSelected(true);
         }
 
         /// <summary>Recolours every built node after the game reports a status change. Only the
@@ -389,6 +415,7 @@ namespace QuestTree.UI
                 ((RectTransform)view.transform).anchoredPosition = _layout[node];
                 view.Bind(node, _onNodeClicked, HighlightChain, _ => ClearHighlight());
                 view.SetDetailLevel(_detailLevel);
+                view.SetSelected(ReferenceEquals(node, _selectedNode));
                 _views[node] = view;
             }
 

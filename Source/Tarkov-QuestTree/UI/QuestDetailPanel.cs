@@ -57,6 +57,10 @@ namespace QuestTree.UI
 
         public bool IsOpen => _detailPanel != null && _detailPanel.gameObject.activeSelf;
 
+        /// <summary>Raised when the panel is dismissed outright (X, Escape) - not when a view
+        /// switch merely takes it off screen. The tree unmarks its selected box from this.</summary>
+        public Action OnHidden;
+
         /// <param name="focusNode">Selects and frames a quest in the graph - what a prerequisite,
         /// route or unlock row does when clicked.</param>
         /// <param name="showOnMap">Switches to the map with this quest selected.</param>
@@ -471,6 +475,7 @@ namespace QuestTree.UI
         {
             _detailNode = null;
             if (_detailPanel != null) _detailPanel.gameObject.SetActive(false);
+            OnHidden?.Invoke();
         }
 
         /// <summary>Takes the panel off screen without forgetting which quest it was showing -

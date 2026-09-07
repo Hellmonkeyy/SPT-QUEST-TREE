@@ -440,6 +440,7 @@ namespace QuestTree.UI
 
             BuildTabRow(root);
             _detail.Build(root, _graph, FocusNode, ShowOnMap, () => _session);
+            _detail.OnHidden = () => _graphView.SetSelectedNode(null);
             BuildIntroPanel(root);
         }
 
