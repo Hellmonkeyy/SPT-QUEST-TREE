@@ -8,7 +8,7 @@
     <LangVersion>latest</LangVersion>
     <!-- MSBuild cannot read the C# constant, so this is the one copy that has to be updated by
          hand: keep it equal to ModInfo.Version in ModInfo.cs, which everything else derives from. -->
-    <AssemblyVersion>1.7.0</AssemblyVersion>
+    <AssemblyVersion>1.7.1</AssemblyVersion>
     <FileVersion>$(AssemblyVersion)</FileVersion>
     <Version>$(AssemblyVersion)</Version>
     <Deterministic>true</Deterministic>
@@ -29,6 +29,14 @@
     <SptPath Condition="'$(SptPath)' == ''">$(MSBuildProjectDirectory)\..\..</SptPath>
     <ManagedPath>$(SptPath)\EscapeFromTarkov_Data\Managed</ManagedPath>
   </PropertyGroup>
+
+  <!-- The two-folders-up fallback resolves to SOMETHING on any machine - on this repo's layout,
+       the desktop - and the build then fails on a missing reference four screens later. Say what
+       is actually wrong, first. -->
+  <Target Name="CheckSptPath" BeforeTargets="ResolveAssemblyReferences">
+    <Error Condition="!Exists('$(ManagedPath)\Assembly-CSharp.dll')"
+           Text="SptPath '$(SptPath)' is not an SPT install (no EscapeFromTarkov_Data\Managed\Assembly-CSharp.dll). Pass -p:SptPath=&quot;C:\Path\To\SPT&quot; or set SPT_PATH." />
+  </Target>
 
   <ItemGroup>
     <Reference Include="BepInEx">
@@ -128,6 +136,18 @@
       <Private>False</Private>
     </Reference>
   </ItemGroup>
+
+  <!-- Git's short hash, and "-dirty" when the tree has uncommitted changes, appended to the
+       informational version (1.7.1+0c50f09-dirty) so two builds that both say 1.7.1 can be told
+       apart from the log line. Tolerates no git at all: the stamp is then just the version. -->
+  <Target Name="ReadGitStamp" BeforeTargets="GetAssemblyVersion" Condition="'$(SourceRevisionId)' == ''">
+    <Exec Command="git describe --always --dirty --exclude &quot;*&quot;"
+          WorkingDirectory="$(MSBuildProjectDirectory)"
+          ConsoleToMSBuild="true" ContinueOnError="true" IgnoreExitCode="true"
+          StandardOutputImportance="low" StandardErrorImportance="low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="SourceRevisionId" />
+    </Exec>
+  </Target>
 
   <!-- Into the build output too, so a release is assembled from bin\ alone. It used to be placed
        into the archive by hand, which is the kind of step that gets forgotten. -->

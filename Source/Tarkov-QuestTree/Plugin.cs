@@ -49,7 +49,7 @@ namespace QuestTree
                 Logger.LogError($"QuestTree: failed to enable the taskbar patch: {ex}");
             }
 
-            Logger.LogInfo("QuestTree: loaded.");
+            Logger.LogInfo($"QuestTree {ModInfo.Stamp}: loaded.");
         }
     }
 }

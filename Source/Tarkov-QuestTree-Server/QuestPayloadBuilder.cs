@@ -128,7 +128,7 @@ namespace QuestTreeServer
                 }
             }
 
-            logger.Info($"Quest Tracker: serving {payload.Quests.Count} quests to the client mod.");
+            logger.Info($"Quest Tracker {ModInfo.Stamp}: serving {payload.Quests.Count} quests to the client mod.");
             return payload;
         }
 

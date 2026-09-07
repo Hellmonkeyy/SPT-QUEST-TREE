@@ -1,3 +1,5 @@
+using System.Reflection;
+
 namespace QuestTreeServer
 {
     /// <summary>
@@ -14,6 +16,15 @@ namespace QuestTreeServer
     /// </summary>
     public static class ModInfo
     {
-        public const string Version = "1.7.0";
+        public const string Version = "1.7.1";
+
+        private static string? _stamp;
+
+        /// <summary>The version plus the git hash the build came from ("1.7.1+0c50f09", with
+        /// "-dirty" when built from uncommitted changes) - the csproj writes it into the assembly's
+        /// informational version. For log lines; the mismatch check compares Version only.</summary>
+        public static string Stamp => _stamp ??=
+            typeof(ModInfo).Assembly.GetCustomAttribute<AssemblyInformationalVersionAttribute>()?.InformationalVersion
+            ?? Version;
     }
 }
