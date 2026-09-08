@@ -90,7 +90,14 @@ namespace QuestTree
 
         /// <summary>Set while a whole section is being reset, so the per-entry change events do
         /// not each re-render the panel; one Changed follows.</summary>
-        private static bool _resetting;
+        /// <summary>Depth of ResetEntries calls in progress - a counter, not a flag, so a nested
+        /// reset (a Changed handler resetting something) cannot clear the guard from under the
+        /// outer one and let its remaining entries fire Changed one by one.</summary>
+        private static int _resetDepth;
+
+        /// <summary>Init runs once. A second call would bind every entry again and subscribe
+        /// Raise a second time, so every change would fire Changed twice.</summary>
+        private static bool _initStarted;
 
         /// <summary>Asks the panel to redraw without any setting having changed - the Settings page
         /// uses it to open and close its dropdowns, which are part of the page it rebuilds.</summary>
@@ -124,7 +131,7 @@ namespace QuestTree
         {
             if (!Ready || entries == null) return;
 
-            _resetting = true;
+            _resetDepth++;
             try
             {
                 foreach (var entry in entries)
@@ -132,7 +139,7 @@ namespace QuestTree
             }
             finally
             {
-                _resetting = false;
+                _resetDepth--;
             }
 
             ColorCache.Clear();
@@ -149,6 +156,13 @@ namespace QuestTree
 
         public static void Init(ConfigFile config)
         {
+            if (_initStarted)
+            {
+                Plugin.LogSource?.LogWarning("QuestTree: ModSettings.Init called twice - the second call is ignored.");
+                return;
+            }
+            _initStarted = true;
+
             HideUnobtainable = config.Bind(
                 "Filters", "Hide unobtainable quests", false,
                 "Hide quests this profile can never complete - the other faction's quests, seasonal " +
@@ -170,8 +184,10 @@ namespace QuestTree
 
             MapArtworkRotation = config.Bind(
                 "Display", "Extra map artwork rotation", 0,
-                "Turns the map picture (not the markers) by this many degrees on top of the " +
-                "rotation the map's own data declares. Leave at 0 unless a map is drawn wrong.");
+                new ConfigDescription(
+                    "Turns the map picture (not the markers) by this many degrees on top of the " +
+                    "rotation the map's own data declares. Leave at 0 unless a map is drawn wrong.",
+                    new AcceptableValueRange<int>(-270, 270)));
 
             MirrorMapArtwork = config.Bind(
                 "Display", "Mirror map artwork", false,
@@ -363,7 +379,7 @@ namespace QuestTree
 
         private static void Raise(object sender, EventArgs e)
         {
-            if (_resetting) return;
+            if (_resetDepth > 0) return;
 
             ColorCache.Clear();
 

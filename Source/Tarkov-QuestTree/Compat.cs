@@ -31,8 +31,21 @@ namespace QuestTree
                 // and the field wanted may be declared on the class the game type derives from.
                 for (var type = owner; type != null && field == null; type = type.BaseType)
                 {
-                    field = type.GetFields(Flags | BindingFlags.DeclaredOnly)
-                        .FirstOrDefault(f => typeof(T).IsAssignableFrom(f.FieldType));
+                    // An exact type first, then anything assignable. GetFields' order is not
+                    // specified, so with two candidates "the first" is luck; an exact match is
+                    // not, and when it comes to luck the log says so.
+                    var candidates = type.GetFields(Flags | BindingFlags.DeclaredOnly)
+                        .Where(f => typeof(T).IsAssignableFrom(f.FieldType))
+                        .ToList();
+
+                    field = candidates.FirstOrDefault(f => f.FieldType == typeof(T)) ?? candidates.FirstOrDefault();
+
+                    if (candidates.Count > 1 && field != null)
+                    {
+                        Plugin.LogSource?.LogWarning(
+                            $"QuestTree: {type.Name} has {candidates.Count} fields assignable to {typeof(T).Name}; " +
+                            $"using '{field.Name}'. If this feature misbehaves, that choice is the first suspect.");
+                    }
                 }
 
                 Cache[key] = field;
