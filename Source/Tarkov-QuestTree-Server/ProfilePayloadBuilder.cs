@@ -101,8 +101,7 @@ namespace QuestTreeServer
                 }
             }
 
-            BuildLockReasons(profile, payload);
-            BuildQuestItemOwnership(profile, payload);
+            WalkQuests(profile, payload);
 
             // Debug: this runs on every panel open, and at Info it was the loudest thing in the
             // server console during a session.
@@ -114,67 +113,23 @@ namespace QuestTreeServer
         }
 
         /// <summary>
-        /// How many of each quest-required item the profile holds.
+        /// One pass over the quest table for the two things the payload needs per quest: how many
+        /// of each item a quest asks for the profile holds (every quest - scoped to templates some
+        /// quest actually wants, so the payload is proportional to the quest database rather than
+        /// to how much the player hoards), and for every quest not yet started, the one gate
+        /// stopping it. These were two full walks per request, on every panel open.
         ///
-        /// Scoped to templates some quest actually asks for, rather than the whole stash: that is
-        /// the only part the client can do anything with, and it keeps the payload proportional to
-        /// the quest database rather than to how much the player hoards.
+        /// Lock reasons are checked in the order the player would act on them: things that can
+        /// never change for this character first (faction, edition, event), then the ones they
+        /// can move (level, loyalty, standing), then prerequisites. Only the FIRST blocker is
+        /// reported - a list of five reasons is not more useful than the one thing to go and do.
         /// </summary>
-        private void BuildQuestItemOwnership(PmcData profile, ProfilePayloadDto payload)
+        private void WalkQuests(PmcData profile, ProfilePayloadDto payload)
         {
             var quests = templateTable.Quests;
             if (quests == null) return;
 
             var owned = ProfileInventory.CountByTemplate(profile);
-            if (owned.Count == 0) return;
-
-            foreach (var quest in quests.Values)
-            {
-                var conditions = quest?.Conditions?.AvailableForFinish;
-                if (conditions == null) continue;
-
-                try
-                {
-                    foreach (var condition in conditions)
-                    {
-                        if (condition == null) continue;
-                        if (!QuestPayloadBuilder.IsItemCondition(condition.ConditionType)) continue;
-
-                        foreach (var template in QuestPayloadBuilder.TargetIds(condition.Target))
-                        {
-                            if (string.IsNullOrWhiteSpace(template)) continue;
-                            if (payload.ItemsOwned.ContainsKey(template)) continue;
-                            if (!owned.TryGetValue(template, out var held)) continue;
-
-                            payload.ItemsOwned[template] = new HeldItemDto
-                            {
-                                FoundInRaid = held.FoundInRaid,
-                                Total = held.Total
-                            };
-                        }
-                    }
-                }
-                catch (Exception ex)
-                {
-                    // One quest's odd condition, not the ownership of every item.
-                    logger.Warning($"Quest Tracker: skipped a quest's item ownership ({quest?.Id}): {ex.Message}");
-                }
-            }
-        }
-
-        /// <summary>
-        /// Works out, for every quest the player has not started, which gate is stopping them.
-        ///
-        /// Checked in the order the player would act on them: things that can never change for this
-        /// character first (faction, edition, event), then the ones they can move (level, loyalty,
-        /// standing), then prerequisites. Only the FIRST blocker is reported - a list of five
-        /// reasons is not more useful than the one thing to go and do.
-        /// </summary>
-        private void BuildLockReasons(PmcData profile, ProfilePayloadDto payload)
-        {
-            var quests = templateTable.Quests;
-            if (quests == null) return;
-
             var started = profile.Quests?.Select(q => q.QId).ToHashSet() ?? new HashSet<MongoId>();
 
             // Built once here: every unstarted quest checks each prerequisite against the profile,
@@ -188,6 +143,22 @@ namespace QuestTreeServer
             foreach (var quest in quests.Values)
             {
                 if (quest == null) continue;
+
+                // Two guards, not one: a quest whose conditions are malformed still gets its
+                // lock reason, and the reverse.
+                if (owned.Count > 0)
+                {
+                    try
+                    {
+                        CollectOwnership(quest, owned, payload);
+                    }
+                    catch (Exception ex)
+                    {
+                        // One quest's odd condition, not the ownership of every item.
+                        logger.Warning($"Quest Tracker: skipped a quest's item ownership ({quest.Id}): {ex.Message}");
+                    }
+                }
+
                 if (started.Contains(quest.Id)) continue; // already in the profile; not locked
 
                 try
@@ -199,6 +170,32 @@ namespace QuestTreeServer
                 {
                     // A malformed or modded quest must not cost every other quest its explanation.
                     logger.Warning($"Quest Tracker: could not evaluate lock reason for '{quest.Id}': {ex.Message}");
+                }
+            }
+        }
+
+        private static void CollectOwnership(
+            Quest quest, Dictionary<string, ProfileInventory.Held> owned, ProfilePayloadDto payload)
+        {
+            var conditions = quest.Conditions?.AvailableForFinish;
+            if (conditions == null) return;
+
+            foreach (var condition in conditions)
+            {
+                if (condition == null) continue;
+                if (!QuestPayloadBuilder.IsItemCondition(condition.ConditionType)) continue;
+
+                foreach (var template in QuestPayloadBuilder.TargetIds(condition.Target))
+                {
+                    if (string.IsNullOrWhiteSpace(template)) continue;
+                    if (payload.ItemsOwned.ContainsKey(template)) continue;
+                    if (!owned.TryGetValue(template, out var held)) continue;
+
+                    payload.ItemsOwned[template] = new HeldItemDto
+                    {
+                        FoundInRaid = held.FoundInRaid,
+                        Total = held.Total
+                    };
                 }
             }
         }
