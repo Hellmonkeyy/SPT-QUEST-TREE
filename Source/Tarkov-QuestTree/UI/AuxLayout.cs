@@ -95,6 +95,7 @@ namespace QuestTree.UI
             label.alignment = TextAlignmentOptions.Left;
             label.enableWordWrapping = false;
             label.overflowMode = TextOverflowModes.Ellipsis;
+            label.raycastTarget = false; // plain text must not eat the wheel meant for the list beneath it
             GameStyle.Apply(label);
 
             y += height;

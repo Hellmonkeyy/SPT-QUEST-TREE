@@ -1137,7 +1137,9 @@ namespace QuestTree.UI
 
             if (!string.IsNullOrEmpty(quest) && quest != marker.ItemName)
             {
-                var more = marker.Quests.Count > 1 ? $" +{marker.Quests.Count - 1}" : "";
+                // Quests can be null when the name came from openedQuestName - the two lists are
+                // built separately server-side, and a marker may carry ids without names.
+                var more = marker.Quests != null && marker.Quests.Count > 1 ? $" +{marker.Quests.Count - 1}" : "";
                 text += $"  <color=#FFFFFF70>{quest}{more}</color>";
             }
 
@@ -1698,6 +1700,9 @@ namespace QuestTree.UI
             label.alignment = TextAlignmentOptions.Left;
             label.enableWordWrapping = false;
             label.overflowMode = TextOverflowModes.Ellipsis;
+            // Plain text: left as a raycast target it swallowed the wheel over the sidebar's
+            // header lines, so the list only scrolled from over a row.
+            label.raycastTarget = false;
             GameStyle.Apply(label);
 
             y += height;
