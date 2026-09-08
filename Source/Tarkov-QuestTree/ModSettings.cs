@@ -96,10 +96,24 @@ namespace QuestTree
         /// uses it to open and close its dropdowns, which are part of the page it rebuilds.</summary>
         public static void RequestRepaint() => Changed?.Invoke(false);
 
+        /// <summary>Parsed once per change rather than per read. ColorFor runs for every box and
+        /// every edge on every zoom step, and parsing the hex string each time allocated a trimmed
+        /// copy per call - six hundred of them a frame. Cleared whenever any setting changes;
+        /// re-parsing five strings then is nothing.</summary>
+        private static readonly Dictionary<ConfigEntry<string>, Color> ColorCache = new();
+
         public static Color ParseColor(ConfigEntry<string> entry, Color fallback)
         {
-            if (entry == null || string.IsNullOrWhiteSpace(entry.Value)) return fallback;
-            return ColorUtility.TryParseHtmlString(entry.Value.Trim(), out var color) ? color : fallback;
+            if (entry == null) return fallback;
+            if (ColorCache.TryGetValue(entry, out var cached)) return cached;
+
+            var value = entry.Value;
+            var color = !string.IsNullOrWhiteSpace(value) && ColorUtility.TryParseHtmlString(value.Trim(), out var parsed)
+                ? parsed
+                : fallback;
+
+            ColorCache[entry] = color;
+            return color;
         }
 
         /// <summary>Puts every entry in a config-file section back to its default, then
@@ -132,6 +146,7 @@ namespace QuestTree
                 _resetting = false;
             }
 
+            ColorCache.Clear();
             Changed?.Invoke(true);
         }
 
@@ -360,6 +375,8 @@ namespace QuestTree
         private static void Raise(object sender, EventArgs e)
         {
             if (_resetting) return;
+
+            ColorCache.Clear();
 
             // Node geometry changes with density, the node budget, and whether titles may take
             // two lines; those need the pooled views thrown away. Everything else is a repaint.
