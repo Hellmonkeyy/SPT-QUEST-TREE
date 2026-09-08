@@ -1,4 +1,5 @@
 using System;
+using System.Text.RegularExpressions;
 using Comfort.Common;
 using EFT.UI;
 using TMPro;
@@ -157,15 +158,17 @@ namespace QuestTree.UI
                 // Measuring is a nicety; the estimate below is what shipped for a year.
             }
 
-            return text.Length * fontSize * 0.56f;
+            // The estimate sees glyphs, not markup: a tab label carries a colour tag pair around
+            // its suffix, which counted as two dozen characters.
+            var visible = text.IndexOf('<') >= 0 ? Regex.Replace(text, "<[^>]*>", "") : text;
+            return visible.Length * fontSize * 0.56f;
         }
 
         /// <summary>A quest, trader, item or objective name as literal text inside rich-text
         /// markup. TMP parses tags in every string it is handed, so a modded name containing a
         /// real tag - "&lt;b&gt;" is all it takes - used to swallow the rest of its line. Wrapped only
         /// when there is a "&lt;" to worry about; the tag pair is invisible.</summary>
-        public static string Safe(string text) =>
-            string.IsNullOrEmpty(text) || text.IndexOf('<') < 0 ? text : "<noparse>" + text + "</noparse>";
+        public static string Safe(string text) => RichText.Safe(text);
 
         public static void Apply(TMP_Text text)
         {

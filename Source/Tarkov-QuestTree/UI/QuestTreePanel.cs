@@ -238,12 +238,11 @@ namespace QuestTree.UI
 
             if (profileId != null && !string.Equals(profileId, _profileId, StringComparison.Ordinal))
             {
-                if (_profileId != null)
-                {
-                    MapView.ResetSession();
-                    _lastRaidPreselect = null;
-                }
-
+                // Also on the first sighting: if the previous character's id could not be read,
+                // its map memory is still here to inherit, and a reset on an untouched view
+                // costs nothing.
+                MapView.ResetSession();
+                _lastRaidPreselect = null;
                 _profileId = profileId;
             }
 
@@ -1008,7 +1007,8 @@ namespace QuestTree.UI
         private void CreateTabButton(string name, string suffix, string traderId)
         {
             var hasIcon = traderId != AllTradersId && !IsAuxTab(traderId);
-            var width = Mathf.Clamp(GameStyle.MeasureWidth(TabLabel(name, suffix), 12) + 28f + (hasIcon ? 24f : 0f), 60f, 260f);
+            var suffixWidth = string.IsNullOrEmpty(suffix) ? 0f : GameStyle.MeasureWidth(suffix, 12) + 8f;
+            var width = Mathf.Clamp(GameStyle.MeasureWidth(name, 12) + suffixWidth + 28f + (hasIcon ? 24f : 0f), 60f, 260f);
 
             var tabGo = new GameObject($"Tab_{(traderId == AllTradersId ? "All" : name)}", typeof(RectTransform), typeof(Image), typeof(Button));
             var tabRect = (RectTransform)tabGo.transform;

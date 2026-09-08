@@ -112,7 +112,7 @@ namespace QuestTree.QuestGraph
                     // a locale key) - falling back to the id here, not just where it's read back
                     // out, means every consumer (tab labels included) gets a non-null string to
                     // work with instead of needing its own null guard.
-                    traderNames[trader.Id] = string.IsNullOrEmpty(trader.LocalizedName) ? trader.Id : trader.LocalizedName;
+                    traderNames[trader.Id] = RichText.Safe(string.IsNullOrEmpty(trader.LocalizedName) ? trader.Id : trader.LocalizedName);
                 }
             }
 
@@ -259,25 +259,20 @@ namespace QuestTree.QuestGraph
                     if (node.IsKappaRequired) matched++;
                 }
 
-                if (matched > 0 || _serverKappaIds.Count == 0) return;
-
                 // The file holds names and the nodes carry localized names, so on a non-English
-                // client nothing matches and every badge silently vanished. Fall back to the
-                // server's ids, which need no translation, and say why once.
-                if (!_ownListWarned)
-                {
-                    _ownListWarned = true;
-                    Plugin.LogSource?.LogWarning(
-                        $"QuestTree: none of the {KappaQuests.Count} names in kappa-quests.json matched a quest name " +
-                        "(a localized client?) - using the server's Kappa list instead.");
-                }
+                // client little or nothing matches and the badges vanished. The own list is used
+                // when at least half its names found a quest - one untranslated title matching by
+                // accident is not a list. Below that, the server's ids, which need no translation.
+                if (matched * 2 >= KappaQuests.Count || _serverKappaIds.Count == 0) return;
+
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: only {matched} of the {KappaQuests.Count} names in kappa-quests.json matched a quest name " +
+                    "(a localized client?) - using the server's Kappa list instead.");
             }
 
             foreach (var node in _byId.Values)
                 node.IsKappaRequired = _serverKappaIds.Contains(node.Id);
         }
-
-        private static bool _ownListWarned;
 
         /// <summary>Recolors every node from its live Quest.QuestStatus (or Locked, if the game
         /// hasn't unlocked it yet) without touching edges or depth. Call this from

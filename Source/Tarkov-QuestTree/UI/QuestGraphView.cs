@@ -127,12 +127,13 @@ namespace QuestTree.UI
         private readonly Stack<QuestNodeView> _nodePool = new();
         private readonly Stack<RectTransform[]> _edgePool = new();
 
-        /// <summary>Ceilings on the pools. A pool exists to make panning cheap, and for that a
-        /// couple of hundred spare boxes is plenty; without a ceiling a pass over a 5,000-quest
-        /// tree left up to the whole node budget - thousands of inactive objects - alive for the
-        /// panel's life. Beyond these a released view is destroyed instead.</summary>
-        private const int MaxPooledNodes = 256;
-        private const int MaxPooledEdges = 768;
+        /// <summary>Ceilings on the pools: the visible-node budget, since every Render releases
+        /// every live view and a ceiling below what was live would destroy and rebuild the
+        /// difference on every keystroke - the churn the pool exists to avoid. What the ceiling
+        /// still stops is a big tree's views outliving a switch to a small one.</summary>
+        private static int MaxPooledNodes =>
+            Mathf.Max(256, ModSettings.Ready ? ModSettings.MaxVisibleNodes.Value : DefaultMaxVisibleNodes);
+        private static int MaxPooledEdges => MaxPooledNodes * 3;
 
         // Scratch collections reused by the visibility sweep so it allocates nothing per frame.
         private readonly List<QuestNode> _nodesToRelease = new();

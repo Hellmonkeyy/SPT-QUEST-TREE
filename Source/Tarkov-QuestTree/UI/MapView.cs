@@ -1480,6 +1480,7 @@ namespace QuestTree.UI
                 click.OnHover = hovering =>
                 {
                     if (rect == null) return;
+                    rest.Hovered = hovering;
                     rest.Show(hovering || rest.Visible);
                     // Above its neighbours while hovered, so the name is not under the next pin.
                     if (hovering) rect.SetAsLastSibling();
@@ -1543,6 +1544,7 @@ namespace QuestTree.UI
             public bool Selected;
             public Action<bool> Show;
             public bool Visible;
+            public bool Hovered;
         }
 
         /// <summary>Decides which at-rest names are drawn at this zoom: the selected quest's
@@ -1562,15 +1564,10 @@ namespace QuestTree.UI
                 var visible = label.Selected || !claimed.Any(other => other.Overlaps(footprint));
                 if (visible) claimed.Add(footprint);
 
-                if (label.Visible != visible)
-                {
-                    label.Visible = visible;
-                    label.Show(visible);
-                }
-                else if (visible)
-                {
-                    label.Show(true); // first placement: nothing has been drawn yet
-                }
+                // A name under the cursor stays whatever the collision says; a zoom must not
+                // take it away until the pointer leaves.
+                label.Visible = visible;
+                label.Show(visible || label.Hovered);
             }
         }
 

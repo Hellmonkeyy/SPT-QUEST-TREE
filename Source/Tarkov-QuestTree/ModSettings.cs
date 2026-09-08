@@ -88,9 +88,9 @@ namespace QuestTree
         /// <summary>Every entry, in bind order, so a section can be reset to its defaults.</summary>
         private static readonly List<ConfigEntryBase> Entries = new();
 
-        /// <summary>Set while a whole section is being reset, so the per-entry change events do
-        /// not each re-render the panel; one Changed follows.</summary>
-        /// <summary>Depth of ResetEntries calls in progress - a counter, not a flag, so a nested
+        /// <summary>Depth of ResetEntries calls in progress - set while a whole section is being
+        /// reset, so the per-entry change events do not each re-render the panel and one Changed
+        /// follows. A counter, not a flag, so a nested
         /// reset (a Changed handler resetting something) cannot clear the guard from under the
         /// outer one and let its remaining entries fire Changed one by one.</summary>
         private static int _resetDepth;

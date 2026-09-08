@@ -120,7 +120,16 @@ namespace QuestTree.UI
             /// <summary>Frees the rasterised floor; the next GetSprite tessellates again.</summary>
             internal void ReleaseSprite()
             {
-                if (_sprite != null) UnityEngine.Object.Destroy(_sprite);
+                if (_sprite != null)
+                {
+                    // BuildSprite gives a map with gradient fills its own atlas texture, which
+                    // destroying the Sprite does not touch; a flat map borrows Unity's shared
+                    // white texture, which must not be destroyed.
+                    var texture = _sprite.texture;
+                    if (texture != null && texture != Texture2D.whiteTexture) UnityEngine.Object.Destroy(texture);
+                    UnityEngine.Object.Destroy(_sprite);
+                }
+
                 _sprite = null;
                 _spriteFailed = false;
             }

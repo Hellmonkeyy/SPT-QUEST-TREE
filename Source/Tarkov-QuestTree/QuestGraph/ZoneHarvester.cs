@@ -229,10 +229,12 @@ namespace QuestTree.QuestGraph
         private static string ItemKey(HarvestedQuestItem i) =>
             string.IsNullOrEmpty(i.ItemId) ? $"{i.TemplateId}|{Grid(i.X)}|{Grid(i.Y)}|{Grid(i.Z)}" : i.ItemId;
 
-        /// <summary>A coordinate rounded to the metre, invariant: the server draws the same key,
-        /// and a locale with its own minus sign (some use U+2212) would otherwise make the two
-        /// halves disagree about what "the same zone" is.</summary>
-        private static string Grid(float value) => value.ToString("F0", CultureInfo.InvariantCulture);
+        /// <summary>A coordinate rounded to the metre as an integer, invariant: the server draws
+        /// the same key (Numbers.Grid). Rounded to an int rather than formatted "F0", which gave
+        /// "-0" on one runtime and "0" on the other for the same value; and a locale with its own
+        /// minus sign would have made the halves disagree about what "the same zone" is.</summary>
+        private static string Grid(float value) =>
+            ((int)Math.Round(value, MidpointRounding.AwayFromZero)).ToString(CultureInfo.InvariantCulture);
 
         /// <summary>Fire-and-forget on a pool thread: the raid does not wait on the network, and
         /// RequestHandler's synchronous calls would block Unity's main thread if used here.</summary>

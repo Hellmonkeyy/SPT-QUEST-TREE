@@ -92,6 +92,7 @@ namespace QuestTree.QuestGraph
                 }
 
                 var payload = JsonConvert.DeserializeObject<QuestPayloadDto>(json);
+                Sanitise(payload);
 
                 if (payload?.Quests == null || payload.Quests.Count == 0)
                 {
@@ -146,11 +147,12 @@ namespace QuestTree.QuestGraph
                 }
 
                 var payload = JsonConvert.DeserializeObject<ProfilePayloadDto>(json);
+                Sanitise(payload);
 
                 if (payload != null && payload.SchemaVersion != ProfilePayloadDto.SupportedSchemaVersion)
                 {
                     Plugin.LogSource?.LogWarning(
-                        $"QuestTree: profile payload schema v{payload.SchemaVersion} but this client expects " +
+                        $"QuestTree: profile payload schema v{payload.SchemaVersion} ({SchemaNote(payload.SchemaVersion, ProfilePayloadDto.SupportedSchemaVersion)}) but this client expects " +
                         $"v{ProfilePayloadDto.SupportedSchemaVersion} (server mod {payload.ModVersion}).");
                 }
 
@@ -216,6 +218,7 @@ namespace QuestTree.QuestGraph
                 }
 
                 _markers = JsonConvert.DeserializeObject<MapMarkerPayloadDto>(json);
+                Sanitise(_markers);
 
                 if (_markers?.Maps == null || _markers.Maps.Count == 0)
                 {
@@ -231,7 +234,7 @@ namespace QuestTree.QuestGraph
                     // that only differs in a field this client does not read still pins fine. Named
                     // in the log so a mis-drawn map has a first place to look.
                     Plugin.LogSource?.LogWarning(
-                        $"QuestTree: map marker payload schema v{_markers.SchemaVersion} but this client expects " +
+                        $"QuestTree: map marker payload schema v{_markers.SchemaVersion} ({SchemaNote(_markers.SchemaVersion, MapMarkerPayloadDto.SupportedSchemaVersion)}) but this client expects " +
                         $"v{MapMarkerPayloadDto.SupportedSchemaVersion} (server mod {_markers.Version}). " +
                         "Update both halves of the mod together.");
                 }
@@ -306,6 +309,51 @@ namespace QuestTree.QuestGraph
             _profileAttempted = false;
         }
 
+        // Every name the views will put inside rich text, made literal once here - see RichText.
+        private static void Sanitise(QuestPayloadDto payload)
+        {
+            if (payload?.Quests == null) return;
+            foreach (var quest in payload.Quests)
+            {
+                if (quest == null) continue;
+                quest.Name = RichText.Safe(quest.Name);
+                quest.LocationId = RichText.Safe(quest.LocationId);
+                if (quest.Objectives == null) continue;
+                foreach (var objective in quest.Objectives)
+                    if (objective != null) objective.Text = RichText.Safe(objective.Text);
+            }
+        }
+
+        private static void Sanitise(ProfilePayloadDto payload)
+        {
+            if (payload?.LockReasons == null) return;
+            foreach (var reason in payload.LockReasons.Values)
+                if (reason != null) reason.Detail = RichText.Safe(reason.Detail);
+        }
+
+        private static void Sanitise(MapMarkerPayloadDto payload)
+        {
+            if (payload?.Maps == null) return;
+            foreach (var map in payload.Maps)
+            {
+                if (map?.Markers == null) continue;
+                foreach (var marker in map.Markers)
+                {
+                    if (marker == null) continue;
+                    marker.ItemName = RichText.Safe(marker.ItemName);
+                    if (marker.Quests == null) continue;
+                    for (var i = 0; i < marker.Quests.Count; i++) marker.Quests[i] = RichText.Safe(marker.Quests[i]);
+                }
+            }
+        }
+
+        private static void Sanitise(KappaPayloadDto payload)
+        {
+            if (payload?.Items == null) return;
+            foreach (var item in payload.Items)
+                if (item != null) item.Name = RichText.Safe(item.Name);
+        }
+
         /// <summary>Whether a schema the client did not expect is an older or a newer server's -
         /// the four mismatch warnings used to treat both the same, and "update both halves" is
         /// the wrong advice when it is the client that is behind.</summary>
@@ -328,26 +376,31 @@ namespace QuestTree.QuestGraph
                 }
 
                 var payload = JsonConvert.DeserializeObject<KappaPayloadDto>(json);
+                Sanitise(payload);
                 if (payload == null)
                     return KappaFetchResult.Failed(EKappaFetchStatus.ServerHalfMissing);
 
-                // A schema difference is a warning here as on the other three routes: a field this
-                // client does not read costs nothing, and a hard failure over one disabled the whole
-                // tab. Two halves from different downloads is the case the tab explains in words,
-                // and the server's own version number is the fact that says so.
+                // Two halves from different downloads is the case the Kappa tab explains in words,
+                // and the server's own version number is the fact that says so. A server too old
+                // to send one is judged by its schema, as before. With the versions equal, a schema
+                // difference cannot occur; the warning below is for a build stamp lying.
+                var differentDownload = string.IsNullOrEmpty(payload.ModVersion)
+                    ? payload.SchemaVersion != KappaPayloadDto.SupportedSchemaVersion
+                    : payload.ModVersion != ModInfo.Version;
+
+                if (differentDownload)
+                {
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: the server half is {(string.IsNullOrEmpty(payload.ModVersion) ? "older than 1.8.1" : payload.ModVersion)} " +
+                        $"and this client is {ModInfo.Version} - reinstall both halves from the same download.");
+                    return KappaFetchResult.Failed(EKappaFetchStatus.VersionMismatch, payload.ModVersion);
+                }
+
                 if (payload.SchemaVersion != KappaPayloadDto.SupportedSchemaVersion)
                 {
                     Plugin.LogSource?.LogWarning(
                         $"QuestTree: Kappa payload schema v{payload.SchemaVersion} ({SchemaNote(payload.SchemaVersion, KappaPayloadDto.SupportedSchemaVersion)}) " +
                         $"but this client expects v{KappaPayloadDto.SupportedSchemaVersion}. Continuing anyway - some fields may be missing.");
-                }
-
-                if (!string.IsNullOrEmpty(payload.ModVersion) && payload.ModVersion != ModInfo.Version)
-                {
-                    Plugin.LogSource?.LogWarning(
-                        $"QuestTree: the server half is {payload.ModVersion} and this client is {ModInfo.Version} - " +
-                        "reinstall both halves from the same download.");
-                    return KappaFetchResult.Failed(EKappaFetchStatus.VersionMismatch, payload.ModVersion);
                 }
 
                 return KappaFetchResult.Ok(payload);
