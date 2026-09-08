@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Net.Http;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading;
@@ -37,8 +39,16 @@ namespace QuestTreeServer
     [Injectable(InjectionType.Singleton)]
     public class ObjectiveGpsClient(ISptLogger<ObjectiveGpsClient> logger)
     {
+        /// <summary>Pinned to a commit rather than the branch: the repository is archived (its
+        /// last commit is 2024-08-22), so "master" is static in practice, and this makes it static
+        /// in fact - the address cannot move even if it were unarchived.</summary>
         private const string Url =
-            "https://raw.githubusercontent.com/TarkovTracker/tarkovdata/master/objective_gps.json";
+            "https://raw.githubusercontent.com/TarkovTracker/tarkovdata/1b9bc2acbea0e873244d1819cba9d9fe0f14e26c/objective_gps.json";
+
+        /// <summary>SHA-256 of the file at that commit (35,817 bytes, 232 entries). A download
+        /// that hashes differently is not written to disk and not used: with the source frozen,
+        /// a difference means tampering or a transport error, never an update.</summary>
+        private const string KnownSha256 = "f68f19dddcdbb96938e01c3b7133efdb5ae2e1dc636763b11089d69b5741a0c3";
 
         private const string CacheFileName = "objective-gps.json";
 
@@ -113,12 +123,17 @@ namespace QuestTreeServer
                 var path = CachePath;
                 if (!System.IO.File.Exists(path)) return null;
 
-                var cached = Parse(System.IO.File.ReadAllText(path));
+                var bytes = System.IO.File.ReadAllBytes(path);
+                var cached = Parse(Encoding.UTF8.GetString(bytes));
                 if (cached == null || cached.Count == 0) return null;
 
+                // A local edit is allowed - it is the user's file - but noted, so a map that
+                // looks wrong has a first place to look.
+                var hash = Sha256(bytes);
                 logger.Info(
                     $"Quest Tracker: {cached.Count} objective locations from the cached " +
-                    $"{CacheFileName}. Delete it to refresh.");
+                    $"{CacheFileName}. Delete it to refresh." +
+                    (hash == KnownSha256 ? "" : " Note: this file differs from the known copy (edited locally?)."));
 
                 return cached;
             }
@@ -166,6 +181,17 @@ namespace QuestTreeServer
                     return (null, status >= 500 || status == 429);
                 }
 
+                // Verified before it is parsed or written: what lands on the user's disk is only
+                // ever the file this build was tested against.
+                var hash = Sha256(Encoding.UTF8.GetBytes(json));
+                if (hash != KnownSha256)
+                {
+                    logger.Warning(
+                        $"Quest Tracker: the downloaded objective location file does not match the known copy " +
+                        $"(got {hash[..12]}, expected {KnownSha256[..12]}) - not used, not cached.");
+                    return (null, false);
+                }
+
                 var places = Parse(json);
 
                 if (places == null || places.Count == 0)
@@ -187,6 +213,8 @@ namespace QuestTreeServer
                 return (null, true);
             }
         }
+
+        private static string Sha256(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
 
         private static string Excerpt(string body)
         {
