@@ -33,6 +33,26 @@ namespace QuestTreeServer
         /// <summary>The map name becomes a file name, so it is held to what a location id can be.</summary>
         private static readonly Regex SafeName = new("^[A-Za-z0-9_\\-]{1,64}$", RegexOptions.Compiled);
 
+        /// <summary>Names the regex admits that Windows still treats as devices: "NUL.json" is the
+        /// NUL device, and "CON.json" can hang a write.</summary>
+        private static readonly HashSet<string> ReservedNames = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "CON", "PRN", "AUX", "NUL",
+            "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+            "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+        };
+
+        /// <summary>Bounds on one harvested entry. A zone id or a template id is a short token;
+        /// anything longer is not from a raid. Coordinates must be finite: an Infinity written
+        /// to the file is refused by the reader, which would cost the map its whole history.</summary>
+        private const int MaxIdLength = 128;
+        private const int MaxKindLength = 64;
+
+        /// <summary>A ceiling on one map's file. Real maps hold a few hundred entries; the union
+        /// never shrinks, and a client that varies positions by a metre could otherwise grow it
+        /// without bound.</summary>
+        private const int MaxEntriesPerMap = 50_000;
+
         private static readonly JsonSerializerOptions FileOptions = new()
         {
             WriteIndented = true,
@@ -51,7 +71,46 @@ namespace QuestTreeServer
         public static string Canonical(string map) =>
             Aliases.TryGetValue(map, out var canonical) ? canonical : map;
 
-        public static bool IsValidMapName(string? map) => map != null && SafeName.IsMatch(map);
+        public static bool IsValidMapName(string? map) =>
+            map != null && SafeName.IsMatch(map) && !ReservedNames.Contains(map);
+
+        /// <summary>Drops the entries of a harvest that cannot be stored or drawn, in place, and
+        /// says how many. The client only sends what it read from a scene, but a scene can hold
+        /// a destroyed object's NaN position, and nothing but this stands between a hostile or
+        /// buggy Fika client and the file every other player's pins are drawn from.</summary>
+        public static int Sanitise(ZoneHarvestRequest request)
+        {
+            var dropped = 0;
+
+            if (request.Triggers != null)
+            {
+                dropped += request.Triggers.RemoveAll(t =>
+                    t == null || string.IsNullOrWhiteSpace(t.Id) || t.Id.Length > MaxIdLength ||
+                    !Finite(t.X) || !Finite(t.Y) || !Finite(t.Z));
+
+                foreach (var t in request.Triggers)
+                {
+                    t.Kind ??= "";
+                    if (t.Kind.Length > MaxKindLength) t.Kind = t.Kind[..MaxKindLength];
+                    if (!Finite(t.ExtentX) || !Finite(t.ExtentY) || !Finite(t.ExtentZ))
+                        t.ExtentX = t.ExtentY = t.ExtentZ = 0f;
+                }
+            }
+
+            if (request.QuestItems != null)
+            {
+                dropped += request.QuestItems.RemoveAll(i =>
+                    i == null || string.IsNullOrWhiteSpace(i.TemplateId) || i.TemplateId.Length > MaxIdLength ||
+                    (i.ItemId != null && i.ItemId.Length > MaxIdLength) ||
+                    !Finite(i.X) || !Finite(i.Y) || !Finite(i.Z));
+
+                foreach (var i in request.QuestItems) i.ItemId ??= "";
+            }
+
+            return dropped;
+        }
+
+        private static bool Finite(float value) => !float.IsNaN(value) && !float.IsInfinity(value);
 
         /// <summary>The harvest for a map, or null when none has been taken.</summary>
         public ZoneFile? TryGet(string map)
@@ -70,8 +129,12 @@ namespace QuestTreeServer
             }
         }
 
-        /// <summary>Unions this harvest into the map's file. Returns what was written.</summary>
-        public ZoneFile Save(ZoneHarvestRequest request)
+        /// <summary>Maps whose file has hit its ceiling, so the warning is said once per boot.</summary>
+        private readonly HashSet<string> _fullWarned = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>Unions this harvest into the map's file. Returns what was written, or null
+        /// when the union would pass the per-map ceiling and nothing was changed.</summary>
+        public ZoneFile? Save(ZoneHarvestRequest request)
         {
             var key = Canonical(request.Map);
 
@@ -90,6 +153,18 @@ namespace QuestTreeServer
                 foreach (var t in request.Triggers ?? new List<HarvestedTrigger>()) triggers[TriggerKey(t)] = t;
                 foreach (var i in request.QuestItems ?? new List<HarvestedQuestItem>()) items[ItemKey(i)] = i;
 
+                if (triggers.Count + items.Count > MaxEntriesPerMap)
+                {
+                    if (_fullWarned.Add(key))
+                    {
+                        logger.Warning(
+                            $"Quest Tracker: zones/{key}.json would exceed {MaxEntriesPerMap} entries - harvests for it are " +
+                            "being refused. Delete the file to start it over.");
+                    }
+
+                    return null;
+                }
+
                 var file = new ZoneFile
                 {
                     Map = key,
@@ -101,8 +176,14 @@ namespace QuestTreeServer
 
                 try
                 {
+                    // Written beside the file and moved over it: the file is the union of every
+                    // harvest ever taken here, and a write cut short by a crash or a full disk
+                    // used to leave a truncated file the reader refuses, losing all of it.
                     System.IO.Directory.CreateDirectory(Folder);
-                    System.IO.File.WriteAllText(PathFor(key), JsonSerializer.Serialize(file, FileOptions));
+                    var path = ResolvePath(key);
+                    var temp = path + ".tmp";
+                    System.IO.File.WriteAllText(temp, JsonSerializer.Serialize(file, FileOptions));
+                    System.IO.File.Move(temp, path, overwrite: true);
                 }
                 catch (Exception ex)
                 {
@@ -132,11 +213,29 @@ namespace QuestTreeServer
 
         private static string PathFor(string key) => System.IO.Path.Combine(Folder, key + ".json");
 
+        /// <summary>The map's file as it exists on disk, whatever its casing, else where a new one
+        /// goes. The cache is case-insensitive but a filesystem may not be: a harvest posted as
+        /// "Bigmap" wrote Bigmap.json, which a Linux host then never read back as bigmap.</summary>
+        private static string ResolvePath(string key)
+        {
+            var wanted = PathFor(key);
+            if (System.IO.File.Exists(wanted) || !System.IO.Directory.Exists(Folder)) return wanted;
+
+            var name = key + ".json";
+            foreach (var candidate in System.IO.Directory.EnumerateFiles(Folder, "*.json"))
+            {
+                if (string.Equals(System.IO.Path.GetFileName(candidate), name, StringComparison.OrdinalIgnoreCase))
+                    return candidate;
+            }
+
+            return wanted;
+        }
+
         private ZoneFile? Read(string key)
         {
             try
             {
-                var path = PathFor(key);
+                var path = ResolvePath(key);
                 if (!System.IO.File.Exists(path)) return null;
 
                 var file = JsonSerializer.Deserialize<ZoneFile>(System.IO.File.ReadAllText(path), FileOptions);

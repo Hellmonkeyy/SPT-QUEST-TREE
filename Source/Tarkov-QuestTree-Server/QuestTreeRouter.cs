@@ -86,25 +86,39 @@ namespace QuestTreeServer
                             () => new MapMarkerPayloadDto { Version = ModInfo.Version }))
             };
 
+        /// <summary>Rejections already logged this boot, by map and reason, so a client that
+        /// keeps sending the same bad harvest is heard once rather than filling the log.</summary>
+        private static readonly HashSet<string> RejectionsLogged = new(StringComparer.Ordinal);
+
         private static string AcceptHarvest(
             ISptLogger<QuestTreeRouter> logger, ZoneHarvestRequest? request, ZoneStore zoneStore,
             MapMarkerPayloadBuilder markerBuilder)
         {
             static string Reply(ZoneHarvestResponse r) => JsonSerializer.Serialize(r, FallbackOptions);
 
-            if (request == null)
-                return Reply(new ZoneHarvestResponse { Ok = false, Message = "no body" });
+            string Reject(string reason)
+            {
+                var key = $"{request?.Map ?? "?"}|{reason}";
+                bool first;
+                lock (RejectionsLogged) first = RejectionsLogged.Add(key);
+                if (first) logger.Warning($"Quest Tracker: refused a zone harvest for '{request?.Map ?? "?"}' - {reason}.");
+                return Reply(new ZoneHarvestResponse { Ok = false, Message = reason });
+            }
 
-            if (!ZoneStore.IsValidMapName(request.Map))
-                return Reply(new ZoneHarvestResponse { Ok = false, Message = "bad map name" });
+            if (request == null) return Reject("no body");
+            if (!ZoneStore.IsValidMapName(request.Map)) return Reject("bad map name");
+
+            // Entries the file could not hold or the map could not draw go first, so the counts
+            // below describe what will actually be kept.
+            var dropped = ZoneStore.Sanitise(request);
 
             var count = (request.Triggers?.Count ?? 0) + (request.QuestItems?.Count ?? 0);
-            if (count == 0)
-                return Reply(new ZoneHarvestResponse { Ok = false, Message = "nothing harvested" });
-            if (count > MaxHarvestEntries)
-                return Reply(new ZoneHarvestResponse { Ok = false, Message = "too many entries" });
+            if (count == 0) return Reject(dropped > 0 ? "nothing usable harvested" : "nothing harvested");
+            if (count > MaxHarvestEntries) return Reject("too many entries");
 
             var saved = zoneStore.Save(request);
+            if (saved == null) return Reject("map file full");
+
             markerBuilder.Rebuild();
 
             return Reply(new ZoneHarvestResponse
@@ -112,7 +126,7 @@ namespace QuestTreeServer
                 Ok = true,
                 Zones = saved.Triggers.Count,
                 QuestItems = saved.QuestItems.Count,
-                Message = "saved"
+                Message = dropped > 0 ? $"saved; {dropped} unusable entries dropped" : "saved"
             });
         }
 
