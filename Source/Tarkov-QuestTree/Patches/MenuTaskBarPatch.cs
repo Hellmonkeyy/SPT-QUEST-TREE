@@ -79,8 +79,17 @@ namespace QuestTree.Patches
             var state = TryBuildButton(menuTaskBar);
             if (state == null) yield break;
 
-            menuTaskBar.StartCoroutine(HealLater(state));
-            menuTaskBar.StartCoroutine(PlaceNextToRaidReviewLater(state));
+            // The taskbar can be torn down during the frame above (a menu rebuild); a coroutine
+            // cannot try/catch across a yield, so the guard is here, around the resumption.
+            try
+            {
+                menuTaskBar.StartCoroutine(HealLater(state));
+                menuTaskBar.StartCoroutine(PlaceNextToRaidReviewLater(state));
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning($"QuestTree: could not schedule the taskbar button's fix-ups ({ex.Message}).");
+            }
         }
 
         /// <summary>Re-applies the label fix at the two points where the Animator has been observed
@@ -95,9 +104,12 @@ namespace QuestTree.Patches
             yield return new WaitForSeconds(SecondHealDelay - FirstHealDelay);
             TryHeal(state, disableAnimatorIfStillHidden: true);
 
+            // Unity's == is the only null test a destroyed component answers to; the ?. operator
+            // sees a live reference and throws on the member access.
+            var label = state.Label == null ? null : state.Label;
             Plugin.LogSource?.LogInfo(
-                $"QuestTree diag: post-heal labelInvisible={(state.Label == null || IsInvisible(state.Label))} " +
-                $"text='{state.Label?.text}' rectWidth={state.Label?.rectTransform.rect.width}");
+                $"QuestTree diag: post-heal labelInvisible={(label == null || IsInvisible(label))} " +
+                $"text='{(label == null ? "" : label.text)}' rectWidth={(label == null ? 0f : label.rectTransform.rect.width)}");
         }
 
         /// <summary>Position only - the button is already built and visible by this point. Polls
@@ -108,7 +120,21 @@ namespace QuestTree.Patches
             for (var attempt = 0; attempt < MaxPollAttempts; attempt++)
             {
                 if (state.Clone == null) yield break;
-                if (TryPlaceNextToRaidReview(state)) yield break;
+
+                bool placed;
+                try
+                {
+                    placed = TryPlaceNextToRaidReview(state);
+                }
+                catch (Exception ex)
+                {
+                    // A scene walk over objects another mod may be destroying; a throw here used
+                    // to escape into Unity's coroutine driver rather than this log.
+                    Plugin.LogSource?.LogInfo($"QuestTree: could not place the button next to Raid Review ({ex.Message}).");
+                    yield break;
+                }
+
+                if (placed) yield break;
                 yield return new WaitForSeconds(PollIntervalSeconds);
             }
 

@@ -58,6 +58,11 @@ namespace QuestTree.UI
         {
             if (_font == null && donorText != null && donorText.font != null)
             {
+                // A re-capture (the previous font asset was unloaded) invalidates the outlined
+                // copy made from its material, which would otherwise be handed out forever.
+                if (_outlinedFontMaterial != null) UnityEngine.Object.Destroy(_outlinedFontMaterial);
+                _outlinedFontMaterial = null;
+
                 _font = donorText.font;
                 // fontSharedMaterial, not fontMaterial: the latter's getter instances a material
                 // on the donor - EFT's own taskbar label - as a side effect of reading it.

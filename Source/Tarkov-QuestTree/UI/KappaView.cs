@@ -32,6 +32,11 @@ namespace QuestTree.UI
         /// Static so the section helpers keep their signatures; the page is built in one call.</summary>
         private static float _x;
         private static float _width;
+
+        /// <summary>The row callback for the build in progress, and null between builds. It is a
+        /// closure over the panel, which owns the graph - left set after Build returned, this
+        /// static kept a destroyed panel and its thousands of nodes alive for the life of the
+        /// process, one copy per menu visit.</summary>
         private static Action<QuestNode> _onQuestSelected;
 
         public static float Build(
@@ -42,6 +47,18 @@ namespace QuestTree.UI
             _width = Mathf.Min(MaxContentWidth, panelSize.x - AuxLayout.Padding * 2f);
             _onQuestSelected = onQuestSelected;
 
+            try
+            {
+                return BuildPage(parent, graph, onRefresh);
+            }
+            finally
+            {
+                _onQuestSelected = null;
+            }
+        }
+
+        private static float BuildPage(RectTransform parent, QuestGraphBuilder graph, Action onRefresh)
+        {
             var y = AuxLayout.Padding;
 
             var result = QuestDataClient.GetKappa();
@@ -355,9 +372,11 @@ namespace QuestTree.UI
         /// <summary>A quest line that opens the quest - its detail, and the tree framed on it.</summary>
         private static void QuestRow(RectTransform parent, ref float y, QuestNode node, string text)
         {
+            // Captured per row: the static is cleared when the build returns.
             var captured = node;
+            var onSelected = _onQuestSelected;
             AuxLayout.AddClickableRow(parent, text, _x, ref y, _width, false,
-                () => _onQuestSelected?.Invoke(captured));
+                () => onSelected?.Invoke(captured));
         }
     }
 }

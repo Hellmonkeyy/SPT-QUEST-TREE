@@ -23,14 +23,22 @@ namespace QuestTree
                 // down with an unhandled throw out of Awake. ModSettings.Ready stays false and the
                 // views fall back to their defaults.
                 ModSettings.Init(Config);
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError($"QuestTree: failed to initialise settings: {ex}");
+            }
 
+            try
+            {
                 // Before the headless check on purpose: a headless client loads every map anyone
-                // plays, which makes it the best zone harvester in the group.
+                // plays, which makes it the best zone harvester in the group. Its own guard: a
+                // config failure above has nothing to do with whether raids can be harvested.
                 new GameWorldStartedPatch().Enable();
             }
             catch (Exception ex)
             {
-                Logger.LogError($"QuestTree: failed to initialise settings or the raid patch: {ex}");
+                Logger.LogError($"QuestTree: failed to enable the raid patch: {ex}");
             }
 
             // A Fika headless client has no player, no UI, and no taskbar to add a button to.
