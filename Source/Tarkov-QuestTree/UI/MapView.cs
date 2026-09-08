@@ -1337,11 +1337,11 @@ namespace QuestTree.UI
             // put it above the markers created so far.
             RectTransform selectedRect = null;
 
-            // Footprints of the labels shown at rest (the selected quest's), in map units, so two
-            // of its pins a few metres apart do not stack their names. Names are held at a constant
-            // screen size, so their size in map units is the screen size divided by the fit.
-            var claimed = new List<Rect>();
-            var labelSpan = new Vector2(LabelWidth, LabelHeight) / Mathf.Max(0.0001f, space.localScale.x);
+            // The labels that may show at rest, placed after the loop and again on every zoom
+            // (see PlaceRestLabels): their screen size is constant, so which of them overlap
+            // depends on the zoom, and a test made once at build time went stale on the first
+            // wheel notch.
+            var restLabels = new List<RestLabel>();
 
             foreach (var (marker, owner, status, clickId, fallback, active, objective) in ordered)
             {
@@ -1459,27 +1459,28 @@ namespace QuestTree.UI
                 // shows any name regardless.
                 var mode = ModSettings.Ready ? ModSettings.PinLabels.Value : ModSettings.PinLabelMode.HoverOnly;
                 var actionable = status == ENodeStatus.Active || status == ENodeStatus.Available;
-                var shownAtRest = isSelected ||
-                                  mode == ModSettings.PinLabelMode.All ||
-                                  (mode == ModSettings.PinLabelMode.Actionable && actionable);
-                if (shownAtRest)
-                {
-                    var footprint = new Rect(
-                        position.x + labelSpan.x * 0.1f, position.y - labelSpan.y * 0.5f,
-                        labelSpan.x, labelSpan.y);
-                    if (!isSelected && claimed.Any(other => other.Overlaps(footprint))) shownAtRest = false;
-                    else claimed.Add(footprint);
-                }
+                var eligible = isSelected ||
+                               mode == ModSettings.PinLabelMode.All ||
+                               (mode == ModSettings.PinLabelMode.Actionable && actionable);
 
-                if (shownAtRest) EnsureLabel().SetActive(true);
+                var rest = new RestLabel
+                {
+                    Position = position,
+                    Selected = isSelected,
+                    Show = show =>
+                    {
+                        if (show) EnsureLabel().SetActive(true);
+                        else if (labelGo != null) labelGo.SetActive(false);
+                    }
+                };
+                if (eligible) restLabels.Add(rest);
 
                 var click = go.AddComponent<MapMarkerClick>();
 
                 click.OnHover = hovering =>
                 {
                     if (rect == null) return;
-                    if (hovering || shownAtRest) EnsureLabel().SetActive(true);
-                    else if (labelGo != null) labelGo.SetActive(false);
+                    rest.Show(hovering || rest.Visible);
                     // Above its neighbours while hovered, so the name is not under the next pin.
                     if (hovering) rect.SetAsLastSibling();
                 };
@@ -1520,6 +1521,57 @@ namespace QuestTree.UI
             }
 
             selectedRect?.SetAsLastSibling();
+
+            PlaceRestLabels(restLabels, space.localScale.x);
+
+            // Re-placed on every zoom: the pins and names keep their screen size, so the footprint
+            // each name claims in map units changes with the scale.
+            var placedAt = space.localScale.x;
+            panZoom.OnViewChanged += (scale, _) =>
+            {
+                if (Mathf.Approximately(scale, placedAt)) return;
+                placedAt = scale;
+                PlaceRestLabels(restLabels, scale);
+            };
+        }
+
+        /// <summary>A pin name that may be shown at rest: where it is, whether it is the selected
+        /// quest's (which never loses a collision), and how to show or hide it.</summary>
+        private sealed class RestLabel
+        {
+            public Vector2 Position;
+            public bool Selected;
+            public Action<bool> Show;
+            public bool Visible;
+        }
+
+        /// <summary>Decides which at-rest names are drawn at this zoom: the selected quest's
+        /// always, then each of the rest unless it would land on a name already placed. Names
+        /// are held at a constant screen size, so their span in map units is the screen span
+        /// divided by the scale.</summary>
+        private static void PlaceRestLabels(List<RestLabel> labels, float scale)
+        {
+            var span = new Vector2(LabelWidth, LabelHeight) / Mathf.Max(0.0001f, scale);
+            var claimed = new List<Rect>();
+
+            foreach (var label in labels.OrderBy(l => l.Selected ? 0 : 1))
+            {
+                var footprint = new Rect(
+                    label.Position.x + span.x * 0.1f, label.Position.y - span.y * 0.5f, span.x, span.y);
+
+                var visible = label.Selected || !claimed.Any(other => other.Overlaps(footprint));
+                if (visible) claimed.Add(footprint);
+
+                if (label.Visible != visible)
+                {
+                    label.Visible = visible;
+                    label.Show(visible);
+                }
+                else if (visible)
+                {
+                    label.Show(true); // first placement: nothing has been drawn yet
+                }
+            }
         }
 
         /// <summary>This map's markers from the server payload, matched on any of the map's internal
