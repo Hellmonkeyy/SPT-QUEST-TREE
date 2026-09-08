@@ -123,8 +123,11 @@ namespace QuestTreeServer
                 var path = CachePath;
                 if (!System.IO.File.Exists(path)) return null;
 
+                // Two reads of one file: the bytes for the hash, the text for the parser.
+                // ReadAllText drops a byte-order mark that a hand-edited file may carry and the
+                // JSON parser refuses; the hash sees the bytes as they are.
                 var bytes = System.IO.File.ReadAllBytes(path);
-                var cached = Parse(Encoding.UTF8.GetString(bytes));
+                var cached = Parse(System.IO.File.ReadAllText(path));
                 if (cached == null || cached.Count == 0) return null;
 
                 // A local edit is allowed - it is the user's file - but noted, so a map that
@@ -169,7 +172,8 @@ namespace QuestTreeServer
                 request.Headers.TryAddWithoutValidation("User-Agent", $"SPT-QuestTree/{ModInfo.Version}");
 
                 using var response = await Http.SendAsync(request, cancellationToken);
-                var json = await response.Content.ReadAsStringAsync(cancellationToken);
+                var bytes = await response.Content.ReadAsByteArrayAsync(cancellationToken);
+                var json = Decode(bytes);
 
                 if (!response.IsSuccessStatusCode)
                 {
@@ -181,9 +185,10 @@ namespace QuestTreeServer
                     return (null, status >= 500 || status == 429);
                 }
 
-                // Verified before it is parsed or written: what lands on the user's disk is only
-                // ever the file this build was tested against.
-                var hash = Sha256(Encoding.UTF8.GetBytes(json));
+                // Verified on the bytes received, before any decoding, and before it is parsed or
+                // written: what lands on the user's disk is only ever the file this build was
+                // tested against.
+                var hash = Sha256(bytes);
                 if (hash != KnownSha256)
                 {
                     logger.Warning(
@@ -201,7 +206,7 @@ namespace QuestTreeServer
                 }
 
                 logger.Info($"Quest Tracker: fetched {places.Count} objective locations from tarkovdata.");
-                WriteCache(json);
+                WriteCache(bytes);
 
                 return (places, false);
             }
@@ -216,15 +221,20 @@ namespace QuestTreeServer
 
         private static string Sha256(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
 
+        /// <summary>The body as text, minus a byte-order mark if the server sent one - the parser
+        /// would refuse it, and ReadAsStringAsync used to strip it for us.</summary>
+        private static string Decode(byte[] bytes) => Encoding.UTF8.GetString(bytes).TrimStart('\uFEFF');
+
         private static string Excerpt(string body)
         {
             var text = body.Replace('\r', ' ').Replace('\n', ' ').Trim();
             return text.Length <= LoggedBodyLength ? text : text[..LoggedBodyLength] + "...";
         }
 
-        /// <summary>Caches the file exactly as served, rather than a re-serialised copy, so what is
-        /// on disk is always something that can be diffed against the source.</summary>
-        private void WriteCache(string json)
+        /// <summary>Caches the file exactly as served - the verified bytes, not a re-serialised or
+        /// re-encoded copy - so what is on disk hashes to the known value and can be diffed
+        /// against the source.</summary>
+        private void WriteCache(byte[] bytes)
         {
             try
             {
@@ -233,7 +243,7 @@ namespace QuestTreeServer
 
                 if (!string.IsNullOrEmpty(folder)) System.IO.Directory.CreateDirectory(folder);
 
-                System.IO.File.WriteAllText(path, json);
+                System.IO.File.WriteAllBytes(path, bytes);
             }
             catch (Exception ex)
             {
