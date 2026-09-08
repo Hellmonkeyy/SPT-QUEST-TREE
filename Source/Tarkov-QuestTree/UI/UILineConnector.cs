@@ -22,9 +22,18 @@ namespace QuestTree.UI
         /// through and is drawn straight instead.</summary>
         private const float MinRoutedSpan = 12f;
 
-        public static RectTransform[] Create(RectTransform parent, Vector2 from, Vector2 to, Color color, float thickness)
+        /// <summary>One pooled edge: its three segments, and their Images kept alongside so a
+        /// recolour - every built edge, every hover-falloff frame while zooming - writes a colour
+        /// rather than looking a component up three times.</summary>
+        public sealed class Line
         {
-            var parts = new RectTransform[Segments];
+            public RectTransform[] Parts;
+            public Image[] Images;
+        }
+
+        public static Line Create(RectTransform parent, Vector2 from, Vector2 to, Color color, float thickness)
+        {
+            var line = new Line { Parts = new RectTransform[Segments], Images = new Image[Segments] };
 
             for (var i = 0; i < Segments; i++)
             {
@@ -38,18 +47,20 @@ namespace QuestTree.UI
 
                 rect.anchorMin = new Vector2(0.5f, 0.5f);
                 rect.anchorMax = new Vector2(0.5f, 0.5f);
-                parts[i] = rect;
+                line.Parts[i] = rect;
+                line.Images[i] = image;
             }
 
-            Apply(parts, from, to, thickness);
-            return parts;
+            Apply(line, from, to, thickness);
+            return line;
         }
 
         /// <summary>Re-aims an existing edge at a new pair of points. Split out from Create so a
         /// pooled edge can be repositioned instead of destroyed and rebuilt - panning a large tree
         /// otherwise churns thousands of GameObjects.</summary>
-        public static void Apply(RectTransform[] parts, Vector2 from, Vector2 to, float thickness)
+        public static void Apply(Line line, Vector2 from, Vector2 to, float thickness)
         {
+            var parts = line?.Parts;
             if (parts == null || parts.Length < Segments) return;
 
             // The target sits in a later column in the normal case, which leaves a gap to turn in.
@@ -76,22 +87,19 @@ namespace QuestTree.UI
             Segment(parts[2], corner2 - overshoot, to, thickness);
         }
 
-        public static void SetColor(RectTransform[] parts, Color color)
+        public static void SetColor(Line line, Color color)
         {
-            if (parts == null) return;
+            if (line?.Images == null) return;
 
-            foreach (var part in parts)
-            {
-                var image = part != null ? part.GetComponent<Image>() : null;
+            foreach (var image in line.Images)
                 if (image != null) image.color = color;
-            }
         }
 
-        public static void SetActive(RectTransform[] parts, bool active)
+        public static void SetActive(Line line, bool active)
         {
-            if (parts == null) return;
+            if (line?.Parts == null) return;
 
-            foreach (var part in parts)
+            foreach (var part in line.Parts)
                 if (part != null) part.gameObject.SetActive(active);
         }
 

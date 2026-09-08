@@ -116,7 +116,7 @@ namespace QuestTree.UI
         /// always looks like the quest it leads to.</summary>
         private static Color EdgeHighlightColor => QuestNodeView.ColorFor(ENodeStatus.Active);
 
-        private readonly Dictionary<int, RectTransform[]> _edgeViews = new();
+        private readonly Dictionary<int, UILineConnector.Line> _edgeViews = new();
 
         /// <summary>The hovered quest's chain. Held so ClearHighlight can no-op when nothing is
         /// highlighted rather than sweeping every built view on every pointer exit.</summary>
@@ -125,7 +125,7 @@ namespace QuestTree.UI
         // Released views are deactivated and kept rather than destroyed - panning across a large
         // tree otherwise means a constant churn of Instantiate/Destroy, which is the expensive part.
         private readonly Stack<QuestNodeView> _nodePool = new();
-        private readonly Stack<RectTransform[]> _edgePool = new();
+        private readonly Stack<UILineConnector.Line> _edgePool = new();
 
         /// <summary>Ceilings on the pools: the visible-node budget, since every Render releases
         /// every live view and a ceiling below what was live would destroy and rebuild the
@@ -856,7 +856,7 @@ namespace QuestTree.UI
 
         private static Color WithAlpha(Color color, float alpha) => new(color.r, color.g, color.b, alpha);
 
-        private RectTransform[] AcquireEdge(int index)
+        private UILineConnector.Line AcquireEdge(int index)
         {
             var edge = _edgeLayout[index];
             var style = EdgeStyleFor(index);
@@ -878,13 +878,13 @@ namespace QuestTree.UI
             return line;
         }
 
-        private void ReleaseEdge(RectTransform[] line)
+        private void ReleaseEdge(UILineConnector.Line line)
         {
             if (line == null) return;
 
             if (_edgePool.Count >= MaxPooledEdges)
             {
-                foreach (var part in line)
+                foreach (var part in line.Parts)
                     if (part != null) UnityEngine.Object.Destroy(part.gameObject);
                 return;
             }
@@ -911,9 +911,9 @@ namespace QuestTree.UI
             while (_edgePool.Count > 0)
             {
                 var line = _edgePool.Pop();
-                if (line == null) continue;
+                if (line?.Parts == null) continue;
 
-                foreach (var part in line)
+                foreach (var part in line.Parts)
                     if (part != null) UnityEngine.Object.Destroy(part.gameObject);
             }
         }
