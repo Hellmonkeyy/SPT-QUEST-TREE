@@ -158,7 +158,7 @@ The Settings view, in four sections, and the same values in BepInEx's F12 menu. 
 ## Troubleshooting
 
 - **No taskbar button** - check `BepInEx\LogOutput.log` for lines starting `QuestTree`. The load
-  line carries the build stamp (`QuestTree 1.8.0+abc1234: loaded.`), which is what to quote.
+  line carries the build stamp (`QuestTree 1.8.1+abc1234: loaded.`), which is what to quote.
 - **Tree only shows unlocked quests, no pins** - the server half is missing, or you are on someone
   else's server that does not have it. See "Both halves are required" above.
 - **`Http response status code: NotFound` on `/questtree/...`** - same cause: the server you are on
