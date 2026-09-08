@@ -757,9 +757,13 @@ namespace QuestTree.UI
 
         /// <summary>The viewport in content-local space - the same space node positions use -
         /// padded so nodes exist slightly before they scroll into view.</summary>
+        /// <summary>Scratch for GetWorldCorners, which insists on an array; one per sweep was a
+        /// per-frame allocation while the view moves.</summary>
+        private readonly Vector3[] _cornerBuffer = new Vector3[4];
+
         private Rect GetVisibleContentRect()
         {
-            var corners = new Vector3[4];
+            var corners = _cornerBuffer;
             _viewport.GetWorldCorners(corners);
 
             var bottomLeft = _content.InverseTransformPoint(corners[0]);

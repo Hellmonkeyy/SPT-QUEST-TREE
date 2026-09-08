@@ -561,7 +561,13 @@ namespace QuestTree.UI
         /// <summary>A specific alpha, for the distance-based dimming around a hovered quest.</summary>
         public void SetDimAlpha(float alpha)
         {
-            if (_canvasGroup != null) _canvasGroup.alpha = Mathf.Clamp01(alpha);
+            if (_canvasGroup == null) return;
+
+            // Writing the same alpha still dirties the group's whole subtree; the falloff pass
+            // asks every built box every zoom frame, and most of them have not changed.
+            var clamped = Mathf.Clamp01(alpha);
+            if (Mathf.Approximately(_canvasGroup.alpha, clamped)) return;
+            _canvasGroup.alpha = clamped;
         }
 
         public void OnPointerClick(PointerEventData eventData)

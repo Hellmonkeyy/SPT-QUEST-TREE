@@ -168,14 +168,19 @@ namespace QuestTree.UI
         /// Screen Space Overlay canvas and wrong for Screen Space Camera, so this asks the
         /// canvas rather than assuming either - and eventData's own camera can be null on a
         /// scroll that had no preceding press.</summary>
+        /// <summary>The canvas above the content, found once: the parent walk ran on every drag
+        /// delta and wheel notch that arrived without a camera of its own.</summary>
+        private Canvas _canvas;
+
         private Camera ResolveEventCamera(PointerEventData eventData)
         {
             if (eventData.pressEventCamera != null) return eventData.pressEventCamera;
             if (eventData.enterEventCamera != null) return eventData.enterEventCamera;
 
-            var canvas = _content != null ? _content.GetComponentInParent<Canvas>() : null;
-            return canvas != null && canvas.renderMode != RenderMode.ScreenSpaceOverlay
-                ? canvas.worldCamera
+            if (_canvas == null && _content != null) _canvas = _content.GetComponentInParent<Canvas>();
+
+            return _canvas != null && _canvas.renderMode != RenderMode.ScreenSpaceOverlay
+                ? _canvas.worldCamera
                 : null;
         }
     }
