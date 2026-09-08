@@ -146,7 +146,10 @@ namespace QuestTree.Patches
         {
             try
             {
-                if (UnityEngine.Object.FindObjectsOfType<ToggleGroup>().Any(g => g.name == ButtonName))
+                // Scoped to this taskbar: during a menu rebuild the old, dying taskbar and the new
+                // one coexist for a frame, and a scene-wide search found the old button and left
+                // the new taskbar with none.
+                if (menuTaskBar.GetComponentsInChildren<ToggleGroup>(true).Any(g => g.name == ButtonName))
                 {
                     Plugin.LogSource?.LogInfo("QuestTree: button already present, skipping.");
                     return null;
@@ -205,10 +208,11 @@ namespace QuestTree.Patches
                     tooltip.SetMessageText("Opens the quest tracker", true);
                 }
 
-                var panel = CreatePanel(menuTaskBar);
-
+                // The panel only once there is a toggle to open it: created first, a clone with
+                // no AnimatedToggle left a full-screen panel nothing could reach.
                 if (toggle != null)
                 {
+                    var panel = CreatePanel(menuTaskBar);
                     toggle.ToggleSilent(false);
                     toggle.onValueChanged.AddListener(isOn =>
                     {
@@ -216,6 +220,19 @@ namespace QuestTree.Patches
 
                         try
                         {
+                            if (panel == null)
+                            {
+                                // The panel died with an earlier menu and this button outlived
+                                // it; said once rather than an error per click.
+                                if (!_deadPanelWarned)
+                                {
+                                    _deadPanelWarned = true;
+                                    Plugin.LogSource?.LogWarning("QuestTree: the Quest Tracker panel is gone - reopen the menu to get a new one.");
+                                }
+
+                                return;
+                            }
+
                             if (panel.gameObject.activeSelf) panel.HideGameObject();
                             else ShowPanel(panel);
                         }
@@ -454,6 +471,7 @@ namespace QuestTree.Patches
         }
 
         private static bool _raidLocationWarned;
+        private static bool _deadPanelWarned;
 
         /// <summary>The map picked on the matchmaker screen, by its internal name ("bigmap",
         /// "factory4_night"), or null from the main menu before one is picked. The taskbar stays
