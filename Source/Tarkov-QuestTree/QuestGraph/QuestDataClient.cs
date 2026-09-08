@@ -103,7 +103,7 @@ namespace QuestTree.QuestGraph
                 {
                     var server = string.IsNullOrEmpty(payload.ModVersion) ? "older than 1.8.1" : payload.ModVersion;
                     Plugin.LogSource?.LogWarning(
-                        $"QuestTree: the QuestTreeServer mod ({server}) speaks payload schema v{payload.SchemaVersion} but this " +
+                        $"QuestTree: the QuestTreeServer mod ({server}, {SchemaNote(payload.SchemaVersion, QuestPayloadDto.SupportedSchemaVersion)}) speaks payload schema v{payload.SchemaVersion} but this " +
                         $"client ({ModInfo.Version}) expects v{QuestPayloadDto.SupportedSchemaVersion}. Update both halves of " +
                         "the mod to the same version. Continuing anyway - some fields may be missing.");
                 }
@@ -306,6 +306,12 @@ namespace QuestTree.QuestGraph
             _profileAttempted = false;
         }
 
+        /// <summary>Whether a schema the client did not expect is an older or a newer server's -
+        /// the four mismatch warnings used to treat both the same, and "update both halves" is
+        /// the wrong advice when it is the client that is behind.</summary>
+        private static string SchemaNote(int actual, int expected) =>
+            actual < expected ? "an older server half" : "a newer server half";
+
         private static KappaFetchResult FetchKappa()
         {
             try
@@ -325,12 +331,22 @@ namespace QuestTree.QuestGraph
                 if (payload == null)
                     return KappaFetchResult.Failed(EKappaFetchStatus.ServerHalfMissing);
 
+                // A schema difference is a warning here as on the other three routes: a field this
+                // client does not read costs nothing, and a hard failure over one disabled the whole
+                // tab. Two halves from different downloads is the case the tab explains in words,
+                // and the server's own version number is the fact that says so.
                 if (payload.SchemaVersion != KappaPayloadDto.SupportedSchemaVersion)
                 {
                     Plugin.LogSource?.LogWarning(
-                        $"QuestTree: Kappa payload schema v{payload.SchemaVersion} but this client expects " +
-                        $"v{KappaPayloadDto.SupportedSchemaVersion} (server mod {payload.ModVersion}). " +
-                        "Reinstall both halves from the same download.");
+                        $"QuestTree: Kappa payload schema v{payload.SchemaVersion} ({SchemaNote(payload.SchemaVersion, KappaPayloadDto.SupportedSchemaVersion)}) " +
+                        $"but this client expects v{KappaPayloadDto.SupportedSchemaVersion}. Continuing anyway - some fields may be missing.");
+                }
+
+                if (!string.IsNullOrEmpty(payload.ModVersion) && payload.ModVersion != ModInfo.Version)
+                {
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: the server half is {payload.ModVersion} and this client is {ModInfo.Version} - " +
+                        "reinstall both halves from the same download.");
                     return KappaFetchResult.Failed(EKappaFetchStatus.VersionMismatch, payload.ModVersion);
                 }
 

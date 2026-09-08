@@ -57,13 +57,18 @@ namespace QuestTree.QuestGraph
 
             if (quests == null) quests = BuildFallbackDtos(questController);
 
+            var duplicates = 0;
             foreach (var dto in quests)
             {
                 if (string.IsNullOrEmpty(dto?.Id)) continue;
                 // A quest can appear more than once across repeatable/profile-specific churn; keep
-                // the first instance seen rather than throwing on a duplicate key.
-                _byId.TryAdd(dto.Id, new QuestNode(dto));
+                // the first instance seen rather than throwing on a duplicate key - but say so,
+                // since a server that sends everything twice is otherwise invisible.
+                if (!_byId.TryAdd(dto.Id, new QuestNode(dto))) duplicates++;
             }
+
+            if (duplicates > 0)
+                Plugin.LogSource?.LogWarning($"QuestTree: {duplicates} duplicate quest id(s) in the quest list were dropped.");
 
             LinkLiveQuests();
 
@@ -80,6 +85,17 @@ namespace QuestTree.QuestGraph
             var depths = ComputeDepths(_byId);
             foreach (var node in _byId.Values)
                 node.Depth = depths[node.Id];
+
+            // A prerequisite the list does not contain is skipped by the depth walk, so such a
+            // quest draws as a root. Said once per build: it is the symptom of a half-updated
+            // install or a quest mod referencing a quest another mod removed.
+            var dangling = 0;
+            foreach (var node in _byId.Values)
+                foreach (var prereqId in node.PrerequisiteIds)
+                    if (!_byId.ContainsKey(prereqId)) dangling++;
+
+            if (dangling > 0)
+                Plugin.LogSource?.LogInfo($"QuestTree: {dangling} prerequisite reference(s) point at quests not in the list; those quests draw as roots.");
 
             RefreshKappaFlags();
 
@@ -220,6 +236,10 @@ namespace QuestTree.QuestGraph
                 foreach (var id in ids)
                     if (!string.IsNullOrEmpty(id)) _serverKappaIds.Add(id);
 
+            var unknown = _serverKappaIds.Count(id => !_byId.ContainsKey(id));
+            if (unknown > 0)
+                Plugin.LogSource?.LogInfo($"QuestTree: {unknown} of the server's {_serverKappaIds.Count} Kappa quest ids are not in the loaded quest list.");
+
             RefreshKappaFlags();
         }
 
@@ -230,13 +250,34 @@ namespace QuestTree.QuestGraph
         /// rather than looked up per draw.</summary>
         public void RefreshKappaFlags()
         {
-            var ownList = KappaQuests.Count > 0;
+            if (KappaQuests.Count > 0)
+            {
+                var matched = 0;
+                foreach (var node in _byId.Values)
+                {
+                    node.IsKappaRequired = KappaQuests.IsKappaRequired(node.Name);
+                    if (node.IsKappaRequired) matched++;
+                }
+
+                if (matched > 0 || _serverKappaIds.Count == 0) return;
+
+                // The file holds names and the nodes carry localized names, so on a non-English
+                // client nothing matches and every badge silently vanished. Fall back to the
+                // server's ids, which need no translation, and say why once.
+                if (!_ownListWarned)
+                {
+                    _ownListWarned = true;
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: none of the {KappaQuests.Count} names in kappa-quests.json matched a quest name " +
+                        "(a localized client?) - using the server's Kappa list instead.");
+                }
+            }
 
             foreach (var node in _byId.Values)
-                node.IsKappaRequired = ownList
-                    ? KappaQuests.IsKappaRequired(node.Name)
-                    : _serverKappaIds.Contains(node.Id);
+                node.IsKappaRequired = _serverKappaIds.Contains(node.Id);
         }
+
+        private static bool _ownListWarned;
 
         /// <summary>Recolors every node from its live Quest.QuestStatus (or Locked, if the game
         /// hasn't unlocked it yet) without touching edges or depth. Call this from

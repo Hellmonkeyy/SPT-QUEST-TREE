@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Threading.Tasks;
 using EFT;
 using EFT.Interactive;
@@ -223,10 +224,15 @@ namespace QuestTree.QuestGraph
 
         /// <summary>Several triggers can share an id (a zone made of more than one volume), so the
         /// key is id plus rounded position - the same de-duplication the server draws with.</summary>
-        private static string TriggerKey(HarvestedTrigger t) => $"{t.Id}|{t.X:F0}|{t.Y:F0}|{t.Z:F0}";
+        private static string TriggerKey(HarvestedTrigger t) => $"{t.Id}|{Grid(t.X)}|{Grid(t.Y)}|{Grid(t.Z)}";
 
         private static string ItemKey(HarvestedQuestItem i) =>
-            string.IsNullOrEmpty(i.ItemId) ? $"{i.TemplateId}|{i.X:F0}|{i.Y:F0}|{i.Z:F0}" : i.ItemId;
+            string.IsNullOrEmpty(i.ItemId) ? $"{i.TemplateId}|{Grid(i.X)}|{Grid(i.Y)}|{Grid(i.Z)}" : i.ItemId;
+
+        /// <summary>A coordinate rounded to the metre, invariant: the server draws the same key,
+        /// and a locale with its own minus sign (some use U+2212) would otherwise make the two
+        /// halves disagree about what "the same zone" is.</summary>
+        private static string Grid(float value) => value.ToString("F0", CultureInfo.InvariantCulture);
 
         /// <summary>Fire-and-forget on a pool thread: the raid does not wait on the network, and
         /// RequestHandler's synchronous calls would block Unity's main thread if used here.</summary>
