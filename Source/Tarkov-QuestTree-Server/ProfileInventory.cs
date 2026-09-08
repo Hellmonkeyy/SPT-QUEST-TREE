@@ -1,3 +1,5 @@
+using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using SPTarkov.Server.Core.Models.Eft.Common.Tables;
 
@@ -30,10 +32,30 @@ namespace QuestTreeServer
             public Held Plus(int foundInRaid, int total) => new(FoundInRaid + foundInRaid, Total + total);
         }
 
+        /// <summary>The last count per profile, kept for a few seconds. The Kappa and profile
+        /// routes are fetched together on every panel open and each walked the whole inventory -
+        /// tens of thousands of items on a hoarder's stash - for the same answer.</summary>
+        private static readonly ConcurrentDictionary<string, (DateTime At, Dictionary<string, Held> Counts)> Recent = new();
+        private static readonly TimeSpan CacheFor = TimeSpan.FromSeconds(3);
+
         /// <summary>Walks the profile's inventory once and totals it by template. Everything the
         /// profile holds is included - stash, equipment, containers - because "do I own one" is the
         /// question being asked, not "where is it".</summary>
         public static Dictionary<string, Held> CountByTemplate(BotBase? profile)
+        {
+            var key = profile?.Id.ToString();
+            if (!string.IsNullOrEmpty(key) && Recent.TryGetValue(key, out var recent) &&
+                DateTime.UtcNow - recent.At < CacheFor)
+            {
+                return recent.Counts;
+            }
+
+            var owned = Count(profile);
+            if (!string.IsNullOrEmpty(key)) Recent[key] = (DateTime.UtcNow, owned);
+            return owned;
+        }
+
+        private static Dictionary<string, Held> Count(BotBase? profile)
         {
             var owned = new Dictionary<string, Held>();
 
