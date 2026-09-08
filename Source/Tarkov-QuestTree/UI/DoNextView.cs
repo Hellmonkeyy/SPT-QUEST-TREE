@@ -29,7 +29,6 @@ namespace QuestTree.UI
         private const int MaxRows = 40;
 
         /// <summary>Rows stop stretching past this: a name and a reason do not need 1900px.</summary>
-        private const float MaxContentWidth = 960f;
 
         internal enum Bucket
         {
@@ -58,7 +57,7 @@ namespace QuestTree.UI
             Action onRefresh)
         {
             var x = AuxLayout.Padding;
-            var width = Mathf.Min(MaxContentWidth, panelSize.x - AuxLayout.Padding * 2f);
+            var width = Mathf.Min(AuxLayout.MaxContentWidth, panelSize.x - AuxLayout.Padding * 2f);
             var y = AuxLayout.Padding;
 
             var profile = QuestDataClient.GetProfile();
@@ -226,16 +225,12 @@ namespace QuestTree.UI
 
                 // The condition's own flag when the server is new enough to send it; the sentence
                 // as the fallback for an older server and for wordings the sentence test misses.
-                var usable = objective.FoundInRaid || MentionsFoundInRaid(objective.Text) ? have.FoundInRaid : have.Total;
+                var usable = objective.FoundInRaid || QuestSummary.MentionsFoundInRaid(objective.Text) ? have.FoundInRaid : have.Total;
                 held += Mathf.Min(need, usable);
             }
 
             return required == 0 ? 0f : (float)held / required;
         }
-
-        private static bool MentionsFoundInRaid(string text) =>
-            !string.IsNullOrEmpty(text) &&
-            text.IndexOf("found in raid", StringComparison.OrdinalIgnoreCase) >= 0;
 
         private static int GateDistance(QuestNode node, int playerLevel)
         {

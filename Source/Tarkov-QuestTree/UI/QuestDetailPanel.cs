@@ -37,7 +37,6 @@ namespace QuestTree.UI
         /// <summary>Room above the content for the close and collapse buttons.</summary>
         private const float TopChrome = 34f;
 
-        private const int RouteSteps = 12;
 
         private QuestGraphBuilder _graph;
         private Action<QuestNode> _focusNode;
@@ -353,11 +352,11 @@ namespace QuestTree.UI
                 {
                     AuxLayout.AddSectionHeader(_content, ref y, $"Route  ·  {route.Count} quests", _left, width);
 
-                    foreach (var step in route.Take(RouteSteps))
+                    foreach (var step in route.Take(QuestSummary.RouteSteps))
                         AddQuestLink(step, width, ref y);
 
-                    if (route.Count > RouteSteps)
-                        AuxLayout.AddLabelAt(_content, $"<color=#FFFFFF60>+{route.Count - RouteSteps} more</color>", 0f, ref y, AuxLayout.RowHeight, 11, width);
+                    if (route.Count > QuestSummary.RouteSteps)
+                        AuxLayout.AddLabelAt(_content, $"<color=#FFFFFF60>+{route.Count - QuestSummary.RouteSteps} more</color>", 0f, ref y, AuxLayout.RowHeight, 11, width);
 
                     y += 8f;
                 }
@@ -462,20 +461,6 @@ namespace QuestTree.UI
             catch (Exception ex)
             {
                 Plugin.LogSource?.LogWarning($"QuestTree: failed to load trader avatar for '{node.TraderId}': {ex.Message}");
-            }
-        }
-
-        /// <summary>The avatar load is async and the rows are destroyed on every Show; this ties
-        /// the load's lifetime to the row's so a late result never lands on a dead Image.</summary>
-        private sealed class CancelOnDestroy : MonoBehaviour
-        {
-            private readonly CancellationTokenSource _cts = new();
-            public CancellationToken Token => _cts.Token;
-
-            public void OnDestroy()
-            {
-                _cts.Cancel();
-                _cts.Dispose();
             }
         }
 

@@ -18,6 +18,10 @@ namespace QuestTree.UI
     internal static class AuxLayout
     {
         public const float Padding = 16f;
+
+        /// <summary>The list views stop stretching their rows past this - a 960px row of 12px text
+        /// is already more than a line should be. Was a private copy in three views.</summary>
+        public const float MaxContentWidth = 960f;
         public const float RowHeight = 22f;
         public const float HeadingHeight = 34f;
         public const float ToggleSize = 18f;

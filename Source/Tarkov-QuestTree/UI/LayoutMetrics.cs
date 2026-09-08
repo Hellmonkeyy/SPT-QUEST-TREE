@@ -61,7 +61,6 @@ namespace QuestTree.UI
         public static float TitleOffsetY => Compact ? -12f : -18f;
         public static float SubtitleOffsetY => Compact ? -26f : -36f;
         public static float ObjectiveOffsetY => Compact ? -38f : -52f;
-        public static float StatusGlyphOffsetY => Compact ? -38f : -66f;
 
         /// <summary>The objective preview is the first thing to go when space is tight - the title
         /// and trader identify a quest, the objective line is detail you can click through for.</summary>

@@ -25,9 +25,6 @@ namespace QuestTree.UI
         /// <summary>Builds the whole tab into <paramref name="parent"/> and returns its height.
         /// Reads the cached fetch result rather than requesting - see QuestDataClient.GetKappa for
         /// why this must not hit the server on every render.</summary>
-        /// <summary>Rows stop stretching past this.</summary>
-        private const float MaxContentWidth = 960f;
-
         /// <summary>Layout for the current build: the x every section draws at, and its width.
         /// Static so the section helpers keep their signatures; the page is built in one call.</summary>
         private static float _x;
@@ -44,7 +41,7 @@ namespace QuestTree.UI
             Action onRefresh)
         {
             _x = AuxLayout.Padding;
-            _width = Mathf.Min(MaxContentWidth, panelSize.x - AuxLayout.Padding * 2f);
+            _width = Mathf.Min(AuxLayout.MaxContentWidth, panelSize.x - AuxLayout.Padding * 2f);
             _onQuestSelected = onQuestSelected;
 
             try

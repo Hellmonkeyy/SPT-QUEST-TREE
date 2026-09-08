@@ -71,7 +71,6 @@ namespace QuestTree.UI
         /// </summary>
         private static Color EdgeColor => new(1f, 1f, 1f, EdgeOpacityScale * 0.14f);
         private static Color EdgeToLockedColor => new(1f, 1f, 1f, EdgeOpacityScale * 0.08f);
-        private static Color EdgeDimmedColor => new(1f, 1f, 1f, EdgeOpacityScale * 0.04f);
 
         /// <summary>The Settings opacity as a multiplier on the resting alphas (14% is 1.0).</summary>
         private static float EdgeOpacityScale =>

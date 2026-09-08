@@ -43,7 +43,13 @@ namespace QuestTree.QuestGraph
             try
             {
                 var modPath = Path.GetDirectoryName(typeof(KappaQuests).Assembly.Location);
-                if (string.IsNullOrEmpty(modPath)) return Empty();
+                if (string.IsNullOrEmpty(modPath))
+                {
+                    // A plugin loaded from memory has no location; said once, since the missing
+                    // file case below says something and this case said nothing.
+                    Plugin.LogSource?.LogInfo("QuestTree: the plugin has no file location, so kappa-quests.json cannot be found.");
+                    return Empty();
+                }
 
                 var path = Path.Combine(modPath, "kappa-quests.json");
                 if (!File.Exists(path))

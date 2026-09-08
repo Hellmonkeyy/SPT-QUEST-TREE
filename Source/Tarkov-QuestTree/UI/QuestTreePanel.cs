@@ -854,9 +854,14 @@ namespace QuestTree.UI
         private void BuildTabs()
         {
             // The tabs' own container, not _tabRow - clearing the row itself would destroy the
-            // scroll content object along with the tabs.
-            foreach (Transform child in _tabContent)
+            // scroll content object along with the tabs. Detached before the deferred Destroy,
+            // as the aux views do, so the outgoing tabs do not draw under the new ones for a frame.
+            for (var i = _tabContent.childCount - 1; i >= 0; i--)
+            {
+                var child = _tabContent.GetChild(i);
+                child.SetParent(null);
                 Destroy(child.gameObject);
+            }
             _tabBackgrounds.Clear();
             _tabStyles.Clear();
             _tabCursorX = 8f;
@@ -1057,21 +1062,6 @@ namespace QuestTree.UI
             catch (Exception ex)
             {
                 Plugin.LogSource?.LogWarning($"QuestTree: failed to load trader avatar for tab '{traderId}': {ex.Message}");
-            }
-        }
-
-        /// <summary>Cancels a CancellationTokenSource when its GameObject is destroyed - lets
-        /// CreateTabIcon tie a real cancellation to the icon's lifetime instead of only observing
-        /// a load that failed after the fact.</summary>
-        private sealed class CancelOnDestroy : MonoBehaviour
-        {
-            private readonly CancellationTokenSource _cts = new();
-            public CancellationToken Token => _cts.Token;
-
-            public void OnDestroy()
-            {
-                _cts.Cancel();
-                _cts.Dispose();
             }
         }
 

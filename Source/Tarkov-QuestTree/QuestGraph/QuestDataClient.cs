@@ -64,6 +64,7 @@ namespace QuestTree.QuestGraph
         {
             if (_attempted && _cached == null) _attempted = false;
             if (_markersAttempted && _markers == null) _markersAttempted = false;
+            if (_profileAttempted && _profile == null) _profileAttempted = false;
         }
 
         private static List<QuestDto> _cached;

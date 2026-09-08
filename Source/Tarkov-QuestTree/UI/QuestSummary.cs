@@ -19,7 +19,15 @@ namespace QuestTree.UI
     {
         /// <summary>How many route steps to list before summarising the rest. A route on a late
         /// Kappa quest can run to dozens - past this it stops being a plan you can read.</summary>
-        private const int RouteSteps = 12;
+        /// <summary>How many route steps a summary or the detail panel lists before "+N more".</summary>
+        internal const int RouteSteps = 12;
+
+        /// <summary>The fallback found-in-raid test for a server that predates the objective's
+        /// own flag: the English objective sentence. Shared by the Do next ranking and the Items
+        /// watchlist, which each had a copy.</summary>
+        internal static bool MentionsFoundInRaid(string objectiveText) =>
+            !string.IsNullOrEmpty(objectiveText) &&
+            objectiveText.IndexOf("found in raid", StringComparison.OrdinalIgnoreCase) >= 0;
 
         /// <summary>
         /// The quest's full story, top to bottom: identity, why it is blocked, what it requires, the

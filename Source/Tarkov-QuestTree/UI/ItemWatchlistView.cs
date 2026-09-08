@@ -55,14 +55,13 @@ namespace QuestTree.UI
         }
 
         /// <summary>Rows stop stretching past this: an item and its quests do not need 1900px.</summary>
-        private const float MaxContentWidth = 960f;
 
         public static float Build(
             RectTransform parent, QuestGraphBuilder graph, Vector2 panelSize, Action<QuestNode> onQuestSelected,
             Action onRefresh)
         {
             var x = AuxLayout.Padding;
-            var width = Mathf.Min(MaxContentWidth, panelSize.x - AuxLayout.Padding * 2f);
+            var width = Mathf.Min(AuxLayout.MaxContentWidth, panelSize.x - AuxLayout.Padding * 2f);
             var y = AuxLayout.Padding;
 
             var profile = QuestDataClient.GetProfile();
@@ -180,7 +179,7 @@ namespace QuestTree.UI
                     // for stock the second quest would reject.
                     // The condition's own flag when the server sends one (schema v2); the
                     // sentence as the fallback for an older server.
-                    watched.NeedsFoundInRaid |= objective.FoundInRaid || MentionsFoundInRaid(objective.Text);
+                    watched.NeedsFoundInRaid |= objective.FoundInRaid || QuestSummary.MentionsFoundInRaid(objective.Text);
 
                     if (!watched.Quests.Contains(node.Name))
                     {
@@ -208,10 +207,6 @@ namespace QuestTree.UI
 
             return objectiveText.Substring(colon + 1).Trim();
         }
-
-        private static bool MentionsFoundInRaid(string objectiveText) =>
-            !string.IsNullOrEmpty(objectiveText) &&
-            objectiveText.IndexOf("found in raid", StringComparison.OrdinalIgnoreCase) >= 0;
 
         internal static string Format(WatchedItem item)
         {
