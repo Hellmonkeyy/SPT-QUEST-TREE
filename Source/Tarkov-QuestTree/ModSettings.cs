@@ -379,9 +379,11 @@ namespace QuestTree
             ColorCache.Clear();
 
             // Node geometry changes with density, the node budget, and whether titles may take
-            // two lines; those need the pooled views thrown away. Everything else is a repaint.
+            // two lines; those need the pooled views thrown away. Tooltips too: the component is
+            // added when a box is created, so a pooled box built with tooltips off never gains
+            // one. Everything else is a repaint.
             var layout = ReferenceEquals(sender, CompactLayout) || ReferenceEquals(sender, MaxVisibleNodes) ||
-                         ReferenceEquals(sender, TallTitles);
+                         ReferenceEquals(sender, TallTitles) || ReferenceEquals(sender, Tooltips);
             Changed?.Invoke(layout);
         }
     }

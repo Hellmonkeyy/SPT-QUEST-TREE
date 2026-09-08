@@ -16,8 +16,12 @@ namespace QuestTree
             {
                 if (_isHeadless.HasValue) return _isHeadless.Value;
 
-                _isHeadless = Chainloader.PluginInfos.Keys
-                    .Any(guid => guid.IndexOf("headless", StringComparison.OrdinalIgnoreCase) >= 0);
+                // Fika's own plugin family, not any GUID with the word in it: another mod
+                // mentioning "headless" in its id used to switch this UI off on a normal client.
+                _isHeadless = Chainloader.PluginInfos.Keys.Any(guid =>
+                    string.Equals(guid, "com.fika.headless", StringComparison.OrdinalIgnoreCase) ||
+                    (guid.StartsWith("com.fika.", StringComparison.OrdinalIgnoreCase) &&
+                     guid.IndexOf("headless", StringComparison.OrdinalIgnoreCase) >= 0));
 
                 return _isHeadless.Value;
             }

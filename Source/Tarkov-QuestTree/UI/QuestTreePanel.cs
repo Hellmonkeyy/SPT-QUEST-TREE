@@ -145,9 +145,25 @@ namespace QuestTree.UI
             }
         }
 
+        /// <summary>A settings change that arrived while the panel was hidden (the F12 menu),
+        /// applied on the next Show. A hidden panel used to rebuild its whole view - the map's
+        /// thousand objects - for every toggle nobody could see.</summary>
+        private bool _settingsDirty;
+        private bool _settingsDirtyLayout;
+
         private void HandleSettingsChanged(bool affectsLayout)
         {
             if (!_builtShell || _questController == null) return;
+
+            if (!gameObject.activeInHierarchy)
+            {
+                _settingsDirty = true;
+                _settingsDirtyLayout |= affectsLayout;
+                return;
+            }
+
+            _settingsDirty = false;
+            _settingsDirtyLayout = false;
 
             try
             {
@@ -260,8 +276,10 @@ namespace QuestTree.UI
             else
             {
                 // Nothing to rebuild, so the panel comes back exactly as it was left - except for
-                // a hand-in made while it was shut (the flag is the deferred refresh's message to
-                // this path), and a raid picked since, which is the one thing worth turning to.
+                // a setting or a hand-in changed while it was shut (each flag is its deferred
+                // refresh's message to this path), and a raid picked since, which is the one thing
+                // worth turning to.
+                if (_settingsDirty) HandleSettingsChanged(_settingsDirtyLayout);
                 if (_statusDirty) RefreshAfterStatusChange();
                 if (raidChanged) PreselectRaidMap(raidLocation, showNow: true);
             }
@@ -799,8 +817,13 @@ namespace QuestTree.UI
         {
             _graph.Build(questController, session);
 
-            // The nodes the history pointed at belong to the graph just replaced.
+            // The nodes the history pointed at belong to the graph just replaced. A pending
+            // settings change is moot for the same reason, except that pooled boxes built to the
+            // old geometry must still go.
             _history.Clear();
+            if (_settingsDirtyLayout) _graphView.DiscardViewPools();
+            _settingsDirty = false;
+            _settingsDirtyLayout = false;
 
             ApplyServerKappaList();
 
