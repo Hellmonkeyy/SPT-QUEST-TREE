@@ -97,6 +97,11 @@ namespace QuestTree.UI
         /// <summary>Whether this is the box the detail panel is about. Cleared on Bind, because a
         /// pooled view arrives wearing whatever it last showed.</summary>
         private bool _selected;
+
+        /// <summary>One screen pixel in content units, set by the graph's sweep from the zoom.
+        /// The outline is drawn in content space, so a fixed 1-unit edge at a third zoom was a
+        /// third of a pixel - drawn on some sides and not others. Selected boxes get twice this.</summary>
+        private float _outlineUnit = 1f;
         private Image _statusBar;
         private TMP_Text _statusGlyph;
         private TMP_Text _title;
@@ -402,14 +407,14 @@ namespace QuestTree.UI
                     // The box the detail panel is about: the accent at full strength on a heavier
                     // edge, so it reads as chosen rather than as a fifth status colour.
                     _outline.effectColor = GameStyle.AccentColor;
-                    _outline.effectDistance = new Vector2(2f, -2f);
+                    _outline.effectDistance = new Vector2(2f * _outlineUnit, -2f * _outlineUnit);
                 }
                 else
                 {
                     // Active gets the full edge; everything else a quieter one, so the quest you
                     // are on is boxed in its own colour and the rest merely tinted.
                     _outline.effectColor = Fade(color, status == ENodeStatus.Active ? 0.9f : 0.45f);
-                    _outline.effectDistance = new Vector2(1f, -1f);
+                    _outline.effectDistance = new Vector2(_outlineUnit, -_outlineUnit);
                 }
             }
 
@@ -531,6 +536,16 @@ namespace QuestTree.UI
 
         /// <summary>Dim state for the chain highlight. Alpha only - the node keeps its layout,
         /// its position and its ability to be clicked.</summary>
+        /// <summary>Sets how thick one screen pixel is in content units at the current zoom - the
+        /// graph's sweep calls this on every built view whenever the zoom moves. Goes through
+        /// RefreshStatus so the outline keeps its one writer.</summary>
+        public void SetOutlineUnit(float unit)
+        {
+            if (Mathf.Approximately(_outlineUnit, unit)) return;
+            _outlineUnit = unit;
+            RefreshStatus();
+        }
+
         /// <summary>Marks or unmarks this box as the one the detail panel is showing. Goes through
         /// RefreshStatus so the outline has exactly one writer and a status change cannot paint
         /// over the selection.</summary>

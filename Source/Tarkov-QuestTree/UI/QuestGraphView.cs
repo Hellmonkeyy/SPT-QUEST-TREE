@@ -393,6 +393,9 @@ namespace QuestTree.UI
             // of a screen pixel - nothing. Re-aim the built ones with a thickness that holds on
             // screen whenever the zoom moves - and, if a quest is hovered, repaint its falloff,
             // whose radii are screen pixels too.
+            // The box outlines have the same problem as the edges, and the same cure.
+            var outlineUnit = ScreenThickness(1f);
+
             if (!Mathf.Approximately(zoom, _edgeZoom))
             {
                 _edgeZoom = zoom;
@@ -402,6 +405,8 @@ namespace QuestTree.UI
                     var edge = _edgeLayout[index];
                     UILineConnector.Apply(line, edge.FromPoint, edge.ToPoint, ScreenThickness(EdgeStyleFor(index).Thickness));
                 }
+
+                foreach (var built in _views.Values) built.SetOutlineUnit(outlineUnit);
 
                 if (_hoveredNode != null) ApplyHighlightFalloff();
             }
@@ -429,6 +434,7 @@ namespace QuestTree.UI
                 ((RectTransform)view.transform).anchoredPosition = _layout[node];
                 view.Bind(node, _onNodeClicked, HighlightChain, _ => ClearHighlight());
                 view.SetDetailLevel(_detailLevel);
+                view.SetOutlineUnit(outlineUnit);
                 view.SetSelected(ReferenceEquals(node, _selectedNode));
                 _views[node] = view;
             }
