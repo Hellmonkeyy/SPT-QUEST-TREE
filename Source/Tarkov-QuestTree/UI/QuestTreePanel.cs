@@ -426,6 +426,10 @@ namespace QuestTree.UI
         public void OnDestroy()
         {
             Unsubscribe();
+
+            // The cached ranking holds this panel's graph and profile; the panel dies with the
+            // menu after every raid, and nothing else would drop it until the next tracker open.
+            DoNextView.Forget();
         }
 
         private void Unsubscribe()
@@ -468,6 +472,7 @@ namespace QuestTree.UI
                     // when it was built, and a refresh only recolours what is there - so a quest
                     // this hand-in just unlocked would never appear. Rebuild instead. A hidden
                     // panel is left alone; it rebuilds on Show (see there).
+                    DoNextView.Forget();
                     _graph.Build(_questController, _session);
                     BuildTabs();
                     RenderSelectedTab();

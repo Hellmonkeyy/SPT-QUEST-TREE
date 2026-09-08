@@ -28,8 +28,6 @@ namespace QuestTree.UI
     {
         private const int MaxRows = 40;
 
-        /// <summary>Rows stop stretching past this: a name and a reason do not need 1900px.</summary>
-
         internal enum Bucket
         {
             InProgress = 0,

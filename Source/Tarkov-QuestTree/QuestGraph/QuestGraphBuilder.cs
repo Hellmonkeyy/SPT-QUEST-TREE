@@ -262,9 +262,11 @@ namespace QuestTree.QuestGraph
         /// landed, so a cyclic cluster's depths depended on enumeration order.
         ///
         /// Here a node is finished only after every prerequisite is. A prerequisite still on the
-        /// stack is a cycle: it contributes nothing to the node that met it, which is the one rule
-        /// applied consistently to every member. A prerequisite outside the loaded set is skipped,
-        /// as before, so such a quest draws as a root rather than not at all.
+        /// stack is a cycle: it contributes nothing to the node that met it. Within a cycle that
+        /// still means the member enumerated first lands one column left of the others, so a
+        /// cyclic cluster's columns follow payload order - the rule is consistent, the result is
+        /// not order-free. A prerequisite outside the loaded set is skipped, as before, so such a
+        /// quest draws as a root rather than not at all.
         /// </summary>
         private static Dictionary<string, int> ComputeDepths(Dictionary<string, QuestNode> byId)
         {

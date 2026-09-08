@@ -54,8 +54,6 @@ namespace QuestTree.UI
             public int Outstanding => Mathf.Max(0, Required - (NeedsFoundInRaid ? OwnedFoundInRaid : OwnedTotal));
         }
 
-        /// <summary>Rows stop stretching past this: an item and its quests do not need 1900px.</summary>
-
         public static float Build(
             RectTransform parent, QuestGraphBuilder graph, Vector2 panelSize, Action<QuestNode> onQuestSelected,
             Action onRefresh)

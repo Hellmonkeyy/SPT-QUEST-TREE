@@ -172,6 +172,11 @@ namespace QuestTree.QuestGraph
         /// one field that is volatile; the pair above is only ever written on the main thread.</summary>
         private static volatile bool _markersStale;
 
+        /// <summary>When an empty answer may be asked about again. Since 1.8.1 the server answers
+        /// empty, uncached, for a minute after a failed marker build; keeping that for the session
+        /// would mean no pins after the server had healed.</summary>
+        private static DateTime _markersRetryAt = DateTime.MinValue;
+
         /// <summary>Drops the cached markers so the next Maps tab build re-fetches. Called by the
         /// zone harvester once the server has accepted a raid's zones and rebuilt its markers -
         /// the one event that changes them while the server is up. Safe from any thread.</summary>
@@ -195,6 +200,7 @@ namespace QuestTree.QuestGraph
             }
 
             if (_markersAttempted) return _markers;
+            if (DateTime.UtcNow < _markersRetryAt) return _markers;
             _markersAttempted = true;
 
             try
@@ -211,7 +217,15 @@ namespace QuestTree.QuestGraph
 
                 _markers = JsonConvert.DeserializeObject<MapMarkerPayloadDto>(json);
 
-                if (_markers != null && _markers.SchemaVersion != MapMarkerPayloadDto.SupportedSchemaVersion)
+                if (_markers?.Maps == null || _markers.Maps.Count == 0)
+                {
+                    _markersAttempted = false;
+                    _markersRetryAt = DateTime.UtcNow.AddSeconds(60);
+                    Plugin.LogSource?.LogInfo("QuestTree: the server sent no map markers - asking again in a minute.");
+                    return _markers;
+                }
+
+                if (_markers.SchemaVersion != MapMarkerPayloadDto.SupportedSchemaVersion)
                 {
                     // Not fatal: the maps are the one feature this payload carries, and a version
                     // that only differs in a field this client does not read still pins fine. Named
@@ -223,11 +237,8 @@ namespace QuestTree.QuestGraph
                 }
 
                 var count = 0;
-                if (_markers?.Maps != null)
-                {
-                    foreach (var map in _markers.Maps)
-                        count += map?.Markers?.Count ?? 0;
-                }
+                foreach (var map in _markers.Maps)
+                    count += map?.Markers?.Count ?? 0;
 
                 Plugin.LogSource?.LogInfo($"QuestTree: loaded {count} quest-item map markers.");
                 return _markers;

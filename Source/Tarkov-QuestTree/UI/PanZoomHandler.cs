@@ -164,14 +164,14 @@ namespace QuestTree.UI
             OnViewChanged?.Invoke(scale, _content.anchoredPosition);
         }
 
-        /// <summary>The camera to interpret a screen point against. Null is CORRECT for a
-        /// Screen Space Overlay canvas and wrong for Screen Space Camera, so this asks the
-        /// canvas rather than assuming either - and eventData's own camera can be null on a
-        /// scroll that had no preceding press.</summary>
         /// <summary>The canvas above the content, found once: the parent walk ran on every drag
         /// delta and wheel notch that arrived without a camera of its own.</summary>
         private Canvas _canvas;
 
+        /// <summary>The camera to interpret a screen point against. Null is CORRECT for a
+        /// Screen Space Overlay canvas and wrong for Screen Space Camera, so this asks the
+        /// canvas rather than assuming either - and eventData's own camera can be null on a
+        /// scroll that had no preceding press.</summary>
         private Camera ResolveEventCamera(PointerEventData eventData)
         {
             if (eventData.pressEventCamera != null) return eventData.pressEventCamera;

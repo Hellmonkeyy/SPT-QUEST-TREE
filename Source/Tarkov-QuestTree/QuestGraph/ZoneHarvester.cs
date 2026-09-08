@@ -51,9 +51,10 @@ namespace QuestTree.QuestGraph
             var second = TryCollect(gameWorld, previous: request, out var secondMap);
             if (second == null) yield break;
 
-            // A transit (Shoreline to Labyrinth) can swap the scene under a GameWorld that
-            // survives it. TryCollect has then started over on the new map; what it holds is
-            // that map's first pass, not a delta on the old one.
+            // Defensive: the notes record that a transit loads a fresh GameWorld, whose own
+            // OnGameStarted starts a new harvest while this coroutine dies with the old world, so
+            // the map should never change between passes. Should it ever, TryCollect has started
+            // over on the new map and what it holds is that map's first pass, not a delta.
             if (!string.Equals(secondMap, map, StringComparison.OrdinalIgnoreCase))
             {
                 Post(second, "first pass after a transit");
@@ -92,9 +93,10 @@ namespace QuestTree.QuestGraph
                 var triggers = new Dictionary<string, HarvestedTrigger>(StringComparer.Ordinal);
                 var items = new Dictionary<string, HarvestedQuestItem>(StringComparer.Ordinal);
 
-                // The earlier pass belongs to the map that was loaded then. Unioning it into a
-                // read of a different map would file one map's zones under another's name on the
-                // server, where harvested positions outrank every other source.
+                // The earlier pass belongs to the map that was loaded then. Not expected to
+                // happen (see HarvestCoroutine), but unioning it into a read of a different map
+                // would file one map's zones under another's name on the server, where harvested
+                // positions outrank every other source - cheap to rule out.
                 if (previous != null && !string.Equals(previous.Map, map, StringComparison.OrdinalIgnoreCase))
                 {
                     Plugin.LogSource?.LogInfo($"QuestTree: map changed from {previous.Map} to {map} between passes - starting over.");

@@ -26,7 +26,9 @@ namespace QuestTree.Patches
             // Inside the game's own raid start; nothing thrown here may reach it.
             try
             {
-                if (!ModSettings.Ready || !ModSettings.HarvestZones.Value) return;
+                // Only an explicit "off" stops the harvest: with settings unbound (Plugin.Awake
+                // guards that failure separately) the default, on, applies.
+                if (ModSettings.Ready && !ModSettings.HarvestZones.Value) return;
                 if (__instance == null) return;
 
                 __instance.StartCoroutine(ZoneHarvester.HarvestCoroutine(__instance));

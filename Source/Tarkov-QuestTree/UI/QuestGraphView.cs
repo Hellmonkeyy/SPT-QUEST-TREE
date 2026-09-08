@@ -754,12 +754,12 @@ namespace QuestTree.UI
             _lastContentScale = zoom;
         }
 
-        /// <summary>The viewport in content-local space - the same space node positions use -
-        /// padded so nodes exist slightly before they scroll into view.</summary>
         /// <summary>Scratch for GetWorldCorners, which insists on an array; one per sweep was a
         /// per-frame allocation while the view moves.</summary>
         private readonly Vector3[] _cornerBuffer = new Vector3[4];
 
+        /// <summary>The viewport in content-local space - the same space node positions use -
+        /// padded so nodes exist slightly before they scroll into view.</summary>
         private Rect GetVisibleContentRect()
         {
             var corners = _cornerBuffer;

@@ -22,9 +22,6 @@ namespace QuestTree.UI
     /// </summary>
     internal static class KappaView
     {
-        /// <summary>Builds the whole tab into <paramref name="parent"/> and returns its height.
-        /// Reads the cached fetch result rather than requesting - see QuestDataClient.GetKappa for
-        /// why this must not hit the server on every render.</summary>
         /// <summary>Layout for the current build: the x every section draws at, and its width.
         /// Static so the section helpers keep their signatures; the page is built in one call.</summary>
         private static float _x;
@@ -36,6 +33,9 @@ namespace QuestTree.UI
         /// process, one copy per menu visit.</summary>
         private static Action<QuestNode> _onQuestSelected;
 
+        /// <summary>Builds the whole tab into <paramref name="parent"/> and returns its height.
+        /// Reads the cached fetch result rather than requesting - see QuestDataClient.GetKappa for
+        /// why this must not hit the server on every render.</summary>
         public static float Build(
             RectTransform parent, QuestGraphBuilder graph, Vector2 panelSize, Action<QuestNode> onQuestSelected,
             Action onRefresh)

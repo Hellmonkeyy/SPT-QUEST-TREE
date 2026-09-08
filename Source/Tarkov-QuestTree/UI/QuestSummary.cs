@@ -17,9 +17,9 @@ namespace QuestTree.UI
     /// </summary>
     internal static class QuestSummary
     {
-        /// <summary>How many route steps to list before summarising the rest. A route on a late
-        /// Kappa quest can run to dozens - past this it stops being a plan you can read.</summary>
-        /// <summary>How many route steps a summary or the detail panel lists before "+N more".</summary>
+        /// <summary>How many route steps a summary or the detail panel lists before "+N more". A
+        /// route on a late Kappa quest can run to dozens - past this it stops being a plan you
+        /// can read.</summary>
         internal const int RouteSteps = 12;
 
         /// <summary>The fallback found-in-raid test for a server that predates the objective's
