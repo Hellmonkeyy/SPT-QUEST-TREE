@@ -237,7 +237,7 @@ namespace QuestTree.UI
                     ? $"<color=#{doneHex}>[done]</color>"
                     : "<color=#FFFFFF40>[     ]</color>";
 
-                QuestRow(parent, ref y, node, $"{mark}  {node.Name}  <color=#FFFFFF60>{node.TraderName}</color>");
+                QuestRow(parent, ref y, node, $"{mark}  {GameStyle.Safe(node.Name)}  <color=#FFFFFF60>{GameStyle.Safe(node.TraderName)}</color>");
             }
         }
 
@@ -336,8 +336,8 @@ namespace QuestTree.UI
                 var hex = ColorUtility.ToHtmlStringRGB(QuestNodeView.ColorFor(node.Status));
 
                 QuestRow(parent, ref y, node,
-                    $"<color=#{hex}>{QuestNodeView.GlyphFor(node.Status)}</color>  {node.Name}" +
-                    $"  <color=#FFFFFF60>{node.TraderName}</color>");
+                    $"<color=#{hex}>{QuestNodeView.GlyphFor(node.Status)}</color>  {GameStyle.Safe(node.Name)}" +
+                    $"  <color=#FFFFFF60>{GameStyle.Safe(node.TraderName)}</color>");
             }
         }
 
@@ -358,7 +358,7 @@ namespace QuestTree.UI
                          .ThenBy(n => n.Name, StringComparer.OrdinalIgnoreCase))
             {
                 QuestRow(parent, ref y, node,
-                    $"<color=#FFFFFF40>[     ]</color>  {node.Name}  <color=#FFFFFF60>{node.TraderName}</color>");
+                    $"<color=#FFFFFF40>[     ]</color>  {GameStyle.Safe(node.Name)}  <color=#FFFFFF60>{GameStyle.Safe(node.TraderName)}</color>");
             }
         }
         // ------------------------------------------------------------------ rows

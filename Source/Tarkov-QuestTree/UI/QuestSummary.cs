@@ -46,7 +46,7 @@ namespace QuestTree.UI
             // was just clicked already says its name and trader.
             var lines = new List<string>
             {
-                includeHeader ? $"<b>{node.Name}</b>" : null,
+                includeHeader ? $"<b>{GameStyle.Safe(node.Name)}</b>" : null,
                 includeHeader ? node.TraderName : null,
                 node.Level > 0 ? $"Level {node.Level}" : null,
                 node.IsKappaRequired ? $"<color=#{GameStyle.WarningHex}>Kappa required</color>" : null,
@@ -72,7 +72,7 @@ namespace QuestTree.UI
                     var note = PrerequisiteNote(node, prereqId);
                     var suffix = note == null ? "" : $"  <color=#FFFFFF60>{note}</color>";
                     lines.Add(graph != null && graph.NodesById.TryGetValue(prereqId, out var prereq)
-                        ? $"{prereq.Name} ({prereq.TraderName}){suffix}"
+                        ? $"{GameStyle.Safe(prereq.Name)} ({GameStyle.Safe(prereq.TraderName)}){suffix}"
                         : prereqId + suffix);
                 }
                 lines.Add("");

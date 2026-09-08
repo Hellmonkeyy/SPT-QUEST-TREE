@@ -285,8 +285,8 @@ namespace QuestTree.UI
             AddAvatar(node, avatar, left, y);
 
             var nameY = y;
-            AuxLayout.AddWrapped(_content, $"<b>{node.Name}</b>", textX, ref nameY, width - textX, 16);
-            AuxLayout.AddLabelAt(_content, $"<color=#FFFFFF80>{node.TraderName}</color>", textX, ref nameY, 16f, 11, width - textX);
+            AuxLayout.AddWrapped(_content, $"<b>{GameStyle.Safe(node.Name)}</b>", textX, ref nameY, width - textX, 16);
+            AuxLayout.AddLabelAt(_content, $"<color=#FFFFFF80>{GameStyle.Safe(node.TraderName)}</color>", textX, ref nameY, 16f, 11, width - textX);
             y = Mathf.Max(nameY, y + avatar) + 6f;
 
             // Walking Requires and Unlocks links is how the panel is mostly used, and there was no
@@ -421,10 +421,10 @@ namespace QuestTree.UI
             var hex = QuestNodeView.HexFor(target.Status);
             var trader = _detailNode != null && target.TraderId == _detailNode.TraderId
                 ? ""
-                : $"  <color=#FFFFFF60>{target.TraderName}</color>";
+                : $"  <color=#FFFFFF60>{GameStyle.Safe(target.TraderName)}</color>";
             var suffix = note == null ? "" : $"  <color=#FFFFFF60>{note}</color>";
 
-            var text = $"<color=#{hex}>{QuestNodeView.GlyphFor(target.Status)}</color>  {target.Name}{trader}{suffix}";
+            var text = $"<color=#{hex}>{QuestNodeView.GlyphFor(target.Status)}</color>  {GameStyle.Safe(target.Name)}{trader}{suffix}";
             var captured = target;
 
             AuxLayout.AddClickableRow(_content, text, _left, ref y, width, false,

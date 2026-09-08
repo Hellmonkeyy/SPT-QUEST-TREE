@@ -96,7 +96,7 @@ namespace QuestTree.UI
                 var captured = node;
 
                 AuxLayout.AddClickableRow(parent,
-                    $"<color=#{hex}>{QuestNodeView.GlyphFor(node.Status)}</color>  {node.Name}  <color=#FFFFFF60>{node.TraderName}</color>",
+                    $"<color=#{hex}>{QuestNodeView.GlyphFor(node.Status)}</color>  {GameStyle.Safe(node.Name)}  <color=#FFFFFF60>{GameStyle.Safe(node.TraderName)}</color>",
                     x, ref y, width, false, () => onQuestSelected?.Invoke(captured));
 
                 var reason = Reason(entry, profile, graph);

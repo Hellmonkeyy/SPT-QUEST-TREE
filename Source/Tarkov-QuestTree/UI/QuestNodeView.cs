@@ -276,9 +276,9 @@ namespace QuestTree.UI
             var (head, tail) = TitleParts(node.Name);
             _tall = LayoutMetrics.AllowTallNodes && (tail != null || EstimateWidth(head, LayoutMetrics.TitleFontSize) > titleWidth);
 
-            _title.text = _tall
+            _title.text = GameStyle.Safe(_tall
                 ? FitToWidth(head, titleWidth) + (tail != null ? "\n" + FitToWidth(tail, titleWidth) : "")
-                : node.Name;
+                : node.Name);
 
             ((RectTransform)transform).sizeDelta = new Vector2(Width, Height + (_tall ? LayoutMetrics.TallNodeExtraHeight : 0f));
 
@@ -287,7 +287,7 @@ namespace QuestTree.UI
                 // With codes off, the zoomed-right-out box shows its title instead - the user's
                 // call; a title at that size is a smear, but some would rather have the smear.
                 var codes = !ModSettings.Ready || ModSettings.AbbreviateWhenZoomedOut.Value;
-                _abbreviation.text = codes ? Abbreviate(node.Name) : node.Name;
+                _abbreviation.text = codes ? Abbreviate(node.Name) : GameStyle.Safe(node.Name);
                 _abbreviation.fontSize = codes ? LayoutMetrics.AbbreviationFontSize : LayoutMetrics.ZoomedOutTitleFontSize;
                 _abbreviation.enableWordWrapping = !codes;
                 _abbreviation.overflowMode = codes ? TextOverflowModes.Overflow : TextOverflowModes.Ellipsis;
@@ -447,7 +447,7 @@ namespace QuestTree.UI
             _subtitle.text = string.Join("  ·  ", parts);
 
             var firstObjective = Node.NecessaryObjectives.FirstOrDefault();
-            var objectiveText = firstObjective != null ? firstObjective.Text : "";
+            var objectiveText = firstObjective != null ? GameStyle.Safe(firstObjective.Text) : "";
 
             if (_objectivePreview != null) _objectivePreview.text = objectiveText;
 
@@ -457,7 +457,7 @@ namespace QuestTree.UI
                 // still answers "what is this one" on hover without opening the detail.
                 var line = string.Join("  ·  ", parts);
                 var body = string.IsNullOrEmpty(objectiveText) ? "" : "\n" + objectiveText;
-                _tooltip.SetMessageText($"<b>{Node.Name}</b>\n{NameFor(Node.Status)}  ·  {line}{body}", rawText: true);
+                _tooltip.SetMessageText($"<b>{GameStyle.Safe(Node.Name)}</b>\n{NameFor(Node.Status)}  ·  {line}{body}", rawText: true);
             }
         }
 

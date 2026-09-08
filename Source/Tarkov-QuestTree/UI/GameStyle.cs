@@ -160,6 +160,13 @@ namespace QuestTree.UI
             return text.Length * fontSize * 0.56f;
         }
 
+        /// <summary>A quest, trader, item or objective name as literal text inside rich-text
+        /// markup. TMP parses tags in every string it is handed, so a modded name containing a
+        /// real tag - "&lt;b&gt;" is all it takes - used to swallow the rest of its line. Wrapped only
+        /// when there is a "&lt;" to worry about; the tag pair is invisible.</summary>
+        public static string Safe(string text) =>
+            string.IsNullOrEmpty(text) || text.IndexOf('<') < 0 ? text : "<noparse>" + text + "</noparse>";
+
         public static void Apply(TMP_Text text)
         {
             if (text == null) return;

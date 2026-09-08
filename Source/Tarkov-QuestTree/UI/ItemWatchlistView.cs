@@ -212,15 +212,15 @@ namespace QuestTree.UI
             var fir = item.NeedsFoundInRaid ? " <color=#FFFFFF60>(FiR)</color>" : "";
 
             if (held >= item.Required)
-                return $"<color=#{QuestNodeView.HexFor(ENodeStatus.Completed)}>[have]</color>  {item.Name}  {held}/{item.Required}{fir}";
+                return $"<color=#{QuestNodeView.HexFor(ENodeStatus.Completed)}>[have]</color>  {GameStyle.Safe(item.Name)}  {held}/{item.Required}{fir}";
 
             // Held but not found-in-raid is its own state: you own the thing and it still will not
             // count, which is exactly the case someone would otherwise get wrong.
             if (item.NeedsFoundInRaid && item.OwnedTotal > 0)
-                return $"<color=#{GameStyle.WarningHex}>[not FiR]</color>  {item.Name}  {held}/{item.Required}" +
+                return $"<color=#{GameStyle.WarningHex}>[not FiR]</color>  {GameStyle.Safe(item.Name)}  {held}/{item.Required}" +
                        $"  <color=#FFFFFF60>{item.OwnedTotal} held, not found in raid</color>";
 
-            return $"<color=#FFFFFF40>[need]</color>  {item.Name}  {held}/{item.Required}{fir}";
+            return $"<color=#FFFFFF40>[need]</color>  {GameStyle.Safe(item.Name)}  {held}/{item.Required}{fir}";
         }
     }
 }

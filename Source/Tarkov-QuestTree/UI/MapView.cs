@@ -1151,7 +1151,7 @@ namespace QuestTree.UI
         private static string LabelFor(
             MapMarkerDto marker, DynamicMapsLibrary.MapLayer owner, bool onThisFloor, string openedQuestName)
         {
-            var text = marker.ItemName;
+            var text = GameStyle.Safe(marker.ItemName);
 
             // Named after the quest a click will open, so the pin never reads one name and opens
             // another. Falls back to the first name the server sent - and only by name: Quests and
@@ -1164,7 +1164,7 @@ namespace QuestTree.UI
                 // Quests can be null when the name came from openedQuestName - the two lists are
                 // built separately server-side, and a marker may carry ids without names.
                 var more = marker.Quests != null && marker.Quests.Count > 1 ? $" +{marker.Quests.Count - 1}" : "";
-                text += $"  <color=#FFFFFF70>{quest}{more}</color>";
+                text += $"  <color=#FFFFFF70>{GameStyle.Safe(quest)}{more}</color>";
             }
 
             if (marker.Alternatives > 1)
@@ -1513,8 +1513,8 @@ namespace QuestTree.UI
                     {
                         GameStyle.PlaySound(EUISoundType.ButtonClick);
                         _notice = unlisted.Status == ENodeStatus.Completed
-                            ? $"{unlisted.Name} is complete - nothing left to do here."
-                            : $"{unlisted.Name} is not among the {MaxQuestRows} quests listed here.";
+                            ? $"{GameStyle.Safe(unlisted.Name)} is complete - nothing left to do here."
+                            : $"{GameStyle.Safe(unlisted.Name)} is not among the {MaxQuestRows} quests listed here.";
                         onRepaint();
                     };
                 }
@@ -1708,8 +1708,8 @@ namespace QuestTree.UI
             var hex = ColorUtility.ToHtmlStringRGB(QuestNodeView.ColorFor(node.Status));
 
             var label = labelGo.AddComponent<TextMeshProUGUI>();
-            label.text = $"<color=#{hex}>{QuestNodeView.GlyphFor(node.Status)}</color>  {node.Name}" +
-                         $"  <color=#FFFFFF60>{node.TraderName}</color>";
+            label.text = $"<color=#{hex}>{QuestNodeView.GlyphFor(node.Status)}</color>  {GameStyle.Safe(node.Name)}" +
+                         $"  <color=#FFFFFF60>{GameStyle.Safe(node.TraderName)}</color>";
             label.fontSize = 12;
             label.color = Color.white;
             label.alignment = TextAlignmentOptions.Left;
