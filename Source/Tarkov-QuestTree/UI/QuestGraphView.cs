@@ -127,6 +127,13 @@ namespace QuestTree.UI
         private readonly Stack<QuestNodeView> _nodePool = new();
         private readonly Stack<RectTransform[]> _edgePool = new();
 
+        /// <summary>Ceilings on the pools. A pool exists to make panning cheap, and for that a
+        /// couple of hundred spare boxes is plenty; without a ceiling a pass over a 5,000-quest
+        /// tree left up to the whole node budget - thousands of inactive objects - alive for the
+        /// panel's life. Beyond these a released view is destroyed instead.</summary>
+        private const int MaxPooledNodes = 256;
+        private const int MaxPooledEdges = 768;
+
         // Scratch collections reused by the visibility sweep so it allocates nothing per frame.
         private readonly List<QuestNode> _nodesToRelease = new();
         private readonly List<int> _edgesToRelease = new();
@@ -818,6 +825,12 @@ namespace QuestTree.UI
             // view left every other node dimmed at 25% with nothing to un-dim them.
             if (view.Node != null && _highlighted.Contains(view.Node)) ClearHighlight();
 
+            if (_nodePool.Count >= MaxPooledNodes)
+            {
+                UnityEngine.Object.Destroy(view.gameObject);
+                return;
+            }
+
             view.gameObject.SetActive(false);
             _nodePool.Push(view);
         }
@@ -867,6 +880,14 @@ namespace QuestTree.UI
         private void ReleaseEdge(RectTransform[] line)
         {
             if (line == null) return;
+
+            if (_edgePool.Count >= MaxPooledEdges)
+            {
+                foreach (var part in line)
+                    if (part != null) UnityEngine.Object.Destroy(part.gameObject);
+                return;
+            }
+
             UILineConnector.SetActive(line, false);
             _edgePool.Push(line);
         }
