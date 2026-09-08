@@ -6,10 +6,12 @@ namespace QuestTreeServer
 {
     internal static class Numbers
     {
-        /// <summary>A coordinate rounded to the metre, invariant. The client draws the same key
-        /// (ZoneHarvester.Grid); a locale with its own minus sign would otherwise make the two
-        /// halves disagree about what "the same zone" is.</summary>
-        public static string Grid(float value) => value.ToString("F0", CultureInfo.InvariantCulture);
+        /// <summary>A coordinate rounded to the metre as an integer, invariant. The client draws
+        /// the same key (ZoneHarvester.Grid). An integer rather than "F0": that format gave "-0"
+        /// here and "0" under Unity's Mono for the same value, and a locale with its own minus
+        /// sign would have made the halves disagree about what "the same zone" is.</summary>
+        public static string Grid(float value) =>
+            ((int)Math.Round(value, MidpointRounding.AwayFromZero)).ToString(CultureInfo.InvariantCulture);
 
         /// <summary>A quest count from the database's double, safely: an unchecked cast of NaN or
         /// a value past int range is undefined by the spec and lands on int.MinValue in practice,

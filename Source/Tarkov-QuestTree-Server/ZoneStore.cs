@@ -140,8 +140,8 @@ namespace QuestTreeServer
 
             lock (_lock)
             {
-                if (!_cache.TryGetValue(key, out var existing))
-                    existing = Read(key);
+                var fromCache = _cache.TryGetValue(key, out var existing);
+                if (!fromCache) existing = Read(key);
 
                 var triggers = new Dictionary<string, HarvestedTrigger>(StringComparer.Ordinal);
                 var items = new Dictionary<string, HarvestedQuestItem>(StringComparer.Ordinal);
@@ -160,9 +160,13 @@ namespace QuestTreeServer
                 // Refused rather than truncated; the router logs the refusal once per map.
                 if (triggers.Count + items.Count > MaxEntriesPerMap) return null;
 
-                // Nothing new: the file already says all this. Not rewritten, and the caller is
-                // told so it can skip the marker rebuild.
-                if (added == 0 && existing != null) return existing;
+                // Nothing new: the file already says all this, so it is not rewritten and the
+                // caller is told to skip the marker rebuild. Only when it really is on disk and
+                // in the cache, though - a harvest whose write failed is kept in memory with a
+                // promise to try the disk next time, and this is next time. A re-read of the same
+                // positions with changed flags is not persisted; the flags are informational.
+                if (added == 0 && existing != null && fromCache && System.IO.File.Exists(ResolvePath(key)))
+                    return existing;
 
                 var file = new ZoneFile
                 {
