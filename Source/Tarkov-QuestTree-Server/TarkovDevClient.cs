@@ -46,6 +46,19 @@ namespace QuestTreeServer
         /// silent 45s stall (90s with the other fetch behind it in series).
         /// </summary>
         private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(7);
+
+        /// <summary>One client for the process, not one per attempt: each new HttpClient redid
+        /// DNS and left a socket in TIME_WAIT. The buffer cap bounds what a slow-drip or runaway
+        /// response can make this hold in memory; the real answer is a few hundred KB.</summary>
+        private static readonly HttpClient Http = new()
+        {
+            Timeout = Timeout,
+            MaxResponseContentBufferSize = 8 * 1024 * 1024
+        };
+
+        /// <summary>Remote JSON is parsed with a depth limit; the default is generous enough for
+        /// a hostile document to be a stack exercise.</summary>
+        private static readonly JsonDocumentOptions DocumentOptions = new() { MaxDepth = 32 };
         private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(1.5);
         private const int Attempts = 2;
 
@@ -190,16 +203,17 @@ namespace QuestTreeServer
         {
             try
             {
-                using var http = new HttpClient { Timeout = Timeout };
+                var body = JsonSerializer.Serialize(new { query = Query });
+                using var request = new HttpRequestMessage(HttpMethod.Post, Endpoint)
+                {
+                    Content = new StringContent(body, Encoding.UTF8, "application/json")
+                };
 
                 // Named so tarkov.dev can see who is calling; they run this for the community and an
                 // anonymous client is a rude one.
-                http.DefaultRequestHeaders.Add("User-Agent", $"SPT-QuestTree/{ModInfo.Version}");
+                request.Headers.TryAddWithoutValidation("User-Agent", $"SPT-QuestTree/{ModInfo.Version}");
 
-                var body = JsonSerializer.Serialize(new { query = Query });
-                using var content = new StringContent(body, Encoding.UTF8, "application/json");
-
-                var response = await http.PostAsync(Endpoint, content, cancellationToken);
+                using var response = await Http.SendAsync(request, cancellationToken);
                 var json = await response.Content.ReadAsStringAsync(cancellationToken);
 
                 if (!response.IsSuccessStatusCode)
@@ -257,7 +271,7 @@ namespace QuestTreeServer
         {
             var locations = new List<ObjectiveLocation>();
 
-            using var document = JsonDocument.Parse(json);
+            using var document = JsonDocument.Parse(json, DocumentOptions);
 
             if (!document.RootElement.TryGetProperty("data", out var data) ||
                 !data.TryGetProperty("tasks", out var tasks) ||

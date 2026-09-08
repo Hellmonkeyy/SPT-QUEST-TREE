@@ -45,6 +45,14 @@ namespace QuestTreeServer
         /// <summary>Same budget as TarkovDevClient, for the same reason: SPT waits on this at boot,
         /// so offline it is a stall on every start. Two tries of seven seconds, ~15s at most.</summary>
         private static readonly TimeSpan Timeout = TimeSpan.FromSeconds(7);
+
+        /// <summary>One client for the process, with a cap on what a response may buffer - see
+        /// TarkovDevClient. The real file is under 100 KB.</summary>
+        private static readonly HttpClient Http = new()
+        {
+            Timeout = Timeout,
+            MaxResponseContentBufferSize = 8 * 1024 * 1024
+        };
         private static readonly TimeSpan RetryDelay = TimeSpan.FromSeconds(1.5);
         private const int Attempts = 2;
         private const int LoggedBodyLength = 300;
@@ -52,7 +60,8 @@ namespace QuestTreeServer
         private static readonly JsonSerializerOptions Options = new()
         {
             PropertyNameCaseInsensitive = true,
-            DefaultIgnoreCondition = JsonIgnoreCondition.Never
+            DefaultIgnoreCondition = JsonIgnoreCondition.Never,
+            MaxDepth = 32 // remote and on-disk JSON alike; the real file is three levels deep
         };
 
         /// <summary>One objective's place on a map, exactly as the file states it.</summary>
@@ -141,10 +150,10 @@ namespace QuestTreeServer
         {
             try
             {
-                using var http = new HttpClient { Timeout = Timeout };
-                http.DefaultRequestHeaders.Add("User-Agent", $"SPT-QuestTree/{ModInfo.Version}");
+                using var request = new HttpRequestMessage(HttpMethod.Get, Url);
+                request.Headers.TryAddWithoutValidation("User-Agent", $"SPT-QuestTree/{ModInfo.Version}");
 
-                var response = await http.GetAsync(Url, cancellationToken);
+                using var response = await Http.SendAsync(request, cancellationToken);
                 var json = await response.Content.ReadAsStringAsync(cancellationToken);
 
                 if (!response.IsSuccessStatusCode)

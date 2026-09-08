@@ -61,12 +61,28 @@ namespace QuestTreeServer
                 // log reads as a hang.
                 logger.Info("Quest Tracker: fetching quest objective locations (tarkov.dev, tarkovdata)...");
 
+                // Started together, awaited apart: with Task.WhenAll one source's fault threw
+                // away the other's answer too.
                 var locations = tarkovDev.GetLocationsAsync(cancellationToken);
                 var places = objectiveGps.GetPlacesAsync(cancellationToken);
-                await Task.WhenAll(locations, places);
 
-                _objectiveLocations = locations.Result;
-                _objectivePlaces = places.Result;
+                try
+                {
+                    _objectiveLocations = await locations;
+                }
+                catch (Exception ex)
+                {
+                    logger.Error($"Quest Tracker: could not fetch tarkov.dev objective locations: {ex}");
+                }
+
+                try
+                {
+                    _objectivePlaces = await places;
+                }
+                catch (Exception ex)
+                {
+                    logger.Error($"Quest Tracker: could not fetch the objective GPS file: {ex}");
+                }
             }
             catch (Exception ex)
             {
