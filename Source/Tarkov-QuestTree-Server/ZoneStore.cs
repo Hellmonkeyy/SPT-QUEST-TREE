@@ -129,13 +129,13 @@ namespace QuestTreeServer
             }
         }
 
-        /// <summary>Maps whose file has hit its ceiling, so the warning is said once per boot.</summary>
-        private readonly HashSet<string> _fullWarned = new(StringComparer.OrdinalIgnoreCase);
-
         /// <summary>Unions this harvest into the map's file. Returns what was written, or null
-        /// when the union would pass the per-map ceiling and nothing was changed.</summary>
-        public ZoneFile? Save(ZoneHarvestRequest request)
+        /// when the union would pass the per-map ceiling and nothing was changed.
+        /// <paramref name="added"/> is how many entries were new - zero when every Fika client
+        /// in a raid posts the same scene, which is the case the caller must not rebuild for.</summary>
+        public ZoneFile? Save(ZoneHarvestRequest request, out int added)
         {
+            added = 0;
             var key = Canonical(request.Map);
 
             lock (_lock)
@@ -149,21 +149,20 @@ namespace QuestTreeServer
                 foreach (var t in existing?.Triggers ?? new List<HarvestedTrigger>()) triggers[TriggerKey(t)] = t;
                 foreach (var i in existing?.QuestItems ?? new List<HarvestedQuestItem>()) items[ItemKey(i)] = i;
 
+                var before = triggers.Count + items.Count;
+
                 // Newest wins on an exact match; anything new is added.
                 foreach (var t in request.Triggers ?? new List<HarvestedTrigger>()) triggers[TriggerKey(t)] = t;
                 foreach (var i in request.QuestItems ?? new List<HarvestedQuestItem>()) items[ItemKey(i)] = i;
 
-                if (triggers.Count + items.Count > MaxEntriesPerMap)
-                {
-                    if (_fullWarned.Add(key))
-                    {
-                        logger.Warning(
-                            $"Quest Tracker: zones/{key}.json would exceed {MaxEntriesPerMap} entries - harvests for it are " +
-                            "being refused. Delete the file to start it over.");
-                    }
+                added = triggers.Count + items.Count - before;
 
-                    return null;
-                }
+                // Refused rather than truncated; the router logs the refusal once per map.
+                if (triggers.Count + items.Count > MaxEntriesPerMap) return null;
+
+                // Nothing new: the file already says all this. Not rewritten, and the caller is
+                // told so it can skip the marker rebuild.
+                if (added == 0 && existing != null) return existing;
 
                 var file = new ZoneFile
                 {
@@ -194,7 +193,6 @@ namespace QuestTreeServer
 
                 _cache[key] = file;
 
-                var added = file.Triggers.Count - (existing?.Triggers.Count ?? 0);
                 logger.Info(
                     $"Quest Tracker: {file.Triggers.Count} zones and {file.QuestItems.Count} quest items " +
                     $"harvested on '{key}'" + (request.Map != key ? $" (as '{request.Map}')" : "") +
@@ -206,10 +204,11 @@ namespace QuestTreeServer
 
         /// <summary>The same keys the client de-duplicates with, so the two sides agree on what
         /// "the same zone" means: id plus rounded position, since one zone can be several volumes.</summary>
-        private static string TriggerKey(HarvestedTrigger t) => $"{t.Id}|{t.X:F0}|{t.Y:F0}|{t.Z:F0}";
+        private static string TriggerKey(HarvestedTrigger t) =>
+            $"{t.Id}|{Numbers.Grid(t.X)}|{Numbers.Grid(t.Y)}|{Numbers.Grid(t.Z)}";
 
         private static string ItemKey(HarvestedQuestItem i) =>
-            string.IsNullOrEmpty(i.ItemId) ? $"{i.TemplateId}|{i.X:F0}|{i.Y:F0}|{i.Z:F0}" : i.ItemId;
+            string.IsNullOrEmpty(i.ItemId) ? $"{i.TemplateId}|{Numbers.Grid(i.X)}|{Numbers.Grid(i.Y)}|{Numbers.Grid(i.Z)}" : i.ItemId;
 
         private static string PathFor(string key) => System.IO.Path.Combine(Folder, key + ".json");
 
@@ -221,12 +220,9 @@ namespace QuestTreeServer
             var wanted = PathFor(key);
             if (System.IO.File.Exists(wanted) || !System.IO.Directory.Exists(Folder)) return wanted;
 
-            var name = key + ".json";
-            foreach (var candidate in System.IO.Directory.EnumerateFiles(Folder, "*.json"))
-            {
-                if (string.Equals(System.IO.Path.GetFileName(candidate), name, StringComparison.OrdinalIgnoreCase))
-                    return candidate;
-            }
+            var options = new System.IO.EnumerationOptions { MatchCasing = System.IO.MatchCasing.CaseInsensitive };
+            foreach (var candidate in System.IO.Directory.EnumerateFiles(Folder, key + ".json", options))
+                return candidate;
 
             return wanted;
         }

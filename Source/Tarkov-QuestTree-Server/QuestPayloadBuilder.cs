@@ -66,28 +66,7 @@ namespace QuestTreeServer
         private string? _cachedJson;
         private Dictionary<string, string>? _locationIdToKey;
 
-        /// <summary>When a failed build may be tried again - see MapMarkerPayloadBuilder for why
-        /// a failure is answered but not cached.</summary>
-        private DateTime _retryAfter = DateTime.MinValue;
-        private const int RetrySeconds = 60;
-
-        /// <summary>Tries the build again in the background once the pause is over, so a GET is
-        /// not the one to pay for a full walk of the quest table - see MapMarkerPayloadBuilder.</summary>
-        private void RewarmLater()
-        {
-            _ = Task.Run(async () =>
-            {
-                await Task.Delay(TimeSpan.FromSeconds(RetrySeconds + 1));
-                try
-                {
-                    GetPayloadJson();
-                }
-                catch (Exception ex)
-                {
-                    logger.Warning($"Quest Tracker: the quest list re-build did not run ({ex.Message}).");
-                }
-            });
-        }
+        private readonly RebuildGate _gate = new(60);
 
         /// <summary>Serialized once and cached: the quest database does not change while the server
         /// is running, and this payload covers every quest in the game.</summary>
@@ -98,7 +77,7 @@ namespace QuestTreeServer
             lock (_buildLock)
             {
                 if (_cachedJson != null) return _cachedJson;
-                if (DateTime.UtcNow < _retryAfter) return JsonSerializer.Serialize(new QuestPayloadDto(), WireJson.Options);
+                if (_gate.Paused) return JsonSerializer.Serialize(new QuestPayloadDto(), WireJson.Options);
 
                 QuestPayloadDto payload;
 
@@ -112,8 +91,8 @@ namespace QuestTreeServer
                     // a valid payload the client already degrades on - answered, not cached, so a
                     // fault at boot does not mean an empty tree until the server restarts.
                     logger.Error($"Quest Tracker: could not build the quest list - the tree will be empty: {ex}");
-                    _retryAfter = DateTime.UtcNow.AddSeconds(RetrySeconds);
-                    RewarmLater();
+                    _gate.PauseThenRewarm(() => GetPayloadJson(),
+                        message => logger.Warning($"Quest Tracker: the quest list re-build did not run ({message})."));
                     return JsonSerializer.Serialize(new QuestPayloadDto(), WireJson.Options);
                 }
 

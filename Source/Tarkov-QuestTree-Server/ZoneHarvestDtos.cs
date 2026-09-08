@@ -78,6 +78,12 @@ namespace QuestTreeServer
     /// version it was taken, so a stale file can be recognised after a game update.</summary>
     public sealed class ZoneFile
     {
+        /// <summary>The shape of this file. Missing (0) in files written before 1.8.2, which
+        /// are the same shape as version 1; a reader meeting a higher number knows the file is
+        /// from a newer server rather than corrupt.</summary>
+        [JsonPropertyName("schemaVersion")]
+        public int SchemaVersion { get; set; } = 1;
+
         [JsonPropertyName("map")]
         public string Map { get; set; } = "";
 

@@ -128,12 +128,7 @@ namespace QuestTreeServer
         private readonly object _buildLock = new();
         private string? _cachedJson;
 
-        /// <summary>When a failed build may be tried again. An exception used to cache the empty
-        /// payload for the life of the server, so one transient fault at boot meant no pins
-        /// until a restart. A minute between attempts keeps a persistent fault from being
-        /// rebuilt on every request.</summary>
-        private DateTime _retryAfter = DateTime.MinValue;
-        private const int RetrySeconds = 60;
+        private readonly RebuildGate _gate = new(60);
 
         /// <summary>Builds again now. Called by the zones route after a harvest lands, so the cost
         /// is paid on the client's fire-and-forget POST and never on a GET.</summary>
@@ -144,30 +139,10 @@ namespace QuestTreeServer
             lock (_buildLock)
             {
                 _cachedJson = null;
-                _retryAfter = DateTime.MinValue;
+                _gate.Clear();
             }
 
             GetPayloadJson();
-        }
-
-        /// <summary>Tries the build again in the background once the pause is over, so the
-        /// multi-second read of every map's loot table is paid off any request - the reason it
-        /// runs at startup in the first place. A GET arriving during the re-warm waits on the
-        /// build lock; one arriving before it answers empty.</summary>
-        private void RewarmLater()
-        {
-            _ = Task.Run(async () =>
-            {
-                await Task.Delay(TimeSpan.FromSeconds(RetrySeconds + 1));
-                try
-                {
-                    GetPayloadJson();
-                }
-                catch (Exception ex)
-                {
-                    logger.Warning($"Quest Tracker: the map marker re-build did not run ({ex.Message}).");
-                }
-            });
         }
 
         /// <summary>Cached like the quest list. The loot tables do not change while the server is
@@ -181,7 +156,7 @@ namespace QuestTreeServer
                 if (_cachedJson != null) return _cachedJson;
 
                 var empty = new MapMarkerPayloadDto { Version = ModInfo.Version };
-                if (DateTime.UtcNow < _retryAfter) return JsonSerializer.Serialize(empty, WireJson.Options);
+                if (_gate.Paused) return JsonSerializer.Serialize(empty, WireJson.Options);
 
                 MapMarkerPayloadDto payload;
 
@@ -196,8 +171,8 @@ namespace QuestTreeServer
                     // empty set means "no pins", which the client already handles; it is answered,
                     // not cached, so the next request after the pause tries again.
                     logger.Error($"Quest Tracker: could not build map markers - maps will show no pins: {ex}");
-                    _retryAfter = DateTime.UtcNow.AddSeconds(RetrySeconds);
-                    RewarmLater();
+                    _gate.PauseThenRewarm(() => GetPayloadJson(),
+                        message => logger.Warning($"Quest Tracker: the map marker re-build did not run ({message})."));
                     return JsonSerializer.Serialize(empty, WireJson.Options);
                 }
 
@@ -350,7 +325,7 @@ namespace QuestTreeServer
                             {
                                 // A zone made of several volumes is one place per volume, but
                                 // two volumes a metre apart are one pin.
-                                if (!seen.Add($"{questId}|{trigger.X:F0}|{trigger.Z:F0}")) continue;
+                                if (!seen.Add($"{questId}|{Numbers.Grid(trigger.X)}|{Numbers.Grid(trigger.Z)}")) continue;
 
                                 result.Markers.Add(new MapMarkerDto
                                 {
@@ -737,7 +712,7 @@ namespace QuestTreeServer
             {
                 // Rounded before de-duplicating: two zones a few centimetres apart are one pin as
                 // far as anybody reading the map is concerned.
-                var key = $"{objective.QuestId}|{objective.X:F0}|{objective.Z:F0}";
+                var key = $"{objective.QuestId}|{Numbers.Grid(objective.X)}|{Numbers.Grid(objective.Z)}";
                 if (!seen.Add(key)) continue;
 
                 markers.Add(new MapMarkerDto

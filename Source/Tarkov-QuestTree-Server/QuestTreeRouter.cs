@@ -116,17 +116,23 @@ namespace QuestTreeServer
             if (count == 0) return Reject(dropped > 0 ? "nothing usable harvested" : "nothing harvested", mapIsValid: true);
             if (count > MaxHarvestEntries) return Reject("too many entries", mapIsValid: true);
 
-            var saved = zoneStore.Save(request);
+            var saved = zoneStore.Save(request, out var added);
             if (saved == null) return Reject("map file full", mapIsValid: true);
 
-            markerBuilder.Rebuild();
+            // Every Fika client in a raid harvests the same scene and posts it; only the first
+            // has anything new, and only new positions are a reason to rebuild every map's
+            // markers - the multi-second read the class comment on the builder describes.
+            if (added > 0) markerBuilder.Rebuild();
+
+            var message = added > 0 ? "saved" : "saved, nothing new";
+            if (dropped > 0) message += $"; {dropped} unusable entries dropped";
 
             return Reply(new ZoneHarvestResponse
             {
                 Ok = true,
                 Zones = saved.Triggers.Count,
                 QuestItems = saved.QuestItems.Count,
-                Message = dropped > 0 ? $"saved; {dropped} unusable entries dropped" : "saved"
+                Message = message
             });
         }
 
