@@ -1393,31 +1393,41 @@ namespace QuestTree.UI
                 }
 
                 // The name, shown only for the hovered pin and the selected quest's pins. Drawing
-                // every name at once turned any cluster of objectives into a block of text.
-                var labelGo = new GameObject("Label", typeof(RectTransform));
-                var labelRect = (RectTransform)labelGo.transform;
-                labelRect.SetParent(rect, worldPositionStays: false);
-                labelRect.anchorMin = labelRect.anchorMax = new Vector2(0.5f, 0.5f);
-                labelRect.pivot = new Vector2(0f, 0.5f);
-                labelRect.anchoredPosition = objective && pin != null
-                    ? new Vector2(PinSize * 0.5f, PinSize * 0.75f)
-                    : new Vector2(MarkerSize * 0.6f, 0f);
-                labelRect.sizeDelta = new Vector2(LabelWidth, LabelHeight);
+                // every name at once turned any cluster of objectives into a block of text. Built
+                // on first need: most pins are never hovered, and a text object per pin was half
+                // of everything a map repaint created.
+                GameObject labelGo = null;
 
-                var label = labelGo.AddComponent<TextMeshProUGUI>();
-                label.text = LabelFor(marker, owner, onThisFloor,
-                    clickTarget != null && graph.NodesById.TryGetValue(clickTarget, out var opened)
-                        ? opened.Name
-                        : null);
-                label.fontSize = 13;
-                // The pin's own colour, so the name says the status the pin does. Full alpha: a
-                // dimmed off-floor pin is a hint, but its name has to be readable when asked for.
-                label.color = new Color(colour.r, colour.g, colour.b, 1f);
-                label.alignment = TextAlignmentOptions.Left;
-                label.enableWordWrapping = false;
-                label.overflowMode = TextOverflowModes.Ellipsis;
-                label.raycastTarget = false;
-                GameStyle.ApplyOutlined(label);
+                GameObject EnsureLabel()
+                {
+                    if (labelGo != null) return labelGo;
+
+                    labelGo = new GameObject("Label", typeof(RectTransform));
+                    var labelRect = (RectTransform)labelGo.transform;
+                    labelRect.SetParent(rect, worldPositionStays: false);
+                    labelRect.anchorMin = labelRect.anchorMax = new Vector2(0.5f, 0.5f);
+                    labelRect.pivot = new Vector2(0f, 0.5f);
+                    labelRect.anchoredPosition = objective && pin != null
+                        ? new Vector2(PinSize * 0.5f, PinSize * 0.75f)
+                        : new Vector2(MarkerSize * 0.6f, 0f);
+                    labelRect.sizeDelta = new Vector2(LabelWidth, LabelHeight);
+
+                    var label = labelGo.AddComponent<TextMeshProUGUI>();
+                    label.text = LabelFor(marker, owner, onThisFloor,
+                        clickTarget != null && graph.NodesById.TryGetValue(clickTarget, out var opened)
+                            ? opened.Name
+                            : null);
+                    label.fontSize = 13;
+                    // The pin's own colour, so the name says the status the pin does. Full alpha:
+                    // a dimmed off-floor pin is a hint, but its name has to be readable when asked.
+                    label.color = new Color(colour.r, colour.g, colour.b, 1f);
+                    label.alignment = TextAlignmentOptions.Left;
+                    label.enableWordWrapping = false;
+                    label.overflowMode = TextOverflowModes.Ellipsis;
+                    label.raycastTarget = false;
+                    GameStyle.ApplyOutlined(label);
+                    return labelGo;
+                }
 
                 // Shown at rest for the selected quest, and beyond that for whichever pins the
                 // Settings say - never where it would land on a label already placed, except the
@@ -1437,16 +1447,17 @@ namespace QuestTree.UI
                     else claimed.Add(footprint);
                 }
 
-                labelGo.SetActive(shownAtRest);
+                if (shownAtRest) EnsureLabel().SetActive(true);
 
                 var click = go.AddComponent<MapMarkerClick>();
 
                 click.OnHover = hovering =>
                 {
-                    if (labelGo == null) return;
-                    labelGo.SetActive(hovering || shownAtRest);
+                    if (rect == null) return;
+                    if (hovering || shownAtRest) EnsureLabel().SetActive(true);
+                    else if (labelGo != null) labelGo.SetActive(false);
                     // Above its neighbours while hovered, so the name is not under the next pin.
-                    if (hovering && rect != null) rect.SetAsLastSibling();
+                    if (hovering) rect.SetAsLastSibling();
                 };
 
                 if (clickTarget != null)
@@ -1496,10 +1507,21 @@ namespace QuestTree.UI
             var payload = QuestDataClient.GetMapMarkers();
             if (payload?.Maps == null) return null;
 
-            return payload.Maps.FirstOrDefault(m =>
+            // Asked five or six times per build (the coverage line, the sidebar, the pin count,
+            // the markers, each fly-to), always for the same map of the same payload.
+            if (ReferenceEquals(payload, _setPayload) && ReferenceEquals(entry, _setEntry)) return _set;
+
+            _set = payload.Maps.FirstOrDefault(m =>
                 m?.LocationKey != null &&
                 entry.InternalNames.Any(n => string.Equals(n, m.LocationKey, StringComparison.OrdinalIgnoreCase)));
+            _setPayload = payload;
+            _setEntry = entry;
+            return _set;
         }
+
+        private static MapMarkerPayloadDto _setPayload;
+        private static DynamicMapsLibrary.MapEntry _setEntry;
+        private static MapMarkerSetDto _set;
 
         /// <summary>Where a quest is on this map, or null if it has no marker here. An objective pin
         /// is where the quest actually happens; an item marker is only somewhere one of the things it

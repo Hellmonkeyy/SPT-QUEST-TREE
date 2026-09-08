@@ -160,7 +160,41 @@ namespace QuestTree.UI
             return "";
         }
 
+        /// <summary>The last ranking and what it was made from. The map sidebar asks for this on
+        /// every repaint - every pin click - to show eight rows, and ranking walks every objective
+        /// of every quest; the answer only changes when the graph, its statuses or the profile do.
+        /// Static because the aux views are rebuilt per repaint; dropped by Forget when the graph
+        /// is rebuilt so it never keeps an old graph's nodes alive.</summary>
+        private static QuestGraphBuilder _rankedGraph;
+        private static int _rankedVersion;
+        private static ProfilePayloadDto _rankedProfile;
+        private static List<Ranked> _ranked;
+
         internal static List<Ranked> Rank(QuestGraphBuilder graph, ProfilePayloadDto profile)
+        {
+            if (_ranked != null && ReferenceEquals(graph, _rankedGraph) && graph.Version == _rankedVersion &&
+                ReferenceEquals(profile, _rankedProfile))
+            {
+                return _ranked;
+            }
+
+            var ranked = RankUncached(graph, profile);
+            _rankedGraph = graph;
+            _rankedVersion = graph.Version;
+            _rankedProfile = profile;
+            _ranked = ranked;
+            return ranked;
+        }
+
+        /// <summary>Drops the cached ranking - called when the graph is rebuilt.</summary>
+        internal static void Forget()
+        {
+            _rankedGraph = null;
+            _rankedProfile = null;
+            _ranked = null;
+        }
+
+        private static List<Ranked> RankUncached(QuestGraphBuilder graph, ProfilePayloadDto profile)
         {
             var owned = profile?.ItemsOwned ?? new Dictionary<string, HeldItemDto>();
             var playerLevel = profile?.Level ?? 0;

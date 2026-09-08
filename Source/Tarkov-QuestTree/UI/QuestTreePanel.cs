@@ -817,6 +817,8 @@ namespace QuestTree.UI
         {
             _graph.Build(questController, session);
 
+            DoNextView.Forget();
+
             // The nodes the history pointed at belong to the graph just replaced. A pending
             // settings change is moot for the same reason, except that pooled boxes built to the
             // old geometry must still go.

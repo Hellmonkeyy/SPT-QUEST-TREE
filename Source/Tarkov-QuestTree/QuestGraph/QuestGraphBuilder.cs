@@ -37,6 +37,11 @@ namespace QuestTree.QuestGraph
         /// rather than the client's own unlocked-only view. Surfaced so the UI can say which.</summary>
         public bool HasFullQuestList { get; private set; }
 
+        /// <summary>Bumped by every build and every status refresh. Anything derived from the
+        /// nodes' statuses (the Do next ranking) checks it to know whether a cached result still
+        /// describes this graph.</summary>
+        public int Version { get; private set; }
+
         /// <summary>Trader id -> display name, resolved from the live session rather than a
         /// hardcoded vanilla trader list, so modded traders get a correct label automatically.</summary>
         public IReadOnlyDictionary<string, string> TraderNames { get; private set; } =
@@ -106,6 +111,7 @@ namespace QuestTree.QuestGraph
 
             Nodes = _byId.Values.ToArray();
             TraderNames = traderNames;
+            Version++;
         }
 
         /// <summary>
@@ -239,6 +245,7 @@ namespace QuestTree.QuestGraph
         {
             LinkLiveQuests();
             RefreshStatusesInternal();
+            Version++;
         }
 
         private void RefreshStatusesInternal()
