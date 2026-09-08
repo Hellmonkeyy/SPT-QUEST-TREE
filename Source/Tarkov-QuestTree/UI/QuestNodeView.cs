@@ -191,13 +191,15 @@ namespace QuestTree.UI
             abbreviation.gameObject.SetActive(false);
             view._abbreviation = abbreviation;
 
-            // Top-right corner, next to the Kappa badge, in the status colour: the one mark that
-            // says the status at any zoom, since the bar is a sliver and the title is words.
+            // Top-right corner, next to the Kappa badge, in the status colour. Only for the three
+            // statuses worth a mark: a locked box - the grey majority - showed a small cross here
+            // that read as a close button at any zoom, when the grey bar and dim text already
+            // say locked. Hidden with the title once the box is a code, where it was a smudge.
             var glyph = CreateText(rect, "StatusGlyph", LayoutMetrics.GlyphFontSize, FontStyles.Bold,
-                new Vector2(1f, 1f), new Vector2(1f, 1f), new Vector2(-6f, -4f));
+                new Vector2(1f, 1f), new Vector2(1f, 1f), new Vector2(-6f, -3f));
             var glyphRect = (RectTransform)glyph.transform;
             glyphRect.pivot = new Vector2(1f, 1f);
-            glyphRect.sizeDelta = new Vector2(16f, 16f);
+            glyphRect.sizeDelta = new Vector2(20f, 20f);
             glyph.alignment = TextAlignmentOptions.TopRight;
             view._statusGlyph = glyph;
 
@@ -421,7 +423,7 @@ namespace QuestTree.UI
 
             if (_statusGlyph != null)
             {
-                _statusGlyph.text = GlyphFor(status);
+                _statusGlyph.text = locked ? "" : GlyphFor(status);
                 _statusGlyph.color = color;
             }
         }
@@ -474,6 +476,7 @@ namespace QuestTree.UI
             if (_subtitle != null) _subtitle.gameObject.SetActive(!zoomedOut);
             if (_objectivePreview != null) _objectivePreview.gameObject.SetActive(!zoomedOut);
             if (_kappaBadge != null && Node != null) _kappaBadge.SetActive(Node.IsKappaRequired && !barOnly);
+            if (_statusGlyph != null) _statusGlyph.gameObject.SetActive(!barOnly);
 
             if (_title == null) return;
 

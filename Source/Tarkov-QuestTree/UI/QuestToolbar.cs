@@ -98,13 +98,24 @@ namespace QuestTree.UI
             searchBackground.color = new Color(1f, 1f, 1f, 0.08f);
             GameStyle.ApplyPanel(searchBackground);
 
+            // The text and placeholder sit inside a masked viewport, not directly in the box:
+            // TMP_InputField clips and scrolls its text only through textViewport, and without
+            // one a long search ran straight out of the box and across the toolbar buttons.
+            var viewportGo = new GameObject("TextArea", typeof(RectTransform), typeof(RectMask2D));
+            var viewportRect = (RectTransform)viewportGo.transform;
+            viewportRect.SetParent(searchRect, worldPositionStays: false);
+            viewportRect.anchorMin = Vector2.zero;
+            viewportRect.anchorMax = Vector2.one;
+            viewportRect.offsetMin = new Vector2(8f, 2f);
+            viewportRect.offsetMax = new Vector2(-8f, -2f);
+
             var searchTextGo = new GameObject("Text", typeof(RectTransform));
             var searchTextRect = (RectTransform)searchTextGo.transform;
-            searchTextRect.SetParent(searchRect, worldPositionStays: false);
+            searchTextRect.SetParent(viewportRect, worldPositionStays: false);
             searchTextRect.anchorMin = Vector2.zero;
             searchTextRect.anchorMax = Vector2.one;
-            searchTextRect.offsetMin = new Vector2(8f, 2f);
-            searchTextRect.offsetMax = new Vector2(-8f, -2f);
+            searchTextRect.offsetMin = Vector2.zero;
+            searchTextRect.offsetMax = Vector2.zero;
             var searchText = searchTextGo.AddComponent<TextMeshProUGUI>();
             searchText.fontSize = 12;
             searchText.color = Color.white;
@@ -114,11 +125,11 @@ namespace QuestTree.UI
             // screen otherwise to say it is a search field at all.
             var placeholderGo = new GameObject("Placeholder", typeof(RectTransform));
             var placeholderRect = (RectTransform)placeholderGo.transform;
-            placeholderRect.SetParent(searchRect, worldPositionStays: false);
+            placeholderRect.SetParent(viewportRect, worldPositionStays: false);
             placeholderRect.anchorMin = Vector2.zero;
             placeholderRect.anchorMax = Vector2.one;
-            placeholderRect.offsetMin = new Vector2(8f, 2f);
-            placeholderRect.offsetMax = new Vector2(-8f, -2f);
+            placeholderRect.offsetMin = Vector2.zero;
+            placeholderRect.offsetMax = Vector2.zero;
 
             var placeholder = placeholderGo.AddComponent<TextMeshProUGUI>();
             placeholder.text = "Search quests or traders  ( / )";
@@ -127,6 +138,7 @@ namespace QuestTree.UI
             GameStyle.Apply(placeholder);
 
             _searchField = searchGo.GetComponent<TMP_InputField>();
+            _searchField.textViewport = viewportRect;
             _searchField.textComponent = searchText;
             _searchField.placeholder = placeholder;
             _searchField.onValueChanged.AddListener(value =>

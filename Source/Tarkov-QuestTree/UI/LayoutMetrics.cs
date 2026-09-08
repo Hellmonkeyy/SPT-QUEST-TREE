@@ -54,7 +54,7 @@ namespace QuestTree.UI
         /// <summary>The zoomed-right-out code (QuestNodeView.Abbreviate). Big, because it is
         /// drawn at a quarter scale: 36px in the box is 9px on screen.</summary>
         public static int AbbreviationFontSize => Compact ? 26 : 36;
-        public static int GlyphFontSize => Compact ? 10 : 12;
+        public static int GlyphFontSize => Compact ? 12 : 14;
         public static int SubtitleFontSize => Compact ? 9 : 10;
         public static int ObjectiveFontSize => Compact ? 8 : 9;
 
