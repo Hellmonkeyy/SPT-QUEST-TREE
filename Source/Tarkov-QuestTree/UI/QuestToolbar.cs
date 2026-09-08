@@ -212,9 +212,8 @@ namespace QuestTree.UI
         private float BuildViewButton(
             RectTransform toolbar, string tabId, string label, float rightOffset, float itemY, float itemHeight)
         {
-            var width = Mathf.Clamp(GameStyle.MeasureWidth(label, 12) + 24f, 70f, 110f);
-
             var buttonRect = GameStyle.CreateButton(toolbar, label, () => _onViewSelected(tabId));
+            var width = Mathf.Clamp(GameStyle.MeasureWidth(buttonRect.GetComponentInChildren<TMP_Text>(), label) + 24f, 70f, 110f);
             buttonRect.anchorMin = buttonRect.anchorMax = new Vector2(1f, 1f);
             buttonRect.pivot = new Vector2(1f, 1f);
             buttonRect.anchoredPosition = new Vector2(-rightOffset, itemY);
@@ -307,7 +306,6 @@ namespace QuestTree.UI
                 _treeOnly.Add(barGo);
 
                 var name = QuestNodeView.NameFor(status);
-                var width = GameStyle.MeasureWidth(name, 11) + 8f;
 
                 var textGo = new GameObject("Label", typeof(RectTransform));
                 var textRect = (RectTransform)textGo.transform;
@@ -315,7 +313,6 @@ namespace QuestTree.UI
                 textRect.anchorMin = textRect.anchorMax = new Vector2(0f, 1f);
                 textRect.pivot = new Vector2(0f, 1f);
                 textRect.anchoredPosition = new Vector2(cursor + LayoutMetrics.StatusBarWidth + 4f, itemY);
-                textRect.sizeDelta = new Vector2(width, itemHeight);
                 var text = textGo.AddComponent<TextMeshProUGUI>();
                 text.text = name;
                 text.fontSize = 11;
@@ -324,6 +321,9 @@ namespace QuestTree.UI
                 text.raycastTarget = false;
                 GameStyle.Apply(text);
                 _treeOnly.Add(textGo);
+
+                var width = GameStyle.MeasureWidth(text, name) + 8f;
+                textRect.sizeDelta = new Vector2(width, itemHeight);
 
                 cursor += LayoutMetrics.StatusBarWidth + 4f + width + 10f;
             }

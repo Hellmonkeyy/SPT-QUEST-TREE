@@ -345,7 +345,7 @@ namespace QuestTree.UI
             foreach (var (name, hex) in ColourPresets)
             {
                 var chipY = y + 2f;
-                var chipWidth = GameStyle.MeasureWidth(name, 10) + 16f;
+                var chipWidth = 40f; // provisional; sized to the label below
                 var preset = hex;
 
                 var row = AuxLayout.AddClickableRow(column, "", x, ref chipY, chipWidth, false,
@@ -363,6 +363,9 @@ namespace QuestTree.UI
                     text.fontSize = 10;
                     text.alignment = TextAlignmentOptions.Center;
                     if (ColorUtility.TryParseHtmlString(hex, out var ink)) text.color = ink;
+
+                    chipWidth = GameStyle.MeasureWidth(text, name) + 16f;
+                    row.sizeDelta = new Vector2(chipWidth, 20f);
                 }
 
                 x += chipWidth + 4f;

@@ -422,15 +422,12 @@ namespace QuestTree.UI
         /// <summary>A small tag - status, level, map - tinted with its colour. Advances x.</summary>
         public static void AddChip(RectTransform parent, string text, Color color, ref float x, float y, float height = 18f)
         {
-            var width = GameStyle.MeasureWidth(text, 10, FontStyles.Bold) + 14f;
-
             var go = new GameObject("Chip", typeof(RectTransform), typeof(Image));
             var rect = (RectTransform)go.transform;
             rect.SetParent(parent, worldPositionStays: false);
             rect.anchorMin = rect.anchorMax = new Vector2(0f, 1f);
             rect.pivot = new Vector2(0f, 1f);
             rect.anchoredPosition = new Vector2(x, -y);
-            rect.sizeDelta = new Vector2(width, height);
 
             var background = go.GetComponent<Image>();
             background.color = new Color(color.r, color.g, color.b, 0.18f);
@@ -454,6 +451,10 @@ namespace QuestTree.UI
             label.raycastTarget = false;
             GameStyle.Apply(label);
             label.color = new Color(color.r, color.g, color.b, 1f);
+
+            // Sized to the label once the font is on it - see GameStyle.MeasureWidth.
+            var width = GameStyle.MeasureWidth(label, text) + 14f;
+            rect.sizeDelta = new Vector2(width, height);
 
             x += width + 6f;
         }

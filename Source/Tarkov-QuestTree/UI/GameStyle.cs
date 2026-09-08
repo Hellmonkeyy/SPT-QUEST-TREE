@@ -125,41 +125,37 @@ namespace QuestTree.UI
 
         private static bool _tooltipWarned;
 
-        /// <summary>A hidden text object the game's font is applied to, kept for measuring.</summary>
-        private static TextMeshProUGUI _measure;
-
-        /// <summary>The width a run of text takes in the game's font at this size. The tabs, chips
-        /// and buttons used to guess from the character count times a per-glyph average, which
-        /// saturated their clamps on any name that was not English. Falls back to that guess if
-        /// the font is not harvested yet or TMP declines to measure.</summary>
-        public static float MeasureWidth(string text, float fontSize, FontStyles style = FontStyles.Normal)
+        /// <summary>The width <paramref name="text"/> takes in <paramref name="label"/>'s font at
+        /// its size, measured on that label after Apply has installed the font - the recipe the
+        /// wrapped rows use. A hidden, never-activated measuring object was tried first and
+        /// answered with widths a fraction of the truth, which crushed the legend and the tabs;
+        /// only a live label under the canvas measures right. Falls back to the character
+        /// estimate the tabs shipped with if TMP declines.</summary>
+        public static float MeasureWidth(TMP_Text label, string text)
         {
             if (string.IsNullOrEmpty(text)) return 0f;
 
-            try
+            if (label != null)
             {
-                if (_measure == null)
+                try
                 {
-                    var go = new GameObject("QuestTreeMeasure", typeof(RectTransform)) { hideFlags = HideFlags.HideAndDontSave };
-                    go.SetActive(false);
-                    _measure = go.AddComponent<TextMeshProUGUI>();
-                    _measure.enableWordWrapping = false;
+                    var width = label.GetPreferredValues(text, Mathf.Infinity, Mathf.Infinity).x;
+                    if (width > 0f && !float.IsNaN(width) && !float.IsInfinity(width)) return width;
                 }
-
-                if (_font != null && _measure.font != _font) _measure.font = _font;
-                _measure.fontSize = fontSize;
-                _measure.fontStyle = style;
-
-                var width = _measure.GetPreferredValues(text, 0f, 0f).x;
-                if (width > 0f && !float.IsNaN(width) && !float.IsInfinity(width)) return width;
-            }
-            catch (Exception)
-            {
-                // Measuring is a nicety; the estimate below is what shipped for a year.
+                catch (Exception)
+                {
+                    // Measuring is a nicety; the estimate below is what shipped for a year.
+                }
             }
 
-            // The estimate sees glyphs, not markup: a tab label carries a colour tag pair around
-            // its suffix, which counted as two dozen characters.
+            return EstimateWidth(text, label != null ? label.fontSize : 12f);
+        }
+
+        /// <summary>The character-count estimate: glyphs only, since a tab label carries a colour
+        /// tag pair around its suffix that would count as two dozen characters.</summary>
+        public static float EstimateWidth(string text, float fontSize)
+        {
+            if (string.IsNullOrEmpty(text)) return 0f;
             var visible = text.IndexOf('<') >= 0 ? Regex.Replace(text, "<[^>]*>", "") : text;
             return visible.Length * fontSize * 0.56f;
         }

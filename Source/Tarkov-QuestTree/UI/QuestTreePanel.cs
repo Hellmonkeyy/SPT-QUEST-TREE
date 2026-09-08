@@ -1007,17 +1007,14 @@ namespace QuestTree.UI
         private void CreateTabButton(string name, string suffix, string traderId)
         {
             var hasIcon = traderId != AllTradersId && !IsAuxTab(traderId);
-            var suffixWidth = string.IsNullOrEmpty(suffix) ? 0f : GameStyle.MeasureWidth(suffix, 12) + 8f;
-            var width = Mathf.Clamp(GameStyle.MeasureWidth(name, 12) + suffixWidth + 28f + (hasIcon ? 24f : 0f), 60f, 260f);
 
+            // Sized after its label exists: the width is measured on the label itself, below.
             var tabGo = new GameObject($"Tab_{(traderId == AllTradersId ? "All" : name)}", typeof(RectTransform), typeof(Image), typeof(Button));
             var tabRect = (RectTransform)tabGo.transform;
             tabRect.SetParent(_tabContent, worldPositionStays: false);
             tabRect.anchorMin = tabRect.anchorMax = new Vector2(0f, 1f);
             tabRect.pivot = new Vector2(0f, 1f);
             tabRect.anchoredPosition = new Vector2(_tabCursorX, -2f);
-            tabRect.sizeDelta = new Vector2(width, TabHeight);
-            _tabCursorX += width + 4f;
 
             // Clear, but still a raycast target so the Button receives the click.
             var background = tabGo.GetComponent<Image>();
@@ -1042,6 +1039,10 @@ namespace QuestTree.UI
             text.text = TabLabel(name, suffix);
             text.raycastTarget = false;
             GameStyle.Apply(text);
+
+            var width = Mathf.Clamp(GameStyle.MeasureWidth(text, text.text) + 14f + (hasIcon ? 24f : 0f), 60f, 260f);
+            tabRect.sizeDelta = new Vector2(width, TabHeight);
+            _tabCursorX += width + 4f;
 
             var underlineGo = new GameObject("Underline", typeof(RectTransform), typeof(Image));
             var underline = (RectTransform)underlineGo.transform;
