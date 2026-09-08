@@ -82,8 +82,11 @@ namespace QuestTreeServer
             };
 
         /// <summary>Rejections already logged this boot, by map and reason, so a client that
-        /// keeps sending the same bad harvest is heard once rather than filling the log.</summary>
+        /// keeps sending the same bad harvest is heard once rather than filling the log. Keyed on
+        /// the canonical map only once it has passed validation, and capped: the raw string is
+        /// the client's to choose, and a set keyed on it would grow with every new bad name.</summary>
         private static readonly HashSet<string> RejectionsLogged = new(StringComparer.Ordinal);
+        private const int MaxRejectionsLogged = 256;
 
         private static string AcceptHarvest(
             ISptLogger<QuestTreeRouter> logger, ZoneHarvestRequest? request, ZoneStore zoneStore,
@@ -91,28 +94,30 @@ namespace QuestTreeServer
         {
             static string Reply(ZoneHarvestResponse r) => JsonSerializer.Serialize(r, WireJson.Options);
 
-            string Reject(string reason)
+            string Reject(string reason, bool mapIsValid)
             {
-                var key = $"{request?.Map ?? "?"}|{reason}";
+                var map = mapIsValid ? ZoneStore.Canonical(request!.Map) : "?";
+                var key = $"{map}|{reason}";
                 bool first;
-                lock (RejectionsLogged) first = RejectionsLogged.Add(key);
-                if (first) logger.Warning($"Quest Tracker: refused a zone harvest for '{request?.Map ?? "?"}' - {reason}.");
+                lock (RejectionsLogged)
+                    first = RejectionsLogged.Count < MaxRejectionsLogged && RejectionsLogged.Add(key);
+                if (first) logger.Warning($"Quest Tracker: refused a zone harvest for '{map}' - {reason}.");
                 return Reply(new ZoneHarvestResponse { Ok = false, Message = reason });
             }
 
-            if (request == null) return Reject("no body");
-            if (!ZoneStore.IsValidMapName(request.Map)) return Reject("bad map name");
+            if (request == null) return Reject("no body", mapIsValid: false);
+            if (!ZoneStore.IsValidMapName(request.Map)) return Reject("bad map name", mapIsValid: false);
 
             // Entries the file could not hold or the map could not draw go first, so the counts
             // below describe what will actually be kept.
             var dropped = ZoneStore.Sanitise(request);
 
             var count = (request.Triggers?.Count ?? 0) + (request.QuestItems?.Count ?? 0);
-            if (count == 0) return Reject(dropped > 0 ? "nothing usable harvested" : "nothing harvested");
-            if (count > MaxHarvestEntries) return Reject("too many entries");
+            if (count == 0) return Reject(dropped > 0 ? "nothing usable harvested" : "nothing harvested", mapIsValid: true);
+            if (count > MaxHarvestEntries) return Reject("too many entries", mapIsValid: true);
 
             var saved = zoneStore.Save(request);
-            if (saved == null) return Reject("map file full");
+            if (saved == null) return Reject("map file full", mapIsValid: true);
 
             markerBuilder.Rebuild();
 

@@ -71,6 +71,24 @@ namespace QuestTreeServer
         private DateTime _retryAfter = DateTime.MinValue;
         private const int RetrySeconds = 60;
 
+        /// <summary>Tries the build again in the background once the pause is over, so a GET is
+        /// not the one to pay for a full walk of the quest table - see MapMarkerPayloadBuilder.</summary>
+        private void RewarmLater()
+        {
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(TimeSpan.FromSeconds(RetrySeconds + 1));
+                try
+                {
+                    GetPayloadJson();
+                }
+                catch (Exception ex)
+                {
+                    logger.Warning($"Quest Tracker: the quest list re-build did not run ({ex.Message}).");
+                }
+            });
+        }
+
         /// <summary>Serialized once and cached: the quest database does not change while the server
         /// is running, and this payload covers every quest in the game.</summary>
         public string GetPayloadJson()
@@ -95,6 +113,7 @@ namespace QuestTreeServer
                     // fault at boot does not mean an empty tree until the server restarts.
                     logger.Error($"Quest Tracker: could not build the quest list - the tree will be empty: {ex}");
                     _retryAfter = DateTime.UtcNow.AddSeconds(RetrySeconds);
+                    RewarmLater();
                     return JsonSerializer.Serialize(new QuestPayloadDto(), WireJson.Options);
                 }
 

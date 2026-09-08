@@ -139,8 +139,35 @@ namespace QuestTreeServer
         /// is paid on the client's fire-and-forget POST and never on a GET.</summary>
         public void Rebuild()
         {
-            lock (_buildLock) _cachedJson = null;
+            // An explicit rebuild ignores the pause a failed build set: the harvest that asked
+            // for it is new data, and answering "saved" while still serving empty would hide it.
+            lock (_buildLock)
+            {
+                _cachedJson = null;
+                _retryAfter = DateTime.MinValue;
+            }
+
             GetPayloadJson();
+        }
+
+        /// <summary>Tries the build again in the background once the pause is over, so the
+        /// multi-second read of every map's loot table is paid off any request - the reason it
+        /// runs at startup in the first place. A GET arriving during the re-warm waits on the
+        /// build lock; one arriving before it answers empty.</summary>
+        private void RewarmLater()
+        {
+            _ = Task.Run(async () =>
+            {
+                await Task.Delay(TimeSpan.FromSeconds(RetrySeconds + 1));
+                try
+                {
+                    GetPayloadJson();
+                }
+                catch (Exception ex)
+                {
+                    logger.Warning($"Quest Tracker: the map marker re-build did not run ({ex.Message}).");
+                }
+            });
         }
 
         /// <summary>Cached like the quest list. The loot tables do not change while the server is
@@ -170,6 +197,7 @@ namespace QuestTreeServer
                     // not cached, so the next request after the pause tries again.
                     logger.Error($"Quest Tracker: could not build map markers - maps will show no pins: {ex}");
                     _retryAfter = DateTime.UtcNow.AddSeconds(RetrySeconds);
+                    RewarmLater();
                     return JsonSerializer.Serialize(empty, WireJson.Options);
                 }
 
@@ -540,33 +568,42 @@ namespace QuestTreeServer
 
             foreach (var quest in quests)
             {
-                var questId = quest.Id.ToString();
-
-                // A quest the harvest placed keeps the harvest's pins only.
-                if (skipQuestIds.Contains(questId)) continue;
-                var questName = QuestPayloadBuilder.ResolveQuestName(quest, questId, locale);
-
-                foreach (var condition in quest.Conditions?.AvailableForFinish ?? [])
+                // Per quest, like the harvested and wanted-item passes: one malformed modded quest
+                // costs its own pins, not the map's.
+                try
                 {
-                    var conditionId = condition?.Id.ToString();
+                    var questId = quest.Id.ToString();
 
-                    if (string.IsNullOrEmpty(conditionId)) continue;
-                    if (!_objectivePlaces.TryGetValue(conditionId!, out var place)) continue;
+                    // A quest the harvest placed keeps the harvest's pins only.
+                    if (skipQuestIds.Contains(questId)) continue;
+                    var questName = QuestPayloadBuilder.ResolveQuestName(quest, questId, locale);
 
-                    // The source states the map too. Trusting the quest's own location over it would
-                    // put a pin on the wrong map wherever the two disagree.
-                    if (!string.Equals(place.Map, locationId, StringComparison.OrdinalIgnoreCase)) continue;
-
-                    markers.Add(new MapMarkerDto
+                    foreach (var condition in quest.Conditions?.AvailableForFinish ?? [])
                     {
-                        ItemName = DescribeObjective(condition!, questName, locale),
-                        Quests = new List<string> { questName },
-                        QuestIds = new List<string> { questId },
-                        Kind = ObjectiveKind,
-                        LeftPercent = place.LeftPercent,
-                        TopPercent = place.TopPercent,
-                        Floor = place.Floor ?? ""
-                    });
+                        var conditionId = condition?.Id.ToString();
+
+                        if (string.IsNullOrEmpty(conditionId)) continue;
+                        if (!_objectivePlaces.TryGetValue(conditionId!, out var place)) continue;
+
+                        // The source states the map too. Trusting the quest's own location over
+                        // it would put a pin on the wrong map wherever the two disagree.
+                        if (!string.Equals(place.Map, locationId, StringComparison.OrdinalIgnoreCase)) continue;
+
+                        markers.Add(new MapMarkerDto
+                        {
+                            ItemName = DescribeObjective(condition!, questName, locale),
+                            Quests = new List<string> { questName },
+                            QuestIds = new List<string> { questId },
+                            Kind = ObjectiveKind,
+                            LeftPercent = place.LeftPercent,
+                            TopPercent = place.TopPercent,
+                            Floor = place.Floor ?? ""
+                        });
+                    }
+                }
+                catch (Exception ex)
+                {
+                    logger.Warning($"Quest Tracker: skipped a quest's GPS pins on '{locationId}' ({quest?.Id}): {ex.Message}");
                 }
             }
 
