@@ -1094,7 +1094,7 @@ namespace QuestTree.UI
             FrameContent();
 
             _toolbar.SetNotice(
-                "<color=#D9A61A>No quests started or available - showing the start of the tree.</color>");
+                $"<color=#{GameStyle.WarningHex}>No quests started or available - showing the start of the tree.</color>");
         }
 
     }

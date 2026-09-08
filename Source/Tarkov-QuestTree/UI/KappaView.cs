@@ -97,7 +97,7 @@ namespace QuestTree.UI
         {
             Section(parent, ref y, "Kappa progress unavailable");
             AuxLayout.AddText(parent, ref y,
-                $"<color=#C86464>{Explain(result)}</color>", 72f, 12);
+                $"<color=#{GameStyle.ErrorHex}>{Explain(result)}</color>", 72f, 12);
             AuxLayout.AddSpacer(ref y, 8f);
             AuxLayout.AddText(parent, ref y,
                 "<color=#FFFFFF80>The quest tree itself still works - only the Kappa checklist and " +
@@ -136,7 +136,7 @@ namespace QuestTree.UI
             {
                 Section(parent, ref y, "Collector items");
                 AuxLayout.AddText(parent, ref y,
-                    "<color=#C86464>The server half of the mod did not answer.</color> " +
+                    $"<color=#{GameStyle.ErrorHex}>The server half of the mod did not answer.</color> " +
                     "The item checklist is read from your profile by QuestTreeServer " +
                     "(SPT_Runtime/user/mods/QuestTree).", 40f);
                 return;
@@ -190,7 +190,7 @@ namespace QuestTree.UI
                        $"<color=#FFFFFF60>{item.OwnedFoundInRaid} found in raid</color>";
 
             if (item.OwnedTotal > 0)
-                return $"<color=#D9A61A>[not FiR]</color>  {name}{need}  " +
+                return $"<color=#{GameStyle.WarningHex}>[not FiR]</color>  {name}{need}  " +
                        $"<color=#FFFFFF60>{item.OwnedTotal} held, none found in raid</color>";
 
             return $"<color=#FFFFFF40>[     ]</color>  <color=#FFFFFFB0>{name}{need}</color>";
@@ -269,7 +269,7 @@ namespace QuestTree.UI
             {
                 Section(parent, ref y, "Kappa quests");
                 AuxLayout.AddText(parent, ref y,
-                    "<color=#C86464>The server half of the mod did not supply the Kappa quest list.</color> " +
+                    $"<color=#{GameStyle.ErrorHex}>The server half of the mod did not supply the Kappa quest list.</color> " +
                     "It is read from Collector's start conditions by QuestTreeServer.", 40f, 12);
                 return;
             }
@@ -288,7 +288,7 @@ namespace QuestTree.UI
             if (LiveRequirementDiffers(payload))
             {
                 AuxLayout.AddText(parent, ref y,
-                    $"<color=#D9A61A>A mod has changed Collector on this install: it currently requires " +
+                    $"<color=#{GameStyle.WarningHex}>A mod has changed Collector on this install: it currently requires " +
                     $"{payload.LiveCollectorPrerequisiteCount} prerequisite quest(s), not {ids.Count}. " +
                     "The canonical list is shown below.</color>", 44f, 11);
             }
@@ -300,7 +300,7 @@ namespace QuestTree.UI
                 // Listed by id rather than dropped silently - a Kappa quest missing from the
                 // loaded set is itself worth seeing.
                 AuxLayout.AddText(parent, ref y,
-                    $"<color=#FFFFFF40>[     ]</color>  <color=#C86464>{ids[index]} (not in the loaded quest set)</color>",
+                    $"<color=#FFFFFF40>[     ]</color>  <color=#{GameStyle.ErrorHex}>{ids[index]} (not in the loaded quest set)</color>",
                     AuxLayout.RowHeight, 12, indent: 6f);
             }
 

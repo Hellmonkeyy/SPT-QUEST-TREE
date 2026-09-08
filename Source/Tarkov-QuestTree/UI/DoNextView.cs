@@ -73,7 +73,7 @@ namespace QuestTree.UI
             if (profile == null || !profile.HasProfile)
             {
                 AuxLayout.AddWrapped(parent,
-                    "<color=#D9A61A>Without the server half this can only order by quest status - it cannot see your stash or your level.</color>",
+                    $"<color=#{GameStyle.WarningHex}>Without the server half this can only order by quest status - it cannot see your stash or your level.</color>",
                     x, ref y, width, 11);
             }
 

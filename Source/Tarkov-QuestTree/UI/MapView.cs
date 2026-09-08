@@ -645,7 +645,7 @@ namespace QuestTree.UI
 
             if (_notice != null)
             {
-                AddDetailLine(content, $"<color=#D9A61A>{_notice}</color>", listX, ref y, inner, 11);
+                AddDetailLine(content, $"<color=#{GameStyle.WarningHex}>{_notice}</color>", listX, ref y, inner, 11);
                 _notice = null;
             }
 

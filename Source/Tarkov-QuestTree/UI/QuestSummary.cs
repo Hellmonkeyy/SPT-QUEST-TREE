@@ -49,10 +49,10 @@ namespace QuestTree.UI
                 includeHeader ? $"<b>{node.Name}</b>" : null,
                 includeHeader ? node.TraderName : null,
                 node.Level > 0 ? $"Level {node.Level}" : null,
-                node.IsKappaRequired ? "<color=#D9A61A>Kappa required</color>" : null,
+                node.IsKappaRequired ? $"<color=#{GameStyle.WarningHex}>Kappa required</color>" : null,
                 // Faction- and edition-locked quests are shown rather than hidden, so this is what
                 // stops one reading as a bug in the tree.
-                node.UnobtainableReason != null ? $"<color=#C86464>{node.UnobtainableReason}</color>" : null,
+                node.UnobtainableReason != null ? $"<color=#{GameStyle.ErrorHex}>{node.UnobtainableReason}</color>" : null,
                 // The single gate actually stopping you, computed server-side against your level,
                 // loyalty and standing. Until this existed a locked quest was a grey box with no
                 // explanation of what to go and do about it.
@@ -165,7 +165,7 @@ namespace QuestTree.UI
             QuestNode node, QuestGraphBuilder graph, ProfilePayloadDto profile)
         {
             var detail = LockReasonDetail(node, graph, profile);
-            return detail == null ? null : $"<color=#D9A61A>Locked - {detail}</color>";
+            return detail == null ? null : $"<color=#{GameStyle.WarningHex}>Locked - {detail}</color>";
         }
 
         /// <summary>The gate as plain text, for a row that has its own colour and prefix - the

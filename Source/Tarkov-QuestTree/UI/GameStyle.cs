@@ -38,6 +38,14 @@ namespace QuestTree.UI
         public static Color DimTextColor { get; private set; } = new(0.78f, 0.76f, 0.71f, 0.55f);
         private static readonly Color DefaultAccentColor = new(0.78f, 0.65f, 0.35f);
 
+        /// <summary>The two semantic text colours every view uses in rich text - "mind this" amber
+        /// and "this is broken" red - and the Kappa gold the badge, chip and toggles share. Named
+        /// here because they were written out in twenty-four places, which is twenty-four places
+        /// to change a shade.</summary>
+        public const string WarningHex = "D9A61A";
+        public const string ErrorHex = "C86464";
+        public static readonly Color KappaGold = new(0.85f, 0.65f, 0.1f);
+
         /// <summary>Selection, headers, highlights. From Settings when set; EFT's own bronze otherwise.</summary>
         public static Color AccentColor =>
             ModSettings.Ready ? ModSettings.ParseColor(ModSettings.ColorAccent, DefaultAccentColor) : DefaultAccentColor;

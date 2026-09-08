@@ -46,7 +46,7 @@ namespace QuestTree.UI
             {
                 AuxLayout.AddHeading(parent, ref y, "Settings");
                 AuxLayout.AddText(parent, ref y,
-                    "<color=#C86464>Settings failed to initialise - check the BepInEx log.</color>", 24f);
+                    $"<color=#{GameStyle.ErrorHex}>Settings failed to initialise - check the BepInEx log.</color>", 24f);
                 return y + AuxLayout.Padding;
             }
 
@@ -212,7 +212,7 @@ namespace QuestTree.UI
 
             if (_kappaReloadResult != null)
             {
-                AuxLayout.AddText(column, ref y, $"<color=#D9A61A>{_kappaReloadResult}</color>", 20f, 11);
+                AuxLayout.AddText(column, ref y, $"<color=#{GameStyle.WarningHex}>{_kappaReloadResult}</color>", 20f, 11);
                 _kappaReloadResult = null;
             }
 

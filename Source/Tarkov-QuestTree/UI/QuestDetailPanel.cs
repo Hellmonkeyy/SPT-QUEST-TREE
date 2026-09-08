@@ -269,7 +269,7 @@ namespace QuestTree.UI
             {
                 // A malformed modded quest must not leave the panel empty and silent.
                 Plugin.LogSource?.LogWarning($"QuestTree: could not lay out the detail for '{node.Name}': {ex.Message}");
-                AuxLayout.AddWrapped(_content, "<color=#C86464>Could not show this quest - see the BepInEx log.</color>", 0f, ref y, width);
+                AuxLayout.AddWrapped(_content, $"<color=#{GameStyle.ErrorHex}>Could not show this quest - see the BepInEx log.</color>", 0f, ref y, width);
             }
 
             _content.sizeDelta = new Vector2(0f, y + Inset);
@@ -304,13 +304,13 @@ namespace QuestTree.UI
             if (node.Level > 0) AuxLayout.AddChip(_content, $"Lv {node.Level}", GameStyle.TextColor, ref chipX, y);
             if (!string.IsNullOrEmpty(node.LocationId) && !node.LocationId.Equals("any", StringComparison.OrdinalIgnoreCase))
                 AuxLayout.AddChip(_content, node.LocationId, GameStyle.TextColor, ref chipX, y);
-            if (node.IsKappaRequired) AuxLayout.AddChip(_content, "Kappa", new Color(0.85f, 0.65f, 0.1f), ref chipX, y);
+            if (node.IsKappaRequired) AuxLayout.AddChip(_content, "Kappa", GameStyle.KappaGold, ref chipX, y);
             y += 26f;
 
             // Faction- and edition-locked quests are shown rather than hidden, so this is what stops
             // one reading as a bug in the tree.
             if (node.UnobtainableReason != null)
-                AuxLayout.AddWrapped(_content, $"<color=#C86464>{node.UnobtainableReason}</color>", left, ref y, width);
+                AuxLayout.AddWrapped(_content, $"<color=#{GameStyle.ErrorHex}>{node.UnobtainableReason}</color>", left, ref y, width);
 
             // The single gate actually stopping you, computed server-side against your level,
             // loyalty and standing.

@@ -168,7 +168,7 @@ namespace QuestTree.UI
             boxRect.sizeDelta = new Vector2(ToggleSize, ToggleSize);
 
             var box = boxGo.GetComponent<Image>();
-            box.color = value ? new Color(0.85f, 0.65f, 0.1f) : new Color(1f, 1f, 1f, 0.15f);
+            box.color = value ? GameStyle.KappaGold : new Color(1f, 1f, 1f, 0.15f);
             GameStyle.ApplyPanel(box);
 
             var textGo = new GameObject("Label", typeof(RectTransform));
@@ -192,7 +192,7 @@ namespace QuestTree.UI
             go.GetComponent<Button>().onClick.AddListener(() =>
             {
                 current = !current;
-                box.color = current ? new Color(0.85f, 0.65f, 0.1f) : new Color(1f, 1f, 1f, 0.15f);
+                box.color = current ? GameStyle.KappaGold : new Color(1f, 1f, 1f, 0.15f);
                 onChanged(current);
             });
         }

@@ -215,7 +215,7 @@ namespace QuestTree.UI
             badgeRect.pivot = new Vector2(1f, 1f);
             badgeRect.anchoredPosition = new Vector2(-24f, -4f);
             badgeRect.sizeDelta = new Vector2(LayoutMetrics.KappaBadgeSize, LayoutMetrics.KappaBadgeSize);
-            badgeGo.GetComponent<Image>().color = new Color(0.85f, 0.65f, 0.1f);
+            badgeGo.GetComponent<Image>().color = GameStyle.KappaGold;
             badgeGo.GetComponent<Image>().raycastTarget = false;
             var badgeText = CreateText(badgeRect, "K", 11, FontStyles.Bold, Vector2.zero, Vector2.one, Vector2.zero);
             badgeText.alignment = TextAlignmentOptions.Center;

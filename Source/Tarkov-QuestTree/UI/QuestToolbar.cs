@@ -425,7 +425,7 @@ namespace QuestTree.UI
 
             // Says so in the UI, not just the log: without the companion server mod the tree can
             // only ever show quests already unlocked, which otherwise just looks like a short tree.
-            var source = _graph.HasFullQuestList ? "" : "  <color=#C86464>(unlocked only - server mod not found)</color>";
+            var source = _graph.HasFullQuestList ? "" : $"  <color=#{GameStyle.ErrorHex}>(unlocked only - server mod not found)</color>";
 
             if (matchingCount == 0)
             {

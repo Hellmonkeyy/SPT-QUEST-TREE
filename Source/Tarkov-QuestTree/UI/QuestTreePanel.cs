@@ -815,7 +815,7 @@ namespace QuestTree.UI
             handleRect.offsetMax = Vector2.zero;
 
             var handleImage = handleGo.GetComponent<Image>();
-            handleImage.color = new Color(0.85f, 0.65f, 0.1f, 0.9f);
+            handleImage.color = new Color(GameStyle.KappaGold.r, GameStyle.KappaGold.g, GameStyle.KappaGold.b, 0.9f);
 
             var scrollbar = barGo.GetComponent<Scrollbar>();
             scrollbar.direction = Scrollbar.Direction.LeftToRight;

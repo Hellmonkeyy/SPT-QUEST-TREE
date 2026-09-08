@@ -69,7 +69,7 @@ namespace QuestTree.UI
                 AuxLayout.AddSectionHeader(parent, ref y, "Quest items", x, width);
                 DoNextView.RefreshLink(parent, y, x, width, onRefresh);
                 AuxLayout.AddWrapped(parent,
-                    "<color=#C86464>Needs the server half of the mod.</color> It reads which items your " +
+                    $"<color=#{GameStyle.ErrorHex}>Needs the server half of the mod.</color> It reads which items your " +
                     "quests want and what is in your stash - the client cannot see either.", x, ref y, width);
                 return y + AuxLayout.Padding;
             }
@@ -105,7 +105,7 @@ namespace QuestTree.UI
             if (ordered.Count > MaxRows)
             {
                 AuxLayout.AddLabelAt(parent,
-                    $"<color=#D9A61A>Showing the first {MaxRows} of {ordered.Count} - the rest are items you already have covered or quests far off.</color>",
+                    $"<color=#{GameStyle.WarningHex}>Showing the first {MaxRows} of {ordered.Count} - the rest are items you already have covered or quests far off.</color>",
                     x, ref y, 20f, 11, width);
                 ordered = ordered.Take(MaxRows).ToList();
             }
@@ -217,7 +217,7 @@ namespace QuestTree.UI
             // Held but not found-in-raid is its own state: you own the thing and it still will not
             // count, which is exactly the case someone would otherwise get wrong.
             if (item.NeedsFoundInRaid && item.OwnedTotal > 0)
-                return $"<color=#D9A61A>[not FiR]</color>  {item.Name}  {held}/{item.Required}" +
+                return $"<color=#{GameStyle.WarningHex}>[not FiR]</color>  {item.Name}  {held}/{item.Required}" +
                        $"  <color=#FFFFFF60>{item.OwnedTotal} held, not found in raid</color>";
 
             return $"<color=#FFFFFF40>[need]</color>  {item.Name}  {held}/{item.Required}{fir}";
