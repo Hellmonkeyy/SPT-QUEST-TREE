@@ -133,6 +133,13 @@ namespace QuestTreeServer
         private readonly object _buildLock = new();
         private string? _cachedJson;
 
+        /// <summary>When a failed build may be tried again. An exception used to cache the empty
+        /// payload for the life of the server, so one transient fault at boot meant no pins
+        /// until a restart. A minute between attempts keeps a persistent fault from being
+        /// rebuilt on every request.</summary>
+        private DateTime _retryAfter = DateTime.MinValue;
+        private const int RetrySeconds = 60;
+
         /// <summary>Builds again now. Called by the zones route after a harvest lands, so the cost
         /// is paid on the client's fire-and-forget POST and never on a GET.</summary>
         public void Rebuild()
@@ -151,6 +158,9 @@ namespace QuestTreeServer
             {
                 if (_cachedJson != null) return _cachedJson;
 
+                var empty = new MapMarkerPayloadDto { Version = ModInfo.Version };
+                if (DateTime.UtcNow < _retryAfter) return JsonSerializer.Serialize(empty, SerializerOptions);
+
                 MapMarkerPayloadDto payload;
 
                 try
@@ -161,9 +171,11 @@ namespace QuestTreeServer
                 {
                     // Built during server startup (OnLoadAsync), where an exception would abort
                     // SPT's boot - one malformed modded quest is not worth the whole server. An
-                    // empty set means "no pins", which the client already handles.
+                    // empty set means "no pins", which the client already handles; it is answered,
+                    // not cached, so the next request after the pause tries again.
                     logger.Error($"Quest Tracker: could not build map markers - maps will show no pins: {ex}");
-                    payload = new MapMarkerPayloadDto { Version = ModInfo.Version };
+                    _retryAfter = DateTime.UtcNow.AddSeconds(RetrySeconds);
+                    return JsonSerializer.Serialize(empty, SerializerOptions);
                 }
 
                 _cachedJson = JsonSerializer.Serialize(payload, SerializerOptions);
@@ -198,51 +210,62 @@ namespace QuestTreeServer
                 if (string.IsNullOrWhiteSpace(internalName) || string.IsNullOrWhiteSpace(locationId))
                     continue;
 
-                var markers = new List<MapMarkerDto>();
-                wantedByLocation.TryGetValue(locationId, out var wanted);
-
-                // Harvested first: positions read from the loaded scene beat every other source,
-                // so a quest or item they cover is left out of the ones below.
-                var zones = zoneStore.TryGet(internalName!);
-                var harvested = HarvestedMarkersFor(locationId!, zones, questsByLocation, wanted, locale);
-                markers.AddRange(harvested.Markers);
-
-                // Item spawns need the map's loot table, so only maps with wanted items pay for
-                // reading one. The objective pins below do not, and must not be skipped with it:
-                // Factory and Labs have no find-item quests and used to lose every pin this way.
-                var remainingWanted = wanted?
-                    .Where(kv => !harvested.CoveredTemplates.Contains(kv.Key))
-                    .ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.OrdinalIgnoreCase);
-
-                if (remainingWanted != null && remainingWanted.Count > 0)
+                // The whole map under one guard: the loot-table read had its own, but the
+                // harvested, objective and GPS sources sat outside it, so one malformed quest
+                // on one map escaped to the whole-build catch and blanked every map's pins.
+                try
                 {
-                    try
+                    var markers = new List<MapMarkerDto>();
+                    wantedByLocation.TryGetValue(locationId, out var wanted);
+
+                    // Harvested first: positions read from the loaded scene beat every other
+                    // source, so a quest or item they cover is left out of the ones below.
+                    var zones = zoneStore.TryGet(internalName!);
+                    var harvested = HarvestedMarkersFor(locationId!, zones, questsByLocation, wanted, locale);
+                    markers.AddRange(harvested.Markers);
+
+                    // Item spawns need the map's loot table, so only maps with wanted items pay
+                    // for reading one. The objective pins below do not, and must not be skipped
+                    // with it: Factory and Labs have no find-item quests and used to lose every
+                    // pin this way.
+                    var remainingWanted = wanted?
+                        .Where(kv => !harvested.CoveredTemplates.Contains(kv.Key))
+                        .ToDictionary(kv => kv.Key, kv => kv.Value, StringComparer.OrdinalIgnoreCase);
+
+                    if (remainingWanted != null && remainingWanted.Count > 0)
                     {
-                        markers.AddRange(CollectMarkers(location!, remainingWanted));
+                        try
+                        {
+                            markers.AddRange(CollectMarkers(location!, remainingWanted));
+                        }
+                        catch (Exception ex)
+                        {
+                            // One unreadable loot table must not cost this map its other pins.
+                            logger.Warning($"Quest Tracker: no item markers for '{internalName}': {ex.Message}");
+                        }
                     }
-                    catch (Exception ex)
+
+                    markers.AddRange(ObjectiveMarkersFor(
+                        objectivesByMap[locationId!].Where(o => !harvested.CoveredQuestIds.Contains(o.QuestId))));
+                    markers.AddRange(GpsMarkersFor(locationId!, questsByLocation, locale, harvested.CoveredQuestIds));
+
+                    // A map with nothing to pin and nothing to locate stays out - a harvest file
+                    // alone (Ground Zero's other variant, aliased) is not a reason to list it.
+                    if (markers.Count == 0 && harvested.ZonesWanted.Count == 0) continue;
+
+                    payload.Maps.Add(new MapMarkerSetDto
                     {
-                        // One unreadable loot table must not cost every other map its markers.
-                        logger.Warning($"Quest Tracker: no item markers for '{internalName}': {ex.Message}");
-                    }
+                        LocationKey = internalName!,
+                        Markers = markers,
+                        ZonesWanted = harvested.ZonesWanted.Count,
+                        ZonesKnown = harvested.ZonesKnown.Count,
+                        HarvestedAt = zones?.HarvestedAt ?? ""
+                    });
                 }
-
-                markers.AddRange(ObjectiveMarkersFor(
-                    objectivesByMap[locationId!].Where(o => !harvested.CoveredQuestIds.Contains(o.QuestId))));
-                markers.AddRange(GpsMarkersFor(locationId!, questsByLocation, locale, harvested.CoveredQuestIds));
-
-                // A map with nothing to pin and nothing to locate stays out - a harvest file alone
-                // (Ground Zero's other variant, aliased) is not a reason to list it.
-                if (markers.Count == 0 && harvested.ZonesWanted.Count == 0) continue;
-
-                payload.Maps.Add(new MapMarkerSetDto
+                catch (Exception ex)
                 {
-                    LocationKey = internalName!,
-                    Markers = markers,
-                    ZonesWanted = harvested.ZonesWanted.Count,
-                    ZonesKnown = harvested.ZonesKnown.Count,
-                    HarvestedAt = zones?.HarvestedAt ?? ""
-                });
+                    logger.Warning($"Quest Tracker: no markers for '{internalName}' - {ex.Message}");
+                }
             }
 
             return payload;
@@ -282,40 +305,49 @@ namespace QuestTreeServer
 
             foreach (var quest in quests)
             {
-                var questId = quest.Id.ToString();
-                var questName = QuestPayloadBuilder.ResolveQuestName(quest, questId, locale);
-
-                foreach (var condition in quest.Conditions?.AvailableForFinish ?? [])
+                // Per quest, as the quest list builder guards: one modded quest with a malformed
+                // condition costs its own pins, not the map's.
+                try
                 {
-                    if (condition == null) continue;
+                    var questId = quest.Id.ToString();
+                    var questName = QuestPayloadBuilder.ResolveQuestName(quest, questId, locale);
 
-                    foreach (var zoneId in QuestPayloadBuilder.ZoneIdsOf(condition))
+                    foreach (var condition in quest.Conditions?.AvailableForFinish ?? [])
                     {
-                        result.ZonesWanted.Add(zoneId);
+                        if (condition == null) continue;
 
-                        if (triggersById == null || !triggersById.Contains(zoneId)) continue;
-                        result.ZonesKnown.Add(zoneId);
-
-                        foreach (var trigger in triggersById[zoneId])
+                        foreach (var zoneId in QuestPayloadBuilder.ZoneIdsOf(condition))
                         {
-                            // A zone made of several volumes is one place per volume, but two
-                            // volumes a metre apart are one pin.
-                            if (!seen.Add($"{questId}|{trigger.X:F0}|{trigger.Z:F0}")) continue;
+                            result.ZonesWanted.Add(zoneId);
 
-                            result.Markers.Add(new MapMarkerDto
+                            if (triggersById == null || !triggersById.Contains(zoneId)) continue;
+                            result.ZonesKnown.Add(zoneId);
+
+                            foreach (var trigger in triggersById[zoneId])
                             {
-                                ItemName = DescribeObjective(condition, questName, locale),
-                                Quests = new List<string> { questName },
-                                QuestIds = new List<string> { questId },
-                                Kind = ObjectiveKind,
-                                X = trigger.X,
-                                Y = trigger.Y,
-                                Z = trigger.Z
-                            });
+                                // A zone made of several volumes is one place per volume, but
+                                // two volumes a metre apart are one pin.
+                                if (!seen.Add($"{questId}|{trigger.X:F0}|{trigger.Z:F0}")) continue;
 
-                            result.CoveredQuestIds.Add(questId);
+                                result.Markers.Add(new MapMarkerDto
+                                {
+                                    ItemName = DescribeObjective(condition, questName, locale),
+                                    Quests = new List<string> { questName },
+                                    QuestIds = new List<string> { questId },
+                                    Kind = ObjectiveKind,
+                                    X = trigger.X,
+                                    Y = trigger.Y,
+                                    Z = trigger.Z
+                                });
+
+                                result.CoveredQuestIds.Add(questId);
+                            }
                         }
                     }
+                }
+                catch (Exception ex)
+                {
+                    logger.Warning($"Quest Tracker: skipped a quest's zones on '{locationId}': {ex.Message}");
                 }
             }
 
@@ -403,8 +435,19 @@ namespace QuestTreeServer
                 var conditions = quest.Conditions?.AvailableForFinish;
                 if (conditions == null) continue;
 
-                var id = quest.Id.ToString();
-                var name = QuestPayloadBuilder.ResolveQuestName(quest, id, locale);
+                string id;
+                string name;
+                try
+                {
+                    id = quest.Id.ToString();
+                    name = QuestPayloadBuilder.ResolveQuestName(quest, id, locale);
+                }
+                catch (Exception ex)
+                {
+                    // One quest, not the item list for every map.
+                    logger.Warning($"Quest Tracker: skipped a quest's wanted items: {ex.Message}");
+                    continue;
+                }
 
                 foreach (var condition in conditions)
                 {

@@ -71,6 +71,11 @@ namespace QuestTreeServer
         private string? _cachedJson;
         private Dictionary<string, string>? _locationIdToKey;
 
+        /// <summary>When a failed build may be tried again - see MapMarkerPayloadBuilder for why
+        /// a failure is answered but not cached.</summary>
+        private DateTime _retryAfter = DateTime.MinValue;
+        private const int RetrySeconds = 60;
+
         /// <summary>Serialized once and cached: the quest database does not change while the server
         /// is running, and this payload covers every quest in the game.</summary>
         public string GetPayloadJson()
@@ -80,6 +85,7 @@ namespace QuestTreeServer
             lock (_buildLock)
             {
                 if (_cachedJson != null) return _cachedJson;
+                if (DateTime.UtcNow < _retryAfter) return JsonSerializer.Serialize(new QuestPayloadDto(), SerializerOptions);
 
                 QuestPayloadDto payload;
 
@@ -89,10 +95,12 @@ namespace QuestTreeServer
                 }
                 catch (Exception ex)
                 {
-                    // Now built at startup, where a throw would abort SPT's boot. An empty list is a
-                    // valid payload the client already degrades on.
+                    // Now built at startup, where a throw would abort SPT's boot. An empty list is
+                    // a valid payload the client already degrades on - answered, not cached, so a
+                    // fault at boot does not mean an empty tree until the server restarts.
                     logger.Error($"Quest Tracker: could not build the quest list - the tree will be empty: {ex}");
-                    payload = new QuestPayloadDto();
+                    _retryAfter = DateTime.UtcNow.AddSeconds(RetrySeconds);
+                    return JsonSerializer.Serialize(new QuestPayloadDto(), SerializerOptions);
                 }
 
                 return _cachedJson = JsonSerializer.Serialize(payload, SerializerOptions);
