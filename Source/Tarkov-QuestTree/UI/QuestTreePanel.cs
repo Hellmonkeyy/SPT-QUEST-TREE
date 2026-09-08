@@ -892,14 +892,8 @@ namespace QuestTree.UI
         private void BuildTabs()
         {
             // The tabs' own container, not _tabRow - clearing the row itself would destroy the
-            // scroll content object along with the tabs. Detached before the deferred Destroy,
-            // as the aux views do, so the outgoing tabs do not draw under the new ones for a frame.
-            for (var i = _tabContent.childCount - 1; i >= 0; i--)
-            {
-                var child = _tabContent.GetChild(i);
-                child.SetParent(null);
-                Destroy(child.gameObject);
-            }
+            // scroll content object along with the tabs.
+            AuxLayout.ClearChildren(_tabContent);
             _tabBackgrounds.Clear();
             _tabStyles.Clear();
             _tabCursorX = 8f;
@@ -1331,18 +1325,10 @@ namespace QuestTree.UI
             _auxPanel.gameObject.SetActive(true);
             _auxContent.anchoredPosition = Vector2.zero;
 
-            // Detached before destroying, not just destroyed: Destroy is deferred to the end of the
-            // frame, so the outgoing rows would otherwise draw over the incoming ones for a frame.
-            // That was invisible when this ran once per tab click, but the Maps dropdown rebuilds
-            // the view on every open, close and select, where the ghost frame reads as flicker.
-            // Walked backwards by index rather than with foreach: detaching a child shifts every
-            // later sibling down, so enumerating forwards would skip every other row.
-            for (var i = _auxContent.childCount - 1; i >= 0; i--)
-            {
-                var child = _auxContent.GetChild(i);
-                child.SetParent(null);
-                Destroy(child.gameObject);
-            }
+            // Detached before destroying (see AuxLayout.ClearChildren): that was invisible when
+            // this ran once per tab click, but the Maps dropdown rebuilds the view on every open,
+            // close and select, where the ghost frame reads as flicker.
+            AuxLayout.ClearChildren(_auxContent);
 
             var size = AuxViewportSize();
 

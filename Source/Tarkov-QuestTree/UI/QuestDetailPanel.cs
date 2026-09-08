@@ -243,14 +243,7 @@ namespace QuestTree.UI
 
             _detailNode = node;
 
-            // Detached before destroying: Destroy is deferred to the end of the frame, and the old
-            // rows would otherwise draw over the new ones for a frame.
-            for (var i = _content.childCount - 1; i >= 0; i--)
-            {
-                var child = _content.GetChild(i);
-                child.SetParent(null);
-                UnityEngine.Object.Destroy(child.gameObject);
-            }
+            AuxLayout.ClearChildren(_content);
 
             var profile = QuestDataClient.GetProfile();
 

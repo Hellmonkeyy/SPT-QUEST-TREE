@@ -19,6 +19,21 @@ namespace QuestTree.UI
     {
         public const float Padding = 16f;
 
+        /// <summary>Removes every child of a rebuilt container. Detached before the deferred
+        /// Destroy, so the outgoing rows do not draw over the incoming ones for a frame; walked
+        /// backwards because detaching shifts every later sibling down. Was three copies.</summary>
+        public static void ClearChildren(Transform parent)
+        {
+            if (parent == null) return;
+
+            for (var i = parent.childCount - 1; i >= 0; i--)
+            {
+                var child = parent.GetChild(i);
+                child.SetParent(null);
+                UnityEngine.Object.Destroy(child.gameObject);
+            }
+        }
+
         /// <summary>The list views stop stretching their rows past this - a 960px row of 12px text
         /// is already more than a line should be. Was a private copy in three views.</summary>
         public const float MaxContentWidth = 960f;
