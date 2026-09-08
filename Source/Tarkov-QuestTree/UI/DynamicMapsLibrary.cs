@@ -98,14 +98,31 @@ namespace QuestTree.UI
             private bool _spriteFailed;
 
             /// <summary>Rasterised on first use and kept - tessellating a 340KB SVG is not something
-            /// to repeat every time a floor is switched back to.</summary>
+            /// to repeat every time a floor is switched back to. Kept for the most recently used
+            /// few, not forever: each is a mesh of up to 65,500 vertices, and a session that
+            /// browsed every floor of every map held all of them for the life of the process.</summary>
             public Sprite GetSprite()
             {
-                if (_sprite != null || _spriteFailed) return _sprite;
+                if (_sprite != null)
+                {
+                    NoteSpriteUse(this);
+                    return _sprite;
+                }
+
+                if (_spriteFailed) return null;
 
                 _sprite = LoadSvgSprite(ImagePath, this);
                 _spriteFailed = _sprite == null;
+                if (_sprite != null) NoteSpriteUse(this);
                 return _sprite;
+            }
+
+            /// <summary>Frees the rasterised floor; the next GetSprite tessellates again.</summary>
+            internal void ReleaseSprite()
+            {
+                if (_sprite != null) UnityEngine.Object.Destroy(_sprite);
+                _sprite = null;
+                _spriteFailed = false;
             }
 
             public bool Covers(float x, float y, float height)
@@ -185,6 +202,24 @@ namespace QuestTree.UI
 
         private static List<MapEntry> _maps;
 
+        /// <summary>Floors whose sprite is built, oldest use first. Past the ceiling the least
+        /// recently viewed is released; the one on screen was just used, so it is never the one.</summary>
+        private const int MaxCachedSprites = 6;
+        private static readonly List<MapLayer> _spriteUse = new();
+
+        private static void NoteSpriteUse(MapLayer layer)
+        {
+            _spriteUse.Remove(layer);
+            _spriteUse.Add(layer);
+
+            while (_spriteUse.Count > MaxCachedSprites)
+            {
+                var oldest = _spriteUse[0];
+                _spriteUse.RemoveAt(0);
+                oldest.ReleaseSprite();
+            }
+        }
+
         /// <summary>True when DynamicMaps is installed and at least one map was readable.</summary>
         public static bool Available => Maps.Count > 0;
 
@@ -223,6 +258,8 @@ namespace QuestTree.UI
                 if (_questPin != null || _questPinFailed) return _questPin;
                 _questPinFailed = true;
 
+                Texture2D texture = null;
+
                 try
                 {
                     var folder = ModFolder;
@@ -231,8 +268,13 @@ namespace QuestTree.UI
                     var path = Path.Combine(Path.Combine(folder, MarkersFolder), "quest.png");
                     if (!File.Exists(path)) return null;
 
-                    var texture = new Texture2D(2, 2, TextureFormat.RGBA32, false);
-                    if (!texture.LoadImage(File.ReadAllBytes(path))) return null;
+                    texture = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+                    if (!texture.LoadImage(File.ReadAllBytes(path)))
+                    {
+                        // The texture is a native allocation; a failed decode used to leave it.
+                        UnityEngine.Object.Destroy(texture);
+                        return null;
+                    }
 
                     texture.filterMode = FilterMode.Bilinear;
 
@@ -244,6 +286,7 @@ namespace QuestTree.UI
                 }
                 catch (Exception ex)
                 {
+                    if (texture != null) UnityEngine.Object.Destroy(texture);
                     Plugin.LogSource?.LogWarning(
                         $"QuestTree: could not load the quest pin icon ({ex.Message}) - using a glyph.");
                     return null;
@@ -503,7 +546,7 @@ namespace QuestTree.UI
                 Mathf.Abs(sprite.rect.width - layer.Viewport.width) < 1f &&
                 Mathf.Abs(sprite.rect.height - layer.Viewport.height) < 1f;
 
-            Plugin.LogSource?.LogInfo(
+            Plugin.LogSource?.LogDebug(
                 $"QuestTree map geometry [{layer.Name}] " +
                 $"viewBox={Describe(layer.Viewport)} " +
                 $"spriteRect={Describe(sprite.rect)} " +
