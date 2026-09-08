@@ -108,33 +108,43 @@ namespace QuestTreeServer
             foreach (var condition in conditions)
             {
                 if (condition == null) continue;
-                if (!QuestPayloadBuilder.IsItemCondition(condition.ConditionType)) continue;
 
-                var templates = QuestPayloadBuilder.TargetIds(condition.Target).ToList();
-                if (templates.Count == 0) continue;
-
-                // A condition can accept any one of several templates (rare, but it happens);
-                // ownership is the sum across all of them, and the name comes from the first.
-                var foundInRaid = 0;
-                var total = 0;
-
-                foreach (var template in templates)
+                // Per condition: one malformed Collector condition used to empty the whole
+                // checklist, which the client then reported as "server half missing".
+                try
                 {
-                    if (!owned.TryGetValue(template, out var counts)) continue;
-                    foundInRaid += counts.FoundInRaid;
-                    total += counts.Total;
+                    if (!QuestPayloadBuilder.IsItemCondition(condition.ConditionType)) continue;
+
+                    var templates = QuestPayloadBuilder.TargetIds(condition.Target).ToList();
+                    if (templates.Count == 0) continue;
+
+                    // A condition can accept any one of several templates (rare, but it happens);
+                    // ownership is the sum across all of them, and the name comes from the first.
+                    var foundInRaid = 0;
+                    var total = 0;
+
+                    foreach (var template in templates)
+                    {
+                        if (!owned.TryGetValue(template, out var counts)) continue;
+                        foundInRaid += counts.FoundInRaid;
+                        total += counts.Total;
+                    }
+
+                    payload.Items.Add(new KappaItemDto
+                    {
+                        ConditionId = condition.Id.ToString(),
+                        Template = templates[0],
+                        Name = ResolveItemName(templates[0], locale),
+                        Required = Math.Max(1, Numbers.ToCount(condition.Value, 1)),
+                        OwnedFoundInRaid = foundInRaid,
+                        OwnedTotal = total,
+                        HandedIn = completedConditions.Contains(condition.Id.ToString())
+                    });
                 }
-
-                payload.Items.Add(new KappaItemDto
+                catch (Exception ex)
                 {
-                    ConditionId = condition.Id.ToString(),
-                    Template = templates[0],
-                    Name = ResolveItemName(templates[0], locale),
-                    Required = Math.Max(1, (int)(condition.Value ?? 1d)),
-                    OwnedFoundInRaid = foundInRaid,
-                    OwnedTotal = total,
-                    HandedIn = completedConditions.Contains(condition.Id.ToString())
-                });
+                    logger.Warning($"Quest Tracker: skipped a Collector condition ({condition.Id}): {ex.Message}");
+                }
             }
 
             logger.Debug(

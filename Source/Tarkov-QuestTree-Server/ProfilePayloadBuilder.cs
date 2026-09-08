@@ -56,19 +56,29 @@ namespace QuestTreeServer
             payload.Side = profile.Info?.Side ?? "";
             payload.GameVersion = profile.Info?.GameVersion ?? "";
 
+            // Each entry under its own guard, like the lock reasons below: one odd trader or
+            // counter record in a profile used to cost the whole payload - every level, loyalty
+            // and progress number on the client - rather than itself.
             if (profile.TradersInfo != null)
             {
                 foreach (var (traderId, info) in profile.TradersInfo)
                 {
                     if (info == null) continue;
 
-                    payload.Traders.Add(new TraderStateDto
+                    try
                     {
-                        Id = traderId.ToString(),
-                        LoyaltyLevel = info.LoyaltyLevel ?? 0,
-                        Standing = info.Standing ?? 0d,
-                        Unlocked = info.Unlocked ?? false
-                    });
+                        payload.Traders.Add(new TraderStateDto
+                        {
+                            Id = traderId.ToString(),
+                            LoyaltyLevel = info.LoyaltyLevel ?? 0,
+                            Standing = info.Standing ?? 0d,
+                            Unlocked = info.Unlocked ?? false
+                        });
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.Warning($"Quest Tracker: skipped a trader record in the profile: {ex.Message}");
+                    }
                 }
             }
 
@@ -79,7 +89,15 @@ namespace QuestTreeServer
                 foreach (var (conditionId, counter) in profile.TaskConditionCounters)
                 {
                     if (counter == null) continue;
-                    payload.ConditionProgress[conditionId.ToString()] = counter.Value ?? 0d;
+
+                    try
+                    {
+                        payload.ConditionProgress[conditionId.ToString()] = counter.Value ?? 0d;
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.Warning($"Quest Tracker: skipped a condition counter in the profile: {ex.Message}");
+                    }
                 }
             }
 
@@ -115,23 +133,31 @@ namespace QuestTreeServer
                 var conditions = quest?.Conditions?.AvailableForFinish;
                 if (conditions == null) continue;
 
-                foreach (var condition in conditions)
+                try
                 {
-                    if (condition == null) continue;
-                    if (!QuestPayloadBuilder.IsItemCondition(condition.ConditionType)) continue;
-
-                    foreach (var template in QuestPayloadBuilder.TargetIds(condition.Target))
+                    foreach (var condition in conditions)
                     {
-                        if (string.IsNullOrWhiteSpace(template)) continue;
-                        if (payload.ItemsOwned.ContainsKey(template)) continue;
-                        if (!owned.TryGetValue(template, out var held)) continue;
+                        if (condition == null) continue;
+                        if (!QuestPayloadBuilder.IsItemCondition(condition.ConditionType)) continue;
 
-                        payload.ItemsOwned[template] = new HeldItemDto
+                        foreach (var template in QuestPayloadBuilder.TargetIds(condition.Target))
                         {
-                            FoundInRaid = held.FoundInRaid,
-                            Total = held.Total
-                        };
+                            if (string.IsNullOrWhiteSpace(template)) continue;
+                            if (payload.ItemsOwned.ContainsKey(template)) continue;
+                            if (!owned.TryGetValue(template, out var held)) continue;
+
+                            payload.ItemsOwned[template] = new HeldItemDto
+                            {
+                                FoundInRaid = held.FoundInRaid,
+                                Total = held.Total
+                            };
+                        }
                     }
+                }
+                catch (Exception ex)
+                {
+                    // One quest's odd condition, not the ownership of every item.
+                    logger.Warning($"Quest Tracker: skipped a quest's item ownership ({quest?.Id}): {ex.Message}");
                 }
             }
         }
@@ -203,7 +229,7 @@ namespace QuestTreeServer
             {
                 if (questHelper.DoesPlayerLevelFulfilCondition(playerLevel, condition)) continue;
 
-                var required = (int)(condition.Value ?? 0d);
+                var required = Numbers.ToCount(condition.Value);
                 return new LockReasonDto
                 {
                     Kind = "Level",
@@ -220,8 +246,8 @@ namespace QuestTreeServer
                 return new LockReasonDto
                 {
                     Kind = "Loyalty",
-                    Detail = $"Requires loyalty level {(int)(condition.Value ?? 0d)}",
-                    RequiredValue = (int)(condition.Value ?? 0d),
+                    Detail = $"Requires loyalty level {Numbers.ToCount(condition.Value)}",
+                    RequiredValue = Numbers.ToCount(condition.Value),
                     TraderId = ResolveConditionTrader(condition)
                 };
             }

@@ -48,7 +48,7 @@ namespace QuestTreeServer
                 if (string.IsNullOrEmpty(template)) continue;
 
                 // A stack of one carries no StackObjectsCount, so absent means one.
-                var count = (int)(item.Upd?.StackObjectsCount ?? 1d);
+                var count = Numbers.ToCount(item.Upd?.StackObjectsCount, 1);
                 if (count < 1) count = 1;
 
                 var foundInRaid = item.Upd?.SpawnedInSession == true ? count : 0;

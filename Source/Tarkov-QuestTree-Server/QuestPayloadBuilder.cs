@@ -285,7 +285,7 @@ namespace QuestTreeServer
                 if (!string.Equals(condition.ConditionType, LevelConditionType, StringComparison.OrdinalIgnoreCase))
                     continue;
 
-                var value = (int)(condition.Value ?? 0d);
+                var value = Numbers.ToCount(condition.Value);
                 if (value > level) level = value;
             }
 
@@ -347,7 +347,7 @@ namespace QuestTreeServer
                     TargetItems = IsItemCondition(condition.ConditionType)
                         ? TargetIds(condition.Target).ToList()
                         : new List<string>(),
-                    Count = (int)(condition.Value ?? 0d),
+                    Count = Numbers.ToCount(condition.Value),
                     FoundInRaid = condition.OnlyFoundInRaid ?? false,
                     ZoneIds = ZoneIdsOf(condition).Distinct(StringComparer.OrdinalIgnoreCase).ToList()
                 });
