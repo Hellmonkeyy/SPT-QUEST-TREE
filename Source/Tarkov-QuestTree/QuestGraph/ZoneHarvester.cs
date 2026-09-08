@@ -48,8 +48,17 @@ namespace QuestTree.QuestGraph
 
             yield return new WaitForSeconds(SecondPassDelay);
 
-            var second = TryCollect(gameWorld, previous: request, out _);
+            var second = TryCollect(gameWorld, previous: request, out var secondMap);
             if (second == null) yield break;
+
+            // A transit (Shoreline to Labyrinth) can swap the scene under a GameWorld that
+            // survives it. TryCollect has then started over on the new map; what it holds is
+            // that map's first pass, not a delta on the old one.
+            if (!string.Equals(secondMap, map, StringComparison.OrdinalIgnoreCase))
+            {
+                Post(second, "first pass after a transit");
+                yield break;
+            }
 
             var newZones = second.Triggers.Count - request.Triggers.Count;
             var newItems = second.QuestItems.Count - request.QuestItems.Count;
@@ -82,6 +91,15 @@ namespace QuestTree.QuestGraph
 
                 var triggers = new Dictionary<string, HarvestedTrigger>(StringComparer.Ordinal);
                 var items = new Dictionary<string, HarvestedQuestItem>(StringComparer.Ordinal);
+
+                // The earlier pass belongs to the map that was loaded then. Unioning it into a
+                // read of a different map would file one map's zones under another's name on the
+                // server, where harvested positions outrank every other source.
+                if (previous != null && !string.Equals(previous.Map, map, StringComparison.OrdinalIgnoreCase))
+                {
+                    Plugin.LogSource?.LogInfo($"QuestTree: map changed from {previous.Map} to {map} between passes - starting over.");
+                    previous = null;
+                }
 
                 if (previous != null)
                 {
@@ -140,8 +158,10 @@ namespace QuestTree.QuestGraph
                 if (!(obj is TriggerWithId trigger) || string.IsNullOrEmpty(trigger.Id)) continue;
 
                 var position = trigger.transform.position;
+                if (!IsFinite(position)) continue; // a NaN would fault the server's JSON reader before any guard
+
                 var collider = trigger.GetComponent<Collider>();
-                var extents = collider != null ? collider.bounds.extents : Vector3.zero;
+                var extents = collider != null && IsFinite(collider.bounds.extents) ? collider.bounds.extents : Vector3.zero;
 
                 var harvested = new HarvestedTrigger
                 {
@@ -175,6 +195,7 @@ namespace QuestTree.QuestGraph
                 if (string.IsNullOrEmpty(lootItem.TemplateId)) continue;
 
                 var position = lootItem.transform.position;
+                if (!IsFinite(position)) continue;
 
                 var harvested = new HarvestedQuestItem
                 {
@@ -191,6 +212,13 @@ namespace QuestTree.QuestGraph
             }
         }
 
+        /// <summary>A position a destroyed or exploded object can report. Newtonsoft writes NaN
+        /// and Infinity as strings, and the server's System.Text.Json refuses those in a float,
+        /// throwing inside SPT's deserializer where none of this mod's guards can reach.</summary>
+        private static bool IsFinite(Vector3 p) =>
+            !float.IsNaN(p.x) && !float.IsNaN(p.y) && !float.IsNaN(p.z) &&
+            !float.IsInfinity(p.x) && !float.IsInfinity(p.y) && !float.IsInfinity(p.z);
+
         /// <summary>Several triggers can share an id (a zone made of more than one volume), so the
         /// key is id plus rounded position - the same de-duplication the server draws with.</summary>
         private static string TriggerKey(HarvestedTrigger t) => $"{t.Id}|{t.X:F0}|{t.Y:F0}|{t.Z:F0}";
@@ -202,24 +230,15 @@ namespace QuestTree.QuestGraph
         /// RequestHandler's synchronous calls would block Unity's main thread if used here.</summary>
         private static void Post(ZoneHarvestRequest request, string label)
         {
-            string json;
-
-            try
-            {
-                json = JsonConvert.SerializeObject(request);
-            }
-            catch (Exception ex)
-            {
-                Plugin.LogSource?.LogWarning($"QuestTree: could not serialize the zone harvest ({ex.Message}).");
-                return;
-            }
-
             var map = request.Map;
 
             Task.Run(async () =>
             {
                 try
                 {
+                    // Serialised here, off the main thread: a few hundred KB of JSON is a frame
+                    // hitch in a raid, and the request object is not touched again after this.
+                    var json = JsonConvert.SerializeObject(request);
                     var reply = await RequestHandler.PostJsonAsync(Route, json);
                     Plugin.LogSource?.LogInfo($"QuestTree: zones for {map} sent to the server ({label}): {Excerpt(reply)}");
 

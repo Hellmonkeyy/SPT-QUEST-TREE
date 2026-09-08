@@ -165,14 +165,15 @@ namespace QuestTree.QuestGraph
         private static MapMarkerPayloadDto _markers;
         private static bool _markersAttempted;
 
+        /// <summary>Set from the harvester's pool thread, read and cleared on the main thread by
+        /// GetMapMarkers. The one field in this class touched off the main thread, so it is the
+        /// one field that is volatile; the pair above is only ever written on the main thread.</summary>
+        private static volatile bool _markersStale;
+
         /// <summary>Drops the cached markers so the next Maps tab build re-fetches. Called by the
         /// zone harvester once the server has accepted a raid's zones and rebuilt its markers -
-        /// the one event that changes them while the server is up.</summary>
-        public static void InvalidateMapMarkers()
-        {
-            _markers = null;
-            _markersAttempted = false;
-        }
+        /// the one event that changes them while the server is up. Safe from any thread.</summary>
+        public static void InvalidateMapMarkers() => _markersStale = true;
 
         /// <summary>
         /// Quest-item spawn markers, keyed by map.
@@ -184,6 +185,13 @@ namespace QuestTree.QuestGraph
         /// </summary>
         public static MapMarkerPayloadDto GetMapMarkers()
         {
+            if (_markersStale)
+            {
+                _markersStale = false;
+                _markers = null;
+                _markersAttempted = false;
+            }
+
             if (_markersAttempted) return _markers;
             _markersAttempted = true;
 
