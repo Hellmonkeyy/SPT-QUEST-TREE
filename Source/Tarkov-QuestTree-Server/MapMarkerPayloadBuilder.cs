@@ -124,11 +124,6 @@ namespace QuestTreeServer
             }
         }
 
-        private static readonly JsonSerializerOptions SerializerOptions = new()
-        {
-            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-            DefaultIgnoreCondition = JsonIgnoreCondition.Never
-        };
 
         private readonly object _buildLock = new();
         private string? _cachedJson;
@@ -159,7 +154,7 @@ namespace QuestTreeServer
                 if (_cachedJson != null) return _cachedJson;
 
                 var empty = new MapMarkerPayloadDto { Version = ModInfo.Version };
-                if (DateTime.UtcNow < _retryAfter) return JsonSerializer.Serialize(empty, SerializerOptions);
+                if (DateTime.UtcNow < _retryAfter) return JsonSerializer.Serialize(empty, WireJson.Options);
 
                 MapMarkerPayloadDto payload;
 
@@ -175,10 +170,10 @@ namespace QuestTreeServer
                     // not cached, so the next request after the pause tries again.
                     logger.Error($"Quest Tracker: could not build map markers - maps will show no pins: {ex}");
                     _retryAfter = DateTime.UtcNow.AddSeconds(RetrySeconds);
-                    return JsonSerializer.Serialize(empty, SerializerOptions);
+                    return JsonSerializer.Serialize(empty, WireJson.Options);
                 }
 
-                _cachedJson = JsonSerializer.Serialize(payload, SerializerOptions);
+                _cachedJson = JsonSerializer.Serialize(payload, WireJson.Options);
 
                 var items = payload.Maps.Sum(m => m.Markers.Count(x => x.Kind == ItemKind));
                 var objectives = payload.Maps.Sum(m => m.Markers.Count(x => x.Kind == ObjectiveKind));

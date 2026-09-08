@@ -43,11 +43,6 @@ namespace QuestTreeServer
         /// <summary>Condition type naming another quest as a prerequisite.</summary>
         private const string QuestConditionType = "Quest";
 
-        private static readonly JsonSerializerOptions SerializerOptions = new()
-        {
-            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-            DefaultIgnoreCondition = JsonIgnoreCondition.Never
-        };
 
         /// <summary>Guards the two fields below. This is a DI singleton serving concurrent HTTP
         /// requests, and while the unguarded race was benign - two callers would at worst each read
@@ -65,7 +60,7 @@ namespace QuestTreeServer
         private bool _canonicalReadFailed;
 
         public string GetPayloadJson(MongoId sessionId) =>
-            JsonSerializer.Serialize(Build(sessionId), SerializerOptions);
+            JsonSerializer.Serialize(Build(sessionId), WireJson.Options);
 
         private KappaPayloadDto Build(MongoId sessionId)
         {

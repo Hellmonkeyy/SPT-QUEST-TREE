@@ -15,6 +15,11 @@ namespace QuestTreeServer
     /// </summary>
     public sealed class ZoneHarvestRequest : IRequestData
     {
+        /// <summary>The shape the client believes it is sending. 0 from a client older than
+        /// 1.8.1, which sent no version at all - the one payload in the system that did not.</summary>
+        [JsonPropertyName("schemaVersion")]
+        public int SchemaVersion { get; set; }
+
         /// <summary>The map's internal name ("bigmap"), as GameWorld reports it.</summary>
         [JsonPropertyName("map")]
         public string Map { get; set; } = "";
@@ -90,12 +95,21 @@ namespace QuestTreeServer
         public List<HarvestedQuestItem> QuestItems { get; set; } = new();
     }
 
-    /// <summary>What POST /questtree/zones answers.</summary>
+    /// <summary>What POST /questtree/zones answers. Named explicitly like the request, for the
+    /// reason at the top of the file; it only ever escaped that rule by being serialized with
+    /// the camelCase options.</summary>
     public sealed class ZoneHarvestResponse
     {
+        [JsonPropertyName("ok")]
         public bool Ok { get; set; }
+
+        [JsonPropertyName("zones")]
         public int Zones { get; set; }
+
+        [JsonPropertyName("questItems")]
         public int QuestItems { get; set; }
+
+        [JsonPropertyName("message")]
         public string Message { get; set; } = "";
     }
 }

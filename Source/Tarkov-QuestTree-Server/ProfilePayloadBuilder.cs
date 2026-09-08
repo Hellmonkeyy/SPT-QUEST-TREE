@@ -34,14 +34,9 @@ namespace QuestTreeServer
         ProfileHelper profileHelper,
         QuestHelper questHelper)
     {
-        private static readonly JsonSerializerOptions SerializerOptions = new()
-        {
-            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-            DefaultIgnoreCondition = JsonIgnoreCondition.Never
-        };
 
         public string GetPayloadJson(MongoId sessionId) =>
-            JsonSerializer.Serialize(Build(sessionId), SerializerOptions);
+            JsonSerializer.Serialize(Build(sessionId), WireJson.Options);
 
         private ProfilePayloadDto Build(MongoId sessionId)
         {

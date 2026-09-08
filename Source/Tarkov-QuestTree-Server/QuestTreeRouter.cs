@@ -37,11 +37,6 @@ namespace QuestTreeServer
         /// triggers. Anything past this is not a raid, it is a bug or a prank.</summary>
         private const int MaxHarvestEntries = 20_000;
 
-        private static readonly JsonSerializerOptions FallbackOptions = new()
-        {
-            PropertyNamingPolicy = JsonNamingPolicy.CamelCase
-        };
-
         private static IEnumerable<RouteAction> BuildRoutes(
             ISptLogger<QuestTreeRouter> logger, QuestPayloadBuilder payloadBuilder,
             KappaPayloadBuilder kappaBuilder, ProfilePayloadBuilder profileBuilder,
@@ -94,7 +89,7 @@ namespace QuestTreeServer
             ISptLogger<QuestTreeRouter> logger, ZoneHarvestRequest? request, ZoneStore zoneStore,
             MapMarkerPayloadBuilder markerBuilder)
         {
-            static string Reply(ZoneHarvestResponse r) => JsonSerializer.Serialize(r, FallbackOptions);
+            static string Reply(ZoneHarvestResponse r) => JsonSerializer.Serialize(r, WireJson.Options);
 
             string Reject(string reason)
             {
@@ -146,7 +141,7 @@ namespace QuestTreeServer
             catch (Exception ex)
             {
                 logger.Error($"Quest Tracker: {route} failed - answering with an empty payload: {ex}");
-                return new ValueTask<string>(JsonSerializer.Serialize(fallback(), FallbackOptions));
+                return new ValueTask<string>(JsonSerializer.Serialize(fallback(), WireJson.Options));
             }
         }
     }

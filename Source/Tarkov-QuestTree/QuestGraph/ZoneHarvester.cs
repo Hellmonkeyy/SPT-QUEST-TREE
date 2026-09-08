@@ -240,7 +240,25 @@ namespace QuestTree.QuestGraph
                     // hitch in a raid, and the request object is not touched again after this.
                     var json = JsonConvert.SerializeObject(request);
                     var reply = await RequestHandler.PostJsonAsync(Route, json);
-                    Plugin.LogSource?.LogInfo($"QuestTree: zones for {map} sent to the server ({label}): {Excerpt(reply)}");
+
+                    var response = string.IsNullOrEmpty(reply) ? null : JsonConvert.DeserializeObject<ZoneHarvestResponse>(reply);
+                    if (response == null)
+                    {
+                        Plugin.LogSource?.LogInfo($"QuestTree: zones for {map} sent ({label}), but the reply was not the server half's - {Excerpt(reply)}");
+                        return;
+                    }
+
+                    if (!response.Ok)
+                    {
+                        // Said at Warning: the raid's zones were read and thrown away, and the
+                        // reason is the server's to give.
+                        Plugin.LogSource?.LogWarning($"QuestTree: the server refused the zones for {map} ({label}): {response.Message}");
+                        return;
+                    }
+
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: zones for {map} sent to the server ({label}) - it now holds {response.Zones} zones and " +
+                        $"{response.QuestItems} quest items for it ({response.Message}).");
 
                     // The server rebuilt its markers; the next Maps tab build must ask again.
                     QuestDataClient.InvalidateMapMarkers();

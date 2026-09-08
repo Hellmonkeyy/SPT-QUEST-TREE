@@ -27,6 +27,10 @@ namespace QuestTree.QuestGraph
         [JsonProperty("schemaVersion")]
         public int SchemaVersion { get; set; }
 
+        /// <summary>The server half's version; empty from a server older than 1.8.1.</summary>
+        [JsonProperty("modVersion")]
+        public string ModVersion { get; set; }
+
         [JsonProperty("quests")]
         public List<QuestDto> Quests { get; set; }
     }

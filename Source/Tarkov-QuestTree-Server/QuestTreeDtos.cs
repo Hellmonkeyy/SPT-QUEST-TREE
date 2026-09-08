@@ -20,6 +20,10 @@ namespace QuestTreeServer
         /// v2 (1.8.0): ObjectiveDto.FoundInRaid.</summary>
         public int SchemaVersion { get; set; } = 2;
 
+        /// <summary>The server half's version, so a mismatch warning on the client can name it -
+        /// the other three payloads already did.</summary>
+        public string ModVersion { get; set; } = "";
+
         public List<QuestDto> Quests { get; set; } = new();
     }
 

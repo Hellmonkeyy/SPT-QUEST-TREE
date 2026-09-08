@@ -61,11 +61,6 @@ namespace QuestTreeServer
         /// <summary>Key into Quest.Rewards for the rewards paid on handing the quest in.</summary>
         private const string SuccessRewardKey = "Success";
 
-        private static readonly JsonSerializerOptions SerializerOptions = new()
-        {
-            PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-            DefaultIgnoreCondition = JsonIgnoreCondition.Never
-        };
 
         private readonly object _buildLock = new();
         private string? _cachedJson;
@@ -85,7 +80,7 @@ namespace QuestTreeServer
             lock (_buildLock)
             {
                 if (_cachedJson != null) return _cachedJson;
-                if (DateTime.UtcNow < _retryAfter) return JsonSerializer.Serialize(new QuestPayloadDto(), SerializerOptions);
+                if (DateTime.UtcNow < _retryAfter) return JsonSerializer.Serialize(new QuestPayloadDto(), WireJson.Options);
 
                 QuestPayloadDto payload;
 
@@ -100,10 +95,11 @@ namespace QuestTreeServer
                     // fault at boot does not mean an empty tree until the server restarts.
                     logger.Error($"Quest Tracker: could not build the quest list - the tree will be empty: {ex}");
                     _retryAfter = DateTime.UtcNow.AddSeconds(RetrySeconds);
-                    return JsonSerializer.Serialize(new QuestPayloadDto(), SerializerOptions);
+                    return JsonSerializer.Serialize(new QuestPayloadDto(), WireJson.Options);
                 }
 
-                return _cachedJson = JsonSerializer.Serialize(payload, SerializerOptions);
+                payload.ModVersion = ModInfo.Version;
+                return _cachedJson = JsonSerializer.Serialize(payload, WireJson.Options);
             }
         }
 

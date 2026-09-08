@@ -101,10 +101,11 @@ namespace QuestTree.QuestGraph
 
                 if (payload.SchemaVersion != QuestPayloadDto.SupportedSchemaVersion)
                 {
+                    var server = string.IsNullOrEmpty(payload.ModVersion) ? "older than 1.8.1" : payload.ModVersion;
                     Plugin.LogSource?.LogWarning(
-                        $"QuestTree: the QuestTreeServer mod speaks payload schema v{payload.SchemaVersion} but this " +
-                        $"client expects v{QuestPayloadDto.SupportedSchemaVersion}. Update both halves of the mod to " +
-                        "the same version. Continuing anyway - some fields may be missing.");
+                        $"QuestTree: the QuestTreeServer mod ({server}) speaks payload schema v{payload.SchemaVersion} but this " +
+                        $"client ({ModInfo.Version}) expects v{QuestPayloadDto.SupportedSchemaVersion}. Update both halves of " +
+                        "the mod to the same version. Continuing anyway - some fields may be missing.");
                 }
 
                 Plugin.LogSource?.LogInfo($"QuestTree: loaded {payload.Quests.Count} quests from the QuestTreeServer mod.");
