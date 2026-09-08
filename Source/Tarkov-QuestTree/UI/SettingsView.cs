@@ -345,7 +345,7 @@ namespace QuestTree.UI
             foreach (var (name, hex) in ColourPresets)
             {
                 var chipY = y + 2f;
-                var chipWidth = name.Length * 6.5f + 16f;
+                var chipWidth = GameStyle.MeasureWidth(name, 10) + 16f;
                 var preset = hex;
 
                 var row = AuxLayout.AddClickableRow(column, "", x, ref chipY, chipWidth, false,

@@ -124,6 +124,42 @@ namespace QuestTree.UI
 
         private static bool _tooltipWarned;
 
+        /// <summary>A hidden text object the game's font is applied to, kept for measuring.</summary>
+        private static TextMeshProUGUI _measure;
+
+        /// <summary>The width a run of text takes in the game's font at this size. The tabs, chips
+        /// and buttons used to guess from the character count times a per-glyph average, which
+        /// saturated their clamps on any name that was not English. Falls back to that guess if
+        /// the font is not harvested yet or TMP declines to measure.</summary>
+        public static float MeasureWidth(string text, float fontSize, FontStyles style = FontStyles.Normal)
+        {
+            if (string.IsNullOrEmpty(text)) return 0f;
+
+            try
+            {
+                if (_measure == null)
+                {
+                    var go = new GameObject("QuestTreeMeasure", typeof(RectTransform)) { hideFlags = HideFlags.HideAndDontSave };
+                    go.SetActive(false);
+                    _measure = go.AddComponent<TextMeshProUGUI>();
+                    _measure.enableWordWrapping = false;
+                }
+
+                if (_font != null && _measure.font != _font) _measure.font = _font;
+                _measure.fontSize = fontSize;
+                _measure.fontStyle = style;
+
+                var width = _measure.GetPreferredValues(text, 0f, 0f).x;
+                if (width > 0f && !float.IsNaN(width) && !float.IsInfinity(width)) return width;
+            }
+            catch (Exception)
+            {
+                // Measuring is a nicety; the estimate below is what shipped for a year.
+            }
+
+            return text.Length * fontSize * 0.56f;
+        }
+
         public static void Apply(TMP_Text text)
         {
             if (text == null) return;

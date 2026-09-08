@@ -212,7 +212,7 @@ namespace QuestTree.UI
         private float BuildViewButton(
             RectTransform toolbar, string tabId, string label, float rightOffset, float itemY, float itemHeight)
         {
-            var width = Mathf.Clamp(label.Length * 8f + 24f, 70f, 110f);
+            var width = Mathf.Clamp(GameStyle.MeasureWidth(label, 12) + 24f, 70f, 110f);
 
             var buttonRect = GameStyle.CreateButton(toolbar, label, () => _onViewSelected(tabId));
             buttonRect.anchorMin = buttonRect.anchorMax = new Vector2(1f, 1f);
@@ -307,7 +307,7 @@ namespace QuestTree.UI
                 _treeOnly.Add(barGo);
 
                 var name = QuestNodeView.NameFor(status);
-                var width = name.Length * 6.5f + 8f;
+                var width = GameStyle.MeasureWidth(name, 11) + 8f;
 
                 var textGo = new GameObject("Label", typeof(RectTransform));
                 var textRect = (RectTransform)textGo.transform;

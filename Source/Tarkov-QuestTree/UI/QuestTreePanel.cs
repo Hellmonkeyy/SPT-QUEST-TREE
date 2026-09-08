@@ -1014,7 +1014,7 @@ namespace QuestTree.UI
         private void CreateTabButton(string name, string suffix, string traderId)
         {
             var hasIcon = traderId != AllTradersId && !IsAuxTab(traderId);
-            var width = Mathf.Clamp(name.Length * 7f + suffix.Length * 6f + 28f + (hasIcon ? 24f : 0f), 60f, 260f);
+            var width = Mathf.Clamp(GameStyle.MeasureWidth(TabLabel(name, suffix), 12) + 28f + (hasIcon ? 24f : 0f), 60f, 260f);
 
             var tabGo = new GameObject($"Tab_{(traderId == AllTradersId ? "All" : name)}", typeof(RectTransform), typeof(Image), typeof(Button));
             var tabRect = (RectTransform)tabGo.transform;

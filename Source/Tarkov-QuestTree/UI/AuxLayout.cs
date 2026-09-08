@@ -407,7 +407,7 @@ namespace QuestTree.UI
         /// <summary>A small tag - status, level, map - tinted with its colour. Advances x.</summary>
         public static void AddChip(RectTransform parent, string text, Color color, ref float x, float y, float height = 18f)
         {
-            var width = text.Length * 6.5f + 14f;
+            var width = GameStyle.MeasureWidth(text, 10, FontStyles.Bold) + 14f;
 
             var go = new GameObject("Chip", typeof(RectTransform), typeof(Image));
             var rect = (RectTransform)go.transform;
