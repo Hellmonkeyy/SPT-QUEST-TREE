@@ -72,12 +72,9 @@ namespace QuestTree.QuestGraph
                 }
             }
 
-            // Shared across every top-level call so a hub quest with many downstream branches
-            // (common in Tarkov's trader chains) has its depth computed once, not once per branch
-            // that happens to pass through it.
-            var depthMemo = new Dictionary<string, int>();
+            var depths = ComputeDepths(_byId);
             foreach (var node in _byId.Values)
-                node.Depth = ComputeDepth(node, _byId, depthMemo, new HashSet<string>());
+                node.Depth = depths[node.Id];
 
             RefreshKappaFlags();
 
@@ -250,27 +247,59 @@ namespace QuestTree.QuestGraph
                 node.Status = node.LiveQuest != null ? ToNodeStatus(node.LiveQuest.QuestStatus) : ENodeStatus.Locked;
         }
 
-        private static int ComputeDepth(
-            QuestNode node, Dictionary<string, QuestNode> byId, Dictionary<string, int> memo, HashSet<string> visiting)
+        /// <summary>
+        /// The longest prerequisite chain under every quest, in one O(N + E) pass with an explicit
+        /// stack. The recursive form it replaces went one frame deeper per link - fine for the
+        /// game's forty-deep chains, not for what a quest mod can produce - and its cycle guard
+        /// wrote a provisional 0 into the memo that other branches read before the real value
+        /// landed, so a cyclic cluster's depths depended on enumeration order.
+        ///
+        /// Here a node is finished only after every prerequisite is. A prerequisite still on the
+        /// stack is a cycle: it contributes nothing to the node that met it, which is the one rule
+        /// applied consistently to every member. A prerequisite outside the loaded set is skipped,
+        /// as before, so such a quest draws as a root rather than not at all.
+        /// </summary>
+        private static Dictionary<string, int> ComputeDepths(Dictionary<string, QuestNode> byId)
         {
-            if (memo.TryGetValue(node.Id, out var cached)) return cached;
-            if (node.PrerequisiteIds.Count == 0) return memo[node.Id] = 0;
+            var depth = new Dictionary<string, int>(byId.Count);
+            var onStack = new HashSet<string>();
+            var stack = new Stack<(QuestNode Node, int Next)>();
 
-            // Guards against a malformed/modded quest chain that references itself - depth
-            // computation must terminate even if the data doesn't form a clean DAG. Memoized like
-            // every other result so a second reference to this same cyclic node (e.g. from a
-            // different branch) doesn't re-walk the cycle and get a possibly-different answer.
-            if (!visiting.Add(node.Id)) return memo[node.Id] = 0;
-
-            var maxPrereqDepth = -1;
-            foreach (var prereqId in node.PrerequisiteIds)
+            foreach (var root in byId.Values)
             {
-                if (!byId.TryGetValue(prereqId, out var prereqNode)) continue; // prerequisite outside the loaded quest set
-                maxPrereqDepth = Math.Max(maxPrereqDepth, ComputeDepth(prereqNode, byId, memo, visiting));
+                if (depth.ContainsKey(root.Id)) continue;
+
+                stack.Push((root, 0));
+                onStack.Add(root.Id);
+
+                while (stack.Count > 0)
+                {
+                    var (node, next) = stack.Pop();
+
+                    if (next < node.PrerequisiteIds.Count)
+                    {
+                        // Come back to this node after the prerequisite below it is done.
+                        stack.Push((node, next + 1));
+
+                        var prereqId = node.PrerequisiteIds[next];
+                        if (depth.ContainsKey(prereqId) || onStack.Contains(prereqId)) continue;
+                        if (!byId.TryGetValue(prereqId, out var prereq)) continue;
+
+                        stack.Push((prereq, 0));
+                        onStack.Add(prereq.Id);
+                        continue;
+                    }
+
+                    var max = -1;
+                    foreach (var prereqId in node.PrerequisiteIds)
+                        if (depth.TryGetValue(prereqId, out var d)) max = Math.Max(max, d);
+
+                    depth[node.Id] = max + 1;
+                    onStack.Remove(node.Id);
+                }
             }
 
-            visiting.Remove(node.Id);
-            return memo[node.Id] = maxPrereqDepth + 1;
+            return depth;
         }
 
         private static ENodeStatus ToNodeStatus(EQuestStatus status) => status switch
