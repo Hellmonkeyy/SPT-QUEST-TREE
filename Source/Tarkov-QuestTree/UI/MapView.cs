@@ -218,6 +218,30 @@ namespace QuestTree.UI
             return null;
         }
 
+        /// <summary>Forgets everything this view remembers - map, floor, selection, pan and zoom,
+        /// notices, the raid cue - for a different profile. The statics exist to survive the aux
+        /// rebuild, not a change of character; a new profile used to inherit the last one's
+        /// selected quest and saved view until it clicked past them.</summary>
+        public static void ResetSession()
+        {
+            _viewStateKey = null;
+            _savedScale = 0f;
+            _savedPan = Vector2.zero;
+            _selectedLocationKey = null;
+            _selectedLevel = null;
+            _pickerOpen = false;
+            _floorPickerOpen = false;
+            _selectedQuestId = null;
+            _pendingFocusQuestId = null;
+            _pendingScrollQuestId = null;
+            _pendingScrollY = null;
+            _notice = null;
+            _raidLocationKey = null;
+            _setPayload = null;
+            _setEntry = null;
+            _set = null;
+        }
+
         /// <summary>Forgets the saved pan and zoom, so the next build fits the floor the way it
         /// was first shown - the F key on the map, matching F on the tree. A pending fly-to is
         /// dropped with it: fitting and then flying would undo the fit.</summary>

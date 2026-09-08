@@ -117,6 +117,11 @@ namespace QuestTree.UI
         /// remembered as done.</summary>
         private static string _lastRaidPreselect;
 
+        /// <summary>The profile the map view's statics belong to. Static like the rest: the panel
+        /// is torn down with the menu, the map's memory is not, and a different character must
+        /// not inherit it.</summary>
+        private static string _profileId;
+
         /// <summary>A raid location waiting for the graph to exist. Set by Show when a rebuild is
         /// about to happen and consumed by RebuildGraph once the nodes are there to look in.</summary>
         private string _pendingRaidLocation;
@@ -218,6 +223,30 @@ namespace QuestTree.UI
             QuestDataClient.InvalidateProfile();
             _session = session; // kept for trader-avatar lookups on tab icons, independent of a graph rebuild
 
+            // A different profile on the same client: the map view's remembered map, quest and
+            // view belong to the last character. Read defensively for the same JIT reason as the
+            // raid location in MenuTaskBarPatch.
+            string profileId = null;
+            try
+            {
+                profileId = ProfileIdOf(session);
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogInfo($"QuestTree: could not read the profile id ({ex.GetType().Name}).");
+            }
+
+            if (profileId != null && !string.Equals(profileId, _profileId, StringComparison.Ordinal))
+            {
+                if (_profileId != null)
+                {
+                    MapView.ResetSession();
+                    _lastRaidPreselect = null;
+                }
+
+                _profileId = profileId;
+            }
+
             // The matchmaker's pick, when there is one and it is not the one already acted on.
             var raidChanged = !string.IsNullOrEmpty(raidLocation) &&
                               !string.Equals(raidLocation, _lastRaidPreselect, StringComparison.OrdinalIgnoreCase);
@@ -284,6 +313,8 @@ namespace QuestTree.UI
                 if (raidChanged) PreselectRaidMap(raidLocation, showNow: true);
             }
         }
+
+        private static string ProfileIdOf(IEftSession session) => session?.Profile?.Id;
 
         /// <summary>Turns the map view to the raid's map. With <paramref name="showNow"/> the map
         /// is also brought on screen if the panel would open on it anyway (the open-on-map
