@@ -86,6 +86,10 @@ run through the column gaps to what it unlocks.
   what they unlock.
 - **Tabs** along the top: All, then one per trader, ordered by how many of their quests you can act
   on. The row scrolls.
+- **Badges** in a box's corner: a gold **K** for a quest on the Kappa list, a blue **C** for one
+  Collector cannot be accepted without on *your* install. Those are different sets as soon as a
+  quest mod touches Collector - the Kappa list can name a hundred and thirty quests while live
+  Collector requires four - so Settings lets you show either mark or both.
 
 **Click a quest** for its detail: status, level and trader chips, why it is locked, the wiki page,
 then **Requires** (with "started is enough" or "N h after" where a prerequisite asks for that),
@@ -132,7 +136,8 @@ The Settings view, in four sections, and the same values in BepInEx's F12 menu. 
 
 - **Tree** - compact layout, two-line titles, zoomed-out codes, prerequisite lines and their
   opacity, hover dimming strength, the zoom levels the boxes simplify at, the visible-quest ceiling,
-  Focus, and the hide filters (unobtainable / completed / traderless).
+  which quest badges the boxes wear (Kappa, Collector, or both), Focus, and the hide filters
+  (unobtainable / completed / traderless).
 - **Behaviour** - open on the map or remember the last view, tooltips, hover sounds, in-raid zone
   harvesting, the controls hint, and reloading `kappa-quests.json`.
 - **Map** - accepted quests only, which sidebar sections show, how many "do next" rows, which pins
@@ -150,6 +155,9 @@ The Settings view, in four sections, and the same values in BepInEx's F12 menu. 
   what badges quests "Kappa" in the tree and the detail. If a mod has changed Collector on your
   install, the Kappa tab says so and still shows the real list. To track your own list instead, put
   quest names in `kappa-quests.json` and hit Reload in Settings.
+- **Collector badge** is the other question: what this install actually gates Collector behind,
+  read from the loaded quest graph rather than the canonical list, so it follows your quest mods.
+  It is the same set the Kappa tab lists under "To unlock Collector".
 - **Zone harvesting** reads the map's quest trigger volumes a few seconds into a raid and sends
   them to the server once. It touches nothing in the raid and can be turned off in Settings.
 - **Not a cheat.** It only displays quest data you would otherwise look up on a wiki, and pins the
@@ -158,7 +166,7 @@ The Settings view, in four sections, and the same values in BepInEx's F12 menu. 
 ## Troubleshooting
 
 - **No taskbar button** - check `BepInEx\LogOutput.log` for lines starting `QuestTree`. The load
-  line carries the build stamp (`QuestTree 1.8.3+abc1234: loaded.`), which is what to quote.
+  line carries the build stamp (`QuestTree 1.8.4+abc1234: loaded.`), which is what to quote.
 - **Tree only shows unlocked quests, no pins** - the server half is missing, or you are on someone
   else's server that does not have it. See "Both halves are required" above.
 - **`Http response status code: NotFound` on `/questtree/...`** - same cause: the server you are on
