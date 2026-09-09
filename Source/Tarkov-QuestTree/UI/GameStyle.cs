@@ -131,29 +131,68 @@ namespace QuestTree.UI
         private static bool _tooltipWarned;
 
         /// <summary>The width <paramref name="text"/> takes in <paramref name="label"/>'s font at
-        /// its size, measured on that label after Apply has installed the font - the recipe the
-        /// wrapped rows use. A hidden, never-activated measuring object was tried first and
-        /// answered with widths a fraction of the truth, which crushed the legend and the tabs;
-        /// only a live label under the canvas measures right. Falls back to the character
-        /// estimate the tabs shipped with if TMP declines.</summary>
+        /// its size, measured on that label after Apply has installed the font.
+        ///
+        /// This has been got wrong twice, both times shipped, and both times the symptom was the
+        /// same: chips, tabs and the toolbar legend a sliver wide with their text spilling across
+        /// each other. First a hidden, never-activated measuring object; then a live label asked
+        /// with infinite bounds. So it is now built to be self-correcting rather than merely
+        /// correct.
+        ///
+        /// Two rules, and neither may be dropped without a play test to replace it:
+        ///
+        /// The bounds passed are (0, 0), not (Infinity, Infinity). Zero means "no constraint" to
+        /// TMP and is the shape AuxLayout.AddWrapped has always measured with successfully; the
+        /// infinite one is what shipped in 1.8.4 and returned near-zero widths.
+        ///
+        /// The answer is only believed when it lands within a sane band around the character
+        /// estimate. A wrong-but-plausible width has never crushed a layout - the estimate alone is
+        /// what shipped for a year - whereas a width of four pixels for "Available" destroys the
+        /// row. So a third TMP quirk, whatever it turns out to be, degrades to a slightly loose
+        /// layout instead of an unreadable one.</summary>
         public static float MeasureWidth(TMP_Text label, string text)
         {
             if (string.IsNullOrEmpty(text)) return 0f;
 
-            if (label != null)
-            {
-                try
-                {
-                    var width = label.GetPreferredValues(text, Mathf.Infinity, Mathf.Infinity).x;
-                    if (width > 0f && !float.IsNaN(width) && !float.IsInfinity(width)) return width;
-                }
-                catch (Exception)
-                {
-                    // Measuring is a nicety; the estimate below is what shipped for a year.
-                }
-            }
+            var estimate = EstimateWidth(text, label != null ? label.fontSize : 12f);
+            if (label == null) return estimate;
 
-            return EstimateWidth(text, label != null ? label.fontSize : 12f);
+            try
+            {
+                // Zero, not Infinity - see the note above.
+                var width = label.GetPreferredValues(text, 0f, 0f).x;
+                if (float.IsNaN(width) || float.IsInfinity(width)) return estimate;
+
+                // The band. Generous on the high side because a wide font legitimately outruns a
+                // 0.56em-per-character guess; tight on the low side because that is the failure
+                // that has actually shipped, twice.
+                if (width >= estimate * 0.5f && width <= estimate * 3f) return width;
+
+                ReportRejectedMeasurement(text, width, estimate);
+                return estimate;
+            }
+            catch (Exception)
+            {
+                // Measuring is a nicety; the estimate is what shipped for a year.
+                return estimate;
+            }
+        }
+
+        private static bool _measurementReported;
+
+        /// <summary>Said once a session, at Info, when TMP's answer is thrown away. Without this the
+        /// only way to learn what TMP is really returning is another install-and-play cycle, and
+        /// two have already been spent guessing.</summary>
+        private static void ReportRejectedMeasurement(string text, float measured, float estimate)
+        {
+            if (_measurementReported) return;
+            _measurementReported = true;
+
+            var sample = text.Length > 40 ? text.Substring(0, 40) : text;
+            Plugin.LogSource?.LogInfo(
+                $"QuestTree: TMP measured \"{sample}\" at {measured:0.#}px against an estimate of " +
+                $"{estimate:0.#}px - outside the sane band, so widths are on the estimate. " +
+                "Layout is correct but slightly loose; this is the fallback working.");
         }
 
         /// <summary>The character-count estimate: glyphs only, since a tab label carries a colour
