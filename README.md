@@ -87,9 +87,11 @@ run through the column gaps to what it unlocks.
 - **Tabs** along the top: All, then one per trader, ordered by how many of their quests you can act
   on. The row scrolls.
 - **Badges** in a box's corner: a gold **K** for a quest on the Kappa list, a blue **C** for one
-  Collector cannot be accepted without on *your* install. Those are different sets as soon as a
-  quest mod touches Collector - the Kappa list can name a hundred and thirty quests while live
-  Collector requires four - so Settings lets you show either mark or both.
+  you must finish before Collector can be accepted on *your* install - including the quests behind
+  those. On a stock install that is a wide net: 252 of 558 quests, and it contains all 136 Kappa
+  quests, so most K boxes wear a C too. Where a quest mod has trimmed Collector it becomes small
+  and sharp - four direct requirements instead of a hundred and thirty-six. Settings chooses which
+  mark the boxes wear, so you can have the wide one, the narrow one, or both.
 
 **Click a quest** for its detail: status, level and trader chips, why it is locked, the wiki page,
 then **Requires** (with "started is enough" or "N h after" where a prerequisite asks for that),
@@ -155,9 +157,11 @@ The Settings view, in four sections, and the same values in BepInEx's F12 menu. 
   what badges quests "Kappa" in the tree and the detail. If a mod has changed Collector on your
   install, the Kappa tab says so and still shows the real list. To track your own list instead, put
   quest names in `kappa-quests.json` and hit Reload in Settings.
-- **Collector badge** is the other question: what this install actually gates Collector behind,
-  read from the loaded quest graph rather than the canonical list, so it follows your quest mods.
-  It is the same set the Kappa tab lists under "To unlock Collector".
+- **Collector badge** answers a different question from the Kappa list: not "is this on the
+  community's Kappa list" but "does Collector, as it exists on this install, depend on this". It is
+  read from the loaded quest graph, so it follows your quest mods, and it is the same set the Kappa
+  tab lists under "To unlock Collector". On an unmodded install it is the larger of the two sets,
+  since it also counts everything the Kappa quests themselves require.
 - **Zone harvesting** reads the map's quest trigger volumes a few seconds into a raid and sends
   them to the server once. It touches nothing in the raid and can be turned off in Settings.
 - **Not a cheat.** It only displays quest data you would otherwise look up on a wiki, and pins the
