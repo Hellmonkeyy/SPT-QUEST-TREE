@@ -228,6 +228,40 @@ namespace QuestTree.QuestGraph
         /// which ships empty, so on a default install no box or detail ever said "Kappa".</summary>
         private readonly HashSet<string> _serverKappaIds = new(StringComparer.Ordinal);
 
+        /// <summary>
+        /// Marks every quest that must be finished before Collector can be accepted - its
+        /// transitive prerequisites in the loaded graph, the same set the Kappa tab's "To unlock
+        /// Collector" section lists, so the badge and that list can never disagree.
+        ///
+        /// Computed from the graph rather than asked of the server, so it follows whatever a quest
+        /// mod has done to Collector on this install - which is the whole point of a second badge:
+        /// the canonical Kappa list can name a hundred and thirty quests while live Collector
+        /// requires four. The id comes from the Kappa payload when there is one, and from
+        /// KappaQuests.CollectorQuestId when there is not.
+        ///
+        /// Structure, not status, so once per build is enough.
+        /// </summary>
+        public void ApplyCollectorClosure(string collectorId)
+        {
+            foreach (var node in _byId.Values)
+                node.IsCollectorPrerequisite = false;
+
+            var id = string.IsNullOrEmpty(collectorId) ? KappaQuests.CollectorQuestId : collectorId;
+
+            if (!_byId.TryGetValue(id, out var collector))
+            {
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: Collector ({id}) is not in the loaded quest list - no Collector badges.");
+                return;
+            }
+
+            var required = QuestRoute.Prerequisites(collector, this);
+            foreach (var node in required)
+                node.IsCollectorPrerequisite = true;
+
+            Plugin.LogSource?.LogInfo($"QuestTree: {required.Count} quest(s) stand between you and Collector.");
+        }
+
         /// <summary>Takes the server's Kappa list and re-badges the nodes from it.</summary>
         public void ApplyServerKappaIds(IEnumerable<string> ids)
         {

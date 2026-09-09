@@ -62,7 +62,15 @@ namespace QuestTree.QuestGraph
 
         public ENodeStatus Status;
 
+        /// <summary>On the canonical Kappa list - Collector's start conditions in SPT's shipped
+        /// database, or the player's own kappa-quests.json.</summary>
         public bool IsKappaRequired;
+
+        /// <summary>Must be finished before Collector can be accepted ON THIS INSTALL: a
+        /// transitive prerequisite of the live Collector quest. Distinct from the above, because a
+        /// quest mod can trim Collector's requirements to a handful while the canonical list still
+        /// names a hundred and thirty.</summary>
+        public bool IsCollectorPrerequisite;
 
         public string Name => string.IsNullOrEmpty(Dto.Name) ? Id : Dto.Name;
 

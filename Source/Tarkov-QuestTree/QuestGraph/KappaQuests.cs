@@ -20,6 +20,11 @@ namespace QuestTree.QuestGraph
     /// </summary>
     internal static class KappaQuests
     {
+        /// <summary>Collector's quest id, the same constant the server half keys its Kappa list
+        /// on. Used only as the fallback when the Kappa payload is unavailable - without the
+        /// server half the Collector badge still has something to resolve.</summary>
+        public const string CollectorQuestId = "5c51aac186f77432ea65c552";
+
         private static HashSet<string> _names;
 
         public static bool IsKappaRequired(string questName)

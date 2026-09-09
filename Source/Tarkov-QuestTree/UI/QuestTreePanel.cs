@@ -841,8 +841,15 @@ namespace QuestTree.UI
         private void ApplyServerKappaList()
         {
             var result = QuestDataClient.GetKappa();
-            if (result != null && result.IsOk && result.Payload?.KappaQuestIds != null)
-                _graph.ApplyServerKappaIds(result.Payload.KappaQuestIds);
+            var payload = result != null && result.IsOk ? result.Payload : null;
+
+            if (payload?.KappaQuestIds != null)
+                _graph.ApplyServerKappaIds(payload.KappaQuestIds);
+
+            // Unconditional, unlike the list above: the closure is walked in the graph, so it
+            // works without the server half too - the payload only supplies a better id than the
+            // built-in constant when a mod has moved Collector.
+            _graph.ApplyCollectorClosure(payload?.CollectorQuestId);
         }
 
         /// <summary>Rebuilds the graph DATA (called only when the QuestController instance
