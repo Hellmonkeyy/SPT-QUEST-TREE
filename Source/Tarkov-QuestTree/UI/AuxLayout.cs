@@ -374,7 +374,7 @@ namespace QuestTree.UI
         /// </summary>
         public static RectTransform AddClickableRow(
             RectTransform parent, string text, float x, ref float y, float width, bool selected,
-            System.Action onClick, float height = RowHeight)
+            System.Action onClick, float height = RowHeight, int fontSize = 12)
         {
             var go = new GameObject("ClickRow", typeof(RectTransform), typeof(Image), typeof(Button));
             var rect = (RectTransform)go.transform;
@@ -407,7 +407,7 @@ namespace QuestTree.UI
 
             var label = labelGo.AddComponent<TextMeshProUGUI>();
             label.text = text;
-            label.fontSize = 12;
+            label.fontSize = fontSize;
             label.color = Color.white;
             label.alignment = TextAlignmentOptions.Left;
             label.enableWordWrapping = false;
@@ -484,10 +484,18 @@ namespace QuestTree.UI
             {
                 var index = i;
                 var tab = GameStyle.CreateButton(parent, labels[i], () => onSelect(index));
+                var label = tab.GetComponentInChildren<TMP_Text>();
+
+                // The selected tab is bold, and bold is wider - so it is styled BEFORE it is
+                // measured, or the selected tab is the one that clips its own label.
+                if (index == selected && label != null)
+                {
+                    label.color = GameStyle.AccentColor;
+                    label.fontStyle = FontStyles.Bold;
+                }
 
                 // Measured off the button's own label, after CreateButton has put the harvested
                 // font on it - the width is meaningless before that.
-                var label = tab.GetComponentInChildren<TMP_Text>();
                 var tabWidth = Mathf.Max(60f, GameStyle.MeasureWidth(label, labels[i]) + labelInset);
 
                 if (cursor > x && cursor + tabWidth > x + width)
@@ -507,12 +515,6 @@ namespace QuestTree.UI
                     var background = tab.GetComponent<Image>();
                     if (background != null)
                         background.color = new Color(accent.r, accent.g, accent.b, 0.3f);
-
-                    if (label != null)
-                    {
-                        label.color = accent;
-                        label.fontStyle = FontStyles.Bold;
-                    }
                 }
 
                 cursor += tabWidth + gap;

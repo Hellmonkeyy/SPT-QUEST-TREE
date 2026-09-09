@@ -128,7 +128,8 @@ namespace QuestTree.UI
                     : $"{item.Quests[0]}, {item.Quests[1]} +{item.Quests.Count - 2} more";
 
                 AuxLayout.AddClickableRow(parent, $"<color=#FFFFFF60>{wanted}</color>", x + 22f, ref y,
-                    width - 22f, false, () => { if (target != null) onQuestSelected?.Invoke(target); }, 16f);
+                    width - 22f, false, () => { if (target != null) onQuestSelected?.Invoke(target); },
+                    16f, fontSize: 10);
             }
 
             return y + AuxLayout.Padding;

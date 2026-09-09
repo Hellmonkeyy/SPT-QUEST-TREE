@@ -108,7 +108,7 @@ namespace QuestTree.UI
 
             // Short of the refresh link, which sits on this same line at the right-hand end.
             AuxLayout.AddTabRow(
-                parent, ref y, _x, _width - RefreshLinkWidth,
+                parent, ref y, _x, Mathf.Max(200f, _width - RefreshLinkWidth),
                 sections.Select(section => section.Label).ToList(), selected,
                 index =>
                 {
