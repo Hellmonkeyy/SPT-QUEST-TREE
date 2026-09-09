@@ -47,6 +47,11 @@ namespace QuestTree.UI
         public const string ErrorHex = "C86464";
         public static readonly Color KappaGold = new(0.85f, 0.65f, 0.1f);
 
+        /// <summary>The Collector mark. The game's own "task completed" blue (#75B9DE, from
+        /// NotesTask's colour map), so the second badge is a colour the player already reads as
+        /// quest chrome and cannot be confused with Kappa gold at a glance.</summary>
+        public static readonly Color CollectorBlue = new(0.459f, 0.725f, 0.871f);
+
         /// <summary>Selection, headers, highlights. From Settings when set; EFT's own bronze otherwise.</summary>
         public static Color AccentColor =>
             ModSettings.Ready ? ModSettings.ParseColor(ModSettings.ColorAccent, DefaultAccentColor) : DefaultAccentColor;

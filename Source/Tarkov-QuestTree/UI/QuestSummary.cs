@@ -50,6 +50,9 @@ namespace QuestTree.UI
                 includeHeader ? node.TraderName : null,
                 node.Level > 0 ? $"Level {node.Level}" : null,
                 node.IsKappaRequired ? $"<color=#{GameStyle.WarningHex}>Kappa required</color>" : null,
+                node.IsCollectorPrerequisite
+                    ? $"<color=#{ColorUtility.ToHtmlStringRGB(GameStyle.CollectorBlue)}>Needed to unlock Collector</color>"
+                    : null,
                 // Faction- and edition-locked quests are shown rather than hidden, so this is what
                 // stops one reading as a bug in the tree.
                 node.UnobtainableReason != null ? $"<color=#{GameStyle.ErrorHex}>{node.UnobtainableReason}</color>" : null,

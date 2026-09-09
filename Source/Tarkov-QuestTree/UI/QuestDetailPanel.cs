@@ -297,7 +297,10 @@ namespace QuestTree.UI
             if (node.Level > 0) AuxLayout.AddChip(_content, $"Lv {node.Level}", GameStyle.TextColor, ref chipX, y);
             if (!string.IsNullOrEmpty(node.LocationId) && !node.LocationId.Equals("any", StringComparison.OrdinalIgnoreCase))
                 AuxLayout.AddChip(_content, node.LocationId, GameStyle.TextColor, ref chipX, y);
+            // Both chips regardless of the badge setting: that setting is about what the boxes
+            // wear at a glance, and the detail is where the facts are stated in full.
             if (node.IsKappaRequired) AuxLayout.AddChip(_content, "Kappa", GameStyle.KappaGold, ref chipX, y);
+            if (node.IsCollectorPrerequisite) AuxLayout.AddChip(_content, "Collector", GameStyle.CollectorBlue, ref chipX, y);
             y += 26f;
 
             // Faction- and edition-locked quests are shown rather than hidden, so this is what stops

@@ -109,6 +109,7 @@ namespace QuestTree.UI
         private TMP_Text _subtitle;
         private TMP_Text _objectivePreview;
         private GameObject _kappaBadge;
+        private GameObject _collectorBadge;
         private HoverTooltipArea _tooltip;
 
         /// <summary>Dims the whole node in one operation when another quest's chain is highlighted.
@@ -208,25 +209,36 @@ namespace QuestTree.UI
             glyph.alignment = TextAlignmentOptions.TopRight;
             view._statusGlyph = glyph;
 
-            var badgeGo = new GameObject("KappaBadge", typeof(RectTransform), typeof(Image));
-            var badgeRect = (RectTransform)badgeGo.transform;
-            badgeRect.SetParent(rect, worldPositionStays: false);
-            badgeRect.anchorMin = badgeRect.anchorMax = new Vector2(1f, 1f);
-            badgeRect.pivot = new Vector2(1f, 1f);
-            badgeRect.anchoredPosition = new Vector2(-24f, -4f);
-            badgeRect.sizeDelta = new Vector2(LayoutMetrics.KappaBadgeSize, LayoutMetrics.KappaBadgeSize);
-            badgeGo.GetComponent<Image>().color = GameStyle.KappaGold;
-            badgeGo.GetComponent<Image>().raycastTarget = false;
-            var badgeText = CreateText(badgeRect, "K", 11, FontStyles.Bold, Vector2.zero, Vector2.one, Vector2.zero);
-            badgeText.alignment = TextAlignmentOptions.Center;
-            badgeText.text = "K";
-            badgeText.color = new Color(0.06f, 0.07f, 0.05f);
-            view._kappaBadge = badgeGo;
+            view._kappaBadge = CreateBadge(rect, "K", GameStyle.KappaGold);
+            view._collectorBadge = CreateBadge(rect, "C", GameStyle.CollectorBlue);
 
             // The game's own tooltip, on hover. Text is set per Bind.
             view._tooltip = GameStyle.AddTooltip(go, "");
 
             return view;
+        }
+
+        /// <summary>A corner mark: a small filled square with one dark letter in it. Where it
+        /// sits is decided per bind by RefreshBadges, since that depends on how many show.</summary>
+        private static GameObject CreateBadge(RectTransform parent, string letter, Color color)
+        {
+            var badgeGo = new GameObject($"{letter}Badge", typeof(RectTransform), typeof(Image));
+            var badgeRect = (RectTransform)badgeGo.transform;
+            badgeRect.SetParent(parent, worldPositionStays: false);
+            badgeRect.anchorMin = badgeRect.anchorMax = new Vector2(1f, 1f);
+            badgeRect.pivot = new Vector2(1f, 1f);
+            badgeRect.sizeDelta = new Vector2(LayoutMetrics.KappaBadgeSize, LayoutMetrics.KappaBadgeSize);
+
+            var image = badgeGo.GetComponent<Image>();
+            image.color = color;
+            image.raycastTarget = false;
+
+            var badgeText = CreateText(badgeRect, letter, 11, FontStyles.Bold, Vector2.zero, Vector2.one, Vector2.zero);
+            badgeText.alignment = TextAlignmentOptions.Center;
+            badgeText.text = letter;
+            badgeText.color = new Color(0.06f, 0.07f, 0.05f);
+
+            return badgeGo;
         }
 
         private static TMP_Text CreateText(RectTransform parent, string name, int size, FontStyles style,
@@ -263,7 +275,7 @@ namespace QuestTree.UI
             SetDimmed(false);
             _selected = false;
 
-            _kappaBadge.SetActive(node.IsKappaRequired);
+            RefreshBadges();
 
             // Size to the title, not the other way round: a name like "The Survivalist Path -
             // Unprotected but Dangerous" was an ellipsis at one line, and three lines over the
@@ -272,7 +284,12 @@ namespace QuestTree.UI
             // says nothing. Widths are estimated from character counts rather than measured:
             // TMP's measurement answered wrong for pooled views, and an estimate is deterministic.
             _title.fontSize = LayoutMetrics.TitleFontSize;
-            var titleWidth = Width - LayoutMetrics.TextInsetX - 44f; // glyph and badge live top-right
+            // Glyph and badge live top-right. A second badge takes one more square out of the
+            // title's width; one badge keeps the inset the box has always used.
+            var badges = (node.IsKappaRequired && ModSettings.ShowKappaBadge ? 1 : 0) +
+                         (node.IsCollectorPrerequisite && ModSettings.ShowCollectorBadge ? 1 : 0);
+            var titleWidth = Width - LayoutMetrics.TextInsetX - 44f -
+                             Mathf.Max(0, badges - 1) * (LayoutMetrics.KappaBadgeSize + BadgeGap);
             var (head, tail) = TitleParts(node.Name);
             _tall = LayoutMetrics.AllowTallNodes && (tail != null || EstimateWidth(head, LayoutMetrics.TitleFontSize) > titleWidth);
 
@@ -456,6 +473,8 @@ namespace QuestTree.UI
                 // The same facts the box shows, at a size that can be read - so a zoomed-out tree
                 // still answers "what is this one" on hover without opening the detail.
                 var line = string.Join("  ·  ", parts);
+                if (Node.IsKappaRequired) line += "  ·  Kappa";
+                if (Node.IsCollectorPrerequisite) line += "  ·  unlocks Collector";
                 var body = string.IsNullOrEmpty(objectiveText) ? "" : "\n" + objectiveText;
                 _tooltip.SetMessageText($"<b>{GameStyle.Safe(Node.Name)}</b>\n{NameFor(Node.Status)}  ·  {line}{body}", rawText: true);
             }
@@ -480,7 +499,7 @@ namespace QuestTree.UI
 
             if (_subtitle != null) _subtitle.gameObject.SetActive(!zoomedOut);
             if (_objectivePreview != null) _objectivePreview.gameObject.SetActive(!zoomedOut);
-            if (_kappaBadge != null && Node != null) _kappaBadge.SetActive(Node.IsKappaRequired && !barOnly);
+            RefreshBadges();
             if (_statusGlyph != null) _statusGlyph.gameObject.SetActive(!barOnly);
 
             if (_title == null) return;
@@ -555,6 +574,43 @@ namespace QuestTree.UI
             _selected = selected;
             RefreshStatus();
         }
+
+        /// <summary>Space between two badges when the box wears both.</summary>
+        private const float BadgeGap = 2f;
+
+        /// <summary>
+        /// Which marks this box wears, and where. Kappa gold for a quest on the canonical list,
+        /// Collector blue for one Collector cannot be accepted without on this install; either can
+        /// be switched off in Settings, and both go with the title once the box is only a code,
+        /// where a 14px square is a smudge.
+        ///
+        /// The first visible mark takes the inner slot, so a box wearing only C puts it exactly
+        /// where a box wearing only K puts that - the corner reads the same either way.
+        /// </summary>
+        private void RefreshBadges()
+        {
+            var barOnly = _detailLevel > 1;
+            var kappa = Node != null && Node.IsKappaRequired && ModSettings.ShowKappaBadge && !barOnly;
+            var collector = Node != null && Node.IsCollectorPrerequisite && ModSettings.ShowCollectorBadge && !barOnly;
+
+            var slot = 0;
+
+            if (_kappaBadge != null)
+            {
+                _kappaBadge.SetActive(kappa);
+                if (kappa) PlaceBadge(_kappaBadge, slot++);
+            }
+
+            if (_collectorBadge != null)
+            {
+                _collectorBadge.SetActive(collector);
+                if (collector) PlaceBadge(_collectorBadge, slot);
+            }
+        }
+
+        private static void PlaceBadge(GameObject badge, int slot) =>
+            ((RectTransform)badge.transform).anchoredPosition =
+                new Vector2(-24f - slot * (LayoutMetrics.KappaBadgeSize + BadgeGap), -4f);
 
         public void SetDimmed(bool dimmed) => SetDimAlpha(dimmed ? DimmedAlpha : 1f);
 
