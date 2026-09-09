@@ -222,7 +222,17 @@ namespace QuestTree.UI
             }
 
             foreach (var item in items)
-                AuxLayout.AddText(parent, ref y, FormatItem(item), AuxLayout.RowHeight, 12, indent: 6f);
+                ItemRow(parent, ref y, item.Template, FormatItem(item));
+        }
+
+        /// <summary>A checklist line that opens the game's own inspect window on the item. The rows
+        /// were plain text, which is a strange thing for a list of items to be in a game where every
+        /// other list of items can be inspected.</summary>
+        private static void ItemRow(RectTransform parent, ref float y, string template, string text)
+        {
+            var captured = template;
+            AuxLayout.AddClickableRow(parent, text, _x + 6f, ref y, _width - 6f, false,
+                () => GameStyle.InspectItem(captured));
         }
 
         /// <summary>

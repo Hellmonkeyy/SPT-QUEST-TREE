@@ -777,7 +777,11 @@ namespace QuestTree.UI
                 AuxLayout.AddSectionHeader(content, ref y, "Items to find here", listX, inner);
 
                 foreach (var item in items)
-                    AddAt(content, ItemWatchlistView.Format(item), listX, ref y, AuxLayout.RowHeight, 12, inner);
+                {
+                    var template = item.Template;
+                    AuxLayout.AddClickableRow(content, ItemWatchlistView.Format(item), listX, ref y, inner, false,
+                        () => GameStyle.InspectItem(template));
+                }
             }
 
             // ---- credits

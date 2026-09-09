@@ -115,14 +115,20 @@ namespace QuestTree.UI
                 var firstId = item.QuestIds.Count > 0 ? item.QuestIds[0] : null;
                 var target = firstId != null && graph.NodesById.TryGetValue(firstId, out var node) ? node : null;
 
+                // One rule across the whole mod: an item row inspects the item, a quest row opens
+                // the quest. The quest jump used to be on the item row, which left no way to look
+                // at the item itself - the thing the row is actually about.
+                var template = item.Template;
                 AuxLayout.AddClickableRow(parent, Format(item), x, ref y, width, false,
-                    () => { if (target != null) onQuestSelected?.Invoke(target); });
+                    () => GameStyle.InspectItem(template));
 
                 // Naming the quest is what makes the line actionable rather than a shopping list.
                 var wanted = item.Quests.Count <= 2
                     ? string.Join(", ", item.Quests)
                     : $"{item.Quests[0]}, {item.Quests[1]} +{item.Quests.Count - 2} more";
-                AuxLayout.AddLabelAt(parent, $"<color=#FFFFFF60>{wanted}</color>", x + 22f, ref y, 16f, 10, width - 22f);
+
+                AuxLayout.AddClickableRow(parent, $"<color=#FFFFFF60>{wanted}</color>", x + 22f, ref y,
+                    width - 22f, false, () => { if (target != null) onQuestSelected?.Invoke(target); }, 16f);
             }
 
             return y + AuxLayout.Padding;

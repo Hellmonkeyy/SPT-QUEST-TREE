@@ -1,6 +1,8 @@
 using System;
 using System.Text.RegularExpressions;
 using Comfort.Common;
+using EFT.HandBook;
+using EFT.InventoryLogic;
 using EFT.UI;
 using TMPro;
 using UnityEngine;
@@ -129,6 +131,59 @@ namespace QuestTree.UI
         }
 
         private static bool _tooltipWarned;
+
+        /// <summary>
+        /// Opens the game's own item inspect window on an item template - the same window the
+        /// handbook opens, with the same stats, image and right-click menu.
+        ///
+        /// It works for every item, not only ones the player owns, and nothing is fabricated to
+        /// achieve that: the handbook holds one real Item per template, built when the profile
+        /// loads, and this asks it for that item exactly as the handbook screen does. A template
+        /// with no handbook entry - a modded item outside the handbook tree - simply declines.
+        ///
+        /// Two things must not be "fixed" here:
+        ///
+        /// The handbook's item is SHARED. It is never disposed or modified; Inspect is safe because
+        /// the window makes and disposes a child context of its own.
+        ///
+        /// An item the player has never examined shows as a question mark with no description. That
+        /// is correct - the handbook does the same - and marking it examined to make the window look
+        /// better would write to the profile and call the server, for a cosmetic gain, from a mod
+        /// that reads.
+        /// </summary>
+        /// <returns>Whether a window opened, so a caller can fall back to its tooltip.</returns>
+        public static bool InspectItem(string templateId)
+        {
+            if (string.IsNullOrEmpty(templateId)) return false;
+
+            try
+            {
+                var context = ItemUiContext.Instance;
+                if (context == null || !Singleton<Handbook>.Instantiated) return false;
+
+                // Null-safe: HandbookNodes' indexer is a TryGetValue behind a [CanBeNull].
+                var item = Singleton<Handbook>.Instance[templateId]?.Data?.Item;
+                if (item == null) return false;
+
+                var itemContext = new DefaultItemContext(item, EItemViewType.Handbook);
+                context.Inspect(itemContext, new HandbookContextInteractions(itemContext, context));
+                return true;
+            }
+            catch (Exception ex)
+            {
+                // Same shape as AddTooltip above, and for the same reason: the inspect window wires
+                // itself to the item controller unguarded, so a menu caught mid-transition throws.
+                if (!_inspectWarned)
+                {
+                    _inspectWarned = true;
+                    Plugin.LogSource?.LogInfo($"QuestTree: item inspect unavailable ({ex.Message}).");
+                }
+
+                return false;
+            }
+        }
+
+        private static bool _inspectWarned;
 
         /// <summary>The width <paramref name="text"/> takes in <paramref name="label"/>'s font at
         /// its size, measured on that label after Apply has installed the font.
