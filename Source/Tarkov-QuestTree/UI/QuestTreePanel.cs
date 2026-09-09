@@ -1364,7 +1364,7 @@ namespace QuestTree.UI
                     QuestDataClient.InvalidateKappa();
                     QuestDataClient.InvalidateProfile();
                     RenderSelectedTab();
-                })
+                }, RenderSelectedTab)
                 : SettingsView.Build(_auxContent, size, () => ShowIntro(true), () =>
                 {
                     // SettingsView has already re-read the file; the flag is baked into each node

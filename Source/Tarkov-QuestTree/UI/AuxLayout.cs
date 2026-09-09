@@ -459,6 +459,69 @@ namespace QuestTree.UI
             x += width + 6f;
         }
 
+        /// <summary>
+        /// A row of tabs across the top of an aux page, for a page whose sections are long enough
+        /// that stacking them buries the last one. Only the selected section is then built, so the
+        /// page costs less to draw as well as less to read.
+        ///
+        /// Each tab is sized to its own label rather than to a fixed width - a row of equal boxes
+        /// wastes half its width on "Items" to fit "To unlock Collector" - and the row wraps rather
+        /// than running off the edge of a narrow panel.
+        /// </summary>
+        /// <returns>The height the row consumed, y already advanced past it.</returns>
+        public static float AddTabRow(
+            RectTransform parent, ref float y, float x, float width,
+            IReadOnlyList<string> labels, int selected, System.Action<int> onSelect)
+        {
+            const float height = 26f;
+            const float gap = 6f;
+            const float labelInset = 24f;
+
+            var top = y;
+            var cursor = x;
+
+            for (var i = 0; i < labels.Count; i++)
+            {
+                var index = i;
+                var tab = GameStyle.CreateButton(parent, labels[i], () => onSelect(index));
+
+                // Measured off the button's own label, after CreateButton has put the harvested
+                // font on it - the width is meaningless before that.
+                var label = tab.GetComponentInChildren<TMP_Text>();
+                var tabWidth = Mathf.Max(60f, GameStyle.MeasureWidth(label, labels[i]) + labelInset);
+
+                if (cursor > x && cursor + tabWidth > x + width)
+                {
+                    cursor = x;
+                    y += height + gap;
+                }
+
+                tab.anchorMin = tab.anchorMax = new Vector2(0f, 1f);
+                tab.pivot = new Vector2(0f, 1f);
+                tab.anchoredPosition = new Vector2(cursor, -y);
+                tab.sizeDelta = new Vector2(tabWidth, height);
+
+                if (index == selected)
+                {
+                    var accent = GameStyle.AccentColor;
+                    var background = tab.GetComponent<Image>();
+                    if (background != null)
+                        background.color = new Color(accent.r, accent.g, accent.b, 0.3f);
+
+                    if (label != null)
+                    {
+                        label.color = accent;
+                        label.fontStyle = FontStyles.Bold;
+                    }
+                }
+
+                cursor += tabWidth + gap;
+            }
+
+            y += height + 10f;
+            return y - top;
+        }
+
         /// <summary>A thin bar showing a fraction done - an objective's counter, say.</summary>
         public static void AddProgressBar(RectTransform parent, float fraction, float x, ref float y, float width, Color fill)
         {

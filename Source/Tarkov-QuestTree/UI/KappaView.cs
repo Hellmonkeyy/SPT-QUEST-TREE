@@ -33,12 +33,26 @@ namespace QuestTree.UI
         /// process, one copy per menu visit.</summary>
         private static Action<QuestNode> _onQuestSelected;
 
+        /// <summary>Which of the page's sections the tab row is showing, by key rather than by
+        /// index: the Collector section is only offered on an install where it says something
+        /// different from the Kappa list, and an index would select the wrong section on the
+        /// installs where it is absent.
+        ///
+        /// Static because the aux panel is destroyed and rebuilt on every repaint - the same reason
+        /// MapView keeps its map and floor here. A selection held in an instance would live for one
+        /// frame.</summary>
+        private static string _section = SectionItems;
+
+        private const string SectionItems = "items";
+        private const string SectionKappa = "kappa";
+        private const string SectionCollector = "collector";
+
         /// <summary>Builds the whole tab into <paramref name="parent"/> and returns its height.
         /// Reads the cached fetch result rather than requesting - see QuestDataClient.GetKappa for
         /// why this must not hit the server on every render.</summary>
         public static float Build(
             RectTransform parent, QuestGraphBuilder graph, Vector2 panelSize, Action<QuestNode> onQuestSelected,
-            Action onRefresh)
+            Action onRefresh, Action onRepaint)
         {
             _x = AuxLayout.Padding;
             _width = Mathf.Min(AuxLayout.MaxContentWidth, panelSize.x - AuxLayout.Padding * 2f);
@@ -46,7 +60,7 @@ namespace QuestTree.UI
 
             try
             {
-                return BuildPage(parent, graph, onRefresh);
+                return BuildPage(parent, graph, onRefresh, onRepaint);
             }
             finally
             {
@@ -54,7 +68,8 @@ namespace QuestTree.UI
             }
         }
 
-        private static float BuildPage(RectTransform parent, QuestGraphBuilder graph, Action onRefresh)
+        private static float BuildPage(
+            RectTransform parent, QuestGraphBuilder graph, Action onRefresh, Action onRepaint)
         {
             var y = AuxLayout.Padding;
 
@@ -68,24 +83,66 @@ namespace QuestTree.UI
 
             var payload = result.Payload;
 
-            BuildItemSection(parent, ref y, payload);
+            // The three sections used to be stacked, which put a hundred and thirty-six quest rows
+            // between the item checklist and anything below it. Only the sections this install has
+            // something to say in get a tab: on an unmodified profile the live Collector
+            // requirement and the canonical Kappa list are the same set, and printing both is noise.
+            var sections = new List<(string Key, string Label)>
+            {
+                (SectionItems, "Collector items"),
+                (SectionKappa, "Kappa quests")
+            };
+
+            if (LiveRequirementDiffers(payload)) sections.Add((SectionCollector, "To unlock Collector"));
+
+            var selected = sections.FindIndex(section => section.Key == _section);
+            if (selected < 0)
+            {
+                // The remembered section is not on offer here - a mod stopped changing Collector,
+                // or this is the first build of the session.
+                selected = 0;
+                _section = sections[0].Key;
+            }
+
+            var tabTop = y;
+
+            // Short of the refresh link, which sits on this same line at the right-hand end.
+            AuxLayout.AddTabRow(
+                parent, ref y, _x, _width - RefreshLinkWidth,
+                sections.Select(section => section.Label).ToList(), selected,
+                index =>
+                {
+                    _section = sections[index].Key;
+                    onRepaint?.Invoke();
+                });
+
             // The checklist reflects your stash, and the mod deliberately does not poll for that -
             // so there is an explicit way to re-read it after a raid without reopening the panel.
-            DoNextView.RefreshLink(parent, AuxLayout.Padding + 32f, _x, _width, onRefresh);
-            AuxLayout.AddSpacer(ref y, 18f);
-            BuildKappaQuestSection(parent, ref y, graph, payload);
-            AuxLayout.AddSpacer(ref y, 18f);
+            // On every tab, because every section here is read from the same fetch.
+            DoNextView.RefreshLink(parent, tabTop + 33f, _x, _width, onRefresh);
 
-            // Only worth showing when it differs from the Kappa list above - on an unmodified
-            // install the two are the same thing and printing both would just be noise.
-            if (LiveRequirementDiffers(payload))
+            switch (_section)
             {
-                BuildCollectorUnlockSection(parent, ref y, graph, payload);
-                AuxLayout.AddSpacer(ref y, 18f);
+                case SectionKappa:
+                    BuildKappaQuestSection(parent, ref y, graph, payload);
+                    break;
+
+                case SectionCollector:
+                    BuildCollectorUnlockSection(parent, ref y, graph, payload);
+                    break;
+
+                default:
+                    BuildItemSection(parent, ref y, payload);
+                    break;
             }
 
             return y + AuxLayout.Padding;
         }
+
+        /// <summary>Width kept clear for the refresh link on the tab row's line. DoNextView.
+        /// RefreshLink right-aligns itself in 150px; the rest is a gap so the last tab does not
+        /// touch it.</summary>
+        private const float RefreshLinkWidth = 165f;
 
         /// <summary>
         /// Explains a failed fetch in terms of what the player has to DO about it. The old message
