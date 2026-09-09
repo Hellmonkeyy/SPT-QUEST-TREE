@@ -22,7 +22,9 @@ containing `EscapeFromTarkov.exe`) and let them merge. You should end up with:
 [SPT folder]\SPT_Runtime\user\mods\QuestTree\zones\*.json
 ```
 
-Start the server first, then the game. A **Quest Tracker** button appears in the bottom taskbar.
+Start the server first, then the game. A **Quest Tracker** button appears in the bottom taskbar, and
+**Ctrl+Q** opens the tracker from anywhere in the menu - including the raid ready-up screen, where
+the game hides the taskbar. That screen gets a button of its own too.
 
 ### Both halves are required
 
@@ -57,7 +59,8 @@ top; the map fills the panel and a column on the right lists what you can do the
 - **Quests on the map** - every quest with an objective or item on this map, one row each. Click a
   row for its objectives and rewards inline, and the map flies to its pins.
 - **Items to find here** - quest items that spawn on this map, and whether you already hold them.
-  **Refresh** on the header line re-reads your stash.
+  Click one to open the game's own inspect window on it. **Refresh** on the header line re-reads
+  your stash.
 - A legend under the map name says what the pin shapes and colours mean.
 - Credits for the map image and the pin icons.
 
@@ -95,7 +98,9 @@ run through the column gaps to what it unlocks.
 
 **Click a quest** for its detail: status, level and trader chips, why it is locked, the wiki page,
 then **Requires** (with "started is enough" or "N h after" where a prerequisite asks for that),
-**Route** (the whole chain between you and it, in the order you can do it), **Objectives** with
+**Route** (the whole chain between you and it, in the order you can do it), **Bring** - the items
+you have to be carrying, named properly, with how many you already hold and what happens to each
+(handed in, found in raid, left in place, planted) - **Objectives** with
 live progress and a "Show on the map" link where there is a pin, **Rewards** and **Unlocks**. Every
 quest named in there is a link; **Back** at the top retraces them, and returns to the list you came
 from. The box the panel is about is outlined in the accent colour. The panel collapses with the
@@ -112,9 +117,12 @@ around it.
 - **Items** - every item an unfinished quest will ask for, how many you hold, whether found-in-raid
   is required, and which quests want it. **This is the "do not sell that" list.** It deliberately
   includes items for quests you have not unlocked yet, because that is exactly when you would
-  otherwise vendor them.
-- **Kappa** - the Collector hand-in checklist against your stash (found-in-raid, which is what
-  Collector actually requires), the full Kappa quest list and your progress through it.
+  otherwise vendor them. Click the item for the game's own inspect window, or the quest names
+  underneath it to open that quest.
+- **Kappa** - tabs across the top: the Collector hand-in checklist against your stash
+  (found-in-raid, which is what Collector actually requires), the full Kappa quest list and your
+  progress through it, and - only where a mod has changed Collector - what it actually requires on
+  your install. Collector items open the inspect window like every other item list.
 - **Settings** - below.
 
 ## Controls
@@ -130,6 +138,7 @@ around it.
 | `[` `]` | On the map, the floor below or above |
 | `Esc` | Close the hint, then the quest detail, then the tracker |
 | `?` | Show the controls hint again |
+| `Ctrl+Q` | Open or close the tracker from anywhere in the menu (rebindable in F12) |
 
 ## Settings
 
@@ -140,8 +149,8 @@ The Settings view, in four sections, and the same values in BepInEx's F12 menu. 
   opacity, hover dimming strength, the zoom levels the boxes simplify at, the visible-quest ceiling,
   which quest badges the boxes wear (Kappa, Collector, or both), Focus, and the hide filters
   (unobtainable / completed / traderless).
-- **Behaviour** - open on the map or remember the last view, tooltips, hover sounds, in-raid zone
-  harvesting, the controls hint, and reloading `kappa-quests.json`.
+- **Behaviour** - open on the map or remember the last view, the open-tracker shortcut, tooltips,
+  hover sounds, in-raid zone harvesting, the controls hint, and reloading `kappa-quests.json`.
 - **Map** - accepted quests only, which sidebar sections show, how many "do next" rows, which pins
   carry their name at rest (hover only / in progress and available / all), sidebar width, and the
   artwork rotation and mirror overrides.
@@ -170,7 +179,7 @@ The Settings view, in four sections, and the same values in BepInEx's F12 menu. 
 ## Troubleshooting
 
 - **No taskbar button** - check `BepInEx\LogOutput.log` for lines starting `QuestTree`. The load
-  line carries the build stamp (`QuestTree 1.8.4+abc1234: loaded.`), which is what to quote.
+  line carries the build stamp (`QuestTree 1.8.5+abc1234: loaded.`), which is what to quote.
 - **Tree only shows unlocked quests, no pins** - the server half is missing, or you are on someone
   else's server that does not have it. See "Both halves are required" above.
 - **`Http response status code: NotFound` on `/questtree/...`** - same cause: the server you are on
