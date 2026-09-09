@@ -273,8 +273,15 @@ namespace QuestTree.UI
                 ModSettings.MapArtworkRotation, ModSettings.PinLabels, ModSettings.SidebarWidth);
         }
 
-        /// <summary>A labelled dropdown. The list itself is built later (deferred) at the y reserved
-        /// here, so it draws above the rows that follow.</summary>
+        /// <summary>A labelled dropdown.
+        ///
+        /// The header is built here, in place, with the rows around it. Only the OPEN list is
+        /// deferred, and only one dropdown is ever open, so the deferred pass builds exactly one
+        /// overlay and builds it after every header on the page.
+        ///
+        /// Deferring the whole control instead is what broke this page in 1.8.4: the deferred pass
+        /// ran header-plus-list, header-plus-list, so the second dropdown's header landed on top of
+        /// the first one's open list. See AuxLayout.AddDropdownHeader.</summary>
         private static void Dropdown(
             RectTransform column, ref float y, float width, List<Func<float>> deferred, string label,
             IReadOnlyList<string> options, int selected, Action<int> onSelect)
@@ -286,20 +293,28 @@ namespace QuestTree.UI
             var open = _openDropdown == label;
             var dropdownWidth = Mathf.Min(300f, width - AuxLayout.Padding * 2f);
 
-            deferred.Add(() => AuxLayout.AddDropdown(
+            AuxLayout.AddDropdownHeader(
                 column, top, options, selected, open,
                 toggleOpen: () =>
                 {
                     _openDropdown = open ? null : label;
                     ModSettings.RequestRepaint();
                 },
-                onSelect: index =>
-                {
-                    _openDropdown = null;
-                    onSelect(index);
-                },
                 width: dropdownWidth,
-                x: AuxLayout.Padding));
+                x: AuxLayout.Padding);
+
+            if (open)
+            {
+                deferred.Add(() => AuxLayout.AddDropdownList(
+                    column, top, options, selected,
+                    onSelect: index =>
+                    {
+                        _openDropdown = null;
+                        onSelect(index);
+                    },
+                    width: dropdownWidth,
+                    x: AuxLayout.Padding));
+            }
 
             y += AuxLayout.DropdownHeight + 10f;
         }

@@ -142,7 +142,7 @@ namespace QuestTree.UI
         /// <summary>The same control placed at an absolute position instead of on the running
         /// <c>y</c> cursor, for a header laid out in columns rather than as a stack - the Maps tab
         /// sits its toggle beside the map and floor dropdowns, which are placed the same way
-        /// (see <see cref="AddDropdown"/>).</summary>
+        /// (see <see cref="AddDropdownHeader"/>).</summary>
         public static float AddToggleAt(
             RectTransform parent, float x, float top, string label, bool value,
             System.Action<bool> onChanged, float width = 240f)
@@ -501,28 +501,20 @@ namespace QuestTree.UI
         public const float DropdownRowHeight = 26f;
 
         /// <summary>
-        /// A dropdown: a header showing the current choice, and - when open - the options drawn
-        /// over whatever is beneath it.
+        /// The closed part of a dropdown: the button showing the current value. Split from the list
+        /// deliberately, and they must stay split.
         ///
-        /// The open state and the selection both belong to the caller rather than to this method.
-        /// Every aux view is rebuilt from scratch on each render, so anything held here would be
-        /// discarded the moment the list was clicked; the caller keeps it in a static the same way
-        /// MapView already keeps its selected map.
-        ///
-        /// Positioned at an explicit <paramref name="top"/> rather than off a running cursor, so it
-        /// can be built *last* while still appearing at the top of the view. That ordering is the
-        /// whole trick: Unity UI draws siblings in order, so an overlay has to be created after the
-        /// content it covers. Returns the bottom of the open list so the caller can size its panel
-        /// to reach it.
-        ///
-        /// Not TMP_Dropdown: that needs a runtime-built template hierarchy and would have to escape
-        /// the aux panel's RectMask2D to overlay properly. Hand-built matches every other control
-        /// here, and cloning the game's own UI has gone badly in this project before.
+        /// Sibling order is draw order in Unity UI, and a dropdown list is an overlay - it covers
+        /// the rows beneath it and belongs to no layout. When one method built both, the second
+        /// dropdown on a page drew its HEADER over the first one's open LIST, which is what made the
+        /// Settings dropdowns unusable in 1.8.4. Every header first, then the single open list last,
+        /// is the only order that cannot do that.
         /// </summary>
-        public static float AddDropdown(
+        /// <returns>The height the header occupies, which is all a caller's y-cursor should
+        /// advance by: the list is an overlay and contributes no layout height.</returns>
+        public static float AddDropdownHeader(
             RectTransform parent, float top, IReadOnlyList<string> options, int selectedIndex,
-            bool open, System.Action toggleOpen, System.Action<int> onSelect, float width = 300f,
-            float x = Padding)
+            bool open, System.Action toggleOpen, float width = 300f, float x = Padding)
         {
             var selectedLabel = selectedIndex >= 0 && selectedIndex < options.Count
                 ? options[selectedIndex]
@@ -535,8 +527,20 @@ namespace QuestTree.UI
             header.anchoredPosition = new Vector2(x, -top);
             header.sizeDelta = new Vector2(width, DropdownHeight);
 
-            if (!open) return 0f;
+            return DropdownHeight;
+        }
 
+        /// <summary>
+        /// The open part: the plate and the rows, drawn under the header at the same
+        /// <paramref name="top"/> that header was given. Call this LAST on the page, and only for
+        /// the one dropdown that is open - see the note on <see cref="AddDropdownHeader"/>.
+        /// </summary>
+        /// <returns>The y the list reaches, so the page can be made tall enough to scroll to the
+        /// bottom of it. It is not layout height; nothing may be stacked under it.</returns>
+        public static float AddDropdownList(
+            RectTransform parent, float top, IReadOnlyList<string> options, int selectedIndex,
+            System.Action<int> onSelect, float width = 300f, float x = Padding)
+        {
             var listTop = top + DropdownHeight;
 
             // A backing plate behind the rows, so the map underneath cannot show between them.

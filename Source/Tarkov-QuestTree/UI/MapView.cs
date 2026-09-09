@@ -358,7 +358,19 @@ namespace QuestTree.UI
             var labels = ordered.Select(LabelFor).ToList();
             var selectedIndex = ordered.FindIndex(m => m.Key == _selectedLocationKey);
 
-            var popupBottom = AuxLayout.AddDropdown(
+            // The floor picker is absent on a single-floor map, which is most of them - a picker
+            // with one entry is furniture. A floor list left open across a map change would have
+            // nothing to draw, so the flag is cleared with the picker it belongs to.
+            var floorNames = entry != null && entry.Layers.Count >= 2
+                ? entry.Layers.Select(l => l.Name).ToList()
+                : null;
+            var floorIndex = floorNames != null ? entry.Layers.IndexOf(layer) : -1;
+            if (floorNames == null) _floorPickerOpen = false;
+
+            // Both headers, then the one open list after them. Sibling order is draw order, so a
+            // list built before the second header would be covered by it - see
+            // AuxLayout.AddDropdownHeader for the whole story.
+            AuxLayout.AddDropdownHeader(
                 parent, AuxLayout.Padding, labels, selectedIndex, _pickerOpen,
                 toggleOpen: () =>
                 {
@@ -366,54 +378,59 @@ namespace QuestTree.UI
                     _floorPickerOpen = false;
                     onRepaint();
                 },
-                onSelect: index =>
-                {
-                    _selectedLocationKey = ordered[index].Key;
-                    _pickerOpen = false;
-
-                    // A quest belongs to the map it is done on, so a selection never survives a map
-                    // change - carrying it would leave a highlight with no row to explain it.
-                    _selectedQuestId = null;
-                    _pendingFocusQuestId = null;
-
-                    onRepaint();
-                },
                 width: PickerWidth);
 
-            popupBottom = Mathf.Max(popupBottom, BuildFloorPicker(parent, entry, layer, onRepaint));
+            if (floorNames != null)
+            {
+                AuxLayout.AddDropdownHeader(
+                    parent, AuxLayout.Padding, floorNames, floorIndex, _floorPickerOpen,
+                    toggleOpen: () =>
+                    {
+                        _floorPickerOpen = !_floorPickerOpen;
+                        _pickerOpen = false;
+                        onRepaint();
+                    },
+                    width: FloorPickerWidth,
+                    x: AuxLayout.Padding + PickerWidth + 10f);
+            }
+
+            var popupBottom = 0f;
+
+            if (_pickerOpen)
+            {
+                popupBottom = AuxLayout.AddDropdownList(
+                    parent, AuxLayout.Padding, labels, selectedIndex,
+                    onSelect: index =>
+                    {
+                        _selectedLocationKey = ordered[index].Key;
+                        _pickerOpen = false;
+
+                        // A quest belongs to the map it is done on, so a selection never survives a
+                        // map change - carrying it would leave a highlight with no row to explain it.
+                        _selectedQuestId = null;
+                        _pendingFocusQuestId = null;
+
+                        onRepaint();
+                    },
+                    width: PickerWidth);
+            }
+            else if (_floorPickerOpen && floorNames != null)
+            {
+                popupBottom = AuxLayout.AddDropdownList(
+                    parent, AuxLayout.Padding, floorNames, floorIndex,
+                    onSelect: chosen =>
+                    {
+                        _selectedLevel = entry.Layers[chosen].Level;
+                        _floorPickerOpen = false;
+                        onRepaint();
+                    },
+                    width: FloorPickerWidth,
+                    x: AuxLayout.Padding + PickerWidth + 10f);
+            }
 
             // An open list is an overlay and so contributes no layout height of its own - but the
             // panel still has to be tall enough to scroll to the bottom of it.
             return Mathf.Max(contentHeight, popupBottom);
-        }
-
-        /// <summary>The floor dropdown, beside the map one. Absent for a map with a single floor,
-        /// which is most of them - a picker with one entry is furniture.</summary>
-        private static float BuildFloorPicker(
-            RectTransform parent, DynamicMapsLibrary.MapEntry entry,
-            DynamicMapsLibrary.MapLayer layer, Action onRepaint)
-        {
-            if (entry == null || entry.Layers.Count < 2) return 0f;
-
-            var names = entry.Layers.Select(l => l.Name).ToList();
-            var index = entry.Layers.IndexOf(layer);
-
-            return AuxLayout.AddDropdown(
-                parent, AuxLayout.Padding, names, index, _floorPickerOpen,
-                toggleOpen: () =>
-                {
-                    _floorPickerOpen = !_floorPickerOpen;
-                    _pickerOpen = false;
-                    onRepaint();
-                },
-                onSelect: chosen =>
-                {
-                    _selectedLevel = entry.Layers[chosen].Level;
-                    _floorPickerOpen = false;
-                    onRepaint();
-                },
-                width: FloorPickerWidth,
-                x: AuxLayout.Padding + PickerWidth + 10f);
         }
 
         /// <summary>The floor to show: the one last chosen if this map has it, else the map's own
