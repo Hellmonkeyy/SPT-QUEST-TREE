@@ -254,6 +254,8 @@ namespace QuestTree.UI
         {
             if (_content == null || !_content.gameObject.activeInHierarchy) return;
 
+            if (_focusRetryFrames > 0 && TickPendingFocus()) return;
+
             // The viewport's world corners are only correct once Unity has laid the panel out, which
             // has not necessarily happened on the frame the tab is built - and if the first sweep
             // measures an empty rect, nothing gets built and the tree looks blank until the user
@@ -670,22 +672,106 @@ namespace QuestTree.UI
         /// earliest match in the chain - or null when nothing is laid out.</summary>
         public QuestNode FirstMatch() => _layoutOrder.Length > 0 ? _layoutOrder[0] : null;
 
-        /// <summary>Frames a quest with its immediate neighbours and opens its detail - what a
-        /// clickable prerequisite or unlock row in the detail panel does. Framing the neighbourhood
-        /// rather than the one box keeps the zoom sane and shows what it connects to.</summary>
+        /// <summary>
+        /// Frames a quest with its immediate neighbours and opens its detail - what a clickable
+        /// prerequisite or unlock row in the detail panel does, and what a Kappa or Do-next row
+        /// does on its way in from an aux tab. Framing the neighbourhood rather than the one box
+        /// keeps the zoom sane and shows what it connects to.
+        ///
+        /// Coming from an aux tab it usually cannot frame on this frame at all: the panel switched
+        /// tabs a moment ago, so the graph viewport has only just been re-activated and Unity has
+        /// not given it a rect yet. FrameNodes reads that rect, finds it empty and gives up, which
+        /// is how a Kappa row used to land the player somewhere in a five-thousand-quest tree with
+        /// their quest selected and nowhere in sight. So a frame that could not happen is
+        /// remembered and retried from Tick - the same deferral MapView uses for its fly-to.
+        /// </summary>
         public void FocusNode(QuestNode node)
         {
             if (node == null || _graph == null) return;
 
+            _pendingFocus = null;
+            _focusRetryFrames = 0;
+
+            if (!FrameChain(node))
+            {
+                if (_layout.ContainsKey(node))
+                {
+                    _pendingFocus = node;
+                    _focusRetryFrames = FocusRetryFrames;
+                }
+                else
+                {
+                    // Nothing to retry: a filter or the search box has kept this quest out of the
+                    // laid-out set entirely, and no amount of waiting will put it back.
+                    ReportUnframedFocus(node, filtered: true);
+                }
+            }
+
+            _onNodeClicked?.Invoke(node);
+        }
+
+        /// <summary>The node a FocusNode could not frame yet, and how many frames are left to keep
+        /// trying. Generous: layout normally settles within a frame or two, and each further
+        /// attempt costs one rect read.</summary>
+        private QuestNode _pendingFocus;
+        private int _focusRetryFrames;
+        private const int FocusRetryFrames = 8;
+
+        /// <summary>One retry attempt. Returns true when this frame was spent framing, in which
+        /// case Tick has nothing further to do - the sweep is run here, because FrameNodes updates
+        /// the movement watermarks itself and Tick would otherwise see a still view sitting over a
+        /// completely different piece of the tree.</summary>
+        private bool TickPendingFocus()
+        {
+            _focusRetryFrames--;
+
+            var node = _pendingFocus;
+            if (node == null)
+            {
+                _focusRetryFrames = 0;
+                return false;
+            }
+
+            if (FrameChain(node))
+            {
+                _pendingFocus = null;
+                _focusRetryFrames = 0;
+                RefreshVisibleNodes();
+                return true;
+            }
+
+            if (_focusRetryFrames == 0)
+            {
+                _pendingFocus = null;
+                ReportUnframedFocus(node, filtered: !_layout.ContainsKey(node));
+            }
+
+            return false;
+        }
+
+        /// <summary>Frames a quest with its prerequisites and unlocks. Shared by the immediate
+        /// attempt and the retry, so both frame the same thing.</summary>
+        private bool FrameChain(QuestNode node)
+        {
             var chain = new List<QuestNode> { node };
             foreach (var prerequisiteId in node.PrerequisiteIds)
                 if (_graph.NodesById.TryGetValue(prerequisiteId, out var prerequisite)) chain.Add(prerequisite);
             chain.AddRange(node.Unlocks);
 
-            // The detail opens on the next line, so it is reserved for unconditionally: asking
-            // whether it is open yet would answer no.
-            FrameNodes(chain, reserveDetail: true, detailOpening: true);
-            _onNodeClicked?.Invoke(node);
+            // The detail opens moments later, so it is reserved for unconditionally: asking whether
+            // it is open yet would answer no.
+            return FrameNodes(chain, reserveDetail: true, detailOpening: true);
+        }
+
+        /// <summary>Says why the quest is selected but not on screen. Silence here is what made the
+        /// old behaviour look like a broken link rather than an active filter.</summary>
+        private void ReportUnframedFocus(QuestNode node, bool filtered)
+        {
+            var name = RichText.Safe(node.Name);
+
+            _toolbar?.SetNotice(filtered
+                ? $"<color=#{GameStyle.WarningHex}>{name} is selected, but a filter or the search box is hiding it - clear those to see it in the tree.</color>"
+                : $"<color=#{GameStyle.WarningHex}>{name} is selected. Press Fit to bring the tree back into view.</color>");
         }
 
         /// <summary>Frames a subset of the laid-out nodes. Used both for "fit everything" and for
@@ -693,11 +779,13 @@ namespace QuestTree.UI
         /// strip the detail panel covers is left out of the frame, so what is framed lands beside
         /// the panel rather than under it; <paramref name="detailOpening"/> says the panel is
         /// about to open even though it is not up yet.</summary>
-        private void FrameNodes(
+        /// <returns>Whether it framed. False means the viewport has no rect yet, or nothing in
+        /// <paramref name="nodes"/> is in the current layout - both of which used to be silent.</returns>
+        private bool FrameNodes(
             System.Collections.Generic.IEnumerable<QuestNode> nodes,
             bool reserveDetail = false, bool detailOpening = false)
         {
-            if (nodes == null || _viewport == null || _layoutOrder.Length == 0) return;
+            if (nodes == null || _viewport == null || _layoutOrder.Length == 0) return false;
 
             float minX = float.MaxValue, maxX = float.MinValue;
             float minY = float.MaxValue, maxY = float.MinValue;
@@ -712,10 +800,13 @@ namespace QuestTree.UI
                 maxY = Mathf.Max(maxY, position.y + QuestNodeView.Height * 0.5f);
             }
 
-            if (minX > maxX || minY > maxY) return;
+            if (minX > maxX || minY > maxY) return false;
 
             var viewportSize = _viewport.rect.size;
-            if (viewportSize.x <= 1f || viewportSize.y <= 1f) return;
+
+            // Not laid out yet - a viewport re-activated on this same frame reads as empty. The
+            // caller decides whether that is worth retrying.
+            if (viewportSize.x <= 1f || viewportSize.y <= 1f) return false;
 
             // The panel sits over the viewport's right edge, so the usable width is what is left
             // of it. Only when there is still a sensible amount left: on a narrow window the
@@ -760,6 +851,7 @@ namespace QuestTree.UI
 
             _lastContentPosition = _content.anchoredPosition;
             _lastContentScale = zoom;
+            return true;
         }
 
         /// <summary>Scratch for GetWorldCorners, which insists on an array; one per sweep was a
