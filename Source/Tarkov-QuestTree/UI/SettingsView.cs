@@ -58,7 +58,7 @@ namespace QuestTree.UI
             var rightY = AuxLayout.Padding;
             var deferred = new List<Func<float>>();
 
-            BuildTreeSection(left, ref leftY, columnWidth);
+            BuildTreeSection(left, ref leftY, columnWidth, deferred);
             AuxLayout.AddSpacer(ref leftY, 18f);
             BuildBehaviourSection(left, ref leftY, columnWidth, onShowIntro, onKappaListReloaded);
 
@@ -120,7 +120,8 @@ namespace QuestTree.UI
 
         // ------------------------------------------------------------------ Tree
 
-        private static void BuildTreeSection(RectTransform column, ref float y, float width)
+        private static void BuildTreeSection(
+            RectTransform column, ref float y, float width, List<Func<float>> deferred)
         {
             Header(column, ref y, "Tree", width);
 
@@ -161,12 +162,18 @@ namespace QuestTree.UI
             Stepper(column, ref y, "Max visible quests", ModSettings.MaxVisibleNodes, 100, 100, 2000,
                 "Ceiling on how many quest boxes exist at once. Only reachable when zoomed right out.");
 
+            AuxLayout.AddSpacer(ref y, 6f);
+            Dropdown(column, ref y, width, deferred, "Quest badges",
+                new[] { "Kappa and Collector", "Kappa only", "Collector only" },
+                (int)ModSettings.QuestBadges.Value,
+                index => ModSettings.QuestBadges.Value = (ModSettings.BadgeMode)index);
+
             ResetLink(column, ref y, width,
                 ModSettings.CompactLayout, ModSettings.TallTitles, ModSettings.AbbreviateWhenZoomedOut,
                 ModSettings.DrawEdges, ModSettings.FocusFrontier, ModSettings.HideUnobtainable,
                 ModSettings.HideCompleted, ModSettings.HideTraderless, ModSettings.EdgeOpacity,
                 ModSettings.HoverDimStrength, ModSettings.TitleOnlyBelowZoom, ModSettings.CodesBelowZoom,
-                ModSettings.MaxVisibleNodes);
+                ModSettings.MaxVisibleNodes, ModSettings.QuestBadges);
         }
 
         // ------------------------------------------------------------------ Behaviour

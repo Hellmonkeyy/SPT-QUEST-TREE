@@ -57,6 +57,15 @@ namespace QuestTree
         public static ConfigEntry<bool> AbbreviateWhenZoomedOut { get; private set; }
         public static ConfigEntry<int> TitleOnlyBelowZoom { get; private set; }
         public static ConfigEntry<int> CodesBelowZoom { get; private set; }
+        public static ConfigEntry<BadgeMode> QuestBadges { get; private set; }
+
+        /// <summary>Read by the boxes; both true before Init has run, which is what the palette
+        /// and every other look-and-feel default does.</summary>
+        public static bool ShowKappaBadge =>
+            !Ready || QuestBadges.Value == BadgeMode.Both || QuestBadges.Value == BadgeMode.Kappa;
+
+        public static bool ShowCollectorBadge =>
+            !Ready || QuestBadges.Value == BadgeMode.Both || QuestBadges.Value == BadgeMode.Collector;
 
         // --- Map look ---
         public static ConfigEntry<int> SidebarWidth { get; private set; }
@@ -78,6 +87,16 @@ namespace QuestTree
         public static ConfigEntry<bool> RememberLastView { get; private set; }
 
         /// <summary>Which map pins carry their name at rest. Hover always shows a name.</summary>
+        /// <summary>Which of the two quest marks the boxes wear. Kappa is the canonical list;
+        /// Collector is what this install actually gates Collector behind, which a quest mod can
+        /// make a very different set.</summary>
+        public enum BadgeMode
+        {
+            Both,
+            Kappa,
+            Collector
+        }
+
         public enum PinLabelMode
         {
             HoverOnly,
@@ -270,6 +289,12 @@ namespace QuestTree
                 new ConfigDescription("Below this zoom (percent) a box shows only its status bar and code.",
                     new AcceptableValueRange<int>(15, 60)));
 
+            QuestBadges = config.Bind(
+                "Tree", "Quest badges", BadgeMode.Both,
+                "Which marks a quest box wears. Kappa is the canonical Kappa list; Collector is " +
+                "what Collector actually requires on this install, which a quest mod can change. " +
+                "Both shows K and C; the detail panel names them either way.");
+
             SidebarWidth = config.Bind(
                 "Map", "Sidebar width", 440,
                 new ConfigDescription("Width of the quest column beside the map, in pixels.",
@@ -315,7 +340,7 @@ namespace QuestTree
                 HideUnobtainable, HideCompleted, HideTraderless, MarkStartedOnly, MapArtworkRotation,
                 MirrorMapArtwork, ShowMapGuides, DrawEdges, FocusFrontier, CompactLayout, MaxVisibleNodes,
                 OpenOnMap, HarvestZones, EdgeOpacity, HoverDimStrength, TallTitles, AbbreviateWhenZoomedOut,
-                TitleOnlyBelowZoom, CodesBelowZoom, SidebarWidth, DoNextRows, ShowItemsSection, ShowCredits,
+                TitleOnlyBelowZoom, CodesBelowZoom, QuestBadges, SidebarWidth, DoNextRows, ShowItemsSection, ShowCredits,
                 PinLabels, ColorActive, ColorAvailable, ColorCompleted, ColorLocked, ColorAccent, Tooltips,
                 HoverSounds, RememberLastView
             });
@@ -345,6 +370,7 @@ namespace QuestTree
             AbbreviateWhenZoomedOut.SettingChanged += Raise;
             TitleOnlyBelowZoom.SettingChanged += Raise;
             CodesBelowZoom.SettingChanged += Raise;
+            QuestBadges.SettingChanged += Raise;
             SidebarWidth.SettingChanged += Raise;
             DoNextRows.SettingChanged += Raise;
             ShowItemsSection.SettingChanged += Raise;
