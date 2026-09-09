@@ -57,6 +57,17 @@ namespace QuestTree
                 Logger.LogError($"QuestTree: failed to enable the taskbar patch: {ex}");
             }
 
+            try
+            {
+                // Its own guard: the ready-up screen's button is a convenience, and the shortcut
+                // still reaches that screen without it.
+                new MatchMakerAcceptScreenPatch().Enable();
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError($"QuestTree: failed to enable the pre-raid button patch: {ex}");
+            }
+
             Logger.LogInfo($"QuestTree {ModInfo.Stamp}: loaded.");
         }
     }

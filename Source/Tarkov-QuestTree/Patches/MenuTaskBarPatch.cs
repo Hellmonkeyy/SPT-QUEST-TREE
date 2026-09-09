@@ -81,10 +81,18 @@ namespace QuestTree.Patches
 
             // The taskbar can be torn down during the frame above (a menu rebuild); a coroutine
             // cannot try/catch across a yield, so the guard is here, around the resumption.
+            //
+            // Hosted on our own object when there is one, not on the taskbar: these run for up to
+            // five seconds after the menu appears, and the taskbar is deactivated outright the
+            // moment the player reaches the ready-up screen, which kills a coroutine running on it.
+            // Entering matchmaking quickly used to cut the label heal short and leave the button
+            // blank for that menu session.
+            var host = state.Host != null ? (MonoBehaviour)state.Host : menuTaskBar;
+
             try
             {
-                menuTaskBar.StartCoroutine(HealLater(state));
-                menuTaskBar.StartCoroutine(PlaceNextToRaidReviewLater(state));
+                host.StartCoroutine(HealLater(state));
+                host.StartCoroutine(PlaceNextToRaidReviewLater(state));
             }
             catch (Exception ex)
             {
@@ -212,7 +220,13 @@ namespace QuestTree.Patches
                 // no AnimatedToggle left a full-screen panel nothing could reach.
                 if (toggle != null)
                 {
-                    var panel = CreatePanel(menuTaskBar);
+                    TrackerAccess.Panel = CreatePanel(menuTaskBar);
+
+                    // The always-on shortcut watcher, hosted beside the panel rather than on it:
+                    // a closed panel is an inactive GameObject, and Unity does not call Update on
+                    // one, so the panel cannot listen for the key that opens it.
+                    state.Host = TrackerHotkey.Create(TrackerAccess.Panel.transform.parent);
+
                     toggle.ToggleSilent(false);
                     toggle.onValueChanged.AddListener(isOn =>
                     {
@@ -220,25 +234,10 @@ namespace QuestTree.Patches
 
                         try
                         {
-                            if (panel == null)
-                            {
-                                // The panel died with an earlier menu and this button outlived
-                                // it; said once rather than an error per click.
-                                if (!_deadPanelWarned)
-                                {
-                                    _deadPanelWarned = true;
-                                    Plugin.LogSource?.LogWarning("QuestTree: the Quest Tracker panel is gone - reopen the menu to get a new one.");
-                                }
-
-                                return;
-                            }
-
-                            if (panel.gameObject.activeSelf) panel.HideGameObject();
-                            else ShowPanel(panel);
-                        }
-                        catch (Exception ex)
-                        {
-                            Plugin.LogSource?.LogError($"QuestTree: the Quest Tracker button failed: {ex}");
+                            // The taskbar button is now one of three ways in - the shortcut and the
+                            // ready-up screen's button are the others - so what it does lives in
+                            // TrackerAccess rather than here.
+                            TrackerAccess.Toggle();
                         }
                         finally
                         {
@@ -438,48 +437,6 @@ namespace QuestTree.Patches
             return panelGo.AddComponent<QuestTreePanel>();
         }
 
-        private static void ShowPanel(QuestTreePanel panel)
-        {
-            var app = ClientAppUtils.GetMainApp();
-            var mainMenu = Compat.Get<MainMenuShowOperation>(app);
-
-            if (mainMenu?.QuestController == null || mainMenu.iEftSession == null)
-            {
-                Plugin.LogSource?.LogWarning("QuestTree: session/quest data not available yet.");
-                return;
-            }
-
-            // Caught here, not inside RaidLocationOf: a member that a game update has renamed
-            // fails when the method that names it is JIT-compiled, i.e. at the call, so a try
-            // inside that method would never see it. The cue is the only thing at stake.
-            string raidLocation = null;
-            try
-            {
-                raidLocation = RaidLocationOf(app);
-            }
-            catch (Exception ex)
-            {
-                if (!_raidLocationWarned)
-                {
-                    _raidLocationWarned = true;
-                    Plugin.LogSource?.LogInfo($"QuestTree: could not read the selected raid location ({ex.GetType().Name}: {ex.Message}).");
-                }
-            }
-
-            panel.Show(mainMenu.QuestController, mainMenu.iEftSession, raidLocation);
-            panel.transform.SetAsLastSibling();
-        }
-
-        private static bool _raidLocationWarned;
-        private static bool _deadPanelWarned;
-
-        /// <summary>The map picked on the matchmaker screen, by its internal name ("bigmap",
-        /// "factory4_night"), or null from the main menu before one is picked. The taskbar stays
-        /// up through the matchmaker, so opening the tracker from there is exactly the "what can
-        /// I do on the map I am about to load" case the map view exists for.</summary>
-        private static string RaidLocationOf(TarkovApplication app) =>
-            app?.CurrentRaidSettings?.SelectedLocation?.Id;
-
         /// <summary>The pieces of the built button that the deferred heal/placement passes need to
         /// keep hold of, so neither has to re-find anything by name after the fact.</summary>
         private sealed class ButtonState
@@ -487,6 +444,11 @@ namespace QuestTree.Patches
             public GameObject Clone;
             public TMP_Text Label;
             public AnimatedToggle Toggle;
+
+            /// <summary>Our own always-active object, and the host for the deferred passes above.
+            /// Null if the panel could not be built, in which case the taskbar hosts them as it
+            /// used to.</summary>
+            public TrackerHotkey Host;
         }
     }
 }

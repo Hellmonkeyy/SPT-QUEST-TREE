@@ -388,6 +388,10 @@ namespace QuestTree.UI
             if (visible) _loadingPanel.SetAsLastSibling();
         }
 
+        /// <summary>Whether the search box has the keyboard. Asked from outside by the open-tracker
+        /// shortcut, which must not fire on a key the player is typing into the box.</summary>
+        public bool IsTyping => _toolbar != null && _toolbar.IsSearchFocused();
+
         /// <summary>Unity only calls Update on an active GameObject, so this only ever runs while
         /// the panel is actually open - no extra "is it visible" guard needed.</summary>
         public void Update()

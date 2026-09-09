@@ -86,6 +86,11 @@ namespace QuestTree
         public static ConfigEntry<bool> HoverSounds { get; private set; }
         public static ConfigEntry<bool> RememberLastView { get; private set; }
 
+        /// <summary>The key that opens and closes the tracker from anywhere in the menu. The only
+        /// way in on the two matchmaker screens, which hide the taskbar and our button with it -
+        /// see TrackerHotkey.</summary>
+        public static ConfigEntry<KeyboardShortcut> OpenTracker { get; private set; }
+
         /// <summary>Which of the two quest marks the boxes wear. Kappa is the canonical list;
         /// Collector is what this install actually gates Collector behind, which a quest mod can
         /// make a very different set.</summary>
@@ -335,6 +340,13 @@ namespace QuestTree
                 "Behaviour", "Remember last view", false,
                 "Open the tracker on whichever view it was closed on, instead of always the map (or the tree).");
 
+            // A modifier by default rather than a bare key, so it cannot be typed into the panel's
+            // own search box, and one that no menu screen already uses. Rebindable in the F12 menu,
+            // including to nothing at all.
+            OpenTracker = config.Bind(
+                "Behaviour", "Open tracker shortcut", new KeyboardShortcut(KeyCode.Q, KeyCode.LeftControl),
+                "Opens and closes the tracker anywhere in the menu, including the raid ready-up screen where the taskbar is hidden.");
+
             Entries.AddRange(new ConfigEntryBase[]
             {
                 HideUnobtainable, HideCompleted, HideTraderless, MarkStartedOnly, MapArtworkRotation,
@@ -342,7 +354,7 @@ namespace QuestTree
                 OpenOnMap, HarvestZones, EdgeOpacity, HoverDimStrength, TallTitles, AbbreviateWhenZoomedOut,
                 TitleOnlyBelowZoom, CodesBelowZoom, QuestBadges, SidebarWidth, DoNextRows, ShowItemsSection, ShowCredits,
                 PinLabels, ColorActive, ColorAvailable, ColorCompleted, ColorLocked, ColorAccent, Tooltips,
-                HoverSounds, RememberLastView
+                HoverSounds, RememberLastView, OpenTracker
             });
 
             // One handler per entry rather than a single global hook, so this only fires for
