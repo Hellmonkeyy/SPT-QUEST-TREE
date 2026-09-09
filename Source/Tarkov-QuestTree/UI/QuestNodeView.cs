@@ -209,8 +209,6 @@ namespace QuestTree.UI
             glyph.alignment = TextAlignmentOptions.TopRight;
             view._statusGlyph = glyph;
 
-            view._kappaBadge = CreateBadge(rect, "K", GameStyle.KappaGold);
-            view._collectorBadge = CreateBadge(rect, "C", GameStyle.CollectorBlue);
 
             // The game's own tooltip, on hover. Text is set per Bind.
             view._tooltip = GameStyle.AddTooltip(go, "");
@@ -284,12 +282,8 @@ namespace QuestTree.UI
             // says nothing. Widths are estimated from character counts rather than measured:
             // TMP's measurement answered wrong for pooled views, and an estimate is deterministic.
             _title.fontSize = LayoutMetrics.TitleFontSize;
-            // Glyph and badge live top-right. A second badge takes one more square out of the
-            // title's width; one badge keeps the inset the box has always used.
-            var badges = (node.IsKappaRequired && ModSettings.ShowKappaBadge ? 1 : 0) +
-                         (node.IsCollectorPrerequisite && ModSettings.ShowCollectorBadge ? 1 : 0);
-            var titleWidth = Width - LayoutMetrics.TextInsetX - 44f -
-                             Mathf.Max(0, badges - 1) * (LayoutMetrics.KappaBadgeSize + BadgeGap);
+            // Glyph and badges live top-right; RefreshBadges above has just counted them.
+            var titleWidth = Width - LayoutMetrics.TextInsetX - 44f - BadgeInset;
             var (head, tail) = TitleParts(node.Name);
             _tall = LayoutMetrics.AllowTallNodes && (tail != null || EstimateWidth(head, LayoutMetrics.TitleFontSize) > titleWidth);
 
@@ -533,7 +527,10 @@ namespace QuestTree.UI
                 titleRect.anchorMin = new Vector2(0f, 1f);
                 titleRect.anchorMax = new Vector2(1f, 1f);
                 titleRect.anchoredPosition = new Vector2(LayoutMetrics.TextInsetX, LayoutMetrics.TitleOffsetY);
-                titleRect.sizeDelta = new Vector2(-(LayoutMetrics.TextInsetX + 30f), 16f * lines);
+                // Badge-aware, like the fitting width in Bind: a single-line title is handed to TMP
+                // whole and ellipsised at this rect's edge, so a rect reaching under the badges put
+                // the tail of the name behind them.
+                titleRect.sizeDelta = new Vector2(-(LayoutMetrics.TextInsetX + 30f + BadgeInset), 16f * lines);
                 _title.alignment = TextAlignmentOptions.TopLeft;
                 _title.enableWordWrapping = false; // the break is explicit, and each line is pre-fitted
 
@@ -578,6 +575,16 @@ namespace QuestTree.UI
         /// <summary>Space between two badges when the box wears both.</summary>
         private const float BadgeGap = 2f;
 
+        /// <summary>How many marks this box is wearing, counted by RefreshBadges and read by the
+        /// title's width in two places - the fit in Bind and the rect in ApplyDetailLevel. Counted
+        /// from the data and the settings only, not from the zoom: the title is hidden at the zoom
+        /// where the badges are, so a width that changed with it would only churn.</summary>
+        private int _badgeSlots;
+
+        /// <summary>Extra width the title gives up for a SECOND badge; one badge fits in the inset
+        /// the box has always reserved.</summary>
+        private float BadgeInset => Mathf.Max(0, _badgeSlots - 1) * (LayoutMetrics.KappaBadgeSize + BadgeGap);
+
         /// <summary>
         /// Which marks this box wears, and where. Kappa gold for a quest on the canonical list,
         /// Collector blue for one Collector cannot be accepted without on this install; either can
@@ -589,28 +596,36 @@ namespace QuestTree.UI
         /// </summary>
         private void RefreshBadges()
         {
-            var barOnly = _detailLevel > 1;
-            var kappa = Node != null && Node.IsKappaRequired && ModSettings.ShowKappaBadge && !barOnly;
-            var collector = Node != null && Node.IsCollectorPrerequisite && ModSettings.ShowCollectorBadge && !barOnly;
+            var kappa = Node != null && Node.IsKappaRequired && ModSettings.ShowKappaBadge;
+            var collector = Node != null && Node.IsCollectorPrerequisite && ModSettings.ShowCollectorBadge;
+            _badgeSlots = (kappa ? 1 : 0) + (collector ? 1 : 0);
 
+            // Hidden with the title once the box is only a code, where a 14px square is a smudge.
+            var barOnly = _detailLevel > 1;
             var slot = 0;
 
-            if (_kappaBadge != null)
-            {
-                _kappaBadge.SetActive(kappa);
-                if (kappa) PlaceBadge(_kappaBadge, slot++);
-            }
+            if (kappa) PlaceBadge(EnsureBadge(ref _kappaBadge, "K", GameStyle.KappaGold), slot++, !barOnly);
+            else if (_kappaBadge != null) _kappaBadge.SetActive(false);
 
-            if (_collectorBadge != null)
-            {
-                _collectorBadge.SetActive(collector);
-                if (collector) PlaceBadge(_collectorBadge, slot);
-            }
+            if (collector) PlaceBadge(EnsureBadge(ref _collectorBadge, "C", GameStyle.CollectorBlue), slot, !barOnly);
+            else if (_collectorBadge != null) _collectorBadge.SetActive(false);
         }
 
-        private static void PlaceBadge(GameObject badge, int slot) =>
+        /// <summary>Builds a mark the first time this box needs one. Most quests wear neither, and
+        /// a view is pooled and rebound many times - two GameObjects apiece, eagerly, on up to two
+        /// thousand live views is a cost paid mostly for boxes that never show a badge.</summary>
+        private GameObject EnsureBadge(ref GameObject badge, string letter, Color color)
+        {
+            badge ??= CreateBadge((RectTransform)transform, letter, color);
+            return badge;
+        }
+
+        private static void PlaceBadge(GameObject badge, int slot, bool visible)
+        {
+            badge.SetActive(visible);
             ((RectTransform)badge.transform).anchoredPosition =
                 new Vector2(-24f - slot * (LayoutMetrics.KappaBadgeSize + BadgeGap), -4f);
+        }
 
         public void SetDimmed(bool dimmed) => SetDimAlpha(dimmed ? DimmedAlpha : 1f);
 

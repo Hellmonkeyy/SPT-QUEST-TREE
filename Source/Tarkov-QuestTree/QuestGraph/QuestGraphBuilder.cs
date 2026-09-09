@@ -98,6 +98,7 @@ namespace QuestTree.QuestGraph
                 Plugin.LogSource?.LogInfo($"QuestTree: {dangling} prerequisite reference(s) point at quests not in the list; those quests draw as roots.");
 
             RefreshKappaFlags();
+            RefreshCollectorClosure();
 
             // Seeded here rather than special-cased wherever a trader name is displayed (tab
             // labels, node subtitles, the detail panel), so every one of those gets a friendly
@@ -243,15 +244,32 @@ namespace QuestTree.QuestGraph
         /// </summary>
         public void ApplyCollectorClosure(string collectorId)
         {
+            // Remembered like _serverKappaIds, and re-applied by Build for the same reason: without
+            // the server half a hand-in rebuilds the whole graph, and a flag that only the panel
+            // knew how to restore would have vanished for the rest of the session.
+            _collectorId = collectorId;
+            RefreshCollectorClosure();
+        }
+
+        private string _collectorId;
+        private int _collectorCount = -1;
+
+        private void RefreshCollectorClosure()
+        {
             foreach (var node in _byId.Values)
                 node.IsCollectorPrerequisite = false;
 
-            var id = string.IsNullOrEmpty(collectorId) ? KappaQuests.CollectorQuestId : collectorId;
+            var id = string.IsNullOrEmpty(_collectorId) ? KappaQuests.CollectorQuestId : _collectorId;
 
             if (!_byId.TryGetValue(id, out var collector))
             {
-                Plugin.LogSource?.LogInfo(
-                    $"QuestTree: Collector ({id}) is not in the loaded quest list - no Collector badges.");
+                if (_collectorCount != 0)
+                {
+                    _collectorCount = 0;
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: Collector ({id}) is not in the loaded quest list - no Collector badges.");
+                }
+
                 return;
             }
 
@@ -259,7 +277,13 @@ namespace QuestTree.QuestGraph
             foreach (var node in required)
                 node.IsCollectorPrerequisite = true;
 
-            Plugin.LogSource?.LogInfo($"QuestTree: {required.Count} quest(s) stand between you and Collector.");
+            // Said when the answer changes, not on every rebuild: a hand-in without the server half
+            // runs this again, and the number is only news when it moves.
+            if (_collectorCount != required.Count)
+            {
+                _collectorCount = required.Count;
+                Plugin.LogSource?.LogInfo($"QuestTree: {required.Count} quest(s) stand between you and Collector.");
+            }
         }
 
         /// <summary>Takes the server's Kappa list and re-badges the nodes from it.</summary>

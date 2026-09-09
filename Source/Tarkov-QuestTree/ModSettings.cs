@@ -86,7 +86,6 @@ namespace QuestTree
         public static ConfigEntry<bool> HoverSounds { get; private set; }
         public static ConfigEntry<bool> RememberLastView { get; private set; }
 
-        /// <summary>Which map pins carry their name at rest. Hover always shows a name.</summary>
         /// <summary>Which of the two quest marks the boxes wear. Kappa is the canonical list;
         /// Collector is what this install actually gates Collector behind, which a quest mod can
         /// make a very different set.</summary>
@@ -97,6 +96,7 @@ namespace QuestTree
             Collector
         }
 
+        /// <summary>Which map pins carry their name at rest. Hover always shows a name.</summary>
         public enum PinLabelMode
         {
             HoverOnly,

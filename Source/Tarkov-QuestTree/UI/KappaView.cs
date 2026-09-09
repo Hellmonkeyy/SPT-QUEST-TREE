@@ -206,9 +206,13 @@ namespace QuestTree.UI
         private static void BuildCollectorUnlockSection(
             RectTransform parent, ref float y, QuestGraphBuilder graph, KappaPayloadDto payload)
         {
-            var collectorId = payload?.CollectorQuestId;
+            // The same fallback the badge uses, so a payload without an id cannot leave the boxes
+            // wearing C while this section says Collector is unknown.
+            var collectorId = string.IsNullOrEmpty(payload?.CollectorQuestId)
+                ? KappaQuests.CollectorQuestId
+                : payload.CollectorQuestId;
 
-            if (string.IsNullOrEmpty(collectorId) || !graph.NodesById.TryGetValue(collectorId, out var collector))
+            if (!graph.NodesById.TryGetValue(collectorId, out var collector))
             {
                 Section(parent, ref y, "To unlock Collector");
                 AuxLayout.AddText(parent, ref y, "Collector is not in the loaded quest set.", 20f, 12);
