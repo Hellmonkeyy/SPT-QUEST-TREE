@@ -162,7 +162,7 @@ namespace QuestTree.UI
                         watched = new WatchedItem
                         {
                             Template = template,
-                            Name = ItemNameFrom(objective.Text, template),
+                            Name = QuestSummary.ItemName(objective, 0),
                             OwnedFoundInRaid = held?.FoundInRaid ?? 0,
                             OwnedTotal = held?.Total ?? 0
                         };
@@ -188,22 +188,6 @@ namespace QuestTree.UI
             }
 
             return byTemplate.Values.ToList();
-        }
-
-        /// <summary>
-        /// The objective text is the only place an item's display name reaches the client - the
-        /// payload carries template ids, and resolving those would mean shipping the item table too.
-        /// Objective text reads "Hand over the found in raid item: Golden egg", so the part after
-        /// the colon is the name; without one, fall back to the id rather than inventing a label.
-        /// </summary>
-        private static string ItemNameFrom(string objectiveText, string template)
-        {
-            if (string.IsNullOrEmpty(objectiveText)) return template;
-
-            var colon = objectiveText.LastIndexOf(':');
-            if (colon < 0 || colon >= objectiveText.Length - 1) return objectiveText;
-
-            return objectiveText.Substring(colon + 1).Trim();
         }
 
         internal static string Format(WatchedItem item)

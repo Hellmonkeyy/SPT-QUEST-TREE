@@ -18,7 +18,7 @@ namespace QuestTreeServer
         /// <summary>Bumped whenever the shape below changes, so an old client paired with a new
         /// server (or the reverse) can say so plainly instead of silently mis-parsing.
         /// v2 (1.8.0): ObjectiveDto.FoundInRaid.</summary>
-        public int SchemaVersion { get; set; } = 2;
+        public int SchemaVersion { get; set; } = 3;
 
         /// <summary>The server half's version, so a mismatch warning on the client can name it -
         /// the other three payloads already did.</summary>
@@ -101,10 +101,20 @@ namespace QuestTreeServer
         /// <summary>The condition's raw type (HandoverItem, FindItem, CounterCreator, ...).</summary>
         public string ConditionType { get; set; } = "";
 
-        /// <summary>Item template ids this objective refers to, for the item-shaped conditions
-        /// (hand over / find in raid). Empty for everything else. This is what lets the client
-        /// build the Collector hand-in checklist from live data instead of a hardcoded list.</summary>
+        /// <summary>Item template ids this objective refers to, for every condition shaped around
+        /// an item: handing one over, finding one in raid, and carrying one in to leave or plant
+        /// somewhere. Empty for everything else. This is what lets the client build the Collector
+        /// hand-in checklist, and the "items to bring" list, from live data rather than a
+        /// hardcoded one.</summary>
         public List<string> TargetItems { get; set; } = new();
+
+        /// <summary>Display names for TargetItems, index for index (schema v3).
+        ///
+        /// Without this the client had to guess a name out of the objective sentence, taking
+        /// whatever followed the last colon - so "Mark the first trading post with an MS2000 Marker
+        /// on Shoreline", which has no colon at all, was shown to the player as the item's name.
+        /// The locale table is right here on the server; guessing was never necessary.</summary>
+        public List<string> TargetItemNames { get; set; } = new();
 
         /// <summary>How many of the target item the objective needs.</summary>
         public int Count { get; set; }

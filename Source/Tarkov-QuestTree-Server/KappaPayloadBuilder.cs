@@ -134,7 +134,7 @@ namespace QuestTreeServer
                     {
                         ConditionId = condition.Id.ToString(),
                         Template = templates[0],
-                        Name = ResolveItemName(templates[0], locale),
+                        Name = QuestPayloadBuilder.ResolveItemName(templates[0], locale),
                         Required = Math.Max(1, Numbers.ToCount(condition.Value, 1)),
                         OwnedFoundInRaid = foundInRaid,
                         OwnedTotal = total,
@@ -312,10 +312,5 @@ namespace QuestTreeServer
             var status = profile?.Quests?.FirstOrDefault(q => q.QId == questId);
             return status == null ? QuestStatusEnum.Locked.ToString() : status.Status.ToString();
         }
-
-        private static string ResolveItemName(string template, Dictionary<string, string> locale) =>
-            locale.TryGetValue($"{template} Name", out var name) && !string.IsNullOrWhiteSpace(name)
-                ? name
-                : template;
     }
 }

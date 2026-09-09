@@ -385,7 +385,7 @@ namespace QuestTreeServer
                     {
                         result.Markers.Add(new MapMarkerDto
                         {
-                            ItemName = ResolveItemName(template, locale),
+                            ItemName = QuestPayloadBuilder.ResolveItemName(template, locale),
                             Template = template,
                             Quests = wanting.Names,
                             QuestIds = wanting.Ids,
@@ -661,7 +661,7 @@ namespace QuestTreeServer
                 {
                     markers.Add(new MapMarkerDto
                     {
-                        ItemName = ResolveItemName(tpl, locale),
+                        ItemName = QuestPayloadBuilder.ResolveItemName(tpl, locale),
                         Template = tpl!,
                         Quests = wanting.Names,
                         QuestIds = wanting.Ids,
@@ -747,10 +747,5 @@ namespace QuestTreeServer
 
             return markers;
         }
-
-        private static string ResolveItemName(string template, Dictionary<string, string> locale) =>
-            locale.TryGetValue($"{template} Name", out var name) && !string.IsNullOrWhiteSpace(name)
-                ? name
-                : template;
     }
 }

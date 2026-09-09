@@ -82,6 +82,7 @@ namespace QuestTree.UI
             }
 
             AddRoute(lines, node, graph);
+            AddItemsToBring(lines, node, profile);
 
             // Available for a locked quest too, not just an accepted one: the objective text
             // arrives with the companion mod's payload rather than being read off a live Quest
@@ -114,6 +115,126 @@ namespace QuestTree.UI
             }
 
             return lines;
+        }
+
+        /// <summary>
+        /// What you have to be carrying, and how much of it you already hold.
+        ///
+        /// The objective sentences say this in prose - "Mark the first trading post with an MS2000
+        /// Marker on Shoreline" - which is exactly the sort of thing a player reads on the map
+        /// screen, walks into a raid, and discovers they left in the stash. Pulled out as its own
+        /// short list above the objectives, with the held count beside each item, it is answerable
+        /// at a glance.
+        ///
+        /// Grouped by item rather than listed per objective: two objectives wanting the same marker
+        /// need two of it, not two lines about it.
+        /// </summary>
+        private static void AddItemsToBring(List<string> lines, QuestNode node, ProfilePayloadDto profile)
+        {
+            var objectives = node.NecessaryObjectives;
+            if (objectives == null) return;
+
+            var order = new List<string>();
+            var wanted = new Dictionary<string, (string Name, int Need, bool FoundInRaid, string Verb)>();
+
+            foreach (var objective in objectives)
+            {
+                if (objective?.TargetItems == null || objective.TargetItems.Count == 0) continue;
+
+                // A condition can accept any one of several templates; the first is the one worth
+                // naming, and counting each alternative separately would inflate the list.
+                var template = objective.TargetItems[0];
+                if (string.IsNullOrWhiteSpace(template)) continue;
+
+                var need = Mathf.Max(1, objective.Count);
+
+                if (wanted.TryGetValue(template, out var existing))
+                {
+                    wanted[template] = (existing.Name, existing.Need + need,
+                        existing.FoundInRaid || NeedsFoundInRaid(objective), existing.Verb);
+                    continue;
+                }
+
+                order.Add(template);
+                wanted[template] = (ItemName(objective, 0), need, NeedsFoundInRaid(objective), Verb(objective));
+            }
+
+            if (order.Count == 0) return;
+
+            lines.Add("<b>Bring</b>");
+
+            foreach (var template in order)
+            {
+                var item = wanted[template];
+                var held = HeldCount(profile, template, item.FoundInRaid);
+
+                var enough = held >= item.Need;
+                var colour = enough ? "#" + QuestNodeView.HexFor(ENodeStatus.Completed) : "#" + GameStyle.WarningHex;
+                var fir = item.FoundInRaid ? " found in raid" : "";
+                var count = item.Need > 1 ? $" x{item.Need}" : "";
+
+                lines.Add(
+                    $"{GameStyle.Safe(item.Name)}{count}  <color={colour}>{held} of {item.Need} held{fir}</color>" +
+                    $"  <color=#FFFFFF60>{item.Verb}</color>");
+            }
+
+            lines.Add("");
+        }
+
+        /// <summary>How many of a template the profile holds, counting only found-in-raid copies
+        /// when the objective insists on them - a stack the quest will refuse is not stock.</summary>
+        private static int HeldCount(ProfilePayloadDto profile, string template, bool foundInRaid)
+        {
+            if (profile?.ItemsOwned == null) return 0;
+            if (!profile.ItemsOwned.TryGetValue(template, out var held) || held == null) return 0;
+
+            return foundInRaid ? held.FoundInRaid : held.Total;
+        }
+
+        /// <summary>The condition's own flag when the server sends one (schema v2); the English
+        /// sentence as the fallback for an older server.</summary>
+        private static bool NeedsFoundInRaid(ObjectiveDto objective) =>
+            objective.FoundInRaid || MentionsFoundInRaid(objective.Text);
+
+        /// <summary>What is done with the item, from the condition type - the difference between
+        /// carrying a marker in and handing a graphics card over, which is the whole reason a
+        /// player cares about this list before a raid rather than after one.</summary>
+        private static string Verb(ObjectiveDto objective) => objective.ConditionType switch
+        {
+            "LeaveItemAtLocation" => "leave it in place",
+            "PlaceBeacon" => "plant it",
+            "HandoverItem" => "hand it in",
+            "FindItem" => "find it",
+            _ => ""
+        };
+
+        /// <summary>
+        /// The display name of one of an objective's target items.
+        ///
+        /// The server resolves these from the locale table (schema v3). The fallback below is what
+        /// every reader used to do on its own: take whatever follows the last colon in the objective
+        /// sentence. That works for "Find in raid and hand over: Bitcoin" and fails completely for a
+        /// sentence with no colon, where it returns the entire sentence as the item's name.
+        /// </summary>
+        internal static string ItemName(ObjectiveDto objective, int index)
+        {
+            if (objective == null) return "";
+
+            var names = objective.TargetItemNames;
+            if (names != null && index < names.Count && !string.IsNullOrWhiteSpace(names[index]))
+                return names[index];
+
+            var template = objective.TargetItems != null && index < objective.TargetItems.Count
+                ? objective.TargetItems[index]
+                : "";
+
+            var text = objective.Text;
+            if (string.IsNullOrEmpty(text)) return template;
+
+            var colon = text.LastIndexOf(':');
+            if (colon < 0 || colon >= text.Length - 1) return string.IsNullOrEmpty(template) ? text : template;
+
+            return text.Substring(colon + 1).Trim();
         }
 
         /// <summary>

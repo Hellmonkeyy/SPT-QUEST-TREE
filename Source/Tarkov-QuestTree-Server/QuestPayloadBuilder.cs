@@ -313,6 +313,10 @@ namespace QuestTreeServer
 
                 var conditionId = condition.Id.ToString();
 
+                var targetItems = IsAnyItemCondition(condition.ConditionType)
+                    ? TargetIds(condition.Target).Where(id => !string.IsNullOrWhiteSpace(id)).ToList()
+                    : new List<string>();
+
                 objectives.Add(new ObjectiveDto
                 {
                     Id = conditionId,
@@ -323,9 +327,8 @@ namespace QuestTreeServer
                         : condition.ConditionType ?? "",
                     IsNecessary = condition.IsNecessary ?? true,
                     ConditionType = condition.ConditionType ?? "",
-                    TargetItems = IsItemCondition(condition.ConditionType)
-                        ? TargetIds(condition.Target).ToList()
-                        : new List<string>(),
+                    TargetItems = targetItems,
+                    TargetItemNames = targetItems.Select(template => ResolveItemName(template, locale)).ToList(),
                     Count = Numbers.ToCount(condition.Value),
                     FoundInRaid = condition.OnlyFoundInRaid ?? false,
                     ZoneIds = ZoneIdsOf(condition).Distinct(StringComparer.OrdinalIgnoreCase).ToList()
@@ -379,12 +382,35 @@ namespace QuestTreeServer
             return reward.Target ?? "";
         }
 
-        /// <summary>Condition types whose Target is a list of item template ids rather than quest
-        /// ids, zone names or anything else. Only these get TargetItems populated - notably this is
-        /// what the Collector hand-in checklist is built from.</summary>
+        /// <summary>Condition types that TAKE an item from you - handed to a trader, or found in
+        /// raid and turned in. These and only these are what the Collector hand-in checklist is
+        /// built from, so the set must stay narrow: an item you plant and leave behind is not an
+        /// item Collector will accept.</summary>
         internal static bool IsItemCondition(string? conditionType) =>
             string.Equals(conditionType, "HandoverItem", StringComparison.OrdinalIgnoreCase) ||
             string.Equals(conditionType, "FindItem", StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>Condition types that have you CARRY an item into a raid and leave it somewhere -
+        /// a marker on a trading post, a beacon in a warehouse. The template id is in the same
+        /// Target field, but the item never reaches a trader, which is why these are kept apart
+        /// from IsItemCondition above.</summary>
+        internal static bool IsCarriedItemCondition(string? conditionType) =>
+            string.Equals(conditionType, "LeaveItemAtLocation", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(conditionType, "PlaceBeacon", StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>Every condition whose Target is item template ids rather than quest ids or zone
+        /// names. This is the set an objective's TargetItems is filled from, and the set the client
+        /// asks "what do I need to bring" of - which is a wider question than "what does a trader
+        /// want", and getting it wrong is what left markers and beacons off that list.</summary>
+        internal static bool IsAnyItemCondition(string? conditionType) =>
+            IsItemCondition(conditionType) || IsCarriedItemCondition(conditionType);
+
+        /// <summary>An item's display name from the locale table, falling back to the template id.
+        /// Was a private copy in three builders.</summary>
+        internal static string ResolveItemName(string template, Dictionary<string, string> locale) =>
+            locale.TryGetValue($"{template} Name", out var name) && !string.IsNullOrWhiteSpace(name)
+                ? name
+                : template;
 
         internal static IEnumerable<string> TargetIds(ListOrT<string>? target)
         {

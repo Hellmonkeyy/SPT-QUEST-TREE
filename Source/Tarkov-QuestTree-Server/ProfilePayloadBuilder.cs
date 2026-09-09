@@ -183,7 +183,10 @@ namespace QuestTreeServer
             foreach (var condition in conditions)
             {
                 if (condition == null) continue;
-                if (!QuestPayloadBuilder.IsItemCondition(condition.ConditionType)) continue;
+                // The wide set, not the hand-in set: an MS2000 marker for a mark-the-place
+                // objective is an item the player has to own, and a held count of nothing is how it
+                // used to read.
+                if (!QuestPayloadBuilder.IsAnyItemCondition(condition.ConditionType)) continue;
 
                 foreach (var template in QuestPayloadBuilder.TargetIds(condition.Target))
                 {

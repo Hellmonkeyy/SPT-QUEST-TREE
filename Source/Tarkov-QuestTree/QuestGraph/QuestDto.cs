@@ -22,7 +22,7 @@ namespace QuestTree.QuestGraph
         /// <summary>Schema this client understands. Compared against the server's on fetch. A
         /// mismatch is a logged warning, not a refusal: v1 (1.7.1) payloads only lack
         /// ObjectiveDto.FoundInRaid, which the readers fall back from.</summary>
-        public const int SupportedSchemaVersion = 2;
+        public const int SupportedSchemaVersion = 3;
 
         [JsonProperty("schemaVersion")]
         public int SchemaVersion { get; set; }
@@ -109,10 +109,17 @@ namespace QuestTree.QuestGraph
         [JsonProperty("conditionType")]
         public string ConditionType { get; set; }
 
-        /// <summary>Item template ids, populated only for item-shaped conditions. This is what the
-        /// Collector hand-in checklist is built from.</summary>
+        /// <summary>Item template ids, populated only for item-shaped conditions - handing an item
+        /// over, finding one in raid, or carrying one in to leave somewhere. This is what the
+        /// Collector hand-in checklist and the "items to bring" list are built from.</summary>
         [JsonProperty("targetItems")]
         public List<string> TargetItems { get; set; }
+
+        /// <summary>Display names for TargetItems, index for index (schema v3). Null or short from
+        /// an older server, in which case the readers fall back to guessing a name out of the
+        /// objective sentence - see QuestSummary.ItemName.</summary>
+        [JsonProperty("targetItemNames")]
+        public List<string> TargetItemNames { get; set; }
 
         [JsonProperty("count")]
         public int Count { get; set; }
