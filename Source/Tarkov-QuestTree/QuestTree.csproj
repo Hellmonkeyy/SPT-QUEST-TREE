@@ -27,6 +27,15 @@
   <PropertyGroup>
     <SptPath Condition="'$(SptPath)' == '' AND '$(SPT_PATH)' != ''">$(SPT_PATH)</SptPath>
     <SptPath Condition="'$(SptPath)' == ''">$(MSBuildProjectDirectory)\..\..</SptPath>
+
+    <!--
+      Whether a build also installs itself into the SPT folder. OFF by default: the install is
+      managed outside this repo (a mod manager, a reinstall), and a build that silently puts back
+      a mod the user had removed is a surprise nobody asked for. Pass -p:DeployToSpt=true to get
+      the old behaviour. SptPath is still resolved either way - the compile needs the game's and
+      the server's DLLs to reference.
+    -->
+    <DeployToSpt Condition="'$(DeployToSpt)' == ''">false</DeployToSpt>
     <ManagedPath>$(SptPath)\EscapeFromTarkov_Data\Managed</ManagedPath>
   </PropertyGroup>
 
@@ -159,7 +168,7 @@
     Copy the built plugin into BepInEx\plugins\QuestTree\. The folder is created first so the copy
     doesn't silently fail if it's missing on a first build.
   -->
-  <Target Name="CopyToPlugins" AfterTargets="PostBuildEvent">
+  <Target Name="CopyToPlugins" AfterTargets="PostBuildEvent" Condition="'$(DeployToSpt)' == 'true'">
     <MakeDir Directories="$(SptPath)\BepInEx\plugins\QuestTree" />
     <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(SptPath)\BepInEx\plugins\QuestTree\" SkipUnchangedFiles="true" />
     <!-- Only copied if it doesn't already exist there, so a user's edited Kappa list is never

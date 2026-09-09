@@ -34,6 +34,15 @@
     <SptPath Condition="'$(SptPath)' == '' AND '$(SPT_PATH)' != ''">$(SPT_PATH)</SptPath>
     <SptPath Condition="'$(SptPath)' == ''">$(MSBuildProjectDirectory)\..\..</SptPath>
     <ServerPath>$(SptPath)\SPT_Runtime</ServerPath>
+
+    <!--
+      Whether a build also installs itself into the SPT folder. OFF by default: the install is
+      managed outside this repo (a mod manager, a reinstall), and a build that silently puts back
+      a mod the user had removed is a surprise nobody asked for. Pass -p:DeployToSpt=true to get
+      the old behaviour. SptPath is still resolved either way - the compile needs the game's and
+      the server's DLLs to reference.
+    -->
+    <DeployToSpt Condition="'$(DeployToSpt)' == ''">false</DeployToSpt>
   </PropertyGroup>
 
   <!--
@@ -83,7 +92,7 @@
     Server mods live in SPT_Runtime\user\mods\<mod folder>\ in SPT 4.1 - NOT SPT\user\mods, which
     is the 4.0 location.
   -->
-  <Target Name="CopyToServerMods" AfterTargets="PostBuildEvent">
+  <Target Name="CopyToServerMods" AfterTargets="PostBuildEvent" Condition="'$(DeployToSpt)' == 'true'">
     <MakeDir Directories="$(ServerPath)\user\mods\QuestTree" />
     <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(ServerPath)\user\mods\QuestTree\" SkipUnchangedFiles="true" />
   </Target>
