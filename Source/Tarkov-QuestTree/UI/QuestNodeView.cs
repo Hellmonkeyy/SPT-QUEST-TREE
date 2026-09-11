@@ -292,15 +292,21 @@ namespace QuestTree.UI
             stripeRect.anchorMin = new Vector2(0f, 0f);
             stripeRect.anchorMax = new Vector2(0f, 1f);
             stripeRect.pivot = new Vector2(0f, 0.5f);
-            stripeRect.anchoredPosition = Vector2.zero;
+            // Where the STATUS bar ends, not at the box's edge.
+            //
+            // Both were drawn at x = 0 - the status bar 6px wide, the stripe 4px - and the stripe was
+            // pushed to the back with SetAsFirstSibling, so the status bar covered it completely. The
+            // trader colour has never actually been on screen.
+            //
+            // It fits in the padding that already exists between the bar and the text, so nothing
+            // moves and no measurement changes: status bar 0-6, trader stripe 6-10, text from
+            // TextInsetX, which is still 14.
+            stripeRect.anchoredPosition = new Vector2(LayoutMetrics.StatusBarWidth, 0f);
             stripeRect.sizeDelta = new Vector2(TraderStripeWidth, 0f);
 
             var stripeImage = stripeGo.GetComponent<Image>();
             stripeImage.raycastTarget = false;
             view._traderStripe = stripeImage;
-
-            // Behind the text, in front of the background.
-            stripeRect.SetAsFirstSibling();
 
             // The game's own tooltip, on hover. Text is set per Bind.
             view._tooltip = GameStyle.AddTooltip(go, "");
