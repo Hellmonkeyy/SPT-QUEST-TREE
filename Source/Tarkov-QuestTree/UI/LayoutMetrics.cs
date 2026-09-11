@@ -51,7 +51,18 @@ namespace QuestTree.UI
 
         // --- the status bar down the left edge, and where text starts to its right ---
         public static float StatusBarWidth => 6f;
-        public static float TextInsetX => StatusBarWidth + 8f;
+
+        /// <summary>The trader slab, immediately right of the status bar.
+        ///
+        /// Sized from what actually survives a zoom-out rather than from taste. A stripe scales with
+        /// its box, so at the 0.35 zoom where a tree is worth looking at, 5px is under two pixels -
+        /// present, and reported as "not working", correctly. Nine is four pixels there and reads as
+        /// a colour. It does not need to survive further out than that, because further out the
+        /// tree collapses to trader bands that are nothing BUT the colour and the name.</summary>
+        public static float TraderStripeWidth => 9f;
+
+        /// <summary>Where text starts: past the status bar, past the trader slab, plus padding.</summary>
+        public static float TextInsetX => StatusBarWidth + TraderStripeWidth + 7f;
 
         /// <summary>Below this zoom the subtitle and objective are hidden and the title grows -
         /// see QuestNodeView.SetDetailLevel. 0.55 is where a 15px title stops being readable.</summary>
@@ -69,7 +80,10 @@ namespace QuestTree.UI
         /// <summary>The zoomed-right-out code (QuestNodeView.Abbreviate). Big, because it is
         /// drawn at a quarter scale: 36px in the box is 9px on screen.</summary>
         public static int AbbreviationFontSize => Compact ? 26 : 36;
-        public static int GlyphFontSize => Compact ? 12 : 14;
+        // Big enough to be the thing you read, not a decoration in the corner: this and the
+        // status bar are what answer "is this one done" at a glance, and the bar alone was doing it
+        // badly once boxes stopped being uniform.
+        public static int GlyphFontSize => Compact ? 15 : 18;
         public static int SubtitleFontSize => Compact ? 9 : 10;
         public static int ObjectiveFontSize => Compact ? 8 : 9;
 

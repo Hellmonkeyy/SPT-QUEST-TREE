@@ -35,9 +35,9 @@ namespace QuestTree.UI
         /// unchanged.</summary>
         public static float Width => LayoutMetrics.NodeWidth;
 
-        /// <summary>How wide the trader stripe is. Narrow on purpose: it is an accent, and
-        /// anything wider starts competing with the status colour it sits beside.</summary>
-        private const float TraderStripeWidth = 5f;
+        /// <summary>How wide the trader slab is. Lives in LayoutMetrics because the text inset
+        /// has to clear it.</summary>
+        private static float TraderStripeWidth => LayoutMetrics.TraderStripeWidth;
 
         private Image _traderStripe;
         public static float Height => LayoutMetrics.NodeHeight;
@@ -274,7 +274,7 @@ namespace QuestTree.UI
                 new Vector2(1f, 1f), new Vector2(1f, 1f), new Vector2(-6f, -3f));
             var glyphRect = (RectTransform)glyph.transform;
             glyphRect.pivot = new Vector2(1f, 1f);
-            glyphRect.sizeDelta = new Vector2(20f, 20f);
+            glyphRect.sizeDelta = new Vector2(26f, 26f);
             glyph.alignment = TextAlignmentOptions.TopRight;
             view._statusGlyph = glyph;
 
@@ -514,7 +514,7 @@ namespace QuestTree.UI
             var locked = status == ENodeStatus.Locked;
 
             if (_statusBar != null) _statusBar.color = color;
-            if (_fill != null) _fill.color = TintedFill(locked ? LockedFillColor : FillColor);
+            if (_fill != null) _fill.color = locked ? LockedFillColor : FillColor;
 
             if (_outline != null)
             {
@@ -544,8 +544,15 @@ namespace QuestTree.UI
 
             if (_statusGlyph != null)
             {
-                _statusGlyph.text = locked ? "" : GlyphFor(status);
-                _statusGlyph.color = color;
+                // Locked shows its cross again.
+                //
+                // It was dropped because a small grey cross in the top-right corner read as a close
+                // button - a fair objection, and the wrong trade: the majority of a tree is locked,
+                // so hiding its mark means most boxes answer "is this done" with nothing at all, and
+                // you are back to reading a 6px bar. Bigger and in the status colour it reads as a
+                // state, and the three marks now partition the tree between them.
+                _statusGlyph.text = GlyphFor(status);
+                _statusGlyph.color = locked ? Fade(color, 0.75f) : color;
             }
         }
 
@@ -593,27 +600,6 @@ namespace QuestTree.UI
         /// unreadable smears that only add noise; hiding them and growing the title keeps the one
         /// thing worth reading readable. Cheap: toggles and one font size, on visible views only.
         /// </summary>
-        /// <summary>The box's own colour, tinted toward the trader's.
-        ///
-        /// A 4px stripe was too quiet to see - at any zoom where the whole tree is in view it is a
-        /// pixel wide, which is why the trader colours read as "not working" even after the stripe
-        /// stopped being hidden behind the status bar.
-        ///
-        /// The fill is free to carry this because it never carried status: status is the bar down
-        /// the left edge and the outline, which are untouched. So the box says whose chain it is and
-        /// still says where you are in it, which was the whole reason for not tinting the fill by
-        /// status in the first place.
-        ///
-        /// A light lerp, not a wash. Dark enough that white title text stays readable, which is the
-        /// constraint that decides the number.</summary>
-        private Color TintedFill(Color baseColour)
-        {
-            if (ModSettings.Ready && !ModSettings.ShowTraderColours.Value) return baseColour;
-            if (Node == null || string.IsNullOrEmpty(Node.TraderId)) return baseColour;
-
-            return Color.Lerp(baseColour, TraderPalette.For(Node.TraderId), 0.30f);
-        }
-
         /// <summary>The trader's colour, or nothing when the setting is off.
         ///
         /// Every trader has a colour including ones from mods - TraderPalette derives one from the
@@ -628,10 +614,6 @@ namespace QuestTree.UI
 
             _traderStripe.enabled = show;
             if (show) _traderStripe.color = TraderPalette.For(Node.TraderId);
-
-            // The fill is tinted from the same colour and is set by RefreshStatus, which may have
-            // run for the previous occupant of this pooled view.
-            RefreshStatus();
         }
 
         public void SetDetailLevel(int level)

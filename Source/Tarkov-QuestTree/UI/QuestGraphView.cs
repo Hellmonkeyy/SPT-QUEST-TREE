@@ -151,6 +151,11 @@ namespace QuestTree.UI
         /// path.</summary>
         private readonly List<GameObject> _traderMarkers = new List<GameObject>();
 
+        /// <summary>Each marker's wanted row, parallel to <see cref="_traderMarkers"/>. Kept because
+        /// the drawn position is the wanted one nudged for the current zoom, and nudging an already
+        /// nudged position accumulates.</summary>
+        private readonly List<float> _traderMarkerY = new List<float>();
+
         /// <summary>Each node's box, measured once per layout. Boxes stopped being uniform in
         /// 1.9.0, so everything that used to read QuestNodeView.Width reads this instead: the edge
         /// origins, the visibility test and the node rect itself.</summary>
@@ -167,6 +172,10 @@ namespace QuestTree.UI
         /// of each other. Past this the collapsed tier takes over anyway, and its bands carry the
         /// trader's name themselves.</summary>
         private const float MaxTraderMarkerScale = 2.5f;
+
+        /// <summary>Room for the trader's name under the portrait. Part of the footprint, so two
+        /// portraits are spaced far enough apart that one name does not sit on the next face.</summary>
+        private const float TraderLabelHeight = 24f;
 
         /// <summary>The collapsed overview, and the bands it draws. Rebuilt with the layout.</summary>
         private TreeOverview _overview;
@@ -450,21 +459,26 @@ namespace QuestTree.UI
                 if (marker != null) UnityEngine.Object.Destroy(marker);
 
             _traderMarkers.Clear();
-            _traderMarkerScale = 1f;
+            _traderMarkerY.Clear();
+
+            // Forces the first placement pass, since the scale may legitimately still be 1.
+            _traderMarkerScale = -1f;
 
             if (ModSettings.Ready && !ModSettings.ShowTraderColours.Value) return;
             if (_content == null) return;
 
-            // Each trader's vertical band, and the left edge of the whole tree.
+            // Every row a trader occupies, and the left edge of the whole tree.
             //
-            // A marker used to sit just left of its trader's FIRST ROOT, which looked right and was
-            // not: that space belongs to whatever other chains are at lower depths, so a portrait
-            // landed on their quests - and counter-scaling then magnified it fivefold into them.
-            // "Ref" sat on top of "Easy money - Part 1"; "BTR Driver" sat on "Fence".
+            // Kept as a list rather than reduced to a min and a max on the way in, because the
+            // MIDDLE of that list is the anchor and the extremes are actively misleading.
             //
-            // The gutter is outside the tree entirely, so there is nothing there to collide with.
-            var top = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
-            var bottom = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+            // A quest's row comes from its prerequisite chain, and chains cross traders - Prapor's
+            // "First Step" runs straight into Aishi's - so a trader's rows are not one contiguous
+            // band on the All tab. Its topmost and bottommost quests can sit at opposite ends of the
+            // tree with nothing of that trader between them, and the midpoint of those two lands in
+            // somebody else's chains. That is the whole reason the portraits came out in a column
+            // that lined up with nothing.
+            var rows = new Dictionary<string, List<float>>(StringComparer.OrdinalIgnoreCase);
             var treeLeft = float.MaxValue;
 
             foreach (var node in nodes)
@@ -475,28 +489,34 @@ namespace QuestTree.UI
 
                 if (string.IsNullOrEmpty(node.TraderId) || node.TraderId == QuestNode.NoTraderId) continue;
 
-                var half = SizeOf(node).y * 0.5f;
+                if (!rows.TryGetValue(node.TraderId, out var list))
+                    rows[node.TraderId] = list = new List<float>();
 
-                if (!top.TryGetValue(node.TraderId, out var t) || position.y + half > t)
-                    top[node.TraderId] = position.y + half;
-
-                if (!bottom.TryGetValue(node.TraderId, out var b) || position.y - half < b)
-                    bottom[node.TraderId] = position.y - half;
+                list.Add(position.y);
             }
 
-            if (top.Count == 0 || treeLeft == float.MaxValue) return;
+            if (rows.Count == 0 || treeLeft == float.MaxValue) return;
 
-            // Tallest band first. Placement below pushes a marker away from one already placed, and
-            // starting with the biggest bands keeps the small ones doing the moving.
-            var traders = new List<string>(top.Keys);
-            traders.Sort((a, b) => (top[b] - bottom[b]).CompareTo(top[a] - bottom[a]));
+            var anchors = new List<KeyValuePair<string, float>>();
 
-            var placed = new List<float>();
-
-            foreach (var traderId in traders)
+            foreach (var entry in rows)
             {
-                var centre = (top[traderId] + bottom[traderId]) * 0.5f;
-                CreateTraderMarker(traderId, new Vector2(treeLeft, Spaced(centre, placed)));
+                var list = entry.Value;
+                list.Sort();
+
+                // The median: the row half this trader's quests sit above and half below. Immune to
+                // the handful a cross-trader prerequisite drags to the far end of the tree, which
+                // an average is not.
+                anchors.Add(new KeyValuePair<string, float>(entry.Key, list[list.Count / 2]));
+            }
+
+            // In row order, so the spacing sweep at draw time can walk them one way.
+            anchors.Sort((a, b) => a.Value.CompareTo(b.Value));
+
+            foreach (var anchor in anchors)
+            {
+                CreateTraderMarker(anchor.Key, new Vector2(treeLeft, anchor.Value));
+                _traderMarkerY.Add(anchor.Value);
             }
         }
 
@@ -557,43 +577,6 @@ namespace QuestTree.UI
             _bands.Sort((a, b) => b.Bounds.height.CompareTo(a.Bounds.height));
         }
 
-        /// <summary>A y near <paramref name="wanted"/> that no marker already occupies.
-        ///
-        /// Markers hold a constant size on SCREEN, so at a far zoom-out one covers a great deal of
-        /// tree - two traders whose bands are close together then overlap each other however the
-        /// bands themselves are arranged. Spacing them in content space at the widest scale they
-        /// will ever be drawn at is what stops that, at the cost of a marker sitting a little off
-        /// its band's exact centre when the tree is crowded.</summary>
-        private static float Spaced(float wanted, List<float> placed)
-        {
-            // The widest the portrait will ever be DRAWN, plus a margin - not its authored size.
-            // Spacing by the authored size left them overlapping the moment the counter-scale grew
-            // them, which is every zoom past 1:1.
-            const float minGap = TraderMarkerSize * MaxTraderMarkerScale * 1.2f;
-
-            var y = wanted;
-            var moved = true;
-            var guard = 0;
-
-            while (moved && guard++ < 64)
-            {
-                moved = false;
-
-                foreach (var other in placed)
-                {
-                    if (Mathf.Abs(y - other) >= minGap) continue;
-
-                    // Away from the one it clashes with, in whichever direction it was already
-                    // leaning, so a marker does not jump across its neighbour.
-                    y = y >= other ? other + minGap : other - minGap;
-                    moved = true;
-                }
-            }
-
-            placed.Add(y);
-            return y;
-        }
-
         /// <summary>Holds the trader portraits at a constant size on screen.
         ///
         /// They were drawn in content space, so they shrank with the tree and became specks at the
@@ -611,10 +594,41 @@ namespace QuestTree.UI
 
             _traderMarkerScale = scale;
 
-            foreach (var marker in _traderMarkers)
+            // The portrait plus the name under it, at the size they are about to be drawn.
+            //
+            // Spacing has to be decided HERE rather than at build time, because how much TREE a
+            // portrait covers depends on the zoom: it holds a constant size on screen, so it eats
+            // more rows the further out you go. Reserving the worst case once, at build time, is
+            // what dragged every portrait off its trader - it spaced them for the most zoomed-out
+            // frame there is and then left them there while you zoomed back in.
+            var minGap = (TraderMarkerSize + TraderLabelHeight) * scale;
+
+            // One sweep in row order: a portrait that would land on the one before it moves clear.
+            // Only ever moves the later one, and there are a dozen of these.
+            var placed = new float[_traderMarkerY.Count];
+            var drift = 0f;
+
+            for (var i = 0; i < _traderMarkerY.Count; i++)
             {
+                var wanted = _traderMarkerY[i];
+                placed[i] = i > 0 ? Mathf.Max(wanted, placed[i - 1] + minGap) : wanted;
+                drift += placed[i] - wanted;
+            }
+
+            // The sweep only ever pushes one way, so on a crowded tree the column would walk off the
+            // end of it. Handing back the average shift keeps the group centred on the tree it
+            // belongs to; each portrait still sits as near its own rows as the spacing allows.
+            drift /= Mathf.Max(1, _traderMarkerY.Count);
+
+            for (var i = 0; i < _traderMarkers.Count && i < placed.Length; i++)
+            {
+                var marker = _traderMarkers[i];
                 if (marker == null) continue;
+
                 marker.transform.localScale = Vector3.one * scale;
+
+                var rect = (RectTransform)marker.transform;
+                rect.anchoredPosition = new Vector2(rect.anchoredPosition.x, placed[i] - drift);
             }
         }
 
