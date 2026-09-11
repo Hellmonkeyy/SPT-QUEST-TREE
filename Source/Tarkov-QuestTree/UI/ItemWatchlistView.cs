@@ -197,13 +197,20 @@ namespace QuestTree.UI
             return byTemplate.Values.ToList();
         }
 
+        /// <summary>One row: whether you OWN enough, wherever it is.
+        ///
+        /// Deliberately still the stash-inclusive total, unlike the map's "Take with you" section
+        /// directly above it, which counts what is on your character. The two answer different
+        /// questions - "do I own one" and "am I carrying one" - and both are worth asking, but they
+        /// sit in the same column, so each has to say which it is answering or they read as a
+        /// contradiction. That is what the "owned" below is for.</summary>
         internal static string Format(WatchedItem item)
         {
             var held = item.NeedsFoundInRaid ? item.OwnedFoundInRaid : item.OwnedTotal;
             var fir = item.NeedsFoundInRaid ? " <color=#FFFFFF60>(FiR)</color>" : "";
 
             if (held >= item.Required)
-                return $"<color=#{QuestNodeView.HexFor(ENodeStatus.Completed)}>[have]</color>  {GameStyle.Safe(item.Name)}  {held}/{item.Required}{fir}";
+                return $"<color=#{QuestNodeView.HexFor(ENodeStatus.Completed)}>[have]</color>  {GameStyle.Safe(item.Name)}  {held}/{item.Required} owned{fir}";
 
             // Held but not found-in-raid is its own state: you own the thing and it still will not
             // count, which is exactly the case someone would otherwise get wrong.
@@ -211,7 +218,7 @@ namespace QuestTree.UI
                 return $"<color=#{GameStyle.WarningHex}>[not FiR]</color>  {GameStyle.Safe(item.Name)}  {held}/{item.Required}" +
                        $"  <color=#FFFFFF60>{item.OwnedTotal} held, not found in raid</color>";
 
-            return $"<color=#FFFFFF40>[need]</color>  {GameStyle.Safe(item.Name)}  {held}/{item.Required}{fir}";
+            return $"<color=#FFFFFF40>[need]</color>  {GameStyle.Safe(item.Name)}  {held}/{item.Required} owned{fir}";
         }
     }
 }

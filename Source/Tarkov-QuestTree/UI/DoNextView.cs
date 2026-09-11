@@ -155,6 +155,23 @@ namespace QuestTree.UI
             if (locked != null) return $"  ·  {locked}";
 
             if (entry.Node.Level > 0) return $"  ·  level {entry.Node.Level}";
+
+            // An available quest is the one row in a ranked "do this next" list that used to
+            // explain nothing, sitting beside rows that all do - and its next action is the least
+            // ambiguous of any of them.
+            if (entry.Node.Status == ENodeStatus.Available)
+            {
+                var trader = graph != null && !string.IsNullOrEmpty(entry.Node.TraderId) &&
+                             graph.TraderNames.TryGetValue(entry.Node.TraderId, out var name) &&
+                             !string.IsNullOrEmpty(name)
+                    ? name
+                    : null;
+
+                return trader == null
+                    ? "  ·  not accepted - take it from its trader first"
+                    : $"  ·  not accepted - take it from {trader} first";
+            }
+
             return "";
         }
 

@@ -135,60 +135,107 @@ namespace QuestTree.UI
             if (objectives == null) return;
 
             var order = new List<string>();
-            var wanted = new Dictionary<string, (string Name, int Need, bool FoundInRaid, string Verb)>();
+            var wanted = new Dictionary<string,
+                (List<string> Templates, string Name, int Need, bool FoundInRaid, string Verb)>();
 
             foreach (var objective in objectives)
             {
                 if (objective?.TargetItems == null || objective.TargetItems.Count == 0) continue;
 
-                // A condition can accept any one of several templates; the first is the one worth
-                // naming, and counting each alternative separately would inflate the list.
-                var template = objective.TargetItems[0];
-                if (string.IsNullOrWhiteSpace(template)) continue;
+                // Keyed on every template the condition accepts, not on the first of them, and
+                // held counts sum across all of them - the same rule the map sidebar's raid check
+                // folds by. They render one above the other in the same column, and the old rule
+                // (name the first, count only that one) made them disagree: a player carrying seven
+                // grenades of five kinds would read "7 on you" in one section and "0" in the other,
+                // because Confidential Info's first template is a V40 they own none of.
+                var templates = objective.TargetItems.Where(t => !string.IsNullOrWhiteSpace(t)).ToList();
+                if (templates.Count == 0) continue;
 
+                var key = string.Join("|", templates.ToArray());
                 var need = Mathf.Max(1, objective.Count);
 
-                if (wanted.TryGetValue(template, out var existing))
+                if (wanted.TryGetValue(key, out var existing))
                 {
-                    wanted[template] = (existing.Name, existing.Need + need,
+                    wanted[key] = (existing.Templates, existing.Name, existing.Need + need,
                         existing.FoundInRaid || NeedsFoundInRaid(objective), existing.Verb);
                     continue;
                 }
 
-                order.Add(template);
-                wanted[template] = (ItemName(objective, 0), need, NeedsFoundInRaid(objective), Verb(objective));
+                order.Add(key);
+                wanted[key] = (templates, ItemName(objective, 0), need, NeedsFoundInRaid(objective), Verb(objective));
             }
 
             if (order.Count == 0) return;
 
             lines.Add("<b>Bring</b>");
 
-            foreach (var template in order)
-            {
-                var item = wanted[template];
-                var held = HeldCount(profile, template, item.FoundInRaid);
+            // Whether the server can say where things are. Below schema v2, or with the roots
+            // unread, on-person counts are UNKNOWN rather than zero - and zero reads exactly like
+            // "carrying nothing" on a full rig.
+            var placesKnown = profile != null &&
+                              profile.SchemaVersion >= ProfilePayloadDto.SupportedSchemaVersion &&
+                              profile.InventoryLocationsKnown;
 
-                var enough = held >= item.Need;
+            foreach (var key in order)
+            {
+                var item = wanted[key];
+                var held = HeldCount(profile, item.Templates, item.FoundInRaid, placesKnown);
+
+                var enough = held.OnYou >= item.Need;
                 var colour = enough ? "#" + QuestNodeView.HexFor(ENodeStatus.Completed) : "#" + GameStyle.WarningHex;
                 var fir = item.FoundInRaid ? " found in raid" : "";
                 var count = item.Need > 1 ? $" x{item.Need}" : "";
 
+                // "Held" was the stash-inclusive total, which told you that you hold a marker
+                // sitting at home - the same falsehood the pre-raid cue exists to prevent, one
+                // screen further in. It counts what is ON YOU now, and says where the rest is.
+                var where =
+                    !placesKnown ? "held" :
+                    enough ? "on you" :
+                    held.Elsewhere > 0 && held.InStash == 0 ? $"on you, {held.Elsewhere} elsewhere" :
+                    held.InStash > 0 ? $"on you, {held.InStash} in stash" :
+                    "on you";
+
                 lines.Add(
-                    $"{GameStyle.Safe(item.Name)}{count}  <color={colour}>{held} of {item.Need} held{fir}</color>" +
+                    $"{GameStyle.Safe(item.Name)}{count}  <color={colour}>{held.OnYou} of {item.Need} {where}{fir}</color>" +
                     $"  <color=#FFFFFF60>{item.Verb}</color>");
             }
 
             lines.Add("");
         }
 
-        /// <summary>How many of a template the profile holds, counting only found-in-raid copies
-        /// when the objective insists on them - a stack the quest will refuse is not stock.</summary>
-        private static int HeldCount(ProfilePayloadDto profile, string template, bool foundInRaid)
+        /// <summary>What the profile holds of a condition's templates, summed across all of
+        /// them, counting only found-in-raid copies when the objective insists on them - a stack the
+        /// quest will refuse is not stock.
+        ///
+        /// OnYou falls back to the stash-inclusive total when the server cannot say where things
+        /// are, which is the honest reading of an older payload: it knew how many, not where.</summary>
+        private static (int OnYou, int InStash, int Elsewhere) HeldCount(
+            ProfilePayloadDto profile, List<string> templates, bool foundInRaid, bool placesKnown)
         {
-            if (profile?.ItemsOwned == null) return 0;
-            if (!profile.ItemsOwned.TryGetValue(template, out var held) || held == null) return 0;
+            if (profile?.ItemsOwned == null || templates == null) return (0, 0, 0);
 
-            return foundInRaid ? held.FoundInRaid : held.Total;
+            var onYou = 0;
+            var inStash = 0;
+            var elsewhere = 0;
+
+            foreach (var template in templates)
+            {
+                if (string.IsNullOrWhiteSpace(template)) continue;
+                if (!profile.ItemsOwned.TryGetValue(template, out var held) || held == null) continue;
+
+                if (!placesKnown)
+                {
+                    onYou += foundInRaid ? held.FoundInRaid : held.Total;
+                    continue;
+                }
+
+                onYou += foundInRaid ? held.OnPersonFoundInRaid : held.OnPerson;
+                inStash += held.InStash;
+                elsewhere += held.Elsewhere;
+            }
+
+            return (onYou, inStash, elsewhere);
         }
 
         /// <summary>The condition's own flag when the server sends one (schema v2); the English
