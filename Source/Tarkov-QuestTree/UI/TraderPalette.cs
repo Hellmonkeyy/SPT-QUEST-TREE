@@ -115,35 +115,83 @@ namespace QuestTree.UI
             return false;
         }
 
+        /// <summary>Hues already given to a GENERATED colour, so two modded traders do not come
+        /// out the same. Deliberately separate from <see cref="Resolved"/>, which also holds the
+        /// curated eight - see <see cref="Generated"/> for why those cannot be avoided.</summary>
+        private static readonly List<float> GeneratedHues = new List<float>();
+
+        /// <summary>Every hue bucket outside every status band, built once from
+        /// <see cref="ReservedHues"/> so the bands stay the one source of truth.
+        ///
+        /// Finer than the wheel this used to walk - 24 buckets rather than 12 - because the choice
+        /// is now made only among hues that are allowed, instead of walking a coarse wheel and
+        /// rejecting most of it.</summary>
+        private static readonly List<float> FreeHues = BuildFreeHues();
+
+        private static List<float> BuildFreeHues()
+        {
+            const int Buckets = 24;
+            var free = new List<float>();
+
+            for (var i = 0; i < Buckets; i++)
+            {
+                var hue = i / (float)Buckets;
+                if (!IsReserved(hue)) free.Add(hue);
+            }
+
+            return free;
+        }
+
         /// <summary>A colour for a trader nobody anticipated.
         ///
-        /// The id picks a starting bucket on a coarse hue wheel; the walk then steps to the first
-        /// bucket that is neither reserved by a status colour nor already in use. Coarse on purpose
-        /// - a dozen buckets that are obviously different beats a continuous hue nobody can tell
-        /// from its neighbour.</summary>
+        /// The id picks a starting point among the hues no status colour claims; the walk then steps
+        /// to the first that no other generated colour has taken.
+        ///
+        /// It does NOT try to avoid the curated eight, and that is the correction. It used to, and
+        /// the result was that no modded trader ever got a generated colour at all: the eight
+        /// vanilla hues, each excluding a bucket and a half either side, between them cover the
+        /// entire wheel - Skier 0.03 through Peacekeeper 0.13 through Therapist 0.36, Jaeger 0.49,
+        /// Prapor 0.59, Mechanic 0.73, Ragman 0.89 and back round to Skier. Every candidate was
+        /// rejected, every modded trader fell through to the "every bucket taken" fallback, and that
+        /// fallback hashed straight to a raw hue WITHOUT checking the status bands. So on an install
+        /// with several trader mods the normal path was the one path that could hand a trader the
+        /// in-progress green - which is what made Aishi's chains unreadable, every box green whether
+        /// it was done or locked.
+        ///
+        /// The priority is what changed, not the mechanism. Never colliding with a STATUS colour is
+        /// mandatory: the status colours are the signal this whole channel exists to protect.
+        /// Differing from another TRADER is best-effort. A generated colour sitting near Prapor's
+        /// blue costs a moment's confusion between two traders that have portraits and occupy
+        /// different parts of the tree; a generated colour sitting on the in-progress green costs
+        /// the meaning of every box in the chain.</summary>
         private static Color Generated(string traderId)
         {
-            const int Buckets = 12;
+            if (FreeHues.Count == 0) return GameStyle.DimTextColor;
 
             var hash = 0;
             foreach (var c in traderId) hash = unchecked(hash * 31 + c);
 
-            var start = Math.Abs(hash % Buckets);
+            var start = Math.Abs(hash % FreeHues.Count);
 
-            for (var step = 0; step < Buckets; step++)
+            for (var step = 0; step < FreeHues.Count; step++)
             {
-                var hue = ((start + step) % Buckets) / (float)Buckets;
+                var hue = FreeHues[(start + step) % FreeHues.Count];
+                if (IsTaken(hue)) continue;
 
-                if (IsReserved(hue) || IsTaken(hue)) continue;
+                GeneratedHues.Add(hue);
 
-                // Saturation and value held where the curated eight sit, so a generated colour
-                // belongs to the same palette rather than glowing next to them.
-                return Color.HSVToRGB(hue, 0.55f, 0.72f);
+                // A little stronger than the curated eight: this is read as a 9px slab on a
+                // near-black box, not as a large flat area.
+                return Color.HSVToRGB(hue, 0.6f, 0.8f);
             }
 
-            // Every bucket taken - more traders than the wheel has room for. Distinctness has run
-            // out, so fall back to a stable hue rather than pretending otherwise.
-            return Color.HSVToRGB(Math.Abs(hash % 1000) / 1000f, 0.45f, 0.65f);
+            // More modded traders than there are distinguishable hues left. Keep the hue the id
+            // asked for and separate by brightness instead - still inside the allowed set, which is
+            // the part that must not be given up.
+            var fallback = FreeHues[start];
+            GeneratedHues.Add(fallback);
+
+            return Color.HSVToRGB(fallback, 0.6f, 0.55f + Math.Abs(hash / FreeHues.Count % 3) * 0.16f);
         }
 
         private static bool IsReserved(float hue)
@@ -154,14 +202,19 @@ namespace QuestTree.UI
             return false;
         }
 
+        /// <summary>Whether another GENERATED colour is already this close.
+        ///
+        /// Hue is a circle, so 0.97 and 0.02 are neighbours; comparing the raw difference called
+        /// them a wheel apart and let two traders sit either side of red looking identical.</summary>
         private static bool IsTaken(float hue)
         {
-            foreach (var used in Resolved.Values)
+            foreach (var used in GeneratedHues)
             {
-                Color.RGBToHSV(used, out var usedHue, out _, out _);
+                var apart = Mathf.Abs(used - hue);
+                if (apart > 0.5f) apart = 1f - apart;
 
-                // Within a bucket and a half of an existing one is too close to call apart.
-                if (Mathf.Abs(usedHue - hue) < 1f / 12f * 1.5f) return true;
+                // Within a bucket and a half of the fine wheel is too close to call apart.
+                if (apart < 1f / 24f * 1.5f) return true;
             }
 
             return false;
@@ -200,6 +253,7 @@ namespace QuestTree.UI
         public static void Forget()
         {
             Resolved.Clear();
+            GeneratedHues.Clear();
             _overridesSeen = null;
         }
     }
