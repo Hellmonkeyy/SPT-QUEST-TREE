@@ -499,11 +499,15 @@ namespace QuestTreeServer
                 if (reward == null) continue;
                 if (reward.IsHidden == true) continue;
 
+                var template = reward.Items?.FirstOrDefault()?.Template.ToString() ?? "";
+
                 rewards.Add(new RewardDto
                 {
                     Type = reward.Type?.ToString() ?? "",
                     Value = reward.Value ?? 0d,
                     Name = ResolveRewardName(reward, locale),
+                    ShortName = ResolveShortName(template, locale),
+                    Template = template,
                     // Trader names are deliberately left to the client, which resolves them from
                     // the live session and so gets modded traders right for free.
                     TraderId = reward.TraderId?.ToString() ?? ""
@@ -528,6 +532,19 @@ namespace QuestTreeServer
             }
 
             return reward.Target ?? "";
+        }
+
+        /// <summary>The item's short name, which is a separate locale key from its name. Empty
+        /// rather than falling back, so the client can tell "there is no short name" from "the short
+        /// name happens to equal the long one" and choose per context.</summary>
+        private static string ResolveShortName(string template, Dictionary<string, string> locale)
+        {
+            if (string.IsNullOrWhiteSpace(template)) return "";
+
+            return locale.TryGetValue($"{template} ShortName", out var shortName) &&
+                   !string.IsNullOrWhiteSpace(shortName)
+                ? shortName
+                : "";
         }
 
         /// <summary>Condition types that TAKE an item from you - handed to a trader, or found in

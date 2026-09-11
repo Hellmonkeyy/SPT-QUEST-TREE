@@ -423,9 +423,13 @@ namespace QuestTree.UI
 
             // The same marks the boxes wear, so a reward reads the same in both places.
             var rewards = node.Rewards
-                .Select(r => new { Mark = QuestNodeView.GlyphForReward(r.Type), Body = QuestSummary.FormatReward(r, _graph) })
+                .Select(r => new
+                {
+                    Mark = QuestNodeView.GlyphForReward(r.Type),
+                    Body = QuestSummary.FormatReward(r, _graph),
+                    r.Template
+                })
                 .Where(r => !string.IsNullOrEmpty(r.Body))
-                .Select(r => new { Text = string.IsNullOrEmpty(r.Mark) ? r.Body : $"<color=#FFFFFF60>{r.Mark}</color>  {r.Body}" })
                 .ToList();
 
             if (rewards.Count > 0)
@@ -433,7 +437,25 @@ namespace QuestTree.UI
                 AuxLayout.AddSectionHeader(_content, ref y, "Rewards", _left, width);
 
                 foreach (var reward in rewards)
-                    AuxLayout.AddWrapped(_content, reward.Text, _left, ref y, width);
+                {
+                    var text = string.IsNullOrEmpty(reward.Mark)
+                        ? reward.Body
+                        : $"<color=#FFFFFF60>{reward.Mark}</color>  {reward.Body}";
+
+                    // An item you are being given, or an offer being unlocked, is something you can
+                    // look at - the game's own inspect window knows far more about it than a line
+                    // of text ever will. Rewards that are a number have nothing to open.
+                    if (!string.IsNullOrEmpty(reward.Template))
+                    {
+                        var captured = reward.Template;
+                        AuxLayout.AddClickableRow(_content, text, _left, ref y, width, false,
+                            () => GameStyle.InspectItem(captured));
+                    }
+                    else
+                    {
+                        AuxLayout.AddWrapped(_content, text, _left, ref y, width);
+                    }
+                }
 
                 y += 8f;
             }

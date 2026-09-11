@@ -23,8 +23,10 @@ namespace QuestTree.QuestGraph
         /// <summary>Schema this client understands. Compared against the server's on fetch. A
         /// mismatch is a logged warning, not a refusal: v1 (1.7.1) payloads only lack
         /// ObjectiveDto.FoundInRaid, which the readers fall back from. v4 (1.9.0) adds
-        /// QuestDto.DerivedLocations, which a v3 server simply never sends.</summary>
-        public const int SupportedSchemaVersion = 4;
+        /// QuestDto.DerivedLocations, which a v3 server simply never sends. v5 (1.10.1) adds
+        /// RewardDto.ShortName and Template; without them a reward row keeps its full name
+        /// and stops being clickable, which is exactly how it read before they existed.</summary>
+        public const int SupportedSchemaVersion = 5;
 
         [JsonProperty("schemaVersion")]
         public int SchemaVersion { get; set; }
@@ -205,8 +207,21 @@ namespace QuestTree.QuestGraph
         [JsonProperty("name")]
         public string Name { get; set; }
 
+        /// <summary>The item's short name where the locale has one - "AFAK" rather than "AFAK
+        /// tactical individual first aid kit". Empty when there is none.</summary>
+        [JsonProperty("shortName")]
+        public string ShortName { get; set; }
+
+        /// <summary>The item template, so a reward row can open the game's inspect window.</summary>
+        [JsonProperty("template")]
+        public string Template { get; set; }
+
         [JsonProperty("traderId")]
         public string TraderId { get; set; }
+
+        /// <summary>The name to print in a LIST, where every row competes for the same width.
+        /// Prefers the short name; falls back to the full one when there is no short name.</summary>
+        public string ListName => string.IsNullOrEmpty(ShortName) ? Name : ShortName;
     }
 
     /// <summary>Mirror of the server's KappaPayloadDto - the Collector hand-in checklist paired

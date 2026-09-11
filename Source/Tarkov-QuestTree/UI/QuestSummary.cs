@@ -577,11 +577,14 @@ namespace QuestTree.UI
                     return string.IsNullOrEmpty(trader) ? "Unlocks a trader" : $"Unlocks {trader}";
 
                 case "Item":
-                    if (string.IsNullOrEmpty(reward.Name)) return null;
-                    return reward.Value >= 2 ? $"{reward.Value:N0}x {reward.Name}" : reward.Name;
+                    if (string.IsNullOrEmpty(reward.ListName)) return null;
+                    return reward.Value >= 2 ? $"{reward.Value:N0}x {reward.ListName}" : reward.ListName;
 
                 case "Skill":
                     return string.IsNullOrEmpty(reward.Name) ? null : $"{reward.Name} +{reward.Value:N0}";
+
+                case "AchievementUnlock":
+                    return string.IsNullOrEmpty(reward.Name) ? null : $"Achievement: {reward.Name}";
 
                 case "AssortmentUnlock":
                     // The item, when we know it. The server already resolves an assortment unlock's
@@ -589,14 +592,16 @@ namespace QuestTree.UI
                     // type - and this branch was the one place that ignored it, so two quests each
                     // unlocking something different from the same trader both read "Unlocks a new
                     // Aishi offer" and neither said what.
-                    var offer = LooksLikeId(reward.Name) ? null : reward.Name;
+                    var offer = LooksLikeId(reward.ListName) ? null : reward.ListName;
 
                     if (string.IsNullOrEmpty(offer))
                         return string.IsNullOrEmpty(trader) ? "Unlocks a new trader offer" : $"Unlocks a new {trader} offer";
 
-                    return string.IsNullOrEmpty(trader)
-                        ? $"Unlocks {offer} at a trader"
-                        : $"{trader} starts selling {offer}";
+                    // "Unlocks AFAK at Aishi" rather than "Aishi starts selling AFAK tactical
+                    // individual first aid kit". A reward list is read down the left edge, so the
+                    // verb belongs at the front and the sentence wants to end before it wraps -
+                    // every wrapped row costs a blank-looking line under the one above it.
+                    return string.IsNullOrEmpty(trader) ? $"Unlocks {offer}" : $"Unlocks {offer} at {trader}";
 
                 default:
                     // Unknown/rare reward types (StashRows, Achievement, ...) still say something

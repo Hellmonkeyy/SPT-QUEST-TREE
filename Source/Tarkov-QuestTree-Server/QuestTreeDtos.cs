@@ -17,8 +17,9 @@ namespace QuestTreeServer
     {
         /// <summary>Bumped whenever the shape below changes, so an old client paired with a new
         /// server (or the reverse) can say so plainly instead of silently mis-parsing.
-        /// v2 (1.8.0): ObjectiveDto.FoundInRaid. v4 (1.9.0): QuestDto.DerivedLocations.</summary>
-        public int SchemaVersion { get; set; } = 4;
+        /// v2 (1.8.0): ObjectiveDto.FoundInRaid. v4 (1.9.0): QuestDto.DerivedLocations.
+        /// v5 (1.10.1): RewardDto.ShortName and RewardDto.Template.</summary>
+        public int SchemaVersion { get; set; } = 5;
 
         /// <summary>The server half's version, so a mismatch warning on the client can name it -
         /// the other three payloads already did.</summary>
@@ -168,6 +169,17 @@ namespace QuestTreeServer
         /// <summary>Already-resolved display name for the thing being rewarded - an item name, a
         /// skill name, a trader name - or empty for rewards that are just a number (Experience).</summary>
         public string Name { get; set; } = "";
+
+        /// <summary>The item's SHORT name where the locale has one - "AFAK" for "AFAK tactical
+        /// individual first aid kit". Empty when there is none, and the caller falls back to Name.
+        ///
+        /// Sent as well as Name rather than instead of it: a short name is what a list wants and a
+        /// full name is what a single row wants, and only the locale knows either.</summary>
+        public string ShortName { get; set; } = "";
+
+        /// <summary>The item template this reward hands over or unlocks, where it is an item at all.
+        /// Lets the client open the game's own inspect window on it.</summary>
+        public string Template { get; set; } = "";
 
         /// <summary>Set for trader-scoped rewards (standing, unlocks, assort unlocks).</summary>
         public string TraderId { get; set; } = "";
