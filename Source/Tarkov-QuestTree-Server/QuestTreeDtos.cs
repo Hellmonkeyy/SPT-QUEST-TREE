@@ -328,6 +328,131 @@ namespace QuestTreeServer
         public List<string> BlockingQuestIds { get; set; } = new();
     }
 
+
+    /// <summary>What you must be CARRYING to finish the quests on each map.
+    ///
+    /// Deliberately narrow: only the carry-in conditions count. A hand-in is done at a trader and a
+    /// find-in-raid is found there, so neither is something to bring, and including them would turn
+    /// a useful verdict into a shopping list nobody can satisfy.
+    ///
+    /// No verdict is reached here. The server reports facts - what each condition wants, where it
+    /// happens, what the profile holds, what state the quest is in - and the client folds them,
+    /// because only the client knows the "count unaccepted quests" setting and only the client has
+    /// ENodeStatus where it has a graph at all.
+    /// </summary>
+    public sealed class RaidCheckDto
+    {
+        /// <summary>1 (1.9.0): first version. The client mirror carries SupportedSchemaVersion = 1
+        /// and warns on a mismatch, exactly as the other four payloads do - an unversioned payload
+        /// is how a mismatched pair gets to disagree silently about whether you are ready.</summary>
+        public int SchemaVersion { get; set; } = 1;
+
+        public string ModVersion { get; set; } = ModInfo.Version;
+
+        /// <summary>False out of game, where there is no profile to read - the client shows its
+        /// neutral state rather than a verdict.</summary>
+        public bool HasProfile { get; set; }
+
+        /// <summary>False when the inventory roots could not be read, so on-person counts are
+        /// unknown rather than zero. The cue must stay neutral on this, never green and never a
+        /// bare "missing".</summary>
+        public bool InventoryLocationsKnown { get; set; }
+
+        /// <summary>Carry conditions with no zone of their own AND no map for their quest either,
+        /// so they belong nowhere. Reported and logged; it gates NOTHING.
+        ///
+        /// Named differently from the per-map UnplaceableConditions on purpose: that one gates its
+        /// map, this one gates nothing, and two fields with the same name and opposite rules told
+        /// apart only by which object they hang on is how the wrong one gets read. On a fully
+        /// harvested install this is 1 - "Friend from Norvinsk - Part 5" names zoneId "1" - and
+        /// gating on it would leave every map permanently neutral.</summary>
+        public int ConditionsWithNoMap { get; set; }
+
+        public List<RaidCheckMapDto> Maps { get; set; } = new();
+
+        /// <summary>Template -> what the profile holds, for every template mentioned above. Reuses
+        /// the profile payload's own type rather than restating five counts per row: an item wanted
+        /// by six conditions is held exactly once.</summary>
+        public Dictionary<string, HeldItemDto> Held { get; set; } = new();
+
+        /// <summary>Template -> resolved display name, for every template mentioned above.
+        ///
+        /// Required by the client rule that a row is named after the template actually HELD, which
+        /// cannot be executed without it: a requirement carries template ids and one Name taken from
+        /// the first of them, and the client has no locale table - and on the ready-up screen no
+        /// quest graph either - so it cannot turn "the F-1 is the one you are carrying" into the
+        /// words "F-1 hand grenade".
+        ///
+        /// On the envelope beside Held for the same reason Held is: the six grenades Confidential
+        /// Info accepts are named once, not once per condition that wants them.</summary>
+        public Dictionary<string, string> ItemNames { get; set; } = new();
+    }
+
+    public sealed class RaidCheckMapDto
+    {
+        /// <summary>Internal name in QuestDto.LocationKey's keyspace, which is NOT the canonical one
+        /// - emitted one row per real location, alias-expanded. ZoneStore.Canonical folds
+        /// factory4_night into factory4_day and Sandbox_high into Sandbox, and the client hands over
+        /// the un-folded SelectedLocation.Id, so a canonical key here would mean Factory night and
+        /// Ground Zero above level 20 match no row at all - and no row renders green.</summary>
+        public string LocationKey { get; set; } = "";
+
+        public string Name { get; set; } = "";
+
+        /// <summary>Conditions listed on this map by assumption rather than by a harvested zone of
+        /// their own - the declared or derived map of the quest was used as the fallback. The row
+        /// still appears, since over-listing costs a false amber and that is the safe direction, but
+        /// the map may not go green: the assumption may have put it here instead of where it
+        /// belongs.</summary>
+        public int UnplaceableConditions { get; set; }
+
+        /// <summary>Whether this map has harvested zones at all. Green requires positive evidence:
+        /// with no harvest a map cannot place an "any"-location carry condition, so it may inform
+        /// but never reassure. Per map, so a fresh install greys out exactly what it should.</summary>
+        public bool ZonesHarvested { get; set; }
+
+        public List<RaidCheckRequirementDto> Requirements { get; set; } = new();
+    }
+
+    /// <summary>One carry condition, on the map that condition actually happens on.
+    ///
+    /// Per condition, not per quest, and that is the whole point. "Is This a Reference" wants 27
+    /// WI-FI cameras spread over eight maps; summed per quest it would tell you to carry all 27 onto
+    /// Factory and read MISSING 20 whatever you brought. Sixteen vanilla quests have this shape.
+    /// </summary>
+    public sealed class RaidCheckRequirementDto
+    {
+        public string QuestId { get; set; } = "";
+
+        public string QuestName { get; set; } = "";
+
+        /// <summary>Every template the condition accepts - the second condition of Hot Zone takes
+        /// any of nine ballistic plates. Held counts are summed across ALL of them, and the client
+        /// picks the display name from whichever is actually held.</summary>
+        public List<string> Templates { get; set; } = new();
+
+        /// <summary>The canonical name, from the first template. A fallback for the red case: when
+        /// nothing is held there is no "what you are carrying" to name it after.</summary>
+        public string Name { get; set; } = "";
+
+        public int Needed { get; set; }
+
+        /// <summary>Whether the condition demands found-in-raid copies. No vanilla carry condition
+        /// sets it - all 149 LeaveItemAtLocation say false and all 96 PlaceBeacon omit it - so this
+        /// ships unexercised. Kept because a quest mod can set it, not because it is verified.</summary>
+        public bool FoundInRaid { get; set; }
+
+        /// <summary>The status of the quest as a string, the way KappaPayloadDto.CollectorStatus
+        /// already does it. Sent as DATA, not as a verdict: the client decides what counts, but it
+        /// cannot decide from nothing, and on the ready-up screen it has no quest graph to consult.
+        ///
+        /// Named Status, NOT QuestStatus: the SPT type of that name is what each entry in
+        /// profile.Quests is, and a property of that name shadows it. A never-touched quest reads
+        /// AvailableForStart here rather than Locked - see QuestFacts.StatusOf, which is the whole
+        /// reason this cannot be a bare read of the profile entry.</summary>
+        public string Status { get; set; } = "";
+    }
+
     /// <summary>Quest-item spawn markers, grouped by map. See MapMarkerPayloadBuilder for why the
     /// positions come from the loot table rather than from the quests.</summary>
     public class MapMarkerPayloadDto

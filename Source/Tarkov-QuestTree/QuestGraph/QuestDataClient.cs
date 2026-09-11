@@ -25,6 +25,7 @@ namespace QuestTree.QuestGraph
         private const string KappaRoute = "/questtree/kappa";
         private const string ProfileRoute = "/questtree/profile";
         private const string MapMarkerRoute = "/questtree/mapmarkers";
+        private const string RaidCheckRoute = "/questtree/raidcheck";
 
         /// <summary>
         /// How long a request may hold the game. Every fetch here is synchronous on Unity's main
@@ -63,6 +64,7 @@ namespace QuestTree.QuestGraph
         public static void RetryFailedFetches()
         {
             if (_attempted && _cached == null) _attempted = false;
+            if (_raidCheckAttempted && _raidCheck == null) _raidCheckAttempted = false;
             if (_markersAttempted && _markers == null) _markersAttempted = false;
             if (_profileAttempted && _profile == null) _profileAttempted = false;
         }
@@ -131,6 +133,97 @@ namespace QuestTree.QuestGraph
             {
                 LogUnavailable(ex.Message);
                 return null;
+            }
+        }
+
+
+        private static RaidCheckDto _raidCheck;
+        private static bool _raidCheckAttempted;
+
+        /// <summary>Drops the cached raid check so the next ask is answered fresh.
+        ///
+        /// It matters more here than for the other payloads: the whole promise is "if it says you
+        /// have enough on you, you have enough", and the way that gets tested is moving an item and
+        /// looking again. Called from the panel refresh link and on raid end - deliberately NOT from
+        /// MapView.Build, which would walk a four-thousand-item inventory on every map click.</summary>
+        public static void InvalidateRaidCheck()
+        {
+            _raidCheckAttempted = false;
+            _raidCheck = null;
+        }
+
+        /// <summary>What you must be carrying, per map - or null when the server half is missing,
+        /// older than this route, or had no profile to read. Null is the NEUTRAL case and must never
+        /// be drawn as "you are ready".
+        ///
+        /// Cached per menu session like the profile payload. The server bypasses its own inventory
+        /// memo for this route, so a fresh fetch really is a fresh answer.</summary>
+        public static RaidCheckDto GetRaidCheck()
+        {
+            if (_raidCheckAttempted) return _raidCheck;
+            _raidCheckAttempted = true;
+
+            try
+            {
+                var json = GetJson(RaidCheckRoute);
+                if (string.IsNullOrEmpty(json))
+                {
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: {RaidCheckRoute} returned nothing - the server half is missing or predates " +
+                        "this route, so the raid check stays neutral.");
+                    return null;
+                }
+
+                var payload = JsonConvert.DeserializeObject<RaidCheckDto>(json);
+                Sanitise(payload);
+
+                if (payload != null && payload.SchemaVersion != RaidCheckDto.SupportedSchemaVersion)
+                {
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: raid check payload schema v{payload.SchemaVersion} but this client expects " +
+                        $"v{RaidCheckDto.SupportedSchemaVersion} (server mod {payload.ModVersion}).");
+                }
+
+                _raidCheck = payload;
+                return _raidCheck;
+            }
+            catch (Exception ex)
+            {
+                LogUnavailable(ex.Message);
+                return null;
+            }
+        }
+
+        /// <summary>Every name in the raid check comes from the locale table and is rendered inside
+        /// markup - and the stacked list above the ready-up button is the worst sink in this mod,
+        /// since a size tag there draws over the matchmaker itself.</summary>
+        private static void Sanitise(RaidCheckDto payload)
+        {
+            if (payload == null) return;
+
+            if (payload.ItemNames != null)
+            {
+                var templates = new List<string>(payload.ItemNames.Keys);
+                foreach (var template in templates)
+                    payload.ItemNames[template] = RichText.Safe(payload.ItemNames[template]);
+            }
+
+            if (payload.Maps == null) return;
+
+            foreach (var map in payload.Maps)
+            {
+                if (map == null) continue;
+
+                map.Name = RichText.Safe(map.Name);
+                if (map.Requirements == null) continue;
+
+                foreach (var requirement in map.Requirements)
+                {
+                    if (requirement == null) continue;
+
+                    requirement.Name = RichText.Safe(requirement.Name);
+                    requirement.QuestName = RichText.Safe(requirement.QuestName);
+                }
             }
         }
 
@@ -318,6 +411,8 @@ namespace QuestTree.QuestGraph
             _markersAttempted = false;
             _cached = null;
             _attempted = false;
+            _raidCheck = null;
+            _raidCheckAttempted = false;
             _kappaResult = null;
             _profile = null;
             _profileAttempted = false;

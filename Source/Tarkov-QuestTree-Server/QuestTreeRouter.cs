@@ -28,8 +28,11 @@ namespace QuestTreeServer
         public QuestTreeRouter(
             JsonUtil jsonUtil, ISptLogger<QuestTreeRouter> logger, QuestPayloadBuilder payloadBuilder,
             KappaPayloadBuilder kappaBuilder, ProfilePayloadBuilder profileBuilder,
-            MapMarkerPayloadBuilder markerBuilder, ZoneStore zoneStore, QuestFacts facts)
-            : base(jsonUtil, BuildRoutes(logger, payloadBuilder, kappaBuilder, profileBuilder, markerBuilder, zoneStore, facts))
+            MapMarkerPayloadBuilder markerBuilder, ZoneStore zoneStore, QuestFacts facts,
+            RaidCheckPayloadBuilder raidCheckBuilder)
+            : base(jsonUtil, BuildRoutes(
+                logger, payloadBuilder, kappaBuilder, profileBuilder, markerBuilder, zoneStore, facts,
+                raidCheckBuilder))
         {
         }
 
@@ -40,7 +43,8 @@ namespace QuestTreeServer
         private static IEnumerable<RouteAction> BuildRoutes(
             ISptLogger<QuestTreeRouter> logger, QuestPayloadBuilder payloadBuilder,
             KappaPayloadBuilder kappaBuilder, ProfilePayloadBuilder profileBuilder,
-            MapMarkerPayloadBuilder markerBuilder, ZoneStore zoneStore, QuestFacts facts) =>
+            MapMarkerPayloadBuilder markerBuilder, ZoneStore zoneStore, QuestFacts facts,
+            RaidCheckPayloadBuilder raidCheckBuilder) =>
             new List<RouteAction>
             {
                 // The one route with a body: the client's in-raid zone harvest (see ZoneHarvester
@@ -72,6 +76,17 @@ namespace QuestTreeServer
                     "/questtree/profile",
                     (url, info, sessionId, output, cancellationToken) =>
                         Guarded(logger, url, () => profileBuilder.GetPayloadJson(sessionId), () => new ProfilePayloadDto())),
+
+                // Profile-scoped and per-request, for the same reason as /questtree/profile: the
+                // answer changes every time the player moves an item, which is precisely what this
+                // is asked about. No request body - RouteAction<T> constrains T to IRequestData, the
+                // client has no POST path outside the fire-and-forget harvest, and every map fits in
+                // one small answer anyway.
+                new RouteAction<EmptyRequestData>(
+                    "/questtree/raidcheck",
+                    (url, info, sessionId, output, cancellationToken) =>
+                        Guarded(logger, url, () => raidCheckBuilder.GetPayloadJson(sessionId),
+                            () => new RaidCheckDto())),
 
                 // Not profile-scoped: where an item spawns is a property of the map, the same for
                 // everyone, so this is built once and cached like the quest list.
