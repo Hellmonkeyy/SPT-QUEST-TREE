@@ -50,6 +50,39 @@ namespace QuestTree.QuestGraph
         public string Name { get; set; }
     }
 
+
+    /// <summary>The requirement a weapon-build quest states, in the terms the game compares
+    /// against. Null for a quest that states none.</summary>
+    internal sealed class WeaponBuildDto
+    {
+        [JsonProperty("weaponTemplate")]
+        public string WeaponTemplate { get; set; }
+
+        [JsonProperty("weaponName")]
+        public string WeaponName { get; set; }
+
+        [JsonProperty("thresholds")]
+        public List<WeaponBuildThresholdDto> Thresholds { get; set; } = new List<WeaponBuildThresholdDto>();
+
+        [JsonProperty("requiredItemNames")]
+        public List<string> RequiredItemNames { get; set; } = new List<string>();
+
+        [JsonProperty("requiredCategoryNames")]
+        public List<string> RequiredCategoryNames { get; set; } = new List<string>();
+    }
+
+    internal sealed class WeaponBuildThresholdDto
+    {
+        [JsonProperty("field")]
+        public string Field { get; set; }
+
+        [JsonProperty("compare")]
+        public string Compare { get; set; }
+
+        [JsonProperty("value")]
+        public double Value { get; set; }
+    }
+
     internal sealed class QuestDto
     {
         [JsonProperty("id")]
@@ -96,6 +129,10 @@ namespace QuestTree.QuestGraph
 
         [JsonProperty("prerequisites")]
         public List<PrerequisiteDto> Prerequisites { get; set; }
+
+        /// <summary>The weapon-build requirement, when this quest states one. Schema v4.</summary>
+        [JsonProperty("weaponBuild")]
+        public WeaponBuildDto WeaponBuild { get; set; }
 
         [JsonProperty("objectives")]
         public List<ObjectiveDto> Objectives { get; set; }

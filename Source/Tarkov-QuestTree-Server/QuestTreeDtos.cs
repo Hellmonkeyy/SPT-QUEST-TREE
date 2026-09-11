@@ -93,6 +93,10 @@ namespace QuestTreeServer
 
         public List<ObjectiveDto> Objectives { get; set; } = new();
 
+        /// <summary>The weapon-build requirement, when this quest states one. Null for the
+        /// other 774 quests. Schema v4.</summary>
+        public WeaponBuildDto? WeaponBuild { get; set; }
+
         public List<RewardDto> Rewards { get; set; } = new();
     }
 
@@ -340,6 +344,44 @@ namespace QuestTreeServer
     /// because only the client knows the "count unaccepted quests" setting and only the client has
     /// ENodeStatus where it has a graph at all.
     /// </summary>
+
+    /// <summary>The requirement a weapon-build quest states, in the terms the game compares against.
+    ///
+    /// Present only for WeaponAssembly conditions. 56 quests on the reference install carry one - 32
+    /// vanilla across 29 quests, the rest from mods - and until now every one of them rendered as
+    /// "Handover the custom M4A1  0/1", which says nothing at all.</summary>
+    public sealed class WeaponBuildDto
+    {
+        /// <summary>The base weapon. Every vanilla condition names exactly one, which is measured
+        /// rather than assumed.</summary>
+        public string WeaponTemplate { get; set; } = "";
+
+        public string WeaponName { get; set; } = "";
+
+        /// <summary>Thresholds actually in force, already filtered. Keyed by the condition's own
+        /// field name so the client needs no enum to stay in step with modded data.</summary>
+        public List<WeaponBuildThresholdDto> Thresholds { get; set; } = new();
+
+        /// <summary>Specific mods the build must contain, resolved to names. 23 of the 32 vanilla
+        /// conditions have these, which is a majority rather than an edge case.</summary>
+        public List<string> RequiredItemNames { get; set; } = new();
+
+        /// <summary>Categories one fitted part must come from - "Comb. tact. device" and the like.
+        /// 16 of 32.</summary>
+        public List<string> RequiredCategoryNames { get; set; } = new();
+    }
+
+    public sealed class WeaponBuildThresholdDto
+    {
+        /// <summary>The condition's own field name: "ergonomics", "recoil", "weight".</summary>
+        public string Field { get; set; } = "";
+
+        /// <summary>"&gt;=", "&lt;=" and so on, as the quest data writes it.</summary>
+        public string Compare { get; set; } = "";
+
+        public double Value { get; set; }
+    }
+
     public sealed class RaidCheckDto
     {
         /// <summary>1 (1.9.0): first version. The client mirror carries SupportedSchemaVersion = 1

@@ -190,6 +190,7 @@ namespace QuestTreeServer
                 Prerequisites = MapPrerequisites(quest),
                 DerivedLocations = DeriveLocations(quest, zoneToMap, locale),
                 Objectives = MapObjectives(quest, locale),
+                WeaponBuild = MapWeaponBuild(quest, locale),
                 Rewards = MapRewards(quest, locale)
             };
         }
@@ -404,6 +405,85 @@ namespace QuestTreeServer
             }
 
             return objectives;
+        }
+
+        /// <summary>Condition type stating a weapon build requirement.</summary>
+        private const string WeaponAssemblyType = "WeaponAssembly";
+
+        /// <summary>What a Gunsmith-style quest actually asks for, in words.
+        ///
+        /// Without this such a quest renders as "Handover the custom M4A1  0/1", which tells you
+        /// nothing about the twelve numbers it is really checking. 56 quests on this install carry
+        /// one of these conditions.</summary>
+        private static WeaponBuildDto? MapWeaponBuild(Quest quest, Dictionary<string, string> locale)
+        {
+            var conditions = quest.Conditions?.AvailableForFinish;
+            if (conditions == null) return null;
+
+            foreach (var condition in conditions)
+            {
+                if (condition == null) continue;
+                if (!string.Equals(condition.ConditionType, WeaponAssemblyType, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                var weapon = TargetIds(condition.Target).FirstOrDefault(t => !string.IsNullOrWhiteSpace(t));
+                if (string.IsNullOrWhiteSpace(weapon)) continue;
+
+                var build = new WeaponBuildDto
+                {
+                    WeaponTemplate = weapon!,
+                    WeaponName = ResolveItemName(weapon!, locale)
+                };
+
+                // Every threshold the condition states, by its own field name so a modded stat
+                // nobody has heard of still reaches the screen.
+                AddThreshold(build, "ergonomics", condition.Ergonomics);
+                AddThreshold(build, "recoil", condition.Recoil);
+                AddThreshold(build, "weight", condition.Weight);
+                AddThreshold(build, "magazine capacity", condition.MagazineCapacity);
+                AddThreshold(build, "effective distance", condition.EffectiveDistance);
+                AddThreshold(build, "durability", condition.Durability);
+                AddThreshold(build, "height", condition.Height);
+                AddThreshold(build, "width", condition.Width);
+                AddThreshold(build, "base accuracy", condition.BaseAccuracy);
+                AddThreshold(build, "muzzle velocity", condition.MuzzleVelocity);
+
+                foreach (var item in condition.ContainsItems ?? new List<string>())
+                {
+                    if (string.IsNullOrWhiteSpace(item)) continue;
+                    build.RequiredItemNames.Add(ResolveItemName(item, locale));
+                }
+
+                foreach (var category in condition.HasItemFromCategory ?? new List<string>())
+                {
+                    if (string.IsNullOrWhiteSpace(category)) continue;
+                    build.RequiredCategoryNames.Add(ResolveItemName(category, locale));
+                }
+
+                return build;
+            }
+
+            return null;
+        }
+
+        /// <summary>Adds a threshold, unless it is the unconstrained default.
+        ///
+        /// Skipped on the VALUE being zero, never on the field name. In the first vanilla condition
+        /// effectiveDistance, weight, baseAccuracy and muzzleVelocity are all ">= 0" and pure noise
+        /// on screen - but height and width are "<= 1" and "<= 4" and entirely real, in 5 quests
+        /// each. Writing those two off by name, which an earlier reading of one example suggested,
+        /// would have dropped a genuine constraint.</summary>
+        private static void AddThreshold(WeaponBuildDto build, string field, ValueCompare? compare)
+        {
+            var value = compare?.Value ?? 0d;
+            if (value == 0d) return;
+
+            build.Thresholds.Add(new WeaponBuildThresholdDto
+            {
+                Field = field,
+                Compare = compare!.CompareMethod ?? ">=",
+                Value = value
+            });
         }
 
         private static List<RewardDto> MapRewards(Quest quest, Dictionary<string, string> locale)

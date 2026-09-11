@@ -82,6 +82,7 @@ namespace QuestTree.UI
             }
 
             AddRoute(lines, node, graph);
+            AddWeaponBuild(lines, node);
             AddItemsToBring(lines, node, profile);
 
             // Available for a locked quest too, not just an accepted one: the objective text
@@ -203,6 +204,50 @@ namespace QuestTree.UI
 
             lines.Add("");
         }
+
+        /// <summary>What a weapon-build quest actually asks for, in words.
+        ///
+        /// These quests render their objective as "Handover the custom M4A1  0/1", which says
+        /// nothing about the twelve numbers the game is really checking - so people fail them with a
+        /// build that looks right and hand in a rifle two ergonomics short.</summary>
+        private static void AddWeaponBuild(List<string> lines, QuestNode node)
+        {
+            var build = node.WeaponBuild;
+            if (build == null) return;
+
+            lines.Add("<b>Build</b>");
+            lines.Add(GameStyle.Safe(build.WeaponName));
+
+            foreach (var threshold in build.Thresholds ?? new List<WeaponBuildThresholdDto>())
+            {
+                if (threshold == null) continue;
+
+                // Durability is NOT a build property - it is the weapon's repair state, and it
+                // appears in all 32 vanilla conditions. Phrased as advice rather than as something
+                // to assemble, because handing in a correct build at 60% durability is a real and
+                // baffling way to fail these.
+                if (string.Equals(threshold.Field, "durability", StringComparison.OrdinalIgnoreCase))
+                {
+                    lines.Add($"<color=#FFFFFF80>hand in at {Compare(threshold)}% durability</color>");
+                    continue;
+                }
+
+                lines.Add($"  {GameStyle.Safe(threshold.Field)} {Compare(threshold)}");
+            }
+
+            foreach (var item in build.RequiredItemNames ?? new List<string>())
+                lines.Add($"  must include {GameStyle.Safe(item)}");
+
+            foreach (var category in build.RequiredCategoryNames ?? new List<string>())
+                lines.Add($"  must include a {GameStyle.Safe(category)}");
+
+            lines.Add("");
+        }
+
+        /// <summary>"&gt;= 62". The compare method is printed as the quest data writes it rather
+        /// than translated, so a modded comparison nobody anticipated still reads correctly.</summary>
+        private static string Compare(WeaponBuildThresholdDto threshold) =>
+            $"{GameStyle.Safe(threshold.Compare)} {threshold.Value:0.##}";
 
         /// <summary>What the profile holds of a condition's templates, summed across all of
         /// them, counting only found-in-raid copies when the objective insists on them - a stack the
