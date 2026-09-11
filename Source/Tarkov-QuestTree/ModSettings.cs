@@ -73,6 +73,41 @@ namespace QuestTree
         public static ConfigEntry<bool> ShowItemsSection { get; private set; }
         public static ConfigEntry<bool> ShowTakeWithYou { get; private set; }
         public static ConfigEntry<int> OverviewLabels { get; private set; }
+        public static ConfigEntry<bool> ShowTraderColours { get; private set; }
+        public static ConfigEntry<string> TraderColours { get; private set; }
+
+        /// <summary>Sets one trader's colour inside the packed override string, or clears it when
+        /// <paramref name="hex"/> is null.
+        ///
+        /// One config entry holding "id=#RRGGBB" pairs rather than one entry per trader, because the
+        /// set of traders is not known at build time - this install alone adds several - and a mod
+        /// that grows a setting every time somebody installs a trader is a mod with an unusable F12
+        /// page. The in-game Settings tab writes through this, so nobody has to type the format.</summary>
+        public static void SetTraderColour(string traderId, string hex)
+        {
+            if (!Ready || string.IsNullOrEmpty(traderId)) return;
+
+            var kept = new List<string>();
+
+            foreach (var pair in (TraderColours.Value ?? "").Split(';'))
+            {
+                var trimmed = pair.Trim();
+                if (trimmed.Length == 0) continue;
+
+                var at = trimmed.IndexOf('=');
+                if (at <= 0) continue;
+
+                // Drop any existing entry for this trader; whatever is being set replaces it.
+                if (string.Equals(trimmed.Substring(0, at).Trim(), traderId, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                kept.Add(trimmed);
+            }
+
+            if (!string.IsNullOrEmpty(hex)) kept.Add($"{traderId}={hex}");
+
+            TraderColours.Value = string.Join(";", kept.ToArray());
+        }
         public static ConfigEntry<bool> CountUnacceptedQuests { get; private set; }
         public static ConfigEntry<bool> ShowCredits { get; private set; }
         public static ConfigEntry<PinLabelMode> PinLabels { get; private set; }
@@ -253,6 +288,18 @@ namespace QuestTree
                 "on the Maps tab. One raid per map is enough. Off means the map keeps only what " +
                 "it already has.");
 
+            ShowTraderColours = config.Bind(
+                "Tree look", "Show trader colours", true,
+                "A coloured stripe down the left edge of each quest, one colour per trader. The box " +
+                "itself keeps showing quest status - the stripe is a second, independent signal.");
+
+            TraderColours = config.Bind(
+                "Tree look", "Trader colours", "",
+                "Override the colour picked for a trader: \"traderId=#RRGGBB\", several separated by " +
+                "semicolons. Leave empty for the built-in colours. Traders this mod does not know - " +
+                "any trader from a mod - are given a colour derived from their id, so they are " +
+                "coloured and distinct without being listed here.");
+
             OverviewLabels = config.Bind(
                 "Tree look", "Overview labels", 15,
                 new ConfigDescription(
@@ -375,7 +422,8 @@ namespace QuestTree
                 MirrorMapArtwork, ShowMapGuides, DrawEdges, FocusFrontier, CompactLayout, MaxVisibleNodes,
                 OpenOnMap, HarvestZones, EdgeOpacity, HoverDimStrength, TallTitles, AbbreviateWhenZoomedOut,
                 TitleOnlyBelowZoom, CodesBelowZoom, QuestBadges, SidebarWidth, DoNextRows, ShowItemsSection,
-                ShowTakeWithYou, CountUnacceptedQuests, OverviewLabels, ShowCredits,
+                ShowTakeWithYou, CountUnacceptedQuests, OverviewLabels, ShowTraderColours,
+                TraderColours, ShowCredits,
                 PinLabels, ColorActive, ColorAvailable, ColorCompleted, ColorLocked, ColorAccent, Tooltips,
                 HoverSounds, RememberLastView, OpenTracker
             });
@@ -411,6 +459,8 @@ namespace QuestTree
             ShowItemsSection.SettingChanged += Raise;
             ShowTakeWithYou.SettingChanged += Raise;
             OverviewLabels.SettingChanged += Raise;
+            ShowTraderColours.SettingChanged += Raise;
+            TraderColours.SettingChanged += Raise;
             CountUnacceptedQuests.SettingChanged += Raise;
             ShowCredits.SettingChanged += Raise;
             PinLabels.SettingChanged += Raise;

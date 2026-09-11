@@ -223,6 +223,9 @@ namespace QuestTree.UI
             QuestDataClient.InvalidateProfile();
             _session = session; // kept for trader-avatar lookups on tab icons, independent of a graph rebuild
 
+            // The tree's chain markers need the same avatars and have no session of their own.
+            TraderAvatars.Session = session;
+
             // A different profile on the same client: the map view's remembered map, quest and
             // view belong to the last character. Read defensively for the same JIT reason as the
             // raid location in MenuTaskBarPatch.
@@ -1375,7 +1378,7 @@ namespace QuestTree.UI
                     QuestDataClient.InvalidateProfile();
                     RenderSelectedTab();
                 }, RenderSelectedTab)
-                : SettingsView.Build(_auxContent, size, () => ShowIntro(true), () =>
+                : SettingsView.Build(_auxContent, size, () => ShowIntro(true), graph: _graph, onKappaListReloaded: () =>
                 {
                     // SettingsView has already re-read the file; the flag is baked into each node
                     // at build time, so the graph needs telling before anything is redrawn.

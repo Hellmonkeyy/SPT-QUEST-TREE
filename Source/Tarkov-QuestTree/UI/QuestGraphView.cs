@@ -145,6 +145,12 @@ namespace QuestTree.UI
         private RectTransform _viewport;
         private RectTransform _content;
 
+        /// <summary>Trader portraits at the left of each trader's first chain, the way the web
+        /// quest trees mark their bands. Rebuilt with the layout rather than per frame: unlike the
+        /// labels these are not counter-scaled, so they zoom with the boxes and need no update
+        /// path.</summary>
+        private readonly List<GameObject> _traderMarkers = new List<GameObject>();
+
         /// <summary>The readable-label overlay. Built lazily with the content, dropped with
         /// it, and drawn from the same sweep that decides which boxes exist - so panning and
         /// zooming update it without a second update path.</summary>
@@ -344,6 +350,7 @@ namespace QuestTree.UI
 
             _layoutOrder = matching.ToArray();
             BuildEdgeLayout(matching);
+            BuildTraderMarkers(matching);
 
             // Put the camera on the content that was just laid out. Without this the view keeps
             // whatever position it had, so searching while panned to a far corner of a 5,000-quest
@@ -355,6 +362,104 @@ namespace QuestTree.UI
             _lastContentScale = _content.localScale.x;
             _initialSweepFrames = InitialSweepFrames;
             RefreshVisibleNodes();
+        }
+
+        /// <summary>A trader portrait and name at the left of each trader's first chain.
+        ///
+        /// The shape the web quest trees use, and it works here because the layout already puts a
+        /// trader's chains together: ComputeTreeLayout orders roots by trader name, so the first
+        /// root of each trader is the top-left corner of that trader's band.
+        ///
+        /// Rebuilt with the layout rather than per frame. Unlike the overview labels these are NOT
+        /// counter-scaled - they zoom with the boxes, which is what makes them read as part of the
+        /// tree rather than as an overlay, and which means they need no update path at all.</summary>
+        private void BuildTraderMarkers(IReadOnlyList<QuestNode> nodes)
+        {
+            foreach (var marker in _traderMarkers)
+                if (marker != null) UnityEngine.Object.Destroy(marker);
+
+            _traderMarkers.Clear();
+
+            if (ModSettings.Ready && !ModSettings.ShowTraderColours.Value) return;
+            if (_content == null) return;
+
+            // The first root of each trader, by layout position: leftmost column, then highest row.
+            var firstByTrader = new Dictionary<string, QuestNode>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var node in nodes)
+            {
+                if (node == null || string.IsNullOrEmpty(node.TraderId)) continue;
+                if (node.TraderId == QuestNode.NoTraderId) continue;
+                if (!_layout.TryGetValue(node, out var position)) continue;
+
+                if (!firstByTrader.TryGetValue(node.TraderId, out var best) ||
+                    !_layout.TryGetValue(best, out var bestPosition) ||
+                    position.x < bestPosition.x ||
+                    (Mathf.Approximately(position.x, bestPosition.x) && position.y > bestPosition.y))
+                {
+                    firstByTrader[node.TraderId] = node;
+                }
+            }
+
+            foreach (var entry in firstByTrader)
+                CreateTraderMarker(entry.Key, _layout[entry.Value]);
+        }
+
+        private void CreateTraderMarker(string traderId, Vector2 nodePosition)
+        {
+            const float size = 76f;
+            const float gap = 18f;
+
+            var go = new GameObject($"TraderMarker_{traderId}", typeof(RectTransform));
+            var rect = (RectTransform)go.transform;
+            rect.SetParent(_content, worldPositionStays: false);
+            rect.anchorMin = rect.anchorMax = new Vector2(0f, 0f);
+            rect.pivot = new Vector2(1f, 0.5f);
+
+            // Left of the chain's first quest, vertically centred on it.
+            rect.anchoredPosition = new Vector2(nodePosition.x - gap, nodePosition.y);
+            rect.sizeDelta = new Vector2(size, size + 20f);
+
+            var portraitGo = new GameObject("Portrait", typeof(RectTransform), typeof(Image));
+            var portrait = (RectTransform)portraitGo.transform;
+            portrait.SetParent(rect, worldPositionStays: false);
+            portrait.anchorMin = portrait.anchorMax = new Vector2(0.5f, 1f);
+            portrait.pivot = new Vector2(0.5f, 1f);
+            portrait.anchoredPosition = Vector2.zero;
+            portrait.sizeDelta = new Vector2(size, size);
+
+            var image = portraitGo.GetComponent<Image>();
+            image.raycastTarget = false;
+
+            // The trader's own colour behind the portrait, so the band still reads while the avatar
+            // is still loading - and so a modded trader the session cannot supply a portrait for is
+            // marked rather than blank.
+            image.color = TraderPalette.For(traderId);
+            TraderAvatars.Assign(traderId, image);
+
+            var labelGo = new GameObject("TraderName", typeof(RectTransform));
+            var labelRect = (RectTransform)labelGo.transform;
+            labelRect.SetParent(rect, worldPositionStays: false);
+            labelRect.anchorMin = new Vector2(0f, 0f);
+            labelRect.anchorMax = new Vector2(1f, 0f);
+            labelRect.pivot = new Vector2(0.5f, 0f);
+            labelRect.anchoredPosition = Vector2.zero;
+            labelRect.sizeDelta = new Vector2(0f, 18f);
+
+            var label = labelGo.AddComponent<TMPro.TextMeshProUGUI>();
+            label.fontSize = 12;
+            label.fontStyle = TMPro.FontStyles.Bold;
+            GameStyle.ApplyOutlined(label);
+
+            label.text = _graph != null && _graph.TraderNames.TryGetValue(traderId, out var name) && !string.IsNullOrEmpty(name)
+                ? GameStyle.Safe(name)
+                : traderId;
+
+            label.alignment = TMPro.TextAlignmentOptions.Center;
+            label.color = TraderPalette.For(traderId);
+            label.raycastTarget = false;
+
+            _traderMarkers.Add(go);
         }
 
         /// <summary>Precomputes every edge's two endpoints once per tab. Nodes are created with

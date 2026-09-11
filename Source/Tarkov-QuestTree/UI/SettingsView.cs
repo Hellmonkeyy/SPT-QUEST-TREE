@@ -38,7 +38,9 @@ namespace QuestTree.UI
             ("White", "#E8E8E4"), ("Grey", "#6B6B66")
         };
 
-        public static float Build(RectTransform parent, Vector2 panelSize, Action onShowIntro, Action onKappaListReloaded)
+        public static float Build(
+            RectTransform parent, Vector2 panelSize, Action onShowIntro, Action onKappaListReloaded,
+            QuestGraphBuilder graph = null)
         {
             var y = AuxLayout.Padding;
 
@@ -65,6 +67,8 @@ namespace QuestTree.UI
             BuildMapSection(right, ref rightY, columnWidth, deferred);
             AuxLayout.AddSpacer(ref rightY, 18f);
             BuildColourSection(right, ref rightY, columnWidth);
+            AuxLayout.AddSpacer(ref rightY, 18f);
+            BuildTraderColourSection(right, ref rightY, columnWidth, graph);
 
             // The dropdown lists, last, so they draw over whatever sits beneath them.
             var popupBottom = 0f;
@@ -134,6 +138,9 @@ namespace QuestTree.UI
             Toggle(column, ref y, "Codes when zoomed right out",
                 "EM-4, GUN-3 and so on in each box when a title could not be read anyway.",
                 ModSettings.AbbreviateWhenZoomedOut);
+            Toggle(column, ref y, "Show trader colours",
+                "A coloured stripe per trader down the left edge of each quest. Status colours are unaffected.",
+                ModSettings.ShowTraderColours);
             Toggle(column, ref y, "Draw prerequisite lines",
                 "Turning this off is a noticeable speed-up on very dense trader chains.",
                 ModSettings.DrawEdges);
@@ -350,6 +357,117 @@ namespace QuestTree.UI
         }
 
         /// <summary>One colour: a swatch of the current value, its name, and the preset chips.</summary>
+        /// <summary>A colour row per trader, built from the traders the graph actually has.
+        ///
+        /// Generated rather than listed, which is the whole point: this install runs several trader
+        /// mods and the next one is not knowable at build time, so hardcoding the vanilla eight
+        /// would leave exactly the traders somebody most wants to recolour with no way to do it.
+        ///
+        /// Each row writes into the single packed TraderColours setting through
+        /// ModSettings.SetTraderColour, so the storage stays one config entry while the UI stays one
+        /// row per trader.</summary>
+        private static void BuildTraderColourSection(
+            RectTransform column, ref float y, float width, QuestGraphBuilder graph)
+        {
+            if (graph?.TraderNames == null || graph.TraderNames.Count == 0) return;
+
+            Header(column, ref y, "Trader colours", width);
+
+            AuxLayout.AddText(column, ref y,
+                "<color=#FFFFFF80>The stripe on each quest. Traders from mods are listed here too.</color>",
+                20f, 11);
+            AuxLayout.AddSpacer(ref y, 4f);
+
+            // By display name, so the list reads the way the tabs do rather than by raw id.
+            var traders = new List<KeyValuePair<string, string>>(graph.TraderNames);
+            traders.Sort((a, b) => string.Compare(a.Value, b.Value, StringComparison.OrdinalIgnoreCase));
+
+            var ids = new List<string>();
+
+            foreach (var trader in traders)
+            {
+                if (string.IsNullOrEmpty(trader.Key)) continue;
+
+                ids.Add(trader.Key);
+                var id = trader.Key;
+
+                TraderColourRow(
+                    column, ref y, width,
+                    string.IsNullOrEmpty(trader.Value) ? id : trader.Value,
+                    TraderPalette.For(id),
+                    hex => ModSettings.SetTraderColour(id, hex));
+            }
+
+            // Clears every override at once, rather than needing each trader set back by hand.
+            var resetY = y;
+            AuxLayout.AddClickableRow(column, "<color=#FFFFFF80>Reset trader colours</color>",
+                AuxLayout.Padding, ref resetY, width - AuxLayout.Padding * 2f, false,
+                () =>
+                {
+                    foreach (var id in ids) ModSettings.SetTraderColour(id, null);
+                    TraderPalette.Forget();
+                }, 20f);
+
+            y = resetY;
+        }
+
+        /// <summary>As ColourRow, but writing through a callback instead of owning a ConfigEntry -
+        /// traders share one packed setting rather than having one each.</summary>
+        private static void TraderColourRow(
+            RectTransform column, ref float y, float width, string label, Color current, Action<string> onPick)
+        {
+            const float rowHeight = 24f;
+            var x = AuxLayout.Padding;
+
+            var swatchGo = new GameObject("Swatch", typeof(RectTransform), typeof(Image));
+            var swatch = (RectTransform)swatchGo.transform;
+            swatch.SetParent(column, worldPositionStays: false);
+            swatch.anchorMin = swatch.anchorMax = new Vector2(0f, 1f);
+            swatch.pivot = new Vector2(0f, 1f);
+            swatch.anchoredPosition = new Vector2(x, -(y + 3f));
+            swatch.sizeDelta = new Vector2(18f, 18f);
+
+            var swatchImage = swatchGo.GetComponent<Image>();
+            swatchImage.color = current;
+            swatchImage.raycastTarget = false;
+            GameStyle.ApplyPanel(swatchImage);
+            x += 26f;
+
+            var labelY = y;
+            AuxLayout.AddLabelAt(column, label, x, ref labelY, rowHeight, 12, 110f);
+            x += 116f;
+
+            foreach (var (name, hex) in ColourPresets)
+            {
+                var chipY = y + 2f;
+                var chipWidth = 40f;
+                var preset = hex;
+
+                var row = AuxLayout.AddClickableRow(column, "", x, ref chipY, chipWidth, false,
+                    () => onPick(preset), 20f);
+
+                var background = row.GetComponent<Image>();
+                if (background != null && ColorUtility.TryParseHtmlString(hex, out var colour))
+                    background.color = new Color(colour.r, colour.g, colour.b, 0.22f);
+
+                var text = row.GetComponentInChildren<TMP_Text>();
+                if (text != null)
+                {
+                    text.text = name;
+                    text.fontSize = 10;
+                    text.alignment = TextAlignmentOptions.Center;
+                    if (ColorUtility.TryParseHtmlString(hex, out var ink)) text.color = ink;
+
+                    chipWidth = GameStyle.MeasureWidth(text, name) + 16f;
+                    row.sizeDelta = new Vector2(chipWidth, 20f);
+                }
+
+                x += chipWidth + 4f;
+            }
+
+            y += rowHeight;
+        }
+
         private static void ColourRow(
             RectTransform column, ref float y, float width, string label, ConfigEntry<string> entry, Color current)
         {

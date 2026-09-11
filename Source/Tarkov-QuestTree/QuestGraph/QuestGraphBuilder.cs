@@ -82,6 +82,11 @@ namespace QuestTree.QuestGraph
                 }
             }
 
+            // Trader colours, assigned once per graph in a fixed order - see TraderPalette.Prime
+            // for why lazily resolving them would make a modded trader's colour depend on which
+            // quest drew first.
+            QuestTree.UI.TraderPalette.Prime(TraderNames.Keys);
+
             // The search haystack, flattened once per graph now that unlocks and trader names
             // are both resolved - both are searchable and neither exists at node construction.
             // Doing this here rather than per keystroke is what lets the search box look at fifteen

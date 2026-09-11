@@ -34,6 +34,12 @@ namespace QuestTree.UI
         /// under these names so every existing call site (framing, visibility, edge maths) reads
         /// unchanged.</summary>
         public static float Width => LayoutMetrics.NodeWidth;
+
+        /// <summary>How wide the trader stripe is. Narrow on purpose: it is an accent, and
+        /// anything wider starts competing with the status colour it sits beside.</summary>
+        private const float TraderStripeWidth = 4f;
+
+        private Image _traderStripe;
         public static float Height => LayoutMetrics.NodeHeight;
 
         // Grey / amber / green / dark green. Available is amber rather than the near-white it used
@@ -216,6 +222,29 @@ namespace QuestTree.UI
             view._statusGlyph = glyph;
 
 
+            // The trader stripe, down the left edge.
+            //
+            // Its own channel rather than the box fill, which stays the STATUS colour: status is how
+            // you read in-progress from available from locked at a glance, and that is worth more in
+            // game than tinting whole nodes by trader the way the web trees do. This way you get
+            // both - the band tells you whose chain you are in, the box still tells you where you
+            // are in it.
+            var stripeGo = new GameObject("TraderStripe", typeof(RectTransform), typeof(Image));
+            var stripeRect = (RectTransform)stripeGo.transform;
+            stripeRect.SetParent(rect, worldPositionStays: false);
+            stripeRect.anchorMin = new Vector2(0f, 0f);
+            stripeRect.anchorMax = new Vector2(0f, 1f);
+            stripeRect.pivot = new Vector2(0f, 0.5f);
+            stripeRect.anchoredPosition = Vector2.zero;
+            stripeRect.sizeDelta = new Vector2(TraderStripeWidth, 0f);
+
+            var stripeImage = stripeGo.GetComponent<Image>();
+            stripeImage.raycastTarget = false;
+            view._traderStripe = stripeImage;
+
+            // Behind the text, in front of the background.
+            stripeRect.SetAsFirstSibling();
+
             // The game's own tooltip, on hover. Text is set per Bind.
             view._tooltip = GameStyle.AddTooltip(go, "");
 
@@ -280,6 +309,7 @@ namespace QuestTree.UI
             _selected = false;
 
             RefreshBadges();
+            RefreshTraderStripe();
 
             // Size to the title, not the other way round: a name like "The Survivalist Path -
             // Unprotected but Dangerous" was an ellipsis at one line, and three lines over the
@@ -494,6 +524,22 @@ namespace QuestTree.UI
         /// unreadable smears that only add noise; hiding them and growing the title keeps the one
         /// thing worth reading readable. Cheap: toggles and one font size, on visible views only.
         /// </summary>
+        /// <summary>The trader's colour, or nothing when the setting is off.
+        ///
+        /// Every trader has a colour including ones from mods - TraderPalette derives one from the
+        /// id rather than falling back to grey, because on an install with several trader mods a
+        /// grey fallback would have left most of the tree uncoloured.</summary>
+        private void RefreshTraderStripe()
+        {
+            if (_traderStripe == null) return;
+
+            var show = (!ModSettings.Ready || ModSettings.ShowTraderColours.Value) &&
+                       Node != null && !string.IsNullOrEmpty(Node.TraderId);
+
+            _traderStripe.enabled = show;
+            if (show) _traderStripe.color = TraderPalette.For(Node.TraderId);
+        }
+
         public void SetDetailLevel(int level)
         {
             if (_detailLevel == level) return;
