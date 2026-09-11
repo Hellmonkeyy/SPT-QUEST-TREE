@@ -441,7 +441,11 @@ namespace QuestTree.UI
         /// <summary>Reports how much of the tab the current filters and search are showing. Since
         /// virtualization removed the render cap this is a plain count rather than a truncation
         /// warning - what is laid out is what you can reach by panning.</summary>
-        public void UpdateRenderNotice(int matchingCount, int tabTotal, bool focused = false)
+        /// <param name="searchMatches">How many of the laid-out quests the search matched, or -1
+        /// when nothing is being searched for. Its own number because search no longer removes
+        /// anything from the layout: "805 of 830 shown" described a tree with 25 quests missing,
+        /// and there is no longer such a tree to describe.</param>
+        public void UpdateRenderNotice(int matchingCount, int tabTotal, bool focused = false, int searchMatches = -1)
         {
             RefreshFocusState();
 
@@ -455,7 +459,17 @@ namespace QuestTree.UI
             {
                 _renderNotice.text = (tabTotal == 0
                     ? "No quests in this tab"
-                    : $"No matches in {tabTotal:N0} quests") + source;
+                    : $"No quests pass the filters in {tabTotal:N0}") + source;
+                return;
+            }
+
+            if (searchMatches >= 0)
+            {
+                var found = searchMatches == 0
+                    ? $"<color=#{GameStyle.WarningHex}>No matches</color>"
+                    : $"{searchMatches:N0} match{(searchMatches == 1 ? "" : "es")}";
+
+                _renderNotice.text = $"{found}  <color=#FFFFFF80>·  {matchingCount:N0} quests shown</color>" + source;
                 return;
             }
 

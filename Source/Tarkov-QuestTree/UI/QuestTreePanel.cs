@@ -583,7 +583,7 @@ namespace QuestTree.UI
                 root,
                 _graph,
                 isAuxTabSelected: () => IsAuxTab(_selectedTraderId),
-                onSearchChanged: RenderSelectedTab,
+                onSearchChanged: () => _graphView.RefreshSearch(),
                 onSearchSubmitted: () =>
                 {
                     var first = _graphView.FirstMatch();

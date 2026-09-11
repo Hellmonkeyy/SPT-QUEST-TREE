@@ -402,16 +402,26 @@ namespace QuestTree.UI
         {
             ClearGraphViews();
 
-            // Filters and search are applied BEFORE layout, not by hiding views after the fact, so
-            // they genuinely reduce the work rather than just the result.
+            // Filters are applied BEFORE layout, so they genuinely reduce the work rather than
+            // just the result.
+            //
+            // SEARCH IS NOT A FILTER any more, and that is the change. It used to drop non-matching
+            // quests out of this list, so they were not hidden, they were ABSENT: the layout was
+            // recomputed around whatever was left, every box moved, and the edges you were tracing
+            // when you started typing stopped existing. A search that rearranges the map to show
+            // you where something is on it destroys the thing that made it findable.
+            //
+            // Now every quest stays where it is and the non-matches simply dim. Spatial memory
+            // survives, the edges survive - and it is far cheaper, because a keystroke stops
+            // triggering a full relayout of eight hundred boxes and becomes an alpha sweep over the
+            // few hundred that are built.
             var frontier = ModSettings.Ready && ModSettings.FocusFrontier.Value ? FrontierOf(candidates) : null;
             var matching = candidates
                 .Where(node => PassesFilters(node) && (frontier == null || frontier.Contains(node)))
-                .Where(_toolbar.MatchesSearch)
                 .ToList();
             _lastCandidateCount = candidates.Count;
             _lastFocused = frontier != null;
-            _toolbar.UpdateRenderNotice(matching.Count, candidates.Count, frontier != null);
+            _toolbar.UpdateRenderNotice(matching.Count, candidates.Count, frontier != null, CountMatches(matching));
 
             if (matching.Count == 0)
             {
@@ -1061,7 +1071,7 @@ namespace QuestTree.UI
 
                 foreach (var built in _views.Values) built.SetOutlineUnit(outlineUnit);
 
-                if (_hoveredNode != null) ApplyHighlightFalloff();
+                if (_hoveredNode != null) RepaintEmphasis();
             }
 
             // --- nodes ---
@@ -1133,6 +1143,11 @@ namespace QuestTree.UI
                 _edgeViews[index] = AcquireEdge(index);
             }
 
+            // Views built by this sweep arrive at full alpha - Bind resets it - so anything the
+            // search or the hover is dimming has to be re-applied to them.
+            if (_hoveredNode != null || (_toolbar != null && _toolbar.SearchNeedle.Length > 0))
+                RepaintEmphasis();
+
             // The guarantee that you can never get lost: if this tab has quests laid out but not one
             // of them landed on screen, the view is somewhere useless. Rather than showing an empty
             // panel with no clue which way to drag, jump to whichever quest is closest.
@@ -1170,24 +1185,16 @@ namespace QuestTree.UI
             }
 
             _highlighted.Clear();
-            _highlighted.Add(node);
             _hoveredNode = node;
+
+            CollectChain(node);
 
             // The card is not shown here - Tick decides, once the pointer has rested. This only
             // records that it could be.
             _hoverCandidate = node;
             _hoverSince = Time.unscaledTime;
 
-            foreach (var prerequisiteId in node.PrerequisiteIds)
-            {
-                if (_graph.NodesById.TryGetValue(prerequisiteId, out var prerequisite))
-                    _highlighted.Add(prerequisite);
-            }
-
-            foreach (var unlocked in node.Unlocks)
-                _highlighted.Add(unlocked);
-
-            ApplyHighlightFalloff();
+            RepaintEmphasis();
         }
 
         /// <summary>
@@ -1195,53 +1202,104 @@ namespace QuestTree.UI
         /// other built box and edge faded by its screen distance from the hovered quest. Called by
         /// HighlightChain, and again from the visibility sweep when the zoom moves mid-hover.
         /// </summary>
-        private void ApplyHighlightFalloff()
+        private void RepaintEmphasis()
         {
-            if (_hoveredNode == null || _content == null) return;
+            if (_content == null) return;
+
+            var hovering = _hoveredNode != null;
+            var searching = _toolbar != null && _toolbar.SearchNeedle.Length > 0;
+
+            if (!hovering && !searching)
+            {
+                foreach (var view in _views.Values) view.SetDimAlpha(1f);
+                foreach (var pair in _edgeViews) UILineConnector.SetColor(pair.Value, EdgeStyleFor(pair.Key).Color);
+                return;
+            }
 
             var zoom = Mathf.Max(0.05f, _content.localScale.x);
             var inner = HighlightInnerScreenRadius / zoom;
             var outer = HighlightOuterScreenRadius / zoom;
             var (near, far) = DimAlphas(zoom);
 
-            var origin = _layout.TryGetValue(_hoveredNode, out var centre)
+            var origin = hovering && _layout.TryGetValue(_hoveredNode, out var centre)
                 ? centre + new Vector2(SizeOf(_hoveredNode).x * 0.5f, 0f)
                 : Vector2.zero;
 
-            foreach (var (built, view) in _views)
-            {
-                if (_highlighted.Contains(built))
-                {
-                    view.SetDimAlpha(1f);
-                    continue;
-                }
+            // The search dim is FLAT, unlike the hover falloff. Distance from a hovered box means
+            // something - it is how far off the chain you are looking. Distance from a search has
+            // no meaning at all: a match on the far side of the tree is exactly as much of a match
+            // as the one under the cursor.
+            var strength = ModSettings.Ready ? ModSettings.HoverDimStrength.Value / 100f : 1f;
+            var searchDim = Mathf.Clamp01(1f - (1f - SearchDimAlpha) * strength);
 
-                var position = _layout.TryGetValue(built, out var at)
-                    ? at + new Vector2(SizeOf(built).x * 0.5f, 0f)
-                    : origin;
-                view.SetDimAlpha(FalloffAlpha(Vector2.Distance(position, origin), inner, outer, near, far));
-            }
+            foreach (var (node, view) in _views)
+                view.SetDimAlpha(NodeAlpha(node, hovering, searching, searchDim, origin, inner, outer, near, far));
 
-            // An edge only counts as part of the chain when BOTH of its ends are in it, otherwise
-            // every line leaving a neighbour would light up too and the chain would not read. The
-            // rest fade with the same falloff as the boxes, measured at the line's midpoint.
             foreach (var (index, line) in _edgeViews)
             {
                 if (index < 0 || index >= _edgeLayout.Length) continue;
 
                 var edge = _edgeLayout[index];
-                var inChain = _highlighted.Contains(edge.From) && _highlighted.Contains(edge.To);
 
-                if (inChain)
+                // An edge only counts as part of the chain when BOTH ends are in it, otherwise
+                // every line leaving a neighbour lights up too and the chain stops reading.
+                if (hovering && _highlighted.Contains(edge.From) && _highlighted.Contains(edge.To))
                 {
                     UILineConnector.SetColor(line, EdgeHighlightColor);
                     continue;
                 }
 
-                var midpoint = (edge.FromPoint + edge.ToPoint) * 0.5f;
-                var alpha = FalloffAlpha(Vector2.Distance(midpoint, origin), inner, outer, near * 0.2f, far * 0.3f);
-                UILineConnector.SetColor(line, new Color(1f, 1f, 1f, alpha));
+                if (hovering)
+                {
+                    var midpoint = (edge.FromPoint + edge.ToPoint) * 0.5f;
+                    var faded = FalloffAlpha(Vector2.Distance(midpoint, origin), inner, outer, near * 0.2f, far * 0.3f);
+                    UILineConnector.SetColor(line, new Color(1f, 1f, 1f, faded));
+                    continue;
+                }
+
+                // Searching: an edge belongs to the search only when it joins two matches.
+                var style = EdgeStyleFor(index);
+                var lit = _toolbar.MatchesSearch(edge.From) && _toolbar.MatchesSearch(edge.To);
+
+                UILineConnector.SetColor(line, lit
+                    ? style.Color
+                    : new Color(style.Color.r, style.Color.g, style.Color.b, style.Color.a * searchDim));
             }
+        }
+
+        /// <summary>Hover wins over search when both are on: you asked about THIS box most
+        /// recently, and a chain half-dimmed by a stale search reads as broken.</summary>
+        private float NodeAlpha(QuestNode node, bool hovering, bool searching, float searchDim,
+            Vector2 origin, float inner, float outer, float near, float far)
+        {
+            if (hovering)
+            {
+                if (_highlighted.Contains(node)) return 1f;
+
+                var position = _layout.TryGetValue(node, out var at)
+                    ? at + new Vector2(SizeOf(node).x * 0.5f, 0f)
+                    : origin;
+
+                return FalloffAlpha(Vector2.Distance(position, origin), inner, outer, near, far);
+            }
+
+            return !searching || _toolbar.MatchesSearch(node) ? 1f : searchDim;
+        }
+
+        /// <summary>How far a non-match drops while searching. Dim enough to recede, bright enough
+        /// that the shape of the tree around a match is still legible - the point of highlighting
+        /// in place rather than filtering is that the context survives.</summary>
+        private const float SearchDimAlpha = 0.22f;
+
+        private int CountMatches(IReadOnlyList<QuestNode> nodes)
+        {
+            if (_toolbar == null || _toolbar.SearchNeedle.Length == 0) return -1;
+
+            var matches = 0;
+            foreach (var node in nodes)
+                if (_toolbar.MatchesSearch(node)) matches++;
+
+            return matches;
         }
 
         /// <summary>How hard the dim bites at this zoom. Close in, the rest of the tree is context
@@ -1268,20 +1326,70 @@ namespace QuestTree.UI
             return Mathf.Lerp(near, far, t);
         }
 
-        /// <summary>Restores every built node and edge to its normal appearance.</summary>
+        /// <summary>Every ancestor and every descendant of a quest, both directions, cycle-guarded.
+        ///
+        /// One hop used to be enough because the highlight only had to say "these are its
+        /// neighbours". What it could never answer is the question a tree this size is actually for:
+        /// what does this quest depend on, all the way back, and what does finishing it open up. On
+        /// a forty-deep chain that is the difference between a hint and an answer.
+        ///
+        /// Walked per hover rather than memoised. The shape does not change with status so a cache
+        /// would be valid, but a breadth-first walk over eight hundred nodes is well under a
+        /// millisecond and happens once when the pointer arrives, not per frame - a cache would be
+        /// complexity bought with nothing.</summary>
+        private void CollectChain(QuestNode node)
+        {
+            _highlighted.Add(node);
+
+            // Backwards: everything this quest waits on.
+            _chainQueue.Clear();
+            _chainQueue.Enqueue(node);
+
+            while (_chainQueue.Count > 0)
+            {
+                var current = _chainQueue.Dequeue();
+
+                foreach (var prerequisiteId in current.PrerequisiteIds)
+                {
+                    if (!_graph.NodesById.TryGetValue(prerequisiteId, out var prerequisite)) continue;
+                    if (!_highlighted.Add(prerequisite)) continue;
+
+                    _chainQueue.Enqueue(prerequisite);
+                }
+            }
+
+            // Forwards: everything that waits on it.
+            _chainQueue.Clear();
+            _chainQueue.Enqueue(node);
+
+            while (_chainQueue.Count > 0)
+            {
+                var current = _chainQueue.Dequeue();
+
+                foreach (var unlocked in current.Unlocks)
+                {
+                    if (unlocked == null || !_highlighted.Add(unlocked)) continue;
+
+                    _chainQueue.Enqueue(unlocked);
+                }
+            }
+        }
+
+        private readonly Queue<QuestNode> _chainQueue = new();
+
+        /// <summary>Drops the hover emphasis. Does NOT restore everything to full: a search may
+        /// still be dimming the tree, and wiping that on mouse-out was the bug waiting to happen
+        /// once two things wanted to own the same alpha.</summary>
         public void ClearHighlight()
         {
             if (_highlighted.Count == 0) return;
+
             _highlighted.Clear();
             _hoveredNode = null;
             _hoverCandidate = null;
             _hoverCard?.Hide();
 
-            foreach (var view in _views.Values)
-                view.SetDimmed(false);
-
-            foreach (var (index, line) in _edgeViews)
-                UILineConnector.SetColor(line, EdgeStyleFor(index).Color);
+            RepaintEmphasis();
         }
 
         private void SnapToNearestNode(Vector2 target)
@@ -1343,7 +1451,43 @@ namespace QuestTree.UI
 
         /// <summary>The first quest in layout order - the top of the first column, which is the
         /// earliest match in the chain - or null when nothing is laid out.</summary>
-        public QuestNode FirstMatch() => _layoutOrder.Length > 0 ? _layoutOrder[0] : null;
+        /// <summary>A keystroke in the search box.
+        ///
+        /// Repaints; does not re-render. This used to be wired straight to a full RenderSelectedTab,
+        /// which cleared every view, re-measured all eight hundred boxes, recomputed the tidy-tree,
+        /// rebuilt the edge list, destroyed and recreated every trader portrait and reframed the
+        /// camera - per character typed. It had to, because search decided which quests existed.
+        ///
+        /// It no longer decides that, so none of that work has anything to do with a keystroke: the
+        /// layout is identical before and after. What changes is which boxes are lit, which is an
+        /// alpha sweep over the few hundred that are built.</summary>
+        public void RefreshSearch()
+        {
+            if (_layoutOrder.Length == 0 || _toolbar == null) return;
+
+            // Why a box matched, for the hover card. Only the built ones - anything scrolled in
+            // later is given its reason by the build loop.
+            foreach (var (node, view) in _views)
+                view.SearchReason = node.MatchReason(_toolbar.SearchNeedle);
+
+            _toolbar.UpdateRenderNotice(
+                _layoutOrder.Length, _lastCandidateCount, _lastFocused, CountMatches(_layoutOrder));
+
+            RepaintEmphasis();
+        }
+
+        public QuestNode FirstMatch()
+        {
+            if (_layoutOrder.Length == 0) return null;
+            if (_toolbar == null || _toolbar.SearchNeedle.Length == 0) return _layoutOrder[0];
+
+            // The first MATCH in layout order, not the first node laid out. They were the same
+            // thing while search filtered the layout; now the layout holds everything.
+            foreach (var node in _layoutOrder)
+                if (_toolbar.MatchesSearch(node)) return node;
+
+            return null;
+        }
 
         /// <summary>
         /// Frames a quest with its immediate neighbours and opens its detail - what a clickable
