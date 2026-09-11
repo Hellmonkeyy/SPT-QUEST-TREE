@@ -13,9 +13,18 @@ namespace QuestTree
     {
         public static ManualLogSource LogSource;
 
+        /// <summary>The plugin behaviour itself, for the rare coroutine that has to outlive the
+        /// thing it is watching.
+        ///
+        /// Unity stops a coroutine the moment its host GameObject is deactivated, so anything
+        /// that watches for a panel being HIDDEN cannot be hosted on that panel - it would freeze
+        /// at exactly the moment it was meant to act. This object is never destroyed.</summary>
+        public static Plugin Instance { get; private set; }
+
         private void Awake()
         {
             LogSource = Logger;
+            Instance = this;
 
             try
             {

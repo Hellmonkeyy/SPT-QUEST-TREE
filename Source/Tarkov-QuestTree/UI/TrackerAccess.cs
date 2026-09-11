@@ -55,6 +55,81 @@ namespace QuestTree.UI
             }
         }
 
+        /// <summary>How many frames to watch for the panel being hidden behind an inspect
+        /// window. Whatever hides it does so within a frame or two of the window opening; watching
+        /// longer would risk fighting a player who closed the tracker themselves.</summary>
+        private const int InspectWatchFrames = 6;
+
+        /// <summary>Keeps the tracker on screen across an item inspect.
+        ///
+        /// Opening the game's inspect window from an item row leaves the window correct and the
+        /// tracker GONE - the player is dropped onto the bare main menu with a knife tooltip over
+        /// it. Nothing throws and nothing is logged, so the panel is being deactivated by something
+        /// else: EFT's own window stack, or one of the menu-restyling mods this install runs.
+        ///
+        /// Which one is not knowable by reading code - Unity scene behaviour never is, and this mod
+        /// has shipped two wrong guesses about exactly that. So this does not try to PREVENT the
+        /// hide. It notices and undoes it, which works whatever the cause.
+        ///
+        /// Hosted on Plugin rather than on the panel, because a coroutine stops dead when its own
+        /// GameObject is deactivated - hosting the watcher on the thing being hidden would freeze it
+        /// at the one moment it exists to act.</summary>
+        public static void KeepOpenThroughInspect()
+        {
+            var panel = Panel;
+            if (panel == null) return;
+
+            // Already closed: the player is not looking at the tracker, so there is nothing to
+            // restore and re-showing it would be the mod opening itself uninvited.
+            if (!panel.gameObject.activeSelf) return;
+
+            var host = Plugin.Instance;
+            if (host == null || !host.isActiveAndEnabled) return;
+
+            host.StartCoroutine(RestoreIfHidden(panel));
+        }
+
+        private static System.Collections.IEnumerator RestoreIfHidden(QuestTreePanel panel)
+        {
+            for (var frame = 1; frame <= InspectWatchFrames; frame++)
+            {
+                yield return null;
+
+                // Destroyed while we waited - a menu teardown. Nothing to put back.
+                if (panel == null) yield break;
+                if (panel.gameObject.activeSelf) continue;
+
+                panel.gameObject.SetActive(true);
+
+                // Deliberately NOT SetAsLastSibling. The panel is a full-screen dark overlay, so
+                // raising it above the inspect window would hide the very thing the player just
+                // opened - a worse bug than the one being fixed. Behind the window is where it
+                // belongs.
+                if (!_inspectRestoreLogged)
+                {
+                    _inspectRestoreLogged = true;
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: the tracker was hidden {frame} frame(s) after an item inspect and " +
+                        "has been restored behind the inspect window. If the tracker now looks wrong " +
+                        "rather than merely restored, this line is the place to start.");
+                }
+
+                yield break;
+            }
+
+            // Never hidden this session: the restore is not needed on this install, and saying so
+            // is what tells the difference between "fixed" and "never happened here".
+            if (!_inspectRestoreLogged && !_inspectIntactLogged)
+            {
+                _inspectIntactLogged = true;
+                Plugin.LogSource?.LogInfo(
+                    "QuestTree: the tracker stayed open across an item inspect - no restore needed.");
+            }
+        }
+
+        private static bool _inspectRestoreLogged;
+        private static bool _inspectIntactLogged;
+
         private static bool _deadPanelWarned;
         private static bool _raidLocationWarned;
 

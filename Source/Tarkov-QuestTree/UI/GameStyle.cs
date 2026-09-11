@@ -174,6 +174,10 @@ namespace QuestTree.UI
 
                 var itemContext = new DefaultItemContext(item, EItemViewType.Handbook);
                 context.Inspect(itemContext, new HandbookContextInteractions(itemContext, context));
+
+                // Here rather than at each call site, so every item row in the mod is covered by
+                // construction and a new one cannot forget.
+                TrackerAccess.KeepOpenThroughInspect();
                 return true;
             }
             catch (Exception ex)
