@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using Newtonsoft.Json;
 
@@ -228,7 +229,8 @@ namespace QuestTree.QuestGraph
     /// because level, loyalty and objective counters all change as you play.</summary>
     internal sealed class ProfilePayloadDto
     {
-        public const int SupportedSchemaVersion = 1;
+        /// <summary>2 (1.9.0): the per-location counts on HeldItemDto, and InventoryLocationsKnown.</summary>
+        public const int SupportedSchemaVersion = 2;
 
         [JsonProperty("schemaVersion")]
         public int SchemaVersion { get; set; }
@@ -239,6 +241,12 @@ namespace QuestTree.QuestGraph
         /// <summary>False when the server had no profile to read (an out-of-game request).</summary>
         [JsonProperty("hasProfile")]
         public bool HasProfile { get; set; }
+
+        /// <summary>Whether the inventory roots resolved, so HeldItemDto's per-location counts mean
+        /// anything. False means unknown, NOT zero - and zero reads exactly like "carrying nothing"
+        /// on a full rig, so anything reading OnPerson must show its unknown state instead.</summary>
+        [JsonProperty("inventoryLocationsKnown")]
+        public bool InventoryLocationsKnown { get; set; }
 
         [JsonProperty("level")]
         public int Level { get; set; }
@@ -275,6 +283,27 @@ namespace QuestTree.QuestGraph
 
         [JsonProperty("total")]
         public int Total { get; set; }
+
+        /// <summary>Copies on the character, including the secure container. Schema v2.
+        ///
+        /// Read this ONLY behind SchemaVersion >= 2 and InventoryLocationsKnown. Newtonsoft lands an
+        /// absent property as 0 and the server emits 0 for a genuinely absent item, so the two are
+        /// indistinguishable per item - the payload version is the only discriminator there is.</summary>
+        [JsonProperty("onPerson")]
+        public int OnPerson { get; set; }
+
+        /// <summary>The found-in-raid subset of OnPerson. Schema v2.</summary>
+        [JsonProperty("onPersonFoundInRaid")]
+        public int OnPersonFoundInRaid { get; set; }
+
+        /// <summary>Copies in the stash, for the "1 in stash" hint. Schema v2.</summary>
+        [JsonProperty("inStash")]
+        public int InStash { get; set; }
+
+        /// <summary>Copies that are neither on the character nor in the stash - a hideout area
+        /// stash, the sorting table, a quest stash. 330 of them on the reference profile, so the
+        /// row says "1 elsewhere" rather than implying the item has to be bought.</summary>
+        public int Elsewhere => Math.Max(0, Total - OnPerson - InStash);
     }
 
     internal sealed class TraderStateDto

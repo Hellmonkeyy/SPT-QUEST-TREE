@@ -129,7 +129,8 @@ namespace QuestTreeServer
             var quests = templateTable.Quests;
             if (quests == null) return;
 
-            var owned = ProfileInventory.CountByTemplate(profile);
+            var owned = ProfileInventory.CountByTemplate(profile, out var locationsKnown);
+            payload.InventoryLocationsKnown = locationsKnown;
 
             // One index, two answers. Built once because every unstarted quest checks each
             // prerequisite against the profile, and a scan of the quest list per check was millions
@@ -195,7 +196,10 @@ namespace QuestTreeServer
                     payload.ItemsOwned[template] = new HeldItemDto
                     {
                         FoundInRaid = held.FoundInRaid,
-                        Total = held.Total
+                        Total = held.Total,
+                        OnPerson = held.OnPerson,
+                        OnPersonFoundInRaid = held.OnPersonFoundInRaid,
+                        InStash = held.InStash
                     };
                 }
             }

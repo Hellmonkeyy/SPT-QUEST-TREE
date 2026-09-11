@@ -210,7 +210,9 @@ namespace QuestTreeServer
     /// it moves as you play.</summary>
     public sealed class ProfilePayloadDto
     {
-        public int SchemaVersion { get; set; } = 1;
+        /// <summary>2 (1.9.0): HeldItemDto.OnPerson/OnPersonFoundInRaid/InStash, and
+        /// InventoryLocationsKnown beside them.</summary>
+        public int SchemaVersion { get; set; } = 2;
 
         public string ModVersion { get; set; } = ModInfo.Version;
 
@@ -234,6 +236,13 @@ namespace QuestTreeServer
         /// already started).</summary>
         public Dictionary<string, LockReasonDto> LockReasons { get; set; } = new();
 
+        /// <summary>Whether the inventory roots resolved, so the per-location counts on HeldItemDto
+        /// mean anything. False means UNKNOWN, not zero - and zero reads exactly like "carrying
+        /// nothing" on a full rig, which is why this is on the wire rather than inferred. Every
+        /// other degraded path in this server half names itself the same way: HasProfile,
+        /// CollectorFound, KappaSource, ZonesKnown.</summary>
+        public bool InventoryLocationsKnown { get; set; }
+
         /// <summary>Item template -> how many the profile holds, for items some quest asks for.
         /// Absent means none held.</summary>
         public Dictionary<string, HeldItemDto> ItemsOwned { get; set; } = new();
@@ -241,11 +250,24 @@ namespace QuestTreeServer
 
     /// <summary>How many of an item the profile holds. Found-in-raid is separate because most
     /// quest hand-ins only accept found-in-raid copies.</summary>
+    /// <summary>How many of an item the profile holds. Found-in-raid is separate because most quest
+    /// hand-ins only accept found-in-raid copies; location is separate (schema v2) because a pre-raid
+    /// check has to know what is on your character rather than what you own.</summary>
     public sealed class HeldItemDto
     {
         public int FoundInRaid { get; set; }
 
         public int Total { get; set; }
+
+        /// <summary>Copies on the character, including the secure container. Schema v2. Only
+        /// meaningful when ProfilePayloadDto.InventoryLocationsKnown is true.</summary>
+        public int OnPerson { get; set; }
+
+        /// <summary>The found-in-raid subset of OnPerson. Schema v2.</summary>
+        public int OnPersonFoundInRaid { get; set; }
+
+        /// <summary>Copies in the stash, for the "1 in stash" hint. Schema v2.</summary>
+        public int InStash { get; set; }
     }
 
     public sealed class TraderStateDto
