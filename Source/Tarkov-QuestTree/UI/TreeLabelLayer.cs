@@ -37,6 +37,9 @@ namespace QuestTree.UI
         /// labels never quite touch.</summary>
         private const float CollisionPadding = 4f;
 
+        /// <summary>Breathing room around a quest box before a label may sit next to it.</summary>
+        private const float BoxPadding = 6f;
+
         private readonly RectTransform _content;
         private readonly List<TMP_Text> _pool = new List<TMP_Text>();
 
@@ -52,11 +55,32 @@ namespace QuestTree.UI
         /// first, then search matches, then quests that are actually actionable. Ties inside a rank
         /// break on distance from the viewport centre, so the labels that appear are the ones
         /// nearest what you are looking at.</summary>
-        public void Draw(IReadOnlyList<(QuestNode Node, Vector2 Position)> ranked, float zoom, int budget)
+        public void Draw(
+            IReadOnlyList<(QuestNode Node, Vector2 Position)> ranked,
+            IReadOnlyCollection<Vector2> occupied,
+            float zoom,
+            int budget)
         {
             if (_content == null) return;
 
             _placed.Clear();
+
+            // Seed the collision set with the BOXES.
+            //
+            // Without this a label lands exactly on its own node - the position it is given IS the
+            // box - so the names drew straight across the boxes and over each other, which is worse
+            // than the silence it replaced. Labels may only occupy empty space between the boxes.
+            if (occupied != null)
+            {
+                foreach (var box in occupied)
+                {
+                    _placed.Add(new Rect(
+                        box.x - BoxPadding,
+                        box.y - LayoutMetrics.NodeHeight * 0.5f - BoxPadding,
+                        LayoutMetrics.NodeWidth + BoxPadding * 2f,
+                        LayoutMetrics.NodeHeight + BoxPadding * 2f));
+                }
+            }
 
             // Nothing to say at full zoom: the boxes are readable, and a second copy of the title
             // floating over them is noise.
@@ -93,9 +117,16 @@ namespace QuestTree.UI
                 var width = GameStyle.MeasureWidth(label, text) * inverse;
                 var height = FontSize * 1.4f * inverse;
 
-                var position = ranked[i].Position;
+                // Above the box rather than on it, in the gap RowSpacing already leaves between
+                // rows. Sitting on the node would cover the very title it is repeating.
+                var anchor = ranked[i].Position;
+                var position = new Vector2(
+                    anchor.x, anchor.y + LayoutMetrics.NodeHeight * 0.5f + height * 0.6f);
+
                 var rect = new Rect(position.x, position.y - height * 0.5f, width, height);
 
+                // No room above this one: another box or another label is already there. Skipping is
+                // the right answer - a label nobody can read helps nobody.
                 if (Collides(rect)) continue;
 
                 _placed.Add(rect);

@@ -180,6 +180,20 @@ namespace QuestTree.UI
             return true;
         }
 
+        /// <summary>One key per scene, folding the aliased pairs together.
+        ///
+        /// Sandbox and Sandbox_high are both "Ground Zero" and factory4_day and factory4_night are
+        /// both "Factory" - separate location ids, one place as far as a player is concerned. The
+        /// map picker listing each twice, with the quests divided between them, is not a view of
+        /// anything real.</summary>
+        private static string CanonicalMapKey(string key)
+        {
+            foreach (var alias in SceneAliases)
+                if (string.Equals(key, alias.A, StringComparison.OrdinalIgnoreCase)) return alias.B;
+
+            return key;
+        }
+
         /// <summary>The map key for a location's internal name: the name itself when the quest data
         /// keys a map by it, else a key that DynamicMaps lists as the same map (Factory has a day
         /// and a night id, Ground Zero a low- and a high-level one), else the same pairs from
@@ -619,10 +633,18 @@ namespace QuestTree.UI
                 // Every map this quest belongs to, not just its declared one: a quest that says
                 // "any" and then names five Shoreline zones belongs on Shoreline, and one that
                 // names zones on two maps belongs on both.
-                foreach (var key in node.MapKeys)
+                foreach (var rawKey in node.MapKeys)
                 {
-                    if (string.IsNullOrEmpty(key)) continue;
-                    if (key.Equals(AnyLocation, StringComparison.OrdinalIgnoreCase)) continue;
+                    if (string.IsNullOrEmpty(rawKey)) continue;
+                    if (rawKey.Equals(AnyLocation, StringComparison.OrdinalIgnoreCase)) continue;
+
+                    // Folded to one key per SCENE, so the picker lists one "Ground Zero" and one
+                    // "Factory" rather than two of each. Sandbox/Sandbox_high and
+                    // factory4_day/factory4_night are separate location ids sharing a display name,
+                    // and once derived quests are alias-expanded onto both, the picker showed the
+                    // same name twice with the quests split between them. ResolveMapKey already
+                    // treats these pairs as one map; this makes the grouping agree with it.
+                    var key = CanonicalMapKey(rawKey);
 
                     if (!byMap.TryGetValue(key, out var list))
                     {

@@ -154,6 +154,10 @@ namespace QuestTree.UI
         /// moves, and the buffers in this file exist precisely so that allocates nothing.</summary>
         private readonly List<(QuestNode Node, Vector2 Position)> _labelRanked =
             new List<(QuestNode Node, Vector2 Position)>();
+
+        /// <summary>Every visible box, so the label layer can refuse to draw over one. Reused for
+        /// the same reason the list above is.</summary>
+        private readonly List<Vector2> _labelOccupied = new List<Vector2>();
         private Vector2 _lastContentPosition;
         private float _lastContentScale;
 
@@ -409,7 +413,7 @@ namespace QuestTree.UI
 
             if (budget <= 0)
             {
-                _labels?.Draw(null, zoom, 0);
+                _labels?.Draw(null, null, zoom, 0);
                 return;
             }
 
@@ -419,6 +423,8 @@ namespace QuestTree.UI
             var centre = visible.center;
             var searching = _toolbar != null && _toolbar.SearchNeedle.Length > 0;
 
+            _labelOccupied.Clear();
+
             foreach (var pair in _layout)
             {
                 var node = pair.Key;
@@ -426,6 +432,9 @@ namespace QuestTree.UI
 
                 // Only what is on screen: a label for a node two screens away is work nobody sees.
                 if (!visible.Contains(position)) continue;
+
+                // Every visible box, so no label is placed on top of one.
+                _labelOccupied.Add(position);
 
                 var rank = RankFor(node, searching);
                 if (rank < 0) continue;
@@ -443,7 +452,7 @@ namespace QuestTree.UI
                 return ((a.Position - centre).sqrMagnitude).CompareTo((b.Position - centre).sqrMagnitude);
             });
 
-            _labels.Draw(_labelRanked, zoom, budget);
+            _labels.Draw(_labelRanked, _labelOccupied, zoom, budget);
             _labelRankOf.Clear();
         }
 
