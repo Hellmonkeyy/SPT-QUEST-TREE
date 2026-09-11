@@ -662,7 +662,7 @@ namespace QuestTree.UI
 
             if (_notice != null)
             {
-                AddDetailLine(content, $"<color=#{GameStyle.WarningHex}>{_notice}</color>", listX, ref y, inner, 11);
+                AuxLayout.AddWrapped(content, $"<color=#{GameStyle.WarningHex}>{_notice}</color>", listX, ref y, inner, 11);
                 _notice = null;
             }
 
@@ -686,7 +686,7 @@ namespace QuestTree.UI
                 // The pins encode two more things than the tree's legend covers - what kind of
                 // place, and whether it is on this floor - and the tree's legend is hidden here
                 // anyway. Text glyphs stand in for the pin sprite; the colours are the real ones.
-                if (spawns > 0) AddDetailLine(content, Legend(), listX, ref y, inner, 11);
+                if (spawns > 0) AuxLayout.AddWrapped(content, Legend(), listX, ref y, inner, 11);
             }
 
             y += 6f;
@@ -723,10 +723,10 @@ namespace QuestTree.UI
 
             if (visible.Count == 0)
             {
-                // AddDetailLine rather than AddAt: this is a sentence, not a label, and AddAt
+                // AuxLayout.AddWrapped rather than AddAt: this is a sentence, not a label, and AddAt
                 // ellipsises at the column edge - which cut off the part saying how to get the
                 // list back.
-                AddDetailLine(content,
+                AuxLayout.AddWrapped(content,
                     "<color=#FFFFFF60>No accepted quests on this map. Turn off \u201cAccepted quests " +
                     "only\u201d to see the rest.</color>",
                     listX, ref y, inner);
@@ -752,7 +752,7 @@ namespace QuestTree.UI
                 // The same lines the tree view's detail panel shows, indented under the row that
                 // opened them. The profile is only fetched here: at most one row is ever open.
                 foreach (var line in QuestSummary.Lines(node, graph, QuestDataClient.GetProfile(), includeHeader: false))
-                    AddDetailLine(content, line, listX + 12f, ref y, inner - 12f);
+                    AuxLayout.AddWrapped(content, line, listX + 12f, ref y, inner - 12f);
 
                 y += 6f;
             }
@@ -1739,48 +1739,6 @@ namespace QuestTree.UI
             y += height;
         }
 
-        /// <summary>
-        /// One line of an expanded quest's detail.
-        ///
-        /// Unlike the list rows this wraps, because objective and reward text is written as prose and
-        /// ellipsising it would lose the half that says what to do. Wrapped text has no height until
-        /// it is measured, so the row is sized from TMP's own preferred height at this width -
-        /// otherwise every line after a wrapped one is drawn on top of it.
-        /// </summary>
-        private static void AddDetailLine(
-            RectTransform parent, string text, float x, ref float y, float width, int fontSize = 12)
-        {
-            if (text == null) return;
-
-            // QuestSummary separates its sections with empty strings; they are spacing, not content.
-            if (text.Length == 0)
-            {
-                y += 6f;
-                return;
-            }
-
-            var go = new GameObject("Detail", typeof(RectTransform));
-            var rect = (RectTransform)go.transform;
-            rect.SetParent(parent, worldPositionStays: false);
-            rect.anchorMin = rect.anchorMax = new Vector2(0f, 1f);
-            rect.pivot = new Vector2(0f, 1f);
-            rect.anchoredPosition = new Vector2(x, -y);
-
-            var label = go.AddComponent<TextMeshProUGUI>();
-            label.text = text;
-            label.fontSize = fontSize;
-            label.color = Color.white;
-            label.alignment = TextAlignmentOptions.TopLeft;
-            label.enableWordWrapping = true;
-            label.raycastTarget = false;
-            GameStyle.Apply(label);
-
-            // Measured after Apply, since the font it installs decides the height.
-            var height = Mathf.Max(16f, label.GetPreferredValues(text, width, 0f).y);
-            rect.sizeDelta = new Vector2(width, height);
-
-            y += height + 2f;
-        }
 
         /// <summary>Places a line at an explicit x, which AuxLayout's full-width rows cannot do -
         /// this view is the only one with side-by-side columns.</summary>

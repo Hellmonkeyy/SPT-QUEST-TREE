@@ -223,7 +223,7 @@ namespace QuestTree.UI
                 // that has actually shipped, twice.
                 if (width >= estimate * 0.5f && width <= estimate * 3f) return width;
 
-                ReportRejectedMeasurement(text, width, estimate);
+                ReportRejectedMeasurement("width", text, width, estimate);
                 return estimate;
             }
             catch (Exception)
@@ -233,20 +233,97 @@ namespace QuestTree.UI
             }
         }
 
-        private static bool _measurementReported;
-
-        /// <summary>Said once a session, at Info, when TMP's answer is thrown away. Without this the
-        /// only way to learn what TMP is really returning is another install-and-play cycle, and
-        /// two have already been spent guessing.</summary>
-        private static void ReportRejectedMeasurement(string text, float measured, float estimate)
+        /// <summary>The height <paramref name="text"/> needs when wrapped to
+        /// <paramref name="width"/>.
+        ///
+        /// Banded like MeasureWidth, and for the same reason now proven twice: TMP under-reports
+        /// here as well. The map sidebar measured each line with GetPreferredValues(text, width,
+        /// 0f).y - the idiom this codebase once called "the one call that has always worked" - and a
+        /// two-line objective came back one line high, so the rows drew on top of each other.
+        ///
+        /// The asymmetry decides the direction: overshooting costs a few pixels of gap,
+        /// undershooting costs legibility. So this takes the LARGER of measured and estimated rather
+        /// than trusting either.</summary>
+        public static float MeasureHeight(TMP_Text label, string text, float width, float lineHeight)
         {
-            if (_measurementReported) return;
-            _measurementReported = true;
+            if (string.IsNullOrEmpty(text)) return 0f;
+            if (lineHeight <= 0f) lineHeight = LineHeightOf(label);
+
+            var estimate = EstimateHeight(text, label != null ? label.fontSize : 12f, width, lineHeight);
+            if (label == null) return estimate;
+
+            try
+            {
+                var height = label.GetPreferredValues(text, width, 0f).y;
+                if (float.IsNaN(height) || float.IsInfinity(height)) return estimate;
+
+                // Not a band in both directions, unlike the width case: a measurement that is too
+                // LARGE here costs a gap, which nobody has ever reported, while one that is too
+                // small overlaps two lines of text, which is the reported bug. So the estimate is a
+                // floor, not an alternative.
+                if (height >= estimate) return height;
+
+                ReportRejectedMeasurement("height", text, height, estimate);
+                return estimate;
+            }
+            catch (Exception)
+            {
+                return estimate;
+            }
+        }
+
+        /// <summary>The line box for a label, as a plain multiple of its font size.
+        ///
+        /// Deliberately not read off the font's FaceInfo, which lives in an assembly this project
+        /// does not reference and would not earn its place here anyway: the only consumer is a
+        /// character-count estimate whose job is to notice a measurement that is out by a WHOLE
+        /// line. A few percent of error in the line box cannot change that answer, and the estimate
+        /// is only ever used as a floor.</summary>
+        public static float LineHeightOf(TMP_Text label) =>
+            (label != null ? label.fontSize : 12f) * 1.2f;
+
+        /// <summary>Visible characters divided by what fits on a line, rounded up, times the line
+        /// box. Crude, and that is the point - it only has to be close enough to catch a measurement
+        /// that is out by a whole line.</summary>
+        public static float EstimateHeight(string text, float fontSize, float width, float lineHeight)
+        {
+            if (string.IsNullOrEmpty(text)) return 0f;
+            if (lineHeight <= 0f) lineHeight = fontSize * 1.2f;
+
+            var perLine = Mathf.Max(1f, width / Mathf.Max(1f, fontSize * 0.56f));
+            var visible = text.IndexOf('<') >= 0 ? Regex.Replace(text, "<[^>]*>", "") : text;
+            var lines = Mathf.Max(1f, Mathf.Ceil(visible.Length / perLine));
+
+            return lines * lineHeight;
+        }
+
+        private static bool _widthReported;
+        private static bool _heightReported;
+
+        /// <summary>Said once a session per dimension, at Info, when TMP's answer is thrown away.
+        /// Without this the only way to learn what TMP is really returning is another
+        /// install-and-play cycle, and two have already been spent guessing.
+        ///
+        /// One flag per dimension, not one shared: whichever rejected first would otherwise suppress
+        /// the other for the rest of the session, and for the height fix that line is the only
+        /// verification instrument there is.</summary>
+        private static void ReportRejectedMeasurement(string dimension, string text, float measured, float estimate)
+        {
+            if (dimension == "height")
+            {
+                if (_heightReported) return;
+                _heightReported = true;
+            }
+            else
+            {
+                if (_widthReported) return;
+                _widthReported = true;
+            }
 
             var sample = text.Length > 40 ? text.Substring(0, 40) : text;
             Plugin.LogSource?.LogInfo(
-                $"QuestTree: TMP measured \"{sample}\" at {measured:0.#}px against an estimate of " +
-                $"{estimate:0.#}px - outside the sane band, so widths are on the estimate. " +
+                $"QuestTree: TMP measured the {dimension} of \"{sample}\" at {measured:0.#}px against " +
+                $"an estimate of {estimate:0.#}px - outside the sane band, so it is on the estimate. " +
                 "Layout is correct but slightly loose; this is the fallback working.");
         }
 

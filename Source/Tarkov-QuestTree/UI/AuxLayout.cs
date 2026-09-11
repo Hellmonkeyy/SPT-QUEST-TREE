@@ -335,6 +335,9 @@ namespace QuestTree.UI
         /// <summary>Prose: wraps at the width, and takes the height it needs. Sized from TMP's own
         /// preferred height, because wrapped text has no height until measured - otherwise every
         /// line after a wrapped one is drawn on top of it. Empty text is spacing.</summary>
+        /// <summary>The one wrapped-text row in this mod. MapView carried a byte-identical copy
+        /// called AddDetailLine until 1.9.0; two copies of a layout rule is how the two sidebars
+        /// came to need the same fix twice.</summary>
         public static void AddWrapped(
             RectTransform parent, string text, float x, ref float y, float width, int fontSize = 12)
         {
@@ -362,7 +365,10 @@ namespace QuestTree.UI
             label.raycastTarget = false;
             GameStyle.Apply(label);
 
-            var height = Mathf.Max(16f, label.GetPreferredValues(text, width, 0f).y);
+            // Measured after Apply, since the font it installs decides the height - and through
+            // GameStyle, which floors TMP's answer at a character-count estimate. TMP under-reports
+            // a wrapped line as one line high, which drew every following row on top of it.
+            var height = Mathf.Max(16f, GameStyle.MeasureHeight(label, text, width, 0f));
             rect.sizeDelta = new Vector2(width, height);
             y += height + 2f;
         }
