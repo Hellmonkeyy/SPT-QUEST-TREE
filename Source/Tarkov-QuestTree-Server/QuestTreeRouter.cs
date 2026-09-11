@@ -28,8 +28,8 @@ namespace QuestTreeServer
         public QuestTreeRouter(
             JsonUtil jsonUtil, ISptLogger<QuestTreeRouter> logger, QuestPayloadBuilder payloadBuilder,
             KappaPayloadBuilder kappaBuilder, ProfilePayloadBuilder profileBuilder,
-            MapMarkerPayloadBuilder markerBuilder, ZoneStore zoneStore)
-            : base(jsonUtil, BuildRoutes(logger, payloadBuilder, kappaBuilder, profileBuilder, markerBuilder, zoneStore))
+            MapMarkerPayloadBuilder markerBuilder, ZoneStore zoneStore, QuestFacts facts)
+            : base(jsonUtil, BuildRoutes(logger, payloadBuilder, kappaBuilder, profileBuilder, markerBuilder, zoneStore, facts))
         {
         }
 
@@ -40,7 +40,7 @@ namespace QuestTreeServer
         private static IEnumerable<RouteAction> BuildRoutes(
             ISptLogger<QuestTreeRouter> logger, QuestPayloadBuilder payloadBuilder,
             KappaPayloadBuilder kappaBuilder, ProfilePayloadBuilder profileBuilder,
-            MapMarkerPayloadBuilder markerBuilder, ZoneStore zoneStore) =>
+            MapMarkerPayloadBuilder markerBuilder, ZoneStore zoneStore, QuestFacts facts) =>
             new List<RouteAction>
             {
                 // The one route with a body: the client's in-raid zone harvest (see ZoneHarvester
@@ -51,7 +51,7 @@ namespace QuestTreeServer
                     "/questtree/zones",
                     (url, request, sessionId, output, cancellationToken) =>
                         Guarded(logger, url,
-                            () => AcceptHarvest(logger, request, zoneStore, markerBuilder, payloadBuilder),
+                            () => AcceptHarvest(logger, request, zoneStore, markerBuilder, payloadBuilder, facts),
                             () => new ZoneHarvestResponse { Ok = false, Message = "failed" })),
 
                 new RouteAction<EmptyRequestData>(
@@ -91,7 +91,7 @@ namespace QuestTreeServer
 
         private static string AcceptHarvest(
             ISptLogger<QuestTreeRouter> logger, ZoneHarvestRequest? request, ZoneStore zoneStore,
-            MapMarkerPayloadBuilder markerBuilder, QuestPayloadBuilder payloadBuilder)
+            MapMarkerPayloadBuilder markerBuilder, QuestPayloadBuilder payloadBuilder, QuestFacts facts)
         {
             static string Reply(ZoneHarvestResponse r) => JsonSerializer.Serialize(r, WireJson.Options);
 
@@ -107,7 +107,24 @@ namespace QuestTreeServer
             }
 
             if (request == null) return Reject("no body", mapIsValid: false);
+
+            // Two checks, AND-ed, because they guard different things. IsValidMapName guards the
+            // FILE - the regex and the reserved-name set stop a harvest escaping the zones folder
+            // or naming a Windows device such as NUL - and cannot be replaced by the table check,
+            // since "Private Area" is a real location whose name the regex rejects.
             if (!ZoneStore.IsValidMapName(request.Map)) return Reject("bad map name", mapIsValid: false);
+
+            // And this one guards the ANSWER. On Fika the zones route is unauthenticated HTTP that
+            // every peer can post to, and the derived-location index treats harvested data as the
+            // authority on which map a zone is on. A peer posting a real quest's zone ids under an
+            // invented map name would otherwise add a map to that quest for everyone.
+            //
+            // It also bounds the store to the ~17 canonical names by construction, which is what
+            // makes a file-count cap and an eviction policy unnecessary rather than merely
+            // unwritten. Built from the location table's own internal names, never from
+            // questConfig.LocationIdMap - that map has no Labyrinth entry, which is why
+            // QuestPayloadBuilder stopped using it.
+            if (!facts.IsRealLocation(request.Map)) return Reject("unknown map", mapIsValid: false);
 
             // Entries the file could not hold or the map could not draw go first, so the counts
             // below describe what will actually be kept.
@@ -117,7 +134,36 @@ namespace QuestTreeServer
             if (count == 0) return Reject(dropped > 0 ? "nothing usable harvested" : "nothing harvested", mapIsValid: true);
             if (count > MaxHarvestEntries) return Reject("too many entries", mapIsValid: true);
 
-            var saved = zoneStore.Save(request, out var added);
+            // Any harvest buffered by an earlier window whose time has come, applied first so a
+            // later post is what flushes an earlier one. No timer to own, and nothing is lost to
+            // the clock.
+            var drained = zoneStore.DrainPending();
+
+            var saved = zoneStore.SaveOrBuffer(request, out var added, out var buffered);
+
+            if (saved == null && buffered)
+            {
+                // Truthful counts, not zeros: ZoneHarvester logs them, and a zero there reads as
+                // "the harvest was rejected" in the one log file the verify pass says to read.
+                var onDisk = zoneStore.TryGet(request.Map);
+                var wait = Math.Max(1, zoneStore.PendingSeconds(request.Map));
+
+                if (drained)
+                {
+                    markerBuilder.Rebuild();
+                    payloadBuilder.Rebuild();
+                }
+
+                return Reply(new ZoneHarvestResponse
+                {
+                    Ok = true,
+                    Zones = onDisk?.Triggers.Count ?? 0,
+                    QuestItems = onDisk?.QuestItems.Count ?? 0,
+                    Message = "buffered; this map was written recently",
+                    RebuildInSeconds = wait
+                });
+            }
+
             if (saved == null) return Reject("map file full", mapIsValid: true);
 
             // Every Fika client in a raid harvests the same scene and posts it; only the first
@@ -128,7 +174,7 @@ namespace QuestTreeServer
             // derived onto, so rebuilding only the markers would give such a quest its pins while
             // its map on the client stayed empty until the next server restart - the "in the list
             // with no pins, or the reverse" split the derivation exists to prevent.
-            if (added > 0)
+            if (added > 0 || drained)
             {
                 markerBuilder.Rebuild();
                 payloadBuilder.Rebuild();

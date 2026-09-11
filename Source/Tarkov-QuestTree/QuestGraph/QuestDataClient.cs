@@ -339,6 +339,17 @@ namespace QuestTree.QuestGraph
                     foreach (var derived in quest.DerivedLocations)
                         if (derived != null) derived.Name = RichText.Safe(derived.Name);
 
+                // Reward names. Interpolated raw into rich text by QuestSummary.FormatReward
+                // since the Rewards block existed, so any quest or item mod ON THE HOST could
+                // swallow that block with a "<" or blow it up with <size=400%>.
+                //
+                // Type is deliberately NOT wrapped here: FormatReward switches on it against string
+                // literals, and a wrapped "Item" would match nothing and drop every modded reward
+                // type into the default branch. It is wrapped at the one place it is printed.
+                if (quest.Rewards != null)
+                    foreach (var reward in quest.Rewards)
+                        if (reward != null) reward.Name = RichText.Safe(reward.Name);
+
                 // Objective target item names, rendered by QuestSummary and - since 1.9.0 - fed
                 // into the search haystack as well. Locale text, mod-controlled, and never
                 // sanitised until now: a name carrying <size=400%> swallowed its whole block.

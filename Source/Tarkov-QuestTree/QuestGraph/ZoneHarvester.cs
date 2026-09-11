@@ -32,6 +32,10 @@ namespace QuestTree.QuestGraph
     /// </summary>
     internal static class ZoneHarvester
     {
+        /// <summary>A ceiling on how long the harvester will sit waiting for the server's write
+        /// window. The server's own window is far shorter; this only bounds a bad answer.</summary>
+        private const int MaxRebuildWait = 120;
+
         private const string Route = "/questtree/zones";
 
         private const float FirstPassDelay = 3f;
@@ -277,6 +281,17 @@ namespace QuestTree.QuestGraph
                     // session. Without this the quest gains its pins from the marker payload and
                     // never gains its map entry - the exact split the derivation exists to prevent,
                     // arriving from the client side instead.
+                    //
+                    // Waited out first when the server says so. A buffered harvest has not been
+                    // written yet, so invalidating now would refetch the PRE-harvest payload and
+                    // latch THAT for the session - strictly worse than not invalidating at all. We
+                    // are in a raid; nobody is looking at the Maps tab.
+                    var wait = response.RebuildInSeconds;
+                    if (wait > 0)
+                    {
+                        await Task.Delay(TimeSpan.FromSeconds(Math.Min(wait + 1, MaxRebuildWait)));
+                    }
+
                     QuestDataClient.InvalidateMapMarkers();
                     QuestDataClient.InvalidateQuests();
                 }

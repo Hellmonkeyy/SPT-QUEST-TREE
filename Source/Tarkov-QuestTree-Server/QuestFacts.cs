@@ -261,6 +261,15 @@ namespace QuestTreeServer
                 : new List<string> { canonical };
         }
 
+        /// <summary>Whether a name is a real location's internal name - "bigmap", "Labyrinth",
+        /// "factory4_night".
+        ///
+        /// The gate on what a peer may write. Keyed on internal names rather than location ids
+        /// because that is what a harvest posts, and case-insensitively because a client's casing
+        /// is its own business.</summary>
+        public bool IsRealLocation(string? map) =>
+            !string.IsNullOrWhiteSpace(map) && BuildLocationLookups().keyToId.ContainsKey(map);
+
         /// <summary>Whether a quest's declared location tells us nothing, so its zones may speak
         /// instead.
         ///

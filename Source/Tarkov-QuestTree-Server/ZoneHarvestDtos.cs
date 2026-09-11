@@ -117,5 +117,18 @@ namespace QuestTreeServer
 
         [JsonPropertyName("message")]
         public string Message { get; set; } = "";
+
+        /// <summary>Seconds to wait before asking for the rebuilt payloads, or 0 to ask at once.
+        ///
+        /// Non-zero when this harvest was buffered because its map is inside its write window. The
+        /// client must honour it: invalidating immediately would refetch the PRE-harvest answer,
+        /// and since the quest list latches for the whole session it would then keep serving that
+        /// answer until the game restarts - which is the bug the derived locations exist to fix,
+        /// recreated by the throttle meant to protect the host.
+        ///
+        /// An older client reads an absent field as 0 and invalidates at once, which is exactly
+        /// today's behaviour, so the halves stay compatible.</summary>
+        [JsonPropertyName("rebuildInSeconds")]
+        public int RebuildInSeconds { get; set; }
     }
 }

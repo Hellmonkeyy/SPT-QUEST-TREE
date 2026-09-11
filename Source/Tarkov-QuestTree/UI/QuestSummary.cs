@@ -429,10 +429,13 @@ namespace QuestTree.UI
         {
             if (reward == null) return null;
 
+            // TraderNames is sanitised where the trader list is built; the raw TraderId fallback
+            // is not, and it is printed whenever a modded reward names a trader the graph has never
+            // heard of - a third unsanitised sink in this one function.
             var trader = !string.IsNullOrEmpty(reward.TraderId) && graph != null &&
                          graph.TraderNames.TryGetValue(reward.TraderId, out var traderName)
                 ? traderName
-                : reward.TraderId;
+                : GameStyle.Safe(reward.TraderId);
 
             switch (reward.Type)
             {
@@ -460,7 +463,13 @@ namespace QuestTree.UI
                 default:
                     // Unknown/rare reward types (StashRows, Achievement, ...) still say something
                     // rather than silently vanishing, but only when there is a name worth showing.
-                    return string.IsNullOrEmpty(reward.Name) ? null : $"{reward.Type}: {reward.Name}";
+                    //
+                    // Type is wrapped HERE rather than at ingest: the switch above compares it
+                    // against string literals, so wrapping it earlier would send every modded type
+                    // into this branch. This is the only place it reaches the screen.
+                    return string.IsNullOrEmpty(reward.Name)
+                        ? null
+                        : $"{GameStyle.Safe(reward.Type)}: {reward.Name}";
             }
         }
     }

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using SPTarkov.Common.Models.Logging;
@@ -48,6 +49,15 @@ namespace QuestTreeServer
         private const int MaxIdLength = 128;
         private const int MaxKindLength = 64;
 
+        /// <summary>ClientVersion is copied into the file verbatim and was never bounded, so a
+        /// 100 MB version string with one trigger passed every other check and landed on disk.</summary>
+        private const int MaxClientVersionLength = 64;
+
+        /// <summary>Coordinates were checked finite but not bounded, so 3.4e38 was accepted and
+        /// became a pin position on every player's map. Tarkov's maps fit inside a couple of
+        /// kilometres; this is generous by two orders of magnitude and still finite enough to draw.</summary>
+        private const float MaxCoordinate = 100_000f;
+
         /// <summary>A ceiling on one map's file. Real maps hold a few hundred entries; the union
         /// never shrinks, and a client that varies positions by a metre could otherwise grow it
         /// without bound.</summary>
@@ -88,11 +98,14 @@ namespace QuestTreeServer
         {
             var dropped = 0;
 
+            if (request.ClientVersion != null && request.ClientVersion.Length > MaxClientVersionLength)
+                request.ClientVersion = request.ClientVersion[..MaxClientVersionLength];
+
             if (request.Triggers != null)
             {
                 dropped += request.Triggers.RemoveAll(t =>
                     t == null || string.IsNullOrWhiteSpace(t.Id) || t.Id.Length > MaxIdLength ||
-                    !Finite(t.X) || !Finite(t.Y) || !Finite(t.Z));
+                    !InWorld(t.X) || !InWorld(t.Y) || !InWorld(t.Z));
 
                 foreach (var t in request.Triggers)
                 {
@@ -108,7 +121,7 @@ namespace QuestTreeServer
                 dropped += request.QuestItems.RemoveAll(i =>
                     i == null || string.IsNullOrWhiteSpace(i.TemplateId) || i.TemplateId.Length > MaxIdLength ||
                     (i.ItemId != null && i.ItemId.Length > MaxIdLength) ||
-                    !Finite(i.X) || !Finite(i.Y) || !Finite(i.Z));
+                    !InWorld(i.X) || !InWorld(i.Y) || !InWorld(i.Z));
 
                 foreach (var i in request.QuestItems) i.ItemId ??= "";
             }
@@ -117,6 +130,11 @@ namespace QuestTreeServer
         }
 
         private static bool Finite(float value) => !float.IsNaN(value) && !float.IsInfinity(value);
+
+        /// <summary>Finite AND somewhere a map could plausibly be. Finite alone let 3.4e38 through,
+        /// which draws as a pin at the edge of the world on everyone's map.</summary>
+        private static bool InWorld(float value) =>
+            Finite(value) && value >= -MaxCoordinate && value <= MaxCoordinate;
 
         /// <summary>Zone id -> the canonical maps it was harvested on, across every map on disk.
         ///
@@ -257,6 +275,150 @@ namespace QuestTreeServer
         /// when the union would pass the per-map ceiling and nothing was changed.
         /// <paramref name="added"/> is how many entries were new - zero when every Fika client
         /// in a raid posts the same scene, which is the case the caller must not rebuild for.</summary>
+        /// <summary>Maps already warned about their ceiling this boot, so a client that keeps
+        /// posting is heard once rather than filling the log.</summary>
+        private readonly HashSet<string> OverflowReported = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>Drops newest-first until the union fits, and says how many went.
+        ///
+        /// Newest-first is the point: the entries already in the file include the shipped seed
+        /// zones, which are the ones worth keeping, and the overflow is by definition what this
+        /// post is trying to add.</summary>
+        private static int DropOverflow(
+            Dictionary<string, HarvestedTrigger> triggers,
+            Dictionary<string, HarvestedQuestItem> items,
+            int overflow)
+        {
+            var dropped = 0;
+
+            foreach (var key in items.Keys.Reverse().Take(overflow).ToList())
+            {
+                items.Remove(key);
+                dropped++;
+            }
+
+            var stillOver = overflow - dropped;
+            if (stillOver <= 0) return dropped;
+
+            foreach (var key in triggers.Keys.Reverse().Take(stillOver).ToList())
+            {
+                triggers.Remove(key);
+                dropped++;
+            }
+
+            return dropped;
+        }
+
+        /// <summary>How often one map may be written. A raid harvests its map up to three times -
+        /// a first pass, one after a transit, and a closing pass - so this must not be so tight
+        /// that a single player's own raid is throttled.</summary>
+        private static readonly TimeSpan WriteWindow = TimeSpan.FromSeconds(20);
+
+        /// <summary>Canonical map -> when it may next be written, and what is waiting.</summary>
+        private readonly Dictionary<string, DateTime> _nextWrite = new(StringComparer.OrdinalIgnoreCase);
+        private readonly Dictionary<string, ZoneHarvestRequest> _pending = new(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>Seconds until this map's pending harvest will be written, or 0 when the last
+        /// post was applied immediately. The client waits this long before invalidating its caches:
+        /// invalidating straight away would refetch the PRE-harvest payload and - because the quest
+        /// list latches for the session - cache it for good.</summary>
+        public int PendingSeconds(string map)
+        {
+            var key = Canonical(map);
+
+            lock (_lock)
+            {
+                if (!_pending.ContainsKey(key)) return 0;
+                if (!_nextWrite.TryGetValue(key, out var at)) return 0;
+
+                var wait = at - DateTime.UtcNow;
+                return wait <= TimeSpan.Zero ? 1 : (int)Math.Ceiling(wait.TotalSeconds);
+            }
+        }
+
+        /// <summary>Applies any harvest that was buffered while a map was inside its write window,
+        /// and says which maps actually changed. Called by the harvest route, so a later post is
+        /// what flushes an earlier one - no timer to own, and nothing is ever lost to the clock.</summary>
+        public bool DrainPending()
+        {
+            List<ZoneHarvestRequest> due;
+
+            lock (_lock)
+            {
+                var now = DateTime.UtcNow;
+                due = _pending
+                    .Where(e => !_nextWrite.TryGetValue(e.Key, out var at) || now >= at)
+                    .Select(e => e.Value)
+                    .ToList();
+
+                foreach (var request in due) _pending.Remove(Canonical(request.Map));
+            }
+
+            var changed = false;
+            foreach (var request in due)
+            {
+                var saved = Save(request, out var added);
+                if (saved != null && added > 0) changed = true;
+            }
+
+            return changed;
+        }
+
+        /// <summary>Merges a harvest into whatever is already waiting for that map.
+        ///
+        /// Buffered rather than refused, which is the whole point: ZoneHarvester posts
+        /// fire-and-forget with no retry, so a bare "too soon" throws the post away for good - and
+        /// on Fika the first peer to post would win the window while every other player's harvest
+        /// was discarded. Returns false only when the buffer itself is at the entry ceiling, which
+        /// is the abuse case rather than the normal one.</summary>
+        private bool Buffer(string key, ZoneHarvestRequest request)
+        {
+            if (!_pending.TryGetValue(key, out var waiting))
+            {
+                _pending[key] = request;
+                return true;
+            }
+
+            var held = (waiting.Triggers?.Count ?? 0) + (waiting.QuestItems?.Count ?? 0);
+            if (held >= MaxEntriesPerMap) return false;
+
+            waiting.Triggers ??= new List<HarvestedTrigger>();
+            waiting.QuestItems ??= new List<HarvestedQuestItem>();
+
+            if (request.Triggers != null) waiting.Triggers.AddRange(request.Triggers);
+            if (request.QuestItems != null) waiting.QuestItems.AddRange(request.QuestItems);
+
+            return true;
+        }
+
+        /// <summary>Whether this harvest was written, or buffered for the map's next window.
+        ///
+        /// The gate sits above Save rather than at the top of the route: Sanitise has to run either
+        /// way, because the buffer may only ever hold validated entries. What is being defended is
+        /// the WRITE - Save builds two dictionaries over the whole union inside the lock and
+        /// rewrites the entire file indented, which near the ceiling is tens of megabytes a post,
+        /// and it holds the lock every ZoneToMap read on the quest and marker paths needs.</summary>
+        public ZoneFile? SaveOrBuffer(ZoneHarvestRequest request, out int added, out bool buffered)
+        {
+            added = 0;
+            buffered = false;
+
+            var key = Canonical(request.Map);
+
+            lock (_lock)
+            {
+                if (_nextWrite.TryGetValue(key, out var at) && DateTime.UtcNow < at)
+                {
+                    buffered = Buffer(key, request);
+                    return null;
+                }
+
+                _nextWrite[key] = DateTime.UtcNow + WriteWindow;
+            }
+
+            return Save(request, out added);
+        }
+
         public ZoneFile? Save(ZoneHarvestRequest request, out int added)
         {
             added = 0;
@@ -279,10 +441,29 @@ namespace QuestTreeServer
                 foreach (var t in request.Triggers ?? new List<HarvestedTrigger>()) triggers[TriggerKey(t)] = t;
                 foreach (var i in request.QuestItems ?? new List<HarvestedQuestItem>()) items[ItemKey(i)] = i;
 
-                added = triggers.Count + items.Count - before;
+                // The excess, never the whole harvest. Refusing the post once a map was full
+                // BRICKED that map permanently: pad a real map to the ceiling and no legitimate
+                // harvest could ever land there again. Eviction is worse, not better - a
+                // HarvestedTrigger carries no timestamp, so there is nothing to evict BY, and
+                // insertion order would delete the eleven shipped seed files first.
+                var overflow = triggers.Count + items.Count - MaxEntriesPerMap;
+                if (overflow > 0)
+                {
+                    var shed = DropOverflow(triggers, items, overflow);
 
-                // Refused rather than truncated; the router logs the refusal once per map.
-                if (triggers.Count + items.Count > MaxEntriesPerMap) return null;
+                    // Once per map per boot, and it names the remedy: refusing quietly would mean
+                    // the map can never accept a new zone again while every post still answers
+                    // "saved", so the failure would look exactly like success.
+                    if (OverflowReported.Add(key))
+                    {
+                        logger.Warning(
+                            $"Quest Tracker: zones/{key}.json is at its {MaxEntriesPerMap} entry ceiling - " +
+                            $"{shed} newly harvested entries were dropped. Delete that file to start it " +
+                            "over; the next raid there will rebuild it.");
+                    }
+                }
+
+                added = triggers.Count + items.Count - before;
 
                 // Nothing new: the file already says all this, so it is not rewritten and the
                 // caller is told to skip the marker rebuild. Only when it really is on disk and

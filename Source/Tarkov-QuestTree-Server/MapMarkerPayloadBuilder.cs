@@ -148,18 +148,35 @@ namespace QuestTreeServer
         private readonly RebuildGate _gate = new(60);
 
         /// <summary>Builds again now. Called by the zones route after a harvest lands, so the cost
-        /// is paid on the client's fire-and-forget POST and never on a GET.</summary>
+        /// is paid on the client's fire-and-forget POST and never on a GET.
+        ///
+        /// Built into a local and SWAPPED, never nulled first. Nulling the cache and then building
+        /// meant every GET arriving during those seconds blocked on _buildLock - on the client's
+        /// main thread, behind its 15-second cap - while the loot tables were re-read. The cache is
+        /// now never absent, only briefly stale, which is the right trade for data that changes
+        /// when somebody finishes a raid.</summary>
         public void Rebuild()
         {
-            // An explicit rebuild ignores the pause a failed build set: the harvest that asked
-            // for it is new data, and answering "saved" while still serving empty would hide it.
             lock (_buildLock)
             {
-                _cachedJson = null;
+                // An explicit rebuild ignores the pause a failed build set: the harvest that asked
+                // for it is new data, and answering "saved" while still serving empty would hide it.
                 _gate.Clear();
-            }
 
-            GetPayloadJson();
+                try
+                {
+                    var payload = Build();
+                    _cachedJson = JsonSerializer.Serialize(payload, WireJson.Options);
+                }
+                catch (Exception ex)
+                {
+                    // Keep serving the previous answer. A harvest is not a reason to lose the pins
+                    // every other map already has.
+                    logger.Warning(
+                        $"Quest Tracker: the map marker rebuild after a harvest failed ({ex.Message}) - " +
+                        "serving the previous markers.");
+                }
+            }
         }
 
         /// <summary>Cached like the quest list. The loot tables do not change while the server is
