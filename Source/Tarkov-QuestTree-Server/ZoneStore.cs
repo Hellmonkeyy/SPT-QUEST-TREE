@@ -65,6 +65,12 @@ namespace QuestTreeServer
         /// once; Save replaces the entry.</summary>
         private readonly Dictionary<string, ZoneFile?> _cache = new(StringComparer.OrdinalIgnoreCase);
 
+        /// <summary>Zone id -> the maps it was harvested on. Built lazily, dropped by Save.</summary>
+        private Dictionary<string, IReadOnlyCollection<string>>? _zoneToMap;
+
+        /// <summary>Canonical maps with at least one usable trigger. Built beside _zoneToMap.</summary>
+        private HashSet<string>? _harvestedMaps;
+
         private static string Folder =>
             System.IO.Path.Combine(AppContext.BaseDirectory, "user", "mods", "QuestTree", "zones");
 
@@ -111,6 +117,124 @@ namespace QuestTreeServer
         }
 
         private static bool Finite(float value) => !float.IsNaN(value) && !float.IsInfinity(value);
+
+        /// <summary>Zone id -> the canonical maps it was harvested on, across every map on disk.
+        ///
+        /// This is what lets a quest declaring "any" be placed on the map it is actually done on:
+        /// its objectives name zone ids, and only the harvest knows where those are. Built from
+        /// harvested data only - never from the zone's name. Ids like "Aishi_Shoreline_TGCrate_1"
+        /// invite string matching, and that guess would file a modded map's quests on whichever
+        /// stock map their name resembles.
+        ///
+        /// A SET of maps per zone, not one. Three shipped zone ids sit on more than one map with no
+        /// attacker present - fuel4 on RezervBase and bigmap, exit777 on Labyrinth and bigmap,
+        /// rshg_event_04_jaeger_r_point on Shoreline, Woods and bigmap - and all three are named by
+        /// real quests. First-harvest-wins dropped one of them, which removes a requirement row, and
+        /// an empty requirement list draws GREEN.
+        ///
+        /// Cached because both payload builders ask, and dropped by Save: a harvest that adds zones
+        /// changes the answer, and the marker rebuild it triggers must not run against a stale
+        /// index.</summary>
+        public IReadOnlyDictionary<string, IReadOnlyCollection<string>> ZoneToMap()
+        {
+            lock (_lock)
+            {
+                BuildIndexes();
+                return _zoneToMap!;
+            }
+        }
+
+        /// <summary>The canonical maps with at least one usable trigger.
+        ///
+        /// Deliberately "usable trigger" rather than "a file exists": the question it stands for is
+        /// "could an any-location condition have been placed here", and a file holding nothing
+        /// placeable answers no. Used to keep the readiness cue neutral on an unharvested map rather
+        /// than letting an empty requirement list read as "you are ready".</summary>
+        public IReadOnlyCollection<string> HarvestedMaps()
+        {
+            lock (_lock)
+            {
+                BuildIndexes();
+                return _harvestedMaps!;
+            }
+        }
+
+        /// <summary>Both indexes from one walk. Caller holds _lock.</summary>
+        private void BuildIndexes()
+        {
+            if (_zoneToMap != null && _harvestedMaps != null) return;
+
+            // OrdinalIgnoreCase, matching every other zone-id comparison in this server - the marker
+            // lookup, ZonesWanted, ObjectiveDto.ZoneIds. Case-sensitive here would give a quest pins
+            // (found case-insensitively) and no derived location (missed case-sensitively), which is
+            // the exact split this index exists to prevent.
+            var index = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+            var maps = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var file in CachedAndOnDisk())
+            {
+                if (file?.Triggers == null) continue;
+
+                // ZoneFile.Map, never the file name: filenames carry the disk's casing (Bigmap.json)
+                // and the key has to be the canonical one Save wrote.
+                var map = file.Map;
+                if (string.IsNullOrWhiteSpace(map)) continue;
+
+                foreach (var trigger in file.Triggers)
+                {
+                    if (trigger == null || string.IsNullOrWhiteSpace(trigger.Id)) continue;
+
+                    // Union, never first-harvest-wins. Besides being wrong on shipped data, keeping
+                    // the first mapping means a legitimate harvest arriving after a bad one can
+                    // never correct it.
+                    if (!index.TryGetValue(trigger.Id, out var set))
+                        index[trigger.Id] = set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                    set.Add(map);
+                    maps.Add(map);
+                }
+            }
+
+            var frozen = new Dictionary<string, IReadOnlyCollection<string>>(StringComparer.OrdinalIgnoreCase);
+            foreach (var entry in index) frozen[entry.Key] = entry.Value;
+
+            _zoneToMap = frozen;
+            _harvestedMaps = maps;
+        }
+
+        /// <summary>Every zone file this server knows about: the cache first, then any file on disk
+        /// not already cached.
+        ///
+        /// The cache first because Save keeps a harvest in memory when the disk write fails, and a
+        /// folder-only listing would silently omit it - pins would appear and derivation would not.
+        /// Caller holds _lock.</summary>
+        private IEnumerable<ZoneFile?> CachedAndOnDisk()
+        {
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var entry in _cache)
+            {
+                seen.Add(entry.Key);
+                if (entry.Value != null) yield return entry.Value;
+            }
+
+            if (!System.IO.Directory.Exists(Folder)) yield break;
+
+            foreach (var path in System.IO.Directory.EnumerateFiles(Folder, "*.json"))
+            {
+                var name = System.IO.Path.GetFileNameWithoutExtension(path);
+
+                // Reuses the validation already here rather than trusting the directory.
+                if (!IsValidMapName(name)) continue;
+
+                var key = Canonical(name);
+                if (!seen.Add(key)) continue;
+
+                var file = Read(key);
+                _cache[key] = file;
+                if (file != null) yield return file;
+            }
+        }
 
         /// <summary>The harvest for a map, or null when none has been taken.</summary>
         public ZoneFile? TryGet(string map)
@@ -196,6 +320,12 @@ namespace QuestTreeServer
                 }
 
                 _cache[key] = file;
+
+                // Both indexes, inside the lock that already guards the cache: a harvest that adds
+                // zones changes which map a zone is on, and the marker rebuild it triggers must not
+                // run against a stale answer.
+                _zoneToMap = null;
+                _harvestedMaps = null;
 
                 logger.Info(
                     $"Quest Tracker: {file.Triggers.Count} zones and {file.QuestItems.Count} quest items " +

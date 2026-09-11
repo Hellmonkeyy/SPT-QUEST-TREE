@@ -40,7 +40,8 @@ namespace QuestTreeServer
         LocaleService localeService,
         TarkovDevClient tarkovDev,
         ObjectiveGpsClient objectiveGps,
-        ZoneStore zoneStore) : IOnLoad
+        ZoneStore zoneStore,
+        QuestFacts facts) : IOnLoad
     {
         /// <summary>
         /// Builds the markers while the server is starting rather than when the client first asks.
@@ -213,6 +214,7 @@ namespace QuestTreeServer
             // Grouped once here rather than scanned once per map below: with a few thousand modded
             // quests, thirteen maps each walking the whole table was the bulk of the build.
             var questsByLocation = QuestsByLocation();
+            var zoneToMap = zoneStore.ZoneToMap();
             var objectivesByMap = _objectiveLocations.ToLookup(o => o.MapId, StringComparer.OrdinalIgnoreCase);
             var locale = localeService.GetLocaleDb();
 
@@ -235,7 +237,8 @@ namespace QuestTreeServer
                     // Harvested first: positions read from the loaded scene beat every other
                     // source, so a quest or item they cover is left out of the ones below.
                     var zones = zoneStore.TryGet(internalName!);
-                    var harvested = HarvestedMarkersFor(locationId!, zones, questsByLocation, wanted, locale);
+                    var harvested = HarvestedMarkersFor(
+                        locationId!, zones, questsByLocation, wanted, locale, zoneToMap);
                     markers.AddRange(harvested.Markers);
 
                     // Item spawns need the map's loot table, so only maps with wanted items pay
@@ -295,6 +298,27 @@ namespace QuestTreeServer
             public readonly HashSet<string> ZonesKnown = new(StringComparer.OrdinalIgnoreCase);
         }
 
+        /// <summary>Whether a zone id is one this map should be counting as its own.
+        ///
+        /// True when nothing has harvested it yet - an unlocated zone is what the coverage line
+        /// exists to report - and true when the harvest says it is here. False only when the harvest
+        /// places it somewhere else entirely, which since 1.9.0 happens on any map that shares a
+        /// quest with another.</summary>
+        private static bool BelongsHere(
+            string zoneId,
+            string? canonical,
+            IReadOnlyDictionary<string, IReadOnlyCollection<string>> zoneToMap)
+        {
+            if (string.IsNullOrWhiteSpace(zoneId)) return false;
+            if (!zoneToMap.TryGetValue(zoneId, out var maps) || maps.Count == 0) return true;
+            if (string.IsNullOrWhiteSpace(canonical)) return true;
+
+            foreach (var map in maps)
+                if (string.Equals(map, canonical, StringComparison.OrdinalIgnoreCase)) return true;
+
+            return false;
+        }
+
         /// <summary>
         /// Markers from the zones a raid harvested: every zone-shaped objective of every quest on
         /// this map, at the position the scene gave it, plus the actual spots of the quest items
@@ -305,11 +329,15 @@ namespace QuestTreeServer
         /// </summary>
         private HarvestResult HarvestedMarkersFor(
             string locationId, ZoneFile? zones, Dictionary<string, List<Quest>> questsByLocation,
-            Dictionary<string, WantedBy>? wanted, Dictionary<string, string> locale)
+            Dictionary<string, WantedBy>? wanted, Dictionary<string, string> locale,
+            IReadOnlyDictionary<string, IReadOnlyCollection<string>> zoneToMap)
         {
             var result = new HarvestResult();
 
             if (!questsByLocation.TryGetValue(locationId, out var quests)) return result;
+
+            // The canonical map this location folds onto, for the wanted-zone test below.
+            var canonical = zones?.Map;
 
             var triggersById = zones?.Triggers
                 .Where(t => !string.IsNullOrWhiteSpace(t.Id))
@@ -332,6 +360,17 @@ namespace QuestTreeServer
 
                         foreach (var zoneId in QuestPayloadBuilder.ZoneIdsOf(condition))
                         {
+                            // A zone this map's quests want, but only if it plausibly belongs here.
+                            // A quest spanning two maps is now filed under both, so counting its
+                            // other map's KNOWN zones as wanted-and-unlocated here would make the
+                            // "50/50 zones located" line read 50/55 on both maps and never reach
+                            // parity - which looks exactly like a broken harvester.
+                            //
+                            // An unharvested zone still counts, which is the whole point of the
+                            // line: nothing knows where it is yet, so it is precisely what is still
+                            // to be found. Only a zone known to live somewhere ELSE is excluded.
+                            if (!BelongsHere(zoneId, canonical, zoneToMap)) continue;
+
                             result.ZonesWanted.Add(zoneId);
 
                             if (triggersById == null || !triggersById.Contains(zoneId)) continue;
@@ -402,7 +441,16 @@ namespace QuestTreeServer
             return result;
         }
 
-        /// <summary>Location id -> the quests set there, for the per-map passes.</summary>
+        /// <summary>Location id -> the quests set there, for the per-map passes.
+        ///
+        /// A quest whose own Location field says nothing useful - blank, "any", or a string that is
+        /// not a location id at all - is filed under each map its objective zones actually sit on.
+        /// Without that, "any" is a bucket no real locationId ever matches, and a quest like
+        /// "Sanitary Investigation - Part 5" gets no pins on the one map it belongs to.
+        ///
+        /// The derivation is facts.MapKeysOfQuest, the same call the quest payload makes. The two
+        /// must agree about which map a quest is on, and two copies of that rule is how a quest ends
+        /// up in a map's list with no pins, or the reverse.</summary>
         private Dictionary<string, List<Quest>> QuestsByLocation()
         {
             var byLocation = new Dictionary<string, List<Quest>>(StringComparer.OrdinalIgnoreCase);
@@ -410,14 +458,30 @@ namespace QuestTreeServer
             var quests = templateTable.Quests;
             if (quests == null) return byLocation;
 
-            foreach (var quest in quests.Values)
-            {
-                if (quest == null || string.IsNullOrWhiteSpace(quest.Location)) continue;
+            var zoneToMap = zoneStore.ZoneToMap();
+            var keyToId = facts.LocationIdsByKey();
 
-                if (!byLocation.TryGetValue(quest.Location, out var list))
-                    byLocation[quest.Location] = list = new List<Quest>();
+            void File(string locationId, Quest quest)
+            {
+                if (!byLocation.TryGetValue(locationId, out var list))
+                    byLocation[locationId] = list = new List<Quest>();
 
                 list.Add(quest);
+            }
+
+            foreach (var quest in quests.Values)
+            {
+                if (quest == null) continue;
+
+                if (!facts.IsUselessLocation(quest.Location))
+                {
+                    File(quest.Location!, quest);
+                    continue;
+                }
+
+                // Derived from harvested zones, so the pins land where the objectives actually are.
+                foreach (var key in facts.MapKeysOfQuest(quest, zoneToMap))
+                    if (keyToId.TryGetValue(key, out var locationId)) File(locationId, quest);
             }
 
             return byLocation;

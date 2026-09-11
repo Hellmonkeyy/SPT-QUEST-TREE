@@ -17,14 +17,30 @@ namespace QuestTreeServer
     {
         /// <summary>Bumped whenever the shape below changes, so an old client paired with a new
         /// server (or the reverse) can say so plainly instead of silently mis-parsing.
-        /// v2 (1.8.0): ObjectiveDto.FoundInRaid.</summary>
-        public int SchemaVersion { get; set; } = 3;
+        /// v2 (1.8.0): ObjectiveDto.FoundInRaid. v4 (1.9.0): QuestDto.DerivedLocations.</summary>
+        public int SchemaVersion { get; set; } = 4;
 
         /// <summary>The server half's version, so a mismatch warning on the client can name it -
         /// the other three payloads already did.</summary>
         public string ModVersion { get; set; } = "";
 
         public List<QuestDto> Quests { get; set; } = new();
+    }
+
+    /// <summary>A map a quest was placed on by its objectives rather than by its own Location field
+    /// (schema v4). Empty for a quest that names a real map, and for one with no harvested zones.</summary>
+    public sealed class DerivedLocationDto
+    {
+        /// <summary>Internal name, in the SAME keyspace as QuestDto.LocationKey - which is NOT the
+        /// canonical one. ZoneStore.Canonical folds factory4_night into factory4_day and Sandbox_high
+        /// into Sandbox, while LocationKey keeps them apart, so emitting the canonical name here
+        /// would file a derived quest under a key that Factory night and Ground Zero above level 20
+        /// never match. Alias-expanded instead: one entry per real location whose Canonical form is
+        /// the harvested map.</summary>
+        public string Key { get; set; } = "";
+
+        /// <summary>Display name, matching QuestDto.LocationId.</summary>
+        public string Name { get; set; } = "";
     }
 
     public sealed class QuestDto
@@ -56,6 +72,14 @@ namespace QuestTreeServer
         /// name because that is what other tools key on - DynamicMaps' map configs list internal
         /// names, and a localized display name cannot be matched against them.</summary>
         public string LocationKey { get; set; } = "";
+
+        /// <summary>The maps this quest was placed on by its objectives, when its own
+        /// Location field said nothing useful - "any", blank, or a string that is not a
+        /// location id at all. A LIST because a quest can genuinely span maps: one plants at
+        /// an aishi_shoreline zone and an aishi_woods zone, and collapsing that to a single
+        /// map would be a different lie. Empty for hand-ins, skills and trader tasks, which
+        /// have no zones and belong on no map.</summary>
+        public List<DerivedLocationDto> DerivedLocations { get; set; } = new();
 
         /// <summary>True when the quest is gated behind a seasonal/holiday event, so it reads as
         /// intentionally unavailable rather than as a bug in the tree.</summary>

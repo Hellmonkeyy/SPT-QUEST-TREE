@@ -276,18 +276,36 @@ namespace QuestTree.UI
         /// its pin flown to. The caller switches to the Maps view afterwards; the next Build does
         /// the rest. If the accepted-only filter would hide the quest, the filter is lifted - it
         /// makes no sense to be sent to a pin that is then not drawn.</summary>
+        /// <summary>The map "show this quest" should open, or null when the quest is on none.
+        ///
+        /// A derived quest declares "any", so its own LocationKey names no map - the answer is the
+        /// first map its objectives were actually placed on.</summary>
+        private static string MapKeyOf(QuestNode node)
+        {
+            if (node == null) return null;
+
+            foreach (var key in node.MapKeys)
+                if (!string.IsNullOrEmpty(key)) return key;
+
+            return null;
+        }
+
         public static void ShowQuest(QuestNode node)
         {
-            if (node == null || string.IsNullOrEmpty(node.LocationKey)) return;
+            // A derived quest's own LocationKey is "any", which is no map at all - so the first of
+            // the maps its objectives actually sit on is what "show this on the map" means for it.
+            // Reading LocationKey blindly sent the player to a map that does not exist.
+            var key = MapKeyOf(node);
+            if (key == null) return;
 
-            _selectedLocationKey = node.LocationKey;
+            _selectedLocationKey = key;
             _selectedQuestId = node.Id;
             _pendingFocusQuestId = node.Id;
             _pendingScrollQuestId = node.Id;
             _pickerOpen = false;
             _floorPickerOpen = false;
 
-            SelectFloorFor(node.Id, DynamicMapsLibrary.FindByLocationKey(node.LocationKey));
+            SelectFloorFor(node.Id, DynamicMapsLibrary.FindByLocationKey(key));
 
             if (StartedOnly && node.Status != ENodeStatus.Active && ModSettings.Ready)
                 ModSettings.MarkStartedOnly.Value = false;
@@ -319,7 +337,12 @@ namespace QuestTree.UI
                 _selectedLocationKey = ordered[0].Key;
 
             var selected = byMap[_selectedLocationKey];
-            var entry = DynamicMapsLibrary.FindByLocationKey(selected[0].LocationKey);
+
+            // The GROUP key, never selected[0].LocationKey. A derived quest's own LocationKey is
+            // "any" or blank, so reading the map identity off the first node returns null here -
+            // and the map then loses its image, its floors and every pin. Whether it broke at all
+            // came down to node ordering, which reads as an intermittent bug.
+            var entry = DynamicMapsLibrary.FindByLocationKey(_selectedLocationKey);
             var layer = ResolveLayer(entry);
 
             // The map and list are built first and the dropdowns last, even though the dropdowns sit
@@ -476,7 +499,37 @@ namespace QuestTree.UI
                 ? "  ·  next raid"
                 : "";
 
-            return $"{quests[0].LocationId}   {actionable}/{quests.Count}{raid}";
+            return $"{DisplayNameFor(map.Key, quests)}   {actionable}/{quests.Count}{raid}";
+        }
+
+        /// <summary>The display name for a map, found on whichever node actually knows it.
+        ///
+        /// quests[0].LocationId used to be read directly, which since 1.9.0 renders "Quests on any"
+        /// whenever the first node in the group is a derived one - its own LocationId is "any", and
+        /// the real name lives in its DerivedLocations entry for this map.</summary>
+        private static string DisplayNameFor(string key, List<QuestNode> quests)
+        {
+            foreach (var quest in quests)
+            {
+                if (quest == null) continue;
+
+                if (!string.IsNullOrEmpty(quest.LocationKey) &&
+                    quest.LocationKey.Equals(key, StringComparison.OrdinalIgnoreCase) &&
+                    !string.IsNullOrEmpty(quest.LocationId) &&
+                    !quest.LocationId.Equals(QuestNode.AnyLocation, StringComparison.OrdinalIgnoreCase))
+                {
+                    return quest.LocationId;
+                }
+
+                foreach (var derived in quest.DerivedLocations)
+                    if (derived.Key.Equals(key, StringComparison.OrdinalIgnoreCase) &&
+                        !string.IsNullOrEmpty(derived.Name))
+                    {
+                        return derived.Name;
+                    }
+            }
+
+            return key;
         }
 
         /// <summary>Quests grouped by map, keyed on the raw location id so it can be matched against
@@ -489,19 +542,22 @@ namespace QuestTree.UI
             {
                 if (node.Status == ENodeStatus.Completed) continue;
 
-                var key = node.LocationKey;
-                var display = node.LocationId;
-
-                if (string.IsNullOrEmpty(key) || string.IsNullOrEmpty(display)) continue;
-                if (display.Equals(AnyLocation, StringComparison.OrdinalIgnoreCase)) continue;
-
-                if (!byMap.TryGetValue(key, out var list))
+                // Every map this quest belongs to, not just its declared one: a quest that says
+                // "any" and then names five Shoreline zones belongs on Shoreline, and one that
+                // names zones on two maps belongs on both.
+                foreach (var key in node.MapKeys)
                 {
-                    list = new List<QuestNode>();
-                    byMap[key] = list;
-                }
+                    if (string.IsNullOrEmpty(key)) continue;
+                    if (key.Equals(AnyLocation, StringComparison.OrdinalIgnoreCase)) continue;
 
-                list.Add(node);
+                    if (!byMap.TryGetValue(key, out var list))
+                    {
+                        list = new List<QuestNode>();
+                        byMap[key] = list;
+                    }
+
+                    list.Add(node);
+                }
             }
 
             return byMap;
@@ -604,7 +660,7 @@ namespace QuestTree.UI
             List<QuestNode> quests, List<QuestNode> visible, DynamicMapsLibrary.MapEntry entry,
             DynamicMapsLibrary.MapLayer layer, QuestGraphBuilder graph, Action onRepaint, Action onRefresh)
         {
-            var mapName = quests[0].LocationId;
+            var mapName = DisplayNameFor(_selectedLocationKey, quests);
             var set = MarkerSetFor(entry);
             var sprite = layer?.GetSprite();
 

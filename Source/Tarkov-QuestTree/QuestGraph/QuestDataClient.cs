@@ -70,10 +70,24 @@ namespace QuestTree.QuestGraph
         private static List<QuestDto> _cached;
         private static bool _attempted;
 
+        /// <summary>Drops the cached quest list so the next fetch asks again.
+        ///
+        /// Needed since 1.9.0, and the comment it replaces was made false by the same change: the
+        /// quest DATABASE still cannot change while the server runs, but the derived locations now
+        /// carried on each quest can - a raid that harvests a map teaches the server where that
+        /// map's zones are, and the server rebuilds its quest payload accordingly. Without this the
+        /// client would keep serving the pre-harvest answer for the rest of the session, so the
+        /// quest would gain its pins and never gain its map.</summary>
+        public static void InvalidateQuests()
+        {
+            _attempted = false;
+            _cached = null;
+        }
+
         /// <summary>The full quest list, or null when the companion server mod is not installed or
-        /// did not answer. Fetched once per game session - the quest database cannot change while
-        /// the server is running, so the only thing that invalidates it is connecting somewhere
-        /// else, which is what <see cref="ResetSession"/> is for.</summary>
+        /// did not answer. Fetched once per game session and after a harvest - see
+        /// <see cref="InvalidateQuests"/> - or on connecting somewhere else, which is what
+        /// <see cref="ResetSession"/> is for.</summary>
         public static List<QuestDto> TryFetchAll()
         {
             if (_attempted) return _cached;
@@ -318,6 +332,24 @@ namespace QuestTree.QuestGraph
                 if (quest == null) continue;
                 quest.Name = RichText.Safe(quest.Name);
                 quest.LocationId = RichText.Safe(quest.LocationId);
+
+                // Derived map names are locale text like every other name here, and they render
+                // inside markup - the sidebar header and the map dropdown both.
+                if (quest.DerivedLocations != null)
+                    foreach (var derived in quest.DerivedLocations)
+                        if (derived != null) derived.Name = RichText.Safe(derived.Name);
+
+                // Objective target item names, rendered by QuestSummary and - since 1.9.0 - fed
+                // into the search haystack as well. Locale text, mod-controlled, and never
+                // sanitised until now: a name carrying <size=400%> swallowed its whole block.
+                if (quest.Objectives != null)
+                    foreach (var objective in quest.Objectives)
+                    {
+                        if (objective?.TargetItemNames == null) continue;
+
+                        for (var i = 0; i < objective.TargetItemNames.Count; i++)
+                            objective.TargetItemNames[i] = RichText.Safe(objective.TargetItemNames[i]);
+                    }
                 if (quest.Objectives == null) continue;
                 foreach (var objective in quest.Objectives)
                     if (objective != null) objective.Text = RichText.Safe(objective.Text);

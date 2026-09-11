@@ -1,3 +1,4 @@
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using EFT.Quests;
@@ -81,6 +82,38 @@ namespace QuestTree.QuestGraph
 
         /// <summary>Raw map id, used to match this quest's map against external map data.</summary>
         public string LocationKey => Dto.LocationKey;
+
+        /// <summary>The maps this quest was placed on by its objectives, when its own declaration
+        /// said nothing useful. Empty for a quest that names its own map, and for one whose zones
+        /// have never been harvested - better silent than wrong, since a false entry would drag a
+        /// false readiness verdict with it.
+        ///
+        /// Never null, matching NecessaryObjectives: QuestGraphBuilder synthesises DTOs when the
+        /// server half is absent, and a null here would be a crash rather than a quiet degrade.</summary>
+        public IEnumerable<DerivedLocationDto> DerivedLocations =>
+            Dto.DerivedLocations == null
+                ? Enumerable.Empty<DerivedLocationDto>()
+                : Dto.DerivedLocations.Where(d => d != null && !string.IsNullOrEmpty(d.Key));
+
+        /// <summary>Every map this quest belongs to: its own, plus any derived. Used wherever the
+        /// question is "does this quest appear on that map" rather than "what does its subtitle
+        /// say".</summary>
+        public IEnumerable<string> MapKeys
+        {
+            get
+            {
+                if (!string.IsNullOrEmpty(LocationKey) &&
+                    !LocationKey.Equals(AnyLocation, StringComparison.OrdinalIgnoreCase))
+                {
+                    yield return LocationKey;
+                }
+
+                foreach (var derived in DerivedLocations) yield return derived.Key;
+            }
+        }
+
+        /// <summary>What a quest's Location field says when it declines to name a map.</summary>
+        public const string AnyLocation = "any";
 
         public QuestNode(QuestDto dto)
         {

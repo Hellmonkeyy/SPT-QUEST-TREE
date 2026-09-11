@@ -41,7 +41,8 @@ namespace QuestTreeServer
         LocaleService localeService,
         SeasonalEventService seasonalEventService,
         QuestConfig questConfig,
-        QuestFacts facts) : IOnLoad
+        QuestFacts facts,
+        ZoneStore zoneStore) : IOnLoad
     {
         /// <summary>Built while the server starts, for the reason MapMarkerPayloadBuilder gives:
         /// the client's request handler is synchronous on Unity's main thread, so paying for the
@@ -67,8 +68,39 @@ namespace QuestTreeServer
 
         private readonly RebuildGate _gate = new(60);
 
-        /// <summary>Serialized once and cached: the quest database does not change while the server
-        /// is running, and this payload covers every quest in the game.</summary>
+        /// <summary>Builds again now, after a harvest has taught the server where new zones are.
+        ///
+        /// Needed since 1.9.0 and its absence was a shipped-broken bug waiting to happen: derived
+        /// locations come from the harvested zone index, so a raid that harvests a map would give a
+        /// quest its PINS - the marker builder rebuilds - while its map on the client stayed empty
+        /// until the next server restart. That is the "in the list with no pins, or the reverse"
+        /// split the derivation exists to prevent, arriving by the back door.
+        ///
+        /// Built into a local and swapped, never nulled first: a GET arriving mid-rebuild would
+        /// otherwise block on _buildLock, on the client's main thread, behind its 15-second cap. The
+        /// cache is therefore never absent, only briefly stale.</summary>
+        public void Rebuild()
+        {
+            lock (_buildLock)
+            {
+                _gate.Clear();
+
+                try
+                {
+                    var payload = Build();
+                    payload.ModVersion = ModInfo.Version;
+                    _cachedJson = JsonSerializer.Serialize(payload, WireJson.Options);
+                }
+                catch (Exception ex)
+                {
+                    // Keep serving the previous answer. A harvest is not a reason to lose the tree.
+                    logger.Warning($"Quest Tracker: the quest list rebuild after a harvest failed ({ex.Message}) - serving the previous list.");
+                }
+            }
+        }
+
+        /// <summary>Serialized and cached. The quest database itself does not change while the
+        /// server is running, but the derived locations on it do - see Rebuild.</summary>
         public string GetPayloadJson()
         {
             if (_cachedJson != null) return _cachedJson;
@@ -113,13 +145,16 @@ namespace QuestTreeServer
 
             var locale = localeService.GetLocaleDb();
 
+            // Hoisted: built once per payload rather than once per quest, like QuestsByLocation.
+            var zoneToMap = zoneStore.ZoneToMap();
+
             foreach (var quest in quests.Values)
             {
                 if (quest == null) continue;
 
                 try
                 {
-                    payload.Quests.Add(MapQuest(quest, locale));
+                    payload.Quests.Add(MapQuest(quest, zoneToMap, locale));
                 }
                 catch (Exception ex)
                 {
@@ -133,7 +168,10 @@ namespace QuestTreeServer
             return payload;
         }
 
-        private QuestDto MapQuest(Quest quest, Dictionary<string, string> locale)
+        private QuestDto MapQuest(
+            Quest quest,
+            IReadOnlyDictionary<string, IReadOnlyCollection<string>> zoneToMap,
+            Dictionary<string, string> locale)
         {
             var id = quest.Id.ToString();
 
@@ -150,6 +188,7 @@ namespace QuestTreeServer
                 IsEvent = IsEventQuest(quest.Id),
                 EditionRestricted = IsEditionRestricted(quest.Id),
                 Prerequisites = MapPrerequisites(quest),
+                DerivedLocations = DeriveLocations(quest, zoneToMap, locale),
                 Objectives = MapObjectives(quest, locale),
                 Rewards = MapRewards(quest, locale)
             };
@@ -210,19 +249,67 @@ namespace QuestTreeServer
         {
             var location = quest.Location;
             if (string.IsNullOrWhiteSpace(location)) return "";
+            if (location.Equals(QuestFacts.AnyLocation, StringComparison.OrdinalIgnoreCase)) return location;
 
-            return facts.LocationIdToKey.TryGetValue(location, out var key) ? key : location;
+            // Blank rather than the raw id for a location that is not a location. Six vanilla quests
+            // declare "marathon", which matches nothing in the table, and the raw-id fallback made
+            // that into a map key: the locale answers "marathon Name" with "Transition", so
+            // GroupByMap filed them under a phantom map of that name with no image, no floors and no
+            // pins, because FindByLocationKey never matched. Blank is already skipped there.
+            //
+            // "any" is excepted deliberately - it is not a location id either, but it is a real
+            // declaration the client names and tests for in three places.
+            return facts.LocationIdToKey.TryGetValue(location, out var key) ? key : "";
+        }
+
+        /// <summary>The maps a quest is actually done on when it refuses to say.
+        ///
+        /// A quest whose Location is "any" can still be firmly placed: "Sanitary Investigation -
+        /// Part 5" declares "any" and then names five Shoreline zones. Left alone, GroupByMap drops
+        /// it and the marker builder never gives it pins, so the quest is missing from the one map
+        /// it belongs to.
+        ///
+        /// A list, not a value: a quest can genuinely span maps - one plants at an aishi_shoreline
+        /// zone and an aishi_woods zone - and collapsing that to a single map would be a different
+        /// lie. Empty for hand-ins, skills and trader tasks, which have no zones and belong on no
+        /// map.
+        ///
+        /// One line of derivation, shared with MapMarkerPayloadBuilder through QuestFacts. It is not
+        /// enough for the two to agree today: the invariant is that a quest never appears in a map's
+        /// list without pins, or the reverse, and that only holds if both read the same function.</summary>
+        private List<DerivedLocationDto> DeriveLocations(
+            Quest quest,
+            IReadOnlyDictionary<string, IReadOnlyCollection<string>> zoneToMap,
+            Dictionary<string, string> locale)
+        {
+            // Only when the declaration is useless. A quest that names a REAL map is trusted, even
+            // if its zones say otherwise - overriding the author would be this mod deciding it knows
+            // better.
+            if (!facts.IsUselessLocation(quest.Location)) return new List<DerivedLocationDto>();
+
+            var maps = new List<DerivedLocationDto>();
+
+            foreach (var key in facts.MapKeysOfQuest(quest, zoneToMap))
+                maps.Add(new DerivedLocationDto { Key = key, Name = facts.LocationNameOf(key, locale) });
+
+            return maps;
         }
 
         /// <summary>Quest.Location is a raw map id (e.g. 5704e3c2d2720bac5b8b4567), which is no use
         /// on a node subtitle. The map's display name lives in the locale table under
         /// "&lt;locationId&gt; Name". "any" is passed through untouched - the client treats it as
         /// "no specific map" and hides it.</summary>
-        private static string ResolveLocationName(Quest quest, Dictionary<string, string> locale)
+        private string ResolveLocationName(Quest quest, Dictionary<string, string> locale)
         {
             var location = quest.Location;
             if (string.IsNullOrWhiteSpace(location)) return "";
-            if (location.Equals("any", StringComparison.OrdinalIgnoreCase)) return "any";
+            if (location.Equals(QuestFacts.AnyLocation, StringComparison.OrdinalIgnoreCase))
+                return QuestFacts.AnyLocation;
+
+            // Blank for a non-location, matching ResolveLocationKey: the locale WILL answer
+            // "marathon Name" with "Transition", which is precisely how a phantom map got a display
+            // name convincing enough to sit in the map dropdown.
+            if (!facts.LocationIdToKey.ContainsKey(location)) return "";
 
             return locale.TryGetValue($"{location} Name", out var name) && !string.IsNullOrWhiteSpace(name)
                 ? name

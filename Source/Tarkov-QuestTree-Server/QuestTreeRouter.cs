@@ -50,7 +50,8 @@ namespace QuestTreeServer
                 new RouteAction<ZoneHarvestRequest>(
                     "/questtree/zones",
                     (url, request, sessionId, output, cancellationToken) =>
-                        Guarded(logger, url, () => AcceptHarvest(logger, request, zoneStore, markerBuilder),
+                        Guarded(logger, url,
+                            () => AcceptHarvest(logger, request, zoneStore, markerBuilder, payloadBuilder),
                             () => new ZoneHarvestResponse { Ok = false, Message = "failed" })),
 
                 new RouteAction<EmptyRequestData>(
@@ -90,7 +91,7 @@ namespace QuestTreeServer
 
         private static string AcceptHarvest(
             ISptLogger<QuestTreeRouter> logger, ZoneHarvestRequest? request, ZoneStore zoneStore,
-            MapMarkerPayloadBuilder markerBuilder)
+            MapMarkerPayloadBuilder markerBuilder, QuestPayloadBuilder payloadBuilder)
         {
             static string Reply(ZoneHarvestResponse r) => JsonSerializer.Serialize(r, WireJson.Options);
 
@@ -122,7 +123,16 @@ namespace QuestTreeServer
             // Every Fika client in a raid harvests the same scene and posts it; only the first
             // has anything new, and only new positions are a reason to rebuild every map's
             // markers - the multi-second read the class comment on the builder describes.
-            if (added > 0) markerBuilder.Rebuild();
+            //
+            // BOTH payloads, since 1.9.0. New zones change which map an "any"-location quest is
+            // derived onto, so rebuilding only the markers would give such a quest its pins while
+            // its map on the client stayed empty until the next server restart - the "in the list
+            // with no pins, or the reverse" split the derivation exists to prevent.
+            if (added > 0)
+            {
+                markerBuilder.Rebuild();
+                payloadBuilder.Rebuild();
+            }
 
             var message = added > 0 ? "saved" : "saved, nothing new";
             if (dropped > 0) message += $"; {dropped} unusable entries dropped";

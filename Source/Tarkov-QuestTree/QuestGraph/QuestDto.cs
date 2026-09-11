@@ -22,8 +22,9 @@ namespace QuestTree.QuestGraph
     {
         /// <summary>Schema this client understands. Compared against the server's on fetch. A
         /// mismatch is a logged warning, not a refusal: v1 (1.7.1) payloads only lack
-        /// ObjectiveDto.FoundInRaid, which the readers fall back from.</summary>
-        public const int SupportedSchemaVersion = 3;
+        /// ObjectiveDto.FoundInRaid, which the readers fall back from. v4 (1.9.0) adds
+        /// QuestDto.DerivedLocations, which a v3 server simply never sends.</summary>
+        public const int SupportedSchemaVersion = 4;
 
         [JsonProperty("schemaVersion")]
         public int SchemaVersion { get; set; }
@@ -34,6 +35,19 @@ namespace QuestTree.QuestGraph
 
         [JsonProperty("quests")]
         public List<QuestDto> Quests { get; set; }
+    }
+
+    /// <summary>A map a quest was placed on by its objectives rather than by its own Location field
+    /// (schema v4). Empty for a quest that names a real map, and for one with no harvested zones.</summary>
+    internal sealed class DerivedLocationDto
+    {
+        /// <summary>Internal name, in the same keyspace as QuestDto.LocationKey.</summary>
+        [JsonProperty("key")]
+        public string Key { get; set; }
+
+        /// <summary>Display name, matching QuestDto.LocationId.</summary>
+        [JsonProperty("name")]
+        public string Name { get; set; }
     }
 
     internal sealed class QuestDto
@@ -66,6 +80,13 @@ namespace QuestTree.QuestGraph
         /// data - a localized display name cannot be matched against those.</summary>
         [JsonProperty("locationKey")]
         public string LocationKey { get; set; }
+
+        /// <summary>The maps this quest was placed on by its objectives, when its own
+        /// declaration said nothing useful. Never null - QuestGraphBuilder synthesises DTOs
+        /// when the server half is absent, and a null list there would be a crash rather than
+        /// an empty map list.</summary>
+        [JsonProperty("derivedLocations")]
+        public List<DerivedLocationDto> DerivedLocations { get; set; } = new List<DerivedLocationDto>();
 
         [JsonProperty("isEvent")]
         public bool IsEvent { get; set; }

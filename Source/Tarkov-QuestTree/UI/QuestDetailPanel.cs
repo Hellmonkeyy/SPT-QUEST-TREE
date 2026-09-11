@@ -373,8 +373,10 @@ namespace QuestTree.UI
                         AuxLayout.AddProgressBar(_content, (float)current / target, _left, ref y, width, QuestNodeView.ColorFor(ENodeStatus.Completed));
                 }
 
-                var hasPlace = !string.IsNullOrEmpty(node.LocationKey) &&
-                               !node.LocationKey.Equals("any", StringComparison.OrdinalIgnoreCase);
+                // MapKeys, not LocationKey: a quest declaring "any" whose objectives were placed on
+                // a real map has somewhere to show, and testing the declaration alone hid the link
+                // on precisely the quests this release taught the mod to place.
+                var hasPlace = node.MapKeys.Any(k => !string.IsNullOrEmpty(k));
                 if (hasPlace && _showOnMap != null)
                 {
                     y += 2f;

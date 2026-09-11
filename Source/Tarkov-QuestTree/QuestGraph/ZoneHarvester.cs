@@ -270,8 +270,15 @@ namespace QuestTree.QuestGraph
                         $"QuestTree: zones for {map} sent to the server ({label}) - it now holds {response.Zones} zones and " +
                         $"{response.QuestItems} quest items for it ({response.Message}).");
 
-                    // The server rebuilt its markers; the next Maps tab build must ask again.
+                    // The server rebuilt both payloads; the next Maps tab build must ask again.
+                    //
+                    // The quest list too, since 1.9.0: new zones change which map an
+                    // "any"-location quest is derived onto, and TryFetchAll latches for the whole
+                    // session. Without this the quest gains its pins from the marker payload and
+                    // never gains its map entry - the exact split the derivation exists to prevent,
+                    // arriving from the client side instead.
                     QuestDataClient.InvalidateMapMarkers();
+                    QuestDataClient.InvalidateQuests();
                 }
                 catch (Exception ex)
                 {
