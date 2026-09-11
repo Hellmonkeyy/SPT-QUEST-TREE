@@ -188,29 +188,42 @@ namespace QuestTree.UI
         /// pair rather than a char and cannot be written as one.</summary>
         public const int Lock = 0x1F512;
 
-        /// <summary>Whether anything in the chain - the game's font or the fallback - can actually
+        /// <summary>Whether anything in the chain - the game's font or our fallback - can actually
         /// draw this character.
         ///
         /// Asked before a glyph is used rather than assumed, because a missing one does not fail
         /// loudly: TMP draws a box, or nothing, and the box keeps its layout either way. This is the
-        /// difference between choosing a mark and hoping for one.</summary>
+        /// difference between choosing a mark and hoping for one.
+        ///
+        /// THE GAME'S FONT IS PROBED READ-ONLY, and that distinction is the whole of this method.
+        ///
+        /// The first version asked both fonts with TryAddCharacters, because it takes a string and
+        /// so can be given a character outside the basic plane, and because on a dynamic atlas it
+        /// tests and rasterises in one call. Convenient, and wrong: TryAddCharacters is a WRITE. On
+        /// EFT's font - a static, pre-baked atlas shared by the entire game UI - asking it to add a
+        /// character it does not have is not a question, it is an attempt to rebuild someone else's
+        /// atlas, and it cost every bold title in the tree.
+        ///
+        /// So: HasCharacter for the game's font, which only looks; TryAddCharacters only for the
+        /// symbol font, which is ours, dynamic, and exists precisely to be written to. A character
+        /// outside the basic plane cannot be expressed as a char at all, so for those the game font
+        /// is not consulted - which is correct anyway, since a display face has no astral glyphs.</summary>
         public static bool HasGlyph(int codePoint)
         {
             try
             {
-                // TryAddCharacters rather than HasCharacter: it takes a STRING, so it works for a
-                // character outside the basic plane - the padlock is a surrogate pair and cannot be
-                // passed as a char at all - and on a dynamic atlas it both tests and rasterises in
-                // one call. It reports back whatever it could not add.
                 var text = char.ConvertFromUtf32(codePoint);
 
-                if (_symbolFont != null && _symbolFont.TryAddCharacters(text, out string symbolMissing))
-                    return string.IsNullOrEmpty(symbolMissing);
+                // Ours. Dynamic. Writing to it is the point.
+                if (_symbolFont != null &&
+                    _symbolFont.TryAddCharacters(text, out string missing) &&
+                    string.IsNullOrEmpty(missing))
+                {
+                    return true;
+                }
 
-                if (_font != null && _font.TryAddCharacters(text, out string fontMissing))
-                    return string.IsNullOrEmpty(fontMissing);
-
-                return false;
+                // The game's. Look, never touch.
+                return text.Length == 1 && _font != null && _font.HasCharacter(text[0]);
             }
             catch
             {
