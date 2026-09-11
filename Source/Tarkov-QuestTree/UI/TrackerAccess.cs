@@ -101,5 +101,59 @@ namespace QuestTree.UI
         /// knows exactly which map you are about to load.</summary>
         private static string RaidLocationOf(TarkovApplication app) =>
             app?.CurrentRaidSettings?.SelectedLocation?.Id;
+
+        /// <summary>The selected map, for callers outside this class - the pre-raid cue needs the
+        /// same answer the panel opens on, and reading it twice in two ways is how the button and
+        /// the panel would come to disagree about which map you are looking at.
+        ///
+        /// Guarded the same way and for the same reason: a renamed member fails when the naming
+        /// method is JIT-compiled, so the try has to sit at the call rather than inside it.</summary>
+        public static string CurrentRaidLocation()
+        {
+            try
+            {
+                return RaidLocationOf(ClientAppUtils.GetMainApp());
+            }
+            catch (Exception ex)
+            {
+                if (!_raidLocationWarned)
+                {
+                    _raidLocationWarned = true;
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: could not read the selected raid location ({ex.GetType().Name}: {ex.Message}).");
+                }
+
+                return null;
+            }
+        }
+
+        /// <summary>Whether the raid being readied is a scav run.
+        ///
+        /// The raid check reads the PMC profile, so a scav run would be judged against gear the
+        /// player is not taking - a green light on a rig they do not have. On a scav raid the cue
+        /// says nothing instead. Scav runs carry no quest objectives, so nothing useful is lost, and
+        /// neutral is honest where green would be a lie.</summary>
+        public static bool IsCurrentRaidScav()
+        {
+            try
+            {
+                var side = ClientAppUtils.GetMainApp()?.CurrentRaidSettings?.Side;
+                return side == ESideType.Savage;
+            }
+            catch (Exception ex)
+            {
+                if (!_sideWarned)
+                {
+                    _sideWarned = true;
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: could not read the raid side ({ex.GetType().Name}: {ex.Message}) - " +
+                        "the pre-raid cue will treat it as a PMC raid.");
+                }
+
+                return false;
+            }
+        }
+
+        private static bool _sideWarned;
     }
 }

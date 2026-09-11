@@ -2,9 +2,11 @@ using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.Reflection;
+using System.Threading.Tasks;
 using EFT;
 using EFT.UI.Matchmaker;
 using HarmonyLib;
+using QuestTree.QuestGraph;
 using QuestTree.UI;
 using SPT.Reflection.Patching;
 using UnityEngine;
@@ -118,7 +120,134 @@ namespace QuestTree.Patches
             // coroutine then dies with the screen, which is the correct behaviour - Show refetches
             // on the next entry anyway - and nothing static has to be cleaned up. StartCoroutine
             // throws on a disabled behaviour, so it stays inside the caller's try.
-            if (screen.isActiveAndEnabled) screen.StartCoroutine(PlaceNextFrame(root, screen, container));
+            if (screen.isActiveAndEnabled)
+            {
+                screen.StartCoroutine(PlaceNextFrame(root, screen, container));
+                screen.StartCoroutine(ApplyVerdict(screen, container, ++_generation));
+            }
+        }
+
+        /// <summary>Bumped on every Show. The fetch runs off the main thread and the screen is
+        /// re-entrant, so an answer that arrives after a newer request started must be dropped
+        /// rather than painted over the newer one. RequestHandler.GetJsonAsync takes no
+        /// cancellation token, so a generation compared on apply is the only workable answer.</summary>
+        private static int _generation;
+
+        /// <summary>Fetches the raid check off the main thread and paints the result on it.
+        ///
+        /// Off-thread because every fetch in this mod is otherwise synchronous behind a 15-second
+        /// cap, and the ready-up screen is the worst place in the game to stall - a raid countdown
+        /// is running. The button draws neutral immediately and repaints when the answer lands,
+        /// which is the same shape the deferred placement above already uses, so the two cooperate
+        /// rather than fighting for a frame.
+        ///
+        /// Two rules this must not break, both learned here: nothing may touch a RectTransform, a
+        /// TMP_Text or a GameObject except on the main thread - including READING one - and a throw
+        /// in the background half must never escape into Unity's thread pool unlogged.</summary>
+        private static IEnumerator ApplyVerdict(
+            MatchMakerAcceptScreen screen, RectTransform container, int generation)
+        {
+            var locationKey = TrackerAccess.CurrentRaidLocation();
+
+            // A scav run is judged against gear the player is not taking, so the cue says nothing
+            // rather than something wrong. Scav runs carry no quest objectives, so nothing useful is
+            // lost, and neutral is honest where green would be a lie.
+            if (string.IsNullOrEmpty(locationKey) || TrackerAccess.IsCurrentRaidScav()) yield break;
+
+            var task = Task.Run(() =>
+            {
+                try
+                {
+                    return QuestDataClient.GetRaidCheck();
+                }
+                catch (Exception ex)
+                {
+                    // Never unlogged, and never rethrown into the pool.
+                    Plugin.LogSource?.LogInfo($"QuestTree: the raid check could not be fetched ({ex.Message}).");
+                    return null;
+                }
+            });
+
+            var deadline = Time.realtimeSinceStartup + FetchTimeoutSeconds;
+            while (!task.IsCompleted && Time.realtimeSinceStartup < deadline) yield return null;
+
+            if (!task.IsCompleted)
+            {
+                // Without this a hung server leaves the cue neutral forever with nothing in the log -
+                // the one state the verify pass is told to read the log to explain.
+                if (!_timeoutLogged)
+                {
+                    _timeoutLogged = true;
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: the raid check did not answer within {FetchTimeoutSeconds}s - " +
+                        "the pre-raid button stays neutral.");
+                }
+
+                yield break;
+            }
+
+            // Stale answer, or the screen went away while we waited. A destroyed Unity object
+            // compares equal to null rather than throwing, so these are real checks.
+            if (generation != _generation || container == null) yield break;
+
+            RaidCheckView.Verdict verdict = null;
+
+            try
+            {
+                verdict = RaidCheckView.Fold(
+                    task.Result, locationKey, null,
+                    !ModSettings.Ready || ModSettings.CountUnacceptedQuests.Value);
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning($"QuestTree: could not fold the raid check ({ex.Message}).");
+                yield break;
+            }
+
+            Paint(container, verdict);
+        }
+
+        private static bool _timeoutLogged;
+        private const float FetchTimeoutSeconds = 15f;
+
+        /// <summary>Paints the verdict onto the button's label.
+        ///
+        /// The LABEL, never the background: CreateButton's background is a 5% white wash and
+        /// ButtonHover caches it at pointer-enter and restores it on exit, so a background
+        /// recoloured here is reverted the moment the pointer leaves. The label is plain white and
+        /// untouched by hover feedback.</summary>
+        private static void Paint(RectTransform container, RaidCheckView.Verdict verdict)
+        {
+            var button = container.Find(ButtonName) as RectTransform;
+            if (button == null) return;
+
+            var label = button.GetComponentInChildren<TMPro.TMP_Text>();
+            if (label == null) return;
+
+            // Neutral: unchanged from what it already says. Never green merely because the answer
+            // did not arrive.
+            if (verdict?.State == null) return;
+
+            label.text = LabelFor(verdict);
+            SizeToLabel(button);
+        }
+
+        private static string LabelFor(RaidCheckView.Verdict verdict)
+        {
+            if (verdict.Empty) return ButtonLabel;
+
+            if (verdict.State == RaidCheckView.Have.OnYou)
+                return $"<color=#{GameStyle.SuccessHex}>{ButtonLabel} - READY</color>";
+
+            // Red wins the button when both apply, and both counts appear: you can pack a stash
+            // item before loading in, and you cannot conjure one you do not own.
+            if (verdict.State == RaidCheckView.Have.Missing)
+            {
+                var tail = verdict.ToPackCount > 0 ? $" · {verdict.ToPackCount} TO PACK" : "";
+                return $"<color=#{GameStyle.ErrorHex}>{ButtonLabel} - {verdict.MissingCount} MISSING{tail}</color>";
+            }
+
+            return $"<color=#{GameStyle.WarningHex}>{ButtonLabel} - {verdict.ToPackCount} TO PACK</color>";
         }
 
         /// <summary>One container for the button and, once the readiness cue lands, its rows.

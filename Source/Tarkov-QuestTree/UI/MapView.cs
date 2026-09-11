@@ -502,6 +502,80 @@ namespace QuestTree.UI
             return $"{DisplayNameFor(map.Key, quests)}   {actionable}/{quests.Count}{raid}";
         }
 
+        /// <summary>The folded raid check for a map, or null when there is nothing to say.
+        ///
+        /// Null is the NEUTRAL case - the server half missing, no profile, an unreadable inventory,
+        /// a map the server does not recognise, or one whose requirements could not be placed. It is
+        /// never drawn as "you are ready".</summary>
+        private static RaidCheckView.Verdict RaidCheckFor(string locationKey, QuestGraphBuilder graph)
+        {
+            if (string.IsNullOrEmpty(locationKey)) return null;
+
+            var payload = QuestDataClient.GetRaidCheck();
+            if (payload == null) return null;
+
+            var countUnaccepted = !ModSettings.Ready || ModSettings.CountUnacceptedQuests.Value;
+            var verdict = RaidCheckView.Fold(payload, locationKey, graph, countUnaccepted);
+
+            // One Info line a session naming the cause, because six different causes all render as
+            // the same silence and telling them apart otherwise means another play session.
+            if (verdict.State == null && !_raidCheckReasonLogged)
+            {
+                _raidCheckReasonLogged = true;
+                Plugin.LogSource?.LogInfo($"QuestTree: the raid check is neutral - {verdict.Reason}.");
+            }
+
+            return verdict;
+        }
+
+        private static bool _raidCheckReasonLogged;
+
+        /// <summary>The one-line answer, in the same three states as the ready-up button.</summary>
+        private static string SummaryLine(RaidCheckView.Verdict verdict)
+        {
+            if (verdict.Empty) return "<color=#FFFFFF80>Nothing to bring for this map.</color>";
+
+            if (verdict.State == RaidCheckView.Have.OnYou)
+                return $"<color=#{GameStyle.SuccessHex}>Ready - everything this map needs is on you</color>";
+
+            if (verdict.State == RaidCheckView.Have.Missing)
+            {
+                var missing = verdict.Lines.First(l => l.State == RaidCheckView.Have.Missing);
+                var tail = verdict.ToPackCount > 0 ? $", {verdict.ToPackCount} to pack" : "";
+
+                return $"<color=#{GameStyle.ErrorHex}>Missing {verdict.MissingCount} of " +
+                       $"{verdict.Lines.Count}: {missing.Name}{tail}</color>";
+            }
+
+            // Amber, and deliberately not "in your stash": 330 of the reference profile's items are
+            // in hideout stashes, the sorting table or quest stashes, so the summary must not claim
+            // the stash when the rows themselves say "elsewhere".
+            return $"<color=#{GameStyle.WarningHex}>{verdict.ToPackCount} to pack - you own it all, " +
+                   "none of it is on you</color>";
+        }
+
+        /// <summary>One row: state colour, name, how many of how many, and where it is.</summary>
+        private static string TakeWithYouRow(RaidCheckView.Line line)
+        {
+            var hex =
+                line.State == RaidCheckView.Have.OnYou ? GameStyle.SuccessHex :
+                line.State == RaidCheckView.Have.ToPack ? GameStyle.WarningHex :
+                GameStyle.ErrorHex;
+
+            var where =
+                line.State == RaidCheckView.Have.OnYou ? "on you" :
+                line.State == RaidCheckView.Have.Missing ? "not owned" :
+                line.InStash >= line.Needed ? "in stash" :
+                line.Elsewhere > 0 ? "elsewhere" :
+                "in stash";
+
+            var quests = line.Quests.Count > 0 ? string.Join(", ", line.Quests.ToArray()) : "";
+            var fir = line.NeedsFoundInRaid ? " (found in raid)" : "";
+
+            return $"<color=#{hex}>{line.Name}</color>  {line.OnPerson} of {line.Needed}  " +
+                   $"<color=#FFFFFF80>{where}{fir}</color>  <color=#FFFFFF60>{quests}</color>";
+        }
+
         /// <summary>The display name for a map, found on whichever node actually knows it.
         ///
         /// quests[0].LocationId used to be read directly, which since 1.9.0 renders "Quests on any"
@@ -708,6 +782,16 @@ namespace QuestTree.UI
             AuxLayout.AddClickableRow(content, "<color=#FFFFFF80>Refresh  ⟳</color>",
                 listX + inner - 90f, ref linkY, 90f, false, onRefresh, 20f);
 
+            // The verdict, in one line, before anything that has to be read.
+            //
+            // AuxLayout.AddWrapped rather than AddAt: AddAt ellipsises at the column edge and this
+            // is a sentence, not a label - a distinction this file learned the hard way.
+            var verdict = RaidCheckFor(_selectedLocationKey, graph);
+            if (verdict != null && verdict.State != null)
+            {
+                AuxLayout.AddWrapped(content, SummaryLine(verdict), listX, ref y, inner, 11);
+            }
+
             // Said once, here, rather than by retitling the header: the map name is what the rest
             // of the sidebar refers back to ("Quests on Customs").
             if (IsShowingRaidMap)
@@ -821,6 +905,26 @@ namespace QuestTree.UI
             {
                 AddAt(content, $"<color=#FFFFFF60>+{visible.Count - MaxQuestRows} more</color>",
                     listX, ref y, AuxLayout.RowHeight, 11, inner);
+            }
+
+            // ---- take with you
+            //
+            // Distinct from "Items to find here" directly below, which is spawn-based: that section
+            // is what the map GIVES you, this is what you must bring through the door. They sit
+            // together because they are both about items, and in this order because you pack before
+            // you land.
+            if ((!ModSettings.Ready || ModSettings.ShowTakeWithYou.Value) &&
+                verdict != null && verdict.State != null && verdict.Lines.Count > 0)
+            {
+                y += 10f;
+                AuxLayout.AddSectionHeader(content, ref y, "Take with you", listX, inner);
+
+                foreach (var line in verdict.Lines)
+                {
+                    var templates = line.Templates;
+                    AuxLayout.AddClickableRow(content, TakeWithYouRow(line), listX, ref y, inner, false,
+                        () => GameStyle.InspectItem(templates != null && templates.Count > 0 ? templates[0] : null));
+                }
             }
 
             // ---- items to look for here

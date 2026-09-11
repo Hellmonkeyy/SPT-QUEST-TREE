@@ -240,6 +240,12 @@ namespace QuestTree.UI
             Toggle(column, ref y, "Show items to find",
                 "The sidebar section listing quest items that spawn on the map, with what you already have.",
                 ModSettings.ShowItemsSection);
+            Toggle(column, ref y, "Show take with you",
+                "The sidebar section listing what you must carry INTO the map, and whether it is on you.",
+                ModSettings.ShowTakeWithYou);
+            Toggle(column, ref y, "Count quests you have not accepted",
+                "Count quests you could accept but have not when working out what to take into a raid.",
+                ModSettings.CountUnacceptedQuests);
             Toggle(column, ref y, "Show map credits",
                 "The map and pin-icon attributions at the bottom of the sidebar.",
                 ModSettings.ShowCredits);
@@ -268,7 +274,8 @@ namespace QuestTree.UI
                 index => ModSettings.SidebarWidth.Value = index == 0 ? 380 : index == 2 ? 520 : 440);
 
             ResetLink(column, ref y, width,
-                ModSettings.MarkStartedOnly, ModSettings.ShowItemsSection, ModSettings.ShowCredits,
+                ModSettings.MarkStartedOnly, ModSettings.ShowItemsSection, ModSettings.ShowTakeWithYou,
+                ModSettings.CountUnacceptedQuests, ModSettings.ShowCredits,
                 ModSettings.MirrorMapArtwork, ModSettings.ShowMapGuides, ModSettings.DoNextRows,
                 ModSettings.MapArtworkRotation, ModSettings.PinLabels, ModSettings.SidebarWidth);
         }

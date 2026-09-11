@@ -71,6 +71,8 @@ namespace QuestTree
         public static ConfigEntry<int> SidebarWidth { get; private set; }
         public static ConfigEntry<int> DoNextRows { get; private set; }
         public static ConfigEntry<bool> ShowItemsSection { get; private set; }
+        public static ConfigEntry<bool> ShowTakeWithYou { get; private set; }
+        public static ConfigEntry<bool> CountUnacceptedQuests { get; private set; }
         public static ConfigEntry<bool> ShowCredits { get; private set; }
         public static ConfigEntry<PinLabelMode> PinLabels { get; private set; }
 
@@ -314,6 +316,17 @@ namespace QuestTree
                 "Map", "Show items to find", true,
                 "Show the sidebar section listing the quest items that spawn on the map and whether you already have them.");
 
+            ShowTakeWithYou = config.Bind(
+                "Map", "Show take with you", true,
+                "Show the sidebar section listing what you must CARRY INTO the map to finish its quests, " +
+                "and whether it is on you, in your stash, or not owned at all.");
+
+            CountUnacceptedQuests = config.Bind(
+                "Map", "Count quests you have not accepted", true,
+                "Count quests you could accept but have not, as well as accepted ones, when deciding what to " +
+                "take into a raid. Turn this off if the list is noisy - with a mod that unlocks everything, " +
+                "'available' is most of the game.");
+
             ShowCredits = config.Bind(
                 "Map", "Show map credits", true,
                 "Show the map and pin-icon attributions at the bottom of the sidebar.");
@@ -352,7 +365,8 @@ namespace QuestTree
                 HideUnobtainable, HideCompleted, HideTraderless, MarkStartedOnly, MapArtworkRotation,
                 MirrorMapArtwork, ShowMapGuides, DrawEdges, FocusFrontier, CompactLayout, MaxVisibleNodes,
                 OpenOnMap, HarvestZones, EdgeOpacity, HoverDimStrength, TallTitles, AbbreviateWhenZoomedOut,
-                TitleOnlyBelowZoom, CodesBelowZoom, QuestBadges, SidebarWidth, DoNextRows, ShowItemsSection, ShowCredits,
+                TitleOnlyBelowZoom, CodesBelowZoom, QuestBadges, SidebarWidth, DoNextRows, ShowItemsSection,
+                ShowTakeWithYou, CountUnacceptedQuests, ShowCredits,
                 PinLabels, ColorActive, ColorAvailable, ColorCompleted, ColorLocked, ColorAccent, Tooltips,
                 HoverSounds, RememberLastView, OpenTracker
             });
@@ -386,6 +400,8 @@ namespace QuestTree
             SidebarWidth.SettingChanged += Raise;
             DoNextRows.SettingChanged += Raise;
             ShowItemsSection.SettingChanged += Raise;
+            ShowTakeWithYou.SettingChanged += Raise;
+            CountUnacceptedQuests.SettingChanged += Raise;
             ShowCredits.SettingChanged += Raise;
             PinLabels.SettingChanged += Raise;
             ColorActive.SettingChanged += Raise;

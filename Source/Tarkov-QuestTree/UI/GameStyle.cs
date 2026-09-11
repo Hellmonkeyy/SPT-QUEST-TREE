@@ -47,6 +47,13 @@ namespace QuestTree.UI
         /// to change a shade.</summary>
         public const string WarningHex = "D9A61A";
         public const string ErrorHex = "C86464";
+
+        /// <summary>"This is settled" green, for the third state the raid-readiness cue needs.
+        ///
+        /// The same green the tree already paints a handed-in quest (ModSettings.ColorCompleted's
+        /// default), so the colour is one the player has already been taught to read as done rather
+        /// than a fourth shade to learn.</summary>
+        public const string SuccessHex = "3D854D";
         public static readonly Color KappaGold = new(0.85f, 0.65f, 0.1f);
 
         /// <summary>The Collector mark. The game's own "task completed" blue (#75B9DE, from

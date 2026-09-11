@@ -1354,6 +1354,12 @@ namespace QuestTree.UI
                 ? MapView.Build(_auxContent, _graph, RenderSelectedTab, () =>
                 {
                     QuestDataClient.InvalidateProfile();
+
+                    // The raid check too: "Take with you" reads the same stash, and the whole
+                    // promise of that section is that moving an item and looking again tells you
+                    // the truth. Only on the refresh link - NOT on every render, which would walk a
+                    // four-thousand-item inventory on every map click.
+                    QuestDataClient.InvalidateRaidCheck();
                     RenderSelectedTab();
                 }, size)
                 : _selectedTraderId == ItemsTabId
