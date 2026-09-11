@@ -200,7 +200,6 @@ namespace QuestTree.UI
         private Image _progressFillImage;
         private GameObject _kappaBadge;
         private GameObject _collectorBadge;
-        private HoverTooltipArea _tooltip;
 
         /// <summary>Why this node survived the current search, or null when it matched on
         /// its own name and needs no explaining. Set by the renderer, which already knows
@@ -379,7 +378,6 @@ namespace QuestTree.UI
             view._traderStripe = stripeImage;
 
             // The game's own tooltip, on hover. Text is set per Bind.
-            view._tooltip = GameStyle.AddTooltip(go, "");
 
             return view;
         }
@@ -907,35 +905,6 @@ namespace QuestTree.UI
             // empty or full, which the count already says.
             ShowProgress(status == ENodeStatus.Active && total > 0, total > 0 ? (float)done / total : 0f);
 
-            var objectiveText = "";
-            var firstObjective = Node.NecessaryObjectives.FirstOrDefault();
-            if (firstObjective != null) objectiveText = GameStyle.Safe(firstObjective.Text);
-
-            if (_tooltip != null)
-            {
-                // The same facts the box shows, at a size that can be read - so a zoomed-out tree
-                // still answers "what is this one" on hover without opening the detail.
-                // The box dropped the objective preview and the map for the meta row, so the
-                // hover is now the only place they survive on the tree. Worth saying: that is the
-                // trade the two-row box makes, and this is the half that pays it back.
-                var line = string.Join("  ·  ", parts);
-                if (!string.IsNullOrEmpty(Node.LocationId) && Node.LocationId != "any")
-                    line += $"  ·  {GameStyle.Safe(Node.LocationId)}";
-                if (!string.IsNullOrEmpty(reason)) line += $"\n{reason}";
-                if (Node.IsKappaRequired) line += "  ·  Kappa";
-                if (Node.IsCollectorPrerequisite) line += "  ·  unlocks Collector";
-                var body = string.IsNullOrEmpty(objectiveText) ? "" : "\n" + objectiveText;
-                // Why it matched the search, when that is not its own name. A box titled
-                // "Debut" matching "PL-15" explains nothing on its own, and there is no room in
-                // the box - so it explains itself on hover, without leaving the tree.
-                var why = string.IsNullOrEmpty(SearchReason)
-                    ? ""
-                    : $"\n<color=#{GameStyle.WarningHex}>matched on {GameStyle.Safe(SearchReason)}</color>";
-
-                _tooltip.SetMessageText(
-                    $"<b>{GameStyle.Safe(Node.Name)}</b>\n{NameFor(Node.Status)}  ·  {line}{body}{why}",
-                    rawText: true);
-            }
         }
 
         /// <summary>

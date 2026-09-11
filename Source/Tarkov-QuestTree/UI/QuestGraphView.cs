@@ -178,6 +178,18 @@ namespace QuestTree.UI
         private TreeOverview _overview;
         private readonly List<TreeOverview.Band> _bands = new List<TreeOverview.Band>();
 
+        /// <summary>What a box says on hover, without a click. Drawn outside the scrolling content
+        /// so it holds a constant size and is never clipped by the viewport mask.</summary>
+        private QuestHoverCard _hoverCard;
+
+        private RectTransform _overlayRoot;
+
+        /// <summary>The box the pointer is resting on and when it arrived, so the card can wait a
+        /// moment before appearing. Sweeping across a dense tree would otherwise strobe a card per
+        /// box.</summary>
+        private QuestNode _hoverCandidate;
+        private float _hoverSince;
+
         /// <summary>The middle of everything laid out, so the overview's cards sit over the tree and
         /// pan with it rather than being pinned to a corner of a canvas half a million pixels
         /// tall.</summary>
@@ -279,6 +291,11 @@ namespace QuestTree.UI
             _content.anchoredPosition = new Vector2(40f, -40f);
 
             viewportGo.AddComponent<PanZoomHandler>().Init(_content, MinZoom, MaxZoom, ZoomSpeed);
+
+            // The card is parented to the ROOT rather than the viewport: the viewport carries a
+            // RectMask2D, which would clip a card opened near an edge exactly when it most needs to
+            // flip inwards instead.
+            _overlayRoot = root;
         }
 
         /// <summary>Swapped out for the aux (Kappa/Settings) surface, which occupies the same
@@ -333,6 +350,8 @@ namespace QuestTree.UI
         /// </summary>
         public void Tick()
         {
+            TickHoverCard();
+
             if (_content == null || !_content.gameObject.activeInHierarchy) return;
 
             if (_focusRetryFrames > 0 && TickPendingFocus()) return;
@@ -551,6 +570,7 @@ namespace QuestTree.UI
         {
             _bands.Clear();
             _overview?.Clear();
+            _hoverCard?.Hide();
 
             var byTrader = new Dictionary<string, TreeOverview.Band>(StringComparer.OrdinalIgnoreCase);
             var edges = new Dictionary<string, Vector4>(StringComparer.OrdinalIgnoreCase);
@@ -834,6 +854,48 @@ namespace QuestTree.UI
             _highlighted.Clear();
         }
 
+        /// <summary>Shows the hover card once the pointer has rested on a box for long enough.
+        ///
+        /// Here rather than in the hover callback because the wait needs a clock, and this class is
+        /// not a MonoBehaviour - Tick is already called every frame by the panel, so it is the frame
+        /// this can count on.
+        ///
+        /// Suppressed while a mouse button is down: dragging the tree sweeps the pointer across
+        /// dozens of boxes, and a card appearing mid-drag is both wrong and in the way.</summary>
+        private void TickHoverCard()
+        {
+            if (_hoverCandidate == null) return;
+            if (ModSettings.Ready && !ModSettings.Tooltips.Value) return;
+
+            if (Input.GetMouseButton(0) || Input.GetMouseButton(1))
+            {
+                _hoverCard?.Hide();
+                return;
+            }
+
+            if (_hoverCard != null && _hoverCard.Visible) return;
+            if (Time.unscaledTime - _hoverSince < QuestHoverCard.Delay) return;
+            if (_overlayRoot == null) return;
+
+            _hoverCard ??= new QuestHoverCard(_overlayRoot);
+
+            ProfilePayloadDto profile = null;
+
+            try
+            {
+                profile = QuestDataClient.GetProfile();
+            }
+            catch
+            {
+                // The card degrades to name, trader and objectives without counters rather than
+                // not appearing at all.
+            }
+
+            var reason = _views.TryGetValue(_hoverCandidate, out var view) ? view.SearchReason : null;
+
+            _hoverCard.Show(_hoverCandidate, profile, _graph, reason, Input.mousePosition);
+        }
+
         /// <summary>Whether the tree should be showing trader bands rather than quests.
         ///
         /// Two thresholds rather than one: crossing back out needs slightly more zoom than falling
@@ -1103,6 +1165,11 @@ namespace QuestTree.UI
             _highlighted.Add(node);
             _hoveredNode = node;
 
+            // The card is not shown here - Tick decides, once the pointer has rested. This only
+            // records that it could be.
+            _hoverCandidate = node;
+            _hoverSince = Time.unscaledTime;
+
             foreach (var prerequisiteId in node.PrerequisiteIds)
             {
                 if (_graph.NodesById.TryGetValue(prerequisiteId, out var prerequisite))
@@ -1199,6 +1266,8 @@ namespace QuestTree.UI
             if (_highlighted.Count == 0) return;
             _highlighted.Clear();
             _hoveredNode = null;
+            _hoverCandidate = null;
+            _hoverCard?.Hide();
 
             foreach (var view in _views.Values)
                 view.SetDimmed(false);
