@@ -82,6 +82,13 @@ namespace QuestTree.QuestGraph
                 }
             }
 
+            // The search haystack, flattened once per graph now that unlocks and trader names
+            // are both resolved - both are searchable and neither exists at node construction.
+            // Doing this here rather than per keystroke is what lets the search box look at fifteen
+            // fields without stuttering across 830 quests.
+            foreach (var node in _byId.Values)
+                node.BuildSearchText(TraderNames.TryGetValue(node.TraderId, out var trader) ? trader : null);
+
             var depths = ComputeDepths(_byId);
             foreach (var node in _byId.Values)
                 node.Depth = depths[node.Id];

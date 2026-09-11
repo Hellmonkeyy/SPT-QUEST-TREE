@@ -43,6 +43,7 @@ namespace QuestTree.UI
         private readonly Dictionary<string, Image> _viewButtonBackgrounds = new();
 
         private string _searchFilter = "";
+        private string _searchNeedle = "";
 
         /// <summary>Toggles the Settings tab on and off - supplied by the panel, which owns tab
         /// selection.</summary>
@@ -144,6 +145,10 @@ namespace QuestTree.UI
             _searchField.onValueChanged.AddListener(value =>
             {
                 _searchFilter = value ?? "";
+
+                // Lowercased here, once per keystroke, rather than once per node per keystroke.
+                // The haystack on each node is already lowercase, so the comparison can be ordinal.
+                _searchNeedle = _searchFilter.Trim().ToLowerInvariant();
 
                 // The Kappa and Settings tabs ignore the search box entirely, and rebuilding them
                 // here used to re-fetch the Kappa payload on EVERY keystroke - a blocking request
@@ -402,17 +407,31 @@ namespace QuestTree.UI
             }
         }
 
-        /// <summary>Whether a node survives the current search box contents. Matched against the
-        /// quest name and its trader, so "prapor" narrows to one trader's chain just as a quest
-        /// name does.</summary>
+        /// <summary>Whether a node survives the current search box contents.
+        ///
+        /// Matched against everything the quest can be found by - its name, its trader, the items
+        /// it rewards, the trader offers it unlocks, the items it wants you to bring, and the maps
+        /// it happens on - against a haystack the graph flattened once, so this is ONE ordinal
+        /// IndexOf per node rather than fifteen comparisons. That is cheaper than the two it
+        /// replaced, not more expensive, which is what makes searching fifteen fields affordable at
+        /// all.
+        ///
+        /// The needle is lowercased once when the box changes, never per node: doing it here would
+        /// allocate a fresh string for each of 830 nodes on every keystroke, which is exactly the
+        /// stutter this design exists to avoid.</summary>
         public bool MatchesSearch(QuestNode node)
         {
-            var search = _searchFilter.Trim();
-            if (search.Length == 0) return true;
+            if (_searchNeedle.Length == 0) return true;
+            if (node == null) return false;
 
-            return node.Name.IndexOf(search, StringComparison.OrdinalIgnoreCase) >= 0
-                   || (node.TraderName?.IndexOf(search, StringComparison.OrdinalIgnoreCase) ?? -1) >= 0;
+            // Ordinal, not the bare IndexOf(string) overload: that one is culture-sensitive, slower
+            // than this, and on some runtimes ignores zero-weight characters and matches things
+            // nobody typed.
+            return node.SearchText.IndexOf(_searchNeedle, StringComparison.Ordinal) >= 0;
         }
+
+        /// <summary>The trimmed, lowercased search text - the needle every node is tested against.</summary>
+        public string SearchNeedle => _searchNeedle;
 
         /// <summary>Reports how much of the tab the current filters and search are showing. Since
         /// virtualization removed the render cap this is a plain count rather than a truncation

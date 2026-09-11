@@ -112,6 +112,12 @@ namespace QuestTree.UI
         private GameObject _collectorBadge;
         private HoverTooltipArea _tooltip;
 
+        /// <summary>Why this node survived the current search, or null when it matched on
+        /// its own name and needs no explaining. Set by the renderer, which already knows
+        /// the needle - computed only for nodes that already matched, which is a handful,
+        /// so it can afford to walk the fields properly.</summary>
+        public string SearchReason { get; set; }
+
         /// <summary>Dims the whole node in one operation when another quest's chain is highlighted.
         /// A CanvasGroup is one component and one float, versus recolouring every child graphic.</summary>
         private CanvasGroup _canvasGroup;
@@ -470,7 +476,16 @@ namespace QuestTree.UI
                 if (Node.IsKappaRequired) line += "  ·  Kappa";
                 if (Node.IsCollectorPrerequisite) line += "  ·  unlocks Collector";
                 var body = string.IsNullOrEmpty(objectiveText) ? "" : "\n" + objectiveText;
-                _tooltip.SetMessageText($"<b>{GameStyle.Safe(Node.Name)}</b>\n{NameFor(Node.Status)}  ·  {line}{body}", rawText: true);
+                // Why it matched the search, when that is not its own name. A box titled
+                // "Debut" matching "PL-15" explains nothing on its own, and there is no room in
+                // the box - so it explains itself on hover, without leaving the tree.
+                var why = string.IsNullOrEmpty(SearchReason)
+                    ? ""
+                    : $"\n<color=#{GameStyle.WarningHex}>matched on {GameStyle.Safe(SearchReason)}</color>";
+
+                _tooltip.SetMessageText(
+                    $"<b>{GameStyle.Safe(Node.Name)}</b>\n{NameFor(Node.Status)}  ·  {line}{body}{why}",
+                    rawText: true);
             }
         }
 

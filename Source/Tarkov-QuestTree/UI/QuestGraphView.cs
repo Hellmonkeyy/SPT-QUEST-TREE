@@ -441,6 +441,12 @@ namespace QuestTree.UI
 
                 var view = AcquireNodeView();
                 ((RectTransform)view.transform).anchoredPosition = _layout[node];
+
+                // Only for what is actually on screen and only while searching, so this walks a
+                // handful of nodes rather than all 830 - the filtering above is the per-node hot
+                // path, and this is not part of it.
+                view.SearchReason = node.MatchReason(_toolbar.SearchNeedle);
+
                 view.Bind(node, _onNodeClicked, HighlightChain, _ => ClearHighlight());
                 view.SetDetailLevel(_detailLevel);
                 view.SetOutlineUnit(outlineUnit);

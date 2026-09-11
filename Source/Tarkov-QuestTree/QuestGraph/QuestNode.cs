@@ -115,6 +115,83 @@ namespace QuestTree.QuestGraph
         /// <summary>What a quest's Location field says when it declines to name a map.</summary>
         public const string AnyLocation = "any";
 
+        /// <summary>Everything this quest can be found by, lowercased and joined, built once per
+        /// graph.
+        ///
+        /// The search box runs over every node on every keystroke, so what it does per node has to
+        /// be ONE comparison rather than fifteen. Rebuilt whenever the graph is - which now includes
+        /// after a zone harvest, because the derived locations in here move with it.
+        ///
+        /// Status is deliberately not in here: it changes as you play, and it is what the filters
+        /// are for.</summary>
+        public string SearchText { get; private set; } = "";
+
+        /// <summary>Fills the search haystack. Called by the builder once the node's unlocks and
+        /// trader name are resolved, since both are searchable and neither exists at
+        /// construction.</summary>
+        public void BuildSearchText(string traderName)
+        {
+            var parts = new List<string> { Name, traderName, LocationId };
+
+            foreach (var derived in DerivedLocations) parts.Add(derived.Name);
+            foreach (var reward in Rewards) parts.Add(reward?.Name);
+            foreach (var unlock in Unlocks) parts.Add(unlock?.Name);
+
+            foreach (var objective in NecessaryObjectives)
+            {
+                if (objective?.TargetItemNames == null) continue;
+                foreach (var item in objective.TargetItemNames) parts.Add(item);
+            }
+
+            var builder = new System.Text.StringBuilder();
+
+            foreach (var part in parts)
+            {
+                if (string.IsNullOrEmpty(part)) continue;
+                if (builder.Length > 0) builder.Append('\n');
+                builder.Append(part.ToLowerInvariant());
+            }
+
+            SearchText = builder.ToString();
+        }
+
+        /// <summary>Why this node matched, computed only for nodes that ALREADY matched - a handful
+        /// - so it can afford to walk the fields properly and name both the field and the value.
+        ///
+        /// A box titled "Debut" matching a search for "PL-15" is baffling with no explanation, and
+        /// there is no room in the box for one.</summary>
+        public string MatchReason(string needle)
+        {
+            if (string.IsNullOrEmpty(needle)) return null;
+
+            if (Contains(Name, needle)) return null;   // matched on its own name: self-evident
+
+            foreach (var reward in Rewards)
+                if (Contains(reward?.Name, needle)) return $"reward: {reward.Name}";
+
+            foreach (var unlock in Unlocks)
+                if (Contains(unlock?.Name, needle)) return $"unlocks: {unlock.Name}";
+
+            foreach (var objective in NecessaryObjectives)
+            {
+                if (objective?.TargetItemNames == null) continue;
+
+                foreach (var item in objective.TargetItemNames)
+                    if (Contains(item, needle)) return $"needs: {item}";
+            }
+
+            if (Contains(LocationId, needle)) return $"map: {LocationId}";
+
+            foreach (var derived in DerivedLocations)
+                if (Contains(derived.Name, needle)) return $"map: {derived.Name}";
+
+            return "trader";
+        }
+
+        private static bool Contains(string haystack, string needle) =>
+            !string.IsNullOrEmpty(haystack) &&
+            haystack.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0;
+
         public QuestNode(QuestDto dto)
         {
             Dto = dto;
