@@ -535,6 +535,22 @@ namespace QuestTree.UI
         /// <summary>Turns one payload reward into a display line. Trader-scoped rewards are named
         /// from the live session's trader list rather than from the payload, so a modded trader
         /// reads correctly without the server mod having to know about it.</summary>
+        /// <summary>Whether a name is really a raw id that failed to resolve.
+        ///
+        /// ResolveRewardName falls back to the reward's Target when the locale has no entry for the
+        /// item, and for an assortment unlock that Target is the assort's own id - a 24-character
+        /// hex string. Printing "Aishi starts selling 5c0e531d86f7747fa23f4d42" is worse than not
+        /// naming it at all, so an unresolved name is treated as no name.</summary>
+        private static bool LooksLikeId(string text)
+        {
+            if (string.IsNullOrEmpty(text) || text.Length != 24) return false;
+
+            foreach (var c in text)
+                if (!Uri.IsHexDigit(c)) return false;
+
+            return true;
+        }
+
         internal static string FormatReward(RewardDto reward, QuestGraphBuilder graph)
         {
             if (reward == null) return null;
@@ -568,7 +584,19 @@ namespace QuestTree.UI
                     return string.IsNullOrEmpty(reward.Name) ? null : $"{reward.Name} +{reward.Value:N0}";
 
                 case "AssortmentUnlock":
-                    return string.IsNullOrEmpty(trader) ? "Unlocks a new trader offer" : $"Unlocks a new {trader} offer";
+                    // The item, when we know it. The server already resolves an assortment unlock's
+                    // item name into Name - ResolveRewardName reads reward.Items[0] for every reward
+                    // type - and this branch was the one place that ignored it, so two quests each
+                    // unlocking something different from the same trader both read "Unlocks a new
+                    // Aishi offer" and neither said what.
+                    var offer = LooksLikeId(reward.Name) ? null : reward.Name;
+
+                    if (string.IsNullOrEmpty(offer))
+                        return string.IsNullOrEmpty(trader) ? "Unlocks a new trader offer" : $"Unlocks a new {trader} offer";
+
+                    return string.IsNullOrEmpty(trader)
+                        ? $"Unlocks {offer} at a trader"
+                        : $"{trader} starts selling {offer}";
 
                 default:
                     // Unknown/rare reward types (StashRows, Achievement, ...) still say something
