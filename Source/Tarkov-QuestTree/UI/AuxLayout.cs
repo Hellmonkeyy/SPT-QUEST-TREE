@@ -373,6 +373,57 @@ namespace QuestTree.UI
             y += height + 2f;
         }
 
+        /// <summary>Wrapped text you can click.
+        ///
+        /// AddClickableRow is a single ellipsised line, which is right for a quest name and wrong
+        /// for an objective - "Hand over the found in raid item: Corrugated hose 0/2" is a sentence,
+        /// and cutting it at the panel's edge would hide the count that makes it worth reading.
+        ///
+        /// So the text wraps exactly as AddWrapped's does, and a transparent Image is laid behind
+        /// the finished block to catch the pointer. Behind rather than around: a TextMeshProUGUI has
+        /// no raycast target of its own, so without it there is nothing to click, and Unity raycasts
+        /// a zero-alpha Graphic perfectly well.</summary>
+        public static void AddClickableWrapped(
+            RectTransform parent, string text, float x, ref float y, float width,
+            System.Action onClick, int fontSize = 12)
+        {
+            if (string.IsNullOrEmpty(text) || onClick == null)
+            {
+                AddWrapped(parent, text, x, ref y, width, fontSize);
+                return;
+            }
+
+            var top = y;
+
+            var hitGo = new GameObject("ClickWrapped", typeof(RectTransform), typeof(Image), typeof(Button));
+            var hit = (RectTransform)hitGo.transform;
+            hit.SetParent(parent, worldPositionStays: false);
+            hit.anchorMin = hit.anchorMax = new Vector2(0f, 1f);
+            hit.pivot = new Vector2(0f, 1f);
+            hit.anchoredPosition = new Vector2(x, -top);
+
+            var background = hitGo.GetComponent<Image>();
+            background.color = new Color(1f, 1f, 1f, 0f);
+
+            var button = hitGo.GetComponent<Button>();
+            button.transition = Selectable.Transition.None;
+            button.onClick.AddListener(() =>
+            {
+                GameStyle.PlaySound(EUISoundType.ButtonClick);
+                onClick();
+            });
+
+            GameStyle.AddHoverFeedback(hitGo, background);
+
+            // The text is added AFTER, so it is the later sibling and draws over the hit area
+            // without any reordering.
+            AddWrapped(parent, text, x, ref y, width, fontSize);
+
+            // Sized to whatever the text turned out to need, which AddWrapped only knows once it
+            // has measured it.
+            hit.sizeDelta = new Vector2(width, Mathf.Max(16f, y - top - 2f));
+        }
+
         /// <summary>
         /// One clickable line. Built by hand rather than as text alone because a bare TextMeshProUGUI
         /// has no raycast target at all; the Image is what makes the row hit-testable. It is fully

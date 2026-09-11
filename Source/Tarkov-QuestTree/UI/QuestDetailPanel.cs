@@ -401,7 +401,27 @@ namespace QuestTree.UI
 
                 foreach (var objective in objectives)
                 {
-                    AuxLayout.AddWrapped(_content, QuestSummary.FormatObjective(objective, profile), _left, ref y, width);
+                    var text = QuestSummary.FormatObjective(objective, profile);
+
+                    // An objective that names an item opens that item. The template is already on
+                    // the wire in TargetItems - the same field the "what do I need to bring" list is
+                    // built from - so this needed nothing new, only a row that could be clicked.
+                    //
+                    // The FIRST target, where there are several. An objective asking for any of a
+                    // set has no single item to show, and picking one arbitrarily is still better
+                    // than picking none: it opens the handbook at the right kind of thing.
+                    var template = objective.TargetItems?.FirstOrDefault(t => !string.IsNullOrEmpty(t));
+
+                    if (!string.IsNullOrEmpty(template))
+                    {
+                        var captured = template;
+                        AuxLayout.AddClickableWrapped(_content, text, _left, ref y, width,
+                            () => GameStyle.InspectItem(captured));
+                    }
+                    else
+                    {
+                        AuxLayout.AddWrapped(_content, text, _left, ref y, width);
+                    }
 
                     if (QuestSummary.TryProgress(objective, profile, out var current, out var target) && target > 0)
                         AuxLayout.AddProgressBar(_content, (float)current / target, _left, ref y, width, QuestNodeView.ColorFor(ENodeStatus.Completed));
@@ -415,7 +435,7 @@ namespace QuestTree.UI
                 {
                     y += 2f;
                     AuxLayout.AddClickableRow(_content, $"<color=#{ColorUtility.ToHtmlStringRGB(GameStyle.AccentColor)}>◎  Show on the map</color>",
-                        0f, ref y, width, false, () => _showOnMap(node), 22f);
+                        _left, ref y, width, false, () => _showOnMap(node), 22f);
                 }
 
                 y += 8f;
