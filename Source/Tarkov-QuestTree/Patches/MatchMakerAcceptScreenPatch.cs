@@ -1,4 +1,6 @@
 using System;
+using System.Collections;
+using System.Collections.Generic;
 using System.Reflection;
 using EFT;
 using EFT.UI.Matchmaker;
@@ -29,9 +31,13 @@ namespace QuestTree.Patches
     /// </summary>
     internal class MatchMakerAcceptScreenPatch : ModulePatch
     {
+        private const string ContainerName = "QuestTreeRaidPanel";
         private const string ButtonName = "QuestTreeRaidButton";
         private const string ButtonLabel = "QUEST TRACKER";
 
+        /// <summary>The button's MINIMUM size. It grows to fit its label, which the readiness cue
+        /// makes much longer than "QUEST TRACKER" - the three-state text runs to roughly 250px, and
+        /// a fixed 150 clipped exactly the state the cue exists to deliver.</summary>
         private static readonly Vector2 ButtonSize = new(150f, 26f);
 
         /// <summary>How far above the location row the button sits, and how far in from the left of
@@ -67,6 +73,7 @@ namespace QuestTree.Patches
         }
 
         private static bool _warned;
+        private static bool _barWarned;
 
         private static void AddButton(MatchMakerAcceptScreen screen)
         {
@@ -75,39 +82,232 @@ namespace QuestTree.Patches
             var root = screen.transform as RectTransform;
             if (root == null) return;
 
-            // Show runs on every entry to this screen, and the screen object is reused - so without
-            // this the buttons stack up one per raid. Scoped to this screen's own children rather
-            // than a scene-wide search, which would find the taskbar's button too.
-            if (root.Find(ButtonName) != null) return;
+            // Find-or-create, never an early return.
+            //
+            // Show runs on every entry to this screen and the screen object is reused, so something
+            // has to stop the buttons stacking up one per raid - but returning here meant that on
+            // every re-entry the position was never recomputed and, once the readiness cue lands,
+            // the verdict was never refetched. Backing out and coming back would show the verdict
+            // from before you moved the item, looking entirely correct while being stale.
+            var container = root.Find(ContainerName) as RectTransform ?? CreateContainer(root);
 
-            var button = GameStyle.CreateButton(root, ButtonLabel, TrackerAccess.Toggle);
-            button.name = ButtonName;
-            button.anchorMin = button.anchorMax = Vector2.zero;
-            button.pivot = Vector2.zero;
-            button.sizeDelta = ButtonSize;
-            button.anchoredPosition = PositionAbove(root, screen._locationName?.rectTransform);
+            var button = container.Find(ButtonName) as RectTransform;
+            if (button == null)
+            {
+                button = GameStyle.CreateButton(container, ButtonLabel, TrackerAccess.Toggle);
+                button.name = ButtonName;
+                button.anchorMin = button.anchorMax = Vector2.zero;
+                button.pivot = Vector2.zero;
+                button.anchoredPosition = Vector2.zero;
 
-            GameStyle.AddTooltip(button.gameObject, "Opens the quest tracker on the map you are about to load");
+                GameStyle.AddTooltip(
+                    button.gameObject, "Opens the quest tracker on the map you are about to load");
+            }
+
+            SizeToLabel(button);
+
+            // Placed now so it is never invisible, then placed again one frame later.
+            //
+            // GetWorldCorners at Show-postfix time is not trustworthy: Unity rebuilds layout at end
+            // of frame, so a rect driven by a layout group still holds last frame's values - or, on
+            // a screen's first show, its authored prefab values. Whether these rects are under a
+            // layout group is prefab data nothing can read, so the answer is to measure twice.
+            Place(root, screen, container);
+
+            // Hosted on the SCREEN, the way MenuTaskBarPatch hosts its own deferred placement. The
+            // coroutine then dies with the screen, which is the correct behaviour - Show refetches
+            // on the next entry anyway - and nothing static has to be cleaned up. StartCoroutine
+            // throws on a disabled behaviour, so it stays inside the caller's try.
+            if (screen.isActiveAndEnabled) screen.StartCoroutine(PlaceNextFrame(root, screen, container));
         }
 
-        /// <summary>Just above the location row, aligned to its left edge - measured through world
-        /// space, since the row's own anchors and its parent's layout are not this mod's to assume.
-        /// Falls back to a fixed corner position if the row is missing, which is the case a game
-        /// update would produce: a button in a slightly odd place still works.</summary>
-        private static Vector2 PositionAbove(RectTransform root, RectTransform row)
+        /// <summary>One container for the button and, once the readiness cue lands, its rows.
+        ///
+        /// Named and reused, because root.Find only ever found the button: rows parented to the root
+        /// would stack up one set per raid, which is the exact bug the idempotency guard exists to
+        /// stop, recreated one level down.</summary>
+        private static RectTransform CreateContainer(RectTransform root)
         {
-            if (row == null) return FallbackPosition;
+            var go = new GameObject(ContainerName, typeof(RectTransform));
+            var rect = (RectTransform)go.transform;
+
+            rect.SetParent(root, worldPositionStays: false);
+            rect.anchorMin = rect.anchorMax = Vector2.zero;
+            rect.pivot = Vector2.zero;
+            rect.sizeDelta = ButtonSize;
+
+            return rect;
+        }
+
+        /// <summary>Grows the button to its label, never below the minimum.
+        ///
+        /// Measured through GameStyle, which floors TMP's answer at a character estimate - an
+        /// under-measured button clips its own text, which is the failure this is here to prevent.</summary>
+        private static void SizeToLabel(RectTransform button)
+        {
+            var label = button.GetComponentInChildren<TMPro.TMP_Text>();
+            if (label == null)
+            {
+                button.sizeDelta = ButtonSize;
+                return;
+            }
+
+            var width = GameStyle.MeasureWidth(label, label.text) + 24f;
+            button.sizeDelta = new Vector2(Mathf.Max(ButtonSize.x, width), ButtonSize.y);
+        }
+
+        /// <summary>Places again after a layout pass has run. The try stays INSIDE the loop and never
+        /// spans the yield: a throw after a yield escapes the postfix's catch entirely and surfaces
+        /// as an unhandled Unity error on the matchmaker screen.</summary>
+        private static IEnumerator PlaceNextFrame(
+            RectTransform root, MatchMakerAcceptScreen screen, RectTransform container)
+        {
+            yield return null;
+
+            // The screen can be torn down between frames, and a destroyed Unity object compares
+            // equal to null rather than throwing on use - so this is a real check, not a formality.
+            if (root == null || container == null || screen == null) yield break;
+
+            try
+            {
+                Place(root, screen, container);
+            }
+            catch (Exception ex)
+            {
+                if (_warned) yield break;
+                _warned = true;
+                Plugin.LogSource?.LogWarning($"QuestTree: could not place the pre-raid button ({ex.Message}).");
+            }
+        }
+
+        private static void Place(RectTransform root, MatchMakerAcceptScreen screen, RectTransform container)
+        {
+            container.anchoredPosition = PositionAbove(root, LocationBarOf(screen), screen);
+        }
+
+        /// <summary>The bar the button sits above: the lowest common ancestor of the location name
+        /// and the conditions panel, which is by construction the row containing both, whatever the
+        /// prefab calls it.
+        ///
+        /// Derived at runtime rather than assumed. Which object is "the panel" is Unity scene data
+        /// that decompiling cannot show, so naming a parent would be a guess - and the first version
+        /// anchored to _locationName alone, whose rect top sits INSIDE the panel below the CURRENT
+        /// LOCATION caption and whose left edge runs wider than its visible text. That is precisely
+        /// what put the button over the caption and off the left side.
+        ///
+        /// Returns null when the answer is not plausible, which the caller reads as "measure the two
+        /// rects directly instead".</summary>
+        private static RectTransform LocationBarOf(MatchMakerAcceptScreen screen)
+        {
+            var name = screen._locationName != null ? screen._locationName.transform : null;
+            var conditions = screen._conditions != null ? screen._conditions.transform : null;
+
+            if (name == null) return null;
+            if (conditions == null) return Plausible(name.parent as RectTransform, screen);
+
+            var ancestors = new HashSet<Transform>();
+            for (var t = name; t != null; t = t.parent) ancestors.Add(t);
+
+            for (var t = conditions; t != null; t = t.parent)
+                if (ancestors.Contains(t)) return Plausible(t as RectTransform, screen);
+
+            return Plausible(name.parent as RectTransform, screen);
+        }
+
+        /// <summary>Rejects a derived bar that cannot be the location row.
+        ///
+        /// The lowest common ancestor of two SIBLING panels is the screen root, and feeding that to
+        /// PositionAbove gives y = root.height + 12 - twelve pixels above the top edge, on a button
+        /// pivoted at the root's bottom-left. The button vanishes, nothing throws, and the log says
+        /// nothing. That is an unbounded failure traded for a bounded one, in a method whose whole
+        /// argument is that guessing at prefab structure is how this went wrong the first time.
+        ///
+        /// Same shape as GameStyle.MeasureWidth's sanity band: believe a derived answer only inside a
+        /// plausible range, say so once when rejecting it, and degrade to something usable.</summary>
+        private static RectTransform Plausible(RectTransform bar, MatchMakerAcceptScreen screen)
+        {
+            if (bar == null) return null;
+
+            var root = screen.transform as RectTransform;
+            if (root == null) return bar;
+
+            var reason =
+                bar == root ? "it is the screen root"
+                : bar.GetComponent<Canvas>() != null ? "it carries a Canvas"
+                : bar.rect.height >= root.rect.height * 0.9f ? "it is as tall as the screen"
+                : null;
+
+            if (reason == null) return bar;
+
+            if (!_barWarned)
+            {
+                _barWarned = true;
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: the pre-raid location bar could not be identified ({reason}), so the " +
+                    "button is placed against the location text directly. Position may be slightly off.");
+            }
+
+            return null;
+        }
+
+        /// <summary>Just above the location bar, aligned to its left edge, clamped into the screen.
+        ///
+        /// Returns an anchoredPosition for a container anchored and pivoted at the root's
+        /// bottom-left. With no trustworthy bar it falls back to the union of the two rects actually
+        /// in hand, which needs no ancestor at all, and then to a fixed corner.</summary>
+        private static Vector2 PositionAbove(
+            RectTransform root, RectTransform bar, MatchMakerAcceptScreen screen)
+        {
+            var target = TopLeftOf(root, bar) ?? UnionTopLeft(root, screen);
+            if (target == null) return Clamp(root, FallbackPosition);
+
+            return Clamp(root, new Vector2(target.Value.x, target.Value.y + GapAboveRow));
+        }
+
+        /// <summary>A rect's top-left corner, in the coordinates an anchor of (0,0) measures from.
+        /// Through world space, so neither the rect's own anchors nor its parent's layout have to be
+        /// assumed.</summary>
+        private static Vector2? TopLeftOf(RectTransform root, RectTransform rect)
+        {
+            if (rect == null) return null;
+
+            // A rect a layout pass has not reached yet reports nothing usable. QuestGraphView guards
+            // the same way before trusting a viewport width.
+            if (rect.rect.width <= 1f && rect.rect.height <= 1f) return null;
 
             var corners = new Vector3[4];
-            row.GetWorldCorners(corners);
+            rect.GetWorldCorners(corners);
 
-            // corners[1] is the top-left. Into the root's local space, then expressed from the
-            // root's bottom-left corner, which is where an anchor of (0, 0) measures from.
+            // corners[1] is the top-left.
             var local = root.InverseTransformPoint(corners[1]);
+            return new Vector2(local.x - root.rect.xMin, local.y - root.rect.yMin);
+        }
 
+        /// <summary>The top-left of the two rects we have typed references to, taken together. No
+        /// ancestor involved, so it survives whatever the prefab does with parenting.</summary>
+        private static Vector2? UnionTopLeft(RectTransform root, MatchMakerAcceptScreen screen)
+        {
+            var name = TopLeftOf(root, screen._locationName != null ? screen._locationName.rectTransform : null);
+            var conditions = TopLeftOf(root, screen._conditions != null ? screen._conditions.transform as RectTransform : null);
+
+            if (name == null) return conditions;
+            if (conditions == null) return name;
+
+            // Leftmost and highest of the two - the corner of the box containing both.
             return new Vector2(
-                local.x - root.rect.xMin,
-                local.y - root.rect.yMin + GapAboveRow);
+                Mathf.Min(name.Value.x, conditions.Value.x),
+                Mathf.Max(name.Value.y, conditions.Value.y));
+        }
+
+        /// <summary>Keeps the result inside the screen. Two lines, and they turn "the derivation was
+        /// nonsense" into a slightly odd position rather than an invisible button - which is the
+        /// difference between a bug someone can report and one nobody can see.</summary>
+        private static Vector2 Clamp(RectTransform root, Vector2 position)
+        {
+            var maxX = Mathf.Max(0f, root.rect.width - ButtonSize.x);
+            var maxY = Mathf.Max(0f, root.rect.height - ButtonSize.y);
+
+            return new Vector2(Mathf.Clamp(position.x, 0f, maxX), Mathf.Clamp(position.y, 0f, maxY));
         }
     }
 }
