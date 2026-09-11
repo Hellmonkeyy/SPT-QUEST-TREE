@@ -392,6 +392,47 @@ namespace QuestTree.UI
                 y += 8f;
             }
 
+            // Build - what a Gunsmith quest wants assembled. Ahead of Objectives because for those
+            // quests it IS the objective: "Hand over the modified weapon" tells you nothing on its
+            // own, and the thresholds under it are the whole task.
+            var buildLines = QuestSummary.WeaponBuildLines(node);
+
+            if (buildLines.Count > 0)
+            {
+                AuxLayout.AddSectionHeader(_content, ref y, "Build", _left, width);
+
+                // The weapon itself is the first line and is an item you can look at.
+                var weaponTemplate = node.WeaponBuild?.WeaponTemplate;
+
+                for (var i = 0; i < buildLines.Count; i++)
+                {
+                    if (i == 0 && !string.IsNullOrEmpty(weaponTemplate))
+                    {
+                        var captured = weaponTemplate;
+                        AuxLayout.AddClickableWrapped(_content, buildLines[i], _left, ref y, width,
+                            () => GameStyle.InspectItem(captured));
+                        continue;
+                    }
+
+                    AuxLayout.AddWrapped(_content, buildLines[i], _left, ref y, width);
+                }
+
+                y += 8f;
+            }
+
+            // Bring - what to have on you before the raid, and how much of it you already hold.
+            var bringLines = QuestSummary.ItemsToBringLines(node, profile);
+
+            if (bringLines.Count > 0)
+            {
+                AuxLayout.AddSectionHeader(_content, ref y, "Take with you", _left, width);
+
+                foreach (var line in bringLines)
+                    AuxLayout.AddWrapped(_content, line, _left, ref y, width);
+
+                y += 8f;
+            }
+
             // Objectives - with the live counter as a bar where the profile has one, and the way to
             // the map when the quest happens somewhere.
             var objectives = node.NecessaryObjectives.ToList();
