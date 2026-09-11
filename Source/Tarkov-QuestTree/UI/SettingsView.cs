@@ -167,7 +167,9 @@ namespace QuestTree.UI
             Stepper(column, ref y, "Title-only below zoom %", ModSettings.TitleOnlyBelowZoom, 5, 30, 80,
                 "Zoomed out past this, a box shows only its title, larger.");
             Stepper(column, ref y, "Code-only below zoom %", ModSettings.CodesBelowZoom, 5, 15, 60,
-                "Zoomed out past this, a box shows only its status bar and a short code such as GUN-3.");
+                "Zoomed out past this, a box shows only its status bar and a short code such as GUN-3. 0 is off.");
+            Stepper(column, ref y, "Trader overview below zoom %", ModSettings.OverviewBelowZoom, 5, 0, 40,
+                "Zoomed out past this, the quests are replaced by one readable card per trader. 0 is off.");
             Stepper(column, ref y, "Max visible quests", ModSettings.MaxVisibleNodes, 100, 100, 2000,
                 "Ceiling on how many quest boxes exist at once. Only reachable when zoomed right out.");
 
@@ -182,6 +184,7 @@ namespace QuestTree.UI
                 ModSettings.DrawEdges, ModSettings.FocusFrontier, ModSettings.HideUnobtainable,
                 ModSettings.HideCompleted, ModSettings.HideTraderless, ModSettings.EdgeOpacity,
                 ModSettings.HoverDimStrength, ModSettings.TitleOnlyBelowZoom, ModSettings.CodesBelowZoom,
+                ModSettings.OverviewBelowZoom,
                 ModSettings.MaxVisibleNodes, ModSettings.QuestBadges);
         }
 

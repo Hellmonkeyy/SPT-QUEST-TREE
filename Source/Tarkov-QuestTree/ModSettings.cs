@@ -57,6 +57,7 @@ namespace QuestTree
         public static ConfigEntry<bool> AbbreviateWhenZoomedOut { get; private set; }
         public static ConfigEntry<int> TitleOnlyBelowZoom { get; private set; }
         public static ConfigEntry<int> CodesBelowZoom { get; private set; }
+        public static ConfigEntry<int> OverviewBelowZoom { get; private set; }
         public static ConfigEntry<BadgeMode> QuestBadges { get; private set; }
 
         /// <summary>Read by the boxes; both true before Init has run, which is what the palette
@@ -454,6 +455,14 @@ namespace QuestTree
                     "0 keeps every box fully detailed at every zoom.",
                     new AcceptableValueRange<int>(0, 60)));
 
+            OverviewBelowZoom = config.Bind(
+                "Tree", "Trader overview below zoom", 0,
+                new ConfigDescription(
+                    "Below this zoom (percent) the quests are replaced by one card per trader, which " +
+                    "stays readable at any distance. 0 is off - the tree keeps drawing quests however " +
+                    "far out you go.",
+                    new AcceptableValueRange<int>(0, 40)));
+
             QuestBadges = config.Bind(
                 "Tree", "Quest badges", BadgeMode.Both,
                 "Which marks a quest box wears. Kappa is the canonical Kappa list; Collector is " +
@@ -531,7 +540,7 @@ namespace QuestTree
                 HideUnobtainable, HideCompleted, HideTraderless, MarkStartedOnly, MapArtworkRotation,
                 MirrorMapArtwork, ShowMapGuides, DrawEdges, FocusFrontier, CompactLayout, MaxVisibleNodes,
                 OpenOnMap, HarvestZones, EdgeOpacity, HoverDimStrength, TallTitles, AbbreviateWhenZoomedOut,
-                TitleOnlyBelowZoom, CodesBelowZoom, QuestBadges, SidebarWidth, DoNextRows, ShowItemsSection,
+                TitleOnlyBelowZoom, CodesBelowZoom, OverviewBelowZoom, QuestBadges, SidebarWidth, DoNextRows, ShowItemsSection,
                 ShowTakeWithYou, CountUnacceptedQuests, OverviewLabels, ShowTraderColours,
                 TraderColours, ShowCredits,
                 PinLabels, ColorActive, ColorAvailable, ColorCompleted, ColorLocked, ColorGated, ColorAccent, Tooltips,
@@ -563,6 +572,7 @@ namespace QuestTree
             AbbreviateWhenZoomedOut.SettingChanged += Raise;
             TitleOnlyBelowZoom.SettingChanged += Raise;
             CodesBelowZoom.SettingChanged += Raise;
+            OverviewBelowZoom.SettingChanged += Raise;
             QuestBadges.SettingChanged += Raise;
             SidebarWidth.SettingChanged += Raise;
             DoNextRows.SettingChanged += Raise;

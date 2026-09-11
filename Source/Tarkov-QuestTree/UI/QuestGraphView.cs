@@ -200,7 +200,8 @@ namespace QuestTree.UI
         ///
         /// So it is pinned clear of the floor, and only then allowed to track BarOnlyZoom. There is
         /// real travel either side of it now.</summary>
-        private float CollapseZoom => Mathf.Max(MinZoom + 0.02f, LayoutMetrics.OverviewZoom);
+        /// <summary>Zero means the overview never takes over, which is the default.</summary>
+        private float CollapseZoom => LayoutMetrics.OverviewZoom;
 
         /// <summary>Hysteresis, so the tier does not flip back and forth while the zoom sits on the
         /// threshold. Entering the overview and leaving it are different numbers on purpose.</summary>
@@ -835,8 +836,13 @@ namespace QuestTree.UI
         /// Two thresholds rather than one: crossing back out needs slightly more zoom than falling
         /// in did, so resting exactly on the boundary does not strobe between a tree and a dozen
         /// blocks.</summary>
-        private bool ShouldCollapse(float zoom) =>
-            _collapsed ? zoom < CollapseZoom * CollapseHysteresis : zoom < CollapseZoom;
+        private bool ShouldCollapse(float zoom)
+        {
+            var threshold = CollapseZoom;
+            if (threshold <= 0f) return false;
+
+            return _collapsed ? zoom < threshold * CollapseHysteresis : zoom < threshold;
+        }
 
         /// <summary>Draws the collapsed overview, and says whether it took over.</summary>
         private bool DrawOverview(float zoom)
@@ -1039,8 +1045,23 @@ namespace QuestTree.UI
                 _edgeViews.Remove(index);
             }
 
+            // Edges get a ceiling too, which they did not have.
+            //
+            // Boxes have always been capped by MaxVisibleNodes, and the cap was only reachable when
+            // zoomed right out - which is also the only place every edge in the tab is on screen at
+            // once. Each edge is three GameObjects (UILineConnector draws in segments so lines run
+            // along the column gaps), so an uncapped loop could ask for several thousand of them in
+            // a single frame, past the pool ceiling, and then destroy and rebuild the overflow on
+            // every sweep.
+            //
+            // It never bit before because the tree stopped drawing boxes long before that zoom. Now
+            // that a box keeps its detail however far out you go, that zoom is somewhere people
+            // actually sit, so the edges need the same discipline the nodes have.
+            var edgeBudget = MaxPooledEdges;
+
             for (var index = 0; index < _edgeLayout.Length; index++)
             {
+                if (_edgeViews.Count >= edgeBudget) break;
                 if (_edgeViews.ContainsKey(index)) continue;
                 if (!IsEdgeVisible(index, visible)) continue;
 

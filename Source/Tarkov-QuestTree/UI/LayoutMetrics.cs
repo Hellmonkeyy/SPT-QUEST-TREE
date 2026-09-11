@@ -98,11 +98,16 @@ namespace QuestTree.UI
 
         /// <summary>Where the tree gives up on boxes entirely and draws trader cards instead.
         ///
-        /// Its own number rather than a fraction of BarOnlyZoom, which is now usually zero: tying
-        /// them together would drag the collapse threshold to the floor with it and the tier would
-        /// never fire at all. That is the same class of mistake as deriving it from BarOnlyZoom in
-        /// the first place, which put it below the minimum zoom.</summary>
-        public static float OverviewZoom => 0.30f;
+        /// Zero by default, meaning never. The tier was built to answer "the zoomed-out tree is an
+        /// unreadable wall", and it answers it by removing the tree - which is the wrong trade for
+        /// anyone who zooms out to see SHAPE rather than to read. At that distance the structure is
+        /// the information: which chains are long, where the branches are, how much of the board is
+        /// still grey. Cards cannot show any of that.
+        ///
+        /// Kept as a setting rather than deleted, because it is genuinely the better answer if what
+        /// you want from a zoomed-out tree is to pick a trader and jump.</summary>
+        public static float OverviewZoom =>
+            ModSettings.Ready ? ModSettings.OverviewBelowZoom.Value / 100f : 0f;
 
         // --- text inside a node ---
         public static int TitleFontSize => Compact ? 12 : 15;
