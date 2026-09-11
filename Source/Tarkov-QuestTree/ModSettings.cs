@@ -71,7 +71,6 @@ namespace QuestTree
         public static ConfigEntry<int> DoNextRows { get; private set; }
         public static ConfigEntry<bool> ShowItemsSection { get; private set; }
         public static ConfigEntry<bool> ShowTakeWithYou { get; private set; }
-        public static ConfigEntry<int> OverviewLabels { get; private set; }
         public static ConfigEntry<bool> ShowTraderColours { get; private set; }
         public static ConfigEntry<string> TraderColours { get; private set; }
 
@@ -385,14 +384,6 @@ namespace QuestTree
                 "any trader from a mod - are given a colour derived from their id, so they are " +
                 "coloured and distinct without being listed here.");
 
-            OverviewLabels = config.Bind(
-                "Tree look", "Overview labels", 15,
-                new ConfigDescription(
-                    "How many quest names stay readable when you zoom out, drawn over the tree at a " +
-                    "constant size. The selected quest and its chain come first, then search matches, " +
-                    "then whatever is actionable. 0 turns them off.",
-                    new AcceptableValueRange<int>(0, 60)));
-
             MaxVisibleNodes = config.Bind(
                 "Performance", "Max visible quests", 600,
                 new ConfigDescription(
@@ -509,7 +500,7 @@ namespace QuestTree
                 MirrorMapArtwork, ShowMapGuides, DrawEdges, FocusFrontier, CompactLayout, MaxVisibleNodes,
                 OpenOnMap, HarvestZones, EdgeOpacity, HoverDimStrength, TallTitles,
                 OverviewBelowZoom, FocusRadius, QuestBadges, SidebarWidth, DoNextRows, ShowItemsSection,
-                ShowTakeWithYou, CountUnacceptedQuests, OverviewLabels, ShowTraderColours,
+                ShowTakeWithYou, CountUnacceptedQuests, ShowTraderColours,
                 TraderColours, ShowCredits,
                 PinLabels, ColorActive, ColorAvailable, ColorCompleted, ColorLocked, ColorGated, ColorAccent, Tooltips,
                 HoverSounds, RememberLastView, OpenTracker
@@ -544,7 +535,6 @@ namespace QuestTree
             DoNextRows.SettingChanged += Raise;
             ShowItemsSection.SettingChanged += Raise;
             ShowTakeWithYou.SettingChanged += Raise;
-            OverviewLabels.SettingChanged += Raise;
             ShowTraderColours.SettingChanged += Raise;
             TraderColours.SettingChanged += Raise;
             CountUnacceptedQuests.SettingChanged += Raise;
