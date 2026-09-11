@@ -70,10 +70,17 @@ namespace QuestTreeServer
         /// with 343 completions and carries just three entries at AvailableForStart, because the
         /// other ~390 available quests have no entry at all.
         /// </summary>
-        public string StatusOf(Progress progress, Quest quest, PmcData profile)
+        public string StatusOf(Progress progress, Quest? quest, PmcData? profile)
         {
+            if (quest == null) return QuestStatusEnum.Locked.ToString();
+
             if (progress.Entries.TryGetValue(quest.Id, out var entry) && entry != null)
                 return entry.Status.ToString();
+
+            // No profile means nothing can be evaluated, so the honest answer is the conservative
+            // one. This is the out-of-game request, where the Kappa checklist is still worth
+            // serving with nothing owned.
+            if (profile == null) return QuestStatusEnum.Locked.ToString();
 
             return ResolveLockReason(quest, profile, progress.Succeeded) == null
                 ? QuestStatusEnum.AvailableForStart.ToString()

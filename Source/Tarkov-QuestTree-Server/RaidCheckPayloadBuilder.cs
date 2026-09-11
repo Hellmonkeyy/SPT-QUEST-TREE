@@ -105,7 +105,7 @@ namespace QuestTreeServer
         }
 
         private void Collect(
-            Quest quest,
+            Quest? quest,
             PmcData profile,
             QuestFacts.Progress progress,
             IReadOnlyDictionary<string, IReadOnlyCollection<string>> zoneToMap,
@@ -114,7 +114,9 @@ namespace QuestTreeServer
             Dictionary<string, RaidCheckMapDto> maps,
             RaidCheckDto payload)
         {
-            var conditions = quest?.Conditions?.AvailableForFinish;
+            if (quest == null) return;
+
+            var conditions = quest.Conditions?.AvailableForFinish;
             if (conditions == null) return;
 
             // Cheap early-out before any status or locale work: 89 of the 558 vanilla quests reach
