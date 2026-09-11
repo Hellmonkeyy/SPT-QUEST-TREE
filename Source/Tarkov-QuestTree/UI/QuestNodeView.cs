@@ -121,8 +121,17 @@ namespace QuestTree.UI
             ENodeStatus.Active => "▶",      // play
             ENodeStatus.Available => "◇",   // outline diamond - "open", nothing done yet
             ENodeStatus.Gated => "▲",       // up arrow - climb to it
-            _ => "✕"                        // cross
+            _ => LockedGlyph
         };
+
+        /// <summary>The padlock when the symbol fallback can draw one, a cross otherwise.
+        ///
+        /// Resolved once. The check rasterises the glyph into a dynamic atlas as a side effect,
+        /// and this is read for every row of every list - asking each time would do that work
+        /// thousands of times over for an answer that cannot change.</summary>
+        private static string LockedGlyph => _lockedGlyph ??= GameStyle.LockGlyph("✕");
+
+        private static string _lockedGlyph;
 
         public static string NameFor(ENodeStatus status) => status switch
         {

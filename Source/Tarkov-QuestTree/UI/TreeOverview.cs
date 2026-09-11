@@ -8,7 +8,7 @@ using UnityEngine.UI;
 namespace QuestTree.UI
 {
     /// <summary>
-    /// What the tree becomes once it is too far out to read: one block per trader instead of
+    /// What the tree becomes once it is too far out to read: one card per trader instead of
     /// hundreds of boxes.
     ///
     /// The problem it solves is arithmetic rather than aesthetic. Text drawn at a constant size on
@@ -18,13 +18,26 @@ namespace QuestTree.UI
     /// repeatedly and why reserving lanes for labels would have failed too - a lane measured in tree
     /// units shrinks on screen like everything else.
     ///
-    /// So at that distance the tree stops drawing quests at all. A dozen blocks have room for real
+    /// So at that distance the tree stops drawing quests at all. A dozen cards have room for real
     /// text in a way eight hundred boxes never will, and the overview becomes something you navigate
     /// with - click a trader, land in their chains - rather than a picture of a wall.
+    ///
+    /// CARDS, NOT REGIONS. The first version drew each band as a translucent rectangle over the
+    /// bounds of that trader's own quests, on the theory that a region visibly collapsing into a
+    /// block reads better than a legend floating above the tree. That theory required a trader's
+    /// quests to occupy a region, and they do not: prerequisite chains cross traders - Prapor's
+    /// "First Step" runs straight into Aishi's - so on the All tab every trader's bounding box is
+    /// very nearly the bounding box of the whole tree. Thirteen of those stacked on top of each
+    /// other is a full-screen grey wash, and on a single-trader tab it is one rectangle covering
+    /// everything. The same wrong assumption put the gutter portraits in a column that lined up
+    /// with nothing.
+    ///
+    /// A card does not claim to be anywhere. It says which trader, how they stand, and takes you
+    /// there when clicked - which is all the overview was ever for.
     /// </summary>
     internal sealed class TreeOverview
     {
-        /// <summary>One trader's band: where it is, and what is in it.</summary>
+        /// <summary>One trader's band: which quests are theirs, and how they stand.</summary>
         internal sealed class Band
         {
             public string TraderId;
@@ -35,8 +48,18 @@ namespace QuestTree.UI
             public int Remaining;
         }
 
+        // Card geometry, in SCREEN pixels. Converted to content units per frame, so a card is the
+        // same size on screen however far out the tree is - which is the whole point of the tier.
+        private const float CardWidth = 300f;
+        private const float CardHeight = 56f;
+        private const float CardGap = 10f;
+
+        /// <summary>Past this many traders the cards run in two columns rather than one. Thirteen
+        /// in a single column is taller than most screens.</summary>
+        private const int TwoColumnThreshold = 8;
+
         private readonly RectTransform _content;
-        private readonly List<GameObject> _blocks = new List<GameObject>();
+        private readonly List<GameObject> _cards = new List<GameObject>();
 
         public TreeOverview(RectTransform content) => _content = content;
 
@@ -44,11 +67,13 @@ namespace QuestTree.UI
         /// detailed tier would otherwise do.</summary>
         public bool Active { get; private set; }
 
-        /// <summary>Draws the bands, or hides them.
+        /// <summary>Draws the cards, or hides them.
         ///
-        /// <paramref name="onPick"/> frames a band's bounds - which is what makes this navigation
-        /// rather than decoration.</summary>
-        public void Draw(IReadOnlyList<Band> bands, float zoom, bool collapsed, Action<Band> onPick)
+        /// <paramref name="centre"/> is where the tree is, so the block of cards sits over it and
+        /// pans with it rather than being pinned to a corner of a canvas that may be half a million
+        /// pixels tall. <paramref name="onPick"/> frames the trader's quests - which is what makes
+        /// this navigation rather than decoration.</summary>
+        public void Draw(IReadOnlyList<Band> bands, float zoom, bool collapsed, Vector2 centre, Action<Band> onPick)
         {
             if (_content == null) return;
 
@@ -61,43 +86,59 @@ namespace QuestTree.UI
 
             Active = true;
 
-            // Rebuilt only when the set changes; the per-frame work is the counter-scale below.
-            if (_blocks.Count != bands.Count) Rebuild(bands, onPick);
+            if (_cards.Count != bands.Count) Rebuild(bands, onPick);
 
-            // Constant size on screen, like the trader portraits. Affordable here precisely because
-            // there are a dozen of these rather than a tree's worth.
-            var inverse = zoom > 0.0001f ? 1f / zoom : 1f;
+            // Screen pixels into content units. Everything below is laid out in content units so it
+            // holds a constant size on screen as the zoom moves.
+            var scale = zoom > 0.0001f ? 1f / zoom : 1f;
 
-            for (var i = 0; i < _blocks.Count && i < bands.Count; i++)
+            var cardW = CardWidth * scale;
+            var cardH = CardHeight * scale;
+            var gap = CardGap * scale;
+
+            var columns = bands.Count > TwoColumnThreshold ? 2 : 1;
+            var rows = Mathf.CeilToInt(bands.Count / (float)columns);
+
+            var blockW = columns * cardW + (columns - 1) * gap;
+            var blockH = rows * cardH + (rows - 1) * gap;
+
+            var left = centre.x - blockW * 0.5f;
+            var top = centre.y + blockH * 0.5f;
+
+            for (var i = 0; i < _cards.Count && i < bands.Count; i++)
             {
-                var block = _blocks[i];
-                if (block == null) continue;
+                var card = _cards[i];
+                if (card == null) continue;
 
-                var rect = (RectTransform)block.transform;
-                var bounds = bands[i].Bounds;
+                // Down the first column, then the second - so reading order matches the sort order
+                // the caller put them in.
+                var column = i / rows;
+                var row = i % rows;
 
-                // Positioned over the band it stands for, so it reads as that region collapsing
-                // rather than as a legend floating above the tree.
-                rect.anchoredPosition = new Vector2(bounds.xMin, bounds.center.y);
+                var rect = (RectTransform)card.transform;
+                rect.sizeDelta = new Vector2(cardW, cardH);
+                rect.anchoredPosition = new Vector2(
+                    left + column * (cardW + gap),
+                    top - row * (cardH + gap));
 
-                var label = block.GetComponentInChildren<TMP_Text>();
-                if (label != null) label.transform.localScale = Vector3.one * inverse;
+                // The text is a child of a rect that is already scaled up by 1/zoom, so it has to be
+                // scaled back down or it would grow twice.
+                foreach (var label in card.GetComponentsInChildren<TMP_Text>(includeInactive: true))
+                    label.transform.localScale = Vector3.one * scale;
 
-                if (!block.activeSelf) block.SetActive(true);
+                foreach (var slab in card.GetComponentsInChildren<RectTransform>(includeInactive: true))
+                    if (slab.name == "Slab") slab.sizeDelta = new Vector2(4f * scale, 0f);
+
+                if (!card.activeSelf) card.SetActive(true);
             }
         }
 
         private void Rebuild(IReadOnlyList<Band> bands, Action<Band> onPick)
         {
-            Hide();
-
-            foreach (var block in _blocks)
-                if (block != null) UnityEngine.Object.Destroy(block);
-
-            _blocks.Clear();
+            Clear();
 
             foreach (var band in bands)
-                _blocks.Add(Create(band, onPick));
+                _cards.Add(Create(band, onPick));
         }
 
         private GameObject Create(Band band, Action<Band> onPick)
@@ -108,29 +149,41 @@ namespace QuestTree.UI
             var rect = (RectTransform)go.transform;
             rect.SetParent(_content, worldPositionStays: false);
 
-            // The same anchor a quest box uses - Unity's default centre - so a band sits where the
-            // layout says it does. Getting this wrong is what put the trader portraits off centre.
+            // The same anchor a quest box uses - Unity's default centre - so a card sits where the
+            // arithmetic above says it does. Pivoted top-left, because the grid is laid out from its
+            // top-left corner.
             rect.anchorMin = rect.anchorMax = new Vector2(0.5f, 0.5f);
-            rect.pivot = new Vector2(0f, 0.5f);
-            rect.sizeDelta = new Vector2(Mathf.Max(band.Bounds.width, 1f), Mathf.Max(band.Bounds.height, 1f));
+            rect.pivot = new Vector2(0f, 1f);
 
             var fill = go.GetComponent<Image>();
-            fill.color = new Color(colour.r, colour.g, colour.b, 0.16f);
+            fill.color = new Color(0.10f, 0.10f, 0.09f, 0.96f);
             GameStyle.ApplyPanel(fill);
 
             var button = go.GetComponent<Button>();
             button.transition = Selectable.Transition.None;
             button.onClick.AddListener(() => onPick?.Invoke(band));
 
-            // One counter-scaled label, anchored to the band's left so it stays put as the band
-            // changes size with the layout.
+            // The trader's colour down the left edge, the same signal the quest boxes carry.
+            var slabGo = new GameObject("Slab", typeof(RectTransform), typeof(Image));
+            var slabRect = (RectTransform)slabGo.transform;
+            slabRect.SetParent(rect, worldPositionStays: false);
+            slabRect.anchorMin = new Vector2(0f, 0f);
+            slabRect.anchorMax = new Vector2(0f, 1f);
+            slabRect.pivot = new Vector2(0f, 0.5f);
+            slabRect.anchoredPosition = Vector2.zero;
+
+            var slab = slabGo.GetComponent<Image>();
+            slab.color = colour;
+            slab.raycastTarget = false;
+
             var labelGo = new GameObject("BandLabel", typeof(RectTransform));
             var labelRect = (RectTransform)labelGo.transform;
             labelRect.SetParent(rect, worldPositionStays: false);
-            labelRect.anchorMin = labelRect.anchorMax = new Vector2(0f, 0.5f);
+            labelRect.anchorMin = new Vector2(0f, 0.5f);
+            labelRect.anchorMax = new Vector2(0f, 0.5f);
             labelRect.pivot = new Vector2(0f, 0.5f);
-            labelRect.anchoredPosition = new Vector2(12f, 0f);
-            labelRect.sizeDelta = new Vector2(320f, 64f);
+            labelRect.anchoredPosition = new Vector2(14f, 0f);
+            labelRect.sizeDelta = new Vector2(CardWidth - 20f, CardHeight - 8f);
 
             var label = labelGo.AddComponent<TextMeshProUGUI>();
             label.fontSize = 15;
@@ -154,17 +207,17 @@ namespace QuestTree.UI
 
         private void Hide()
         {
-            foreach (var block in _blocks)
-                if (block != null && block.activeSelf) block.SetActive(false);
+            foreach (var card in _cards)
+                if (card != null && card.activeSelf) card.SetActive(false);
         }
 
-        /// <summary>Drops the blocks, for a graph rebuild.</summary>
+        /// <summary>Drops the cards, for a graph rebuild.</summary>
         public void Clear()
         {
-            foreach (var block in _blocks)
-                if (block != null) UnityEngine.Object.Destroy(block);
+            foreach (var card in _cards)
+                if (card != null) UnityEngine.Object.Destroy(card);
 
-            _blocks.Clear();
+            _cards.Clear();
             Active = false;
         }
     }

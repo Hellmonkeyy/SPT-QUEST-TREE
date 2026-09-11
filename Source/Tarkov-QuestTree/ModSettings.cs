@@ -232,7 +232,11 @@ namespace QuestTree
         public static ConfigEntry<bool> HasSeenIntro { get; private set; }
 
         /// <summary>The current palette generation. Bump when the defaults change again.</summary>
-        private const int CurrentColourScheme = 1;
+        private const int CurrentColourScheme = 2;
+
+        /// <summary>The zooms at which a box shed its detail before 1.10.</summary>
+        private const int LegacyTitleOnlyBelowZoom = 55;
+        private const int LegacyCodesBelowZoom = 35;
 
         /// <summary>Moves an existing config onto the new palette, once.
         ///
@@ -257,14 +261,35 @@ namespace QuestTree
             moved += AdoptNewDefault(ColorCompleted, LegacyColours.Completed);
             moved += AdoptNewDefault(ColorLocked, LegacyColours.Locked);
 
+            // Scheme 2: a box keeps its detail at every zoom.
+            //
+            // These thresholds were picked when the row they hid was a subtitle - trader, level,
+            // map - and losing it cost nothing you could not guess. They now hide the objective
+            // count, the reward marks, the progress bar and the reason a quest is blocked, which is
+            // what the box is FOR. At a comfortable working zoom of around 50% every box was still
+            // drawing title-only, so the redesign was invisible to the person it was built for.
+            // Both go to 0, which means never.
+            if (TitleOnlyBelowZoom != null && TitleOnlyBelowZoom.Value == LegacyTitleOnlyBelowZoom)
+            {
+                TitleOnlyBelowZoom.Value = (int)TitleOnlyBelowZoom.DefaultValue;
+                moved++;
+            }
+
+            if (CodesBelowZoom != null && CodesBelowZoom.Value == LegacyCodesBelowZoom)
+            {
+                CodesBelowZoom.Value = (int)CodesBelowZoom.DefaultValue;
+                moved++;
+            }
+
             ColourScheme.Value = CurrentColourScheme;
 
             if (moved > 0)
             {
                 Plugin.LogSource?.LogInfo(
-                    $"QuestTree: moved {moved} status colour(s) onto the 1.10 palette - in-progress is amber " +
-                    "and available is blue, so they no longer share a hue with completed. " +
-                    "Settings > Colours > Restore previous colours puts the old set back.");
+                    $"QuestTree: moved {moved} setting(s) onto the 1.10 defaults - in-progress is amber and " +
+                    "available is blue so they no longer share a hue with completed, and a box keeps its " +
+                    "detail row at every zoom. Settings > Colours > Restore previous colours puts the old " +
+                    "palette back.");
             }
         }
 
@@ -416,14 +441,18 @@ namespace QuestTree
                 "Show a short code (EM-4, GUN-3) in each box when zoomed too far out to read a title. Off shows the title only, however small.");
 
             TitleOnlyBelowZoom = config.Bind(
-                "Tree", "Title-only below zoom", 55,
-                new ConfigDescription("Below this zoom (percent) a box shows only its title, larger.",
-                    new AcceptableValueRange<int>(30, 80)));
+                "Tree", "Title-only below zoom", 0,
+                new ConfigDescription(
+                    "Below this zoom (percent) a box drops its detail row and shows only its title, larger. " +
+                    "0 keeps every box fully detailed at every zoom.",
+                    new AcceptableValueRange<int>(0, 80)));
 
             CodesBelowZoom = config.Bind(
-                "Tree", "Code-only below zoom", 35,
-                new ConfigDescription("Below this zoom (percent) a box shows only its status bar and code.",
-                    new AcceptableValueRange<int>(15, 60)));
+                "Tree", "Code-only below zoom", 0,
+                new ConfigDescription(
+                    "Below this zoom (percent) a box shows only its status bar and a short code. " +
+                    "0 keeps every box fully detailed at every zoom.",
+                    new AcceptableValueRange<int>(0, 60)));
 
             QuestBadges = config.Bind(
                 "Tree", "Quest badges", BadgeMode.Both,

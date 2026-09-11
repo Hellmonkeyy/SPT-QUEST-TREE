@@ -87,6 +87,7 @@ namespace QuestTree.UI
                 _outlinedFontMaterial = null;
 
                 _font = donorText.font;
+                EnsureSymbolFallback();
                 // fontSharedMaterial, not fontMaterial: the latter's getter instances a material
                 // on the donor - EFT's own taskbar label - as a side effect of reading it.
                 _fontMaterial = donorText.fontSharedMaterial;
@@ -103,6 +104,125 @@ namespace QuestTree.UI
             }
 
         }
+
+
+        // ------------------------------------------------------------------ symbol fallback
+
+        /// <summary>Whether the fallback has been attempted. Once only, success or not.</summary>
+        private static bool _symbolFallbackTried;
+
+        private static TMP_FontAsset _symbolFont;
+
+        /// <summary>OS fonts that carry the geometric shapes, arrows and the padlock, best first.
+        ///
+        /// EFT's own font is a display face chosen for Latin text; it has no reason to carry U+25CE
+        /// or U+1F512, and asking it to is how a glyph becomes a tofu box. These are the Windows
+        /// faces that do. Tried in order, first one that loads wins.</summary>
+        private static readonly string[] SymbolFontCandidates =
+        {
+            "Segoe UI Symbol",
+            "Segoe UI Emoji",
+            "Arial Unicode MS",
+            "Segoe UI",
+            "Arial"
+        };
+
+        /// <summary>Hangs a symbol font off the game's font as a fallback, so a glyph the game's
+        /// face does not have is drawn from one that does instead of coming out as a box.
+        ///
+        /// Built at RUNTIME from an installed OS font rather than shipped as an AssetBundle. A
+        /// bundle would have to be compiled against this exact Unity - 2022.3.43f1 - and would stop
+        /// loading the moment the game moved, for a handful of glyphs. This asks Unity for a font
+        /// it already has and lets TMP rasterise characters into a dynamic atlas on demand, so
+        /// there is no asset to ship, nothing to version, and no new file in the plugin folder.
+        ///
+        /// Adding to the game font's own fallback table is a shared mutation, and a deliberately
+        /// safe one: a fallback is only consulted for characters the primary face LACKS, so no text
+        /// that renders correctly today can change. Everything is guarded - if any step fails the
+        /// mod carries on with the glyphs it already had.</summary>
+        private static void EnsureSymbolFallback()
+        {
+            if (_symbolFallbackTried || _font == null) return;
+            _symbolFallbackTried = true;
+
+            try
+            {
+                foreach (var candidate in SymbolFontCandidates)
+                {
+                    var os = Font.CreateDynamicFontFromOSFont(candidate, 32);
+                    if (os == null) continue;
+
+                    var asset = TMP_FontAsset.CreateFontAsset(os);
+                    if (asset == null) continue;
+
+                    asset.name = $"QuestTree symbols ({candidate})";
+
+                    // Dynamic, so characters are rasterised into the atlas the first time they are
+                    // asked for rather than all of Unicode up front.
+                    asset.atlasPopulationMode = AtlasPopulationMode.Dynamic;
+
+                    _font.fallbackFontAssetTable ??= new System.Collections.Generic.List<TMP_FontAsset>();
+                    if (!_font.fallbackFontAssetTable.Contains(asset))
+                        _font.fallbackFontAssetTable.Add(asset);
+
+                    _symbolFont = asset;
+
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: symbol fallback is '{candidate}' - " +
+                        $"lock={HasGlyph(Lock)} diamond={HasGlyph('\u25c7')} bullseye={HasGlyph('\u25ce')}.");
+                    return;
+                }
+
+                Plugin.LogSource?.LogInfo(
+                    "QuestTree: no symbol font could be loaded - staying on the glyphs the game's own font has.");
+            }
+            catch (System.Exception ex)
+            {
+                // Never fatal. The glyphs already in use are ones this codebase draws elsewhere, so
+                // the worst case is the status marks staying exactly as they were.
+                Plugin.LogSource?.LogWarning($"QuestTree: symbol fallback unavailable ({ex.Message}).");
+            }
+        }
+
+        /// <summary>The padlock, as a string - it is outside the basic plane, so it is a surrogate
+        /// pair rather than a char and cannot be written as one.</summary>
+        public const int Lock = 0x1F512;
+
+        /// <summary>Whether anything in the chain - the game's font or the fallback - can actually
+        /// draw this character.
+        ///
+        /// Asked before a glyph is used rather than assumed, because a missing one does not fail
+        /// loudly: TMP draws a box, or nothing, and the box keeps its layout either way. This is the
+        /// difference between choosing a mark and hoping for one.</summary>
+        public static bool HasGlyph(int codePoint)
+        {
+            try
+            {
+                // TryAddCharacters rather than HasCharacter: it takes a STRING, so it works for a
+                // character outside the basic plane - the padlock is a surrogate pair and cannot be
+                // passed as a char at all - and on a dynamic atlas it both tests and rasterises in
+                // one call. It reports back whatever it could not add.
+                var text = char.ConvertFromUtf32(codePoint);
+
+                if (_symbolFont != null && _symbolFont.TryAddCharacters(text, out string symbolMissing))
+                    return string.IsNullOrEmpty(symbolMissing);
+
+                if (_font != null && _font.TryAddCharacters(text, out string fontMissing))
+                    return string.IsNullOrEmpty(fontMissing);
+
+                return false;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        public static bool HasGlyph(char character) => HasGlyph((int)character);
+
+        /// <summary>The padlock if it can be drawn, the given fallback otherwise.</summary>
+        public static string LockGlyph(string fallback) =>
+            HasGlyph(Lock) ? char.ConvertFromUtf32(Lock) : fallback;
 
         /// <summary>
         /// The game's own tooltip on hover. HoverTooltipArea finds the tooltip itself in Awake

@@ -81,14 +81,28 @@ namespace QuestTree.UI
         /// the count in the meta row is the precise answer.</summary>
         public static float ProgressBarHeight => 3f;
 
-        /// <summary>Below this zoom the subtitle and objective are hidden and the title grows -
-        /// see QuestNodeView.SetDetailLevel. 0.55 is where a 15px title stops being readable.</summary>
+        /// <summary>Below this zoom a box drops its detail row and grows its title.
+        ///
+        /// Zero by default, meaning never. A box that changes shape as you zoom is a box you have to
+        /// re-read, and the detail row is the whole point of the box. Still a setting, for anyone who
+        /// would rather have bigger titles at a distance.</summary>
         public static float DetailLevelZoom =>
-            ModSettings.Ready ? ModSettings.TitleOnlyBelowZoom.Value / 100f : 0.55f;
+            ModSettings.Ready ? ModSettings.TitleOnlyBelowZoom.Value / 100f : 0f;
 
-        /// <summary>Below this zoom the title goes too: a 20px title at a quarter scale is 5px.</summary>
+        /// <summary>Below this zoom the title goes too and a short code takes its place. Also zero
+        /// by default, for the same reason.</summary>
         public static float BarOnlyZoom =>
-            ModSettings.Ready ? Mathf.Min(ModSettings.CodesBelowZoom.Value / 100f, DetailLevelZoom - 0.05f) : 0.35f;
+            ModSettings.Ready
+                ? Mathf.Min(ModSettings.CodesBelowZoom.Value / 100f, DetailLevelZoom - 0.05f)
+                : 0f;
+
+        /// <summary>Where the tree gives up on boxes entirely and draws trader cards instead.
+        ///
+        /// Its own number rather than a fraction of BarOnlyZoom, which is now usually zero: tying
+        /// them together would drag the collapse threshold to the floor with it and the tier would
+        /// never fire at all. That is the same class of mistake as deriving it from BarOnlyZoom in
+        /// the first place, which put it below the minimum zoom.</summary>
+        public static float OverviewZoom => 0.30f;
 
         // --- text inside a node ---
         public static int TitleFontSize => Compact ? 12 : 15;

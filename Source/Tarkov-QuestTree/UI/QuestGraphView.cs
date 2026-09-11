@@ -181,6 +181,11 @@ namespace QuestTree.UI
         private TreeOverview _overview;
         private readonly List<TreeOverview.Band> _bands = new List<TreeOverview.Band>();
 
+        /// <summary>The middle of everything laid out, so the overview's cards sit over the tree and
+        /// pan with it rather than being pinned to a corner of a canvas half a million pixels
+        /// tall.</summary>
+        private Vector2 _treeCentre;
+
         /// <summary>Where the tree stops drawing quests and starts drawing traders.
         ///
         /// Just under the zoom where a box is reduced to a bar: at that point the boxes have already
@@ -195,8 +200,7 @@ namespace QuestTree.UI
         ///
         /// So it is pinned clear of the floor, and only then allowed to track BarOnlyZoom. There is
         /// real travel either side of it now.</summary>
-        private float CollapseZoom =>
-            Mathf.Max(MinZoom + 0.05f, LayoutMetrics.BarOnlyZoom * 0.85f);
+        private float CollapseZoom => Mathf.Max(MinZoom + 0.02f, LayoutMetrics.OverviewZoom);
 
         /// <summary>Hysteresis, so the tier does not flip back and forth while the zoom sits on the
         /// threshold. Entering the overview and leaving it are different numbers on purpose.</summary>
@@ -588,8 +592,41 @@ namespace QuestTree.UI
                 _bands.Add(entry.Value);
             }
 
-            // Tallest first, so the biggest trader draws behind the smaller ones it may overlap.
-            _bands.Sort((a, b) => b.Bounds.height.CompareTo(a.Bounds.height));
+            // Most to do first. The cards are a list to read rather than a picture of the tree,
+            // so the useful order is "who still has work in them", not who is physically largest -
+            // and Bounds turned out to be near-identical for every trader anyway, since chains cross
+            // traders and each one's bounding box is very nearly the whole tree.
+            _bands.Sort((a, b) =>
+            {
+                var byActive = b.Active.CompareTo(a.Active);
+                if (byActive != 0) return byActive;
+
+                var byAvailable = b.Available.CompareTo(a.Available);
+                if (byAvailable != 0) return byAvailable;
+
+                return b.Remaining.CompareTo(a.Remaining);
+            });
+
+            // The middle of the laid-out tree, for the card grid to sit on.
+            var whole = new Rect(float.MaxValue, float.MaxValue, 0f, 0f);
+            var any = false;
+
+            foreach (var entry in edges)
+            {
+                var box = entry.Value;
+                if (!any)
+                {
+                    whole = Rect.MinMaxRect(box.x, box.z, box.y, box.w);
+                    any = true;
+                    continue;
+                }
+
+                whole = Rect.MinMaxRect(
+                    Mathf.Min(whole.xMin, box.x), Mathf.Min(whole.yMin, box.z),
+                    Mathf.Max(whole.xMax, box.y), Mathf.Max(whole.yMax, box.w));
+            }
+
+            _treeCentre = any ? whole.center : Vector2.zero;
         }
 
         /// <summary>Holds the trader portraits at a constant size on screen.
@@ -808,7 +845,7 @@ namespace QuestTree.UI
             _collapsed = collapse;
 
             _overview ??= new TreeOverview(_content);
-            _overview.Draw(_bands, zoom, collapse, band =>
+            _overview.Draw(_bands, zoom, collapse, _treeCentre, band =>
             {
                 // Land in that trader's chains. FrameNodes already knows how to fit a set of nodes
                 // to the viewport, so picking a band is the same operation as focusing a search.
