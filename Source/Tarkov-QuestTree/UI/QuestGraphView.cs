@@ -873,7 +873,15 @@ namespace QuestTree.UI
                 return;
             }
 
-            if (_hoverCard != null && _hoverCard.Visible) return;
+            // Already up: keep it with the pointer. A card that sits still while the mouse moves
+            // reads as belonging to something else entirely, which is exactly how the misplaced
+            // one looked.
+            if (_hoverCard != null && _hoverCard.Visible)
+            {
+                _hoverCard.Place(Input.mousePosition);
+                return;
+            }
+
             if (Time.unscaledTime - _hoverSince < QuestHoverCard.Delay) return;
             if (_overlayRoot == null) return;
 

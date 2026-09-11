@@ -78,28 +78,52 @@ namespace QuestTree.UI
         /// <summary>Beside the pointer, flipped and clamped so the whole card stays on screen.
         ///
         /// Offset rather than centred, so the card never sits under the cursor and covers the box
-        /// you are pointing at.</summary>
-        private void Place(Vector2 screenPoint)
+        /// you are pointing at.
+        ///
+        /// TWO COORDINATE MISTAKES lived here, and together they put the card in a corner with no
+        /// visible relationship to the mouse at all.
+        ///
+        /// ScreenPointToLocalPointInRectangle answers relative to the rect's PIVOT, while an
+        /// anchoredPosition against a (0,0) anchor is measured from its BOTTOM-LEFT corner. On a
+        /// centred pivot those differ by half the screen, in both axes. rect.min is exactly that
+        /// offset, so converting through it is the whole correction.
+        ///
+        /// And the camera argument was null, which is only right for a Screen Space - Overlay
+        /// canvas. EFT's is not; on a camera-space canvas, passing null makes the conversion answer
+        /// in a space that has nothing to do with where the pointer is.</summary>
+        public void Place(Vector2 screenPoint)
         {
+            if (_card == null || _root == null) return;
+
+            var canvas = _root.GetComponentInParent<Canvas>();
+            var camera = canvas != null && canvas.renderMode != RenderMode.ScreenSpaceOverlay
+                ? canvas.worldCamera
+                : null;
+
             if (!RectTransformUtility.ScreenPointToLocalPointInRectangle(
-                    _root, screenPoint, null, out var local))
+                    _root, screenPoint, camera, out var local))
             {
                 return;
             }
 
+            var rect = _root.rect;
+
+            // Pivot-relative to corner-relative, which is the space anchoredPosition is in.
+            var point = local - rect.min;
+
+            // The card hangs DOWN from its anchor: pivot is (0, 1), so y is its top edge.
             var height = _card.sizeDelta.y;
-            var bounds = _root.rect;
 
-            var x = local.x + 18f;
-            var y = local.y - 12f;
+            var x = point.x + 18f;
+            var y = point.y - 12f;
 
-            // Flip to the other side of the pointer rather than letting the card run off the edge.
-            if (x + Width > bounds.xMax) x = local.x - 18f - Width;
-            if (y - height < bounds.yMin) y = local.y + 12f + height;
+            // Flip to the other side of the pointer rather than run off the edge.
+            if (x + Width > rect.width) x = point.x - 18f - Width;
+            if (y - height < 0f) y = point.y + 12f + height;
 
             _card.anchoredPosition = new Vector2(
-                Mathf.Clamp(x, bounds.xMin + 4f, bounds.xMax - Width - 4f),
-                Mathf.Clamp(y, bounds.yMin + height + 4f, bounds.yMax - 4f));
+                Mathf.Clamp(x, 4f, Mathf.Max(4f, rect.width - Width - 4f)),
+                Mathf.Clamp(y, Mathf.Min(height + 4f, rect.height), Mathf.Max(height + 4f, rect.height - 4f)));
         }
 
         // ------------------------------------------------------------------ construction
