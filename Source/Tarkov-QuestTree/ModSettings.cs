@@ -55,6 +55,7 @@ namespace QuestTree
         public static ConfigEntry<int> HoverDimStrength { get; private set; }
         public static ConfigEntry<bool> TallTitles { get; private set; }
         public static ConfigEntry<int> OverviewBelowZoom { get; private set; }
+        public static ConfigEntry<int> FocusRadius { get; private set; }
         public static ConfigEntry<BadgeMode> QuestBadges { get; private set; }
 
         /// <summary>Read by the boxes; both true before Init has run, which is what the palette
@@ -338,8 +339,16 @@ namespace QuestTree
 
             FocusFrontier = config.Bind(
                 "Display", "Focus on what you can work on", false,
-                "Show only quests in progress or available to start, plus what each one needs and " +
-                "what it unlocks. Toggle with X in the tree, or the Focus button.");
+                "Show only quests within reach of something you can work on now - see Focus reach. " +
+                "Toggle with X in the tree, or the Focus button.");
+
+            FocusRadius = config.Bind(
+                "Display", "Focus reach", 4,
+                new ConfigDescription(
+                    "How many quests out from something you can work on Focus reaches. 1 is just what " +
+                    "each one needs and unlocks; 4 shows the run either side of it. Anything further " +
+                    "away is dropped from the tree entirely while Focus is on.",
+                    new AcceptableValueRange<int>(1, 10)));
 
             DrawEdges = config.Bind(
                 "Display", "Draw prerequisite lines", true,
@@ -499,7 +508,7 @@ namespace QuestTree
                 HideUnobtainable, HideCompleted, HideTraderless, MarkStartedOnly, MapArtworkRotation,
                 MirrorMapArtwork, ShowMapGuides, DrawEdges, FocusFrontier, CompactLayout, MaxVisibleNodes,
                 OpenOnMap, HarvestZones, EdgeOpacity, HoverDimStrength, TallTitles,
-                OverviewBelowZoom, QuestBadges, SidebarWidth, DoNextRows, ShowItemsSection,
+                OverviewBelowZoom, FocusRadius, QuestBadges, SidebarWidth, DoNextRows, ShowItemsSection,
                 ShowTakeWithYou, CountUnacceptedQuests, OverviewLabels, ShowTraderColours,
                 TraderColours, ShowCredits,
                 PinLabels, ColorActive, ColorAvailable, ColorCompleted, ColorLocked, ColorGated, ColorAccent, Tooltips,
@@ -529,6 +538,7 @@ namespace QuestTree
             HoverDimStrength.SettingChanged += Raise;
             TallTitles.SettingChanged += Raise;
             OverviewBelowZoom.SettingChanged += Raise;
+            FocusRadius.SettingChanged += Raise;
             QuestBadges.SettingChanged += Raise;
             SidebarWidth.SettingChanged += Raise;
             DoNextRows.SettingChanged += Raise;

@@ -1870,21 +1870,48 @@ namespace QuestTree.UI
         private HashSet<QuestNode> FrontierOf(IReadOnlyList<QuestNode> candidates)
         {
             var frontier = new HashSet<QuestNode>();
+            var radius = ModSettings.Ready ? ModSettings.FocusRadius.Value : DefaultFocusRadius;
+
+            // Breadth-first from EVERY actionable quest at once, so a node's distance is its
+            // distance from the nearest one rather than from whichever happened to be walked first.
+            // That matters here: the same quest is often two steps past one thing you are doing and
+            // nine steps past another, and only the short answer is the honest one.
+            var pending = new Queue<(QuestNode Node, int Steps)>();
 
             foreach (var node in candidates)
             {
                 if (node.Status != ENodeStatus.Active && node.Status != ENodeStatus.Available) continue;
+                if (!frontier.Add(node)) continue;
 
-                frontier.Add(node);
+                pending.Enqueue((node, 0));
+            }
 
-                foreach (var unlocked in node.Unlocks) frontier.Add(unlocked);
+            while (pending.Count > 0)
+            {
+                var (current, steps) = pending.Dequeue();
+                if (steps >= radius) continue;
 
-                foreach (var prerequisiteId in node.PrerequisiteIds)
-                    if (_graph.NodesById.TryGetValue(prerequisiteId, out var prerequisite)) frontier.Add(prerequisite);
+                foreach (var unlocked in current.Unlocks)
+                {
+                    if (unlocked == null || !frontier.Add(unlocked)) continue;
+
+                    pending.Enqueue((unlocked, steps + 1));
+                }
+
+                foreach (var prerequisiteId in current.PrerequisiteIds)
+                {
+                    if (!_graph.NodesById.TryGetValue(prerequisiteId, out var prerequisite)) continue;
+                    if (!frontier.Add(prerequisite)) continue;
+
+                    pending.Enqueue((prerequisite, steps + 1));
+                }
             }
 
             return frontier;
         }
+
+        /// <summary>How far Focus reaches when settings are not up yet.</summary>
+        private const int DefaultFocusRadius = 4;
 
         /// <summary>The Settings-tab filters. Applied before layout so hiding a category actually
         /// makes the tree smaller rather than just sparser.</summary>

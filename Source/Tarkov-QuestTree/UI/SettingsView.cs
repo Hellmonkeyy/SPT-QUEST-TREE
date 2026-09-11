@@ -163,6 +163,8 @@ namespace QuestTree.UI
                 "How far the rest of the tree fades around a hovered quest. 0 is off.");
             Stepper(column, ref y, "Trader overview below zoom %", ModSettings.OverviewBelowZoom, 5, 0, 40,
                 "Zoomed out past this, the quests are replaced by one readable card per trader. 0 is off.");
+            Stepper(column, ref y, "Focus reach", ModSettings.FocusRadius, 1, 1, 10,
+                "How many quests out from something you can work on the Focus button reaches. Further than this is dropped.");
             Stepper(column, ref y, "Max visible quests", ModSettings.MaxVisibleNodes, 100, 100, 2000,
                 "Ceiling on how many quest boxes exist at once. Only reachable when zoomed right out.");
 
@@ -176,7 +178,7 @@ namespace QuestTree.UI
                 ModSettings.CompactLayout, ModSettings.TallTitles,
                 ModSettings.DrawEdges, ModSettings.FocusFrontier, ModSettings.HideUnobtainable,
                 ModSettings.HideCompleted, ModSettings.HideTraderless, ModSettings.EdgeOpacity,
-                ModSettings.HoverDimStrength, ModSettings.OverviewBelowZoom,
+                ModSettings.HoverDimStrength, ModSettings.OverviewBelowZoom, ModSettings.FocusRadius,
                 ModSettings.MaxVisibleNodes, ModSettings.QuestBadges);
         }
 

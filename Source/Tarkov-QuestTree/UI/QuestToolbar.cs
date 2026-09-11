@@ -183,7 +183,8 @@ namespace QuestTree.UI
             // Focus is a toggle, so its background says whether it is on - the tree itself looking
             // sparse is not enough of a clue.
             navX += BuildToolbarAction(toolbar, "Focus (X)", navX, itemY, itemHeight, 90f, ToggleFocus,
-                "Show only what you can work on, plus what it needs and unlocks", out _focusBackground, treeOnly: true);
+                "Show only what you can work on and the quests within reach of it - Settings sets the reach",
+                out _focusBackground, treeOnly: true);
             RefreshFocusState();
 
             // The controls hint is shown once and then never again on its own, which would make it
