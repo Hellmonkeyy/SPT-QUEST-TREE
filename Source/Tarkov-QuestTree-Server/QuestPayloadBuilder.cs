@@ -41,7 +41,7 @@ namespace QuestTreeServer
         LocaleService localeService,
         SeasonalEventService seasonalEventService,
         QuestConfig questConfig,
-        LocationTable locationTable) : IOnLoad
+        QuestFacts facts) : IOnLoad
     {
         /// <summary>Built while the server starts, for the reason MapMarkerPayloadBuilder gives:
         /// the client's request handler is synchronous on Unity's main thread, so paying for the
@@ -64,7 +64,6 @@ namespace QuestTreeServer
 
         private readonly object _buildLock = new();
         private string? _cachedJson;
-        private Dictionary<string, string>? _locationIdToKey;
 
         private readonly RebuildGate _gate = new(60);
 
@@ -202,7 +201,9 @@ namespace QuestTreeServer
         /// the obvious source and is the wrong one: it has no Labyrinth entry, so the Labyrinth
         /// quests resolved to a bare MongoId and matched nothing.
         ///
-        /// Built once and cached. Falls back to the raw id, which is at least stable, for a
+        /// The pairing itself lives on QuestFacts, which builds it once and hands the same table to
+        /// the marker builder - the two must agree about which map a quest is on, and two copies of
+        /// that is how they stop agreeing. Falls back to the raw id, which is at least stable, for a
         /// location that is not in the table at all.
         /// </summary>
         private string ResolveLocationKey(Quest quest)
@@ -210,27 +211,7 @@ namespace QuestTreeServer
             var location = quest.Location;
             if (string.IsNullOrWhiteSpace(location)) return "";
 
-            _locationIdToKey ??= BuildLocationKeyLookup();
-
-            return _locationIdToKey.TryGetValue(location, out var key) ? key : location;
-        }
-
-        private Dictionary<string, string> BuildLocationKeyLookup()
-        {
-            var lookup = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-
-            foreach (var location in locationTable.GetDictionary().Values)
-            {
-                var internalName = location?.Base?.Id;
-                var locationId = location?.Base?.IdField.ToString();
-
-                if (string.IsNullOrWhiteSpace(internalName) || string.IsNullOrWhiteSpace(locationId))
-                    continue;
-
-                lookup[locationId] = internalName;
-            }
-
-            return lookup;
+            return facts.LocationIdToKey.TryGetValue(location, out var key) ? key : location;
         }
 
         /// <summary>Quest.Location is a raw map id (e.g. 5704e3c2d2720bac5b8b4567), which is no use

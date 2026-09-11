@@ -8,6 +8,7 @@ using SPTarkov.Common.Models.Logging;
 using SPTarkov.DI.Annotations;
 using SPTarkov.Server.Core.Helpers.Profile;
 using SPTarkov.Server.Core.Models.Common;
+using SPTarkov.Server.Core.Models.Eft.Common;
 using SPTarkov.Server.Core.Models.Eft.Common.Tables;
 using SPTarkov.Server.Core.Models.Enums;
 using SPTarkov.Server.Core.Models.Spt.Tables;
@@ -31,7 +32,8 @@ namespace QuestTreeServer
         ISptLogger<KappaPayloadBuilder> logger,
         TemplateTable templateTable,
         LocaleService localeService,
-        ProfileHelper profileHelper)
+        ProfileHelper profileHelper,
+        QuestFacts facts)
     {
         /// <summary>The Collector quest, whose completion awards the Kappa container. Constant
         /// because it is the same id in every vanilla install; a name match covers the case where a
@@ -99,8 +101,11 @@ namespace QuestTreeServer
             // A missing profile is not fatal - the checklist itself is still worth returning, just
             // with nothing owned.
             var owned = ProfileInventory.CountByTemplate(profile);
-            var completedConditions = GetCompletedConditions(profile, collector.Id);
-            payload.CollectorStatus = GetQuestStatus(profile, collector.Id);
+            // One pass over the profile's quest list rather than two scans of it: the shared
+            // helpers take the index, so asking two questions about the same quest costs one walk.
+            var progress = facts.IndexProgress(profile);
+            var completedConditions = facts.CompletedConditionsOf(progress, collector.Id);
+            payload.CollectorStatus = facts.StatusOf(progress, collector, profile);
 
             var conditions = collector.Conditions?.AvailableForFinish;
             if (conditions == null) return payload;
@@ -135,7 +140,7 @@ namespace QuestTreeServer
                         ConditionId = condition.Id.ToString(),
                         Template = templates[0],
                         Name = QuestPayloadBuilder.ResolveItemName(templates[0], locale),
-                        Required = Math.Max(1, Numbers.ToCount(condition.Value, 1)),
+                        Required = QuestFacts.RequiredCount(condition),
                         OwnedFoundInRaid = foundInRaid,
                         OwnedTotal = total,
                         HandedIn = completedConditions.Contains(condition.Id.ToString())
@@ -269,7 +274,10 @@ namespace QuestTreeServer
         /// The checklist is still worth serving in that case, just with nothing marked as owned, so
         /// this degrades instead of failing the whole route.
         /// </summary>
-        private BotBase? TryGetProfile(MongoId sessionId)
+        /// <summary>PmcData rather than BotBase, since 1.9.0: the shared QuestFacts helpers need the
+        /// PMC-shaped profile, and GetPmcProfile returns one anyway - the wider type was only ever
+        /// what ProfileInventory.CountByTemplate happened to accept.</summary>
+        private PmcData? TryGetProfile(MongoId sessionId)
         {
             try
             {
@@ -295,22 +303,5 @@ namespace QuestTreeServer
                 string.Equals(q.QuestName, CollectorQuestName, StringComparison.OrdinalIgnoreCase));
         }
 
-
-        /// <summary>Condition ids the player has already satisfied on the Collector quest. Empty
-        /// when the quest has not been accepted, which is the normal case for most of a wipe.</summary>
-        private static HashSet<string> GetCompletedConditions(BotBase? profile, MongoId questId)
-        {
-            var status = profile?.Quests?.FirstOrDefault(q => q.QId == questId);
-
-            return status?.CompletedConditions == null
-                ? new HashSet<string>()
-                : new HashSet<string>(status.CompletedConditions);
-        }
-
-        private static string GetQuestStatus(BotBase? profile, MongoId questId)
-        {
-            var status = profile?.Quests?.FirstOrDefault(q => q.QId == questId);
-            return status == null ? QuestStatusEnum.Locked.ToString() : status.Status.ToString();
-        }
     }
 }

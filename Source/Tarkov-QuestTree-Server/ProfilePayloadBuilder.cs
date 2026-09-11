@@ -32,7 +32,7 @@ namespace QuestTreeServer
         ISptLogger<ProfilePayloadBuilder> logger,
         TemplateTable templateTable,
         ProfileHelper profileHelper,
-        QuestHelper questHelper)
+        QuestFacts facts)
     {
 
         public string GetPayloadJson(MongoId sessionId) =>
@@ -130,15 +130,13 @@ namespace QuestTreeServer
             if (quests == null) return;
 
             var owned = ProfileInventory.CountByTemplate(profile);
-            var started = profile.Quests?.Select(q => q.QId).ToHashSet() ?? new HashSet<MongoId>();
 
-            // Built once here: every unstarted quest checks each prerequisite against the profile,
-            // and a scan of the profile's quest list per check was millions of comparisons per
-            // request on a large modded install.
-            var succeeded = profile.Quests?
-                .Where(q => q.Status == SPTarkov.Server.Core.Models.Enums.QuestStatusEnum.Success)
-                .Select(q => q.QId.ToString())
-                .ToHashSet() ?? new HashSet<string>();
+            // One index, two answers. Built once because every unstarted quest checks each
+            // prerequisite against the profile, and a scan of the quest list per check was millions
+            // of comparisons per request on a large modded install.
+            var progress = facts.IndexProgress(profile);
+            var started = progress.Entries.Keys;
+            var succeeded = progress.Succeeded;
 
             foreach (var quest in quests.Values)
             {
@@ -163,7 +161,7 @@ namespace QuestTreeServer
 
                 try
                 {
-                    var reason = ResolveLockReason(quest, profile, succeeded);
+                    var reason = facts.ResolveLockReason(quest, profile, succeeded);
                     if (reason != null) payload.LockReasons[quest.Id.ToString()] = reason;
                 }
                 catch (Exception ex)
@@ -202,95 +200,6 @@ namespace QuestTreeServer
                 }
             }
         }
-
-        /// <summary>Null when nothing is blocking the quest.</summary>
-        private LockReasonDto? ResolveLockReason(Quest quest, PmcData profile, HashSet<string> succeeded)
-        {
-            if (questHelper.QuestIsForOtherSide(profile.Info?.Side, quest.Id))
-                return new LockReasonDto { Kind = "OtherFaction", Detail = "For the other faction" };
-
-            var gameVersion = profile.Info?.GameVersion;
-
-            if (questHelper.QuestIsProfileBlacklisted(gameVersion, quest.Id) ||
-                !questHelper.QuestIsProfileWhitelisted(gameVersion, quest.Id))
-            {
-                return new LockReasonDto { Kind = "Edition", Detail = "Not available in your game edition" };
-            }
-
-            if (!questHelper.ShowEventQuestToPlayer(quest.Id))
-                return new LockReasonDto { Kind = "Event", Detail = "Seasonal event quest, not currently active" };
-
-            var conditions = quest.Conditions?.AvailableForStart;
-            if (conditions == null) return null;
-
-            var playerLevel = profile.Info?.Level ?? 0;
-
-            foreach (var condition in conditions.GetLevelConditions())
-            {
-                if (questHelper.DoesPlayerLevelFulfilCondition(playerLevel, condition)) continue;
-
-                var required = Numbers.ToCount(condition.Value);
-                return new LockReasonDto
-                {
-                    Kind = "Level",
-                    Detail = $"Requires level {required}",
-                    RequiredValue = required,
-                    CurrentValue = playerLevel
-                };
-            }
-
-            foreach (var condition in conditions.GetLoyaltyConditions())
-            {
-                if (questHelper.TraderLoyaltyLevelRequirementCheck(condition, profile)) continue;
-
-                return new LockReasonDto
-                {
-                    Kind = "Loyalty",
-                    Detail = $"Requires loyalty level {Numbers.ToCount(condition.Value)}",
-                    RequiredValue = Numbers.ToCount(condition.Value),
-                    TraderId = ResolveConditionTrader(condition)
-                };
-            }
-
-            foreach (var condition in conditions.GetStandingConditions())
-            {
-                if (questHelper.TraderStandingRequirementCheck(condition, profile)) continue;
-
-                return new LockReasonDto
-                {
-                    Kind = "Standing",
-                    Detail = "Requires higher trader standing",
-                    TraderId = ResolveConditionTrader(condition)
-                };
-            }
-
-            // Prerequisites last: they are the common case, and the client can already name the
-            // quest from its own graph, so this only has to say that one is outstanding.
-            var outstanding = conditions.GetQuestConditions()
-                .SelectMany(c => QuestPayloadBuilder.TargetIds(c.Target))
-                .Where(id => !string.IsNullOrWhiteSpace(id))
-                .Where(id => !succeeded.Contains(id))
-                .ToList();
-
-            if (outstanding.Count > 0)
-            {
-                return new LockReasonDto
-                {
-                    Kind = "Prerequisite",
-                    Detail = outstanding.Count == 1
-                        ? "Requires an earlier quest"
-                        : $"Requires {outstanding.Count} earlier quests",
-                    BlockingQuestIds = outstanding
-                };
-            }
-
-            return null;
-        }
-
-        private static string ResolveConditionTrader(QuestCondition condition) =>
-            condition.Target != null && !condition.Target.IsList
-                ? condition.Target.Item ?? ""
-                : condition.Target?.List?.FirstOrDefault() ?? "";
 
         /// <summary>GetPmcProfile throws rather than returning null on an empty session id, which is
         /// what an out-of-game request carries. Same guard as KappaPayloadBuilder.</summary>
