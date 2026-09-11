@@ -37,7 +37,7 @@ namespace QuestTree.UI
 
         /// <summary>How wide the trader stripe is. Narrow on purpose: it is an accent, and
         /// anything wider starts competing with the status colour it sits beside.</summary>
-        private const float TraderStripeWidth = 4f;
+        private const float TraderStripeWidth = 5f;
 
         private Image _traderStripe;
         public static float Height => LayoutMetrics.NodeHeight;
@@ -514,7 +514,7 @@ namespace QuestTree.UI
             var locked = status == ENodeStatus.Locked;
 
             if (_statusBar != null) _statusBar.color = color;
-            if (_fill != null) _fill.color = locked ? LockedFillColor : FillColor;
+            if (_fill != null) _fill.color = TintedFill(locked ? LockedFillColor : FillColor);
 
             if (_outline != null)
             {
@@ -593,6 +593,27 @@ namespace QuestTree.UI
         /// unreadable smears that only add noise; hiding them and growing the title keeps the one
         /// thing worth reading readable. Cheap: toggles and one font size, on visible views only.
         /// </summary>
+        /// <summary>The box's own colour, tinted toward the trader's.
+        ///
+        /// A 4px stripe was too quiet to see - at any zoom where the whole tree is in view it is a
+        /// pixel wide, which is why the trader colours read as "not working" even after the stripe
+        /// stopped being hidden behind the status bar.
+        ///
+        /// The fill is free to carry this because it never carried status: status is the bar down
+        /// the left edge and the outline, which are untouched. So the box says whose chain it is and
+        /// still says where you are in it, which was the whole reason for not tinting the fill by
+        /// status in the first place.
+        ///
+        /// A light lerp, not a wash. Dark enough that white title text stays readable, which is the
+        /// constraint that decides the number.</summary>
+        private Color TintedFill(Color baseColour)
+        {
+            if (ModSettings.Ready && !ModSettings.ShowTraderColours.Value) return baseColour;
+            if (Node == null || string.IsNullOrEmpty(Node.TraderId)) return baseColour;
+
+            return Color.Lerp(baseColour, TraderPalette.For(Node.TraderId), 0.30f);
+        }
+
         /// <summary>The trader's colour, or nothing when the setting is off.
         ///
         /// Every trader has a colour including ones from mods - TraderPalette derives one from the
@@ -607,6 +628,10 @@ namespace QuestTree.UI
 
             _traderStripe.enabled = show;
             if (show) _traderStripe.color = TraderPalette.For(Node.TraderId);
+
+            // The fill is tinted from the same colour and is set by RefreshStatus, which may have
+            // run for the previous occupant of this pooled view.
+            RefreshStatus();
         }
 
         public void SetDetailLevel(int level)

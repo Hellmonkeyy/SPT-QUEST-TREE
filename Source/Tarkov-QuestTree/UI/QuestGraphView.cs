@@ -160,6 +160,14 @@ namespace QuestTree.UI
         /// that keeps two markers apart is derived from it.</summary>
         private const float TraderMarkerSize = 76f;
 
+        /// <summary>How far a portrait may grow as the tree shrinks.
+        ///
+        /// Capped, because the spacing that keeps two portraits apart is fixed at layout time and an
+        /// uncapped counter-scale outruns any fixed gap - which is exactly what stacked them on top
+        /// of each other. Past this the collapsed tier takes over anyway, and its bands carry the
+        /// trader's name themselves.</summary>
+        private const float MaxTraderMarkerScale = 2.5f;
+
         /// <summary>The collapsed overview, and the bands it draws. Rebuilt with the layout.</summary>
         private TreeOverview _overview;
         private readonly List<TreeOverview.Band> _bands = new List<TreeOverview.Band>();
@@ -558,7 +566,10 @@ namespace QuestTree.UI
         /// its band's exact centre when the tree is crowded.</summary>
         private static float Spaced(float wanted, List<float> placed)
         {
-            const float minGap = TraderMarkerSize * 1.4f;
+            // The widest the portrait will ever be DRAWN, plus a margin - not its authored size.
+            // Spacing by the authored size left them overlapping the moment the counter-scale grew
+            // them, which is every zoom past 1:1.
+            const float minGap = TraderMarkerSize * MaxTraderMarkerScale * 1.2f;
 
             var y = wanted;
             var moved = true;
@@ -595,7 +606,7 @@ namespace QuestTree.UI
         {
             if (_traderMarkers.Count == 0) return;
 
-            var scale = zoom > 0.0001f ? Mathf.Max(1f, 1f / zoom) : 1f;
+            var scale = zoom > 0.0001f ? Mathf.Clamp(1f / zoom, 1f, MaxTraderMarkerScale) : 1f;
             if (Mathf.Approximately(scale, _traderMarkerScale)) return;
 
             _traderMarkerScale = scale;
@@ -608,6 +619,12 @@ namespace QuestTree.UI
         }
 
         private float _traderMarkerScale = 1f;
+
+        private void ShowTraderMarkers(bool show)
+        {
+            foreach (var marker in _traderMarkers)
+                if (marker != null && marker.activeSelf != show) marker.SetActive(show);
+        }
 
         /// <summary>The portrait for one trader, hung in the gutter left of the tree.</summary>
         private void CreateTraderMarker(string traderId, Vector2 gutterPosition)
@@ -869,9 +886,14 @@ namespace QuestTree.UI
             {
                 ReleaseAllViews();
                 _labels?.Draw(null, null, zoom, 0);
-                ScaleTraderMarkers(zoom);
+
+                // The bands name their own traders, so a second set of portraits over them is just
+                // clutter at the zoom with the least room for it.
+                ShowTraderMarkers(false);
                 return;
             }
+
+            ShowTraderMarkers(true);
 
             var level = zoom < LayoutMetrics.BarOnlyZoom ? 2 : zoom < LayoutMetrics.DetailLevelZoom ? 1 : 0;
             if (level != _detailLevel)
