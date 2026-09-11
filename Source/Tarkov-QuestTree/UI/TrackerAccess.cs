@@ -1,3 +1,4 @@
+using UnityEngine;
 using System;
 using EFT;
 using SPT.Reflection.Utils;
@@ -86,49 +87,90 @@ namespace QuestTree.UI
             var host = Plugin.Instance;
             if (host == null || !host.isActiveAndEnabled) return;
 
-            host.StartCoroutine(RestoreIfHidden(panel));
+            var parent = panel.transform.parent;
+            if (parent == null) return;
+
+            host.StartCoroutine(RestoreBehindWindow(panel, parent, parent.childCount));
         }
 
-        private static System.Collections.IEnumerator RestoreIfHidden(QuestTreePanel panel)
+        /// <summary>Puts the panel back BELOW the window EFT just opened, or leaves it closed.
+        ///
+        /// The first attempt simply re-activated the panel, which restored it in FRONT - the tracker
+        /// is a full-screen dark overlay, so it swallowed the very window the player had just
+        /// clicked to see. That is worse than the bug it was fixing.
+        ///
+        /// Sibling order is why. TrackerAccess.Show calls SetAsLastSibling, which parks the panel
+        /// above everything under the root canvas - including EFT's window layer. The window is not
+        /// ours to raise (it lives in the game's own stack, per ItemUiContext.SetAsTopWindow), so
+        /// instead the panel is moved DOWN to where the window appeared.
+        ///
+        /// The window is identified by what it is, not by what it is called: any child added to our
+        /// parent at or after the index recorded before Inspect ran. If none appears there, the
+        /// window went somewhere we cannot see, and then the panel is LEFT CLOSED - the behaviour
+        /// before any of this. Never restore a panel that cannot be proven to be behind the window.</summary>
+        private static System.Collections.IEnumerator RestoreBehindWindow(
+            QuestTreePanel panel, Transform parent, int childCountBefore)
         {
             for (var frame = 1; frame <= InspectWatchFrames; frame++)
             {
                 yield return null;
 
                 // Destroyed while we waited - a menu teardown. Nothing to put back.
-                if (panel == null) yield break;
+                if (panel == null || parent == null) yield break;
                 if (panel.gameObject.activeSelf) continue;
+
+                // Anything added since Inspect ran, ignoring the panel itself.
+                var window = -1;
+                for (var i = childCountBefore - 1; i < parent.childCount; i++)
+                {
+                    if (i < 0) continue;
+
+                    var child = parent.GetChild(i);
+                    if (child == null || child == panel.transform) continue;
+
+                    window = i;
+                    break;
+                }
+
+                if (window < 0)
+                {
+                    LogInspect(
+                        "QuestTree: the tracker was hidden by an item inspect and the inspect window " +
+                        "is not a sibling of the panel, so the tracker has been left closed rather " +
+                        "than restored on top of it. Close the window to get the tracker back.");
+                    yield break;
+                }
 
                 panel.gameObject.SetActive(true);
 
-                // Deliberately NOT SetAsLastSibling. The panel is a full-screen dark overlay, so
-                // raising it above the inspect window would hide the very thing the player just
-                // opened - a worse bug than the one being fixed. Behind the window is where it
-                // belongs.
-                if (!_inspectRestoreLogged)
-                {
-                    _inspectRestoreLogged = true;
-                    Plugin.LogSource?.LogInfo(
-                        $"QuestTree: the tracker was hidden {frame} frame(s) after an item inspect and " +
-                        "has been restored behind the inspect window. If the tracker now looks wrong " +
-                        "rather than merely restored, this line is the place to start.");
-                }
+                // Below the window. SetSiblingIndex shifts the window up by one, which is exactly
+                // the intent: the thing the player clicked stays readable, the tracker is behind it.
+                panel.transform.SetSiblingIndex(window);
+
+                LogInspect(
+                    $"QuestTree: the tracker was hidden {frame} frame(s) after an item inspect and has " +
+                    "been restored behind the inspect window.");
 
                 yield break;
             }
 
             // Never hidden this session: the restore is not needed on this install, and saying so
             // is what tells the difference between "fixed" and "never happened here".
-            if (!_inspectRestoreLogged && !_inspectIntactLogged)
-            {
-                _inspectIntactLogged = true;
-                Plugin.LogSource?.LogInfo(
-                    "QuestTree: the tracker stayed open across an item inspect - no restore needed.");
-            }
+            LogInspect("QuestTree: the tracker stayed open across an item inspect - no restore needed.");
         }
 
-        private static bool _inspectRestoreLogged;
-        private static bool _inspectIntactLogged;
+        /// <summary>One line a session about the inspect interaction, whichever of the three
+        /// outcomes happened. Six ways for this to look wrong on screen and one way to tell them
+        /// apart.</summary>
+        private static void LogInspect(string message)
+        {
+            if (_inspectLogged) return;
+            _inspectLogged = true;
+
+            Plugin.LogSource?.LogInfo(message);
+        }
+
+        private static bool _inspectLogged;
 
         private static bool _deadPanelWarned;
         private static bool _raidLocationWarned;

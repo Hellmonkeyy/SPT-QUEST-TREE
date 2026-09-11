@@ -65,23 +65,6 @@ namespace QuestTree.UI
 
             _placed.Clear();
 
-            // Seed the collision set with the BOXES.
-            //
-            // Without this a label lands exactly on its own node - the position it is given IS the
-            // box - so the names drew straight across the boxes and over each other, which is worse
-            // than the silence it replaced. Labels may only occupy empty space between the boxes.
-            if (occupied != null)
-            {
-                foreach (var box in occupied)
-                {
-                    _placed.Add(new Rect(
-                        box.x - BoxPadding,
-                        box.y - LayoutMetrics.NodeHeight * 0.5f - BoxPadding,
-                        LayoutMetrics.NodeWidth + BoxPadding * 2f,
-                        LayoutMetrics.NodeHeight + BoxPadding * 2f));
-                }
-            }
-
             // Nothing to say at full zoom: the boxes are readable, and a second copy of the title
             // floating over them is noise.
             if (budget <= 0 || ranked == null || ranked.Count == 0 || zoom >= LayoutMetrics.DetailLevelZoom)
@@ -90,12 +73,34 @@ namespace QuestTree.UI
                 return;
             }
 
-            // Counter-scaled so the text is the same size on screen at any zoom. MapView already
-            // does this for place names with the shared outlined material, so the old worry about
-            // font materials does not apply - that bug was per-label material INSTANCING, not
-            // scaling.
+            // EVERYTHING BELOW IS IN SCREEN PIXELS, and that is the whole fix.
+            //
+            // The first version measured collisions in CONTENT space while the labels are
+            // counter-scaled to a constant screen size - so at 20% zoom a 13px label is ~90 units
+            // tall in tree coordinates, taller than the gap RowSpacing leaves between rows. Every
+            // candidate overlapped the row above, every one was skipped, and the layer drew
+            // absolutely nothing.
+            //
+            // On screen there is plenty of room at that zoom, because the boxes are tiny. So the
+            // question is asked where it actually lives: multiply positions by the zoom, place and
+            // test in pixels, then divide back on the way out.
             var inverse = zoom > 0.0001f ? 1f / zoom : 1f;
+
+            // The boxes, so a label can only occupy empty space between them.
+            if (occupied != null)
+            {
+                foreach (var box in occupied)
+                {
+                    _placed.Add(new Rect(
+                        box.x * zoom - BoxPadding,
+                        (box.y - LayoutMetrics.NodeHeight * 0.5f) * zoom - BoxPadding,
+                        LayoutMetrics.NodeWidth * zoom + BoxPadding * 2f,
+                        LayoutMetrics.NodeHeight * zoom + BoxPadding * 2f));
+                }
+            }
+
             var used = 0;
+            var considered = 0;
 
             for (var i = 0; i < ranked.Count && used < budget; i++)
             {
@@ -105,36 +110,39 @@ namespace QuestTree.UI
                 var text = node.Name;
                 if (string.IsNullOrEmpty(text)) continue;
 
+                considered++;
                 var label = Acquire(used);
 
                 // Assigned only when it changed: setting TMP text re-lays it out, and this runs
                 // through every frame of a drag.
                 if (label.text != text) label.text = text;
 
-                // Measured through GameStyle, which floors TMP's answer at a character estimate. An
-                // under-measured rect makes the collision test pass and two labels overlap, which
-                // is the one thing this layer exists to prevent.
-                var width = GameStyle.MeasureWidth(label, text) * inverse;
-                var height = FontSize * 1.4f * inverse;
+                // Both already in screen pixels - MeasureWidth measures the label at its own font
+                // size, and the label is counter-scaled so that size IS its on-screen size.
+                var width = GameStyle.MeasureWidth(label, text);
+                var height = FontSize * 1.4f;
 
-                // Above the box rather than on it, in the gap RowSpacing already leaves between
-                // rows. Sitting on the node would cover the very title it is repeating.
-                var anchor = ranked[i].Position;
+                // Above the box, clear of it by a few pixels on screen at any zoom.
+                var anchor = ranked[i].Position * zoom;
                 var position = new Vector2(
-                    anchor.x, anchor.y + LayoutMetrics.NodeHeight * 0.5f + height * 0.6f);
+                    anchor.x,
+                    anchor.y + LayoutMetrics.NodeHeight * 0.5f * zoom + height * 0.6f);
 
                 var rect = new Rect(position.x, position.y - height * 0.5f, width, height);
 
-                // No room above this one: another box or another label is already there. Skipping is
-                // the right answer - a label nobody can read helps nobody.
+                // No room: another box or another label is already there. Skipping is right - a
+                // label nobody can read helps nobody.
                 if (Collides(rect)) continue;
 
                 _placed.Add(rect);
 
                 var transform = (RectTransform)label.transform;
+
+                // Counter-scaled, so sizeDelta in screen pixels renders at exactly that size:
+                // sizeDelta * (1/zoom) * zoom = sizeDelta.
                 transform.localScale = Vector3.one * inverse;
-                transform.anchoredPosition = position;
                 transform.sizeDelta = new Vector2(width, height);
+                transform.anchoredPosition = position * inverse;
 
                 label.color = QuestNodeView.ColorFor(node.Status);
                 if (!label.gameObject.activeSelf) label.gameObject.SetActive(true);
@@ -143,6 +151,27 @@ namespace QuestTree.UI
             }
 
             Hide(used);
+            Report(considered, used);
+        }
+
+        private static bool _reported;
+
+        /// <summary>Said once a session: how many labels were wanted and how many landed.
+        ///
+        /// This exists because the failure it replaces was SILENT - the layer drew nothing and
+        /// looked exactly like a layer that had been turned off. "15 of 15 skipped" is a diagnosis;
+        /// a blank screen is another play session. Third time this mod has shipped a layout thing
+        /// wrong by reasoning about it instead of looking at it, so it reports on itself.</summary>
+        private static void Report(int considered, int placed)
+        {
+            if (_reported || considered == 0) return;
+            _reported = true;
+
+            Plugin.LogSource?.LogInfo(
+                $"QuestTree: overview labels - {placed} of {considered} candidate(s) placed. " +
+                (placed == 0
+                    ? "None fitted, which usually means the collision rects are wrong rather than that the tree is full."
+                    : "This is the layer working."));
         }
 
         /// <summary>Against PLACED labels only, never against candidates not yet considered.
