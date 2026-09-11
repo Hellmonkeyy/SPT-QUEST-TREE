@@ -6,13 +6,29 @@ using EFT.Quests;
 namespace QuestTree.QuestGraph
 {
     /// <summary>Display status bucket a node is colored by. Collapses EQuestStatus down to the
-    /// four states the tree actually needs to distinguish.</summary>
+    /// states the tree actually needs to distinguish.
+    ///
+    /// <see cref="Gated"/> is a split of Locked, and it is the one distinction a player acts on:
+    /// "another quest has to happen first" and "I just need to level up" are the difference between
+    /// not actionable and actionable-later, and until now the tree drew them identically. The data
+    /// to tell them apart was already on the wire - LockReasonDto.Kind - and was being thrown away
+    /// at the node.
+    ///
+    /// APPENDED, not inserted. The order is not persisted anywhere, but several switches compare
+    /// against it and a couple of views sort by it; adding at the end keeps every existing value
+    /// where it was.</summary>
     internal enum ENodeStatus
     {
         Locked,
         Available,
         Active,
-        Completed
+        Completed,
+
+        /// <summary>Every prerequisite quest is done; a level, loyalty or standing threshold is
+        /// not. Never set for a gate that can never change (faction, edition, event) - those stay
+        /// Locked, because "come back when you are level 30" is advice and "wrong edition" is
+        /// not.</summary>
+        Gated
     }
 
     /// <summary>

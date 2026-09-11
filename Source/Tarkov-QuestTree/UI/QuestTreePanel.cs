@@ -539,6 +539,12 @@ namespace QuestTree.UI
 
             try
             {
+                // Here rather than in the event handler: this pass reads the profile, and the
+                // handler invalidated that cache a frame ago, so asking for it there would have
+                // fetched synchronously inside the game's invocation list. See ApplyLockGates.
+                _graph.ApplyLockGates();
+                _graphView?.RefreshNodeStatuses();
+
                 if (IsAuxTab(_selectedTraderId))
                 {
                     RenderSelectedTab();

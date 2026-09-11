@@ -48,20 +48,32 @@ namespace QuestTree.UI
 
         private Vector2 _size = new Vector2(LayoutMetrics.NodeWidth, LayoutMetrics.NodeHeight);
 
-        // Grey / amber / green / dark green. Available is amber rather than the near-white it used
-        // to be: white and grey are the two colours that do not survive a zoomed-out tree, and the
-        // game's own Tasks screen says "you can take this" in amber. The one quest you are actually
-        // doing stays the brightest thing on the screen, in a vivid green.
-        private static readonly Color LockedColor = new(0.42f, 0.42f, 0.4f, 1f);
-        private static readonly Color AvailableColor = new(0.85f, 0.66f, 0.28f, 1f);
-        private static readonly Color ActiveColor = new(0.36f, 0.91f, 0.17f, 1f);
+        // Grey / blue / amber / green / red.
+        //
+        // This is a ROTATION of the old palette, and the reason is that the old one put in-progress
+        // and completed in the same hue. They were separated by brightness alone - the argument
+        // being that completed quests are the backdrop of a mature tree and should recede - and in
+        // practice that failed the one question the canvas has to answer. On a chain of forty green
+        // boxes you cannot see which one you are on.
+        //
+        // So hue now carries status and nothing else: blue you may take, amber you are doing, green
+        // you have done, red is a threshold away, grey is behind another quest. Completed still
+        // recedes, but by being dimmed and struck through rather than by being a darker version of
+        // the colour that means something else.
+        private static readonly Color LockedColor = new(0.42f, 0.42f, 0.42f, 1f);
+        private static readonly Color AvailableColor = new(0.31f, 0.64f, 0.89f, 1f);
+        private static readonly Color ActiveColor = new(0.91f, 0.64f, 0.24f, 1f);
 
-        // Completed is also green - "done" is green by convention and that is worth keeping - so the
-        // two are separated by BRIGHTNESS rather than hue: this is 43% darker than Active. Hue alone
-        // does not survive the 11px glyphs in the legend and the lists, and it survives the 25%
-        // chain-dimming even less. Completed quests are the backdrop of a mature tree; they should
-        // recede, not compete.
-        private static readonly Color CompletedColor = new(0.24f, 0.52f, 0.3f, 1f);
+        /// <summary>Level, loyalty or standing - a wall you climb rather than one you unlock.
+        /// Red because it is the only status that is about YOU rather than about the quest.</summary>
+        private static readonly Color GatedColor = new(0.85f, 0.33f, 0.31f, 1f);
+
+        // Completed keeps green - "done" is green by convention - and now it is the ONLY green, so
+        // it no longer has to be a darker shade of in-progress to be told apart from it. Brightened
+        // accordingly: the old value was dimmed to create that separation, and with hue doing the
+        // work the dimming is free to move to where it belongs, which is the box itself (struck
+        // title, reduced alpha) rather than the status colour shared with the legend and the lists.
+        private static readonly Color CompletedColor = new(0.31f, 0.75f, 0.5f, 1f);
 
         /// <summary>The box itself. Slightly lighter than the panel so the box has an edge, and
         /// opaque so an edge passing behind it stops at it.</summary>
@@ -80,18 +92,24 @@ namespace QuestTree.UI
             ENodeStatus.Completed => FromSettings(ModSettings.ColorCompleted, CompletedColor),
             ENodeStatus.Active => FromSettings(ModSettings.ColorActive, ActiveColor),
             ENodeStatus.Available => FromSettings(ModSettings.ColorAvailable, AvailableColor),
+            ENodeStatus.Gated => FromSettings(ModSettings.ColorGated, GatedColor),
             _ => FromSettings(ModSettings.ColorLocked, LockedColor)
         };
 
         private static Color FromSettings(BepInEx.Configuration.ConfigEntry<string> entry, Color fallback) =>
             ModSettings.Ready ? ModSettings.ParseColor(entry, fallback) : fallback;
 
-        /// <summary>A glyph per status, so state is not carried by colour alone.</summary>
+        /// <summary>A glyph per status, so state is not carried by colour alone.
+        ///
+        /// This is what the greyscale test rests on: desaturate every accent and the five states
+        /// must still be tellable apart. Colour is the fast channel, the glyph is the one that
+        /// still works for a colour-blind player and at the zoom where a 6px bar is a smudge.</summary>
         public static string GlyphFor(ENodeStatus status) => status switch
         {
             ENodeStatus.Completed => "✓",   // check
             ENodeStatus.Active => "▶",      // play
-            ENodeStatus.Available => "○",   // hollow circle
+            ENodeStatus.Available => "◇",   // outline diamond - "open", nothing done yet
+            ENodeStatus.Gated => "▲",       // up arrow - climb to it
             _ => "✕"                        // cross
         };
 
@@ -100,6 +118,7 @@ namespace QuestTree.UI
             ENodeStatus.Completed => "Completed",
             ENodeStatus.Active => "In progress",
             ENodeStatus.Available => "Available",
+            ENodeStatus.Gated => "Level gated",
             _ => "Locked"
         };
 
@@ -511,10 +530,16 @@ namespace QuestTree.UI
         {
             var status = Node.Status;
             var color = ColorFor(status);
-            var locked = status == ENodeStatus.Locked;
+
+            // "Cannot be started", which is now two statuses rather than one. Every recede-into-the-
+            // background decision below keys off THIS rather than off Locked alone - a gated quest
+            // is no more takeable than a locked one, and leaving it bright would have made the
+            // biggest visual difference on the tree between two states that are equally out of
+            // reach today.
+            var unstarted = status == ENodeStatus.Locked || status == ENodeStatus.Gated;
 
             if (_statusBar != null) _statusBar.color = color;
-            if (_fill != null) _fill.color = locked ? LockedFillColor : FillColor;
+            if (_fill != null) _fill.color = unstarted ? LockedFillColor : FillColor;
 
             if (_outline != null)
             {
@@ -534,13 +559,13 @@ namespace QuestTree.UI
                 }
             }
 
-            // Body text is the game's own colour on a dark box, whatever the status; only Locked
-            // steps down, so the part of the tree you cannot touch yet recedes as a whole.
-            var ink = locked ? GameStyle.DimTextColor : GameStyle.TextColor;
+            // Body text is the game's own colour on a dark box, whatever the status; only what you
+            // cannot start steps down, so that part of the tree recedes as a whole.
+            var ink = unstarted ? GameStyle.DimTextColor : GameStyle.TextColor;
             if (_title != null) _title.color = ink;
             if (_abbreviation != null) _abbreviation.color = ink;
-            if (_subtitle != null) _subtitle.color = Fade(GameStyle.TextColor, locked ? 0.4f : 0.6f);
-            if (_objectivePreview != null) _objectivePreview.color = Fade(GameStyle.TextColor, locked ? 0.35f : 0.55f);
+            if (_subtitle != null) _subtitle.color = Fade(GameStyle.TextColor, unstarted ? 0.4f : 0.6f);
+            if (_objectivePreview != null) _objectivePreview.color = Fade(GameStyle.TextColor, unstarted ? 0.35f : 0.55f);
 
             if (_statusGlyph != null)
             {
@@ -552,7 +577,12 @@ namespace QuestTree.UI
                 // you are back to reading a 6px bar. Bigger and in the status colour it reads as a
                 // state, and the three marks now partition the tree between them.
                 _statusGlyph.text = GlyphFor(status);
-                _statusGlyph.color = locked ? Fade(color, 0.75f) : color;
+
+                // Locked's cross is faded because the grey majority of a tree does not need
+                // shouting at. Gated's arrow is NOT - the box around it has just receded, and the
+                // arrow is the one thing on it saying this is a wall you climb rather than a quest
+                // you have not reached.
+                _statusGlyph.color = status == ENodeStatus.Locked ? Fade(color, 0.75f) : color;
             }
         }
 

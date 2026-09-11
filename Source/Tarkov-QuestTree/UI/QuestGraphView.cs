@@ -185,8 +185,18 @@ namespace QuestTree.UI
         ///
         /// Just under the zoom where a box is reduced to a bar: at that point the boxes have already
         /// stopped carrying a title, so nothing readable is being taken away - it is being replaced
-        /// with something that IS readable.</summary>
-        private float CollapseZoom => LayoutMetrics.BarOnlyZoom * 0.75f;
+        /// with something that IS readable.
+        ///
+        /// The floor is the whole point. This was BarOnlyZoom * 0.75, which on the default settings
+        /// is 0.2625 - against a MinZoom of 0.25. The overview therefore existed in a band one and a
+        /// quarter percent of the zoom range wide, and the feature built to fix the zoomed-out grey
+        /// wall was, in practice, unreachable. Worse than a badly chosen number: a number that could
+        /// not be reached at all, and a setting could push it below MinZoom entirely.
+        ///
+        /// So it is pinned clear of the floor, and only then allowed to track BarOnlyZoom. There is
+        /// real travel either side of it now.</summary>
+        private float CollapseZoom =>
+            Mathf.Max(MinZoom + 0.05f, LayoutMetrics.BarOnlyZoom * 0.85f);
 
         /// <summary>Hysteresis, so the tier does not flip back and forth while the zoom sits on the
         /// threshold. Entering the overview and leaving it are different numbers on purpose.</summary>
@@ -1476,6 +1486,10 @@ namespace QuestTree.UI
                 ENodeStatus.Active => (WithAlpha(QuestNodeView.ColorFor(ENodeStatus.Active), Mathf.Min(1f, 0.45f * EdgeOpacityScale)), EdgeThickness),
                 ENodeStatus.Available => (WithAlpha(QuestNodeView.ColorFor(ENodeStatus.Available), Mathf.Min(1f, 0.4f * EdgeOpacityScale)), EdgeThickness),
                 ENodeStatus.Completed => (EdgeColor, EdgeThickness),
+
+                // Nearer to available than to locked: the chain into a gated quest is finished, and
+                // drawing it as a locked hairline would say the opposite.
+                ENodeStatus.Gated => (WithAlpha(QuestNodeView.ColorFor(ENodeStatus.Gated), Mathf.Min(1f, 0.35f * EdgeOpacityScale)), EdgeThickness),
                 _ => (EdgeToLockedColor, EdgeToLockedThickness)
             };
         }

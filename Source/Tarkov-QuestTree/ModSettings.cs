@@ -117,7 +117,22 @@ namespace QuestTree
         public static ConfigEntry<string> ColorAvailable { get; private set; }
         public static ConfigEntry<string> ColorCompleted { get; private set; }
         public static ConfigEntry<string> ColorLocked { get; private set; }
+        public static ConfigEntry<string> ColorGated { get; private set; }
         public static ConfigEntry<string> ColorAccent { get; private set; }
+
+        /// <summary>Which generation of the status palette this config holds.
+        ///
+        /// Exists because BepInEx's Bind NEVER overwrites a value that is already in the .cfg - it
+        /// only supplies a default for a key that is absent. So changing a default ships the change
+        /// to new installs and to nobody who has ever run the mod, which for a palette fix is the
+        /// one group that needed it. Without this the rotation below would have been invisible on
+        /// every existing install.</summary>
+        public static ConfigEntry<int> ColourScheme { get; private set; }
+
+        /// <summary>The palette before 1.10.0, kept so "Restore previous colours" is one click and
+        /// so the migration can tell an untouched old default from a deliberate choice.</summary>
+        public static readonly (string Active, string Available, string Completed, string Locked) LegacyColours =
+            ("#5CE82B", "#D9A847", "#3D854D", "#6B6B66");
 
         // --- Behaviour ---
         public static ConfigEntry<bool> Tooltips { get; private set; }
@@ -215,6 +230,64 @@ namespace QuestTree
         /// <summary>Cleared once the intro has been dismissed. Not shown in the Settings tab - it is
         /// state, not a preference; the "?" button in the toolbar is how you get the hint back.</summary>
         public static ConfigEntry<bool> HasSeenIntro { get; private set; }
+
+        /// <summary>The current palette generation. Bump when the defaults change again.</summary>
+        private const int CurrentColourScheme = 1;
+
+        /// <summary>Moves an existing config onto the new palette, once.
+        ///
+        /// 1.10.0 rotated the status colours because the old set gave in-progress and completed the
+        /// same hue, separated only by brightness - which failed the one question the tree exists to
+        /// answer. Shipping that as a default change alone would have fixed it for new installs and
+        /// for nobody else, since Bind leaves an existing value alone.
+        ///
+        /// Only values that still match the OLD DEFAULT are rewritten. Someone who picked their own
+        /// colours picked them on purpose, and having the mod overwrite a deliberate choice is worse
+        /// than leaving them on a palette they can change - so a customised entry is left exactly as
+        /// it is, and only the untouched ones move. The version stamp goes down either way, so this
+        /// runs once and never again.</summary>
+        private static void MigrateColourScheme()
+        {
+            if (ColourScheme.Value >= CurrentColourScheme) return;
+
+            var moved = 0;
+
+            moved += AdoptNewDefault(ColorActive, LegacyColours.Active);
+            moved += AdoptNewDefault(ColorAvailable, LegacyColours.Available);
+            moved += AdoptNewDefault(ColorCompleted, LegacyColours.Completed);
+            moved += AdoptNewDefault(ColorLocked, LegacyColours.Locked);
+
+            ColourScheme.Value = CurrentColourScheme;
+
+            if (moved > 0)
+            {
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: moved {moved} status colour(s) onto the 1.10 palette - in-progress is amber " +
+                    "and available is blue, so they no longer share a hue with completed. " +
+                    "Settings > Colours > Restore previous colours puts the old set back.");
+            }
+        }
+
+        /// <summary>Rewrites one entry to its new default, but only if it still holds the old one.
+        /// Returns 1 when it moved, so the caller can report how much it changed.</summary>
+        private static int AdoptNewDefault(ConfigEntry<string> entry, string legacyValue)
+        {
+            if (entry == null) return 0;
+            if (!string.Equals(entry.Value?.Trim(), legacyValue, StringComparison.OrdinalIgnoreCase)) return 0;
+
+            entry.Value = (string)entry.DefaultValue;
+            return 1;
+        }
+
+        /// <summary>Puts the pre-1.10 status colours back, for anyone who preferred them.
+        /// Wired to a Settings row rather than left as a .cfg edit.</summary>
+        public static void RestoreLegacyColours()
+        {
+            ColorActive.Value = LegacyColours.Active;
+            ColorAvailable.Value = LegacyColours.Available;
+            ColorCompleted.Value = LegacyColours.Completed;
+            ColorLocked.Value = LegacyColours.Locked;
+        }
 
         public static void Init(ConfigFile config)
         {
@@ -391,11 +464,19 @@ namespace QuestTree
                 "Map", "Pin labels", PinLabelMode.HoverOnly,
                 "Which pins carry their name at rest. Hovering a pin always shows its name. HoverOnly keeps clusters readable; Actionable names in-progress and available quests; All names every pin.");
 
-            ColorActive = config.Bind("Colours", "In progress", "#5CE82B", "Hex colour for quests you have accepted. The F12 menu has a picker; the in-game Settings tab has presets.");
-            ColorAvailable = config.Bind("Colours", "Available", "#D9A847", "Hex colour for quests you can accept now.");
-            ColorCompleted = config.Bind("Colours", "Completed", "#3D854D", "Hex colour for quests handed in.");
-            ColorLocked = config.Bind("Colours", "Locked", "#6B6B66", "Hex colour for quests still gated.");
+            ColorActive = config.Bind("Colours", "In progress", "#E8A33D", "Hex colour for quests you have accepted. The F12 menu has a picker; the in-game Settings tab has presets.");
+            ColorAvailable = config.Bind("Colours", "Available", "#4FA3E3", "Hex colour for quests you can accept now.");
+            ColorCompleted = config.Bind("Colours", "Completed", "#4FBF7F", "Hex colour for quests handed in.");
+            ColorLocked = config.Bind("Colours", "Locked", "#6B6B6B", "Hex colour for quests behind another quest.");
+            ColorGated = config.Bind("Colours", "Level gated", "#D9534F", "Hex colour for quests whose prerequisites are done but whose level, loyalty or standing requirement is not.");
             ColorAccent = config.Bind("Colours", "Accent", "#C7A659", "Hex colour for selection, headers and highlights.");
+
+            ColourScheme = config.Bind(
+                "Colours", "Scheme version", 0,
+                "Which generation of the status palette this file holds. Do not edit: the mod uses it " +
+                "to apply a one-time palette update and will not touch your colours again afterwards.");
+
+            MigrateColourScheme();
 
             Tooltips = config.Bind(
                 "Behaviour", "Tooltips", true,
@@ -424,7 +505,7 @@ namespace QuestTree
                 TitleOnlyBelowZoom, CodesBelowZoom, QuestBadges, SidebarWidth, DoNextRows, ShowItemsSection,
                 ShowTakeWithYou, CountUnacceptedQuests, OverviewLabels, ShowTraderColours,
                 TraderColours, ShowCredits,
-                PinLabels, ColorActive, ColorAvailable, ColorCompleted, ColorLocked, ColorAccent, Tooltips,
+                PinLabels, ColorActive, ColorAvailable, ColorCompleted, ColorLocked, ColorGated, ColorAccent, Tooltips,
                 HoverSounds, RememberLastView, OpenTracker
             });
 
@@ -468,6 +549,7 @@ namespace QuestTree
             ColorAvailable.SettingChanged += Raise;
             ColorCompleted.SettingChanged += Raise;
             ColorLocked.SettingChanged += Raise;
+            ColorGated.SettingChanged += Raise;
             ColorAccent.SettingChanged += Raise;
             Tooltips.SettingChanged += Raise;
             HoverSounds.SettingChanged += Raise;

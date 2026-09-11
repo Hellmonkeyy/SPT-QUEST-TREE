@@ -137,6 +137,7 @@ namespace QuestTree.QuestGraph
             }
 
             RefreshStatusesInternal();
+            ApplyLockGates();
 
             Nodes = _byId.Values.ToArray();
             TraderNames = traderNames;
@@ -359,6 +360,54 @@ namespace QuestTree.QuestGraph
             foreach (var node in _byId.Values)
                 node.Status = node.LiveQuest != null ? ToNodeStatus(node.LiveQuest.QuestStatus) : ENodeStatus.Locked;
         }
+
+        /// <summary>Splits Locked into "behind another quest" and "behind a threshold".
+        ///
+        /// The game gives one Locked and no reason; the server already works the reason out, in
+        /// QuestFacts.ResolveLockReason, and sends it - so this is a relabel of data already on the
+        /// wire rather than a new rule. Level, loyalty and standing are walls you climb, and knowing
+        /// that a quest needs nothing but your next level is the difference between planning around
+        /// it and writing it off.
+        ///
+        /// Faction, edition and event gates deliberately stay Locked. "Come back at level 30" is
+        /// advice; "wrong game edition" is not, and colouring those the same red would promise
+        /// something that is never going to happen.
+        ///
+        /// SEPARATE FROM RefreshStatusesInternal on purpose. That runs straight off the game's
+        /// quest-completion event, which has just invalidated the profile cache - calling GetProfile
+        /// there would fire a blocking fetch inside the game's own invocation list, mid hand-in.
+        /// So the gate pass runs a frame later, from the deferred refresh, and a gated box spends
+        /// one frame grey.</summary>
+        public void ApplyLockGates()
+        {
+            ProfilePayloadDto profile;
+
+            try
+            {
+                profile = QuestDataClient.GetProfile();
+            }
+            catch (Exception ex)
+            {
+                // Without the reasons every gate stays Locked, which is what the tree drew before
+                // this existed. Degrade, never throw: this is on a refresh path.
+                Plugin.LogSource?.LogDebug($"QuestTree: no lock reasons for the gate pass ({ex.Message}).");
+                return;
+            }
+
+            if (profile?.LockReasons == null) return;
+
+            foreach (var node in _byId.Values)
+            {
+                if (node.Status != ENodeStatus.Locked) continue;
+                if (!profile.LockReasons.TryGetValue(node.Id, out var reason) || reason == null) continue;
+
+                if (IsThreshold(reason.Kind)) node.Status = ENodeStatus.Gated;
+            }
+        }
+
+        /// <summary>Whether a lock is something the player can grow out of.</summary>
+        private static bool IsThreshold(string kind) =>
+            kind == "Level" || kind == "Loyalty" || kind == "Standing";
 
         /// <summary>
         /// The longest prerequisite chain under every quest, in one O(N + E) pass with an explicit

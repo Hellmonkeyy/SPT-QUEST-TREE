@@ -348,12 +348,22 @@ namespace QuestTree.UI
             ColourRow(column, ref y, width, "In progress", ModSettings.ColorActive, QuestNodeView.ColorFor(ENodeStatus.Active));
             ColourRow(column, ref y, width, "Available", ModSettings.ColorAvailable, QuestNodeView.ColorFor(ENodeStatus.Available));
             ColourRow(column, ref y, width, "Completed", ModSettings.ColorCompleted, QuestNodeView.ColorFor(ENodeStatus.Completed));
+            ColourRow(column, ref y, width, "Level gated", ModSettings.ColorGated, QuestNodeView.ColorFor(ENodeStatus.Gated));
             ColourRow(column, ref y, width, "Locked", ModSettings.ColorLocked, QuestNodeView.ColorFor(ENodeStatus.Locked));
             ColourRow(column, ref y, width, "Accent", ModSettings.ColorAccent, GameStyle.AccentColor);
 
+            // The palette rotated in 1.10 so that in-progress and completed stopped sharing a hue.
+            // Anyone who preferred the old set should not have to reconstruct four hex codes by
+            // hand, and "reset to defaults" below now resets to the NEW defaults - which is the
+            // opposite of what they would want.
+            y += 4f;
+            AuxLayout.AddClickableRow(column, "<color=#FFFFFF60>Restore the pre-1.10 colours</color>",
+                AuxLayout.Padding, ref y, width - AuxLayout.Padding * 2f, false,
+                ModSettings.RestoreLegacyColours, 20f);
+
             ResetLink(column, ref y, width,
                 ModSettings.ColorActive, ModSettings.ColorAvailable, ModSettings.ColorCompleted,
-                ModSettings.ColorLocked, ModSettings.ColorAccent);
+                ModSettings.ColorLocked, ModSettings.ColorGated, ModSettings.ColorAccent);
         }
 
         /// <summary>One colour: a swatch of the current value, its name, and the preset chips.</summary>

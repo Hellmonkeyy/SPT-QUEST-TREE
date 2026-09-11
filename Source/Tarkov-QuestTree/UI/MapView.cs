@@ -492,7 +492,7 @@ namespace QuestTree.UI
             var grey = ColorUtility.ToHtmlStringRGB(UnknownMarkerColor);
             var accent = ColorUtility.ToHtmlStringRGB(GameStyle.AccentColor);
 
-            var statuses = string.Join("  ", new[] { ENodeStatus.Active, ENodeStatus.Available, ENodeStatus.Completed, ENodeStatus.Locked }
+            var statuses = string.Join("  ", new[] { ENodeStatus.Active, ENodeStatus.Available, ENodeStatus.Completed, ENodeStatus.Gated, ENodeStatus.Locked }
                 .Select(s => $"<color=#{QuestNodeView.HexFor(s)}>\u25a0</color> {QuestNodeView.NameFor(s).ToLowerInvariant()}"));
 
             return "<color=#FFFFFF60>" +

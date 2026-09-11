@@ -289,9 +289,14 @@ namespace QuestTree.UI
         /// name - laid out inline. Returns the width consumed.</summary>
         private float BuildLegendChips(RectTransform toolbar, float x, float itemY, float itemHeight)
         {
+            // Hardcoded and therefore easy to forget: a status left out of this array simply never
+            // appears in the legend, with nothing to catch it. Ordered the way the tree is read -
+            // what you are doing, what you could take, what is done, what is behind a wall, what is
+            // behind a quest.
             var statuses = new[]
             {
-                ENodeStatus.Active, ENodeStatus.Available, ENodeStatus.Completed, ENodeStatus.Locked
+                ENodeStatus.Active, ENodeStatus.Available, ENodeStatus.Completed,
+                ENodeStatus.Gated, ENodeStatus.Locked
             };
 
             var cursor = x;
