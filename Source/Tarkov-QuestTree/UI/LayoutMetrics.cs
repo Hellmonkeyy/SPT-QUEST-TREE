@@ -21,13 +21,18 @@ namespace QuestTree.UI
 
         // --- node box ---
         public static float NodeWidth => Compact ? 170f : 220f;
-        public static float NodeHeight => Compact ? 52f : 84f;
+        /// <summary>Tall enough for the two rows a box actually draws, and no taller.
+        ///
+        /// 84 dated from when a box carried a title, a subtitle AND an objective line. The objective
+        /// line is gone, so most of that height was empty - visible as boxes with a strip of content
+        /// floating in a large dark rectangle.</summary>
+        public static float NodeHeight => Compact ? 44f : 62f;
 
         // --- graph spacing ---
         // Row spacing must stay above NodeHeight or rows touch; the gap is deliberately smaller in
         // compact mode because that vertical space is what dominates the canvas height.
         public static float ColumnSpacing => Compact ? 195f : 260f;
-        public static float RowSpacing => Compact ? 62f : 112f;
+        public static float RowSpacing => Compact ? 54f : 84f;
 
         /// <summary>The widest a box may grow to fit its own title.
         ///
@@ -45,8 +50,8 @@ namespace QuestTree.UI
         public static float RowGap => RowSpacing - NodeHeight;
 
         /// <summary>A node whose title needs two lines grows by this much (comfortable layout
-        /// only - compact has no room). RowSpacing leaves a gap for it: 84 + 16 = 100 &lt; 112.</summary>
-        public static float TallNodeExtraHeight => 16f;
+        /// only - compact has no room). RowSpacing leaves a gap for it: 62 + 20 = 82 &lt; 84.</summary>
+        public static float TallNodeExtraHeight => 20f;
         public static bool AllowTallNodes => !Compact && (!ModSettings.Ready || ModSettings.TallTitles.Value);
 
         // --- the status bar down the left edge, and where text starts to its right ---
@@ -105,8 +110,23 @@ namespace QuestTree.UI
         /// <summary>The reward marks at the right-hand end of the meta row.</summary>
         public static int RewardFontSize => Compact ? 10 : 12;
 
-        public static float TitleOffsetY => Compact ? -12f : -18f;
-        public static float SubtitleOffsetY => Compact ? -26f : -36f;
+        /// <summary>Space above the title inside the box.</summary>
+        public static float ContentTopPad => Compact ? 5f : 7f;
+
+        /// <summary>Vertical room ONE line of title needs.
+        ///
+        /// Derived from the font rather than picked, and that is the fix it represents: the rows
+        /// were laid out on a hardcoded 16, which is less than a 15px line actually occupies. With
+        /// overflow set to ellipsis a line that does not fit is not clipped, it is DROPPED - so a
+        /// title could vanish entirely while the meta row under it drew perfectly, which is exactly
+        /// what a box reading only "Needs Part 11" was.</summary>
+        public static float TitleLineHeight => Mathf.Ceil(TitleFontSize * 1.35f);
+
+        /// <summary>Vertical room the meta row needs, on the same basis.</summary>
+        public static float MetaLineHeight => Mathf.Ceil(SubtitleFontSize * 1.45f);
+
+        /// <summary>Gap between the title block and the meta row.</summary>
+        public static float RowGapY => 3f;
 
         public static float KappaBadgeSize => Compact ? 14f : 18f;
     }

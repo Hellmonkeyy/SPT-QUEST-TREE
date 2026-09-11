@@ -316,17 +316,16 @@ namespace QuestTree.UI
             var textX = LayoutMetrics.TextInsetX;
 
             view._title = CreateText(rect, "Title", LayoutMetrics.TitleFontSize, FontStyles.Bold,
-                new Vector2(0f, 1f), new Vector2(1f, 1f),
-                new Vector2(LayoutMetrics.TitleInsetX, LayoutMetrics.TitleOffsetY));
+                new Vector2(0f, 1f), new Vector2(1f, 1f), Vector2.zero);
 
             view._subtitle = CreateText(rect, "Subtitle", LayoutMetrics.SubtitleFontSize, FontStyles.Normal,
-                new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(textX, LayoutMetrics.SubtitleOffsetY));
+                new Vector2(0f, 1f), new Vector2(1f, 1f), Vector2.zero);
 
             // The reward marks, right-aligned on the meta row. Its own element rather than part of
             // the subtitle string: one TMP line cannot be left-aligned at one end and right-aligned
             // at the other, and padding it with spaces would drift with every name length.
             var rewards = CreateText(rect, "Rewards", LayoutMetrics.RewardFontSize, FontStyles.Normal,
-                new Vector2(1f, 1f), new Vector2(1f, 1f), new Vector2(-8f, LayoutMetrics.SubtitleOffsetY));
+                new Vector2(1f, 1f), new Vector2(1f, 1f), Vector2.zero);
             var rewardsRect = (RectTransform)rewards.transform;
             rewardsRect.pivot = new Vector2(1f, 1f);
             rewardsRect.sizeDelta = new Vector2(70f, 16f);
@@ -342,8 +341,7 @@ namespace QuestTree.UI
             // the name rather than with it was the whole reason status felt like something you had
             // to decode. Hidden with the title once the box is only a code, where it was a smudge.
             var glyph = CreateText(rect, "StatusGlyph", LayoutMetrics.GlyphFontSize, FontStyles.Bold,
-                new Vector2(0f, 1f), new Vector2(0f, 1f),
-                new Vector2(LayoutMetrics.TextInsetX, LayoutMetrics.TitleOffsetY));
+                new Vector2(0f, 1f), new Vector2(0f, 1f), Vector2.zero);
             var glyphRect = (RectTransform)glyph.transform;
             glyphRect.pivot = new Vector2(0f, 1f);
             glyphRect.sizeDelta = new Vector2(LayoutMetrics.GlyphSlotWidth, 22f);
@@ -965,18 +963,17 @@ namespace QuestTree.UI
         ///
         /// ONE path, always. There used to be three - full, title-only, and a short code - switched
         /// by a zoom threshold, and the node rendered differently depending on which had last been
-        /// applied to it. That produced the bug this replaces: the same quest drawing a huge wrapped
-        /// centred title at one zoom and a small correct one at another, sometimes with the meta row
-        /// showing underneath a title styled as though the meta row were hidden.
+        /// applied to it. Two branches wrote the same eight properties on one TMP_Text, and the
+        /// level that chose between them lived on the view, so a pooled view came back wearing the
+        /// level it was released at. No threshold fixes that; deleting the second branch does.
         ///
-        /// The cause was structural rather than a bad number. Two branches wrote the same eight
-        /// properties on one TMP_Text, and the level that chose between them lived on the view - so
-        /// a view sitting in the pool kept the level it was released at, and came back wearing it,
-        /// while the graph only pushed a new level to views it had already built. No threshold fixes
-        /// that; deleting the second branch does.
-        ///
-        /// It also buys the thing the tiers cost: nothing appears, disappears, re-wraps or
-        /// re-centres as you zoom, so the tree scales instead of switching modes.</summary>
+        /// Everything here is placed with offsetMin/offsetMax rather than anchoredPosition, and that
+        /// is the second fix. A rect stretched between anchors at x 0 and 1 does not take
+        /// anchoredPosition.x as a left inset - it takes it as an offset of the rect's PIVOT from
+        /// the centre of the span. Setting it to the text inset therefore shoved every row right by
+        /// that amount and pushed its right edge off the box, which is why a short title looked
+        /// centred and a long one ran under the badges. offsetMin/offsetMax are literally the left
+        /// and right insets, so they cannot mean anything else.</summary>
         private void LayoutContents()
         {
             RefreshBadges();
@@ -984,35 +981,66 @@ namespace QuestTree.UI
             if (_title == null) return;
 
             var lines = _tall ? 2 : 1;
-            var extra = _tall ? LayoutMetrics.TallNodeExtraHeight : 0f;
-            var titleRect = (RectTransform)_title.transform;
+
+            var titleTop = LayoutMetrics.ContentTopPad;
+            var titleHeight = LayoutMetrics.TitleLineHeight * lines;
+            var metaTop = titleTop + titleHeight + LayoutMetrics.RowGapY;
+            var metaHeight = LayoutMetrics.MetaLineHeight;
+
+            // The glyph sits on the title's own line, left of it, in the slot the title inset was
+            // widened to leave.
+            if (_statusGlyph != null)
+            {
+                PlaceRow((RectTransform)_statusGlyph.transform,
+                    LayoutMetrics.TextInsetX,
+                    _size.x - LayoutMetrics.TextInsetX - LayoutMetrics.GlyphSlotWidth,
+                    titleTop,
+                    LayoutMetrics.TitleLineHeight);
+
+                _statusGlyph.alignment = TextAlignmentOptions.TopLeft;
+            }
 
             _title.fontSize = LayoutMetrics.TitleFontSize;
-            titleRect.anchorMin = new Vector2(0f, 1f);
-            titleRect.anchorMax = new Vector2(1f, 1f);
-            titleRect.anchoredPosition = new Vector2(LayoutMetrics.TitleInsetX, LayoutMetrics.TitleOffsetY);
-
-            // Badge-aware, like the fitting width in Bind: a single-line title is handed to TMP
-            // whole and ellipsised at this rect's edge, so a rect reaching under the badges put the
-            // tail of the name behind them.
-            titleRect.sizeDelta = new Vector2(-(LayoutMetrics.TitleInsetX + 30f + BadgeInset), 16f * lines);
             _title.alignment = TextAlignmentOptions.TopLeft;
 
-            // The break is explicit and each line is pre-fitted, so wrapping would only ever
-            // second-guess the fit. maxVisibleLines is the hard stop: turning wrapping off was not
-            // enough on its own - the title still broke onto the subtitle's line.
+            // The break is explicit and each line is pre-fitted, so wrapping would only second-guess
+            // the fit. maxVisibleLines is the hard stop: turning wrapping off was not enough on its
+            // own - the title still broke onto the meta row's line.
             _title.enableWordWrapping = false;
             _title.maxVisibleLines = lines;
 
-            // The rows beneath move down by the extra line, so a two-line title never sits on its
-            // own subtitle.
+            // Badge-aware on the right, like the fitting width in Bind: a rect reaching under the
+            // badges put the tail of the name behind them.
+            PlaceRow((RectTransform)_title.transform,
+                LayoutMetrics.TitleInsetX, 8f + BadgeInset, titleTop, titleHeight);
+
+            // The meta row keeps clear of the reward marks on its right.
             if (_subtitle != null)
-                ((RectTransform)_subtitle.transform).anchoredPosition =
-                    new Vector2(LayoutMetrics.TextInsetX, LayoutMetrics.SubtitleOffsetY - extra);
+                PlaceRow((RectTransform)_subtitle.transform,
+                    LayoutMetrics.TextInsetX, RewardSlotWidth + 12f, metaTop, metaHeight);
 
             if (_rewards != null)
-                ((RectTransform)_rewards.transform).anchoredPosition =
-                    new Vector2(-8f, LayoutMetrics.SubtitleOffsetY - extra);
+                PlaceRow((RectTransform)_rewards.transform,
+                    _size.x - RewardSlotWidth - 8f, 8f, metaTop, metaHeight);
+        }
+
+        /// <summary>Room reserved at the right-hand end of the meta row for the reward marks.</summary>
+        private const float RewardSlotWidth = 56f;
+
+        /// <summary>Pins a row to the top of the box with explicit left and right insets.
+        ///
+        /// The rect stretches horizontally between the box's edges and hangs from its top, so
+        /// <paramref name="top"/> and <paramref name="height"/> are distances DOWN from the top edge
+        /// and read the way the box is described.</summary>
+        private static void PlaceRow(RectTransform rect, float left, float right, float top, float height)
+        {
+            if (rect == null) return;
+
+            rect.anchorMin = new Vector2(0f, 1f);
+            rect.anchorMax = new Vector2(1f, 1f);
+            rect.pivot = new Vector2(0f, 1f);
+            rect.offsetMin = new Vector2(left, -(top + height));
+            rect.offsetMax = new Vector2(-right, -top);
         }
 
         /// <summary>Dim state for the chain highlight. Alpha only - the node keeps its layout,
