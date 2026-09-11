@@ -224,6 +224,28 @@ namespace QuestTree.UI
         public static string LockGlyph(string fallback) =>
             HasGlyph(Lock) ? char.ConvertFromUtf32(Lock) : fallback;
 
+        /// <summary>The first of these the font chain can actually draw, or "" if none of them.
+        ///
+        /// Every decorative character now goes through this rather than being written into a string
+        /// and hoped for. A character the font lacks does not fail loudly - TMP draws a box, keeps
+        /// its layout, and the result reads as a bug in the mod rather than a gap in a font, which
+        /// is exactly what happened to the arrow in a blocked quest's reason line.
+        ///
+        /// Pass a plain-text last resort as the final candidate where a mark is load-bearing, and
+        /// "" where the line reads fine without one.</summary>
+        public static string PickGlyph(params string[] candidates)
+        {
+            if (candidates == null) return "";
+
+            foreach (var candidate in candidates)
+            {
+                if (string.IsNullOrEmpty(candidate)) return "";
+                if (HasGlyph(char.ConvertToUtf32(candidate, 0))) return candidate;
+            }
+
+            return "";
+        }
+
         /// <summary>
         /// The game's own tooltip on hover. HoverTooltipArea finds the tooltip itself in Awake
         /// (ItemUiContext.Instance.Tooltip), so all this adds is the component and the text - but

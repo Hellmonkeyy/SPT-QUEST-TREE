@@ -54,9 +54,6 @@ namespace QuestTree
         public static ConfigEntry<int> EdgeOpacity { get; private set; }
         public static ConfigEntry<int> HoverDimStrength { get; private set; }
         public static ConfigEntry<bool> TallTitles { get; private set; }
-        public static ConfigEntry<bool> AbbreviateWhenZoomedOut { get; private set; }
-        public static ConfigEntry<int> TitleOnlyBelowZoom { get; private set; }
-        public static ConfigEntry<int> CodesBelowZoom { get; private set; }
         public static ConfigEntry<int> OverviewBelowZoom { get; private set; }
         public static ConfigEntry<BadgeMode> QuestBadges { get; private set; }
 
@@ -235,10 +232,6 @@ namespace QuestTree
         /// <summary>The current palette generation. Bump when the defaults change again.</summary>
         private const int CurrentColourScheme = 2;
 
-        /// <summary>The zooms at which a box shed its detail before 1.10.</summary>
-        private const int LegacyTitleOnlyBelowZoom = 55;
-        private const int LegacyCodesBelowZoom = 35;
-
         /// <summary>Moves an existing config onto the new palette, once.
         ///
         /// 1.10.0 rotated the status colours because the old set gave in-progress and completed the
@@ -262,26 +255,10 @@ namespace QuestTree
             moved += AdoptNewDefault(ColorCompleted, LegacyColours.Completed);
             moved += AdoptNewDefault(ColorLocked, LegacyColours.Locked);
 
-            // Scheme 2: a box keeps its detail at every zoom.
-            //
-            // These thresholds were picked when the row they hid was a subtitle - trader, level,
-            // map - and losing it cost nothing you could not guess. They now hide the objective
-            // count, the reward marks, the progress bar and the reason a quest is blocked, which is
-            // what the box is FOR. At a comfortable working zoom of around 50% every box was still
-            // drawing title-only, so the redesign was invisible to the person it was built for.
-            // Both go to 0, which means never.
-            if (TitleOnlyBelowZoom != null && TitleOnlyBelowZoom.Value == LegacyTitleOnlyBelowZoom)
-            {
-                TitleOnlyBelowZoom.Value = (int)TitleOnlyBelowZoom.DefaultValue;
-                moved++;
-            }
-
-            if (CodesBelowZoom != null && CodesBelowZoom.Value == LegacyCodesBelowZoom)
-            {
-                CodesBelowZoom.Value = (int)CodesBelowZoom.DefaultValue;
-                moved++;
-            }
-
+            // Scheme 2 moved the two detail thresholds to "never". They have since been deleted
+            // outright - a box has one appearance now - so there is nothing left to migrate, and
+            // BepInEx drops an orphaned key from the file on its own. The version still advances so
+            // this never runs twice.
             ColourScheme.Value = CurrentColourScheme;
 
             if (moved > 0)
@@ -437,24 +414,6 @@ namespace QuestTree
                 "Tree", "Two-line titles", true,
                 "Let a quest box grow a line so a series/episode title (\"Gunsmith - Part 3\") shows both parts instead of an ellipsis.");
 
-            AbbreviateWhenZoomedOut = config.Bind(
-                "Tree", "Codes when zoomed right out", true,
-                "Show a short code (EM-4, GUN-3) in each box when zoomed too far out to read a title. Off shows the title only, however small.");
-
-            TitleOnlyBelowZoom = config.Bind(
-                "Tree", "Title-only below zoom", 0,
-                new ConfigDescription(
-                    "Below this zoom (percent) a box drops its detail row and shows only its title, larger. " +
-                    "0 keeps every box fully detailed at every zoom.",
-                    new AcceptableValueRange<int>(0, 80)));
-
-            CodesBelowZoom = config.Bind(
-                "Tree", "Code-only below zoom", 0,
-                new ConfigDescription(
-                    "Below this zoom (percent) a box shows only its status bar and a short code. " +
-                    "0 keeps every box fully detailed at every zoom.",
-                    new AcceptableValueRange<int>(0, 60)));
-
             OverviewBelowZoom = config.Bind(
                 "Tree", "Trader overview below zoom", 0,
                 new ConfigDescription(
@@ -539,8 +498,8 @@ namespace QuestTree
             {
                 HideUnobtainable, HideCompleted, HideTraderless, MarkStartedOnly, MapArtworkRotation,
                 MirrorMapArtwork, ShowMapGuides, DrawEdges, FocusFrontier, CompactLayout, MaxVisibleNodes,
-                OpenOnMap, HarvestZones, EdgeOpacity, HoverDimStrength, TallTitles, AbbreviateWhenZoomedOut,
-                TitleOnlyBelowZoom, CodesBelowZoom, OverviewBelowZoom, QuestBadges, SidebarWidth, DoNextRows, ShowItemsSection,
+                OpenOnMap, HarvestZones, EdgeOpacity, HoverDimStrength, TallTitles,
+                OverviewBelowZoom, QuestBadges, SidebarWidth, DoNextRows, ShowItemsSection,
                 ShowTakeWithYou, CountUnacceptedQuests, OverviewLabels, ShowTraderColours,
                 TraderColours, ShowCredits,
                 PinLabels, ColorActive, ColorAvailable, ColorCompleted, ColorLocked, ColorGated, ColorAccent, Tooltips,
@@ -569,9 +528,6 @@ namespace QuestTree
             EdgeOpacity.SettingChanged += Raise;
             HoverDimStrength.SettingChanged += Raise;
             TallTitles.SettingChanged += Raise;
-            AbbreviateWhenZoomedOut.SettingChanged += Raise;
-            TitleOnlyBelowZoom.SettingChanged += Raise;
-            CodesBelowZoom.SettingChanged += Raise;
             OverviewBelowZoom.SettingChanged += Raise;
             QuestBadges.SettingChanged += Raise;
             SidebarWidth.SettingChanged += Raise;

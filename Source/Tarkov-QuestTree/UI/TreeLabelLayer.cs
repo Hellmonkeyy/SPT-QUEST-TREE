@@ -33,6 +33,14 @@ namespace QuestTree.UI
         /// content's zoom.</summary>
         private const float FontSize = 13f;
 
+        /// <summary>Above this zoom there is nothing for this layer to add, because the boxes are
+        /// readable on their own.
+        ///
+        /// Its own number now. It used to borrow the zoom at which a box dropped its detail row,
+        /// which was a fair proxy while that existed and is meaningless now that a box always
+        /// carries everything it has.</summary>
+        private const float LabelZoom = 0.5f;
+
         /// <summary>Padding around a label's measured rect when testing for collisions, so two
         /// labels never quite touch.</summary>
         private const float CollisionPadding = 4f;
@@ -70,7 +78,11 @@ namespace QuestTree.UI
 
             // Nothing to say at full zoom: the boxes are readable, and a second copy of the title
             // floating over them is noise.
-            if (budget <= 0 || ranked == null || ranked.Count == 0 || zoom >= LayoutMetrics.DetailLevelZoom)
+            //
+            // Its own threshold now. It used to borrow DetailLevelZoom, which was the point where a
+            // box dropped its detail row - a reasonable proxy while that existed, and meaningless
+            // once a box always carries everything.
+            if (budget <= 0 || ranked == null || ranked.Count == 0 || zoom >= LabelZoom)
             {
                 Hide(0);
                 return;

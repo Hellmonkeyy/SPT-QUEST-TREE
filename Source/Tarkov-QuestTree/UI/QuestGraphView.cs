@@ -96,9 +96,6 @@ namespace QuestTree.UI
         /// falloff at the new scale.</summary>
         private QuestNode _hoveredNode;
 
-        /// <summary>Level of detail the built views are currently drawn at (QuestNodeView.SetDetailLevel).</summary>
-        private int _detailLevel;
-
         /// <summary>The zoom the built edges were last aimed at - see RefreshVisibleNodes.</summary>
         private float _edgeZoom = 1f;
 
@@ -498,7 +495,19 @@ namespace QuestTree.UI
             // tree with nothing of that trader between them, and the midpoint of those two lands in
             // somebody else's chains. That is the whole reason the portraits came out in a column
             // that lined up with nothing.
-            var rows = new Dictionary<string, List<float>>(StringComparer.OrdinalIgnoreCase);
+            // Each trader's STARTING quest - the one its chains begin at - and the left edge of
+            // the whole tree.
+            //
+            // This was the median row of all that trader's quests, which was a fix for a real
+            // problem (the bounds midpoint is meaningless when prerequisite chains cross traders,
+            // so the portraits lined up with nothing) but the wrong answer to it. A portrait beside
+            // the middle of a scattered set still points at nothing in particular. Beside the quest
+            // the chain STARTS at, it means something: this is where this trader begins.
+            //
+            // Shallowest Depth wins, because Depth is the length of the longest prerequisite chain
+            // under a quest - so the trader's entry point is its minimum. Ties break upwards, to the
+            // topmost row, so the choice is stable rather than dependent on enumeration order.
+            var starts = new Dictionary<string, (int Depth, float Y)>(StringComparer.OrdinalIgnoreCase);
             var treeLeft = float.MaxValue;
 
             foreach (var node in nodes)
@@ -509,26 +518,20 @@ namespace QuestTree.UI
 
                 if (string.IsNullOrEmpty(node.TraderId) || node.TraderId == QuestNode.NoTraderId) continue;
 
-                if (!rows.TryGetValue(node.TraderId, out var list))
-                    rows[node.TraderId] = list = new List<float>();
-
-                list.Add(position.y);
+                if (!starts.TryGetValue(node.TraderId, out var best) ||
+                    node.Depth < best.Depth ||
+                    (node.Depth == best.Depth && position.y > best.Y))
+                {
+                    starts[node.TraderId] = (node.Depth, position.y);
+                }
             }
 
-            if (rows.Count == 0 || treeLeft == float.MaxValue) return;
+            if (starts.Count == 0 || treeLeft == float.MaxValue) return;
 
             var anchors = new List<KeyValuePair<string, float>>();
 
-            foreach (var entry in rows)
-            {
-                var list = entry.Value;
-                list.Sort();
-
-                // The median: the row half this trader's quests sit above and half below. Immune to
-                // the handful a cross-trader prerequisite drags to the far end of the tree, which
-                // an average is not.
-                anchors.Add(new KeyValuePair<string, float>(entry.Key, list[list.Count / 2]));
-            }
+            foreach (var entry in starts)
+                anchors.Add(new KeyValuePair<string, float>(entry.Key, entry.Value.Y));
 
             // In row order, so the spacing sweep at draw time can walk them one way.
             anchors.Sort((a, b) => a.Value.CompareTo(b.Value));
@@ -967,13 +970,6 @@ namespace QuestTree.UI
 
             ShowTraderMarkers(true);
 
-            var level = zoom < LayoutMetrics.BarOnlyZoom ? 2 : zoom < LayoutMetrics.DetailLevelZoom ? 1 : 0;
-            if (level != _detailLevel)
-            {
-                _detailLevel = level;
-                foreach (var built in _views.Values) built.SetDetailLevel(level);
-            }
-
             DrawLabels(visible, zoom);
 
             // Edges are drawn in content space, so a 1px hairline at a quarter zoom is a quarter
@@ -1026,7 +1022,6 @@ namespace QuestTree.UI
                 view.SearchReason = node.MatchReason(_toolbar.SearchNeedle);
 
                 view.Bind(node, _onNodeClicked, HighlightChain, _ => ClearHighlight());
-                view.SetDetailLevel(_detailLevel);
                 view.SetOutlineUnit(outlineUnit);
                 view.SetSelected(ReferenceEquals(node, _selectedNode));
                 _views[node] = view;
@@ -1546,7 +1541,11 @@ namespace QuestTree.UI
 
             return target.Status switch
             {
-                ENodeStatus.Active => (WithAlpha(QuestNodeView.ColorFor(ENodeStatus.Active), Mathf.Min(1f, 0.45f * EdgeOpacityScale)), EdgeThickness),
+                // 0.30 rather than 0.45. The number was chosen when in-progress was a vivid
+                // green; the palette rotation made it amber, which at the same alpha is far louder
+                // against a near-black tree - so lines that had always been emphasised suddenly
+                // read as something being wrong.
+                ENodeStatus.Active => (WithAlpha(QuestNodeView.ColorFor(ENodeStatus.Active), Mathf.Min(1f, 0.30f * EdgeOpacityScale)), EdgeThickness),
                 ENodeStatus.Available => (WithAlpha(QuestNodeView.ColorFor(ENodeStatus.Available), Mathf.Min(1f, 0.4f * EdgeOpacityScale)), EdgeThickness),
                 ENodeStatus.Completed => (EdgeColor, EdgeThickness),
 

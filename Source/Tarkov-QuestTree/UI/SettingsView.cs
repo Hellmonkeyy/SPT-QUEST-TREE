@@ -135,9 +135,6 @@ namespace QuestTree.UI
             Toggle(column, ref y, "Two-line titles",
                 "Let a box grow a line so \"Gunsmith - Part 3\" shows both parts instead of an ellipsis.",
                 ModSettings.TallTitles);
-            Toggle(column, ref y, "Codes when zoomed right out",
-                "EM-4, GUN-3 and so on in each box when a title could not be read anyway.",
-                ModSettings.AbbreviateWhenZoomedOut);
             Toggle(column, ref y, "Show trader colours",
                 "A coloured stripe per trader down the left edge of each quest. Status colours are unaffected.",
                 ModSettings.ShowTraderColours);
@@ -164,10 +161,6 @@ namespace QuestTree.UI
                 "How visible the lines are at rest. Lines into a quest you can act on are drawn stronger regardless.");
             Stepper(column, ref y, "Hover dimming strength %", ModSettings.HoverDimStrength, 10, 0, 200,
                 "How far the rest of the tree fades around a hovered quest. 0 is off.");
-            Stepper(column, ref y, "Title-only below zoom %", ModSettings.TitleOnlyBelowZoom, 5, 30, 80,
-                "Zoomed out past this, a box shows only its title, larger.");
-            Stepper(column, ref y, "Code-only below zoom %", ModSettings.CodesBelowZoom, 5, 15, 60,
-                "Zoomed out past this, a box shows only its status bar and a short code such as GUN-3. 0 is off.");
             Stepper(column, ref y, "Trader overview below zoom %", ModSettings.OverviewBelowZoom, 5, 0, 40,
                 "Zoomed out past this, the quests are replaced by one readable card per trader. 0 is off.");
             Stepper(column, ref y, "Max visible quests", ModSettings.MaxVisibleNodes, 100, 100, 2000,
@@ -180,11 +173,10 @@ namespace QuestTree.UI
                 index => ModSettings.QuestBadges.Value = (ModSettings.BadgeMode)index);
 
             ResetLink(column, ref y, width,
-                ModSettings.CompactLayout, ModSettings.TallTitles, ModSettings.AbbreviateWhenZoomedOut,
+                ModSettings.CompactLayout, ModSettings.TallTitles,
                 ModSettings.DrawEdges, ModSettings.FocusFrontier, ModSettings.HideUnobtainable,
                 ModSettings.HideCompleted, ModSettings.HideTraderless, ModSettings.EdgeOpacity,
-                ModSettings.HoverDimStrength, ModSettings.TitleOnlyBelowZoom, ModSettings.CodesBelowZoom,
-                ModSettings.OverviewBelowZoom,
+                ModSettings.HoverDimStrength, ModSettings.OverviewBelowZoom,
                 ModSettings.MaxVisibleNodes, ModSettings.QuestBadges);
         }
 

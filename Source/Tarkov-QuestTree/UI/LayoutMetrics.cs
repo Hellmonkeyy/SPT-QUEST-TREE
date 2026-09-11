@@ -81,21 +81,6 @@ namespace QuestTree.UI
         /// the count in the meta row is the precise answer.</summary>
         public static float ProgressBarHeight => 3f;
 
-        /// <summary>Below this zoom a box drops its detail row and grows its title.
-        ///
-        /// Zero by default, meaning never. A box that changes shape as you zoom is a box you have to
-        /// re-read, and the detail row is the whole point of the box. Still a setting, for anyone who
-        /// would rather have bigger titles at a distance.</summary>
-        public static float DetailLevelZoom =>
-            ModSettings.Ready ? ModSettings.TitleOnlyBelowZoom.Value / 100f : 0f;
-
-        /// <summary>Below this zoom the title goes too and a short code takes its place. Also zero
-        /// by default, for the same reason.</summary>
-        public static float BarOnlyZoom =>
-            ModSettings.Ready
-                ? Mathf.Min(ModSettings.CodesBelowZoom.Value / 100f, DetailLevelZoom - 0.05f)
-                : 0f;
-
         /// <summary>Where the tree gives up on boxes entirely and draws trader cards instead.
         ///
         /// Zero by default, meaning never. The tier was built to answer "the zoomed-out tree is an
@@ -111,11 +96,6 @@ namespace QuestTree.UI
 
         // --- text inside a node ---
         public static int TitleFontSize => Compact ? 12 : 15;
-        public static int ZoomedOutTitleFontSize => Compact ? 16 : 20;
-
-        /// <summary>The zoomed-right-out code (QuestNodeView.Abbreviate). Big, because it is
-        /// drawn at a quarter scale: 36px in the box is 9px on screen.</summary>
-        public static int AbbreviationFontSize => Compact ? 26 : 36;
         // Big enough to be the thing you read, not a decoration in the corner: this and the
         // status bar are what answer "is this one done" at a glance, and the bar alone was doing it
         // badly once boxes stopped being uniform.
