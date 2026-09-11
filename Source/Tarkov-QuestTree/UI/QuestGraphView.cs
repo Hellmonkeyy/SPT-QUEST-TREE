@@ -144,6 +144,16 @@ namespace QuestTree.UI
         private Action<QuestNode> _onNodeClicked;
         private RectTransform _viewport;
         private RectTransform _content;
+
+        /// <summary>The readable-label overlay. Built lazily with the content, dropped with
+        /// it, and drawn from the same sweep that decides which boxes exist - so panning and
+        /// zooming update it without a second update path.</summary>
+        private TreeLabelLayer _labels;
+
+        /// <summary>Scratch for the label ranking, reused: this runs on every frame the view
+        /// moves, and the buffers in this file exist precisely so that allocates nothing.</summary>
+        private readonly List<(QuestNode Node, Vector2 Position)> _labelRanked =
+            new List<(QuestNode Node, Vector2 Position)>();
         private Vector2 _lastContentPosition;
         private float _lastContentScale;
 
@@ -381,6 +391,85 @@ namespace QuestTree.UI
         /// own - which matters, because hand-rolled rect maths in this hierarchy has already cost
         /// this project two rounds of debugging.
         /// </summary>
+        /// <summary>Ranks the nodes worth labelling and hands them to the label layer.
+        ///
+        /// Ranked, not arbitrary, and the ranking is the design:
+        ///
+        /// 1. the selected quest and its chain, so "what does this lead to" survives zooming out -
+        ///    the one question only a tree can answer, and the one zoom currently destroys;
+        /// 2. search matches, so finding a quest ends with it named in context rather than lost
+        ///    among identical boxes;
+        /// 3. quests that are actually actionable, so the overview answers "what next" at a glance.
+        ///
+        /// Ties inside a rank break on distance from the viewport centre, so the labels that do
+        /// appear are the ones nearest what you are looking at.</summary>
+        private void DrawLabels(Rect visible, float zoom)
+        {
+            var budget = ModSettings.Ready ? ModSettings.OverviewLabels.Value : 15;
+
+            if (budget <= 0)
+            {
+                _labels?.Draw(null, zoom, 0);
+                return;
+            }
+
+            _labels ??= new TreeLabelLayer(_content);
+            _labelRanked.Clear();
+
+            var centre = visible.center;
+            var searching = _toolbar != null && _toolbar.SearchNeedle.Length > 0;
+
+            foreach (var pair in _layout)
+            {
+                var node = pair.Key;
+                var position = pair.Value;
+
+                // Only what is on screen: a label for a node two screens away is work nobody sees.
+                if (!visible.Contains(position)) continue;
+
+                var rank = RankFor(node, searching);
+                if (rank < 0) continue;
+
+                _labelRanked.Add((node, position));
+                _labelRankOf[node] = rank;
+            }
+
+            // Rank first, then nearest the middle of what you are looking at.
+            _labelRanked.Sort((a, b) =>
+            {
+                var byRank = _labelRankOf[a.Node].CompareTo(_labelRankOf[b.Node]);
+                if (byRank != 0) return byRank;
+
+                return ((a.Position - centre).sqrMagnitude).CompareTo((b.Position - centre).sqrMagnitude);
+            });
+
+            _labels.Draw(_labelRanked, zoom, budget);
+            _labelRankOf.Clear();
+        }
+
+        private readonly Dictionary<QuestNode, int> _labelRankOf = new Dictionary<QuestNode, int>();
+
+        /// <summary>Lower is more important; -1 means do not label.</summary>
+        private int RankFor(QuestNode node, bool searching)
+        {
+            if (node == null) return -1;
+
+            if (ReferenceEquals(node, _selectedNode)) return 0;
+
+            if (_selectedNode != null &&
+                (_selectedNode.PrerequisiteIds.Contains(node.Id) || node.PrerequisiteIds.Contains(_selectedNode.Id)))
+            {
+                return 1;
+            }
+
+            if (searching && _toolbar.MatchesSearch(node)) return 2;
+
+            if (node.Status == ENodeStatus.Active) return 3;
+            if (node.Status == ENodeStatus.Available) return 4;
+
+            return -1;
+        }
+
         private void RefreshVisibleNodes()
         {
             if (_layoutOrder.Length == 0 && _edgeViews.Count == 0) return;
@@ -397,6 +486,8 @@ namespace QuestTree.UI
                 _detailLevel = level;
                 foreach (var built in _views.Values) built.SetDetailLevel(level);
             }
+
+            DrawLabels(visible, zoom);
 
             // Edges are drawn in content space, so a 1px hairline at a quarter zoom is a quarter
             // of a screen pixel - nothing. Re-aim the built ones with a thickness that holds on

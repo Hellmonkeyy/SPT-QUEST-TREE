@@ -151,6 +151,8 @@ namespace QuestTree.UI
                 ModSettings.HideTraderless);
 
             AuxLayout.AddSpacer(ref y, 6f);
+            Stepper(column, ref y, "Overview labels", ModSettings.OverviewLabels, 5, 0, 60,
+                "How many quest names stay readable when you zoom out. 0 turns them off.");
             Stepper(column, ref y, "Prerequisite line opacity %", ModSettings.EdgeOpacity, 2, 0, 60,
                 "How visible the lines are at rest. Lines into a quest you can act on are drawn stronger regardless.");
             Stepper(column, ref y, "Hover dimming strength %", ModSettings.HoverDimStrength, 10, 0, 200,

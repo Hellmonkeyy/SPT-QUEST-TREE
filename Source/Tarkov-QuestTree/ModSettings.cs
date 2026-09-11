@@ -72,6 +72,7 @@ namespace QuestTree
         public static ConfigEntry<int> DoNextRows { get; private set; }
         public static ConfigEntry<bool> ShowItemsSection { get; private set; }
         public static ConfigEntry<bool> ShowTakeWithYou { get; private set; }
+        public static ConfigEntry<int> OverviewLabels { get; private set; }
         public static ConfigEntry<bool> CountUnacceptedQuests { get; private set; }
         public static ConfigEntry<bool> ShowCredits { get; private set; }
         public static ConfigEntry<PinLabelMode> PinLabels { get; private set; }
@@ -252,6 +253,14 @@ namespace QuestTree
                 "on the Maps tab. One raid per map is enough. Off means the map keeps only what " +
                 "it already has.");
 
+            OverviewLabels = config.Bind(
+                "Tree look", "Overview labels", 15,
+                new ConfigDescription(
+                    "How many quest names stay readable when you zoom out, drawn over the tree at a " +
+                    "constant size. The selected quest and its chain come first, then search matches, " +
+                    "then whatever is actionable. 0 turns them off.",
+                    new AcceptableValueRange<int>(0, 60)));
+
             MaxVisibleNodes = config.Bind(
                 "Performance", "Max visible quests", 600,
                 new ConfigDescription(
@@ -366,7 +375,7 @@ namespace QuestTree
                 MirrorMapArtwork, ShowMapGuides, DrawEdges, FocusFrontier, CompactLayout, MaxVisibleNodes,
                 OpenOnMap, HarvestZones, EdgeOpacity, HoverDimStrength, TallTitles, AbbreviateWhenZoomedOut,
                 TitleOnlyBelowZoom, CodesBelowZoom, QuestBadges, SidebarWidth, DoNextRows, ShowItemsSection,
-                ShowTakeWithYou, CountUnacceptedQuests, ShowCredits,
+                ShowTakeWithYou, CountUnacceptedQuests, OverviewLabels, ShowCredits,
                 PinLabels, ColorActive, ColorAvailable, ColorCompleted, ColorLocked, ColorAccent, Tooltips,
                 HoverSounds, RememberLastView, OpenTracker
             });
@@ -401,6 +410,7 @@ namespace QuestTree
             DoNextRows.SettingChanged += Raise;
             ShowItemsSection.SettingChanged += Raise;
             ShowTakeWithYou.SettingChanged += Raise;
+            OverviewLabels.SettingChanged += Raise;
             CountUnacceptedQuests.SettingChanged += Raise;
             ShowCredits.SettingChanged += Raise;
             PinLabels.SettingChanged += Raise;
