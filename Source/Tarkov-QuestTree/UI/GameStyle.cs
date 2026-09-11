@@ -147,13 +147,49 @@ namespace QuestTree.UI
 
             try
             {
-                foreach (var candidate in SymbolFontCandidates)
-                {
-                    var os = Font.CreateDynamicFontFromOSFont(candidate, 32);
-                    if (os == null) continue;
+                // What Unity can actually see. The first attempt asked for five faces by name and
+                // reported only that all five failed, which does not distinguish "that font is not
+                // installed" from "the name is right but TMP would not build an asset from it" -
+                // and those want opposite fixes.
+                string[] installed;
 
-                    var asset = TMP_FontAsset.CreateFontAsset(os);
-                    if (asset == null) continue;
+                try
+                {
+                    installed = Font.GetOSInstalledFontNames() ?? System.Array.Empty<string>();
+                }
+                catch (System.Exception ex)
+                {
+                    installed = System.Array.Empty<string>();
+                    Plugin.LogSource?.LogInfo($"QuestTree: cannot enumerate OS fonts ({ex.Message}).");
+                }
+
+                foreach (var candidate in Candidates(installed))
+                {
+                    var face = Font.CreateDynamicFontFromOSFont(candidate, 32);
+
+                    if (face == null)
+                    {
+                        Plugin.LogSource?.LogDebug($"QuestTree: '{candidate}' did not load as a Unity font.");
+                        continue;
+                    }
+
+                    TMP_FontAsset asset;
+
+                    try
+                    {
+                        asset = TMP_FontAsset.CreateFontAsset(face);
+                    }
+                    catch (System.Exception ex)
+                    {
+                        Plugin.LogSource?.LogDebug($"QuestTree: '{candidate}' loaded but TMP refused it ({ex.Message}).");
+                        continue;
+                    }
+
+                    if (asset == null)
+                    {
+                        Plugin.LogSource?.LogDebug($"QuestTree: '{candidate}' loaded but TMP returned no asset.");
+                        continue;
+                    }
 
                     asset.name = $"QuestTree symbols ({candidate})";
 
@@ -174,7 +210,8 @@ namespace QuestTree.UI
                 }
 
                 Plugin.LogSource?.LogInfo(
-                    "QuestTree: no symbol font could be loaded - staying on the glyphs the game's own font has.");
+                    $"QuestTree: no symbol font could be loaded from {installed.Length} installed face(s) - " +
+                    "staying on the glyphs the game's own font has. Set the log to Debug for the per-font reason.");
             }
             catch (System.Exception ex)
             {
@@ -182,6 +219,42 @@ namespace QuestTree.UI
                 // the worst case is the status marks staying exactly as they were.
                 Plugin.LogSource?.LogWarning($"QuestTree: symbol fallback unavailable ({ex.Message}).");
             }
+        }
+
+        /// <summary>The preferred faces first, then anything installed whose name suggests it covers
+        /// symbols, then everything else.
+        ///
+        /// CreateDynamicFontFromOSFont matches on the exact family name, so a hardcoded list is only
+        /// as good as the guess behind it - "Segoe UI Symbol" is not present on every Windows, and
+        /// on a machine where none of five names match, a name-only list has nothing left to try.
+        /// Walking what is actually installed does.</summary>
+        private static System.Collections.Generic.IEnumerable<string> Candidates(string[] installed)
+        {
+            var seen = new System.Collections.Generic.HashSet<string>(System.StringComparer.OrdinalIgnoreCase);
+
+            foreach (var name in SymbolFontCandidates)
+                if (seen.Add(name))
+                    yield return name;
+
+            // Names that tend to mean broad Unicode coverage rather than a display face.
+            foreach (var name in installed)
+            {
+                if (string.IsNullOrEmpty(name) || !seen.Add(name)) continue;
+
+                if (name.IndexOf("Symbol", System.StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    name.IndexOf("Unicode", System.StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    name.IndexOf("DejaVu", System.StringComparison.OrdinalIgnoreCase) >= 0 ||
+                    name.IndexOf("Noto", System.StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    yield return name;
+                }
+            }
+
+            // Last resort: anything at all. A plain text face still carries the geometric shapes
+            // this actually needs, even if it has no padlock.
+            foreach (var name in installed)
+                if (!string.IsNullOrEmpty(name) && seen.Add(name))
+                    yield return name;
         }
 
         /// <summary>The padlock, as a string - it is outside the basic plane, so it is a surrogate

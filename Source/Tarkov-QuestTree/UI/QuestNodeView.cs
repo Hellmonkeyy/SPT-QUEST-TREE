@@ -798,6 +798,10 @@ namespace QuestTree.UI
             return marks.Count == 0 ? "" : string.Join(" ", marks);
         }
 
+        /// <summary>The mark for a kind of reward, for anything outside the box that wants to say
+        /// the same thing the same way - the detail panel and the hover card both do.</summary>
+        public static string GlyphForReward(string rewardType) => RewardGlyph(rewardType) ?? "";
+
         private static string RewardGlyph(string rewardType)
         {
             var mark = rewardType switch

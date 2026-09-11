@@ -377,6 +377,24 @@ namespace QuestTree.UI
         /// named from the client's own trader list rather than the server guessing a display name,
         /// and a prerequisite names the actual quest, since the client has the graph to resolve it.
         /// </summary>
+        /// <summary>The quest actually standing in the way, when one is, so a caller can offer to
+        /// take you there rather than only naming it.
+        ///
+        /// LockReasonDetail resolves the same ids and then throws them away into a joined string,
+        /// which is why the banner was dead text while every other mention of the same quest in the
+        /// panel was a link.</summary>
+        internal static QuestNode BlockingQuest(QuestNode node, QuestGraphBuilder graph, ProfilePayloadDto profile)
+        {
+            if (profile?.LockReasons == null || graph == null) return null;
+            if (!profile.LockReasons.TryGetValue(node.Id, out var reason) || reason == null) return null;
+            if (reason.Kind != "Prerequisite" || reason.BlockingQuestIds == null) return null;
+
+            foreach (var id in reason.BlockingQuestIds)
+                if (graph.NodesById.TryGetValue(id, out var blocker)) return blocker;
+
+            return null;
+        }
+
         internal static string FormatLockReason(
             QuestNode node, QuestGraphBuilder graph, ProfilePayloadDto profile)
         {

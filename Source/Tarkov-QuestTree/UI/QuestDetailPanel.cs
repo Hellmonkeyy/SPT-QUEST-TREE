@@ -312,7 +312,22 @@ namespace QuestTree.UI
             // loyalty and standing.
             var lockReason = QuestSummary.FormatLockReason(node, _graph, profile);
             if (!string.IsNullOrEmpty(lockReason))
-                AuxLayout.AddWrapped(_content, lockReason, left, ref y, width);
+            {
+                // Clickable when a QUEST is the gate, since then the banner names somewhere you can
+                // go. A level or loyalty gate names a number, which there is nowhere to click to.
+                var blocker = QuestSummary.BlockingQuest(node, _graph, profile);
+
+                if (blocker != null)
+                {
+                    var captured = blocker;
+                    AuxLayout.AddClickableRow(_content, lockReason, left, ref y, width, false,
+                        () => _focusNode?.Invoke(captured));
+                }
+                else
+                {
+                    AuxLayout.AddWrapped(_content, lockReason, left, ref y, width);
+                }
+            }
 
             AuxLayout.AddClickableRow(_content, "<color=#FFFFFF80>Open the wiki page  ↗</color>", left, ref y, width, false, OpenWiki, 20f);
             y += 6f;
@@ -321,9 +336,26 @@ namespace QuestTree.UI
         private void BuildSections(QuestNode node, ProfilePayloadDto profile, float width, float left, ref float y)
         {
             _left = left;
+
+            // Route is worked out first, because whether it is going to be drawn decides whether
+            // Requires should be.
+            var route = node.Status != ENodeStatus.Completed && _graph != null
+                ? QuestRoute.Remaining(node, _graph)
+                : null;
+
+            var routeShown = route != null && route.Count >= 2;
+
             // Requires - named here rather than drawn as a line, since a prerequisite from another
             // trader has no node in a single-trader tab. Clicking one selects it in the graph.
-            if (node.PrerequisiteIds.Count > 0)
+            //
+            // Skipped when Route is about to list the same quests. The blocking prerequisite was
+            // being stated three times - in the amber banner, here, and as the last row of Route,
+            // which orders by depth and so puts the immediate one at the bottom - and three mentions
+            // of one fact read as three facts.
+            //
+            // Only skipped when Route actually renders, though. A completed quest has no route at
+            // all, and for those this section is the only place its prerequisites appear.
+            if (node.PrerequisiteIds.Count > 0 && !routeShown)
             {
                 AuxLayout.AddSectionHeader(_content, ref y, "Requires", _left, width);
 
@@ -332,30 +364,32 @@ namespace QuestTree.UI
                     if (_graph != null && _graph.NodesById.TryGetValue(prereqId, out var prereq))
                         AddQuestLink(prereq, width, ref y, QuestSummary.PrerequisiteNote(node, prereqId));
                     else
-                        AuxLayout.AddLabelAt(_content, prereqId, 0f, ref y, AuxLayout.RowHeight, 12, width);
+                        AuxLayout.AddLabelAt(_content, prereqId, _left, ref y, AuxLayout.RowHeight, 12, width);
                 }
 
                 y += 8f;
             }
 
             // Route - the chain still to walk to reach a locked quest.
-            if (node.Status != ENodeStatus.Completed && _graph != null)
+            if (routeShown)
             {
-                var route = QuestRoute.Remaining(node, _graph);
+                AuxLayout.AddSectionHeader(_content, ref y, $"Route  ·  {route.Count} quests", _left, width);
 
-                // A single step is already spelled out by Requires; a one-item route is noise.
-                if (route.Count >= 2)
+                foreach (var step in route.Take(QuestSummary.RouteSteps))
                 {
-                    AuxLayout.AddSectionHeader(_content, ref y, $"Route  ·  {route.Count} quests", _left, width);
+                    // The note Requires used to carry - "started is enough", "3 h after" - follows
+                    // the quest it belongs to rather than being lost with that section.
+                    var note = node.PrerequisiteIds.Contains(step.Id)
+                        ? QuestSummary.PrerequisiteNote(node, step.Id)
+                        : null;
 
-                    foreach (var step in route.Take(QuestSummary.RouteSteps))
-                        AddQuestLink(step, width, ref y);
-
-                    if (route.Count > QuestSummary.RouteSteps)
-                        AuxLayout.AddLabelAt(_content, $"<color=#FFFFFF60>+{route.Count - QuestSummary.RouteSteps} more</color>", 0f, ref y, AuxLayout.RowHeight, 11, width);
-
-                    y += 8f;
+                    AddQuestLink(step, width, ref y, note);
                 }
+
+                if (route.Count > QuestSummary.RouteSteps)
+                    AuxLayout.AddLabelAt(_content, $"<color=#FFFFFF60>+{route.Count - QuestSummary.RouteSteps} more</color>", _left, ref y, AuxLayout.RowHeight, 11, width);
+
+                y += 8f;
             }
 
             // Objectives - with the live counter as a bar where the profile has one, and the way to
@@ -387,9 +421,11 @@ namespace QuestTree.UI
                 y += 8f;
             }
 
+            // The same marks the boxes wear, so a reward reads the same in both places.
             var rewards = node.Rewards
-                .Select(r => QuestSummary.FormatReward(r, _graph))
-                .Where(r => !string.IsNullOrEmpty(r))
+                .Select(r => new { Mark = QuestNodeView.GlyphForReward(r.Type), Body = QuestSummary.FormatReward(r, _graph) })
+                .Where(r => !string.IsNullOrEmpty(r.Body))
+                .Select(r => new { Text = string.IsNullOrEmpty(r.Mark) ? r.Body : $"<color=#FFFFFF60>{r.Mark}</color>  {r.Body}" })
                 .ToList();
 
             if (rewards.Count > 0)
@@ -397,7 +433,7 @@ namespace QuestTree.UI
                 AuxLayout.AddSectionHeader(_content, ref y, "Rewards", _left, width);
 
                 foreach (var reward in rewards)
-                    AuxLayout.AddWrapped(_content, reward, _left, ref y, width);
+                    AuxLayout.AddWrapped(_content, reward.Text, _left, ref y, width);
 
                 y += 8f;
             }
