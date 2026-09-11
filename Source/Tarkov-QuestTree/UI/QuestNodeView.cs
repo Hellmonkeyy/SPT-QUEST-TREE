@@ -48,6 +48,17 @@ namespace QuestTree.UI
 
         private Vector2 _size = new Vector2(LayoutMetrics.NodeWidth, LayoutMetrics.NodeHeight);
 
+        /// <summary>The graph the boxes are currently drawn from, so a blocked box can turn a
+        /// prerequisite ID into a name.
+        ///
+        /// Static because it is the same object for every view in a render and threading it through
+        /// Bind would put the identical reference on hundreds of calls per sweep. Set once per
+        /// render by QuestGraphView; a stale value can only produce a missing name, never a wrong
+        /// box, because the lookup either resolves or is skipped.</summary>
+        private static QuestGraph.QuestGraphBuilder _graphContext;
+
+        public static void SetGraphContext(QuestGraph.QuestGraphBuilder graph) => _graphContext = graph;
+
         // Grey / blue / amber / green / red.
         //
         // This is a ROTATION of the old palette, and the reason is that the old one put in-progress
@@ -138,7 +149,15 @@ namespace QuestTree.UI
         private TMP_Text _title;
         private TMP_Text _abbreviation;
         private TMP_Text _subtitle;
-        private TMP_Text _objectivePreview;
+        /// <summary>The reward marks at the right-hand end of the meta row.</summary>
+        private TMP_Text _rewards;
+
+        /// <summary>The in-progress bar, and the part of it that is filled. Created on demand -
+        /// most of a tree is not in progress, and two Images apiece on every pooled view is a cost
+        /// paid mostly for boxes that never show one.</summary>
+        private GameObject _progressTrack;
+        private RectTransform _progressFill;
+        private Image _progressFillImage;
         private GameObject _kappaBadge;
         private GameObject _collectorBadge;
         private HoverTooltipArea _tooltip;
@@ -189,13 +208,15 @@ namespace QuestTree.UI
 
             var badges = (node.IsKappaRequired ? 1 : 0) + (node.IsCollectorPrerequisite ? 1 : 0);
             var badgeInset = Mathf.Max(0, badges - 1) * (LayoutMetrics.KappaBadgeSize + BadgeGap);
-            var chrome = LayoutMetrics.TextInsetX + 44f + badgeInset;
+            var chrome = LayoutMetrics.TitleInsetX + 44f + badgeInset;
 
             var min = LayoutMetrics.NodeWidth;
             var max = LayoutMetrics.MaxNodeWidth;
 
+            var name = DisplayName(node);
+
             // One line if the whole name fits inside the clamp.
-            var oneLine = EstimateWidth(node.Name, LayoutMetrics.TitleFontSize) + chrome;
+            var oneLine = EstimateWidth(name, LayoutMetrics.TitleFontSize) + chrome;
             if (oneLine <= max)
                 return new Vector2(Mathf.Max(min, oneLine), LayoutMetrics.NodeHeight);
 
@@ -259,19 +280,24 @@ namespace QuestTree.UI
             var textX = LayoutMetrics.TextInsetX;
 
             view._title = CreateText(rect, "Title", LayoutMetrics.TitleFontSize, FontStyles.Bold,
-                new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(textX, LayoutMetrics.TitleOffsetY));
+                new Vector2(0f, 1f), new Vector2(1f, 1f),
+                new Vector2(LayoutMetrics.TitleInsetX, LayoutMetrics.TitleOffsetY));
 
             view._subtitle = CreateText(rect, "Subtitle", LayoutMetrics.SubtitleFontSize, FontStyles.Normal,
                 new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(textX, LayoutMetrics.SubtitleOffsetY));
 
-            // Dropped entirely in compact mode - there is no room for it, and the title plus
-            // trader is what identifies a quest.
-            if (LayoutMetrics.ShowObjectivePreview)
-            {
-                view._objectivePreview = CreateText(rect, "Objective", LayoutMetrics.ObjectiveFontSize,
-                    FontStyles.Italic, new Vector2(0f, 1f), new Vector2(1f, 1f),
-                    new Vector2(textX, LayoutMetrics.ObjectiveOffsetY));
-            }
+            // The reward marks, right-aligned on the meta row. Its own element rather than part of
+            // the subtitle string: one TMP line cannot be left-aligned at one end and right-aligned
+            // at the other, and padding it with spaces would drift with every name length.
+            var rewards = CreateText(rect, "Rewards", LayoutMetrics.RewardFontSize, FontStyles.Normal,
+                new Vector2(1f, 1f), new Vector2(1f, 1f), new Vector2(-8f, LayoutMetrics.SubtitleOffsetY));
+            var rewardsRect = (RectTransform)rewards.transform;
+            rewardsRect.pivot = new Vector2(1f, 1f);
+            rewardsRect.sizeDelta = new Vector2(70f, 16f);
+            rewards.alignment = TextAlignmentOptions.TopRight;
+            rewards.enableWordWrapping = false;
+            rewards.overflowMode = TextOverflowModes.Overflow;
+            view._rewards = rewards;
 
             // The zoomed-right-out label: a code for the title, sized to fill the box. Hidden until
             // the detail level asks for it.
@@ -285,16 +311,19 @@ namespace QuestTree.UI
             abbreviation.gameObject.SetActive(false);
             view._abbreviation = abbreviation;
 
-            // Top-right corner, next to the Kappa badge, in the status colour. Only for the three
-            // statuses worth a mark: a locked box - the grey majority - showed a small cross here
-            // that read as a close button at any zoom, when the grey bar and dim text already
-            // say locked. Hidden with the title once the box is a code, where it was a smudge.
+            // In front of the title, on the same line, in the status colour.
+            //
+            // It used to sit in the top-right corner beside the Kappa badge, which is where you look
+            // last. This glyph answers the question the box exists to answer, and reading it after
+            // the name rather than with it was the whole reason status felt like something you had
+            // to decode. Hidden with the title once the box is only a code, where it was a smudge.
             var glyph = CreateText(rect, "StatusGlyph", LayoutMetrics.GlyphFontSize, FontStyles.Bold,
-                new Vector2(1f, 1f), new Vector2(1f, 1f), new Vector2(-6f, -3f));
+                new Vector2(0f, 1f), new Vector2(0f, 1f),
+                new Vector2(LayoutMetrics.TextInsetX, LayoutMetrics.TitleOffsetY));
             var glyphRect = (RectTransform)glyph.transform;
-            glyphRect.pivot = new Vector2(1f, 1f);
-            glyphRect.sizeDelta = new Vector2(26f, 26f);
-            glyph.alignment = TextAlignmentOptions.TopRight;
+            glyphRect.pivot = new Vector2(0f, 1f);
+            glyphRect.sizeDelta = new Vector2(LayoutMetrics.GlyphSlotWidth, 22f);
+            glyph.alignment = TextAlignmentOptions.TopLeft;
             view._statusGlyph = glyph;
 
 
@@ -408,12 +437,14 @@ namespace QuestTree.UI
             _size = size;
 
             // Glyph and badges live top-right; RefreshBadges above has just counted them.
-            var titleWidth = size.x - LayoutMetrics.TextInsetX - 44f - BadgeInset;
-            var (head, tail) = TitleParts(node.Name);
+            var titleWidth = size.x - LayoutMetrics.TitleInsetX - 44f - BadgeInset;
+            var (head, tail) = TitleParts(DisplayName(node));
 
+            // The head line only has to name the series, so it may lose its tail; the single-line
+            // and episode forms keep theirs, because that is what tells one box from the next.
             _title.text = GameStyle.Safe(_tall && tail != null
-                ? FitToWidth(head, titleWidth) + "\n" + FitToWidth(tail, titleWidth)
-                : FitToWidth(node.Name, titleWidth));
+                ? FitToWidth(head, titleWidth, protectTail: false) + "\n" + FitToWidth(tail, titleWidth)
+                : FitToWidth(DisplayName(node), titleWidth));
 
             ((RectTransform)transform).sizeDelta = size;
 
@@ -444,11 +475,68 @@ namespace QuestTree.UI
 
         /// <summary>Cuts a line to the estimated width with an ellipsis - by hand, because TMP's
         /// ellipsis only ever applies to the last line, and a two-line title needs it on the first.</summary>
-        private string FitToWidth(string text, float width)
+        private string FitToWidth(string text, float width, bool protectTail = true)
         {
             var maxChars = Mathf.FloorToInt(width / (LayoutMetrics.TitleFontSize * AverageGlyphAdvance));
-            if (text.Length <= maxChars || maxChars < 4) return text;
-            return text.Substring(0, maxChars - 1).TrimEnd() + "\u2026";
+            if (text.Length <= maxChars || maxChars < 6) return text;
+
+            // Cut the MIDDLE, not the tail.
+            //
+            // Cutting from the right removes the only part that distinguishes one quest in a series
+            // from the next: a column of "Weapon Proficiency - Marksman..." six times over is six
+            // identical boxes. The end of a quest name is where the episode, the part number and
+            // the weapon live - it is the half worth keeping.
+            if (!protectTail)
+                return text.Substring(0, maxChars - 1).TrimEnd() + "\u2026";
+
+            // Roughly a third to the head, the rest to the tail: the head only has to identify the
+            // series, which the surrounding boxes are also saying.
+            var tailChars = Mathf.Max(3, (maxChars - 1) * 2 / 3);
+            var headChars = maxChars - 1 - tailChars;
+
+            if (headChars < 2) return "\u2026" + text.Substring(text.Length - (maxChars - 1));
+
+            return text.Substring(0, headChars).TrimEnd() + "\u2026" +
+                   text.Substring(text.Length - tailChars).TrimStart();
+        }
+
+        /// <summary>Series names long enough to crowd out the part that identifies the quest.
+        ///
+        /// Applied before anything measures a title, so the box is sized for what will actually be
+        /// drawn. Deliberately short: an abbreviation only earns its place when the full form is
+        /// long AND repeated down a chain, which is exactly the case that made the tree unreadable.
+        /// A name not in this table is left alone.</summary>
+        private static readonly Dictionary<string, string> SeriesAbbreviations =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+            {
+                ["Weapon Proficiency"] = "W. Prof.",
+                ["Weapon Acquisition"] = "W. Acq.",
+                ["Weapon Mastery"] = "W. Mastery",
+                ["Armour Delivery"] = "Armour Del.",
+                ["Sanitary Investigation"] = "Sanitary Inv.",
+                ["Compensation for Damage"] = "Compensation",
+                ["The Survivalist Path"] = "Survivalist",
+                ["Grab That Cash, Make a Stash"] = "Grab That Cash",
+                ["Physical and Medical Preparation"] = "Phys. & Med. Prep.",
+                ["The Huntsman Path"] = "Huntsman"
+            };
+
+        /// <summary>The name as the box draws it: the series shortened where there is a shortening
+        /// worth making, the episode untouched.
+        ///
+        /// Everything that measures a title goes through this - MeasureSize when the layout decides
+        /// how wide the box is, Bind when the text is fitted into it. Two callers reading two
+        /// different names is how a title ends up cut at a width nothing laid it out for.</summary>
+        public static string DisplayName(QuestNode node)
+        {
+            if (node == null) return "";
+
+            var name = node.Name;
+            var (head, tail) = TitleParts(name);
+
+            if (!SeriesAbbreviations.TryGetValue(head, out var shortHead)) return name;
+
+            return string.IsNullOrEmpty(tail) ? shortHead : shortHead + " \u2013 " + tail;
         }
 
         /// <summary>The separators quest names use between a series and its episode: "Gunsmith -
@@ -559,13 +647,34 @@ namespace QuestTree.UI
                 }
             }
 
-            // Body text is the game's own colour on a dark box, whatever the status; only what you
-            // cannot start steps down, so that part of the tree recedes as a whole.
-            var ink = unstarted ? GameStyle.DimTextColor : GameStyle.TextColor;
-            if (_title != null) _title.color = ink;
+            // Body text is the game's own colour on a dark box; the two states you cannot act on
+            // step down, so those parts of the tree recede as a whole.
+            //
+            // Completed recedes too, but by FADING rather than by dimming the box. The obvious
+            // implementation - drop the CanvasGroup alpha - would have fought the hover highlight
+            // for the same channel, and ClearHighlight resets every view to 1 on mouse-out, so a
+            // completed box would have brightened permanently the first time you hovered near it.
+            // Fading the ink leaves that channel to the one writer that owns it.
+            var completed = status == ENodeStatus.Completed;
+            var ink = unstarted ? GameStyle.DimTextColor
+                : completed ? Fade(GameStyle.TextColor, 0.72f)
+                : GameStyle.TextColor;
+
+            if (_title != null)
+            {
+                _title.color = ink;
+
+                // Struck through when it is done, so the state survives greyscale and survives the
+                // zoom at which the bar is a smudge.
+                _title.fontStyle = completed
+                    ? FontStyles.Bold | FontStyles.Strikethrough
+                    : FontStyles.Bold;
+            }
+
             if (_abbreviation != null) _abbreviation.color = ink;
-            if (_subtitle != null) _subtitle.color = Fade(GameStyle.TextColor, unstarted ? 0.4f : 0.6f);
-            if (_objectivePreview != null) _objectivePreview.color = Fade(GameStyle.TextColor, unstarted ? 0.35f : 0.55f);
+            if (_subtitle != null)
+                _subtitle.color = Fade(GameStyle.TextColor, unstarted ? 0.4f : completed ? 0.42f : 0.6f);
+            if (_rewards != null) _rewards.color = Fade(GameStyle.TextColor, unstarted ? 0.35f : 0.5f);
 
             if (_statusGlyph != null)
             {
@@ -589,26 +698,241 @@ namespace QuestTree.UI
         private static Color Fade(Color color, float alpha) =>
             new(color.r, color.g, color.b, alpha);
 
+        /// <summary>How many of this quest's necessary objectives are done.
+        ///
+        /// Counted from ConditionProgress, which the server already sends and the detail panel
+        /// already reads through QuestSummary.TryProgress - so this is the same arithmetic the
+        /// panel does, on the same numbers, and the two cannot disagree.
+        ///
+        /// The profile simply has no entry for an objective that has not started, so "no counter"
+        /// reads as not done. A completed quest is all of them by definition, whatever the counters
+        /// were left holding.</summary>
+        private void ObjectiveProgress(QuestGraph.ProfilePayloadDto profile, out int done, out int total)
+        {
+            done = 0;
+            total = 0;
+
+            foreach (var objective in Node.NecessaryObjectives)
+            {
+                total++;
+
+                if (QuestSummary.TryProgress(objective, profile, out var current, out var target) &&
+                    target > 0 && current >= target)
+                {
+                    done++;
+                }
+            }
+
+            if (Node.Status == ENodeStatus.Completed) done = total;
+        }
+
+        /// <summary>Why this box cannot be started, in the few words a meta row has room for.
+        ///
+        /// The server has already decided the reason - this renders it rather than re-deriving it.
+        /// Null when there is nothing on file, and the caller then draws the normal meta row rather
+        /// than an empty one.</summary>
+        private string BlockedReason(QuestGraph.ProfilePayloadDto profile)
+        {
+            if (profile?.LockReasons == null) return null;
+            if (!profile.LockReasons.TryGetValue(Node.Id, out var reason) || reason == null) return null;
+
+            var hex = HexFor(Node.Status);
+
+            switch (reason.Kind)
+            {
+                case "Level":
+                    return $"<color=#{hex}>Lv {reason.RequiredValue}</color>";
+
+                case "Loyalty":
+                    return $"<color=#{hex}>LL{reason.RequiredValue}</color>";
+
+                case "Standing":
+                    return $"<color=#{hex}>Rep {reason.RequiredValue}</color>";
+
+                case "Prerequisite":
+                    return BlockingQuestLine(reason, hex);
+
+                default:
+                    // Faction, edition, event - a wall that never moves. The detail is already
+                    // short enough to print as it stands.
+                    return string.IsNullOrEmpty(reason.Detail)
+                        ? null
+                        : $"<color=#{hex}>{GameStyle.Safe(reason.Detail)}</color>";
+            }
+        }
+
+        /// <summary>"Needs Carbines III", plus a count when more than one quest is in the way.
+        ///
+        /// Names the FIRST blocker rather than listing them: a meta row holds about thirty
+        /// characters, and one name you can act on beats three you cannot read.</summary>
+        private static string BlockingQuestLine(QuestGraph.LockReasonDto reason, string hex)
+        {
+            if (reason.BlockingQuestIds == null || reason.BlockingQuestIds.Count == 0) return null;
+            if (_graphContext == null) return null;
+
+            string firstName = null;
+
+            foreach (var id in reason.BlockingQuestIds)
+            {
+                if (!_graphContext.NodesById.TryGetValue(id, out var blocker)) continue;
+
+                firstName = blocker.Name;
+                break;
+            }
+
+            if (string.IsNullOrEmpty(firstName)) return null;
+
+            // The series prefix is what the blocker shares with everything around it; the episode is
+            // what tells them apart. "Needs Weapon Proficiency" on a box whose neighbours are all
+            // Weapon Proficiency says nothing at all.
+            var (head, tail) = TitleParts(firstName);
+            var shown = string.IsNullOrEmpty(tail) ? head : tail;
+
+            var more = reason.BlockingQuestIds.Count - 1;
+            var suffix = more > 0 ? $"  <color=#FFFFFF60>+{more} more</color>" : "";
+
+            return $"<color=#{hex}>\u2191 Needs {GameStyle.Safe(shown)}</color>{suffix}";
+        }
+
+        /// <summary>A mark per kind of reward, at most three.
+        ///
+        /// Kinds, not amounts: the box has room to say "there is XP and an item in this", the panel
+        /// has room to say how much. Glyphs come from the set this codebase already draws elsewhere,
+        /// because the game's font is the one thing here that cannot be checked without launching
+        /// it - every one of these is on screen somewhere today.</summary>
+        private string RewardMarks()
+        {
+            if (Node.Rewards == null) return "";
+
+            var marks = new List<string>();
+
+            foreach (var reward in Node.Rewards)
+            {
+                var mark = RewardGlyph(reward.Type);
+                if (mark == null || marks.Contains(mark)) continue;
+
+                marks.Add(mark);
+                if (marks.Count == 3) break;
+            }
+
+            return marks.Count == 0 ? "" : string.Join(" ", marks);
+        }
+
+        private static string RewardGlyph(string rewardType) => rewardType switch
+        {
+            "Experience" => "\u25c6",        // filled diamond
+            "Item" => "\u25a0",              // filled square
+            "TraderStanding" => "\u25cf",    // filled circle
+            "TraderUnlock" => "\u25ce",      // bullseye - a trader opening up
+            "AssortmentUnlock" => "\u25cb",  // hollow circle - a new offer
+            "Skill" => "\u25b2",             // up triangle
+            _ => null
+        };
+
+        /// <summary>Whether the bar is wanted, kept so the detail-level sweep can hide it without
+        /// losing the fact that this quest is in progress.</summary>
+        private bool _progressWanted;
+
+        /// <summary>Shows, hides and fills the in-progress bar. Built the first time a box needs
+        /// one; most boxes never do.</summary>
+        private void ShowProgress(bool wanted, float fraction)
+        {
+            _progressWanted = wanted;
+
+            if (!wanted)
+            {
+                if (_progressTrack != null) _progressTrack.SetActive(false);
+                return;
+            }
+
+            EnsureProgressBar();
+
+            _progressTrack.SetActive(_detailLevel == 0);
+            if (_progressFillImage != null) _progressFillImage.color = ColorFor(ENodeStatus.Active);
+
+            // The fill is an ANCHOR, not a width: the bar stretches with the box, and boxes stopped
+            // being a fixed width in 1.9.0, so a width computed here would be wrong for every node
+            // whose title made it wider.
+            if (_progressFill != null)
+                _progressFill.anchorMax = new Vector2(Mathf.Clamp01(fraction), 1f);
+        }
+
+        private void EnsureProgressBar()
+        {
+            if (_progressTrack != null) return;
+
+            var rect = (RectTransform)transform;
+
+            _progressTrack = new GameObject("Progress", typeof(RectTransform), typeof(Image));
+            var trackRect = (RectTransform)_progressTrack.transform;
+            trackRect.SetParent(rect, worldPositionStays: false);
+            trackRect.anchorMin = new Vector2(0f, 0f);
+            trackRect.anchorMax = new Vector2(1f, 0f);
+            trackRect.pivot = new Vector2(0f, 0f);
+            trackRect.offsetMin = new Vector2(LayoutMetrics.TextInsetX, 4f);
+            trackRect.offsetMax = new Vector2(-8f, 4f + LayoutMetrics.ProgressBarHeight);
+
+            var track = _progressTrack.GetComponent<Image>();
+            track.color = new Color(1f, 1f, 1f, 0.10f);
+            track.raycastTarget = false;
+
+            var fillGo = new GameObject("Fill", typeof(RectTransform), typeof(Image));
+            _progressFill = (RectTransform)fillGo.transform;
+            _progressFill.SetParent(trackRect, worldPositionStays: false);
+            _progressFill.anchorMin = new Vector2(0f, 0f);
+            _progressFill.anchorMax = new Vector2(0f, 1f);
+            _progressFill.pivot = new Vector2(0f, 0.5f);
+            _progressFill.offsetMin = Vector2.zero;
+            _progressFill.offsetMax = Vector2.zero;
+
+            _progressFillImage = fillGo.GetComponent<Image>();
+            _progressFillImage.raycastTarget = false;
+        }
+
         private void RefreshDetails()
         {
+            var profile = QuestGraph.QuestDataClient.GetProfile();
+            var status = Node.Status;
+            var blocked = status == ENodeStatus.Locked || status == ENodeStatus.Gated;
+
             var level = Node.Level > 0 ? $"Lv {Node.Level}" : null;
-            var map = string.IsNullOrEmpty(Node.LocationId) || Node.LocationId == "any"
-                ? null
-                : Node.LocationId;
+            ObjectiveProgress(profile, out var done, out var total);
+            var counted = total > 0 ? $"{done}/{total}" : null;
 
-            var parts = new[] { Node.TraderName, level, map }.Where(p => !string.IsNullOrEmpty(p)).ToList();
-            _subtitle.text = string.Join("  ·  ", parts);
+            // The map gave up its slot to the objective count. Of the three it was the weakest -
+            // most quests are on one obvious map and the sidebar says so anyway, whereas "6/9" is
+            // the only thing on the box that moves while you play.
+            var parts = new[] { Node.TraderName, level, counted }.Where(p => !string.IsNullOrEmpty(p)).ToList();
 
+            // A blocked box spends its meta row on WHY. This is the single most useful thing it can
+            // say and until now it cost a click to find out - the tree drew "Scorpion · Lv 25" on a
+            // quest you cannot touch, which is the one case where the trader and the level are not
+            // what you wanted to know.
+            var reason = blocked ? BlockedReason(profile) : null;
+
+            _subtitle.text = reason ?? string.Join("  ·  ", parts);
+
+            if (_rewards != null) _rewards.text = blocked ? "" : RewardMarks();
+
+            // Only what you are actually doing gets a bar. On everything else it would either be
+            // empty or full, which the count already says.
+            ShowProgress(status == ENodeStatus.Active && total > 0, total > 0 ? (float)done / total : 0f);
+
+            var objectiveText = "";
             var firstObjective = Node.NecessaryObjectives.FirstOrDefault();
-            var objectiveText = firstObjective != null ? GameStyle.Safe(firstObjective.Text) : "";
-
-            if (_objectivePreview != null) _objectivePreview.text = objectiveText;
+            if (firstObjective != null) objectiveText = GameStyle.Safe(firstObjective.Text);
 
             if (_tooltip != null)
             {
                 // The same facts the box shows, at a size that can be read - so a zoomed-out tree
                 // still answers "what is this one" on hover without opening the detail.
+                // The box dropped the objective preview and the map for the meta row, so the
+                // hover is now the only place they survive on the tree. Worth saying: that is the
+                // trade the two-row box makes, and this is the half that pays it back.
                 var line = string.Join("  ·  ", parts);
+                if (!string.IsNullOrEmpty(Node.LocationId) && Node.LocationId != "any")
+                    line += $"  ·  {GameStyle.Safe(Node.LocationId)}";
+                if (!string.IsNullOrEmpty(reason)) line += $"\n{reason}";
                 if (Node.IsKappaRequired) line += "  ·  Kappa";
                 if (Node.IsCollectorPrerequisite) line += "  ·  unlocks Collector";
                 var body = string.IsNullOrEmpty(objectiveText) ? "" : "\n" + objectiveText;
@@ -659,7 +983,8 @@ namespace QuestTree.UI
             var barOnly = _detailLevel > 1;
 
             if (_subtitle != null) _subtitle.gameObject.SetActive(!zoomedOut);
-            if (_objectivePreview != null) _objectivePreview.gameObject.SetActive(!zoomedOut);
+            if (_rewards != null) _rewards.gameObject.SetActive(!zoomedOut);
+            if (_progressTrack != null) _progressTrack.SetActive(!zoomedOut && _progressWanted);
             RefreshBadges();
             if (_statusGlyph != null) _statusGlyph.gameObject.SetActive(!barOnly);
 
@@ -679,8 +1004,8 @@ namespace QuestTree.UI
                 _title.fontSize = LayoutMetrics.ZoomedOutTitleFontSize;
                 titleRect.anchorMin = new Vector2(0f, 0f);
                 titleRect.anchorMax = new Vector2(1f, 1f);
-                titleRect.anchoredPosition = new Vector2(LayoutMetrics.TextInsetX, 0f);
-                titleRect.sizeDelta = new Vector2(-(LayoutMetrics.TextInsetX + 24f), 0f);
+                titleRect.anchoredPosition = new Vector2(LayoutMetrics.TitleInsetX, 0f);
+                titleRect.sizeDelta = new Vector2(-(LayoutMetrics.TitleInsetX + 24f), 0f);
                 _title.alignment = TextAlignmentOptions.Left;
                 _title.enableWordWrapping = true;
                 _title.maxVisibleLines = 3;
@@ -693,11 +1018,11 @@ namespace QuestTree.UI
                 _title.fontSize = LayoutMetrics.TitleFontSize;
                 titleRect.anchorMin = new Vector2(0f, 1f);
                 titleRect.anchorMax = new Vector2(1f, 1f);
-                titleRect.anchoredPosition = new Vector2(LayoutMetrics.TextInsetX, LayoutMetrics.TitleOffsetY);
+                titleRect.anchoredPosition = new Vector2(LayoutMetrics.TitleInsetX, LayoutMetrics.TitleOffsetY);
                 // Badge-aware, like the fitting width in Bind: a single-line title is handed to TMP
                 // whole and ellipsised at this rect's edge, so a rect reaching under the badges put
                 // the tail of the name behind them.
-                titleRect.sizeDelta = new Vector2(-(LayoutMetrics.TextInsetX + 30f + BadgeInset), 16f * lines);
+                titleRect.sizeDelta = new Vector2(-(LayoutMetrics.TitleInsetX + 30f + BadgeInset), 16f * lines);
                 _title.alignment = TextAlignmentOptions.TopLeft;
                 _title.enableWordWrapping = false; // the break is explicit, and each line is pre-fitted
 
@@ -711,9 +1036,9 @@ namespace QuestTree.UI
                 if (_subtitle != null)
                     ((RectTransform)_subtitle.transform).anchoredPosition =
                         new Vector2(LayoutMetrics.TextInsetX, LayoutMetrics.SubtitleOffsetY - extra);
-                if (_objectivePreview != null)
-                    ((RectTransform)_objectivePreview.transform).anchoredPosition =
-                        new Vector2(LayoutMetrics.TextInsetX, LayoutMetrics.ObjectiveOffsetY - extra);
+                if (_rewards != null)
+                    ((RectTransform)_rewards.transform).anchoredPosition =
+                        new Vector2(-8f, LayoutMetrics.SubtitleOffsetY - extra);
             }
         }
 

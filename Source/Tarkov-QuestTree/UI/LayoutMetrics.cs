@@ -64,6 +64,23 @@ namespace QuestTree.UI
         /// <summary>Where text starts: past the status bar, past the trader slab, plus padding.</summary>
         public static float TextInsetX => StatusBarWidth + TraderStripeWidth + 7f;
 
+        /// <summary>Room for the status glyph, which now sits in front of the title rather than in
+        /// the top-right corner.
+        ///
+        /// It moved because the corner is where you look last. The glyph answers "is this done",
+        /// which is the question the box exists to answer, and it was being read after the title
+        /// instead of with it.</summary>
+        public static float GlyphSlotWidth => Compact ? 16f : 20f;
+
+        /// <summary>Where the title starts: past the glyph. Everything that measures a title - the
+        /// box width in MeasureSize, the fitting width in Bind, the rect in ApplyDetailLevel - has
+        /// to agree on this one number or the name is cut at a width it was not laid out for.</summary>
+        public static float TitleInsetX => TextInsetX + GlyphSlotWidth;
+
+        /// <summary>The in-progress bar along the bottom edge. Thin on purpose: it is a glance, and
+        /// the count in the meta row is the precise answer.</summary>
+        public static float ProgressBarHeight => 3f;
+
         /// <summary>Below this zoom the subtitle and objective are hidden and the title grows -
         /// see QuestNodeView.SetDetailLevel. 0.55 is where a 15px title stops being readable.</summary>
         public static float DetailLevelZoom =>
@@ -85,15 +102,12 @@ namespace QuestTree.UI
         // badly once boxes stopped being uniform.
         public static int GlyphFontSize => Compact ? 15 : 18;
         public static int SubtitleFontSize => Compact ? 9 : 10;
-        public static int ObjectiveFontSize => Compact ? 8 : 9;
+
+        /// <summary>The reward marks at the right-hand end of the meta row.</summary>
+        public static int RewardFontSize => Compact ? 10 : 12;
 
         public static float TitleOffsetY => Compact ? -12f : -18f;
         public static float SubtitleOffsetY => Compact ? -26f : -36f;
-        public static float ObjectiveOffsetY => Compact ? -38f : -52f;
-
-        /// <summary>The objective preview is the first thing to go when space is tight - the title
-        /// and trader identify a quest, the objective line is detail you can click through for.</summary>
-        public static bool ShowObjectivePreview => !Compact;
 
         public static float KappaBadgeSize => Compact ? 14f : 18f;
     }

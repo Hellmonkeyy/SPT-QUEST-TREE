@@ -438,6 +438,11 @@ namespace QuestTree.UI
                     -y[node]);
 
             _layoutOrder = matching.ToArray();
+
+            // A blocked box names the quest in its way, and it only has the ID. One reference for
+            // the whole render rather than the same one threaded onto hundreds of Bind calls.
+            QuestNodeView.SetGraphContext(_graph);
+
             BuildEdgeLayout(matching);
             BuildTraderMarkers(matching);
             BuildBands(matching);

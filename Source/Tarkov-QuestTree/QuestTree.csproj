@@ -8,7 +8,7 @@
     <LangVersion>latest</LangVersion>
     <!-- MSBuild cannot read the C# constant, so this is the one copy that has to be updated by
          hand: keep it equal to ModInfo.Version in ModInfo.cs, which everything else derives from. -->
-    <AssemblyVersion>1.9.0</AssemblyVersion>
+    <AssemblyVersion>1.10.0</AssemblyVersion>
     <FileVersion>$(AssemblyVersion)</FileVersion>
     <Version>$(AssemblyVersion)</Version>
     <Deterministic>true</Deterministic>
