@@ -56,112 +56,107 @@ namespace QuestTree.UI
             }
         }
 
-        /// <summary>How many frames to watch for the panel being hidden behind an inspect
-        /// window. Whatever hides it does so within a frame or two of the window opening; watching
-        /// longer would risk fighting a player who closed the tracker themselves.</summary>
+        /// <summary>How many frames to give the game to create its window before giving up.</summary>
         private const int InspectWatchFrames = 6;
 
-        /// <summary>Keeps the tracker on screen across an item inspect.
+        /// <summary>Gets the tracker out of the way of the item inspect window.
         ///
-        /// Opening the game's inspect window from an item row leaves the window correct and the
-        /// tracker GONE - the player is dropped onto the bare main menu with a knife tooltip over
-        /// it. Nothing throws and nothing is logged, so the panel is being deactivated by something
-        /// else: EFT's own window stack, or one of the menu-restyling mods this install runs.
+        /// The first two attempts at this were built on a wrong premise, and the log line they
+        /// carried is what corrected it: "the tracker stayed open across an item inspect". The panel
+        /// is NEVER hidden. The window simply renders underneath it, because TrackerAccess.Show
+        /// calls SetAsLastSibling and parks the panel above EFT's own window layer - so all the
+        /// restore-if-hidden machinery was solving a problem that did not exist.
         ///
-        /// Which one is not knowable by reading code - Unity scene behaviour never is, and this mod
-        /// has shipped two wrong guesses about exactly that. So this does not try to PREVENT the
-        /// hide. It notices and undoes it, which works whatever the cause.
+        /// The window is an EFT.UI.InfoWindow, instantiated from ItemUiContext's template. It is not
+        /// ours to raise - it lives in the game's own window stack - so the panel moves DOWN to meet
+        /// it instead: walk up from the window until an ancestor shares the panel's parent, then
+        /// take that ancestor's sibling index.
         ///
-        /// Hosted on Plugin rather than on the panel, because a coroutine stops dead when its own
-        /// GameObject is deactivated - hosting the watcher on the thing being hidden would freeze it
-        /// at the one moment it exists to act.</summary>
+        /// If no shared ancestor exists the window is under some other canvas entirely, and then the
+        /// panel is HIDDEN rather than left covering it. The player clicked to see an item; a
+        /// tracker that swallows it is the one outcome that is not acceptable.</summary>
         public static void KeepOpenThroughInspect()
         {
             var panel = Panel;
-            if (panel == null) return;
-
-            // Already closed: the player is not looking at the tracker, so there is nothing to
-            // restore and re-showing it would be the mod opening itself uninvited.
-            if (!panel.gameObject.activeSelf) return;
+            if (panel == null || !panel.gameObject.activeSelf) return;
 
             var host = Plugin.Instance;
             if (host == null || !host.isActiveAndEnabled) return;
 
-            var parent = panel.transform.parent;
-            if (parent == null) return;
-
-            host.StartCoroutine(RestoreBehindWindow(panel, parent, parent.childCount));
+            host.StartCoroutine(MoveBelowInspectWindow(panel));
         }
 
-        /// <summary>Puts the panel back BELOW the window EFT just opened, or leaves it closed.
-        ///
-        /// The first attempt simply re-activated the panel, which restored it in FRONT - the tracker
-        /// is a full-screen dark overlay, so it swallowed the very window the player had just
-        /// clicked to see. That is worse than the bug it was fixing.
-        ///
-        /// Sibling order is why. TrackerAccess.Show calls SetAsLastSibling, which parks the panel
-        /// above everything under the root canvas - including EFT's window layer. The window is not
-        /// ours to raise (it lives in the game's own stack, per ItemUiContext.SetAsTopWindow), so
-        /// instead the panel is moved DOWN to where the window appeared.
-        ///
-        /// The window is identified by what it is, not by what it is called: any child added to our
-        /// parent at or after the index recorded before Inspect ran. If none appears there, the
-        /// window went somewhere we cannot see, and then the panel is LEFT CLOSED - the behaviour
-        /// before any of this. Never restore a panel that cannot be proven to be behind the window.</summary>
-        private static System.Collections.IEnumerator RestoreBehindWindow(
-            QuestTreePanel panel, Transform parent, int childCountBefore)
+        private static System.Collections.IEnumerator MoveBelowInspectWindow(QuestTreePanel panel)
         {
             for (var frame = 1; frame <= InspectWatchFrames; frame++)
             {
                 yield return null;
 
-                // Destroyed while we waited - a menu teardown. Nothing to put back.
-                if (panel == null || parent == null) yield break;
-                if (panel.gameObject.activeSelf) continue;
+                if (panel == null) yield break;
 
-                // Anything added since Inspect ran, ignoring the panel itself.
-                var window = -1;
-                for (var i = childCountBefore - 1; i < parent.childCount; i++)
+                var parent = panel.transform.parent;
+                if (parent == null) yield break;
+
+                var window = FindInspectWindow();
+                if (window == null) continue;   // not built yet; look again next frame
+
+                // Up from the window to whichever ancestor is our own sibling.
+                var ancestor = window;
+                while (ancestor != null && ancestor.parent != parent) ancestor = ancestor.parent;
+
+                if (ancestor == null)
                 {
-                    if (i < 0) continue;
+                    // Different canvas. Nothing about sibling order can help, so get out of the way
+                    // the only other way available.
+                    panel.HideGameObject();
 
-                    var child = parent.GetChild(i);
-                    if (child == null || child == panel.transform) continue;
-
-                    window = i;
-                    break;
-                }
-
-                if (window < 0)
-                {
                     LogInspect(
-                        "QuestTree: the tracker was hidden by an item inspect and the inspect window " +
-                        "is not a sibling of the panel, so the tracker has been left closed rather " +
-                        "than restored on top of it. Close the window to get the tracker back.");
+                        "QuestTree: the item inspect window is not a sibling of the tracker, so the " +
+                        "tracker has been hidden to keep the window readable. Reopen it with the " +
+                        "taskbar button or the hotkey.");
+
                     yield break;
                 }
 
-                panel.gameObject.SetActive(true);
-
-                // Below the window. SetSiblingIndex shifts the window up by one, which is exactly
-                // the intent: the thing the player clicked stays readable, the tracker is behind it.
-                panel.transform.SetSiblingIndex(window);
+                var windowIndex = ancestor.GetSiblingIndex();
+                if (panel.transform.GetSiblingIndex() > windowIndex)
+                {
+                    // Below it. SetSiblingIndex shifts the window up by one, which is the intent:
+                    // the thing the player clicked stays readable and the tracker sits behind it.
+                    panel.transform.SetSiblingIndex(windowIndex);
+                }
 
                 LogInspect(
-                    $"QuestTree: the tracker was hidden {frame} frame(s) after an item inspect and has " +
-                    "been restored behind the inspect window.");
+                    $"QuestTree: the item inspect window appeared {frame} frame(s) after the click and " +
+                    "the tracker has been moved behind it.");
 
                 yield break;
             }
 
-            // Never hidden this session: the restore is not needed on this install, and saying so
-            // is what tells the difference between "fixed" and "never happened here".
-            LogInspect("QuestTree: the tracker stayed open across an item inspect - no restore needed.");
+            LogInspect(
+                "QuestTree: no item inspect window appeared after a click on an item row - the tracker " +
+                "has been left as it is.");
         }
 
-        /// <summary>One line a session about the inspect interaction, whichever of the three
-        /// outcomes happened. Six ways for this to look wrong on screen and one way to tell them
-        /// apart.</summary>
+        /// <summary>The live inspect window, or null while it is still being built.
+        ///
+        /// FindObjectsOfType is not cheap, and that is fine here: this runs once per click on an
+        /// item row, not per frame, and only until the window is found.</summary>
+        private static Transform FindInspectWindow()
+        {
+            EFT.UI.InfoWindow best = null;
+
+            foreach (var window in UnityEngine.Object.FindObjectsOfType<EFT.UI.InfoWindow>())
+            {
+                if (window == null || !window.gameObject.activeInHierarchy) continue;
+                best = window;
+            }
+
+            return best != null ? best.transform : null;
+        }
+
+        /// <summary>One line a session about the inspect interaction, whichever outcome happened.
+        /// It is what corrected the premise this method was first built on.</summary>
         private static void LogInspect(string message)
         {
             if (_inspectLogged) return;

@@ -405,6 +405,32 @@ namespace QuestTree.UI
                 CreateTraderMarker(entry.Key, _layout[entry.Value]);
         }
 
+        /// <summary>Holds the trader portraits at a constant size on screen.
+        ///
+        /// They were drawn in content space, so they shrank with the tree and became specks at the
+        /// zoom where they are most useful - the overview, where the boxes have stopped being
+        /// readable and the portrait is the only thing saying whose chain you are looking at.
+        ///
+        /// Counter-scaled rather than made bigger: a fixed larger size would be enormous when zoomed
+        /// in. Clamped at 1 so they never grow beyond their authored size at full zoom.</summary>
+        private void ScaleTraderMarkers(float zoom)
+        {
+            if (_traderMarkers.Count == 0) return;
+
+            var scale = zoom > 0.0001f ? Mathf.Max(1f, 1f / zoom) : 1f;
+            if (Mathf.Approximately(scale, _traderMarkerScale)) return;
+
+            _traderMarkerScale = scale;
+
+            foreach (var marker in _traderMarkers)
+            {
+                if (marker == null) continue;
+                marker.transform.localScale = Vector3.one * scale;
+            }
+        }
+
+        private float _traderMarkerScale = 1f;
+
         private void CreateTraderMarker(string traderId, Vector2 nodePosition)
         {
             const float size = 76f;
@@ -417,6 +443,8 @@ namespace QuestTree.UI
             rect.pivot = new Vector2(1f, 0.5f);
 
             // Left of the chain's first quest, vertically centred on it.
+            // Pivoted at its right edge so counter-scaling grows it leftward, away from the
+            // chain, rather than over the first quest in it.
             rect.anchoredPosition = new Vector2(nodePosition.x - gap, nodePosition.y);
             rect.sizeDelta = new Vector2(size, size + 20f);
 
@@ -559,6 +587,7 @@ namespace QuestTree.UI
 
             _labels.Draw(_labelRanked, _labelOccupied, zoom, budget);
             _labelRankOf.Clear();
+            ScaleTraderMarkers(zoom);
         }
 
         private readonly Dictionary<QuestNode, int> _labelRankOf = new Dictionary<QuestNode, int>();

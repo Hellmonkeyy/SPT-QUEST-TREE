@@ -40,6 +40,9 @@ namespace QuestTree.UI
         /// <summary>Breathing room around a quest box before a label may sit next to it.</summary>
         private const float BoxPadding = 6f;
 
+        /// <summary>Screen pixels between the top of a box and the bottom of its label.</summary>
+        private const float LabelGap = 2f;
+
         private readonly RectTransform _content;
         private readonly List<TMP_Text> _pool = new List<TMP_Text>();
 
@@ -122,11 +125,16 @@ namespace QuestTree.UI
                 var width = GameStyle.MeasureWidth(label, text);
                 var height = FontSize * 1.4f;
 
-                // Above the box, clear of it by a few pixels on screen at any zoom.
+                // Clear of the box, measured from the label's BOTTOM EDGE rather than its centre.
+                //
+                // Offsetting the centre is what made every label collide with its own node: the box
+                // rect seeded into _placed is padded by BoxPadding, so the label's bottom has to
+                // clear NodeHeight/2 * zoom + BoxPadding, and a centre offset of
+                // NodeHeight/2 * zoom + height * 0.6 leaves it short by most of BoxPadding. The log
+                // said "0 of 7 placed", which is what that arithmetic looks like from outside.
                 var anchor = ranked[i].Position * zoom;
-                var position = new Vector2(
-                    anchor.x,
-                    anchor.y + LayoutMetrics.NodeHeight * 0.5f * zoom + height * 0.6f);
+                var boxTop = LayoutMetrics.NodeHeight * 0.5f * zoom + BoxPadding;
+                var position = new Vector2(anchor.x, anchor.y + boxTop + LabelGap + height * 0.5f);
 
                 var rect = new Rect(position.x, position.y - height * 0.5f, width, height);
 
