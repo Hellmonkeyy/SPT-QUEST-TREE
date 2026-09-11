@@ -29,6 +29,21 @@ namespace QuestTree.UI
         public static float ColumnSpacing => Compact ? 195f : 260f;
         public static float RowSpacing => Compact ? 62f : 112f;
 
+        /// <summary>The widest a box may grow to fit its own title.
+        ///
+        /// A clamp, not a target: one pathological modded quest name would otherwise create a
+        /// 2,000px box and drag its whole column out with it, since a column is as wide as its
+        /// widest member. Anything past this still ellipsises, which is the right answer for a name
+        /// nobody can read anyway.</summary>
+        public static float MaxNodeWidth => NodeWidth * 2f;
+
+        /// <summary>Space between one column's widest box and the next column's left edge. Replaces
+        /// the fixed ColumnSpacing once columns size themselves.</summary>
+        public static float ColumnGap => ColumnSpacing - NodeWidth;
+
+        /// <summary>Space between two stacked boxes. Replaces the fixed RowSpacing.</summary>
+        public static float RowGap => RowSpacing - NodeHeight;
+
         /// <summary>A node whose title needs two lines grows by this much (comfortable layout
         /// only - compact has no room). RowSpacing leaves a gap for it: 84 + 16 = 100 &lt; 112.</summary>
         public static float TallNodeExtraHeight => 16f;

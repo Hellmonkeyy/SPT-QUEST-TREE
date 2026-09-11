@@ -42,6 +42,12 @@ namespace QuestTree.UI
         private Image _traderStripe;
         public static float Height => LayoutMetrics.NodeHeight;
 
+        /// <summary>The size this bound node was given, for anything that has to line up with it.
+        /// Boxes stopped being uniform in 1.9.0.</summary>
+        public Vector2 Size => _size;
+
+        private Vector2 _size = new Vector2(LayoutMetrics.NodeWidth, LayoutMetrics.NodeHeight);
+
         // Grey / amber / green / dark green. Available is amber rather than the near-white it used
         // to be: white and grey are the two colours that do not survive a zoomed-out tree, and the
         // game's own Tasks screen says "you can take this" in amber. The one quest you are actually
@@ -140,6 +146,57 @@ namespace QuestTree.UI
         public Action<QuestNode> OnClicked;
         public Action<QuestNode> OnHoverEnter;
         public Action<QuestNode> OnHoverExit;
+
+        /// <summary>The box this quest wants, and whether its title needs two lines.
+        ///
+        /// The layout asks this once per graph build; Bind asks it again per node so the box and the
+        /// text inside it are decided by the SAME arithmetic rather than by two measurements that
+        /// have to agree.
+        ///
+        /// Sized from EstimateWidth, never from TMP. That is deliberate and it is the decision that
+        /// makes a dynamic layout affordable at all: on a modded install the All tab is thousands of
+        /// nodes, TMP measurement is slow at that count, and it is the single least reliable thing in
+        /// this codebase - it has under-reported width twice and height once, each time shipped. The
+        /// estimate is pure arithmetic over the visible character count, so it is instant, identical
+        /// every run, and cannot regress.
+        ///
+        /// Prefers a WIDER box to a taller one, up to the clamp. "Weapon Mastery FN P90 5.7x28mm" on
+        /// one readable line beats the same name cut to "Weapon Mastery FN P90 5.7x28mm Pa..." over
+        /// two.</summary>
+        public static Vector2 MeasureSize(QuestNode node, out bool tall)
+        {
+            tall = false;
+            if (node == null) return new Vector2(LayoutMetrics.NodeWidth, LayoutMetrics.NodeHeight);
+
+            var badges = (node.IsKappaRequired ? 1 : 0) + (node.IsCollectorPrerequisite ? 1 : 0);
+            var badgeInset = Mathf.Max(0, badges - 1) * (LayoutMetrics.KappaBadgeSize + BadgeGap);
+            var chrome = LayoutMetrics.TextInsetX + 44f + badgeInset;
+
+            var min = LayoutMetrics.NodeWidth;
+            var max = LayoutMetrics.MaxNodeWidth;
+
+            // One line if the whole name fits inside the clamp.
+            var oneLine = EstimateWidth(node.Name, LayoutMetrics.TitleFontSize) + chrome;
+            if (oneLine <= max)
+                return new Vector2(Mathf.Max(min, oneLine), LayoutMetrics.NodeHeight);
+
+            var (head, tail) = TitleParts(node.Name);
+
+            // No part to break on, or tall boxes turned off: as wide as allowed, and the text
+            // ellipsises. Honest rather than pretending a name fits.
+            if (tail == null || !LayoutMetrics.AllowTallNodes)
+                return new Vector2(max, LayoutMetrics.NodeHeight);
+
+            tall = true;
+
+            var wider = Mathf.Max(
+                EstimateWidth(head, LayoutMetrics.TitleFontSize),
+                EstimateWidth(tail, LayoutMetrics.TitleFontSize)) + chrome;
+
+            return new Vector2(
+                Mathf.Clamp(wider, min, max),
+                LayoutMetrics.NodeHeight + LayoutMetrics.TallNodeExtraHeight);
+        }
 
         public static QuestNodeView Create(RectTransform parent)
         {
@@ -318,16 +375,22 @@ namespace QuestTree.UI
             // says nothing. Widths are estimated from character counts rather than measured:
             // TMP's measurement answered wrong for pooled views, and an estimate is deterministic.
             _title.fontSize = LayoutMetrics.TitleFontSize;
+
+            // The box the layout reserved for this quest, from the same call the layout made - so
+            // the text is fitted to the space that was actually allocated, rather than to a global
+            // constant the box no longer has.
+            var size = MeasureSize(node, out _tall);
+            _size = size;
+
             // Glyph and badges live top-right; RefreshBadges above has just counted them.
-            var titleWidth = Width - LayoutMetrics.TextInsetX - 44f - BadgeInset;
+            var titleWidth = size.x - LayoutMetrics.TextInsetX - 44f - BadgeInset;
             var (head, tail) = TitleParts(node.Name);
-            _tall = LayoutMetrics.AllowTallNodes && (tail != null || EstimateWidth(head, LayoutMetrics.TitleFontSize) > titleWidth);
 
-            _title.text = GameStyle.Safe(_tall
-                ? FitToWidth(head, titleWidth) + (tail != null ? "\n" + FitToWidth(tail, titleWidth) : "")
-                : node.Name);
+            _title.text = GameStyle.Safe(_tall && tail != null
+                ? FitToWidth(head, titleWidth) + "\n" + FitToWidth(tail, titleWidth)
+                : FitToWidth(node.Name, titleWidth));
 
-            ((RectTransform)transform).sizeDelta = new Vector2(Width, Height + (_tall ? LayoutMetrics.TallNodeExtraHeight : 0f));
+            ((RectTransform)transform).sizeDelta = size;
 
             if (_abbreviation != null)
             {

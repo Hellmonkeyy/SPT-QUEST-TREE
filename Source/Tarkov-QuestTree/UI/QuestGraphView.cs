@@ -151,6 +151,17 @@ namespace QuestTree.UI
         /// path.</summary>
         private readonly List<GameObject> _traderMarkers = new List<GameObject>();
 
+        /// <summary>Each node's box, measured once per layout. Boxes stopped being uniform in
+        /// 1.9.0, so everything that used to read QuestNodeView.Width reads this instead: the edge
+        /// origins, the visibility test and the node rect itself.</summary>
+        private readonly Dictionary<QuestNode, Vector2> _sizes = new Dictionary<QuestNode, Vector2>();
+
+        /// <summary>The box a node was laid out with, or the default if it is not in this tab.</summary>
+        private Vector2 SizeOf(QuestNode node) =>
+            node != null && _sizes.TryGetValue(node, out var size)
+                ? size
+                : new Vector2(LayoutMetrics.NodeWidth, LayoutMetrics.NodeHeight);
+
         /// <summary>The readable-label overlay. Built lazily with the content, dropped with
         /// it, and drawn from the same sweep that decides which boxes exist - so panning and
         /// zooming update it without a second update path.</summary>
@@ -340,13 +351,43 @@ namespace QuestTree.UI
                 return;
             }
 
+            // Measure first: both axes need the sizes before anything can be placed.
+            _sizes.Clear();
+            foreach (var node in matching)
+                _sizes[node] = QuestNodeView.MeasureSize(node, out _);
+
             var y = ComputeTreeLayout(matching);
+
+            // Columns as wide as their widest member, laid end to end.
+            //
+            // Depth still decides WHICH column a quest is in - that is global and comes from the
+            // graph builder - but no longer where that column sits, because a column holding a
+            // double-width box can no longer be a fixed step from its neighbour.
+            var columnX = new Dictionary<int, float>();
+            var widest = new Dictionary<int, float>();
+
+            foreach (var node in matching)
+            {
+                var width = SizeOf(node).x;
+                if (!widest.TryGetValue(node.Depth, out var current) || width > current)
+                    widest[node.Depth] = width;
+            }
+
+            var depths = new List<int>(widest.Keys);
+            depths.Sort();
+
+            var x = 0f;
+            foreach (var depth in depths)
+            {
+                columnX[depth] = x;
+                x += widest[depth] + LayoutMetrics.ColumnGap;
+            }
 
             _layout.Clear();
             foreach (var node in matching)
                 _layout[node] = new Vector2(
-                    node.Depth * LayoutMetrics.ColumnSpacing,
-                    -y[node] * LayoutMetrics.RowSpacing);
+                    columnX.TryGetValue(node.Depth, out var left) ? left : 0f,
+                    -y[node]);
 
             _layoutOrder = matching.ToArray();
             BuildEdgeLayout(matching);
@@ -439,22 +480,31 @@ namespace QuestTree.UI
             var go = new GameObject($"TraderMarker_{traderId}", typeof(RectTransform));
             var rect = (RectTransform)go.transform;
             rect.SetParent(_content, worldPositionStays: false);
-            rect.anchorMin = rect.anchorMax = new Vector2(0f, 0f);
-            rect.pivot = new Vector2(1f, 0.5f);
 
-            // Left of the chain's first quest, vertically centred on it.
-            // Pivoted at its right edge so counter-scaling grows it leftward, away from the
-            // chain, rather than over the first quest in it.
+            // The SAME anchors a quest box uses, which is Unity's default centre - QuestNodeView.Create
+            // sets a pivot and never touches the anchors. Anchoring this to the bottom-left instead
+            // measured its position from a different origin than the node it is meant to line up
+            // with, which is why the portrait sat low and to one side of its chain.
+            rect.anchorMin = rect.anchorMax = new Vector2(0.5f, 0.5f);
+
+            // Pivoted at the right edge, vertically centred: the marker hangs to the LEFT of the
+            // chain's first quest and shares that quest's centre line. Counter-scaling then grows it
+            // leftward, away from the chain, rather than over it.
+            rect.pivot = new Vector2(1f, 0.5f);
             rect.anchoredPosition = new Vector2(nodePosition.x - gap, nodePosition.y);
-            rect.sizeDelta = new Vector2(size, size + 20f);
+
+            // Square, and only the portrait. The name hangs BELOW the marker rather than inside it:
+            // a taller box would put the portrait's centre above the node's, which is the same
+            // off-by-half this method just stopped making.
+            rect.sizeDelta = new Vector2(size, size);
 
             var portraitGo = new GameObject("Portrait", typeof(RectTransform), typeof(Image));
             var portrait = (RectTransform)portraitGo.transform;
             portrait.SetParent(rect, worldPositionStays: false);
-            portrait.anchorMin = portrait.anchorMax = new Vector2(0.5f, 1f);
-            portrait.pivot = new Vector2(0.5f, 1f);
-            portrait.anchoredPosition = Vector2.zero;
-            portrait.sizeDelta = new Vector2(size, size);
+            portrait.anchorMin = Vector2.zero;
+            portrait.anchorMax = Vector2.one;
+            portrait.offsetMin = Vector2.zero;
+            portrait.offsetMax = Vector2.zero;
 
             var image = portraitGo.GetComponent<Image>();
             image.raycastTarget = false;
@@ -468,10 +518,12 @@ namespace QuestTree.UI
             var labelGo = new GameObject("TraderName", typeof(RectTransform));
             var labelRect = (RectTransform)labelGo.transform;
             labelRect.SetParent(rect, worldPositionStays: false);
+
+            // Under the portrait, outside the square, so it cannot pull the portrait off centre.
             labelRect.anchorMin = new Vector2(0f, 0f);
             labelRect.anchorMax = new Vector2(1f, 0f);
-            labelRect.pivot = new Vector2(0.5f, 0f);
-            labelRect.anchoredPosition = Vector2.zero;
+            labelRect.pivot = new Vector2(0.5f, 1f);
+            labelRect.anchoredPosition = new Vector2(0f, -2f);
             labelRect.sizeDelta = new Vector2(0f, 18f);
 
             var label = labelGo.AddComponent<TMPro.TextMeshProUGUI>();
@@ -505,7 +557,10 @@ namespace QuestTree.UI
 
             foreach (var node in nodes)
             {
-                var fromPoint = _layout[node] + new Vector2(QuestNodeView.Width, 0f);
+                // The node's OWN width. A fixed constant here left every edge on a wider-than-
+                // default box starting part-way across it, which is the single most visible thing
+                // that would break when boxes stopped being uniform.
+                var fromPoint = _layout[node] + new Vector2(SizeOf(node).x, 0f);
 
                 foreach (var unlocked in node.Unlocks)
                 {
@@ -776,7 +831,7 @@ namespace QuestTree.UI
             var (near, far) = DimAlphas(zoom);
 
             var origin = _layout.TryGetValue(_hoveredNode, out var centre)
-                ? centre + new Vector2(QuestNodeView.Width * 0.5f, 0f)
+                ? centre + new Vector2(SizeOf(_hoveredNode).x * 0.5f, 0f)
                 : Vector2.zero;
 
             foreach (var (built, view) in _views)
@@ -787,7 +842,9 @@ namespace QuestTree.UI
                     continue;
                 }
 
-                var position = _layout.TryGetValue(built, out var at) ? at + new Vector2(QuestNodeView.Width * 0.5f, 0f) : origin;
+                var position = _layout.TryGetValue(built, out var at)
+                    ? at + new Vector2(SizeOf(built).x * 0.5f, 0f)
+                    : origin;
                 view.SetDimAlpha(FalloffAlpha(Vector2.Distance(position, origin), inner, outer, near, far));
             }
 
@@ -1034,10 +1091,12 @@ namespace QuestTree.UI
             {
                 if (!_layout.TryGetValue(node, out var position)) continue;
 
+                var size = SizeOf(node);
+
                 minX = Mathf.Min(minX, position.x);
-                maxX = Mathf.Max(maxX, position.x + QuestNodeView.Width);
-                minY = Mathf.Min(minY, position.y - QuestNodeView.Height * 0.5f);
-                maxY = Mathf.Max(maxY, position.y + QuestNodeView.Height * 0.5f);
+                maxX = Mathf.Max(maxX, position.x + size.x);
+                minY = Mathf.Min(minY, position.y - size.y * 0.5f);
+                maxY = Mathf.Max(maxY, position.y + size.y * 0.5f);
             }
 
             if (minX > maxX || minY > maxY) return false;
@@ -1119,11 +1178,15 @@ namespace QuestTree.UI
         {
             if (!_layout.TryGetValue(node, out var position)) return false;
 
-            // pivot (0, 0.5): x runs right from the position, y is centred on it.
-            return position.x + QuestNodeView.Width >= visible.xMin
+            // pivot (0, 0.5): x runs right from the position, y is centred on it. Sized per node
+            // since 1.9.0 - a uniform box here would cull a wide one a fraction early and pop it in
+            // as you panned.
+            var size = SizeOf(node);
+
+            return position.x + size.x >= visible.xMin
                    && position.x <= visible.xMax
-                   && position.y + QuestNodeView.Height * 0.5f >= visible.yMin
-                   && position.y - QuestNodeView.Height * 0.5f <= visible.yMax;
+                   && position.y + size.y * 0.5f >= visible.yMin
+                   && position.y - size.y * 0.5f <= visible.yMax;
         }
 
         /// <summary>An edge is drawn whenever its bounding box touches the viewport, so a long line
@@ -1261,6 +1324,7 @@ namespace QuestTree.UI
             _edgeViews.Clear();
 
             _layout.Clear();
+            _sizes.Clear();
             _layoutOrder = Array.Empty<QuestNode>();
             _edgeLayout = Array.Empty<(QuestNode, QuestNode, Vector2, Vector2)>();
 
@@ -1359,6 +1423,11 @@ namespace QuestTree.UI
 
             var y = new Dictionary<QuestNode, float>();
             var visiting = new HashSet<QuestNode>();
+
+            // PIXELS now, not row slots. A leaf advances the cursor by its OWN height, so a
+            // two-line box takes the room it needs and a one-line box no longer reserves room it
+            // does not - which is why a variable layout comes out SHORTER than the fixed grid on a
+            // tree where most titles fit on one line.
             var nextLeafSlot = 0f;
 
             float AssignY(QuestNode node)
@@ -1373,14 +1442,23 @@ namespace QuestTree.UI
                 float result;
                 if (kids.Count == 0)
                 {
-                    result = nextLeafSlot;
-                    nextLeafSlot += 1f;
+                    // The cursor sits at the TOP of the next free strip; the node's own position is
+                    // its centre, so it moves down by half its height and the cursor by all of it.
+                    var height = SizeOf(node).y;
+                    result = nextLeafSlot + height * 0.5f;
+                    nextLeafSlot += height + LayoutMetrics.RowGap;
                 }
                 else
                 {
-                    var sum = 0f;
-                    foreach (var kid in kids) sum += AssignY(kid);
-                    result = sum / kids.Count;
+                    // Centred on the span its children occupy, not on their average: with variable
+                    // heights an average is pulled towards whichever side has more small boxes, and
+                    // the parent visibly drifts off the middle of its own bracket.
+                    var first = AssignY(kids[0]);
+                    var last = first;
+
+                    for (var i = 1; i < kids.Count; i++) last = AssignY(kids[i]);
+
+                    result = (first + last) * 0.5f;
                 }
 
                 visiting.Remove(node);
@@ -1398,7 +1476,13 @@ namespace QuestTree.UI
             // Anything a cycle guard prevented AssignY from reaching still needs a slot rather
             // than being silently dropped from the layout.
             foreach (var node in nodes)
-                if (!y.ContainsKey(node)) y[node] = nextLeafSlot++;
+            {
+                if (y.ContainsKey(node)) continue;
+
+                var height = SizeOf(node).y;
+                y[node] = nextLeafSlot + height * 0.5f;
+                nextLeafSlot += height + LayoutMetrics.RowGap;
+            }
 
             return y;
         }
