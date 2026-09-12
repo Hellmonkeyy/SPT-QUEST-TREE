@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Linq;
 using SPTarkov.Common.Models.Logging;
 using SPTarkov.DI.Annotations;
+using SPTarkov.Server.Core.Helpers.Items;
 using SPTarkov.Server.Core.Models.Common;
 
 namespace QuestTreeServer
@@ -31,6 +32,11 @@ namespace QuestTreeServer
     ///            These are not preferences and must not compete with stats for a slot. Routing is
     ///            against the tree as it stands rather than against routes chosen in advance, so a
     ///            chain one part paid for is reused by the next instead of duplicated.
+    ///   DRESS/CLIMB both work against a cost whose FIRST rank is whole requirements rather than
+    ///            numbers: a slot the game marks Required and will not let the player leave empty,
+    ///            and a category the quest names - "must include a Silencer", 16 of the 32 vanilla
+    ///            conditions - with nothing on the gun from it. Neither is a degree of anything, and
+    ///            a build that trades either for a better number is one that cannot be handed in.
     ///   DRESS    Every remaining slot is filled greedily, by a per-part heuristic that counts what
     ///            a part lets you fit BEHIND it as well as what it is. A starting point, not an
     ///            answer.
@@ -56,13 +62,17 @@ namespace QuestTreeServer
     /// looks like an answer.
     ///
     /// The measure of all of it: 60 of the 60 weapon-build requirements on the reference install,
-    /// vanilla and modded, in 135 ms for all sixty.
+    /// vanilla and modded, in 217 ms for all sixty - every threshold met, every part and category the
+    /// quest names present, and no required slot left empty, so each one is a gun the player can
+    /// actually assemble. Enforcing the last two cost nothing: before they were enforced the same
+    /// search scored 60 and only 33 of those builds were assemblable and complete.
     /// </summary>
     [Injectable(InjectionType.Singleton)]
     public class WeaponSolver(
         ISptLogger<WeaponSolver> logger,
         WeaponGraph graph,
-        WeaponStatModel model)
+        WeaponStatModel model,
+        ItemHelper itemHelper)
     {
         /// <summary>Nodes the search may open before it gives up and reports what it has. A node is
         /// one scored trial, and the climb spends them in thousands rather than the greedy's dozens,
@@ -122,6 +132,10 @@ namespace QuestTreeServer
         /// <summary>Improvement a move must make to be taken. Guards the climb against oscillating
         /// on floating point noise.</summary>
         private const double MinGain = 1e-6;
+
+        /// <summary>How many required categories one condition may name. Three is the most any
+        /// condition on the reference install uses; 30 is the width of the mask that tracks them.</summary>
+        private const int MaxCategories = 30;
 
         /// <summary>Most headroom one met threshold may contribute, as a fraction of itself. Capped so
         /// that a gun with 200 ergonomics against a threshold of 15 cannot outvote four other
@@ -192,6 +206,7 @@ namespace QuestTreeServer
             MongoId weapon,
             IReadOnlyList<(string Field, string Compare, double Value)> thresholds,
             IReadOnlyCollection<MongoId> mustInclude,
+            IReadOnlyCollection<MongoId> mustIncludeCategories,
             IReadOnlyCollection<MongoId>? allowed)
         {
             var result = new Result();
@@ -233,7 +248,7 @@ namespace QuestTreeServer
             // is what made the old ordering leave muzzle brakes on the floor.
             var bare = model.Score(weapon, Array.Empty<MongoId>());
 
-            var state = new SearchState(reachable, allowed, goals, Stopwatch.StartNew())
+            var state = new SearchState(reachable, allowed, goals, mustIncludeCategories, Stopwatch.StartNew())
             {
                 RecoilPerPercent = (bare?.Recoil ?? 0d) / 100d
             };
@@ -273,7 +288,10 @@ namespace QuestTreeServer
 
                 var climbed = Climb(weapon, root, state);
                 var missing = required.Count(part => Find(root, part) == null);
-                var cost = climbed.Shortfall + missing * MissingPartPenalty;
+
+                // A whole requirement outweighs any sum of shortfalls, whether it is a part the quest
+                // named, a category it named, or a slot the game will not let the player leave empty.
+                var cost = (climbed.Gaps + missing) * MissingPartPenalty + climbed.Shortfall;
 
                 if (cost < bestCost)
                 {
@@ -333,6 +351,29 @@ namespace QuestTreeServer
                 result.Unmet.Add(reachable.ContainsKey(part)
                     ? $"could not fit the required part {part} (reachable, not placed)"
                     : $"required part {part} is NOT REACHABLE from this weapon's slots");
+            }
+
+            // A slot the game marks Required cannot be left empty in the modding screen, so a build
+            // that leaves one is not a build at all - it is arithmetic the player cannot assemble.
+            // Every one of the 30 vanilla quest weapons has at least one: mod_barrel on the M1A,
+            // mod_pistol_grip and mod_gas_block on every AK, mod_reciever and mod_charge on the M4A1.
+            var starved = new List<string>();
+            EmptyRequired(best, state, starved);
+
+            foreach (var slot in starved)
+                result.Unmet.Add($"required slot {slot} is empty - the game will not assemble this build");
+
+            // Categories are requirements in exactly the way the named parts are - "must include a
+            // Silencer" is 16 of the 32 vanilla conditions - and an unenforced requirement is an
+            // unmet one.
+            var carried = 0;
+            foreach (var template in fitted) carried |= CategoryMask(template, state);
+
+            for (var index = 0; index < state.Categories.Count; index++)
+            {
+                if ((carried & (1 << index)) != 0) continue;
+
+                result.Unmet.Add($"no fitted part from the required category {state.Categories[index]}");
             }
 
             result.Found = result.Unmet.Count == 0;
@@ -614,7 +655,7 @@ namespace QuestTreeServer
         /// An empty slot is a legitimate choice: a part that helps nothing measured is weight for
         /// free, and weight is a threshold in its own right. The climb revisits every slot this
         /// leaves empty, so a wrong "no" here costs a sweep rather than the answer.</summary>
-        private static MongoId? Choose(Node parent, WeaponGraph.SlotInfo slot, SearchState state)
+        private MongoId? Choose(Node parent, WeaponGraph.SlotInfo slot, SearchState state)
         {
             var shortlist = state.Shortlist;
             shortlist.Clear();
@@ -640,10 +681,14 @@ namespace QuestTreeServer
 
                 // An empty slot is a legitimate choice: a part that helps nothing measured is weight
                 // for free, and weight is a threshold in its own right.
-                return best.Score > 0d ? best.Template : (MongoId?)null;
+                //
+                // UNLESS the game marks the slot Required, in which case it cannot be left empty in
+                // the modding screen and "this part helps nothing" is no reason to hand the player a
+                // gun they cannot assemble.
+                return best.Score > 0d || slot.Required ? best.Template : (MongoId?)null;
             }
 
-            if (state.Shuffle.Next(SkipOneSlotIn) == 0) return null;
+            if (!slot.Required && state.Shuffle.Next(SkipOneSlotIn) == 0) return null;
 
             // EVERY legal candidate, not the ones the heuristic likes. That distinction is what
             // cracked the M1A: an M14 suppressor scores badly on its own - it costs a great deal of
@@ -665,7 +710,7 @@ namespace QuestTreeServer
         /// Optimistic on purpose: it assumes every slot behind the part gets its best occupant, which
         /// conflicts and slot contention may deny. That is the right bias for a dressing whose whole
         /// job is to hand the climb somewhere worth standing.</summary>
-        private static double Potential(MongoId template, SearchState state, int depth)
+        private double Potential(MongoId template, SearchState state, int depth)
         {
             if (depth > MaxDepth) return 0d;
             if (state.Potentials.TryGetValue(template, out var cached)) return cached;
@@ -698,9 +743,13 @@ namespace QuestTreeServer
 
         /// <summary>How much one part helps BY ITSELF, summed over the goals, each in units of its own
         /// threshold so that percentages, kilograms and ergonomics points are comparable.</summary>
-        private static double Score(WeaponGraph.PartInfo part, SearchState state)
+        private double Score(WeaponGraph.PartInfo part, SearchState state)
         {
-            var score = 0d;
+            // A part from a category the quest names is worth a whole threshold's worth of anything
+            // else, because without one the build cannot be handed in at all. Counted here and not
+            // only in the cost, so that Potential carries it back through an adapter: the AKM's Kiba
+            // muzzle adapter is worth nothing whatsoever except that a suppressor screws onto it.
+            var score = CategoryMask(part.Template, state) != 0 ? 1d : 0d;
 
             foreach (var goal in state.Goals)
             {
@@ -749,7 +798,7 @@ namespace QuestTreeServer
             var buffer = new List<MongoId>();
             var current = Measure(weapon, root, state, buffer);
 
-            for (var sweep = 0; sweep < MaxSweeps && current.Shortfall > 0d; sweep++)
+            for (var sweep = 0; sweep < MaxSweeps && !current.Done; sweep++)
             {
                 var moved = false;
                 var queue = new Queue<Node>();
@@ -780,7 +829,7 @@ namespace QuestTreeServer
 
                         moved = true;
                         if (placed != null) queue.Enqueue(placed);
-                        if (current.Shortfall <= 0d) return current;
+                        if (current.Done) return current;
                     }
                 }
 
@@ -961,7 +1010,22 @@ namespace QuestTreeServer
             CollectTemplates(root, buffer);
 
             var stats = model.Score(weapon, buffer);
-            if (stats == null) return new Cost(double.MaxValue, 0d);
+            if (stats == null) return new Cost(int.MaxValue, double.MaxValue, 0d);
+
+            // Structural gaps, counted before any number is looked at. A required slot left empty or
+            // a category with nothing from it is not a worse build - it is one the player cannot
+            // assemble or cannot hand in, and the search has to close that before it spends anything
+            // on a threshold.
+            var gaps = EmptyRequired(root, state, null);
+
+            if (state.Categories.Count > 0)
+            {
+                var carried = 0;
+                foreach (var template in buffer) carried |= CategoryMask(template, state);
+
+                for (var index = 0; index < state.Categories.Count; index++)
+                    if ((carried & (1 << index)) == 0) gaps++;
+            }
 
             var shortfall = 0d;
             var headroom = 0d;
@@ -984,11 +1048,17 @@ namespace QuestTreeServer
                 else headroom += Math.Min(margin, HeadroomCap);
             }
 
-            return new Cost(shortfall, headroom);
+            return new Cost(gaps, shortfall, headroom);
         }
 
-        /// <summary>What a build is worth to the climb: how far short of the thresholds it falls, and
-        /// how much room to spare it has on the ones it already meets.
+        /// <summary>What a build is worth to the climb, in three ranks: how many requirements it
+        /// structurally fails, how far short of the thresholds it falls, and how much room to spare it
+        /// has on the ones it already meets.
+        ///
+        /// Gaps outrank everything because they are not degrees of anything. A gun with an empty
+        /// mod_charge cannot be assembled in the modding screen and a gun with no silencer does not
+        /// satisfy a condition that asks for one, however good its recoil; trading either away for a
+        /// better number would produce a build that reads well and cannot be handed in.
         ///
         /// The headroom half is not a nicety, it is what unsticks the M1A. Shortfall alone gives a met
         /// threshold no pull at all, so the climb spends every point of spare ergonomics on whatever
@@ -996,18 +1066,28 @@ namespace QuestTreeServer
         /// than is left, no single move improves anything, and the gun settles at its BARE recoil with
         /// the threshold 64 points away. Ranked strictly below shortfall, so a build that passes always
         /// beats one that does not, however roomy.</summary>
-        private readonly struct Cost(double shortfall, double headroom)
+        private readonly struct Cost(int gaps, double shortfall, double headroom)
         {
+            /// <summary>Required slots left empty plus required categories with nothing from them.
+            /// Whole requirements, not degrees of one.</summary>
+            public int Gaps { get; } = gaps;
+
             /// <summary>Summed distance from the thresholds not met, each as a fraction of its own
-            /// threshold. Zero is a build that passes.</summary>
+            /// threshold.</summary>
             public double Shortfall { get; } = shortfall;
 
             /// <summary>Summed room to spare on the thresholds that are met, each capped so one very
             /// slack threshold cannot outvote the rest.</summary>
             public double Headroom { get; } = headroom;
 
+            /// <summary>A build that satisfies everything the search can see. There is nothing left
+            /// to climb for.</summary>
+            public bool Done => Gaps == 0 && Shortfall <= 0d;
+
             public bool Beats(in Cost other)
             {
+                if (Gaps != other.Gaps) return Gaps < other.Gaps;
+
                 if (Shortfall < other.Shortfall - MinGain) return true;
                 if (Shortfall > other.Shortfall + MinGain) return false;
 
@@ -1050,6 +1130,47 @@ namespace QuestTreeServer
 
             /// <summary>Detached by a swap, and therefore no longer part of the build.</summary>
             public bool Removed;
+        }
+
+        /// <summary>Required slots left empty anywhere on the gun, counted and optionally named.</summary>
+        private static int EmptyRequired(Node node, SearchState state, List<string>? into)
+        {
+            if (!state.Reachable.TryGetValue(node.Template, out var part)) return 0;
+
+            var starved = 0;
+
+            for (var index = 0; index < part.Slots.Length; index++)
+            {
+                if (!part.Slots[index].Required) continue;
+                if (Occupant(node, index) != null) continue;
+
+                starved++;
+                into?.Add($"'{part.Slots[index].Name}' on {node.Template}");
+            }
+
+            foreach (var child in node.Children)
+                starved += EmptyRequired(child, state, into);
+
+            return starved;
+        }
+
+        /// <summary>Which of the quest's required categories a template belongs to, one bit each.
+        ///
+        /// Memoised because IsOfBaseclass walks the item's parent chain and the climb asks this of
+        /// thousands of candidates per request.</summary>
+        private int CategoryMask(MongoId template, SearchState state)
+        {
+            if (state.Categories.Count == 0) return 0;
+            if (state.CategoryMasks.TryGetValue(template, out var cached)) return cached;
+
+            var mask = 0;
+
+            for (var index = 0; index < state.Categories.Count; index++)
+                if (itemHelper.IsOfBaseclass(template, state.Categories[index])) mask |= 1 << index;
+
+            state.CategoryMasks[template] = mask;
+
+            return mask;
         }
 
         private static Node? Occupant(Node node, int slotIndex)
@@ -1177,12 +1298,20 @@ namespace QuestTreeServer
                 IReadOnlyDictionary<MongoId, WeaponGraph.PartInfo> reachable,
                 IReadOnlyCollection<MongoId>? allowed,
                 List<Goal> goals,
+                IReadOnlyCollection<MongoId> categories,
                 Stopwatch clock)
             {
                 Reachable = reachable;
                 Allowed = allowed;
                 Goals = goals;
                 Clock = clock;
+
+                // Capped at the width of the mask that tracks them. No condition on any install comes
+                // near it, and a mask that silently wrapped would report a category as satisfied by a
+                // part from a different one.
+                foreach (var category in categories)
+                    if (Categories.Count < MaxCategories && !Categories.Contains(category))
+                        Categories.Add(category);
 
                 Index(reachable);
             }
@@ -1214,6 +1343,12 @@ namespace QuestTreeServer
             /// <summary>What each part is worth with everything behind it, memoised. Depends only on
             /// the goals, so one pass over the graph serves every restart of one request.</summary>
             public Dictionary<MongoId, double> Potentials { get; } = new();
+
+            /// <summary>Categories the quest insists a fitted part come from.</summary>
+            public List<MongoId> Categories { get; } = new();
+
+            /// <summary>Which categories each template belongs to, memoised.</summary>
+            public Dictionary<MongoId, int> CategoryMasks { get; } = new();
 
             public int Nodes;
             public bool Exhausted;

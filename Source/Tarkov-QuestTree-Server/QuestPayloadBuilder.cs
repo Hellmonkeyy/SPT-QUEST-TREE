@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
@@ -113,7 +113,14 @@ namespace QuestTreeServer
                 foreach (var id in build.RequiredItemIds)
                     if (id.TryParseMongoId(out var parsed)) mustInclude.Add(parsed);
 
-                var result = weaponSolver.Solve(weapon, thresholds, mustInclude, allowed: null);
+                // "Must include a Silencer" is a requirement in exactly the way a named part is, and
+                // 16 of the 32 vanilla conditions state one. Stage A kept the raw ids alongside the
+                // names for precisely this.
+                var mustIncludeCategories = new List<MongoId>();
+                foreach (var id in build.RequiredCategoryIds)
+                    if (id.TryParseMongoId(out var parsed)) mustIncludeCategories.Add(parsed);
+
+                var result = weaponSolver.Solve(weapon, thresholds, mustInclude, mustIncludeCategories, allowed: null);
 
                 if (result.HitCeiling) ceiling++;
                 if (result.NodesOpened > worst) worst = result.NodesOpened;
@@ -153,9 +160,13 @@ namespace QuestTreeServer
                         ? "required part not reachable (graph gap)"
                         : unmet.StartsWith("could not fit", StringComparison.OrdinalIgnoreCase)
                             ? "required part reachable but not placed (search gap)"
-                            : unmet.Contains("no value", StringComparison.OrdinalIgnoreCase)
-                                ? $"{unmet.Split(':')[0]}: nothing provides it"
-                                : unmet.Split(' ')[0];
+                            : unmet.StartsWith("required slot", StringComparison.OrdinalIgnoreCase)
+                                ? "required slot left empty (not assemblable)"
+                                : unmet.StartsWith("no fitted part from", StringComparison.OrdinalIgnoreCase)
+                                    ? "no part from a required category"
+                                    : unmet.Contains("no value", StringComparison.OrdinalIgnoreCase)
+                                        ? $"{unmet.Split(':')[0]}: nothing provides it"
+                                        : unmet.Split(' ')[0];
 
                     reasons[kind] = reasons.TryGetValue(kind, out var count) ? count + 1 : 1;
                 }
