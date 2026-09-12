@@ -87,6 +87,11 @@ namespace QuestTreeServer
 
             var solved = 0;
             var ceiling = 0;
+
+            // Part counts, because "satisfied" says nothing about whether the build is sane. A
+            // seventeen-part AKS-74N wearing two identical sights satisfied every threshold too.
+            var parts = 0;
+            var widestBuild = 0;
             var failed = new List<string>();
 
             // The search has a wall-clock ceiling, so how much of it the worst request actually spends
@@ -128,6 +133,8 @@ namespace QuestTreeServer
                 if (result.Found)
                 {
                     solved++;
+                    parts += result.Parts.Count;
+                    if (result.Parts.Count > widestBuild) widestBuild = result.Parts.Count;
                     logger.Debug(
                         $"Quest Tracker: solved '{questName}' ({build.WeaponName}) with {result.Parts.Count} parts " +
                         $"in {result.NodesOpened:N0} nodes.");
@@ -176,7 +183,8 @@ namespace QuestTreeServer
                 $"Quest Tracker: weapon solver dry run - {solved} of {_questBuilds.Count} build requirement(s) " +
                 $"satisfied from the full parts list" +
                 (ceiling > 0 ? $", {ceiling} hit the search budget" : "") +
-                $" - {clock.ElapsedMilliseconds:N0} ms for all of them, {worst:N0} nodes for the worst one.");
+                $" - {clock.ElapsedMilliseconds:N0} ms for all of them, {worst:N0} nodes for the worst one, " +
+                $"{(solved > 0 ? (double)parts / solved : 0d):0.#} parts per build, {widestBuild} at most.");
 
             if (reasons.Count > 0)
                 logger.Info(

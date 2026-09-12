@@ -307,6 +307,8 @@ namespace QuestTreeServer
 
             if (best == null) return result;
 
+            Prune(weapon, best, state, required);
+
             var fitted = new List<MongoId>();
             CollectTemplates(best, fitted);
 
@@ -1004,13 +1006,81 @@ namespace QuestTreeServer
         }
 
         /// <summary>What the assembled gun costs, in units of the thresholds themselves.</summary>
+        /// <summary>Takes off every part the quest does not actually need.
+        ///
+        /// The climb can only ever ADD. It starts from a greedily dressed gun and its moves swap one
+        /// part for another in a slot, so there is no move that empties a slot and no way for a
+        /// finished build to shed the parts it picked up on the way. Ranking part count in the cost
+        /// helped barely at all for that reason - it can pick the leaner of two builds it is already
+        /// considering, and it is never considering a leaner one.
+        ///
+        /// So this is a separate pass, and it is deliberately the dumbest thing that works: take a
+        /// part off, re-measure, put it back if anything got worse. Deepest parts first, so a scope
+        /// comes off before the mount holding it and the mount is then free to go too.
+        ///
+        /// It cannot make a build worse, which is the whole reason it is safe to run on an answer
+        /// that is already correct: a removal is kept only when gaps stay closed and shortfall does
+        /// not rise. A part that was carrying a threshold pays for itself and stays.</summary>
+        private void Prune(MongoId weapon, Node root, SearchState state, List<MongoId> required)
+        {
+            var buffer = new List<MongoId>();
+            var before = Measure(weapon, root, state, buffer);
+
+            // Only worth doing on a build that actually passes. On one that does not, every part is
+            // still a candidate for carrying the shortfall and stripping it would only hide how
+            // close the search got.
+            if (!before.Done) return;
+
+            var removable = new List<Node>();
+            CollectNodes(root, removable);
+
+            // Deepest first: a part cannot come off while something is mounted on it.
+            removable.Sort((a, b) => b.Depth.CompareTo(a.Depth));
+
+            foreach (var node in removable)
+            {
+                if (node.Parent == null) continue;
+                if (node.Children.Count > 0) continue;
+
+                // A part the quest named is not optional however little it contributes.
+                if (required.Contains(node.Template)) continue;
+
+                var parent = node.Parent;
+                var index = parent.Children.IndexOf(node);
+                if (index < 0) continue;
+
+                parent.Children.RemoveAt(index);
+
+                var after = Measure(weapon, root, state, buffer);
+
+                // Strictly not worse on both dimensions that matter. Headroom is allowed to fall -
+                // that is the point.
+                if (after.Gaps <= before.Gaps && after.Shortfall <= before.Shortfall + MinGain)
+                {
+                    before = after;
+                    continue;
+                }
+
+                parent.Children.Insert(index, node);
+            }
+        }
+
+        private static void CollectNodes(Node node, List<Node> into)
+        {
+            foreach (var child in node.Children)
+            {
+                into.Add(child);
+                CollectNodes(child, into);
+            }
+        }
+
         private Cost Measure(MongoId weapon, Node root, SearchState state, List<MongoId> buffer)
         {
             buffer.Clear();
             CollectTemplates(root, buffer);
 
             var stats = model.Score(weapon, buffer);
-            if (stats == null) return new Cost(int.MaxValue, double.MaxValue, 0d);
+            if (stats == null) return new Cost(int.MaxValue, double.MaxValue, int.MaxValue, 0d);
 
             // Structural gaps, counted before any number is looked at. A required slot left empty or
             // a category with nothing from it is not a worse build - it is one the player cannot
@@ -1048,12 +1118,12 @@ namespace QuestTreeServer
                 else headroom += Math.Min(margin, HeadroomCap);
             }
 
-            return new Cost(gaps, shortfall, headroom);
+            return new Cost(gaps, shortfall, buffer.Count, headroom);
         }
 
-        /// <summary>What a build is worth to the climb, in three ranks: how many requirements it
-        /// structurally fails, how far short of the thresholds it falls, and how much room to spare it
-        /// has on the ones it already meets.
+        /// <summary>What a build is worth to the climb, in four ranks: how many requirements it
+        /// structurally fails, how far short of the thresholds it falls, how many parts it took, and
+        /// how much room to spare it has on the ones it already meets.
         ///
         /// Gaps outrank everything because they are not degrees of anything. A gun with an empty
         /// mod_charge cannot be assembled in the modding screen and a gun with no silencer does not
@@ -1066,7 +1136,7 @@ namespace QuestTreeServer
         /// than is left, no single move improves anything, and the gun settles at its BARE recoil with
         /// the threshold 64 points away. Ranked strictly below shortfall, so a build that passes always
         /// beats one that does not, however roomy.</summary>
-        private readonly struct Cost(int gaps, double shortfall, double headroom)
+        private readonly struct Cost(int gaps, double shortfall, int parts, double headroom)
         {
             /// <summary>Required slots left empty plus required categories with nothing from them.
             /// Whole requirements, not degrees of one.</summary>
@@ -1075,6 +1145,22 @@ namespace QuestTreeServer
             /// <summary>Summed distance from the thresholds not met, each as a fraction of its own
             /// threshold.</summary>
             public double Shortfall { get; } = shortfall;
+
+            /// <summary>How many parts are on the gun.
+            ///
+            /// Ranked ABOVE headroom, and that ordering is the whole of this. Without it the climb
+            /// has nothing to tell it when to stop: gaps close, shortfall reaches zero, and then the
+            /// only remaining direction is more headroom - so it keeps bolting parts on to grow a
+            /// margin nobody asked for. It produced a seventeen-part AKS-74N scoring ergonomics 74.5
+            /// against a threshold of 65, wearing two identical Kobra sights and two identical sight
+            /// shades, because a second copy of a part is never worse by headroom and the search had
+            /// no other opinion.
+            ///
+            /// A quest asks for a gun that meets its numbers, not the best gun reachable. Below
+            /// shortfall so a passing build still beats a failing one however lean, and above
+            /// headroom so spare margin is a tiebreak between equal builds rather than a reason to
+            /// keep shopping.</summary>
+            public int Parts { get; } = parts;
 
             /// <summary>Summed room to spare on the thresholds that are met, each capped so one very
             /// slack threshold cannot outvote the rest.</summary>
@@ -1090,6 +1176,9 @@ namespace QuestTreeServer
 
                 if (Shortfall < other.Shortfall - MinGain) return true;
                 if (Shortfall > other.Shortfall + MinGain) return false;
+
+                // Equal on everything that must be true: the leaner gun wins.
+                if (Parts != other.Parts) return Parts < other.Parts;
 
                 return Headroom > other.Headroom + MinGain;
             }
