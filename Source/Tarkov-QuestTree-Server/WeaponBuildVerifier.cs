@@ -419,6 +419,12 @@ namespace QuestTreeServer
             var selected = 0;
             var claimed = new HashSet<MongoId>();
 
+            // What those parts might contribute to the SUMMED stats while they are busy being a magazine
+            // or a sight. Needed because the threshold bound below counts them as budget spent, and it may
+            // only do that if it also concedes whatever they could have been worth.
+            var selectedErgonomics = 0d;
+            var selectedRecoil = 0d;
+
             foreach (var (field, compare, value) in thresholds)
             {
                 if (!compare.StartsWith(">", StringComparison.Ordinal)) continue;
@@ -446,6 +452,23 @@ namespace QuestTreeServer
                 if (provider.Any(claimed.Contains)) continue;
 
                 foreach (var template in provider) claimed.Add(template);
+
+                var bestErgonomicsOf = 0d;
+                var bestRecoilOf = 0d;
+
+                foreach (var template in provider)
+                {
+                    if (!Template(template, out var part)) continue;
+
+                    if ((part.Properties!.Ergonomics ?? 0d) > bestErgonomicsOf)
+                        bestErgonomicsOf = part.Properties!.Ergonomics ?? 0d;
+
+                    if (-(part.Properties!.Recoil ?? 0d) > bestRecoilOf)
+                        bestRecoilOf = -(part.Properties!.Recoil ?? 0d);
+                }
+
+                selectedErgonomics += bestErgonomicsOf;
+                selectedRecoil += bestRecoilOf;
 
                 selected++;
             }
@@ -588,7 +611,16 @@ namespace QuestTreeServer
                     var wanted = ErgonomicsWeight[weighting] * needErgonomics
                                  + RecoilWeight[weighting] * needRecoil;
 
-                    var needs = Reach(BestBelow(weapon, weighting, 0), wanted, named.Count);
+                    // The parts that have to BE a magazine or a sight are budget the summed stats do not
+                    // get to spend, so they are taken off the count - and in exchange the requirement is
+                    // reduced by the most they could have contributed while doing it. Conceding that is
+                    // what keeps this a bound rather than a guess, and the trade is worth it because a
+                    // magazine is rarely the part that buys ergonomics.
+                    var allowance = ErgonomicsWeight[weighting] * selectedErgonomics
+                                    + RecoilWeight[weighting] * selectedRecoil;
+
+                    var needs = Reach(
+                        BestBelow(weapon, weighting, 0), wanted - allowance, named.Count + selected);
 
                     if (needs > joint) joint = needs;
                 }
