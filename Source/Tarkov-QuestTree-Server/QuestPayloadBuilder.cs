@@ -120,6 +120,31 @@ namespace QuestTreeServer
                     continue;
                 }
 
+                logger.Info(
+                    $"DETAIL {questName} ({build.WeaponTemplate}): " +
+                    string.Join(", ", build.Thresholds.Select(t => $"{t.Field}{t.Compare}{t.Value}")) +
+                    $" | required {string.Join(", ", build.RequiredItemNames)}" +
+                    $" | cats {string.Join(", ", build.RequiredCategoryNames)}" +
+                    $" | emptyTac {build.EmptyTacticalSlots}" +
+                    $" | nodes {result.NodesOpened} ceiling {result.HitCeiling}" +
+                    $" | parts {result.Parts.Count}");
+
+                logger.Info("  BUILD " + string.Join(" ", result.Parts.Select(p => $"{p.SlotName}={p.Template}")));
+
+                foreach (var threshold in build.Thresholds)
+                {
+                    var solo = weaponSolver.Solve(
+                        weapon, new[] { (threshold.Field, threshold.Compare, threshold.Value) }, mustInclude, null);
+
+                    logger.Info(
+                        $"  SOLO {threshold.Field}{threshold.Compare}{threshold.Value} -> " +
+                        (solo.Stats == null
+                            ? "no stats"
+                            : $"erg {solo.Stats.Ergonomics:0.##} rec {solo.Stats.Recoil:0.##} wt {solo.Stats.Weight:0.###} " +
+                              $"mag {solo.Stats.MagazineCapacity} eff {solo.Stats.EffectiveDistance}") +
+                        (solo.Found ? " MET" : $" UNMET {string.Join("; ", solo.Unmet.Take(2))}"));
+                }
+
                 // A bare template id does not say which part the search could not place, and that is
                 // the only question these lines get read to answer. The DTO already carries the
                 // names parallel to the ids, so the substitution costs nothing.

@@ -74,12 +74,27 @@ namespace QuestTreeServer
         /// this only bounds a pathological oscillation.</summary>
         private const int MaxSweeps = 24;
 
-        /// <summary>How far below a candidate a trial fills before scoring it.
+        /// <summary>Restarts of the dress-and-climb. The first two are deterministic - a greedily
+        /// dressed gun, and a gun wearing nothing but what the quest demands - and the rest randomise
+        /// the dressing.
         ///
-        /// A mount is worth nothing by itself and everything with a scope on it, so a trial that
-        /// judged parts bare would reject every adapter ever made. Two levels sees the scope, and is
-        /// cheap because the fill uses the per-part heuristic rather than the stat model.</summary>
-        private const int TrialFillDepth = 2;
+        /// Randomising is the cheapest way out of a local optimum, and single-slot moves leave real
+        /// ones: the KRISS Vector can reach 221 recoil, 79 ergonomics, 800 metres and a 100-round
+        /// magazine, each on its own, and one climb from one dressing settled at 232 against a
+        /// threshold of 230. A different starting point is worth more there than a longer look at
+        /// this one.</summary>
+        private const int Attempts = 16;
+
+        /// <summary>How many candidates for one slot get their own slots chosen against the model
+        /// rather than by the heuristic. Three, because the cost of a sweep is multiplied by this and
+        /// the heuristic is wrong about the ORDER of good candidates far less often than it is wrong
+        /// about whether a part is worth fitting at all.</summary>
+        private const int PolishCandidates = 3;
+
+        /// <summary>One in this many slots a randomised dressing leaves empty on purpose. Weight and
+        /// recoil thresholds are met by NOT fitting things, and a dressing that fills every hole it
+        /// can never starts the climb anywhere near that.</summary>
+        private const int SkipOneSlotIn = 3;
 
         /// <summary>Charged for a threshold the build produces no value for at all - no magazine
         /// against a magazine-capacity goal, no sight against a range goal. One whole unit, so it
@@ -95,6 +110,11 @@ namespace QuestTreeServer
         /// <summary>Improvement a move must make to be taken. Guards the climb against oscillating
         /// on floating point noise.</summary>
         private const double MinGain = 1e-6;
+
+        /// <summary>Most headroom one met threshold may contribute, as a fraction of itself. Capped so
+        /// that a gun with 200 ergonomics against a threshold of 15 cannot outvote four other
+        /// thresholds sitting on the line.</summary>
+        private const double HeadroomCap = 1d;
 
         public sealed class FittedPart
         {
@@ -139,14 +159,6 @@ namespace QuestTreeServer
 
             public bool Met(double actual) => HigherIsBetter ? actual >= Value : actual <= Value;
             public double Margin(double actual) => HigherIsBetter ? actual - Value : Value - actual;
-
-            /// <summary>How far from met, as a fraction of the threshold. Zero once met - the search
-            /// wants a build that passes, not the best one, and a met goal must stop pulling.</summary>
-            public double Shortfall(double actual)
-            {
-                var margin = Margin(actual);
-                return margin < 0d ? -margin / Scale : 0d;
-            }
         }
 
         /// <summary>Stats the model scores. Anything else a quest constrains is reported as
@@ -221,22 +233,35 @@ namespace QuestTreeServer
             Node? best = null;
             var bestCost = double.PositiveInfinity;
 
-            // Two starting points, because a climb is a local search and which optimum it reaches
+            // Many starting points, because a climb is a local search and which optimum it reaches
             // depends on where it starts. A greedily dressed gun is the better start most of the
             // time; a gun wearing nothing but what the quest demands wins when the thresholds want
-            // LESS of something, where every part the dressing adds is a step away from the answer.
-            for (var attempt = 0; attempt < 2; attempt++)
+            // LESS of something, where every part the dressing adds is a step away from the answer;
+            // and past those two, a randomised dressing is what gets out of a basin a single-slot
+            // move cannot leave.
+            for (var attempt = 0; attempt < Attempts; attempt++)
             {
                 var root = new Node { Template = weapon, Locked = true };
 
                 state.ResetTree(weapon);
+
+                // Seeded by the attempt alone, so the same request always returns the same build. A
+                // solver that answers differently on each boot cannot be measured, and a player
+                // comparing two panels would be told two different things.
+                state.Shuffle = attempt < 2 ? null : new Random(attempt);
+
                 Plan(root, required, state);
 
-                if (attempt == 0) Fill(root, state, MaxDepth);
+                if (attempt != 1) Fill(root, state, MaxDepth);
 
-                var penalty = Climb(weapon, root, state);
+                // The randomness belongs to the dressing only. The climb fills the sub-slots of every
+                // candidate it tries, and a random fill there would have it judging parts by a throw
+                // of the dice rather than by what they are worth.
+                state.Shuffle = null;
+
+                var climbed = Climb(weapon, root, state);
                 var missing = required.Count(part => Find(root, part) == null);
-                var cost = penalty + missing * MissingPartPenalty;
+                var cost = climbed.Shortfall + missing * MissingPartPenalty;
 
                 if (cost < bestCost)
                 {
@@ -409,7 +434,7 @@ namespace QuestTreeServer
             if (!state.Reachable.TryGetValue(node.Template, out var host)) return false;
 
             var part = order[index];
-            var steps = new List<(int Slot, MongoId Candidate, int Left)>();
+            var steps = new List<(int Slot, MongoId Candidate, int Left, double Worth, int Toss)>();
 
             for (var slot = 0; slot < host.Slots.Length; slot++)
             {
@@ -421,22 +446,36 @@ namespace QuestTreeServer
                     // the chain, is not a step towards it.
                     if (!part.Steps.TryGetValue(candidate, out var left) || left >= remaining) continue;
 
-                    steps.Add((slot, candidate, left));
+                    steps.Add((slot, candidate, left, Potential(candidate, state, 0),
+                        state.Shuffle?.Next() ?? 0));
                 }
             }
 
-            // Closest to the part first, then through the narrowest slot that admits it: a slot
-            // taking three things is the one the part was made for, and spending a rail that admits
-            // eighty denies it to a part with nowhere else to go.
+            // Closest to the part first. Then the best INTERMEDIATE, which is a stats decision and not
+            // only a routing one: the M1A hides the UltiMAK mount's seat on its stock, so the stock the
+            // planner picks is the stock the gun wears - and because a chain the planner lays is locked
+            // against the climb, picking the merely nearest one froze a stock 12 ergonomics and 2%
+            // recoil worse than the chassis next to it, in every restart, and cost the quest. A restart
+            // shuffles this, so a plan the numbers like is tried alongside plans they do not.
+            //
+            // Narrowest slot last, and still worth having: a slot taking three things is the one the
+            // part was made for, and spending a rail that admits eighty denies it to a part with
+            // nowhere else to go.
             steps.Sort((left, right) =>
             {
                 var closer = left.Left.CompareTo(right.Left);
                 if (closer != 0) return closer;
 
+                var tossed = left.Toss.CompareTo(right.Toss);
+                if (tossed != 0) return tossed;
+
+                var worth = right.Worth.CompareTo(left.Worth);
+                if (worth != 0) return worth;
+
                 return host.Slots[left.Slot].Candidates.Length.CompareTo(host.Slots[right.Slot].Candidates.Length);
             });
 
-            foreach (var (slot, candidate, left) in steps)
+            foreach (var (slot, candidate, left, _, _) in steps)
             {
                 if (IsAncestor(node, candidate)) continue;
                 if (!Compatible(candidate, state)) continue;
@@ -560,27 +599,87 @@ namespace QuestTreeServer
         /// leaves empty, so a wrong "no" here costs a sweep rather than the answer.</summary>
         private static MongoId? Choose(Node parent, WeaponGraph.SlotInfo slot, SearchState state)
         {
-            MongoId? best = null;
-            var bestScore = 0d;
+            var shortlist = state.Shortlist;
+            shortlist.Clear();
 
             foreach (var candidate in slot.Candidates)
             {
                 if (state.Allowed != null && !state.Allowed.Contains(candidate)) continue;
-                if (!state.Reachable.TryGetValue(candidate, out var part)) continue;
+                if (!state.Reachable.ContainsKey(candidate)) continue;
                 if (IsAncestor(parent, candidate)) continue;
                 if (!Compatible(candidate, state)) continue;
 
-                var score = Score(part, state);
-                if (score <= bestScore) continue;
-
-                bestScore = score;
-                best = candidate;
+                shortlist.Add((candidate, Potential(candidate, state, 0)));
             }
 
-            return best;
+            if (shortlist.Count == 0) return null;
+
+            if (state.Shuffle == null)
+            {
+                var best = shortlist[0];
+
+                foreach (var entry in shortlist)
+                    if (entry.Score > best.Score) best = entry;
+
+                // An empty slot is a legitimate choice: a part that helps nothing measured is weight
+                // for free, and weight is a threshold in its own right.
+                return best.Score > 0d ? best.Template : (MongoId?)null;
+            }
+
+            if (state.Shuffle.Next(SkipOneSlotIn) == 0) return null;
+
+            // EVERY legal candidate, not the ones the heuristic likes. That distinction is what
+            // cracked the M1A: an M14 suppressor scores badly on its own - it costs a great deal of
+            // ergonomics for its recoil - so it never appeared in any dressing, and the climb only
+            // ever saw it as a single move that made things worse. A dressing that starts with it
+            // already fitted is a different basin, and the one with the answer in it.
+            return shortlist[state.Shuffle.Next(shortlist.Count)].Template;
         }
 
-        /// <summary>How much one part helps, summed over the goals, each in units of its own
+        /// <summary>What a part is worth INCLUDING everything it lets you fit behind it.
+        ///
+        /// This is not an embellishment of <see cref="Score"/>, it is the difference between finding
+        /// the M1A's build and not. An AR-15 buffer tube has no ergonomics, no recoil and no weight
+        /// worth naming, so it scores zero on its own and a dressing that asks "does this part help?"
+        /// never fits one - and the stock worth -24% recoil that only mounts on a buffer tube is then
+        /// unreachable, at every depth, in every restart. The gun sat at -25% recoil with -36% on the
+        /// shelf behind an adapter nothing would fit.
+        ///
+        /// Optimistic on purpose: it assumes every slot behind the part gets its best occupant, which
+        /// conflicts and slot contention may deny. That is the right bias for a dressing whose whole
+        /// job is to hand the climb somewhere worth standing.</summary>
+        private static double Potential(MongoId template, SearchState state, int depth)
+        {
+            if (depth > MaxDepth) return 0d;
+            if (state.Potentials.TryGetValue(template, out var cached)) return cached;
+            if (!state.Reachable.TryGetValue(template, out var part)) return 0d;
+
+            // Marked BEFORE descending, so a slot graph that admits its own host meets the marker and
+            // contributes nothing instead of looping. The memo doubles as the visited set, exactly as
+            // it does in the graph's own walk.
+            state.Potentials[template] = 0d;
+
+            var total = Score(part, state);
+
+            foreach (var slot in part.Slots)
+            {
+                var best = 0d;
+
+                foreach (var candidate in slot.Candidates)
+                {
+                    var value = Potential(candidate, state, depth + 1);
+                    if (value > best) best = value;
+                }
+
+                total += best;
+            }
+
+            state.Potentials[template] = total;
+
+            return total;
+        }
+
+        /// <summary>How much one part helps BY ITSELF, summed over the goals, each in units of its own
         /// threshold so that percentages, kilograms and ergonomics points are comparable.</summary>
         private static double Score(WeaponGraph.PartInfo part, SearchState state)
         {
@@ -626,14 +725,14 @@ namespace QuestTreeServer
         // ---------------------------------------------------------------------------------------
 
         /// <summary>Re-examines every unlocked slot against the stat model until a sweep finds no
-        /// improvement, and returns the penalty of the build it settles on. Zero means every
+        /// improvement, and returns the cost of the build it settles on. A zero shortfall means every
         /// threshold is met.</summary>
-        private double Climb(MongoId weapon, Node root, SearchState state)
+        private Cost Climb(MongoId weapon, Node root, SearchState state)
         {
             var buffer = new List<MongoId>();
-            var current = Penalty(weapon, root, state, buffer);
+            var current = Measure(weapon, root, state, buffer);
 
-            for (var sweep = 0; sweep < MaxSweeps && current > 0d; sweep++)
+            for (var sweep = 0; sweep < MaxSweeps && current.Shortfall > 0d; sweep++)
             {
                 var moved = false;
                 var queue = new Queue<Node>();
@@ -660,11 +759,11 @@ namespace QuestTreeServer
                         if (occupant is { Locked: true }) continue;
 
                         if (!BestSwap(weapon, root, node, part.Slots[index], index, occupant, state, buffer,
-                                ref current, out var placed)) continue;
+                                ref current, refine: true, out var placed)) continue;
 
                         moved = true;
                         if (placed != null) queue.Enqueue(placed);
-                        if (current <= 0d) return current;
+                        if (current.Shortfall <= 0d) return current;
                     }
                 }
 
@@ -675,7 +774,15 @@ namespace QuestTreeServer
         }
 
         /// <summary>Tries every candidate for one slot, plus leaving it empty, and applies the best
-        /// that beats the build already in hand. Returns whether anything changed.</summary>
+        /// that beats the build already in hand. Returns whether anything changed.
+        ///
+        /// <paramref name="refine"/> buys the few most promising candidates a second look with their
+        /// OWN slots chosen against the model rather than by the heuristic. Without it the M1A cannot
+        /// be solved at all: the recoil it needs lives on a muzzle device, the muzzle device mounts on
+        /// a barrel, and a barrel by itself is nothing but weight - so the barrel is judged as weight,
+        /// rejected, and everything threaded onto it is unreachable at every depth in every restart.
+        /// The heuristic cannot see past that, because it cannot know that a suppressor's 15 points of
+        /// ergonomics are affordable when ergonomics is met and recoil is 64 short.</summary>
         private bool BestSwap(
             MongoId weapon,
             Node root,
@@ -685,7 +792,8 @@ namespace QuestTreeServer
             Node? occupant,
             SearchState state,
             List<MongoId> buffer,
-            ref double current,
+            ref Cost current,
+            bool refine,
             out Node? placed)
         {
             placed = null;
@@ -694,20 +802,24 @@ namespace QuestTreeServer
             // carry the part it would replace - and so that emptying the slot is itself a trial.
             if (occupant != null) Detach(occupant, state);
 
-            var bestPenalty = current;
+            var best = current;
             Node? bestNode = null;
             var bestEmpty = false;
 
             if (occupant != null)
             {
-                var empty = Penalty(weapon, root, state, buffer);
+                var empty = Measure(weapon, root, state, buffer);
 
-                if (empty < bestPenalty - MinGain)
+                if (empty.Beats(best))
                 {
-                    bestPenalty = empty;
+                    best = empty;
                     bestEmpty = true;
                 }
             }
+
+            // Candidates worth the closer look, and only a few: refining every candidate of every
+            // slot would multiply the cost of a sweep by the size of a subtree.
+            var promising = refine ? new List<(Node Trial, Cost Cost)>(PolishCandidates + 1) : null;
 
             foreach (var candidate in slot.Candidates)
             {
@@ -727,24 +839,49 @@ namespace QuestTreeServer
                 };
 
                 Attach(node, trial, state);
-                Fill(trial, state, node.Depth + 1 + TrialFillDepth);
 
-                var penalty = Penalty(weapon, root, state, buffer);
+                // Filled before it is judged. A mount is worth nothing by itself and everything with
+                // a scope on it, so a trial that weighed parts bare would reject every adapter ever
+                // made. Cheap, because the fill uses the per-part heuristic rather than the model.
+                Fill(trial, state, MaxDepth);
+
+                var cost = Measure(weapon, root, state, buffer);
 
                 Detach(trial, state);
 
-                if (penalty >= bestPenalty - MinGain) continue;
+                if (promising != null) Remember(promising, trial, cost);
 
-                bestPenalty = penalty;
+                if (!cost.Beats(best)) continue;
+
+                best = cost;
                 bestNode = trial;
                 bestEmpty = false;
             }
+
+            if (promising != null)
+                foreach (var (trial, _) in promising)
+                {
+                    if (state.OutOfBudget()) break;
+
+                    Reattach(node, trial, state);
+
+                    var cost = Measure(weapon, root, state, buffer);
+                    Polish(weapon, root, trial, state, buffer, ref cost);
+
+                    Detach(trial, state);
+
+                    if (!cost.Beats(best)) continue;
+
+                    best = cost;
+                    bestNode = trial;
+                    bestEmpty = false;
+                }
 
             if (bestNode != null)
             {
                 Reattach(node, bestNode, state);
 
-                current = bestPenalty;
+                current = best;
                 placed = bestNode;
 
                 return true;
@@ -752,7 +889,7 @@ namespace QuestTreeServer
 
             if (bestEmpty)
             {
-                current = bestPenalty;
+                current = best;
                 return true;
             }
 
@@ -762,17 +899,55 @@ namespace QuestTreeServer
             return false;
         }
 
-        /// <summary>How far the assembled gun is from meeting every threshold, in units of the
-        /// thresholds themselves. Zero is a build that passes.</summary>
-        private double Penalty(MongoId weapon, Node root, SearchState state, List<MongoId> buffer)
+        /// <summary>Chooses the occupants of one part's own slots against the model instead of the
+        /// heuristic. One level deep, which is all that is needed: the part's children are dressed by
+        /// <see cref="Potential"/>, which already looks through an adapter to what mounts on it - what
+        /// it cannot do is judge a part whose own numbers look bad and whose effect on THIS gun is
+        /// good.</summary>
+        private void Polish(
+            MongoId weapon, Node root, Node node, SearchState state, List<MongoId> buffer, ref Cost cost)
+        {
+            if (node.Depth >= MaxDepth) return;
+            if (!state.Reachable.TryGetValue(node.Template, out var part)) return;
+
+            for (var index = 0; index < part.Slots.Length; index++)
+            {
+                if (state.OutOfBudget()) return;
+
+                var occupant = Occupant(node, index);
+                if (occupant is { Locked: true }) continue;
+
+                BestSwap(weapon, root, node, part.Slots[index], index, occupant, state, buffer,
+                    ref cost, refine: false, out _);
+            }
+        }
+
+        /// <summary>Keeps the best few trials seen, by cost.</summary>
+        private static void Remember(List<(Node Trial, Cost Cost)> promising, Node trial, Cost cost)
+        {
+            promising.Add((trial, cost));
+
+            if (promising.Count <= PolishCandidates) return;
+
+            var worst = 0;
+
+            for (var i = 1; i < promising.Count; i++)
+                if (promising[worst].Cost.Beats(promising[i].Cost)) worst = i;
+
+            promising.RemoveAt(worst);
+        }
+
+        /// <summary>What the assembled gun costs, in units of the thresholds themselves.</summary>
+        private Cost Measure(MongoId weapon, Node root, SearchState state, List<MongoId> buffer)
         {
             buffer.Clear();
             CollectTemplates(root, buffer);
 
             var stats = model.Score(weapon, buffer);
-            if (stats == null) return double.MaxValue;
+            if (stats == null) return new Cost(double.MaxValue, 0d);
 
-            var total = 0d;
+            var shortfall = 0d;
+            var headroom = 0d;
 
             foreach (var goal in state.Goals)
             {
@@ -782,14 +957,45 @@ namespace QuestTreeServer
                 // with no magazine is completely unmet.
                 if (actual == null)
                 {
-                    total += MissingStatPenalty;
+                    shortfall += MissingStatPenalty;
                     continue;
                 }
 
-                total += goal.Shortfall(actual.Value);
+                var margin = goal.Margin(actual.Value) / goal.Scale;
+
+                if (margin < 0d) shortfall += -margin;
+                else headroom += Math.Min(margin, HeadroomCap);
             }
 
-            return total;
+            return new Cost(shortfall, headroom);
+        }
+
+        /// <summary>What a build is worth to the climb: how far short of the thresholds it falls, and
+        /// how much room to spare it has on the ones it already meets.
+        ///
+        /// The headroom half is not a nicety, it is what unsticks the M1A. Shortfall alone gives a met
+        /// threshold no pull at all, so the climb spends every point of spare ergonomics on whatever
+        /// else it is chasing - and then the muzzle device that would fix recoil costs more ergonomics
+        /// than is left, no single move improves anything, and the gun settles at its BARE recoil with
+        /// the threshold 64 points away. Ranked strictly below shortfall, so a build that passes always
+        /// beats one that does not, however roomy.</summary>
+        private readonly struct Cost(double shortfall, double headroom)
+        {
+            /// <summary>Summed distance from the thresholds not met, each as a fraction of its own
+            /// threshold. Zero is a build that passes.</summary>
+            public double Shortfall { get; } = shortfall;
+
+            /// <summary>Summed room to spare on the thresholds that are met, each capped so one very
+            /// slack threshold cannot outvote the rest.</summary>
+            public double Headroom { get; } = headroom;
+
+            public bool Beats(in Cost other)
+            {
+                if (Shortfall < other.Shortfall - MinGain) return true;
+                if (Shortfall > other.Shortfall + MinGain) return false;
+
+                return Headroom > other.Headroom + MinGain;
+            }
         }
 
         private static double? Read(WeaponStatModel.Stats stats, string field) => field.ToLowerInvariant() switch
@@ -979,6 +1185,18 @@ namespace QuestTreeServer
 
             /// <summary>How many of each template the build currently carries.</summary>
             public Dictionary<MongoId, int> Counts { get; } = new();
+
+            /// <summary>Set while a restart is dressing the gun randomly, null the rest of the time.
+            /// Seeded from the attempt number, never from the clock.</summary>
+            public Random? Shuffle;
+
+            /// <summary>Reused by the dressing, which runs once per slot per restart and would
+            /// otherwise allocate a list each time.</summary>
+            public List<(MongoId Template, double Score)> Shortlist { get; } = new();
+
+            /// <summary>What each part is worth with everything behind it, memoised. Depends only on
+            /// the goals, so one pass over the graph serves every restart of one request.</summary>
+            public Dictionary<MongoId, double> Potentials { get; } = new();
 
             public int Nodes;
             public bool Exhausted;

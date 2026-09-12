@@ -296,7 +296,16 @@ namespace QuestTreeServer
                 {
                     Name = slot.Name ?? "",
                     Required = slot.Required ?? false,
-                    Candidates = allowed == null ? Array.Empty<MongoId>() : allowed.ToArray()
+
+                    // SORTED, and that is load-bearing rather than tidiness. Filter is a HashSet and
+                    // .NET randomises string hash codes per process, so the order it materialises in
+                    // differs on every server start. The solver's search is greedy and breaks ties by
+                    // iteration order, so without this the same quest gets a different build on each
+                    // boot and a pass rate measured once means nothing. Ordinal on the id's own text,
+                    // once per slot at boot.
+                    Candidates = allowed == null
+                        ? Array.Empty<MongoId>()
+                        : allowed.OrderBy(id => id.ToString(), StringComparer.Ordinal).ToArray()
                 });
             }
 
