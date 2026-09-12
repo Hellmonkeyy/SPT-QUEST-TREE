@@ -74,10 +74,13 @@ namespace QuestTreeServer
         WeaponStatModel model,
         ItemHelper itemHelper)
     {
-        /// <summary>Nodes the search may open before it gives up and reports what it has. A node is
-        /// one scored trial, and the climb spends them in thousands rather than the greedy's dozens,
-        /// so this is sized for the climb.</summary>
-        private const int NodeCeiling = 400000;
+        /// <summary>Nodes the search may open before it gives up and reports what it has.
+        ///
+        /// Sized for the shrink loop, which is the expensive part: a full round of restarts for every
+        /// part it tries to remove, and most of those rounds end in "no". The worst request on this
+        /// install spends 375,148, and a ceiling just above that would make the answer depend on how
+        /// busy the machine is - the one thing a search reporting a measured result must not do.</summary>
+        private const int NodeCeiling = 2_000_000;
 
         /// <summary>Wall clock, because a node is not a fixed cost. This runs on a request thread
         /// and may not become a way to stall the server.</summary>
@@ -237,7 +240,9 @@ namespace QuestTreeServer
             IReadOnlyList<(string Field, string Compare, double Value)> thresholds,
             IReadOnlyCollection<MongoId> mustInclude,
             IReadOnlyCollection<MongoId> mustIncludeCategories,
-            IReadOnlyCollection<MongoId>? allowed)
+            IReadOnlyCollection<MongoId>? allowed,
+            IReadOnlyList<FittedPart>? knownGood = null,
+            int seed = 0)
         {
             var result = new Result();
 
@@ -249,28 +254,7 @@ namespace QuestTreeServer
                 return result;
             }
 
-            var goals = new List<Goal>();
-
-            foreach (var (field, compare, value) in thresholds)
-            {
-                if (NotBuildProperties.Contains(field)) continue;
-
-                if (!Scored.Contains(field))
-                {
-                    result.Unchecked.Add($"{field} {compare} {value:0.##}");
-                    continue;
-                }
-
-                goals.Add(new Goal
-                {
-                    Field = field,
-                    Value = value,
-                    // ">=" and ">" want more; "<=" and "<" want less. Read from the data rather than
-                    // assumed per stat, because the same stat points both ways across quests.
-                    HigherIsBetter = compare.StartsWith(">", StringComparison.Ordinal),
-                    Scale = Math.Max(Math.Abs(value), 1d)
-                });
-            }
+            var goals = Goals(thresholds, result);
 
             // The bare weapon, scored once. Recoil is why: a mod moves recoil by a PERCENTAGE, so
             // "-8%" is worth eight percent of THIS weapon's recoil - 52 points on a P226 at 651 and
@@ -280,14 +264,13 @@ namespace QuestTreeServer
 
             var state = new SearchState(reachable, allowed, goals, mustIncludeCategories, Stopwatch.StartNew())
             {
-                RecoilPerPercent = (bare?.Recoil ?? 0d) / 100d
+                RecoilPerPercent = (bare?.Recoil ?? 0d) / 100d,
+                Seed = seed
             };
 
             state.Measure(weapon);
 
-            var required = new List<MongoId>();
-            foreach (var id in mustInclude)
-                if (id != weapon && !required.Contains(id)) required.Add(id);
+            var required = Required(weapon, mustInclude);
 
             Node? best = null;
             var bestWhole = int.MaxValue;
@@ -314,6 +297,89 @@ namespace QuestTreeServer
 
             result.Floor = floor;
 
+            // Search once for a build that works, then keep asking for one part fewer until the answer
+            // is no. The climb only ever ADDS a part that closes a shortfall and the pruning passes only
+            // ever take off what carries nothing, so between them they find a build that cannot be made
+            // smaller BY EDITING IT - which is not the same as the smallest build, and the difference is
+            // the whole reason for asking again from scratch under a ceiling.
+            //
+            // The ceiling is enforced where every other requirement is, in the cost: a part over the
+            // limit counts as a gap, so it outranks every threshold and the climb spends its moves
+            // getting under the limit before it spends any on a number. An attempt that cannot is not a
+            // worse answer, it is evidence that the size is impossible for this search.
+            // A build carried over from a previous boot is the incumbent, and the only question worth
+            // asking about it is whether anything SMALLER works. So the search starts under a ceiling one
+            // part below it and is seeded with it, which makes the first move "take a part off and repair
+            // what that broke" - by far the likeliest way to find a build one part smaller than one that
+            // already works.
+            //
+            // Nothing found means the incumbent stands, which is not a failure: it is a boot's worth of
+            // evidence that the size is hard to beat, and the next boot will try again from the same
+            // place. Across boots the answer can only get smaller.
+            state.Incumbent = knownGood == null ? null : Rebuild(weapon, knownGood, state);
+
+            if (state.Incumbent != null)
+            {
+                bestWhole = 0;
+                bestShortfall = 0d;
+                bestCount = CountParts(state.Incumbent);
+                best = state.Incumbent;
+
+                state.PartCeiling = bestCount - 1;
+            }
+
+            var found = Search(weapon, required, state, floor, ref bestWhole, ref bestShortfall, ref bestCount);
+
+            if (found != null) best = found;
+
+            while (best != null && bestWhole == 0 && bestShortfall <= 0d && bestCount > floor && !state.Exhausted)
+            {
+                state.PartCeiling = bestCount - 1;
+                state.Incumbent = best;
+
+                var whole = int.MaxValue;
+                var shortfall = double.PositiveInfinity;
+                var count = int.MaxValue;
+                var leaner = Search(weapon, required, state, floor, ref whole, ref shortfall, ref count);
+
+                // Only a build that satisfies EVERYTHING counts as leaner. One that merely fits inside
+                // the ceiling while missing a threshold is the ceiling being too tight, which is the
+                // answer to the question rather than a better build.
+                if (leaner == null || whole != 0 || shortfall > 0d || count >= bestCount) break;
+
+                best = leaner;
+                bestWhole = whole;
+                bestShortfall = shortfall;
+                bestCount = count;
+            }
+
+            state.PartCeiling = int.MaxValue;
+            state.Incumbent = null;
+
+            result.NodesOpened = state.Nodes;
+            result.HitCeiling = state.Exhausted;
+
+            if (best == null) return result;
+            Report(weapon, best, goals, required, state, result);
+
+            return result;
+        }
+
+        /// <summary>One full round of restarts, and the best build any of them reached.
+        ///
+        /// Separate from Solve because it is run more than once: first to find a build at all, then again
+        /// under a ceiling one part lower, and again, until the answer comes back no.</summary>
+        private Node? Search(
+            MongoId weapon,
+            List<MongoId> required,
+            SearchState state,
+            int floor,
+            ref int bestWhole,
+            ref double bestShortfall,
+            ref int bestCount)
+        {
+            Node? best = null;
+
             // Many starting points, because a climb is a local search and which optimum it reaches
             // depends on where it starts. Starting from the FLOOR - the weapon, the parts the quest
             // names, and nothing else but the slots the game refuses to leave empty - is the one that
@@ -323,21 +389,31 @@ namespace QuestTreeServer
             // gets out of a basin no single move can leave.
             for (var attempt = 0; attempt < Attempts; attempt++)
             {
-                var root = new Node { Template = weapon, Locked = true };
-
                 state.ResetTree(weapon);
 
-                // Seeded by the attempt alone, so the same request always returns the same build. A
-                // solver that answers differently on each boot cannot be measured, and a player
-                // comparing two panels would be told two different things.
-                state.Shuffle = attempt < 2 ? null : new Random(attempt);
+                // Seeded by the attempt AND by which boot this is. Within a boot it is fixed, so the
+                // same request twice gives the same build and the dry run measures what the panel shows.
+                // Across boots it moves, and that is deliberate: an identical search finds an identical
+                // answer, so a solver that never varies its starting points stops improving the moment it
+                // has run once. The incumbent makes that safe - a new starting point can only ever
+                // replace the build with a smaller one that verifies.
+                state.Shuffle = attempt < 2 ? null : new Random(state.Seed + attempt);
 
-                Plan(root, required, state);
+                // The first attempt starts from the build already in hand when there is one. Over the
+                // ceiling by exactly one part, so the climb's first move is to shed one - and because a
+                // part over the limit counts as a gap, shedding outranks every threshold and the repair
+                // work happens afterwards, on a gun that is already the right size.
+                var root = attempt == 0 && state.Incumbent != null
+                    ? Clone(state.Incumbent, state)
+                    : new Node { Template = weapon, Locked = true };
 
-                // Even attempts start at the floor, odd ones fully dressed.
-                var lean = attempt % 2 == 0;
+                if (attempt != 0 || state.Incumbent == null)
+                {
+                    Plan(root, required, state);
 
-                Fill(root, state, MaxDepth, requiredOnly: lean);
+                    // Even attempts start at the floor, odd ones fully dressed.
+                    Fill(root, state, MaxDepth, requiredOnly: attempt % 2 == 0);
+                }
 
                 // The randomness belongs to the dressing only. The climb fills the sub-slots of every
                 // candidate it tries, and a random fill there would have it judging parts by a throw
@@ -351,8 +427,9 @@ namespace QuestTreeServer
                 // only the winner is ever trimmed.
                 Prune(weapon, root, state, required, floor);
 
-                var whole = climbed.Gaps + required.Count(part => Find(root, part) == null);
-                var shortfall = Measure(weapon, root, state, new List<MongoId>()).Shortfall;
+                var measured = Measure(weapon, root, state, new List<MongoId>());
+                var whole = measured.Gaps + required.Count(part => Find(root, part) == null);
+                var shortfall = measured.Shortfall;
                 var count = CountParts(root);
 
                 // Whole requirements, then how far short the numbers are, then HOW MANY PARTS. The
@@ -375,10 +452,97 @@ namespace QuestTreeServer
                 if (state.Exhausted) break;
             }
 
-            result.NodesOpened = state.Nodes;
-            result.HitCeiling = state.Exhausted;
+            return best;
+        }
 
-            if (best == null) return result;
+        // ---------------------------------------------------------------------------------------
+        // PLAN - the parts the quest names, placed into an explicit tree
+        // ---------------------------------------------------------------------------------------
+
+        /// <summary>The thresholds this search can act on, and a note of the ones it cannot.</summary>
+        private static List<Goal> Goals(
+            IReadOnlyList<(string Field, string Compare, double Value)> thresholds, Result result)
+        {
+            var goals = new List<Goal>();
+
+            foreach (var (field, compare, value) in thresholds)
+            {
+                if (NotBuildProperties.Contains(field)) continue;
+
+                if (!Scored.Contains(field))
+                {
+                    result.Unchecked.Add($"{field} {compare} {value:0.##}");
+                    continue;
+                }
+
+                goals.Add(new Goal
+                {
+                    Field = field,
+                    Value = value,
+                    // ">=" and ">" want more; "<=" and "<" want less. Read from the data rather than
+                    // assumed per stat, because the same stat points both ways across quests.
+                    HigherIsBetter = compare.StartsWith(">", StringComparison.Ordinal),
+                    Scale = Math.Max(Math.Abs(value), 1d)
+                });
+            }
+
+
+            return goals;
+        }
+
+        /// <summary>The parts the quest names, deduplicated, the weapon itself excluded.</summary>
+        private static List<MongoId> Required(MongoId weapon, IReadOnlyCollection<MongoId> mustInclude)
+        {
+            var required = new List<MongoId>();
+
+            foreach (var id in mustInclude)
+                if (id != weapon && !required.Contains(id)) required.Add(id);
+
+            return required;
+        }
+
+        /// <summary>Everything a caller is told about a finished build, without searching for one.
+        ///
+        /// Here so that a build carried over from a previous run costs what it should cost - nothing. The
+        /// search is what is expensive; describing its result is a handful of dictionary lookups, and a
+        /// shipped mod that already knows the answer should not be re-deriving it sixty times on every
+        /// start.</summary>
+        public Result Describe(
+            MongoId weapon,
+            IReadOnlyList<(string Field, string Compare, double Value)> thresholds,
+            IReadOnlyCollection<MongoId> mustInclude,
+            IReadOnlyCollection<MongoId> mustIncludeCategories,
+            IReadOnlyList<FittedPart> parts)
+        {
+            var result = new Result();
+            var reachable = graph.Reachable(weapon, out _);
+
+            if (reachable == null) return result;
+
+            var goals = Goals(thresholds, result);
+
+            var state = new SearchState(reachable, null, goals, mustIncludeCategories, Stopwatch.StartNew());
+            var required = Required(weapon, mustInclude);
+
+            var root = Rebuild(weapon, parts, state);
+
+            if (root == null) return result;
+
+            Report(weapon, root, goals, required, state, result);
+
+            return result;
+        }
+
+        /// <summary>Fills in the verdict on one finished build: what it scores, what it fails, and the
+        /// fewest parts one mandatory skeleton for the quest would take.</summary>
+        private Result Report(
+            MongoId weapon,
+            Node best,
+            List<Goal> goals,
+            List<MongoId> required,
+            SearchState state,
+            Result result)
+        {
 
             var fitted = new List<MongoId>();
             CollectTemplates(best, fitted);
@@ -421,7 +585,7 @@ namespace QuestTreeServer
             {
                 if (fitted.Contains(part)) continue;
 
-                result.Unmet.Add(reachable.ContainsKey(part)
+                result.Unmet.Add(state.Reachable.ContainsKey(part)
                     ? $"could not fit the required part {part} (reachable, not placed)"
                     : $"required part {part} is NOT REACHABLE from this weapon's slots");
             }
@@ -453,10 +617,6 @@ namespace QuestTreeServer
 
             return result;
         }
-
-        // ---------------------------------------------------------------------------------------
-        // PLAN - the parts the quest names, placed into an explicit tree
-        // ---------------------------------------------------------------------------------------
 
         /// <summary>Places every required part, backtracking when two of them want the same slot.
         ///
@@ -1545,7 +1705,13 @@ namespace QuestTreeServer
             // a category with nothing from it is not a worse build - it is one the player cannot
             // assemble or cannot hand in, and the search has to close that before it spends anything
             // on a threshold.
+            //
+            // A part over the ceiling counts the same way, which is what makes "find one that works in
+            // nine parts" a question the climb can answer: getting under the limit outranks every
+            // number, so it is done first and never traded away for one.
             var gaps = EmptyRequired(root, state, null);
+
+            if (buffer.Count > state.PartCeiling) gaps += buffer.Count - state.PartCeiling;
 
             if (state.Categories.Count > 0)
             {
@@ -1752,6 +1918,69 @@ namespace QuestTreeServer
             return missing;
         }
 
+        /// <summary>Turns a flat parts list back into a tree, or null when it does not describe one this
+        /// weapon could wear.
+        ///
+        /// Returning null is the guard on a cache written by an older install: a slot name that no longer
+        /// exists, or a parent index out of order, costs a search rather than producing a gun with parts
+        /// hanging off nothing.</summary>
+        private static Node? Rebuild(MongoId weapon, IReadOnlyList<FittedPart> parts, SearchState state)
+        {
+            var root = new Node { Template = weapon, Locked = true };
+            var placed = new List<Node>(parts.Count);
+
+            foreach (var part in parts)
+            {
+                if (part.Parent < -1 || part.Parent >= placed.Count) return null;
+
+                var host = part.Parent < 0 ? root : placed[part.Parent];
+
+                if (!state.Reachable.TryGetValue(host.Template, out var info)) return null;
+
+                var index = Array.FindIndex(info.Slots, slot => slot.Name == part.SlotName);
+                if (index < 0 || Occupant(host, index) != null) return null;
+
+                var node = new Node
+                {
+                    Template = part.Template,
+                    SlotName = part.SlotName,
+                    SlotIndex = index,
+                    Depth = host.Depth + 1
+                };
+
+                Attach(host, node, state);
+                placed.Add(node);
+            }
+
+            return root;
+        }
+
+        /// <summary>A fresh copy of a tree, so an attempt can edit it without spoiling the build it came
+        /// from - which is still the answer if the attempt finds nothing better.</summary>
+        private static Node Clone(Node node, SearchState state)
+        {
+            var copy = new Node
+            {
+                Template = node.Template,
+                SlotName = node.SlotName,
+                SlotIndex = node.SlotIndex,
+                Depth = node.Depth,
+                Locked = node.Locked
+            };
+
+            state.Counts[copy.Template] = state.Counts.GetValueOrDefault(copy.Template) + 1;
+
+            foreach (var child in node.Children)
+            {
+                var branch = Clone(child, state);
+
+                branch.Parent = copy;
+                copy.Children.Add(branch);
+            }
+
+            return copy;
+        }
+
         private static Node? Occupant(Node node, int slotIndex)
         {
             foreach (var child in node.Children)
@@ -1920,6 +2149,18 @@ namespace QuestTreeServer
             /// required part instead of one per question.</summary>
             public Dictionary<MongoId, List<MongoId>> Hosts { get; } = new();
 
+            /// <summary>Where this boot's random starting points begin. Advanced once per boot by the
+            /// cache, so no two boots explore the same ground.</summary>
+            public int Seed { get; init; }
+
+            /// <summary>A build already known to satisfy this quest, from a previous boot or from the
+            /// round before this one. The search is only ever asked to beat it.</summary>
+            public Node? Incumbent;
+
+            /// <summary>Most parts the build may carry. Set while the search is asked for something
+            /// leaner than it has already found; unbounded the rest of the time.</summary>
+            public int PartCeiling = int.MaxValue;
+
             /// <summary>How many of each template the build currently carries.</summary>
             public Dictionary<MongoId, int> Counts { get; } = new();
 
@@ -2016,4 +2257,5 @@ namespace QuestTreeServer
         }
     }
 }
+
 

@@ -47,7 +47,8 @@ namespace QuestTreeServer
         WeaponStatModel weaponStatModel,
         WeaponGraph weaponGraph,
         WeaponSolver weaponSolver,
-        WeaponBuildVerifier weaponBuildVerifier) : IOnLoad
+        WeaponBuildVerifier weaponBuildVerifier,
+        WeaponBuildCache weaponBuildCache) : IOnLoad
     {
         /// <summary>Built while the server starts, for the reason MapMarkerPayloadBuilder gives:
         /// the client's request handler is synchronous on Unity's main thread, so paying for the
@@ -60,8 +61,25 @@ namespace QuestTreeServer
         /// so the solver can be run over all of them at boot.</summary>
         private readonly List<(string Quest, WeaponBuildDto Build)> _questBuilds = new();
 
+        /// <summary>What the solver said about each build requirement, keyed the way the cache keys it.
+        ///
+        /// Here because the search was being run TWICE for every quest - once to put the build on the
+        /// wire and once for the dry run that measures it - which is the same question asked twice and
+        /// paid for twice.</summary>
+        private readonly Dictionary<string, WeaponSolver.Result> _solved = new();
+
+        /// <summary>Where this boot's random starting points begin, and how many builds it improved on
+        /// what the last boot managed.</summary>
+        private int _seed;
+        private int _improved;
+
         public Task OnLoadAsync(CancellationToken cancellationToken)
         {
+            // Before anything is solved: every boot searches from starting points no previous boot used,
+            // which is what lets the answer keep getting smaller instead of settling on whatever the
+            // first boot happened to find.
+            _seed = weaponBuildCache.Advance();
+
             GetPayloadJson();
 
             // After the payload, because the set of weapons to walk is filled while it is built.
@@ -69,6 +87,19 @@ namespace QuestTreeServer
             // would meet one has to happen where a log line is read rather than inside a request.
             weaponGraph.Survey(_questWeapons);
             SurveySolver();
+
+            // After the survey, because that is what finishes solving: the payload builds what it needs
+            // and the survey covers the rest.
+            weaponBuildCache.Flush();
+
+            logger.Info(_improved > 0
+                ? $"Quest Tracker: this boot found smaller builds for {_improved} requirement(s)."
+                : "Quest Tracker: no smaller build found during startup.");
+
+            // And then it keeps going, off the boot path entirely. One generation per boot is a slow clock
+            // - eight boots took four minutes of restarting to find two improvements - and there is no
+            // reason the search has to stop just because the server has finished starting.
+            Improve(cancellationToken);
 
             return Task.CompletedTask;
         }
@@ -138,7 +169,7 @@ namespace QuestTreeServer
                 foreach (var id in build.RequiredCategoryIds)
                     if (id.TryParseMongoId(out var parsed)) mustIncludeCategories.Add(parsed);
 
-                var result = weaponSolver.Solve(weapon, thresholds, mustInclude, mustIncludeCategories, allowed: null);
+                var result = Solve(weapon, thresholds, mustInclude, mustIncludeCategories);
 
                 if (result.HitCeiling) ceiling++;
                 if (result.NodesOpened > worst) worst = result.NodesOpened;
@@ -745,7 +776,7 @@ namespace QuestTreeServer
             foreach (var id in build.RequiredCategoryIds)
                 if (id.TryParseMongoId(out var parsed)) mustIncludeCategories.Add(parsed);
 
-            var result = weaponSolver.Solve(weapon, thresholds, mustInclude, mustIncludeCategories, allowed: null);
+            var result = Solve(weapon, thresholds, mustInclude, mustIncludeCategories);
 
             if (result.Parts.Count == 0 && !result.Found) return null;
 
@@ -778,6 +809,269 @@ namespace QuestTreeServer
             solution.Unchecked.AddRange(result.Unchecked);
 
             return solution;
+        }
+
+        /// <summary>Generations one boot runs without finding anything before it gives up.
+        ///
+        /// ONE on a normal start, and that is the whole shape of this: every boot contributes a single
+        /// round of fresh starting points, writes down anything smaller it finds, and stops. Nobody's
+        /// machine grinds, and the builds still improve for as long as people keep starting the server.
+        ///
+        /// TRAINING - a file called "training" in the cache folder - runs generation after generation
+        /// instead, because that is what produces the cache that ships. It is deliberately not a build
+        /// flag: an install that never creates the file can never be made to grind by accident.</summary>
+        private int IdleGenerations => weaponBuildCache.Training ? 3 : 1;
+
+        /// <summary>How long a TRAINING run searches before it is allowed to stop, however little it finds.
+        ///
+        /// A round takes a second or two, and the interesting improvements are the ones that need a dozen
+        /// rounds of different starting points to fall out - so a training run that stopped as soon as two
+        /// rounds came up empty would keep missing them. Three minutes is roughly a hundred rounds.</summary>
+        private static readonly TimeSpan TrainingFloor = TimeSpan.FromMinutes(3);
+
+        /// <summary>How long the search may run. Seconds on a normal start, minutes while training. This is
+        /// CPU on the machine hosting the game, and a solver improving a build by one part does not get to
+        /// cost somebody a raid.</summary>
+        private TimeSpan ImproveBudget =>
+            weaponBuildCache.Training ? TimeSpan.FromMinutes(30) : TimeSpan.FromSeconds(20);
+
+        /// <summary>Pause between generations, so the search yields the machine rather than pinning a core
+        /// for three minutes straight.</summary>
+        private static readonly TimeSpan BetweenGenerations = TimeSpan.FromMilliseconds(250);
+
+        /// <summary>Keeps looking for smaller builds after the server is up.
+        ///
+        /// The boot path needs ONE good answer per quest and the cache gives it that immediately, so making
+        /// the answer BETTER is not urgent and does not belong on the boot path. It happens here instead:
+        /// a round of fresh starting points, each one only able to replace a build with a smaller one that
+        /// verifies, written down for every start after this one.
+        ///
+        /// This runs on every start, shipped or not, and that is the point. The cache that ships is a
+        /// starting position rather than a final answer - a player's install has parts this machine never
+        /// had, and one round per start means their builds get smaller too, without anybody waiting for it.
+        ///
+        /// It cannot make an answer worse: the incumbent only ever loses to something strictly smaller that
+        /// passes the verifier. So the risk is not correctness, it is CPU on a machine somebody is playing
+        /// on, which is what the budget, the pause between rounds, and the cancellation token are for.
+        ///
+        /// Every improvement rebuilds the payload, so a client asking after one lands gets the better build
+        /// rather than the one this start began with.</summary>
+        private void Improve(CancellationToken cancellationToken)
+        {
+            if (_questBuilds.Count == 0) return;
+
+            _ = Task.Run(async () =>
+            {
+                var clock = System.Diagnostics.Stopwatch.StartNew();
+                var idle = 0;
+                var total = 0;
+
+                try
+                {
+                    var training = weaponBuildCache.Training;
+                    var idleLimit = IdleGenerations;
+                    var budget = ImproveBudget;
+                    var floor = training ? TrainingFloor : TimeSpan.Zero;
+                    var rounds = 0;
+
+                    if (training)
+                        logger.Warning(
+                            "Quest Tracker: TRAINING. This start will spend at least " +
+                            $"{TrainingFloor.TotalMinutes:0} minutes looking for smaller weapon builds and will " +
+                            "use a core doing it. Unset QUESTTREE_TRAIN, or delete the cache/training file, for a " +
+                            "normal start.");
+
+                    // Below the floor it keeps going whatever happens; above it, it stops once a few rounds
+                    // running have found nothing. A round is one set of fresh starting points across all
+                    // sixty, and the improvements worth having are often a dozen rounds apart - so stopping
+                    // at the first two empty rounds is what would make a training run pointless.
+                    while (!cancellationToken.IsCancellationRequested
+                           && clock.Elapsed < budget
+                           && (clock.Elapsed < floor || idle < idleLimit))
+                    {
+                        await Task.Delay(BetweenGenerations, cancellationToken).ConfigureAwait(false);
+
+                        var found = Generation();
+
+                        rounds++;
+                        total += found;
+                        idle = found > 0 ? 0 : idle + 1;
+
+                        // Progress, because a process that sits there for three minutes has to say what it
+                        // is doing. Every tenth round, so it is visible without being noise.
+                        if (training && rounds % 10 == 0)
+                            logger.Info(
+                                $"Quest Tracker: training - {rounds} rounds in {clock.Elapsed.TotalSeconds:0}s, " +
+                                $"{total} smaller build(s) found so far.");
+
+                        if (found <= 0) continue;
+
+                        weaponBuildCache.Flush();
+                        Rebuild();
+
+                        logger.Info(
+                            $"Quest Tracker: found smaller builds for {found} requirement(s) while running - " +
+                            $"{total} so far this session. The quest list has been rebuilt with them.");
+                    }
+
+                    logger.Info(total > 0
+                        ? $"Quest Tracker: found smaller builds for {total} requirement(s) over {rounds} round(s) in " +
+                          $"{clock.Elapsed.TotalSeconds:0}s. Every start does at least one round, so they keep improving."
+                        : $"Quest Tracker: no smaller build found over {rounds} round(s) in " +
+                          $"{clock.Elapsed.TotalSeconds:0}s. The next start tries different starting points.");
+                }
+                catch (OperationCanceledException)
+                {
+                    // The server is shutting down. Whatever was found is already written.
+                }
+                catch (Exception ex)
+                {
+                    // Never the reason a server falls over: this is an optimisation nobody is waiting on.
+                    logger.Warning(
+                        $"Quest Tracker: the background build search stopped early ({ex.Message}). The builds " +
+                        "already found are unaffected.");
+                }
+            }, cancellationToken);
+        }
+
+        /// <summary>One sweep over every requirement from a fresh set of starting points, and how many
+        /// builds it managed to shrink.</summary>
+        private int Generation()
+        {
+            _seed = weaponBuildCache.Advance();
+
+            var found = 0;
+
+            foreach (var (_, build) in _questBuilds)
+            {
+                if (!build.WeaponTemplate.TryParseMongoId(out var weapon)) continue;
+
+                var thresholds = build.Thresholds.Select(t => (t.Field, t.Compare, t.Value)).ToList();
+
+                var mustInclude = new List<MongoId>();
+                foreach (var id in build.RequiredItemIds)
+                    if (id.TryParseMongoId(out var parsed)) mustInclude.Add(parsed);
+
+                var mustIncludeCategories = new List<MongoId>();
+                foreach (var id in build.RequiredCategoryIds)
+                    if (id.TryParseMongoId(out var parsed)) mustIncludeCategories.Add(parsed);
+
+                var key = WeaponBuildCache.KeyFor(weapon, thresholds, mustInclude, mustIncludeCategories);
+                var remembered = weaponBuildCache.Get(key);
+
+                if (remembered == null) continue;
+
+                var result = weaponSolver.Solve(
+                    weapon, thresholds, mustInclude, mustIncludeCategories,
+                    allowed: null, knownGood: Restore(remembered), seed: _seed);
+
+                if (!result.Found || result.Parts.Count >= remembered.Parts.Count)
+                {
+                    weaponBuildCache.Held(key);
+                    continue;
+                }
+
+                weaponBuildCache.Put(key, result.Parts, result.Floor);
+
+                // So the payload rebuild and the next generation both see the better one.
+                lock (_solved) _solved[key] = result;
+
+                found++;
+            }
+
+            return found;
+        }
+
+        /// <summary>The build for one requirement, solved once per boot and remembered across boots.
+        ///
+        /// The cache is not a shortcut past the search, it is the INCUMBENT. Every boot hands the build it
+        /// remembers back to the solver and asks for a smaller one, so the answer improves over time and
+        /// can never get worse: a boot that finds nothing better has spent one round of restarts proving
+        /// the size is hard to beat, and a boot that finds something better writes it down.
+        ///
+        /// That is why this is safe in a way a plain cache would not be. A plain cache freezes whatever
+        /// the search managed the first time, including whatever it managed badly.</summary>
+        private WeaponSolver.Result Solve(
+            MongoId weapon,
+            List<(string Field, string Compare, double Value)> thresholds,
+            List<MongoId> mustInclude,
+            List<MongoId> mustIncludeCategories)
+        {
+            var key = WeaponBuildCache.KeyFor(weapon, thresholds, mustInclude, mustIncludeCategories);
+
+            lock (_solved)
+                if (_solved.TryGetValue(key, out var already)) return already;
+
+            var remembered = weaponBuildCache.Get(key);
+            var incumbent = remembered == null ? null : Restore(remembered);
+
+            // A remembered build is DESCRIBED rather than re-derived. Searching again would cost seconds to
+            // arrive back where it started, and the verifier is what decides whether the remembered answer
+            // is good - not another search.
+            //
+            // Training is the exception and the reason the search still exists here: that mode is trying to
+            // beat the build, so it has to run.
+            if (incumbent != null && !weaponBuildCache.Training)
+            {
+                var described = weaponSolver.Describe(
+                    weapon, thresholds, mustInclude, mustIncludeCategories, incumbent);
+
+                if (described.Found)
+                {
+                    lock (_solved) _solved[key] = described;
+                    return described;
+                }
+
+                // It does not hold up on this install. Solve it properly rather than ship it.
+                logger.Debug(
+                    "Quest Tracker: a remembered weapon build no longer satisfies its quest here, so it is " +
+                    "being solved again.");
+
+                incumbent = null;
+            }
+
+            var result = weaponSolver.Solve(
+                weapon, thresholds, mustInclude, mustIncludeCategories,
+                allowed: null, knownGood: incumbent, seed: _seed);
+
+            // Written back only when it is an improvement or there was nothing there; otherwise the boot
+            // is recorded as one more that could not beat it, which is the only honest thing to say about
+            // a build nobody has proved minimal.
+            if (result.Found && (remembered == null || result.Parts.Count < remembered.Parts.Count))
+            {
+                weaponBuildCache.Put(key, result.Parts, result.Floor);
+                _improved++;
+            }
+            else if (remembered != null)
+            {
+                weaponBuildCache.Held(key);
+            }
+
+            lock (_solved) _solved[key] = result;
+
+            return result;
+        }
+
+        /// <summary>A remembered build in the shape the solver takes. Anything unparseable is dropped and
+        /// the solver is handed nothing, which costs a search rather than a wrong build.</summary>
+        private static List<WeaponSolver.FittedPart>? Restore(WeaponBuildCache.CachedBuild remembered)
+        {
+            var parts = new List<WeaponSolver.FittedPart>(remembered.Parts.Count);
+
+            foreach (var part in remembered.Parts)
+            {
+                if (!part.Template.TryParseMongoId(out var template)) return null;
+
+                parts.Add(new WeaponSolver.FittedPart
+                {
+                    SlotName = part.Slot,
+                    Template = template,
+                    Depth = part.Depth,
+                    Parent = part.Parent
+                });
+            }
+
+            return parts.Count > 0 ? parts : null;
         }
 
         /// <summary>Scores the quest's own named parts on the quest's own weapon.
