@@ -73,6 +73,14 @@ namespace QuestTreeServer
         {
             public List<CachedPart> Parts { get; set; } = new();
 
+            /// <summary>Parts this build needs that the weapon does not ship with - THE OBJECTIVE. What the
+            /// player pays in roubles and trader trips, which is the thing a quest build is actually trying
+            /// to keep small.
+            ///
+            /// Remembered beside the part count because the write rule is lexicographic on both, so a boot
+            /// has to know what the remembered build cost as well as how big it was.</summary>
+            public int Changes { get; set; }
+
             /// <summary>Boots that have tried to beat this build and failed. Not a promise that it is
             /// minimal - it is the amount of evidence that it might be, and the honest thing to show
             /// beside a build nobody has proved anything about.</summary>
@@ -346,7 +354,8 @@ namespace QuestTreeServer
             string key,
             IReadOnlyList<WeaponSolver.FittedPart> parts,
             int floor,
-            IReadOnlyCollection<string>? binding = null)
+            IReadOnlyCollection<string>? binding = null,
+            int changes = 0)
         {
             lock (_lock)
             {
@@ -355,6 +364,7 @@ namespace QuestTreeServer
                 _file!.Builds[key] = new CachedBuild
                 {
                     Floor = floor,
+                    Changes = changes,
                     Binding = binding == null ? new List<string>() : binding.ToList(),
                     Parts = parts.Select(part => new CachedPart
                     {
@@ -484,6 +494,10 @@ namespace QuestTreeServer
                         // it would let a stale proof mark a build finished forever.
                         foreach (var build in found.Builds.Values)
                         {
+                            // Zero, not "unknown": a build's cost is recomputed the first time this boot
+                            // measures it, and a stale count would let a worse build hold its place under the
+                            // lexicographic write rule.
+                            build.Changes = 0;
                             build.Bound = 0;
                             build.BoundSessions = 0;
                             build.Falsifications = 0;

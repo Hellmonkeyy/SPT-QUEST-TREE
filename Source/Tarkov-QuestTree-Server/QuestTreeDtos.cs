@@ -1,4 +1,4 @@
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 
 namespace QuestTreeServer
 {
@@ -21,8 +21,10 @@ namespace QuestTreeServer
         /// v5 (1.10.1): RewardDto.ShortName and RewardDto.Template. v6 (1.10.2): the weapon build
         /// keeps its template ids, records dropped zero thresholds and empty-slot counts, and carries
         /// the stat model's own numbers for the quest's example parts. v7 (1.10.3): a quest carries
-        /// EVERY weapon build it asks for rather than only the first.</summary>
-        public int SchemaVersion { get; set; } = 9;
+        /// EVERY weapon build it asks for rather than only the first. v10 (1.12.0): a solved build is a
+        /// DIFF against the weapon's default preset - every part says whether it is already fitted, a
+        /// swap or an addition, and the build carries the number of changes.</summary>
+        public int SchemaVersion { get; set; } = 10;
 
         /// <summary>The server half's version, so a mismatch warning on the client can name it -
         /// the other three payloads already did.</summary>
@@ -493,6 +495,18 @@ namespace QuestTreeServer
 
         public List<SolvedPartDto> Parts { get; set; } = new();
 
+        /// <summary>Parts the player has to fit that the weapon does not already wear - swaps plus
+        /// additions. THE NUMBER TO LEAD WITH: it is what every community guide is implicitly counting, and
+        /// it is what this search now minimises.
+        ///
+        /// Meaningless without HasDefaults, which is why they travel together: zero changes on a weapon with
+        /// no preset means "nothing to compare against", not "nothing to buy".</summary>
+        public int Changes { get; set; }
+
+        /// <summary>Whether the game ships a default preset for this weapon, and therefore whether the
+        /// statuses and the change count mean anything. False for most modded weapons.</summary>
+        public bool HasDefaults { get; set; }
+
         /// <summary>What the build scores, in the same terms the thresholds are written in.</summary>
         public List<string> Scores { get; set; } = new();
 
@@ -511,6 +525,17 @@ namespace QuestTreeServer
 
         public string Template { get; set; } = "";
         public string Name { get; set; } = "";
+
+        /// <summary>What the player has to do about this part: "fitted" (the weapon already wears it),
+        /// "swap" (something else is in that slot) or "add" (the slot is empty on the default).
+        ///
+        /// EMPTY when the weapon has no default preset - most modded weapons - and an empty status is the
+        /// honest answer there rather than a guess at what the gun ships with. A client seeing empty
+        /// statuses shows the build the way it always did.</summary>
+        public string Status { get; set; } = "";
+
+        /// <summary>For a swap, the name of the part being taken off. Empty otherwise.</summary>
+        public string Replaces { get; set; } = "";
     }
 
     public sealed class WeaponBuildThresholdDto
