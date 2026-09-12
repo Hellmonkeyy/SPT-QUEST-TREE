@@ -48,8 +48,16 @@ namespace QuestTreeServer
 
         private static readonly JsonSerializerOptions FileOptions = new() { WriteIndented = true };
 
+        /// <summary>Where the history lives. Overridable by QUESTTREE_CACHE_DIR so a test can point it
+        /// at scratch space instead.
+        ///
+        /// That override exists because the two things this file is for pull in opposite directions. The
+        /// determinism gate has to DELETE the history before every boot, or fifty boots test one search and
+        /// forty-nine reads of its answer. Training has to ACCUMULATE it. Sharing one path meant the gate
+        /// quietly ate the one artifact worth shipping, twice, before anybody noticed.</summary>
         private static string Folder =>
-            System.IO.Path.Combine(AppContext.BaseDirectory, "user", "mods", "QuestTree", "cache");
+            Environment.GetEnvironmentVariable("QUESTTREE_CACHE_DIR")
+            ?? System.IO.Path.Combine(AppContext.BaseDirectory, "user", "mods", "QuestTree", "cache");
 
         private static string Path => System.IO.Path.Combine(Folder, "weapon-builds.json");
 
@@ -99,29 +107,21 @@ namespace QuestTreeServer
         private bool _dirty;
         private string? _fingerprint;
 
-        /// <summary>Whether this install is TRAINING - grinding the builds smaller for as long as it
-        /// takes - rather than doing the single round every start does.
+        /// <summary>Whether this launch is TRAINING - grinding the builds smaller for as long as it
+        /// takes - rather than doing the single round every launch does.
         ///
-        /// Opt-in by a file rather than a build flag, so an install that never creates it can never be made
-        /// to grind by accident. Every start improves the builds either way; this only decides whether it
-        /// stops after one round or keeps going, which is the difference between a player's machine helping
-        /// a little and a developer's machine producing the cache that ships.</summary>
-        public bool Training
-        {
-            get
-            {
-                // A flag on the launch itself, which is how a training run is actually started: set it for
-                // one launch and that launch trains, with nothing left behind to make the next one train by
-                // accident.
-                var flag = Environment.GetEnvironmentVariable("QUESTTREE_TRAIN");
-
-                if (flag is "1" or "true" or "TRUE" or "yes") return true;
-
-                // And a file, for leaving a machine training across restarts without setting the variable
-                // every time. Either turns it on; neither is the default.
-                return System.IO.File.Exists(System.IO.Path.Combine(Folder, "training"));
-            }
-        }
+        /// A launch-time environment variable and NOTHING ELSE, which is a deliberate narrowing. A marker
+        /// file did the same job and was the better developer experience, but it survives being copied: a
+        /// release zipped up from a machine that had been training would carry it, and every user who
+        /// installed that release would burn a core for three minutes on every start without ever asking
+        /// to. An environment variable cannot be packaged by accident. Set it for the launch you want to
+        /// train and nothing is left behind for the next one.
+        ///
+        /// Every launch improves the builds either way. This only decides whether it stops after one round
+        /// or keeps going, which is the difference between a player's machine helping a little and a
+        /// developer's machine producing the history that ships.</summary>
+        public bool Training =>
+            Environment.GetEnvironmentVariable("QUESTTREE_TRAIN") is "1" or "true" or "TRUE" or "yes";
 
         /// <summary>False when the cache was written against a different set of items than this install
         /// has. The entries are still used - a build that VERIFIES is a good answer whoever wrote it - but

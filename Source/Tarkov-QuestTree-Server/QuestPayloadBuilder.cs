@@ -822,18 +822,16 @@ namespace QuestTreeServer
         /// flag: an install that never creates the file can never be made to grind by accident.</summary>
         private int IdleGenerations => weaponBuildCache.Training ? 3 : 1;
 
-        /// <summary>How long a TRAINING run searches before it is allowed to stop, however little it finds.
-        ///
-        /// A round takes a second or two, and the interesting improvements are the ones that need a dozen
-        /// rounds of different starting points to fall out - so a training run that stopped as soon as two
-        /// rounds came up empty would keep missing them. Three minutes is roughly a hundred rounds.</summary>
-        private static readonly TimeSpan TrainingFloor = TimeSpan.FromMinutes(3);
+        /// <summary>Rounds between progress lines while training. A run that goes on for hours has to say
+        /// what it is doing without filling the log.</summary>
+        private const int TrainingReportEvery = 10;
 
         /// <summary>How long the search may run. Seconds on a normal start, minutes while training. This is
         /// CPU on the machine hosting the game, and a solver improving a build by one part does not get to
         /// cost somebody a raid.</summary>
-        private TimeSpan ImproveBudget =>
-            weaponBuildCache.Training ? TimeSpan.FromMinutes(30) : TimeSpan.FromSeconds(20);
+        /// <summary>How long a NORMAL launch spends improving in the background. A training launch has no
+        /// budget at all - it runs until it is stopped.</summary>
+        private static readonly TimeSpan ImproveBudget = TimeSpan.FromSeconds(20);
 
         /// <summary>Pause between generations, so the search yields the machine rather than pinning a core
         /// for three minutes straight.</summary>
@@ -865,29 +863,27 @@ namespace QuestTreeServer
                 var clock = System.Diagnostics.Stopwatch.StartNew();
                 var idle = 0;
                 var total = 0;
+                var rounds = 0;
 
                 try
                 {
                     var training = weaponBuildCache.Training;
-                    var idleLimit = IdleGenerations;
-                    var budget = ImproveBudget;
-                    var floor = training ? TrainingFloor : TimeSpan.Zero;
-                    var rounds = 0;
 
                     if (training)
                         logger.Warning(
-                            "Quest Tracker: TRAINING. This start will spend at least " +
-                            $"{TrainingFloor.TotalMinutes:0} minutes looking for smaller weapon builds and will " +
-                            "use a core doing it. Unset QUESTTREE_TRAIN, or delete the cache/training file, for a " +
-                            "normal start.");
+                            "Quest Tracker: TRAINING. This launch will keep looking for smaller weapon builds " +
+                            "FOR AS LONG AS IT RUNS, using a core to do it, and will not stop on its own. Stop the " +
+                            "server when you have had enough - every improvement is written down as it is found, " +
+                            "so nothing is lost by stopping. Unset QUESTTREE_TRAIN for a normal launch.");
 
-                    // Below the floor it keeps going whatever happens; above it, it stops once a few rounds
-                    // running have found nothing. A round is one set of fresh starting points across all
-                    // sixty, and the improvements worth having are often a dozen rounds apart - so stopping
-                    // at the first two empty rounds is what would make a training run pointless.
+                    // Training has no budget and no patience limit: it runs until the server stops. A round is
+                    // one set of fresh starting points across all sixty, the improvements worth having are
+                    // often a dozen rounds apart, and there is no number of empty rounds that means there are
+                    // none left - so the only sensible stopping condition is a person deciding to stop.
+                    //
+                    // A normal launch is the opposite: one round, twenty seconds, then out of the way.
                     while (!cancellationToken.IsCancellationRequested
-                           && clock.Elapsed < budget
-                           && (clock.Elapsed < floor || idle < idleLimit))
+                           && (training || (clock.Elapsed < ImproveBudget && idle < IdleGenerations)))
                     {
                         await Task.Delay(BetweenGenerations, cancellationToken).ConfigureAwait(false);
 
@@ -897,12 +893,11 @@ namespace QuestTreeServer
                         total += found;
                         idle = found > 0 ? 0 : idle + 1;
 
-                        // Progress, because a process that sits there for three minutes has to say what it
-                        // is doing. Every tenth round, so it is visible without being noise.
-                        if (training && rounds % 10 == 0)
+                        // Progress, because a process that sits there for hours has to say what it is doing.
+                        if (training && rounds % TrainingReportEvery == 0)
                             logger.Info(
-                                $"Quest Tracker: training - {rounds} rounds in {clock.Elapsed.TotalSeconds:0}s, " +
-                                $"{total} smaller build(s) found so far.");
+                                $"Quest Tracker: training - {rounds} rounds in {clock.Elapsed.TotalMinutes:0.0} " +
+                                $"minutes, {total} smaller build(s) found so far. Stop the server to finish.");
 
                         if (found <= 0) continue;
 
@@ -922,7 +917,11 @@ namespace QuestTreeServer
                 }
                 catch (OperationCanceledException)
                 {
-                    // The server is shutting down. Whatever was found is already written.
+                    // The server is shutting down, which for a training run is how it is MEANT to end.
+                    // Everything found was flushed as it was found, so there is nothing to save here.
+                    logger.Info(
+                        $"Quest Tracker: training stopped after {rounds} round(s) and {total} smaller build(s). " +
+                        "All of them are already written down.");
                 }
                 catch (Exception ex)
                 {
@@ -1016,16 +1015,28 @@ namespace QuestTreeServer
                 var described = weaponSolver.Describe(
                     weapon, thresholds, mustInclude, mustIncludeCategories, incumbent);
 
-                if (described.Found)
+                // BOTH have to agree before a remembered build is served. The solver's own report re-reads
+                // the thresholds and the required slots, but it does not check that every part sits in a
+                // slot whose filter admits it, or that no template is claimed twice - and a history written
+                // on another install, or edited, or half-written, is exactly where that would go wrong.
+                //
+                // This is the one failure mode a shipped history introduces, so it is the one the cold path
+                // is not allowed to take on trust. A rejected entry costs a search. It never reaches a
+                // panel.
+                var audited = weaponBuildVerifier.Verify(
+                    weapon, described.Parts, thresholds, mustInclude, mustIncludeCategories);
+
+                if (described.Found && audited.Verified)
                 {
                     lock (_solved) _solved[key] = described;
                     return described;
                 }
 
-                // It does not hold up on this install. Solve it properly rather than ship it.
-                logger.Debug(
-                    "Quest Tracker: a remembered weapon build no longer satisfies its quest here, so it is " +
-                    "being solved again.");
+                logger.Info(
+                    $"Quest Tracker: a remembered weapon build for '{weapon}' does not hold up on this install, " +
+                    "so it is being solved again. " +
+                    (audited.Failures.Count > 0 ? string.Join("; ", audited.Failures.Take(2)) : "") +
+                    (described.Unmet.Count > 0 ? string.Join("; ", described.Unmet.Take(2)) : ""));
 
                 incumbent = null;
             }
@@ -1284,6 +1295,7 @@ namespace QuestTreeServer
         }
     }
 }
+
 
 
 
