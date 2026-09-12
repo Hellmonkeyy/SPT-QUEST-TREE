@@ -191,12 +191,26 @@ namespace QuestTreeServer
         /// name.</summary>
         private static string Named(string unmet, WeaponBuildDto build)
         {
-            var count = Math.Min(build.RequiredItemIds.Count, build.RequiredItemNames.Count);
+            unmet = Substitute(unmet, build.RequiredItemIds, build.RequiredItemNames);
+
+            // Categories too. They were left out when this was written, which meant a category
+            // failure printed 550aa4cd4bdc2dd8348b456c where it meant "Silencer" - and a category
+            // failure is exactly the kind a reader has no other way to identify, since the id names
+            // a base class rather than anything they could look up in the handbook.
+            return Substitute(unmet, build.RequiredCategoryIds, build.RequiredCategoryNames);
+        }
+
+        private static string Substitute(string text, List<string> ids, List<string> names)
+        {
+            // Pairwise, so a list that has drifted out of step substitutes what it can rather than
+            // throwing. The two are built together and cannot drift today; this is here so that a
+            // log line never becomes the thing that breaks a payload.
+            var count = Math.Min(ids.Count, names.Count);
 
             for (var i = 0; i < count; i++)
-                unmet = unmet.Replace(build.RequiredItemIds[i], build.RequiredItemNames[i], StringComparison.Ordinal);
+                text = text.Replace(ids[i], names[i], StringComparison.Ordinal);
 
-            return unmet;
+            return text;
         }
 
         /// <summary>Condition type that names another quest as a prerequisite.</summary>
