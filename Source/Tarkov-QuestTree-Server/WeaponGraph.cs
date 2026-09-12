@@ -79,6 +79,21 @@ namespace QuestTreeServer
             public double Weight { get; init; }
             public int? MagazineCapacity { get; init; }
             public double? SightingRange { get; init; }
+
+            /// <summary>What this part adds to the assembled gun's grid footprint, and for a weapon, the
+            /// footprint it starts with.
+            ///
+            /// Here because the SEARCH has to know. A width limit that only the verifier understood produced
+            /// a five-wide MP-133 against a limit of four: the solver reported it satisfied, the verifier
+            /// caught it, and the quest ended up with no answer at all instead of a wrong one. A constraint
+            /// the search cannot optimise against is not a constraint, it is a rejection notice.</summary>
+            public int Width { get; init; }
+            public int Height { get; init; }
+            public int ExtraUp { get; init; }
+            public int ExtraDown { get; init; }
+            public int ExtraLeft { get; init; }
+            public int ExtraRight { get; init; }
+            public bool ExtraForced { get; init; }
         }
 
         private readonly Dictionary<MongoId, PartInfo> _parts = new();
@@ -321,7 +336,14 @@ namespace QuestTreeServer
                 RecoilPercent = props.Recoil ?? 0d,
                 Weight = props.Weight ?? 0d,
                 MagazineCapacity = capacity > 0 ? (int)capacity : null,
-                SightingRange = props.SightingRange > 0 ? props.SightingRange : null
+                SightingRange = props.SightingRange > 0 ? props.SightingRange : null,
+                Width = props.Width ?? 1,
+                Height = props.Height ?? 1,
+                ExtraUp = props.ExtraSizeUp ?? 0,
+                ExtraDown = props.ExtraSizeDown ?? 0,
+                ExtraLeft = props.ExtraSizeLeft ?? 0,
+                ExtraRight = props.ExtraSizeRight ?? 0,
+                ExtraForced = props.ExtraSizeForceAdd == true
             };
         }
     }

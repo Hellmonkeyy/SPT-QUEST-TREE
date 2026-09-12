@@ -225,7 +225,17 @@ namespace QuestTreeServer
         /// the empty-tactical-slot count are all real constraints this cannot see.</summary>
         private static readonly HashSet<string> Scored = new(StringComparer.OrdinalIgnoreCase)
         {
-            "ergonomics", "recoil", "weight", "magazine capacity", "effective distance"
+            "ergonomics", "recoil", "weight", "magazine capacity", "effective distance", "height", "width"
+        };
+
+        /// <summary>Goals measured from the assembled grid rather than from the stat model.
+        ///
+        /// Computed here independently of the verifier's own version, and deliberately so: the verifier is
+        /// only a second opinion while it is a SEPARATE opinion, and sharing one implementation of the rule
+        /// would have meant neither could catch the other being wrong about it.</summary>
+        private static readonly HashSet<string> Sized = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "height", "width"
         };
 
         /// <summary>Fields that are not build properties at all, so their absence from a build is
@@ -563,9 +573,13 @@ namespace QuestTreeServer
 
             if (stats == null) return result;
 
+            var footprint = Footprint(best, state);
+
             foreach (var goal in goals)
             {
-                var actual = Read(stats, goal.Field);
+                var actual = Sized.Contains(goal.Field)
+                    ? goal.Field.ToLowerInvariant() == "height" ? footprint.Height : footprint.Width
+                    : Read(stats, goal.Field);
 
                 if (actual == null)
                 {
@@ -1160,6 +1174,18 @@ namespace QuestTreeServer
                         if (part.SightingRange is { } range)
                             score += direction * range / goal.Scale;
                         break;
+
+                    // A size limit always wants LESS, so a part that widens or heightens the gun is a cost.
+                    // Approximate on purpose: the real rule takes a maximum across parts rather than a sum,
+                    // and this only has to steer the dressing away from the widest options - the climb
+                    // measures the assembled footprint exactly.
+                    case "height":
+                        score += direction * (part.ExtraUp + part.ExtraDown) / goal.Scale;
+                        break;
+
+                    case "width":
+                        score += direction * (part.ExtraLeft + part.ExtraRight) / goal.Scale;
+                        break;
                 }
             }
 
@@ -1710,6 +1736,8 @@ namespace QuestTreeServer
             var stats = model.Score(weapon, buffer);
             if (stats == null) return new Cost(int.MaxValue, double.MaxValue, int.MaxValue, 0d);
 
+            var footprint = Footprint(root, state);
+
             // Structural gaps, counted before any number is looked at. A required slot left empty or
             // a category with nothing from it is not a worse build - it is one the player cannot
             // assemble or cannot hand in, and the search has to close that before it spends anything
@@ -1736,7 +1764,9 @@ namespace QuestTreeServer
 
             foreach (var goal in state.Goals)
             {
-                var actual = Read(stats, goal.Field);
+                var actual = Sized.Contains(goal.Field)
+                    ? goal.Field.ToLowerInvariant() == "height" ? footprint.Height : footprint.Width
+                    : Read(stats, goal.Field);
 
                 // No value is neither a pass nor a near miss: a magazine-capacity threshold on a gun
                 // with no magazine is completely unmet.
@@ -1815,6 +1845,64 @@ namespace QuestTreeServer
                 if (Parts != other.Parts) return Parts < other.Parts;
 
                 return Headroom > other.Headroom + MinGain;
+            }
+        }
+
+        /// <summary>The grid the assembled gun takes up. The receiver is 1x1 and every part extends it,
+        /// so each direction takes the LARGEST extension any one part asks for, except parts marked
+        /// ExtraSizeForceAdd which stack on top.
+        ///
+        /// Folding and collapsing are NOT applied, matching the verifier's reading for the same reason: the
+        /// item data does not say whether a hand-in measures a weapon extended or reduced, and a build that
+        /// fits extended fits whatever the player does with the stock.</summary>
+        private static (int Width, int Height) Footprint(Node root, SearchState state)
+        {
+            if (!state.Reachable.TryGetValue(root.Template, out var weapon)) return (1, 1);
+
+            var up = 0;
+            var down = 0;
+            var left = 0;
+            var right = 0;
+
+            var forcedUp = 0;
+            var forcedDown = 0;
+            var forcedLeft = 0;
+            var forcedRight = 0;
+
+            Extend(root, state, ref up, ref down, ref left, ref right,
+                ref forcedUp, ref forcedDown, ref forcedLeft, ref forcedRight);
+
+            return (weapon.Width + left + right + forcedLeft + forcedRight,
+                weapon.Height + up + down + forcedUp + forcedDown);
+        }
+
+        private static void Extend(
+            Node node, SearchState state,
+            ref int up, ref int down, ref int left, ref int right,
+            ref int forcedUp, ref int forcedDown, ref int forcedLeft, ref int forcedRight)
+        {
+            foreach (var child in node.Children)
+            {
+                if (state.Reachable.TryGetValue(child.Template, out var part))
+                {
+                    if (part.ExtraForced)
+                    {
+                        forcedUp += part.ExtraUp;
+                        forcedDown += part.ExtraDown;
+                        forcedLeft += part.ExtraLeft;
+                        forcedRight += part.ExtraRight;
+                    }
+                    else
+                    {
+                        if (part.ExtraUp > up) up = part.ExtraUp;
+                        if (part.ExtraDown > down) down = part.ExtraDown;
+                        if (part.ExtraLeft > left) left = part.ExtraLeft;
+                        if (part.ExtraRight > right) right = part.ExtraRight;
+                    }
+                }
+
+                Extend(child, state, ref up, ref down, ref left, ref right,
+                    ref forcedUp, ref forcedDown, ref forcedLeft, ref forcedRight);
             }
         }
 
