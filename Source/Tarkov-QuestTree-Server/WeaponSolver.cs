@@ -242,7 +242,9 @@ namespace QuestTreeServer
             IReadOnlyCollection<MongoId> mustIncludeCategories,
             IReadOnlyCollection<MongoId>? allowed,
             IReadOnlyList<FittedPart>? knownGood = null,
-            int seed = 0)
+            int seed = 0,
+            int restarts = 0,
+            int ceiling = 0)
         {
             var result = new Result();
 
@@ -265,7 +267,8 @@ namespace QuestTreeServer
             var state = new SearchState(reachable, allowed, goals, mustIncludeCategories, Stopwatch.StartNew())
             {
                 RecoilPerPercent = (bare?.Recoil ?? 0d) / 100d,
-                Seed = seed
+                Seed = seed,
+                Restarts = restarts > 0 ? restarts : Attempts
             };
 
             state.Measure(weapon);
@@ -328,6 +331,12 @@ namespace QuestTreeServer
                 state.PartCeiling = bestCount - 1;
             }
 
+            // An explicit ceiling is how a caller asks a different question. "Find one THIS size" rather
+            // than "find one smaller" is a search of a different basin at the same cost, and a build found
+            // that way is somewhere new to try shrinking from next time - which is the difference between
+            // a search that keeps exploring and one that has converged and stopped.
+            if (ceiling > 0) state.PartCeiling = ceiling;
+
             var found = Search(weapon, required, state, floor, ref bestWhole, ref bestShortfall, ref bestCount);
 
             if (found != null) best = found;
@@ -387,7 +396,7 @@ namespace QuestTreeServer
             // A fully dressed start still earns its place: it reaches builds the lean one cannot,
             // and it is why the KRISS Vector solves at all. Past those, a randomised start is what
             // gets out of a basin no single move can leave.
-            for (var attempt = 0; attempt < Attempts; attempt++)
+            for (var attempt = 0; attempt < state.Restarts; attempt++)
             {
                 state.ResetTree(weapon);
 
@@ -2148,6 +2157,10 @@ namespace QuestTreeServer
             /// what makes "how far is this template from that part" answerable by one walk per
             /// required part instead of one per question.</summary>
             public Dictionary<MongoId, List<MongoId>> Hosts { get; } = new();
+
+            /// <summary>How many dressings to climb from. More of them is the only lever that reliably
+            /// finds anything on a build that has resisted, and a training run has time to spend.</summary>
+            public int Restarts { get; init; } = Attempts;
 
             /// <summary>Where this boot's random starting points begin. Advanced once per boot by the
             /// cache, so no two boots explore the same ground.</summary>

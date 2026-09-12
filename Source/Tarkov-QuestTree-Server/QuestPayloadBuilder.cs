@@ -73,6 +73,17 @@ namespace QuestTreeServer
         private int _seed;
         private int _improved;
 
+        /// <summary>Where training is searching FROM for each build, which is not always what the cache
+        /// holds: a wander round moves this without moving the answer.</summary>
+        private readonly Dictionary<string, List<WeaponSolver.FittedPart>> _working = new();
+
+        /// <summary>Builds whose size equals a proven lower bound. No search can improve them, so spending
+        /// a third of every round on them - which is what uniform effort did - is arithmetic nobody needs
+        /// repeated.</summary>
+        private readonly HashSet<string> _settled = new();
+
+        private int _round;
+
         public Task OnLoadAsync(CancellationToken cancellationToken)
         {
             // Before anything is solved: every boot searches from starting points no previous boot used,
@@ -396,6 +407,19 @@ namespace QuestTreeServer
         private QuestPayloadDto Build()
         {
             var payload = new QuestPayloadDto();
+
+            // Emptied first, because this runs again on every rebuild and these are APPENDED to as the
+            // quests are walked. Without the clear they grow by sixty each time: the training run, which
+            // rebuilds the payload every time it finds a smaller build, reported "20 of 180 are provably
+            // minimal" and was searching every requirement three times a round.
+            //
+            // Latent since Rebuild was written - a harvest rebuild is rare enough that nobody saw it - and
+            // only visible once something started rebuilding often.
+            lock (_questBuilds)
+            {
+                _questBuilds.Clear();
+                _questWeapons.Clear();
+            }
 
             var quests = templateTable.Quests;
             if (quests == null)
@@ -743,9 +767,11 @@ namespace QuestTreeServer
                 // Remembered so the slot graphs can be walked once at boot. Collected here rather
                 // than re-derived later because this is the only pass that already knows which
                 // weapons the installed quests actually name.
-                if (weapon!.TryParseMongoId(out var weaponId)) _questWeapons.Add(weaponId);
+                lock (_questBuilds)
+                    if (weapon!.TryParseMongoId(out var weaponId)) _questWeapons.Add(weaponId);
 
-                _questBuilds.Add((ResolveQuestName(quest, quest.Id.ToString(), locale), build));
+                lock (_questBuilds)
+                    _questBuilds.Add((ResolveQuestName(quest, quest.Id.ToString(), locale), build));
             }
 
             return builds;
@@ -822,6 +848,28 @@ namespace QuestTreeServer
         /// flag: an install that never creates the file can never be made to grind by accident.</summary>
         private int IdleGenerations => weaponBuildCache.Training ? 3 : 1;
 
+        /// <summary>Restarts a training round spends on a build that has never resisted, and the most it
+        /// will escalate to for one that has.
+        ///
+        /// Effort was uniform, which is the wrong shape twice over: a build that has failed forty rounds at
+        /// the same size will not fall to a forty-first identical attempt, and a build nobody has looked at
+        /// twice does not need sixty restarts. It now grows with resistance.</summary>
+        private const int BaseRestarts = 16;
+        private const int MaxRestarts = 96;
+
+        /// <summary>One round in this many is a WANDER: instead of asking for a smaller build it asks for a
+        /// different one of the same size, and keeps it as the place to search from next time.
+        ///
+        /// Without this the search is a hill climb from one fixed point. It converged to 583 parts on the
+        /// second round and then found nothing for twenty more, because every round was re-asking the same
+        /// question from the same place. A same-size build somewhere else in the space is a new basin to
+        /// try shrinking from, and it costs a round to get one.
+        ///
+        /// A wander never reaches the cache. It changes where training LOOKS, not what the mod serves - the
+        /// history is still only ever replaced by something strictly smaller, so no player is told to fit
+        /// one thing today and another tomorrow.</summary>
+        private const int WanderEveryNthRound = 4;
+
         /// <summary>Rounds between progress lines while training. A run that goes on for hours has to say
         /// what it is doing without filling the log.</summary>
         private const int TrainingReportEvery = 10;
@@ -897,7 +945,9 @@ namespace QuestTreeServer
                         if (training && rounds % TrainingReportEvery == 0)
                             logger.Info(
                                 $"Quest Tracker: training - {rounds} rounds in {clock.Elapsed.TotalMinutes:0.0} " +
-                                $"minutes, {total} smaller build(s) found so far. Stop the server to finish.");
+                                $"minutes, {total} smaller build(s) found so far. {_settled.Count} of " +
+                                $"{Requirements} are provably minimal and no longer searched. Stop the " +
+                                "server to finish.");
 
                         if (found <= 0) continue;
 
@@ -933,15 +983,36 @@ namespace QuestTreeServer
             }, cancellationToken);
         }
 
+        private int Requirements
+        {
+            get { lock (_questBuilds) return _questBuilds.Count; }
+        }
+
+        /// <summary>The proven lower bound for one requirement, worked out once and kept.</summary>
+        private int Proven(
+            MongoId weapon,
+            List<(string Field, string Compare, double Value)> thresholds,
+            List<MongoId> mustInclude,
+            List<MongoId> mustIncludeCategories) =>
+            weaponBuildVerifier.LowestPossible(weapon, thresholds, mustInclude, mustIncludeCategories).Parts;
+
         /// <summary>One sweep over every requirement from a fresh set of starting points, and how many
         /// builds it managed to shrink.</summary>
         private int Generation()
         {
             _seed = weaponBuildCache.Advance();
+            _round++;
 
+            var wander = _round % WanderEveryNthRound == 0;
             var found = 0;
 
-            foreach (var (_, build) in _questBuilds)
+            // A snapshot, because an improvement rebuilds the payload on this same thread and a rebuild
+            // clears and refills the list this is walking. Enumerating it directly is how a background
+            // search that succeeds trips over its own success.
+            List<(string Quest, WeaponBuildDto Build)> requirements;
+            lock (_questBuilds) requirements = _questBuilds.ToList();
+
+            foreach (var (_, build) in requirements)
             {
                 if (!build.WeaponTemplate.TryParseMongoId(out var weapon)) continue;
 
@@ -960,17 +1031,48 @@ namespace QuestTreeServer
 
                 if (remembered == null) continue;
 
-                var result = weaponSolver.Solve(
-                    weapon, thresholds, mustInclude, mustIncludeCategories,
-                    allowed: null, knownGood: Restore(remembered), seed: _seed);
+                // Provably minimal already. Nothing to find, so nothing is spent looking.
+                if (_settled.Contains(key)) continue;
 
-                if (!result.Found || result.Parts.Count >= remembered.Parts.Count)
+                if (remembered.Parts.Count <= Proven(weapon, thresholds, mustInclude, mustIncludeCategories))
+                {
+                    _settled.Add(key);
+                    continue;
+                }
+
+                var working = _working.GetValueOrDefault(key) ?? Restore(remembered);
+                if (working == null) continue;
+
+                // Effort follows resistance. A build that has failed forty rounds gets a wider search than
+                // one nobody has looked at twice, because a forty-first identical attempt is not a search.
+                var restarts = Math.Min(MaxRestarts, BaseRestarts + remembered.Attempts);
+
+                var result = wander
+                    ? weaponSolver.Solve(
+                        weapon, thresholds, mustInclude, mustIncludeCategories,
+                        allowed: null, knownGood: null, seed: _seed, restarts: restarts,
+                        ceiling: working.Count)
+                    : weaponSolver.Solve(
+                        weapon, thresholds, mustInclude, mustIncludeCategories,
+                        allowed: null, knownGood: working, seed: _seed, restarts: restarts);
+
+                if (!result.Found)
                 {
                     weaponBuildCache.Held(key);
                     continue;
                 }
 
+                // Somewhere new of the same size: worth searching from, not worth serving.
+                if (result.Parts.Count >= remembered.Parts.Count)
+                {
+                    if (result.Parts.Count <= working.Count) _working[key] = result.Parts;
+
+                    weaponBuildCache.Held(key);
+                    continue;
+                }
+
                 weaponBuildCache.Put(key, result.Parts, result.Floor);
+                _working[key] = result.Parts;
 
                 // So the payload rebuild and the next generation both see the better one.
                 lock (_solved) _solved[key] = result;
