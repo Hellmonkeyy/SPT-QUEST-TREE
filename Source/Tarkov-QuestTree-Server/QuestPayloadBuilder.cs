@@ -89,6 +89,12 @@ namespace QuestTreeServer
             var ceiling = 0;
             var failed = new List<string>();
 
+            // The search has a wall-clock ceiling, so how much of it the worst request actually spends
+            // is the difference between a solver that always answers and one that answers differently
+            // on a busy machine. Reported rather than assumed.
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            var worst = 0;
+
             // Why, not just how many. A pass rate with no cause behind it invites guessing at the
             // algorithm, and the reasons separate three very different problems: a search too weak
             // to place the parts a quest names, a search that places them and misses a number, and a
@@ -110,6 +116,7 @@ namespace QuestTreeServer
                 var result = weaponSolver.Solve(weapon, thresholds, mustInclude, allowed: null);
 
                 if (result.HitCeiling) ceiling++;
+                if (result.NodesOpened > worst) worst = result.NodesOpened;
 
                 if (result.Found)
                 {
@@ -120,30 +127,16 @@ namespace QuestTreeServer
                     continue;
                 }
 
-                logger.Info(
-                    $"DETAIL {questName} ({build.WeaponTemplate}): " +
-                    string.Join(", ", build.Thresholds.Select(t => $"{t.Field}{t.Compare}{t.Value}")) +
-                    $" | required {string.Join(", ", build.RequiredItemNames)}" +
-                    $" | cats {string.Join(", ", build.RequiredCategoryNames)}" +
-                    $" | emptyTac {build.EmptyTacticalSlots}" +
-                    $" | nodes {result.NodesOpened} ceiling {result.HitCeiling}" +
-                    $" | parts {result.Parts.Count}");
-
-                logger.Info("  BUILD " + string.Join(" ", result.Parts.Select(p => $"{p.SlotName}={p.Template}")));
-
-                foreach (var threshold in build.Thresholds)
-                {
-                    var solo = weaponSolver.Solve(
-                        weapon, new[] { (threshold.Field, threshold.Compare, threshold.Value) }, mustInclude, null);
-
-                    logger.Info(
-                        $"  SOLO {threshold.Field}{threshold.Compare}{threshold.Value} -> " +
-                        (solo.Stats == null
-                            ? "no stats"
-                            : $"erg {solo.Stats.Ergonomics:0.##} rec {solo.Stats.Recoil:0.##} wt {solo.Stats.Weight:0.###} " +
-                              $"mag {solo.Stats.MagazineCapacity} eff {solo.Stats.EffectiveDistance}") +
-                        (solo.Found ? " MET" : $" UNMET {string.Join("; ", solo.Unmet.Take(2))}"));
-                }
+                // Everything the next person to look at a failure needs, and nothing that needs the
+                // solver run twice to produce: what the quest asked for, what the search spent, and
+                // the parts it settled on. Debug, because on a working install there are none of
+                // these; the one-line summary above is what a normal boot says.
+                logger.Debug(
+                    $"Quest Tracker: unsolved '{questName}' ({build.WeaponName}) wants " +
+                    string.Join(", ", build.Thresholds.Select(t => $"{t.Field} {t.Compare} {t.Value:0.##}")) +
+                    $"; requires {string.Join(", ", build.RequiredItemNames)}" +
+                    $"; searched {result.NodesOpened:N0} nodes" + (result.HitCeiling ? " AND HIT THE BUDGET" : "") +
+                    $"; settled on {string.Join(" ", result.Parts.Select(p => $"{p.SlotName}={p.Template}"))}.");
 
                 // A bare template id does not say which part the search could not place, and that is
                 // the only question these lines get read to answer. The DTO already carries the
@@ -171,7 +164,8 @@ namespace QuestTreeServer
             logger.Info(
                 $"Quest Tracker: weapon solver dry run - {solved} of {_questBuilds.Count} build requirement(s) " +
                 $"satisfied from the full parts list" +
-                (ceiling > 0 ? $", {ceiling} hit the search budget" : "") + ".");
+                (ceiling > 0 ? $", {ceiling} hit the search budget" : "") +
+                $" - {clock.ElapsedMilliseconds:N0} ms for all of them, {worst:N0} nodes for the worst one.");
 
             if (reasons.Count > 0)
                 logger.Info(

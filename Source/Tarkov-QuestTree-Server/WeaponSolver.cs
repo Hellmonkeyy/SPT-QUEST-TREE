@@ -451,26 +451,31 @@ namespace QuestTreeServer
                 }
             }
 
-            // Closest to the part first. Then the best INTERMEDIATE, which is a stats decision and not
-            // only a routing one: the M1A hides the UltiMAK mount's seat on its stock, so the stock the
-            // planner picks is the stock the gun wears - and because a chain the planner lays is locked
-            // against the climb, picking the merely nearest one froze a stock 12 ergonomics and 2%
-            // recoil worse than the chassis next to it, in every restart, and cost the quest. A restart
-            // shuffles this, so a plan the numbers like is tried alongside plans they do not.
+            // The best step first, WORTH before distance, because where a chain runs is a stats
+            // decision and not only a routing one - and a chain the planner lays is locked against the
+            // climb, so a step chosen badly here cannot be recovered later.
             //
-            // Narrowest slot last, and still worth having: a slot taking three things is the one the
-            // part was made for, and spending a rail that admits eighty denies it to a part with
-            // nowhere else to go.
+            // Both of the last two failures were this. The M1A hides the UltiMAK mount's seat on its
+            // stock, so the stock the chain runs through is the stock the gun wears, and the nearest
+            // one was 12 ergonomics and 2% recoil worse than the chassis beside it. The ASh-12 needs
+            // its required foregrip fitted to the polymer handguard rather than straight into the slot
+            // that admits them both - the handguard is +5 ergonomics, the quest wants 40, and the best
+            // build there reaches exactly 40. Shortest-route-first could not see either.
+            //
+            // Distance still ranks, below worth: an equally good step that spends fewer slots leaves
+            // more of the gun for the rest of the build. So does narrowest slot, last - a slot taking
+            // three things is the one the part was made for, and spending a rail that admits eighty
+            // denies it to a part with nowhere else to go.
             steps.Sort((left, right) =>
             {
-                var closer = left.Left.CompareTo(right.Left);
-                if (closer != 0) return closer;
-
                 var tossed = left.Toss.CompareTo(right.Toss);
                 if (tossed != 0) return tossed;
 
                 var worth = right.Worth.CompareTo(left.Worth);
                 if (worth != 0) return worth;
+
+                var closer = left.Left.CompareTo(right.Left);
+                if (closer != 0) return closer;
 
                 return host.Slots[left.Slot].Candidates.Length.CompareTo(host.Slots[right.Slot].Candidates.Length);
             });
