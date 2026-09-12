@@ -233,10 +233,15 @@ namespace QuestTreeServer
                 // single-threaded answers, and every concurrent recomputation for the rest of the boot is
                 // compared against them build by build. Sixty matching sixty, not one total matching another
                 // - two different wrong bounds can sum to the same number.
-                Crosscheck(
-                    WeaponBuildCache.KeyFor(weapon, thresholds, mustInclude, mustIncludeCategories),
-                    lowest.Parts,
-                    weapon);
+                var boundKey = WeaponBuildCache.KeyFor(weapon, thresholds, mustInclude, mustIncludeCategories);
+
+                Crosscheck(boundKey, lowest.Parts, weapon);
+
+                // Recorded HERE as well as in Proven, and the first version of this missed it: the survey is
+                // the only place a bound is computed on a boot that does no training, so without this the
+                // evidence line reported zeros on every normal launch - a denominator of nothing, which is
+                // the exact failure it was added to prevent.
+                weaponBuildCache.Bound(boundKey, lowest.Parts);
 
                 duplicates += verdict.Duplicates;
                 unverifiable += verdict.Unverifiable.Count;
