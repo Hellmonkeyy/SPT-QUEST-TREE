@@ -48,7 +48,11 @@ namespace QuestTreeServer
         WeaponGraph weaponGraph,
         WeaponSolver weaponSolver,
         WeaponBuildVerifier weaponBuildVerifier,
-        WeaponBuildCache weaponBuildCache) : IOnLoad
+        WeaponBuildCache weaponBuildCache,
+        WeaponPresets weaponPresets,
+        PartAvailability partAvailability,
+        SPTarkov.Server.Core.Helpers.Profile.ProfileHelper profileHelper,
+        SPTarkov.Server.Core.Servers.SaveServer saveServer) : IOnLoad
     {
         /// <summary>Built while the server starts, for the reason MapMarkerPayloadBuilder gives:
         /// the client's request handler is synchronous on Unity's main thread, so paying for the
@@ -111,7 +115,18 @@ namespace QuestTreeServer
         /// <summary>Builds whose size equals a proven lower bound. No search can improve them, so spending
         /// a third of every round on them - which is what uniform effort did - is arithmetic nobody needs
         /// repeated.</summary>
-        private readonly HashSet<string> _settled = new();
+        /// <summary>Requirements whose build matches the fewest PARTS any satisfying build could have.
+        ///
+        /// It used to be a skip list - a build at its bound could not get smaller, so it was never searched
+        /// again. It cannot be one any more. The objective is now the number of parts a player has to BUY,
+        /// and a build already as small as possible may still be cheaper to assemble, so every requirement
+        /// stays searchable.
+        ///
+        /// What it still is: a true statement about part count, produced by a bound that cost 566 million
+        /// nodes to establish, and the set the falsifier attacks. What it is NOT is a count of builds proven
+        /// minimal over the new objective - that needs a lower bound over CHANGES, which does not exist yet,
+        /// so that count is reported as zero rather than inheriting this one's number.</summary>
+        private readonly HashSet<string> _proven = new();
 
         /// <summary>Searches spent this boot. The unit the progress line and both gates count in, since a
         /// round stopped existing when the barrier did.</summary>
@@ -131,6 +146,7 @@ namespace QuestTreeServer
             // would meet one has to happen where a log line is read rather than inside a request.
             weaponGraph.Survey(_questWeapons);
             SurveySolver();
+            AuditAvailability();
 
             // After the survey, because that is what finishes solving: the payload builds what it needs
             // and the survey covers the rest.
@@ -180,6 +196,12 @@ namespace QuestTreeServer
             var unproven = new List<string>();
             var unverifiable = 0;
             var disagreed = 0;
+
+            // THE OBJECTIVE, summed: parts these builds need that the weapons do not already wear. Reported
+            // beside the part count rather than replacing it, because the bounds and the proofs are over part
+            // count and would read as claims about this number if it stood alone.
+            var changes = 0;
+            var withDefaults = 0;
             var failed = new List<string>();
 
             // The search has a wall-clock ceiling, so how much of it the worst request actually spends
@@ -264,6 +286,8 @@ namespace QuestTreeServer
                     solved++;
                     parts += result.Parts.Count;
                     proven += lowest.Parts;
+                    changes += result.Changes;
+                    if (weaponPresets.For(weapon) != null) withDefaults++;
 
                     if (verdict.Irreducible) irreducible++;
                     foreach (var spare in verdict.Spare) logger.Warning($"Quest Tracker: '{questName}' carries a spare part - {spare}. The search should not have left it.");
@@ -333,6 +357,17 @@ namespace QuestTreeServer
                     ? $", {unverifiable} constraint(s) across {unscorable} build(s) that nothing here can score"
                     : "") +
                 (disagreed > 0 ? $", SOLVER AND VERIFIER DISAGREED ON {disagreed}" : "") + ".");
+
+            // The objective's own line, and the statement about what is NOT proven about it. Every bound and
+            // every proof in this file is over part count; none of them says anything about how many parts a
+            // player has to buy, so the count of builds proven minimal on the objective is zero - not the
+            // twenty-one carried over from a bound that answers a different question.
+            logger.Info(
+                $"Quest Tracker: the objective - {changes} change(s) from the default presets across " +
+                $"{solved} build(s), {(solved > 0 ? (double)changes / solved : 0d):0.##} per build; " +
+                $"{withDefaults} of them have a default preset to be measured against. 0 of {solved} are " +
+                "proven minimal on changes: the bound that proves minimality is over PART COUNT, and no " +
+                "bound over changes exists yet.");
 
             // Per quest, how far the build is above what can be PROVEN necessary. A gap is not waste -
             // the bound omits the chains that named parts have to be routed through, and bounding
@@ -875,13 +910,63 @@ namespace QuestTreeServer
                 HitBudget = result.HitCeiling
             };
 
-            foreach (var part in result.Parts)
-                solution.Parts.Add(new SolvedPartDto
+            // THE DIFF, computed here from live data rather than read from the history. The history holds
+            // what the search chose; what a player has to do about it depends on the item database in front of
+            // them, so computing it at payload-build time means it is always current and there is no second
+            // fingerprint to keep in step.
+            var defaults = weaponPresets.For(weapon);
+            var changes = 0;
+
+            solution.HasDefaults = defaults != null;
+
+            for (var index = 0; index < result.Parts.Count; index++)
+            {
+                var part = result.Parts[index];
+
+                var row = new SolvedPartDto
                 {
                     Slot = part.SlotName,
                     Template = part.Template.ToString(),
                     Name = ResolveItemName(part.Template.ToString(), locale)
-                });
+                };
+
+                if (defaults != null)
+                {
+                    // The host is what the part is fitted TO - the weapon itself for a part at the top, or
+                    // the template of the part above it. A slot name alone is not a place on a gun.
+                    var host = part.Parent >= 0 && part.Parent < result.Parts.Count
+                        ? result.Parts[part.Parent].Template
+                        : weapon;
+
+                    if (!defaults.Occupants.TryGetValue((host, part.SlotName), out var stock))
+                    {
+                        row.Status = "add";
+                        changes++;
+                    }
+                    else if (stock == part.Template)
+                    {
+                        row.Status = "fitted";
+                    }
+                    else
+                    {
+                        row.Status = "swap";
+                        row.Replaces = ResolveItemName(stock.ToString(), locale);
+                        changes++;
+                    }
+                }
+
+                solution.Parts.Add(row);
+            }
+
+            solution.Changes = changes;
+
+            // Two independent counts of the same thing - this one walks the DTO rows, the solver's walks its
+            // own tree - so a disagreement means one of them is reading the preset differently and the panel
+            // would show a diff that does not match the objective the build was chosen by.
+            if (defaults != null && changes != result.Changes)
+                logger.Warning(
+                    $"Quest Tracker: the panel counts {changes} change(s) for '{build.WeaponName}' and the " +
+                    $"search counted {result.Changes}. They read the same preset, so one of them is wrong.");
 
             if (result.Stats is { } stats)
             {
@@ -1132,8 +1217,9 @@ namespace QuestTreeServer
                 logger.Info(
                     $"Quest Tracker: {what} - {_attempts:N0} attempt(s) in {clock.Elapsed.TotalMinutes:0.0} " +
                     $"minute(s) across {Threads} thread(s) ({_attempts / minutes:N0}/min), {_improved} smaller " +
-                    $"build(s) found. {_settled.Count} of {Requirements} are provably minimal and no longer " +
-                    $"searched. {_boundsChecked:N0} bound comparison(s) across {_bounds.Count} requirement(s), " +
+                    $"build(s) found. {_proven.Count} of {Requirements} are provably minimal ON PART COUNT, " +
+                    $"0 proven minimal on CHANGES - the objective - because no bound over changes exists yet. " +
+                    $"{_boundsChecked:N0} bound comparison(s) across {_bounds.Count} requirement(s), " +
                     $"{_boundsDisagreed} disagreement(s)." +
                     (Falsifying
                         ? $" {_falsifyTries:N0} falsification attempt(s) against proven-minimal builds, " +
@@ -1194,6 +1280,15 @@ namespace QuestTreeServer
         }
 
         /// <summary>The proven lower bound for one requirement, worked out once and kept.</summary>
+        /// <summary>Whether one build beats another on the objective: fewer purchases, or the same number
+        /// of purchases and fewer parts.
+        ///
+        /// The single place the write rule is expressed, so the improvement loop and the boot solve cannot
+        /// disagree about what an improvement is - which they did for a while, in the days when one of them
+        /// required strictly smaller and the other did not.</summary>
+        private static bool Cheaper(int changes, int parts, int wasChanges, int wasParts) =>
+            changes < wasChanges || (changes == wasChanges && parts < wasParts);
+
         private int Proven(
             MongoId weapon,
             List<(string Field, string Compare, double Value)> thresholds,
@@ -1241,6 +1336,155 @@ namespace QuestTreeServer
                 $"{first} earlier in this boot. A bound is a property of the item data and cannot depend on who " +
                 "asked - the proof tables are not order-independent, and no build should be called minimal " +
                 "until that is fixed.");
+        }
+
+        /// <summary>Counts the builds that name a part the player cannot get.
+        ///
+        /// THE MEASUREMENT THAT COMES BEFORE THE OPTIMISATION. The search chooses from every part that
+        /// exists, so it can recommend something a profile cannot obtain at any price, and until now nothing
+        /// looked. A build that cannot be assembled is worse than an expensive one, so the honest first step
+        /// is to find out how often it happens rather than to start pricing things.
+        ///
+        /// Every profile on the install, because this is used with FIKA: a host serves a group, and the
+        /// answer differs sharply between a fresh profile and a finished one. Read-only, allocated per
+        /// profile, and it runs once at boot after the survey - it touches no shared state and nothing waits
+        /// on it.
+        ///
+        /// The loyalty view is the interesting half. A part this profile cannot buy might be gated behind
+        /// trader progress or not sold at all, and those are different problems: one is "your traders are too
+        /// low", the other is "nobody sells this". The same data answers what a player with every trader at
+        /// level one would be missing, which is the case that matters most - they are the ones doing Gunsmith
+        /// early and the most likely to be handed advice they cannot act on.</summary>
+        private void AuditAvailability()
+        {
+            List<(string Quest, WeaponBuildDto Build)> requirements;
+            lock (_questBuilds) requirements = _questBuilds.ToList();
+
+            if (requirements.Count == 0) return;
+
+            Dictionary<MongoId, SPTarkov.Server.Core.Models.Eft.Profile.SptProfile> profiles;
+
+            try
+            {
+                profiles = saveServer.GetProfiles();
+            }
+            catch (Exception ex)
+            {
+                logger.Info($"Quest Tracker: no profiles to check part availability against ({ex.Message}).");
+                return;
+            }
+
+            if (profiles.Count == 0)
+            {
+                logger.Info("Quest Tracker: no profiles on this install, so part availability cannot be checked.");
+                return;
+            }
+
+            foreach (var (id, _) in profiles)
+            {
+                SPTarkov.Server.Core.Models.Eft.Common.PmcData? pmc = null;
+
+                try
+                {
+                    pmc = profileHelper.GetPmcProfile(id);
+                }
+                catch (Exception)
+                {
+                    continue;
+                }
+
+                if (pmc is null) continue;
+
+                var sources = partAvailability.For(id, pmc);
+
+                if (sources == null) continue;
+
+                var unbuildable = 0;      // builds naming at least one part this profile cannot get
+                var missing = new HashSet<MongoId>();
+                var gatedOnly = new HashSet<MongoId>();   // sold, but behind trader progress
+                var unsold = new HashSet<MongoId>();      // no trader offers it at any level
+                var earlyBlocked = 0;     // builds a profile with every trader at level one could not build
+                var affected = new List<string>();
+                var owned = 0;            // parts already in the stash
+                var priced = 0L;          // what the rest would cost at trader prices
+
+                foreach (var (_, build) in requirements)
+                {
+                    if (!build.WeaponTemplate.TryParseMongoId(out var weapon)) continue;
+
+                    var thresholds = build.Thresholds.Select(t => (t.Field, t.Compare, t.Value)).ToList();
+
+                    var mustInclude = new List<MongoId>();
+                    foreach (var named in build.RequiredItemIds)
+                        if (named.TryParseMongoId(out var parsed)) mustInclude.Add(parsed);
+
+                    var mustIncludeCategories = new List<MongoId>();
+                    foreach (var category in build.RequiredCategoryIds)
+                        if (category.TryParseMongoId(out var parsed)) mustIncludeCategories.Add(parsed);
+
+                    var key = WeaponBuildCache.KeyFor(weapon, thresholds, mustInclude, mustIncludeCategories);
+                    var remembered = weaponBuildCache.Get(key);
+
+                    if (remembered == null) continue;
+
+                    var blocked = false;
+                    var earlyBlockedHere = false;
+                    var defaults = weaponPresets.For(weapon);
+
+                    foreach (var part in remembered.Parts)
+                    {
+                        if (!part.Template.TryParseMongoId(out var template)) continue;
+
+                        // A part the weapon already wears needs no trader at all.
+                        if (defaults != null && defaults.Occupants.Values.Contains(template)) continue;
+
+                        if (sources.Owned.Contains(template)) { owned++; continue; }
+
+                        if (sources.Buyable.TryGetValue(template, out var price))
+                        {
+                            priced += price;
+                            if (sources.Gated.TryGetValue(template, out var gate) && gate > 1) earlyBlockedHere = true;
+                            continue;
+                        }
+
+                        if (sources.Barter.Contains(template))
+                        {
+                            if (sources.Gated.TryGetValue(template, out var gate) && gate > 1) earlyBlockedHere = true;
+                            continue;
+                        }
+
+                        blocked = true;
+                        missing.Add(template);
+                        earlyBlockedHere = true;
+
+                        if (sources.Gated.ContainsKey(template)) gatedOnly.Add(template);
+                        else unsold.Add(template);
+                    }
+
+                    if (blocked)
+                    {
+                        unbuildable++;
+                        affected.Add(build.WeaponName);
+                    }
+                    if (earlyBlockedHere) earlyBlocked++;
+                }
+
+                logger.Info(
+                    $"Quest Tracker: part availability for profile {id} (level {pmc.Info?.Level}, " +
+                    $"{sources.Traders} trader(s) read) - {unbuildable} of {requirements.Count} build(s) name a " +
+                    $"part this profile cannot get, {missing.Count} distinct part(s): {gatedOnly.Count} sold but " +
+                    $"locked behind trader progress, {unsold.Count} not sold by any trader at any level. " +
+                    $"{owned} part instance(s) are already in the stash and the rest would cost {priced:N0} " +
+                    $"roubles at this profile's trader prices. With every trader at loyalty 1, " +
+                    $"{earlyBlocked} of {requirements.Count} build(s) would be out of reach.");
+
+                if (missing.Count > 0)
+                    logger.Info(
+                        "Quest Tracker: template ids no trader offers this profile - " +
+                        string.Join(", ", missing.Take(12).Select(template => template.ToString())) +
+                        (missing.Count > 12 ? $" and {missing.Count - 12} more" : "") +
+                        ". Affected: " + string.Join("; ", affected.Take(8)) + ".");
+            }
         }
 
         /// <summary>Whether the VERIFIER agrees this build satisfies the requirement. Nothing reaches the
@@ -1311,29 +1555,25 @@ namespace QuestTreeServer
 
             if (remembered == null) return false;
 
-            // Provably minimal already. Nothing to find, so nothing is spent looking.
-            var settled = false;
-            lock (_settled) settled = _settled.Contains(key);
+            // Provably minimal ON PART COUNT already - which is no longer a reason to stop.
+            var proven = false;
+            lock (_proven) proven = _proven.Contains(key);
 
-            if (!settled && remembered.Parts.Count <= Proven(weapon, thresholds, mustInclude, mustIncludeCategories))
+            if (!proven && remembered.Parts.Count <= Proven(weapon, thresholds, mustInclude, mustIncludeCategories))
             {
-                lock (_settled) _settled.Add(key);
-                settled = true;
+                lock (_proven) _proven.Add(key);
+                proven = true;
             }
 
-            if (settled)
-            {
-                // Normally the end of the story: a build at its proven bound cannot get smaller, so another
-                // search of it is spent proving nothing. Under QUESTTREE_FALSIFY it is the opposite - these
-                // are the only builds worth attacking, because they are the ones making a claim.
-                // Effort follows IGNORANCE. A bound already attacked this hard has all the evidence another
-                // search would add; one never attacked has none, so the budget moves to it. Without this the
-                // run re-picks at random with no memory of what previous runs already established.
-                if (Falsifying && remembered.Falsifications < FalsifyEnough)
-                    Falsify(build, weapon, thresholds, mustInclude, mustIncludeCategories, remembered, seed);
-
-                return false;
-            }
+            // AND THEN IT KEEPS SEARCHING, which is the change the new objective forces. A build at its
+            // part-count bound cannot get smaller; it can still get cheaper to assemble, and cheaper is what
+            // is being minimised. The early return that used to live here would have frozen 21 of the 60 at
+            // whatever they happened to cost.
+            //
+            // Effort follows IGNORANCE where it does spend: a bound already attacked this hard has all the
+            // evidence another search would add, and one never attacked has none.
+            if (proven && Falsifying && remembered.Falsifications < FalsifyEnough)
+                Falsify(build, weapon, thresholds, mustInclude, mustIncludeCategories, remembered, seed);
 
             // Counted HERE and not in the loop, so an attempt means a search that happened. A settled
             // requirement costs a dictionary lookup and is not an attempt at anything.
@@ -1372,8 +1612,14 @@ namespace QuestTreeServer
                 return false;
             }
 
-            // Somewhere new of the same size: worth searching from, not worth serving.
-            if (result.Parts.Count >= remembered.Parts.Count)
+            // Somewhere new that is no cheaper and no leaner: worth searching from, not worth serving.
+            //
+            // LEXICOGRAPHIC ON (changes, parts), and the loosening from "strictly fewer parts" is deliberate
+            // rather than a weakening. Both components can only ever improve, so the guarantee that matters -
+            // a build never gets more expensive and never grows - holds exactly as before. What it admits is
+            // the build that costs one purchase less and happens to carry one part more, which under the old
+            // rule could never be written down at all.
+            if (!Cheaper(result.Changes, result.Parts.Count, remembered.Changes, remembered.Parts.Count))
             {
                 if (result.Parts.Count <= working.Count)
                     lock (_working) _working[key] = result.Parts;
@@ -1390,7 +1636,7 @@ namespace QuestTreeServer
                 return false;
             }
 
-            weaponBuildCache.Put(key, result.Parts, result.Floor, result.Binding);
+            weaponBuildCache.Put(key, result.Parts, result.Floor, result.Binding, result.Changes);
 
             lock (_working) _working[key] = result.Parts;
 
@@ -1400,8 +1646,13 @@ namespace QuestTreeServer
             return true;
         }
 
-        /// <summary>Tries to find a smaller build than one the prover called MINIMAL, and says so loudly if
-        /// it succeeds.
+        /// <summary>Tries to find a build with fewer PARTS than one the part-count bound called minimal, and
+        /// says so loudly if it succeeds.
+        ///
+        /// Still about part count after the objective moved to changes, deliberately: the bound it attacks is
+        /// a bound on part count, the 5,022 failed attacks already recorded are evidence about part count,
+        /// and relabelling either to match the new objective would turn true evidence into a claim nobody
+        /// tested. A falsifier for the changes objective arrives with the changes bound it would attack.
         ///
         /// The only check here that tests the proof against reality instead of against another part of this
         /// code. The bound is argued from the item data; this goes looking for a counterexample with the
@@ -1457,7 +1708,7 @@ namespace QuestTreeServer
                 ". The bound understates what is reachable, so no build should be reported as minimal until " +
                 "that is found and fixed.");
 
-            weaponBuildCache.Put(key, smaller.Parts, smaller.Floor, smaller.Binding);
+            weaponBuildCache.Put(key, smaller.Parts, smaller.Floor, smaller.Binding, smaller.Changes);
 
             weaponBuildCache.Flush();
         }
@@ -1546,10 +1797,11 @@ namespace QuestTreeServer
             // and the valid build was never written because it was not SMALLER than the broken one. One
             // wasted re-solve per launch, for the life of the install.
             if (result.Found
-                && (remembered == null || rejected || result.Parts.Count < remembered.Parts.Count)
+                && (remembered == null || rejected
+                    || Cheaper(result.Changes, result.Parts.Count, remembered.Changes, remembered.Parts.Count))
                 && Sound(weapon, result.Parts, thresholds, mustInclude, mustIncludeCategories, "a freshly solved build"))
             {
-                weaponBuildCache.Put(key, result.Parts, result.Floor, result.Binding);
+                weaponBuildCache.Put(key, result.Parts, result.Floor, result.Binding, result.Changes);
                 _improved++;
             }
             else if (remembered != null)
