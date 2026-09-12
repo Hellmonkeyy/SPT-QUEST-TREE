@@ -222,7 +222,10 @@ namespace QuestTreeServer
                     foreach (var spare in verdict.Spare) logger.Warning($"Quest Tracker: '{questName}' carries a spare part - {spare}. The search should not have left it.");
 
                     if (result.Parts.Count <= lowest.Parts) atFloor++;
-                    else unproven.Add($"{questName} at {result.Parts.Count} parts, proven necessary {lowest.Parts} ({lowest.Reason}), solver floor {result.Floor}");
+                    else unproven.Add(
+                        $"{questName} at {result.Parts.Count} parts, proven necessary {lowest.Parts} " +
+                        $"({lowest.Reason}), solver floor {result.Floor}, binding " +
+                        (result.Binding.Count > 0 ? string.Join("/", result.Binding) : "nothing - it has slack everywhere"));
                     if (result.Parts.Count > widestBuild) widestBuild = result.Parts.Count;
 
                     logger.Debug(
@@ -1166,13 +1169,20 @@ namespace QuestTreeServer
             // nobody has looked at twice, because a forty-first identical attempt is not a search.
             var restarts = Math.Min(MaxRestarts, BaseRestarts + remembered.Attempts);
 
+            // The hint the last measurement of this build left behind: the thresholds it meets with
+            // nothing to spare. The climb keeps buying slack on those after they are met, which is the only
+            // currency a removal can be paid for in.
+            var binding = remembered.Binding;
+
             var result = wander
                 ? weaponSolver.Solve(
                     weapon, thresholds, mustInclude, mustIncludeCategories,
-                    allowed: null, knownGood: null, seed: _seed, restarts: restarts, ceiling: working.Count)
+                    allowed: null, knownGood: null, seed: _seed, restarts: restarts, ceiling: working.Count,
+                    binding: binding)
                 : weaponSolver.Solve(
                     weapon, thresholds, mustInclude, mustIncludeCategories,
-                    allowed: null, knownGood: working, seed: _seed, restarts: restarts);
+                    allowed: null, knownGood: working, seed: _seed, restarts: restarts,
+                    binding: binding);
 
             if (!result.Found)
             {
@@ -1198,7 +1208,7 @@ namespace QuestTreeServer
                 return false;
             }
 
-            weaponBuildCache.Put(key, result.Parts, result.Floor);
+            weaponBuildCache.Put(key, result.Parts, result.Floor, result.Binding);
 
             lock (_working) _working[key] = result.Parts;
 
@@ -1263,6 +1273,11 @@ namespace QuestTreeServer
                 // not allowed to take on trust. A rejected entry costs a search. It never reaches a panel.
                 if (described.Found)
                 {
+                    // Every normal boot describes every remembered build, so this is where the hint comes
+                    // from for the builds that never change - which is most of them, and precisely the ones
+                    // a directed search is for.
+                    weaponBuildCache.Note(key, described.Binding);
+
                     lock (_solved) _solved[key] = described;
                     return described;
                 }
@@ -1278,7 +1293,8 @@ namespace QuestTreeServer
 
             var result = weaponSolver.Solve(
                 weapon, thresholds, mustInclude, mustIncludeCategories,
-                allowed: null, knownGood: incumbent, seed: _seed);
+                allowed: null, knownGood: incumbent, seed: _seed,
+                binding: remembered?.Binding);
 
             // A remembered entry that FAILED verification counts as absent, and that word "rejected" is
             // load-bearing. Without it an invalid entry that happens to be small blocks its own replacement
@@ -1289,12 +1305,13 @@ namespace QuestTreeServer
                 && (remembered == null || rejected || result.Parts.Count < remembered.Parts.Count)
                 && Sound(weapon, result.Parts, thresholds, mustInclude, mustIncludeCategories, "a freshly solved build"))
             {
-                weaponBuildCache.Put(key, result.Parts, result.Floor);
+                weaponBuildCache.Put(key, result.Parts, result.Floor, result.Binding);
                 _improved++;
             }
             else if (remembered != null)
             {
                 weaponBuildCache.Held(key);
+                weaponBuildCache.Note(key, result.Binding);
             }
 
             lock (_solved) _solved[key] = result;

@@ -81,6 +81,19 @@ namespace QuestTreeServer
             /// <summary>The proven lower bound this build was measured against, carried so a warm boot
             /// reports the same numbers a cold one did rather than a blank where the proof was.</summary>
             public int Floor { get; set; }
+
+            /// <summary>Which thresholds this build meets with nothing to spare - the reason it cannot lose a
+            /// part, as far as anything here knows.
+            ///
+            /// Remembered rather than recomputed because it is what makes the next search DIRECTED: the only
+            /// way to drop a part is to buy slack on one of these first, and a search that does not know
+            /// which they are spends its effort uniformly over five thresholds instead of on the one that is
+            /// actually in the way.
+            ///
+            /// Measured, never guessed: it comes from the same reading of the assembled build that decides
+            /// whether the thresholds are met at all. An empty list means nobody has looked yet, not that
+            /// nothing binds.</summary>
+            public List<string> Binding { get; set; } = new();
         }
 
         public sealed class CacheFile
@@ -148,6 +161,32 @@ namespace QuestTreeServer
             }
         }
 
+        /// <summary>Records what the thresholds looked like on a build nobody changed.
+        ///
+        /// Separate from Put because the common case is a boot that serves the remembered build unchanged -
+        /// and that boot still measures it, so it still knows which thresholds are on the line. Without this
+        /// the hint would only ever be written for a build that had just got smaller, so the builds that
+        /// most need directing - the ones that have resisted for hundreds of rounds - would be the only ones
+        /// with nothing recorded.</summary>
+        public void Note(string key, IReadOnlyCollection<string> binding)
+        {
+            if (binding.Count == 0) return;
+
+            lock (_lock)
+            {
+                Load();
+
+                if (!_file!.Builds.TryGetValue(key, out var build)) return;
+
+                // Only when it actually changed: the file is rewritten on every flush and a boot that
+                // learned nothing new should not make it look like it did.
+                if (build.Binding.Count == binding.Count && !binding.Except(build.Binding).Any()) return;
+
+                build.Binding = binding.ToList();
+                _dirty = true;
+            }
+        }
+
         /// <summary>Records that a boot tried to beat a build and could not.</summary>
         public void Held(string key)
         {
@@ -173,7 +212,11 @@ namespace QuestTreeServer
             }
         }
 
-        public void Put(string key, IReadOnlyList<WeaponSolver.FittedPart> parts, int floor)
+        public void Put(
+            string key,
+            IReadOnlyList<WeaponSolver.FittedPart> parts,
+            int floor,
+            IReadOnlyCollection<string>? binding = null)
         {
             lock (_lock)
             {
@@ -182,6 +225,7 @@ namespace QuestTreeServer
                 _file!.Builds[key] = new CachedBuild
                 {
                     Floor = floor,
+                    Binding = binding == null ? new List<string>() : binding.ToList(),
                     Parts = parts.Select(part => new CachedPart
                     {
                         Slot = part.SlotName,

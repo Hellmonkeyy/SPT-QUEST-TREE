@@ -155,6 +155,24 @@ namespace QuestTreeServer
         /// thresholds sitting on the line.</summary>
         private const double HeadroomCap = 1d;
 
+        /// <summary>The cap for a goal named as BINDING - one a previous search found sitting on the line,
+        /// and therefore the reason the build cannot lose a part.
+        ///
+        /// Slack is what pays for a removal. A build meeting recoil exactly cannot drop the part that bought
+        /// the last two points, however spare everything else is, and the ordinary cap tells the climb to
+        /// stop caring about recoil the moment it is met - so it never accumulates what the next pruning
+        /// pass would have to spend. Raising the cap on that one goal asks for the same gun with room to
+        /// spare where the room is worth something.
+        ///
+        /// Safe because of where headroom sits in Cost: BELOW parts. A build carrying an extra part can
+        /// never win on headroom however slack it is, so this cannot bring back the seventeen-part AKS-74N.
+        /// It can only choose between builds of the same size.</summary>
+        private const double BindingHeadroomCap = 4d;
+
+        /// <summary>How little room to spare counts as sitting on the line, as a fraction of the threshold.
+        /// Five percent: recoil met at 605 against 610 is binding, met at 520 is not.</summary>
+        private const double BindingSlack = 0.05d;
+
         public sealed class FittedPart
         {
             public string SlotName { get; init; } = "";
@@ -189,6 +207,14 @@ namespace QuestTreeServer
             /// <summary>Constrained stats this model cannot score at all, so a pass on everything
             /// else does not mean the quest is satisfied.</summary>
             public List<string> Unchecked { get; } = new();
+
+            /// <summary>Thresholds this build MEETS with almost nothing to spare.
+            ///
+            /// Why a build cannot get smaller is nearly always one or two of these, and it was computed on
+            /// every measurement and thrown away. Recorded here, remembered beside the build, and handed
+            /// back to the next search as the number worth buying slack on - which is the difference
+            /// between exploring uniformly and exploring where the answer is.</summary>
+            public List<string> Binding { get; } = new();
 
             /// <summary>The size of ONE mandatory skeleton: what the planner had to place, the slots the
             /// game will not leave empty, and one part for each category still unaccounted for.
@@ -254,7 +280,8 @@ namespace QuestTreeServer
             IReadOnlyList<FittedPart>? knownGood = null,
             int seed = 0,
             int restarts = 0,
-            int ceiling = 0)
+            int ceiling = 0,
+            IReadOnlyCollection<string>? binding = null)
         {
             var result = new Result();
 
@@ -278,7 +305,13 @@ namespace QuestTreeServer
             {
                 RecoilPerPercent = (bare?.Recoil ?? 0d) / 100d,
                 Seed = seed,
-                Restarts = restarts > 0 ? restarts : Attempts
+                Restarts = restarts > 0 ? restarts : Attempts,
+
+                // What the last search learned about this build: which thresholds it could not get any
+                // slack on. A first boot has none of this and searches exactly as it did before.
+                Binding = binding == null || binding.Count == 0
+                    ? null
+                    : new HashSet<string>(binding, StringComparer.OrdinalIgnoreCase)
             };
 
             state.Measure(weapon);
@@ -590,7 +623,17 @@ namespace QuestTreeServer
                     continue;
                 }
 
-                if (goal.Met(actual.Value)) continue;
+                if (goal.Met(actual.Value))
+                {
+                    // Met, and by how little. A goal on the line is the reason the gun cannot be leaner, so
+                    // it is reported as a fact about the build rather than left in a local. A sized goal is
+                    // whole grid squares, so on the line means exactly on it.
+                    var slack = goal.Margin(actual.Value) / goal.Scale;
+
+                    if (slack <= (Sized.Contains(goal.Field) ? 0d : BindingSlack)) result.Binding.Add(goal.Field);
+
+                    continue;
+                }
 
                 result.Unmet.Add(
                     $"{goal.Field} {actual.Value:0.##}, needs {(goal.HigherIsBetter ? ">=" : "<=")} {goal.Value:0.##} " +
@@ -1779,7 +1822,7 @@ namespace QuestTreeServer
                 var margin = goal.Margin(actual.Value) / goal.Scale;
 
                 if (margin < 0d) shortfall += -margin;
-                else headroom += Math.Min(margin, HeadroomCap);
+                else headroom += Math.Min(margin, state.Binds(goal.Field) ? BindingHeadroomCap : HeadroomCap);
             }
 
             return new Cost(gaps, shortfall, buffer.Count, headroom);
@@ -2211,6 +2254,14 @@ namespace QuestTreeServer
 
         private sealed class SearchState
         {
+            /// <summary>Goals a previous search found sitting on the line for this build, so the climb keeps
+            /// buying slack on them after they are met. Null for a search with no history to go on, which is
+            /// what a first boot is - and that case behaves exactly as it did before this existed.</summary>
+            public HashSet<string>? Binding;
+
+            /// <summary>Whether this goal is one the climb should keep paying for after it is met.</summary>
+            public bool Binds(string field) => Binding != null && Binding.Contains(field);
+
             public SearchState(
                 IReadOnlyDictionary<MongoId, WeaponGraph.PartInfo> reachable,
                 IReadOnlyCollection<MongoId>? allowed,
