@@ -1,7 +1,7 @@
 {
   "SchemaVersion": 1,
   "SolverVersion": 9,
-  "Generation": 358,
+  "Generation": 62602,
   "Items": "7F63D6257473D0B58F7CF6C02358EFCB9E4C008745A1AAAEE7F30FCAC0C360E1",
   "Builds": {
     "17332CC29F5F084A3ACF701F1D0161F5B08A6B47B8F13EFBB0E470F73FDF6D0E": {
@@ -37,8 +37,19 @@
           "Parent": -1
         }
       ],
-      "Attempts": 0,
-      "Floor": 6
+      "Attempts": 9,
+      "Floor": 6,
+      "Bound": 5,
+      "BoundSessions": 5,
+      "Falsifications": 241,
+      "FalsifyNodes": 26485233,
+      "LastFalsifySeed": 49750000,
+      "Nodes": 0,
+      "Binding": [
+        "recoil",
+        "height",
+        "width"
+      ]
     },
     "B8D6027404CA24FDADAE85F3F5088679B868DA9251F3C8B70940BE4AA2E191F7": {
       "Parts": [
@@ -79,8 +90,19 @@
           "Parent": -1
         }
       ],
-      "Attempts": 383,
-      "Floor": 3
+      "Attempts": 2021,
+      "Floor": 3,
+      "Bound": 4,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 338769,
+      "Binding": [
+        "magazine capacity",
+        "height",
+        "width"
+      ]
     },
     "4B3BE9A7FFC4A9B29EB0F2AD9239C0B0DD8876183ADB7E2C980E3165BAB3854D": {
       "Parts": [
@@ -139,8 +161,19 @@
           "Parent": -1
         }
       ],
-      "Attempts": 383,
-      "Floor": 7
+      "Attempts": 2021,
+      "Floor": 7,
+      "Bound": 8,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 263834,
+      "Binding": [
+        "ergonomics",
+        "recoil",
+        "effective distance"
+      ]
     },
     "ECAC93A3FF88967D699A03B1B159197845CD3088D49E77ABE343136198045910": {
       "Parts": [
@@ -193,8 +226,18 @@
           "Parent": -1
         }
       ],
-      "Attempts": 383,
-      "Floor": 5
+      "Attempts": 2021,
+      "Floor": 5,
+      "Bound": 5,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 102899,
+      "Binding": [
+        "recoil",
+        "effective distance"
+      ]
     },
     "BEB2DAEDB53F909D3A256DDDCF8A7DBE2482F243738B22EC23A81BCE6B64995E": {
       "Parts": [
@@ -247,8 +290,17 @@
           "Parent": -1
         }
       ],
-      "Attempts": 383,
-      "Floor": 6
+      "Attempts": 2018,
+      "Floor": 6,
+      "Bound": 6,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 844088,
+      "Binding": [
+        "recoil"
+      ]
     },
     "BD5B70740883A7BFD855BD801FABE37583806BDE0A2B45C30DC98983F853A2C9": {
       "Parts": [
@@ -313,8 +365,17 @@
           "Parent": -1
         }
       ],
-      "Attempts": 383,
-      "Floor": 8
+      "Attempts": 2016,
+      "Floor": 8,
+      "Bound": 9,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 717750,
+      "Binding": [
+        "magazine capacity"
+      ]
     },
     "479337BA3D7C28AD6EE2121C25BCD2D87894D87E34E94FEF217DC37F735A39AE": {
       "Parts": [
@@ -367,8 +428,17 @@
           "Parent": -1
         }
       ],
-      "Attempts": 365,
-      "Floor": 8
+      "Attempts": 2002,
+      "Floor": 8,
+      "Bound": 7,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 120248,
+      "Binding": [
+        "recoil"
+      ]
     },
     "E203FB2ADD8B635C53332392407E0D84AB4120E0AF3AD80F9E04639C6369793B": {
       "Parts": [
@@ -421,8 +491,17 @@
           "Parent": -1
         }
       ],
-      "Attempts": 383,
-      "Floor": 6
+      "Attempts": 2020,
+      "Floor": 6,
+      "Bound": 6,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 337136,
+      "Binding": [
+        "ergonomics"
+      ]
     },
     "9FECB358FE9520853BAD101B17282F49E9D534B3593656DC2378F144A6FCA53C": {
       "Parts": [
@@ -487,8 +566,20 @@
           "Parent": -1
         }
       ],
-      "Attempts": 18,
-      "Floor": 10
+      "Attempts": 27,
+      "Floor": 10,
+      "Bound": 10,
+      "BoundSessions": 5,
+      "Falsifications": 240,
+      "FalsifyNodes": 23103335,
+      "LastFalsifySeed": 49698000,
+      "Nodes": 0,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity",
+        "height",
+        "width"
+      ]
     },
     "1BD48340DFF5AEB8694B2329A0382AB8F3319FC04F7D57E3585FCBF16D9DCAC1": {
       "Parts": [
@@ -535,8 +626,18 @@
           "Parent": -1
         }
       ],
-      "Attempts": 383,
-      "Floor": 3
+      "Attempts": 2019,
+      "Floor": 3,
+      "Bound": 4,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 601617,
+      "Binding": [
+        "magazine capacity",
+        "height"
+      ]
     },
     "9A1F12CB4F79389997679E9E6042693B7DEB10FB4E0533CB59A277F5CB7490C3": {
       "Parts": [
@@ -589,8 +690,19 @@
           "Parent": -1
         }
       ],
-      "Attempts": 383,
-      "Floor": 7
+      "Attempts": 2020,
+      "Floor": 7,
+      "Bound": 7,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 60580,
+      "Binding": [
+        "ergonomics",
+        "recoil",
+        "magazine capacity"
+      ]
     },
     "8D8AF4CB26861859069A970C74AC8C209C37B8B39DB3572B91EDCAD51AECF1D0": {
       "Parts": [
@@ -667,8 +779,20 @@
           "Parent": -1
         }
       ],
-      "Attempts": 383,
-      "Floor": 10
+      "Attempts": 2019,
+      "Floor": 10,
+      "Bound": 9,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 275536,
+      "Binding": [
+        "ergonomics",
+        "recoil",
+        "height",
+        "width"
+      ]
     },
     "A88D223974C169A55055FAC966AE90AC762E89F27B0DA7FF3286E7F5C8D88A75": {
       "Parts": [
@@ -733,8 +857,17 @@
           "Parent": -1
         }
       ],
-      "Attempts": 383,
-      "Floor": 8
+      "Attempts": 2019,
+      "Floor": 8,
+      "Bound": 8,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 268820,
+      "Binding": [
+        "recoil"
+      ]
     },
     "F4A6746EB1C63A0BA61A7200FEAE49337DD26155C7EF4AFB0E10694DF8715E70": {
       "Parts": [
@@ -793,8 +926,18 @@
           "Parent": 7
         }
       ],
-      "Attempts": 18,
-      "Floor": 10
+      "Attempts": 27,
+      "Floor": 10,
+      "Bound": 9,
+      "BoundSessions": 5,
+      "Falsifications": 240,
+      "FalsifyNodes": 7330514,
+      "LastFalsifySeed": 49703000,
+      "Nodes": 0,
+      "Binding": [
+        "ergonomics",
+        "effective distance"
+      ]
     },
     "7AFBEDD8D4992EA69E92F363951DB6A4FB4B2BA45F5440589518A570227A3E00": {
       "Parts": [
@@ -859,8 +1002,17 @@
           "Parent": -1
         }
       ],
-      "Attempts": 383,
-      "Floor": 10
+      "Attempts": 2020,
+      "Floor": 10,
+      "Bound": 7,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 7711,
+      "Binding": [
+        "recoil"
+      ]
     },
     "7D8E0EBDAFFD6F506D1181FBE057DBE335C7D733838BB71A5C66BA0A7A7B3F46": {
       "Parts": [
@@ -937,8 +1089,17 @@
           "Parent": -1
         }
       ],
-      "Attempts": 383,
-      "Floor": 12
+      "Attempts": 2020,
+      "Floor": 12,
+      "Bound": 10,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 44949,
+      "Binding": [
+        "magazine capacity"
+      ]
     },
     "2A13A30D6E804CD8D039E9196ED9EFEF67C756F55D11F151BAE90945032EFF24": {
       "Parts": [
@@ -997,8 +1158,18 @@
           "Parent": -1
         }
       ],
-      "Attempts": 383,
-      "Floor": 6
+      "Attempts": 2018,
+      "Floor": 6,
+      "Bound": 8,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 416183,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
     },
     "7ABE9CDE0B4B413B39F35DBB6BB3F1D0CD062A49C3D5F7DB370249DE8E8468CB": {
       "Parts": [
@@ -1039,8 +1210,18 @@
           "Parent": -1
         }
       ],
-      "Attempts": 18,
-      "Floor": 4
+      "Attempts": 27,
+      "Floor": 4,
+      "Bound": 6,
+      "BoundSessions": 5,
+      "Falsifications": 240,
+      "FalsifyNodes": 5646825,
+      "LastFalsifySeed": 49707000,
+      "Nodes": 0,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
     },
     "9BE33D2FB03BA2DA630BC29169A1E8D83B61490CAB9B179FC1B014B03F2972E7": {
       "Parts": [
@@ -1099,8 +1280,17 @@
           "Parent": -1
         }
       ],
-      "Attempts": 383,
-      "Floor": 4
+      "Attempts": 2019,
+      "Floor": 4,
+      "Bound": 8,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 257452,
+      "Binding": [
+        "recoil"
+      ]
     },
     "04DFCA713C01BF4B7AF91152CC71E6EE8B8DE59D42AB408CBE74EB51D55B45E9": {
       "Parts": [
@@ -1189,8 +1379,17 @@
           "Parent": -1
         }
       ],
-      "Attempts": 373,
-      "Floor": 13
+      "Attempts": 2009,
+      "Floor": 13,
+      "Bound": 13,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 168711,
+      "Binding": [
+        "weight"
+      ]
     },
     "060D74A30A5D58481A70B3E251E29722BF44E81690C6476AB00F6E0BD4E1A4F1": {
       "Parts": [
@@ -1279,8 +1478,19 @@
           "Parent": -1
         }
       ],
-      "Attempts": 383,
-      "Floor": 14
+      "Attempts": 2020,
+      "Floor": 14,
+      "Bound": 9,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 15509,
+      "Binding": [
+        "recoil",
+        "magazine capacity",
+        "effective distance"
+      ]
     },
     "C7806D0657E319A89891F04186E88EA7DA64A3DF286B79E7216837B6AD825381": {
       "Parts": [
@@ -1339,8 +1549,18 @@
           "Parent": -1
         }
       ],
-      "Attempts": 382,
-      "Floor": 5
+      "Attempts": 2016,
+      "Floor": 5,
+      "Bound": 6,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 581253,
+      "Binding": [
+        "recoil",
+        "magazine capacity"
+      ]
     },
     "9F71E8656ED700FE8FEE8A9DA189F9B5D1203FC3EC29922D05AA854DE403EC0A": {
       "Parts": [
@@ -1411,8 +1631,17 @@
           "Parent": -1
         }
       ],
-      "Attempts": 383,
-      "Floor": 10
+      "Attempts": 2019,
+      "Floor": 10,
+      "Bound": 10,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 55408,
+      "Binding": [
+        "effective distance"
+      ]
     },
     "F6726E8170D083D61DC0121B4D091C9AFC08F77947BEFB07EBE8CB768C1DF2F7": {
       "Parts": [
@@ -1483,8 +1712,20 @@
           "Parent": -1
         }
       ],
-      "Attempts": 383,
-      "Floor": 10
+      "Attempts": 2018,
+      "Floor": 10,
+      "Bound": 10,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 374886,
+      "Binding": [
+        "ergonomics",
+        "recoil",
+        "magazine capacity",
+        "effective distance"
+      ]
     },
     "DB8DBA834B5E71A3363672573DFE4A1784DAA05676D497DA6ABBA64F185484D5": {
       "Parts": [
@@ -1585,8 +1826,17 @@
           "Parent": -1
         }
       ],
-      "Attempts": 366,
-      "Floor": 18
+      "Attempts": 2002,
+      "Floor": 18,
+      "Bound": 14,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 49383,
+      "Binding": [
+        "effective distance"
+      ]
     },
     "BE73FEA7007490D672A5E790DF68C12DD69EA9BB65340D66D3EC7FAA44C1EB9D": {
       "Parts": [
@@ -1651,8 +1901,15 @@
           "Parent": -1
         }
       ],
-      "Attempts": 383,
-      "Floor": 9
+      "Attempts": 2018,
+      "Floor": 9,
+      "Bound": 8,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 137956,
+      "Binding": []
     },
     "33225F622D6CA86CC2D2B1A8B03CCF44CFDB2308A844AF206B406D86A048E4BF": {
       "Parts": [
@@ -1669,8 +1926,17 @@
           "Parent": -1
         }
       ],
-      "Attempts": 383,
-      "Floor": 1
+      "Attempts": 2019,
+      "Floor": 1,
+      "Bound": 1,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 4749,
+      "Binding": [
+        "ergonomics"
+      ]
     },
     "2190933030382CA1B77FF02ACBF0A0B4C97FADCF278CD58DCF3EB244BB78F911": {
       "Parts": [
@@ -1723,8 +1989,17 @@
           "Parent": -1
         }
       ],
-      "Attempts": 18,
-      "Floor": 9
+      "Attempts": 27,
+      "Floor": 9,
+      "Bound": 8,
+      "BoundSessions": 5,
+      "Falsifications": 239,
+      "FalsifyNodes": 90353571,
+      "LastFalsifySeed": 49717000,
+      "Nodes": 0,
+      "Binding": [
+        "recoil"
+      ]
     },
     "6C4F49F8F7E933CC9417DD8A44CBDA16F76B69D092CA175C37347A9623978EDD": {
       "Parts": [
@@ -1807,8 +2082,17 @@
           "Parent": -1
         }
       ],
-      "Attempts": 383,
-      "Floor": 12
+      "Attempts": 2018,
+      "Floor": 12,
+      "Bound": 9,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 121878,
+      "Binding": [
+        "magazine capacity"
+      ]
     },
     "4F80D8147ADD36CAE9AEE0EC9C8F1291F45C4804BD582C715F7F2A266C223702": {
       "Parts": [
@@ -1891,8 +2175,18 @@
           "Parent": -1
         }
       ],
-      "Attempts": 322,
-      "Floor": 15
+      "Attempts": 1957,
+      "Floor": 15,
+      "Bound": 11,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 30923,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
     },
     "3A96B22EF581206DED2116635E78733423AEC0921FF907E7C482FAC8D6D05A9B": {
       "Parts": [
@@ -1933,8 +2227,17 @@
           "Parent": -1
         }
       ],
-      "Attempts": 18,
-      "Floor": 6
+      "Attempts": 27,
+      "Floor": 6,
+      "Bound": 7,
+      "BoundSessions": 5,
+      "Falsifications": 239,
+      "FalsifyNodes": 7880248,
+      "LastFalsifySeed": 49720000,
+      "Nodes": 0,
+      "Binding": [
+        "magazine capacity"
+      ]
     },
     "BE39D256B2365EF7154B90F3C7D9FFC840C58D009FA003222C470E1F91DC9F59": {
       "Parts": [
@@ -1981,8 +2284,18 @@
           "Parent": -1
         }
       ],
-      "Attempts": 382,
-      "Floor": 5
+      "Attempts": 2017,
+      "Floor": 5,
+      "Bound": 5,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 79297,
+      "Binding": [
+        "ergonomics",
+        "recoil"
+      ]
     },
     "1BF7E1BCAC460A344C8DC8477D3A8C4A3E4FB0610C6E9EBD34D175708C15AB71": {
       "Parts": [
@@ -2023,8 +2336,17 @@
           "Parent": -1
         }
       ],
-      "Attempts": 18,
-      "Floor": 6
+      "Attempts": 27,
+      "Floor": 6,
+      "Bound": 6,
+      "BoundSessions": 5,
+      "Falsifications": 239,
+      "FalsifyNodes": 12930720,
+      "LastFalsifySeed": 49722000,
+      "Nodes": 0,
+      "Binding": [
+        "magazine capacity"
+      ]
     },
     "28A3DF18E199D0341A23D9E8B4034CD49D53A9EA5E17ED8EFA04E46CC15461B9": {
       "Parts": [
@@ -2071,8 +2393,18 @@
           "Parent": -1
         }
       ],
-      "Attempts": 18,
-      "Floor": 6
+      "Attempts": 27,
+      "Floor": 6,
+      "Bound": 7,
+      "BoundSessions": 5,
+      "Falsifications": 239,
+      "FalsifyNodes": 20636341,
+      "LastFalsifySeed": 49723000,
+      "Nodes": 0,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
     },
     "483AD97CDCB66AC7C03807FB770DCB46705408DF5C71E57C3ED49BB328EC5716": {
       "Parts": [
@@ -2131,8 +2463,18 @@
           "Parent": -1
         }
       ],
-      "Attempts": 18,
-      "Floor": 8
+      "Attempts": 27,
+      "Floor": 8,
+      "Bound": 9,
+      "BoundSessions": 5,
+      "Falsifications": 239,
+      "FalsifyNodes": 18794789,
+      "LastFalsifySeed": 49724000,
+      "Nodes": 0,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
     },
     "665F9D87C4A84C3177120808B902A7D64E54934C184907D5149131A3B4D22645": {
       "Parts": [
@@ -2215,8 +2557,18 @@
           "Parent": -1
         }
       ],
-      "Attempts": 18,
-      "Floor": 14
+      "Attempts": 27,
+      "Floor": 14,
+      "Bound": 17,
+      "BoundSessions": 5,
+      "Falsifications": 239,
+      "FalsifyNodes": 13961878,
+      "LastFalsifySeed": 49725000,
+      "Nodes": 0,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
     },
     "75CC65385B19B33A5F36D6B71FA7AC8F05B3CADC49410C4CABA88081AAA2F1F8": {
       "Parts": [
@@ -2281,8 +2633,18 @@
           "Parent": -1
         }
       ],
-      "Attempts": 18,
-      "Floor": 10
+      "Attempts": 27,
+      "Floor": 10,
+      "Bound": 10,
+      "BoundSessions": 5,
+      "Falsifications": 239,
+      "FalsifyNodes": 3815498,
+      "LastFalsifySeed": 49726000,
+      "Nodes": 0,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
     },
     "90B666752A0B1257ED34D9EBAD3F990DED7EA86FA58D0E9ADA91709C6781493E": {
       "Parts": [
@@ -2311,8 +2673,15 @@
           "Parent": -1
         }
       ],
-      "Attempts": 18,
-      "Floor": 4
+      "Attempts": 27,
+      "Floor": 4,
+      "Bound": 4,
+      "BoundSessions": 5,
+      "Falsifications": 239,
+      "FalsifyNodes": 3972663,
+      "LastFalsifySeed": 49727000,
+      "Nodes": 0,
+      "Binding": []
     },
     "7F2150537B1E8E134BA651DBA6800FD76C63F127A7E38CF06BDAD4895D55FBF4": {
       "Parts": [
@@ -2383,8 +2752,17 @@
           "Parent": -1
         }
       ],
-      "Attempts": 383,
-      "Floor": 11
+      "Attempts": 2018,
+      "Floor": 11,
+      "Bound": 9,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 56,
+      "Binding": [
+        "magazine capacity"
+      ]
     },
     "6BBFF1FA17F602C5EE57BD05B91756D3CE54D1945C7E71AF43B6E5048BD64591": {
       "Parts": [
@@ -2449,8 +2827,17 @@
           "Parent": -1
         }
       ],
-      "Attempts": 345,
-      "Floor": 12
+      "Attempts": 1980,
+      "Floor": 12,
+      "Bound": 8,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 76172,
+      "Binding": [
+        "ergonomics"
+      ]
     },
     "8EB1009BF8C72CFC16437A5CB50C17282FAF3CBFB852E5E3EF38D45D2848C5FB": {
       "Parts": [
@@ -2533,8 +2920,18 @@
           "Parent": -1
         }
       ],
-      "Attempts": 383,
-      "Floor": 11
+      "Attempts": 2018,
+      "Floor": 11,
+      "Bound": 10,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 183386,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
     },
     "1A2295B1575E58471CA014C6DD869B1979F16D02318820D1B3DAFF59A5B2C89E": {
       "Parts": [
@@ -2587,8 +2984,18 @@
           "Parent": -1
         }
       ],
-      "Attempts": 18,
-      "Floor": 7
+      "Attempts": 27,
+      "Floor": 7,
+      "Bound": 9,
+      "BoundSessions": 5,
+      "Falsifications": 239,
+      "FalsifyNodes": 958914,
+      "LastFalsifySeed": 49731000,
+      "Nodes": 0,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
     },
     "1D43749E59B39EFAF7730F2A66F665AFA9716B1EAE9F692DB9E6016AD8CB4904": {
       "Parts": [
@@ -2647,8 +3054,18 @@
           "Parent": -1
         }
       ],
-      "Attempts": 5,
-      "Floor": 10
+      "Attempts": 14,
+      "Floor": 10,
+      "Bound": 9,
+      "BoundSessions": 5,
+      "Falsifications": 239,
+      "FalsifyNodes": 7253997,
+      "LastFalsifySeed": 49732000,
+      "Nodes": 0,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
     },
     "AF1FB0115A4D87CEB007A43A7AE8BBCE1010CA892D8976D45EE444D0C169B7B4": {
       "Parts": [
@@ -2677,8 +3094,18 @@
           "Parent": -1
         }
       ],
-      "Attempts": 18,
-      "Floor": 3
+      "Attempts": 27,
+      "Floor": 3,
+      "Bound": 4,
+      "BoundSessions": 5,
+      "Falsifications": 239,
+      "FalsifyNodes": 1301226,
+      "LastFalsifySeed": 49733000,
+      "Nodes": 0,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
     },
     "BE437EB92AB7A66EC6C5D0F21D60ADD4D6AC55B3EBB7CBFF98C00AEF14C48999": {
       "Parts": [
@@ -2737,8 +3164,18 @@
           "Parent": -1
         }
       ],
-      "Attempts": 18,
-      "Floor": 8
+      "Attempts": 27,
+      "Floor": 8,
+      "Bound": 12,
+      "BoundSessions": 5,
+      "Falsifications": 239,
+      "FalsifyNodes": 4591288,
+      "LastFalsifySeed": 49734000,
+      "Nodes": 0,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
     },
     "755559E6AC75FCB21C6C398B2207C5222067E8FF81D36DD51C603EC14A18D778": {
       "Parts": [
@@ -2809,8 +3246,18 @@
           "Parent": -1
         }
       ],
-      "Attempts": 18,
-      "Floor": 10
+      "Attempts": 27,
+      "Floor": 10,
+      "Bound": 14,
+      "BoundSessions": 5,
+      "Falsifications": 239,
+      "FalsifyNodes": 4623760,
+      "LastFalsifySeed": 49735000,
+      "Nodes": 0,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
     },
     "C2079B6E0D698D9FAE40093064794B8668F3F1ABAF499D77BA0170A8EA168D79": {
       "Parts": [
@@ -2875,8 +3322,18 @@
           "Parent": -1
         }
       ],
-      "Attempts": 366,
-      "Floor": 11
+      "Attempts": 2001,
+      "Floor": 11,
+      "Bound": 8,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 11120,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
     },
     "5E5E9A19536F48E7FEFBFD77CA2535A07048BCA28F17A4EA0415419B56493505": {
       "Parts": [
@@ -2959,8 +3416,18 @@
           "Parent": 11
         }
       ],
-      "Attempts": 383,
-      "Floor": 14
+      "Attempts": 2018,
+      "Floor": 14,
+      "Bound": 11,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 18707,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
     },
     "6DA82260FC3D47E28CC2998F440207328346C8B029DDB4AEEA8F61B17616B370": {
       "Parts": [
@@ -3013,8 +3480,17 @@
           "Parent": -1
         }
       ],
-      "Attempts": 18,
-      "Floor": 7
+      "Attempts": 27,
+      "Floor": 7,
+      "Bound": 8,
+      "BoundSessions": 5,
+      "Falsifications": 239,
+      "FalsifyNodes": 5976015,
+      "LastFalsifySeed": 49738000,
+      "Nodes": 0,
+      "Binding": [
+        "magazine capacity"
+      ]
     },
     "13254425DBB0B49EBDDDB8A0124B781CBB1A1692D87C653870D0A3AEB616F641": {
       "Parts": [
@@ -3097,8 +3573,18 @@
           "Parent": -1
         }
       ],
-      "Attempts": 383,
-      "Floor": 11
+      "Attempts": 2018,
+      "Floor": 11,
+      "Bound": 9,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 107763,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
     },
     "AF06AACBBC62FE5665DAB349AFDE9097CE2C24D345F8C28198C0F001A8FF7401": {
       "Parts": [
@@ -3193,8 +3679,18 @@
           "Parent": -1
         }
       ],
-      "Attempts": 18,
-      "Floor": 15
+      "Attempts": 27,
+      "Floor": 15,
+      "Bound": 16,
+      "BoundSessions": 5,
+      "Falsifications": 239,
+      "FalsifyNodes": 4802121,
+      "LastFalsifySeed": 49740000,
+      "Nodes": 0,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
     },
     "C19EF93F3949C45D3B3199BCFD7EDB76EB6BDC207C26D8009414D14548052E14": {
       "Parts": [
@@ -3241,8 +3737,18 @@
           "Parent": -1
         }
       ],
-      "Attempts": 383,
-      "Floor": 5
+      "Attempts": 2018,
+      "Floor": 5,
+      "Bound": 4,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 114194,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
     },
     "9A6629389E5A52142F86A2587DE6505E78BAA27DFDAF6312A009E9AC316D5135": {
       "Parts": [
@@ -3361,8 +3867,15 @@
           "Parent": -1
         }
       ],
-      "Attempts": 383,
-      "Floor": 18
+      "Attempts": 2015,
+      "Floor": 18,
+      "Bound": 18,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 215075,
+      "Binding": []
     },
     "2912B61C85307E1CA66778BD351E7F6790DAE57495A66297E6011BD848092527": {
       "Parts": [
@@ -3421,8 +3934,17 @@
           "Parent": -1
         }
       ],
-      "Attempts": 18,
-      "Floor": 7
+      "Attempts": 27,
+      "Floor": 7,
+      "Bound": 9,
+      "BoundSessions": 5,
+      "Falsifications": 237,
+      "FalsifyNodes": 252687493,
+      "LastFalsifySeed": 49683000,
+      "Nodes": 0,
+      "Binding": [
+        "recoil"
+      ]
     },
     "989F0A9D688D1F08B2FD39A8F88B77AB2B80796D74F63D4ACEB9EDD11A17B7C7": {
       "Parts": [
@@ -3463,8 +3985,19 @@
           "Parent": -1
         }
       ],
-      "Attempts": 18,
-      "Floor": 4
+      "Attempts": 27,
+      "Floor": 4,
+      "Bound": 6,
+      "BoundSessions": 5,
+      "Falsifications": 239,
+      "FalsifyNodes": 49490068,
+      "LastFalsifySeed": 49744000,
+      "Nodes": 0,
+      "Binding": [
+        "ergonomics",
+        "recoil",
+        "magazine capacity"
+      ]
     },
     "3322F092DA9085311283A0D167C878E5FB8A893212D416371F7A8DF92D0F5C8E": {
       "Parts": [
@@ -3529,8 +4062,18 @@
           "Parent": -1
         }
       ],
-      "Attempts": 383,
-      "Floor": 6
+      "Attempts": 2014,
+      "Floor": 6,
+      "Bound": 6,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 491740,
+      "Binding": [
+        "magazine capacity",
+        "effective distance"
+      ]
     },
     "B255E3D47500E075F88990757AD942E0901163D8B56BC03859CCB8DD2815E255": {
       "Parts": [
@@ -3595,8 +4138,18 @@
           "Parent": -1
         }
       ],
-      "Attempts": 383,
-      "Floor": 7
+      "Attempts": 2013,
+      "Floor": 7,
+      "Bound": 9,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 717533,
+      "Binding": [
+        "ergonomics",
+        "effective distance"
+      ]
     },
     "4F24CD15E68894215825E31436694CD320901F27F0040A72C1B2A498D275B2AB": {
       "Parts": [
@@ -3679,8 +4232,21 @@
           "Parent": -1
         }
       ],
-      "Attempts": 295,
-      "Floor": 10
+      "Attempts": 1927,
+      "Floor": 10,
+      "Bound": 9,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 273655,
+      "Binding": [
+        "ergonomics",
+        "recoil",
+        "weight",
+        "magazine capacity",
+        "effective distance"
+      ]
     },
     "F4012679BE476DC651583F82581337827B1FE3E239AB4B20C5EF2B0D8AFDD32C": {
       "Parts": [
@@ -3721,8 +4287,19 @@
           "Parent": -1
         }
       ],
-      "Attempts": 383,
-      "Floor": 3
+      "Attempts": 2013,
+      "Floor": 3,
+      "Bound": 5,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 755763,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity",
+        "effective distance"
+      ]
     },
     "5E56252161D457A8BD48EE10B9348A4690E30326688A77565BCF0D02927C7AAC": {
       "Parts": [
@@ -3793,8 +4370,15 @@
           "Parent": -1
         }
       ],
-      "Attempts": 383,
-      "Floor": 9
+      "Attempts": 2012,
+      "Floor": 9,
+      "Bound": 10,
+      "BoundSessions": 5,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 823378,
+      "Binding": []
     }
   }
 }
