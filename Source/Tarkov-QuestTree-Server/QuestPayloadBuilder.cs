@@ -44,14 +44,25 @@ namespace QuestTreeServer
         QuestConfig questConfig,
         QuestFacts facts,
         ZoneStore zoneStore,
-        WeaponStatModel weaponStatModel) : IOnLoad
+        WeaponStatModel weaponStatModel,
+        WeaponGraph weaponGraph) : IOnLoad
     {
         /// <summary>Built while the server starts, for the reason MapMarkerPayloadBuilder gives:
         /// the client's request handler is synchronous on Unity's main thread, so paying for the
         /// first build there froze the game on the first panel open.</summary>
+        /// <summary>Weapons named by a WeaponAssembly condition on this install, filled while the
+        /// quests are mapped.</summary>
+        private readonly HashSet<MongoId> _questWeapons = new();
+
         public Task OnLoadAsync(CancellationToken cancellationToken)
         {
             GetPayloadJson();
+
+            // After the payload, because the set of weapons to walk is filled while it is built.
+            // Deliberately at boot: a cyclic slot graph is uncatchable at runtime, so the walk that
+            // would meet one has to happen where a log line is read rather than inside a request.
+            weaponGraph.Survey(_questWeapons);
+
             return Task.CompletedTask;
         }
 
@@ -479,6 +490,11 @@ namespace QuestTreeServer
 
                 build.ModelCheck = CheckModel(build);
                 builds.Add(build);
+
+                // Remembered so the slot graphs can be walked once at boot. Collected here rather
+                // than re-derived later because this is the only pass that already knows which
+                // weapons the installed quests actually name.
+                if (weapon!.TryParseMongoId(out var weaponId)) _questWeapons.Add(weaponId);
             }
 
             return builds;

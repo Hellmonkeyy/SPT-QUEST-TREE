@@ -172,6 +172,66 @@ namespace QuestTreeServer
             }
         }
 
+        /// <summary>Walks a set of weapons and reports what the graph looks like, once, at boot.
+        ///
+        /// The warm-up is the lesser half. The real job is that a cyclic slot graph is the one
+        /// failure this codebase cannot recover from - a StackOverflowException is uncatchable, so
+        /// Guarded never sees it and the process dies with every player's raid inside it. The guard
+        /// against it is a visited set and a depth cap, and a guard nobody has ever seen fire is a
+        /// guard nobody knows works.
+        ///
+        /// So this fires it deliberately, on every weapon the installed quests actually name, and
+        /// says out loud whether anything was truncated. On a clean install that line reports
+        /// nothing unusual; on an install whose mods have built a loop, it is the difference between
+        /// knowing and finding out mid-raid.</summary>
+        public void Survey(IEnumerable<MongoId> weapons)
+        {
+            EnsureBuilt();
+
+            var surveyed = 0;
+            var widest = 0;
+            MongoId widestWeapon = default;
+            var truncated = new List<string>();
+
+            foreach (var weapon in weapons ?? Enumerable.Empty<MongoId>())
+            {
+                var reached = Reachable(weapon, out var notes);
+                if (reached == null) continue;
+
+                surveyed++;
+
+                if (reached.Count > widest)
+                {
+                    widest = reached.Count;
+                    widestWeapon = weapon;
+                }
+
+                foreach (var note in notes)
+                    if (note.Contains("truncated", StringComparison.OrdinalIgnoreCase))
+                        truncated.Add($"{weapon} ({reached.Count} parts)");
+            }
+
+            if (surveyed == 0)
+            {
+                logger.Info("Quest Tracker: no weapon-build quests to survey.");
+                return;
+            }
+
+            logger.Info(
+                $"Quest Tracker: walked the slot graph of {surveyed} quest weapon(s); the widest is " +
+                $"'{widestWeapon}' at {widest:N0} reachable parts.");
+
+            // Not a warning: truncation is the guard working. It is logged loudly because it also
+            // means any build for that weapon is drawn from a partial set of parts, and that is a
+            // caveat the solver has to carry rather than discover.
+            if (truncated.Count > 0)
+                logger.Warning(
+                    $"Quest Tracker: {truncated.Count} weapon slot graph(s) hit the depth or size cap and were " +
+                    $"truncated - {string.Join(", ", truncated.Take(5))}. Builds for these are drawn from a " +
+                    "partial parts list. A cyclic graph from a mod is the usual cause, and the cap is what " +
+                    "stops it taking the server down.");
+        }
+
         private static PartInfo Flatten(MongoId id, TemplateItem template)
         {
             var props = template.Properties!;
