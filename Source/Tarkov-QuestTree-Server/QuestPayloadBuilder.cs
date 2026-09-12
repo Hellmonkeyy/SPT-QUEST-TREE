@@ -96,6 +96,11 @@ namespace QuestTreeServer
         ///
         /// Off by default because it is pure cost on a player's machine: nothing it finds makes a build
         /// smaller, it only says whether a claim is false.</summary>
+        /// <summary>Adversarial searches a single bound needs before the budget moves elsewhere. Evidence
+        /// has diminishing returns: the thousandth failed attack on one build says far less than the first
+        /// attack on a build nobody has tested.</summary>
+        private const int FalsifyEnough = 2_000;
+
         private static bool Falsifying =>
             Environment.GetEnvironmentVariable("QUESTTREE_FALSIFY") is "1" or "true" or "TRUE" or "yes";
 
@@ -327,6 +332,18 @@ namespace QuestTreeServer
             // Per quest, how far the build is above what can be PROVEN necessary. A gap is not waste -
             // the bound omits the chains that named parts have to be routed through, and bounding
             // those exactly is a Steiner tree - but it is the honest measure of what is still open.
+            // The denominators. "Zero counterexamples" and "zero comparisons" read identically otherwise,
+            // which is the same defect as a check that cannot fail - and this is the claim the whole feature
+            // rests on, so it is the last place to leave it implicit.
+            var evidence = weaponBuildCache.Evidence();
+
+            logger.Info(
+                $"Quest Tracker: the evidence behind the proofs - the least-tested minimal build has survived " +
+                $"{evidence.Weakest:N0} adversarial search(es), {evidence.Untested} of them have never been " +
+                $"attacked, {evidence.Nodes:N0} node(s) have been spent trying to beat them, and the " +
+                $"shortest-standing bound has held for {evidence.Sessions} session(s). Set QUESTTREE_FALSIFY=1 " +
+                "to spend a launch attacking them.");
+
             foreach (var line in unproven)
                 logger.Debug($"Quest Tracker: minimality unproven - {line}");
 
@@ -1179,8 +1196,14 @@ namespace QuestTreeServer
             List<MongoId> mustIncludeCategories)
         {
             var bound = weaponBuildVerifier.LowestPossible(weapon, thresholds, mustInclude, mustIncludeCategories).Parts;
+            var key = WeaponBuildCache.KeyFor(weapon, thresholds, mustInclude, mustIncludeCategories);
 
-            Crosscheck(WeaponBuildCache.KeyFor(weapon, thresholds, mustInclude, mustIncludeCategories), bound, weapon);
+            Crosscheck(key, bound, weapon);
+
+            // Written down rather than recomputed from nothing next time, and with its own history: a bound
+            // that has not moved in fifty sessions is a different object from one that improved last
+            // session.
+            weaponBuildCache.Bound(key, bound);
 
             return bound;
         }
@@ -1298,7 +1321,10 @@ namespace QuestTreeServer
                 // Normally the end of the story: a build at its proven bound cannot get smaller, so another
                 // search of it is spent proving nothing. Under QUESTTREE_FALSIFY it is the opposite - these
                 // are the only builds worth attacking, because they are the ones making a claim.
-                if (Falsifying)
+                // Effort follows IGNORANCE. A bound already attacked this hard has all the evidence another
+                // search would add; one never attacked has none, so the budget moves to it. Without this the
+                // run re-picks at random with no memory of what previous runs already established.
+                if (Falsifying && remembered.Falsifications < FalsifyEnough)
                     Falsify(build, weapon, thresholds, mustInclude, mustIncludeCategories, remembered, seed);
 
                 return false;
@@ -1332,6 +1358,8 @@ namespace QuestTreeServer
                     weapon, thresholds, mustInclude, mustIncludeCategories,
                     allowed: null, knownGood: working, seed: seed, restarts: restarts,
                     binding: binding);
+
+            weaponBuildCache.Cost(key, result.NodesOpened);
 
             if (!result.Found)
             {
@@ -1398,7 +1426,15 @@ namespace QuestTreeServer
                 ceiling: remembered.Parts.Count - 1,
                 binding: remembered.Binding);
 
-            if (!smaller.Found || smaller.Parts.Count >= remembered.Parts.Count) return;
+            var key = WeaponBuildCache.KeyFor(weapon, thresholds, mustInclude, mustIncludeCategories);
+
+            if (!smaller.Found || smaller.Parts.Count >= remembered.Parts.Count)
+            {
+                // A FAILED falsification is the expensive half of this and it used to vanish. Recorded, so
+                // the evidence accumulates across sessions instead of being re-bought every run.
+                weaponBuildCache.Falsified(key, smaller.NodesOpened, seed);
+                return;
+            }
 
             // The verifier decides, exactly as everywhere else. A "counterexample" the verifier rejects is a
             // search bug and says nothing about the bound.
@@ -1416,8 +1452,7 @@ namespace QuestTreeServer
                 ". The bound understates what is reachable, so no build should be reported as minimal until " +
                 "that is found and fixed.");
 
-            weaponBuildCache.Put(key: WeaponBuildCache.KeyFor(weapon, thresholds, mustInclude, mustIncludeCategories),
-                parts: smaller.Parts, floor: smaller.Floor, binding: smaller.Binding);
+            weaponBuildCache.Put(key, smaller.Parts, smaller.Floor, smaller.Binding);
 
             weaponBuildCache.Flush();
         }

@@ -82,6 +82,36 @@ namespace QuestTreeServer
             /// reports the same numbers a cold one did rather than a blank where the proof was.</summary>
             public int Floor { get; set; }
 
+            /// <summary>The verifier's PROVEN lower bound, and how many sessions in a row it has come back
+            /// the same.
+            ///
+            /// Kept because a bound is expensive to compute and its history says how much to trust it: one
+            /// that has not moved in fifty sessions at full effort is a different object from one that
+            /// improved last session, and they deserve different effort. Zero means nobody has recorded one.</summary>
+            public int Bound { get; set; }
+
+            public int BoundSessions { get; set; }
+
+            /// <summary>Adversarial searches that tried to beat this build and failed, the nodes they spent,
+            /// and the last seed they used.
+            ///
+            /// A FAILED falsification is expensive evidence that the bound is sound, and it used to be
+            /// thrown away - only a counterexample was ever logged. Recorded here so the evidence
+            /// accumulates across sessions rather than being re-bought every run: a build attacked ten
+            /// thousand times is one to stop spending on, and a build never attacked is the next one to
+            /// test.</summary>
+            public int Falsifications { get; set; }
+
+            public long FalsifyNodes { get; set; }
+
+            public int LastFalsifySeed { get; set; }
+
+            /// <summary>The most nodes a search of this build has ever opened. The worst build on this
+            /// install searches 376,062 and a typical one a fraction of that, which is the difference
+            /// between a scheduler that can run ten cheap builds in the time one expensive one takes and
+            /// one that cannot tell them apart.</summary>
+            public int Nodes { get; set; }
+
             /// <summary>Which thresholds this build meets with nothing to spare - the reason it cannot lose a
             /// part, as far as anything here knows.
             ///
@@ -186,6 +216,106 @@ namespace QuestTreeServer
                 _dirty = true;
             }
         }
+
+        /// <summary>Records the proven lower bound for a build, and how long it has stood.</summary>
+        public void Bound(string key, int bound)
+        {
+            if (bound <= 0) return;
+
+            lock (_lock)
+            {
+                Load();
+
+                if (!_file!.Builds.TryGetValue(key, out var build)) return;
+
+                if (build.Bound == bound)
+                {
+                    // Counted once per SESSION, not once per call: this is asked thousands of times a run and
+                    // "stable across fifty sessions" has to mean fifty sessions.
+                    if (_counted.Add(key))
+                    {
+                        build.BoundSessions++;
+                        _dirty = true;
+                    }
+
+                    return;
+                }
+
+                // A bound that MOVED. The stability count starts again, because what it measures is how long
+                // this particular number has survived.
+                build.Bound = bound;
+                build.BoundSessions = 1;
+                _dirty = true;
+
+                _counted.Add(key);
+            }
+        }
+
+        /// <summary>Records an adversarial search that failed to beat a build - the evidence that its bound
+        /// is sound, which is worth keeping precisely because nothing visible happened.</summary>
+        public void Falsified(string key, int nodes, int seed)
+        {
+            lock (_lock)
+            {
+                Load();
+
+                if (!_file!.Builds.TryGetValue(key, out var build)) return;
+
+                build.Falsifications++;
+                build.FalsifyNodes += Math.Max(0, nodes);
+                build.LastFalsifySeed = seed;
+                _dirty = true;
+            }
+        }
+
+        /// <summary>Records what searching this build costs, so effort can be spent where it buys most.</summary>
+        public void Cost(string key, int nodes)
+        {
+            if (nodes <= 0) return;
+
+            lock (_lock)
+            {
+                Load();
+
+                if (!_file!.Builds.TryGetValue(key, out var build) || build.Nodes >= nodes) return;
+
+                build.Nodes = nodes;
+                _dirty = true;
+            }
+        }
+
+        /// <summary>The evidence behind the proofs, for a boot that wants to report it honestly: how hard
+        /// the least-tested bound has been attacked, and how many have never been attacked at all. A zero
+        /// is only evidence when the denominator is known.</summary>
+        public (int Weakest, int Untested, long Nodes, int Sessions) Evidence()
+        {
+            lock (_lock)
+            {
+                Load();
+
+                var weakest = int.MaxValue;
+                var untested = 0;
+                var nodes = 0L;
+                var sessions = int.MaxValue;
+
+                foreach (var build in _file!.Builds.Values)
+                {
+                    if (build.Bound <= 0 || build.Bound < build.Parts.Count) continue;
+
+                    if (build.Falsifications < weakest) weakest = build.Falsifications;
+                    if (build.Falsifications == 0) untested++;
+                    if (build.BoundSessions < sessions) sessions = build.BoundSessions;
+
+                    nodes += build.FalsifyNodes;
+                }
+
+                return (weakest == int.MaxValue ? 0 : weakest, untested, nodes,
+                    sessions == int.MaxValue ? 0 : sessions);
+            }
+        }
+
+        /// <summary>Requirements whose bound has already been counted for this session.</summary>
+        private readonly HashSet<string> _counted = new();
 
         /// <summary>Records that a boot tried to beat a build and could not.</summary>
         public void Held(string key)
@@ -345,6 +475,22 @@ namespace QuestTreeServer
                         _dirty = true;
 
                         Authoritative = false;
+
+                        // EVERYTHING PROVEN IS RE-OPENED. A build carried over from another install is still
+                        // a build and the verifier will say whether it is a legal one - but a bound, the
+                        // evidence behind it and the cost of searching it were all facts about a different
+                        // set of parts. New parts can make a smaller build possible, so a proof that nothing
+                        // smaller exists is exactly what a different fingerprint invalidates, and inheriting
+                        // it would let a stale proof mark a build finished forever.
+                        foreach (var build in found.Builds.Values)
+                        {
+                            build.Bound = 0;
+                            build.BoundSessions = 0;
+                            build.Falsifications = 0;
+                            build.FalsifyNodes = 0;
+                            build.Nodes = 0;
+                            build.Binding.Clear();
+                        }
 
                         logger.Info(
                             $"Quest Tracker: {found.Builds.Count} weapon build(s) carried over from a different " +
