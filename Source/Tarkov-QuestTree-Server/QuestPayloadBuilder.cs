@@ -846,7 +846,16 @@ namespace QuestTreeServer
         /// TRAINING - a file called "training" in the cache folder - runs generation after generation
         /// instead, because that is what produces the cache that ships. It is deliberately not a build
         /// flag: an install that never creates the file can never be made to grind by accident.</summary>
-        private int IdleGenerations => weaponBuildCache.Training ? 3 : 1;
+        /// <summary>Rounds a normal launch runs before the loop exits for good.
+        ///
+        /// Ten, and then the process does no further optimisation for the rest of its life. A COUNT rather
+        /// than a time budget because it is stable across machines: twenty seconds bought a fast box three
+        /// times the rounds a slow one got, and how much work a launch does should not depend on hardware.
+        ///
+        /// Bounded so completely that no politeness machinery is needed. Ten rounds on the lowest thread
+        /// priority cannot disturb somebody playing, and detecting whether they are would have been
+        /// guesswork dressed up as a feature.</summary>
+        private const int LaunchRounds = 10;
 
         /// <summary>Restarts a training round spends on a build that has never resisted, and the most it
         /// will escalate to for one that has.
@@ -877,7 +886,9 @@ namespace QuestTreeServer
         /// rounds in 34 minutes on a sixteen-core machine, using one core. Half rather than all, because the
         /// other half belongs to whoever is playing - this is a background optimisation and it does not get
         /// to make a raid stutter.</summary>
-        private static int Threads => Math.Max(1, Environment.ProcessorCount / 2);
+        private int Threads => weaponBuildCache.Training
+            ? Math.Max(1, Environment.ProcessorCount / 2)
+            : LaunchThreads;
 
         /// <summary>Rounds between progress lines while training. A run that goes on for hours has to say
         /// what it is doing without filling the log.</summary>
@@ -886,9 +897,9 @@ namespace QuestTreeServer
         /// <summary>How long the search may run. Seconds on a normal start, minutes while training. This is
         /// CPU on the machine hosting the game, and a solver improving a build by one part does not get to
         /// cost somebody a raid.</summary>
-        /// <summary>How long a NORMAL launch spends improving in the background. A training launch has no
-        /// budget at all - it runs until it is stopped.</summary>
-        private static readonly TimeSpan ImproveBudget = TimeSpan.FromSeconds(20);
+        /// <summary>Threads a normal launch uses. Two: ten rounds is brief and the machine belongs to
+        /// whoever is playing. Training keeps half the box, which is a session the user chose to spend.</summary>
+        private static int LaunchThreads => Math.Max(1, Math.Min(2, Environment.ProcessorCount));
 
         /// <summary>Pause between generations, so the search yields the machine rather than pinning a core
         /// for three minutes straight.</summary>
@@ -917,14 +928,24 @@ namespace QuestTreeServer
 
             _ = Task.Run(async () =>
             {
+                // Below everything else on the machine. Brief and preemptible beats brief and competing
+                // with a game for a core.
+                try { Thread.CurrentThread.Priority = ThreadPriority.Lowest; }
+                catch (Exception) { /* a platform that will not lower it is no reason to skip the work */ }
+
                 var clock = System.Diagnostics.Stopwatch.StartNew();
-                var idle = 0;
                 var total = 0;
                 var rounds = 0;
 
                 try
                 {
                     var training = weaponBuildCache.Training;
+
+                    if (!training)
+                        logger.Info(
+                            $"Quest Tracker: looking for smaller weapon builds in the background - {LaunchRounds} " +
+                            "rounds on the lowest thread priority, then it stops for good. Anything it finds is " +
+                            "used from the next start. Set QUESTTREE_TRAIN=1 to search until the server stops.");
 
                     if (training)
                         logger.Warning(
@@ -938,9 +959,10 @@ namespace QuestTreeServer
                     // often a dozen rounds apart, and there is no number of empty rounds that means there are
                     // none left - so the only sensible stopping condition is a person deciding to stop.
                     //
-                    // A normal launch is the opposite: one round, twenty seconds, then out of the way.
+                    // A normal launch does ten rounds and then nothing, ever. Whatever it finds goes in the
+                    // file for the next launch to pick up, so nothing is running while people are playing.
                     while (!cancellationToken.IsCancellationRequested
-                           && (training || (clock.Elapsed < ImproveBudget && idle < IdleGenerations)))
+                           && (training || rounds < LaunchRounds))
                     {
                         await Task.Delay(BetweenGenerations, cancellationToken).ConfigureAwait(false);
 
@@ -948,7 +970,6 @@ namespace QuestTreeServer
 
                         rounds++;
                         total += found;
-                        idle = found > 0 ? 0 : idle + 1;
 
                         // The generation is what stops the next session re-exploring this one's ground, and it
                         // only reaches the file when the file is written - which was only happening when a
@@ -967,27 +988,42 @@ namespace QuestTreeServer
 
                         if (found <= 0) continue;
 
+                        // Written to the file and NOWHERE ELSE. The improvement loop used to rebuild the
+                        // served payload so a smaller build appeared mid-session, and that one decision was
+                        // the source of both bugs found here: the race where this thread walked _questBuilds
+                        // while a rebuild cleared and refilled it, and the duplication where the list grew by
+                        // sixty every time. A loop that can only append to a file cannot do either.
+                        //
+                        // What a player wants is the best build available when they look, not a build that
+                        // changes while they are looking at it. So the panel is built once per boot from the
+                        // best history there is at that moment, and what this finds shows up next launch.
                         weaponBuildCache.Flush();
-                        Rebuild();
 
                         logger.Info(
-                            $"Quest Tracker: found smaller builds for {found} requirement(s) while running - " +
-                            $"{total} so far this session. The quest list has been rebuilt with them.");
+                            $"Quest Tracker: found smaller builds for {found} requirement(s) - {total} so far. " +
+                            "They will be used from the next start.");
                     }
+
+                    // Whatever the last rounds found, before the task ends.
+                    weaponBuildCache.Flush();
 
                     logger.Info(total > 0
                         ? $"Quest Tracker: found smaller builds for {total} requirement(s) over {rounds} round(s) in " +
-                          $"{clock.Elapsed.TotalSeconds:0}s. Every start does at least one round, so they keep improving."
+                          $"{clock.Elapsed.TotalSeconds:0}s. They will be used from the next start."
                         : $"Quest Tracker: no smaller build found over {rounds} round(s) in " +
                           $"{clock.Elapsed.TotalSeconds:0}s. The next start tries different starting points.");
                 }
                 catch (OperationCanceledException)
                 {
-                    // The server is shutting down, which for a training run is how it is MEANT to end.
-                    // Everything found was flushed as it was found, so there is nothing to save here.
+                    // The server is shutting down, which for a training run is how it is MEANT to end. Flushed
+                    // here as well as every tenth round: with nothing reaching the client mid-session, the file
+                    // is the only place progress lives, and losing the last rounds to a quit would be the one
+                    // way this is worse than rebuilding live.
+                    weaponBuildCache.Flush();
+
                     logger.Info(
-                        $"Quest Tracker: training stopped after {rounds} round(s) and {total} smaller build(s). " +
-                        "All of them are already written down.");
+                        $"Quest Tracker: training stopped after {rounds} round(s) and {total} smaller build(s), " +
+                        "all written down. They will be used from the next start.");
                 }
                 catch (Exception ex)
                 {
@@ -1153,6 +1189,7 @@ namespace QuestTreeServer
 
             var remembered = weaponBuildCache.Get(key);
             var incumbent = remembered == null ? null : Restore(remembered);
+            var rejected = false;
 
             // A remembered build is DESCRIBED rather than re-derived. Searching again would cost seconds to
             // arrive back where it started, and the verifier is what decides whether the remembered answer
@@ -1184,21 +1221,23 @@ namespace QuestTreeServer
 
                 logger.Info(
                     $"Quest Tracker: a remembered weapon build for '{weapon}' does not hold up on this install, " +
-                    "so it is being solved again. " +
-                    (audited.Failures.Count > 0 ? string.Join("; ", audited.Failures.Take(2)) : "") +
-                    (described.Unmet.Count > 0 ? string.Join("; ", described.Unmet.Take(2)) : ""));
+                    "so it is being solved again - " +
+                    string.Join("; ", audited.Failures.Concat(described.Unmet).Distinct().Take(3)) + ".");
 
                 incumbent = null;
+                rejected = true;
             }
 
             var result = weaponSolver.Solve(
                 weapon, thresholds, mustInclude, mustIncludeCategories,
                 allowed: null, knownGood: incumbent, seed: _seed);
 
-            // Written back only when it is an improvement or there was nothing there; otherwise the boot
-            // is recorded as one more that could not beat it, which is the only honest thing to say about
-            // a build nobody has proved minimal.
-            if (result.Found && (remembered == null || result.Parts.Count < remembered.Parts.Count))
+            // A remembered entry that FAILED verification counts as absent, and that word "rejected" is
+            // load-bearing. Without it an invalid entry that happens to be small blocks its own replacement
+            // forever: the MP-133 was 5 wide against a limit of 4, was rejected and re-solved on EVERY boot,
+            // and the valid build was never written because it was not SMALLER than the broken one. One
+            // wasted re-solve per launch, for the life of the install.
+            if (result.Found && (remembered == null || rejected || result.Parts.Count < remembered.Parts.Count))
             {
                 weaponBuildCache.Put(key, result.Parts, result.Floor);
                 _improved++;
