@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
@@ -128,6 +128,10 @@ namespace QuestTreeServer
         /// than any plausible sum of shortfalls, because a build missing a part the quest named is
         /// the wrong answer rather than a worse one.</summary>
         private const double MissingPartPenalty = 1000d;
+
+        /// <summary>Rounds of shedding and bypassing. Each round that changes anything takes a part
+        /// off, so this only bounds a build that started implausibly large.</summary>
+        private const int PruneRounds = 8;
 
         /// <summary>Improvement a move must make to be taken. Guards the climb against oscillating
         /// on floating point noise.</summary>
@@ -278,7 +282,26 @@ namespace QuestTreeServer
             var bestWhole = int.MaxValue;
             var bestShortfall = double.PositiveInfinity;
             var bestCount = int.MaxValue;
-            var floor = int.MaxValue;
+
+            // THE FLOOR, worked out once before anything is searched: what the plan has to place, the
+            // slots the game will not let the player leave empty, and one part for each category still
+            // unaccounted for. Nothing can be smaller, so a build that reaches it is provably minimal
+            // and the search can stop.
+            //
+            // Once, and not as a running minimum over the attempts, because it is the threshold the
+            // search stops at: a floor that starts too high and falls as attempts go by lets the loop
+            // break on an early fat build that happened to match the loose bound it had at the time.
+            // That cost two parts across the sixty when the bypass pass made early builds leaner.
+            var scratch = new Node { Template = weapon, Locked = true };
+
+            state.Shuffle = null;
+            state.ResetTree(weapon);
+            Plan(scratch, required, state);
+            Fill(scratch, state, MaxDepth, requiredOnly: true);
+
+            var floor = CountParts(scratch) + UnmetCategories(scratch, state);
+
+            result.Floor = floor;
 
             // Many starting points, because a climb is a local search and which optimum it reaches
             // depends on where it starts. Starting from the FLOOR - the weapon, the parts the quest
@@ -304,11 +327,6 @@ namespace QuestTreeServer
                 var lean = attempt % 2 == 0;
 
                 Fill(root, state, MaxDepth, requiredOnly: lean);
-
-                // The smallest this quest could possibly be: what the plan had to place, the slots
-                // that cannot be empty, and one part for each category still unaccounted for. Reported
-                // so that "11 parts" can be read against something.
-                if (lean) floor = Math.Min(floor, CountParts(root) + UnmetCategories(root, state));
 
                 // The randomness belongs to the dressing only. The climb fills the sub-slots of every
                 // candidate it tries, and a random fill there would have it judging parts by a throw
@@ -345,8 +363,6 @@ namespace QuestTreeServer
                 if (bestWhole == 0 && bestShortfall <= 0d && bestCount <= floor) break;
                 if (state.Exhausted) break;
             }
-
-            result.Floor = floor == int.MaxValue ? 0 : floor;
 
             result.NodesOpened = state.Nodes;
             result.HitCeiling = state.Exhausted;
@@ -535,7 +551,7 @@ namespace QuestTreeServer
         private MongoId? Nearest(int category, SearchState state)
         {
             MongoId? best = null;
-            var bestSteps = int.MaxValue;
+            var bestCost = int.MaxValue;
             var bestWorth = double.NegativeInfinity;
 
             foreach (var (template, _) in state.Reachable)
@@ -543,12 +559,16 @@ namespace QuestTreeServer
                 if ((CategoryMask(template, state) & (1 << category)) == 0) continue;
                 if (!state.Distance.TryGetValue(template, out var steps)) continue;
 
+                // The chain to reach it, plus whatever it forces once it is there. The thresholds only
+                // break a tie, because the requirement is "a part of this category" and any member
+                // satisfies it - so the one that costs fewest parts is the right one.
+                var cost = steps - 1 + Burden(template, state, 0);
                 var worth = Potential(template, state, 0);
 
-                if (steps > bestSteps) continue;
-                if (steps == bestSteps && worth <= bestWorth) continue;
+                if (cost > bestCost) continue;
+                if (cost == bestCost && worth <= bestWorth) continue;
 
-                bestSteps = steps;
+                bestCost = cost;
                 bestWorth = worth;
                 best = template;
             }
@@ -793,6 +813,27 @@ namespace QuestTreeServer
 
             if (state.Shuffle == null)
             {
+                // A required slot is filled either way, so the cheapest occupant wins and the
+                // thresholds only break a tie between equally cheap ones.
+                if (slot.Required)
+                {
+                    var pick = shortlist[0];
+                    var cost = Burden(pick.Template, state, 0);
+
+                    foreach (var entry in shortlist)
+                    {
+                        var burden = Burden(entry.Template, state, 0);
+
+                        if (burden > cost) continue;
+                        if (burden == cost && entry.Score <= pick.Score) continue;
+
+                        pick = entry;
+                        cost = burden;
+                    }
+
+                    return pick.Template;
+                }
+
                 var best = shortlist[0];
 
                 foreach (var entry in shortlist)
@@ -856,6 +897,46 @@ namespace QuestTreeServer
             }
 
             state.Potentials[template] = total;
+
+            return total;
+        }
+
+        /// <summary>How many parts fitting one template forces onto the gun: itself, plus the
+        /// cheapest occupant of every slot it cannot leave empty, recursively.
+        ///
+        /// A required slot is going to be filled whatever happens, so the question there is not which
+        /// part helps most but which costs least - and the cost is not one. An M1A barrel forces a
+        /// muzzle device; an AR receiver forces a charging handle; an occupant chosen for its
+        /// ergonomics can bring three parts with it. Choosing by stats and counting the parts
+        /// afterwards is how a floor of eight becomes a build of twelve.</summary>
+        private int Burden(MongoId template, SearchState state, int depth)
+        {
+            if (depth > MaxDepth) return 1;
+            if (state.Burdens.TryGetValue(template, out var cached)) return cached;
+            if (!state.Reachable.TryGetValue(template, out var part)) return 1;
+
+            // Marked before descending, at the honest minimum for one part: a slot graph that admits
+            // its own host meets the marker and stops instead of looping.
+            state.Burdens[template] = 1;
+
+            var total = 1;
+
+            foreach (var slot in part.Slots)
+            {
+                if (!slot.Required) continue;
+
+                var cheapest = int.MaxValue;
+
+                foreach (var candidate in slot.Candidates)
+                {
+                    var burden = Burden(candidate, state, depth + 1);
+                    if (burden < cheapest) cheapest = burden;
+                }
+
+                if (cheapest != int.MaxValue) total += cheapest;
+            }
+
+            state.Burdens[template] = total;
 
             return total;
         }
@@ -1148,11 +1229,30 @@ namespace QuestTreeServer
             // close the search got.
             if (!before.Done) return;
 
+            // Both passes, repeated. Dropping a leaf can leave its parent a leaf, and bypassing a
+            // mount can leave the part above it removable, so one pass of either is not closed. It
+            // terminates because every accepted change takes a part off and a build has finitely many.
+            for (var round = 0; round < PruneRounds; round++)
+            {
+                var shed = Shed(weapon, root, state, required, buffer, ref before);
+                var bypassed = Bypass(weapon, root, state, required, buffer, ref before);
+
+                if (!shed && !bypassed) break;
+            }
+        }
+
+        /// <summary>Takes off every part that carries nothing and pays for nothing.</summary>
+        private bool Shed(
+            MongoId weapon, Node root, SearchState state, List<MongoId> required, List<MongoId> buffer, ref Cost before)
+        {
             var removable = new List<Node>();
             CollectNodes(root, removable);
 
-            // Deepest first: a part cannot come off while something is mounted on it.
-            removable.Sort((a, b) => b.Depth.CompareTo(a.Depth));
+            // Deepest first: a part cannot come off while something is mounted on it, and taking the
+            // deepest first is what lets a whole chain go in one pass.
+            removable.Sort((left, right) => right.Depth.CompareTo(left.Depth));
+
+            var shed = false;
 
             foreach (var node in removable)
             {
@@ -1166,23 +1266,123 @@ namespace QuestTreeServer
                 if (required.Contains(node.Template)) continue;
 
                 var parent = node.Parent;
-                var index = parent.Children.IndexOf(node);
-                if (index < 0) continue;
 
-                parent.Children.RemoveAt(index);
+                Detach(node, state);
 
                 var after = Measure(weapon, root, state, buffer);
 
-                // Strictly not worse on both dimensions that matter. Headroom is allowed to fall -
-                // that is the point.
+                // Strictly not worse on the two that matter. Headroom is allowed to fall - that is the
+                // point of the pass.
                 if (after.Gaps <= before.Gaps && after.Shortfall <= before.Shortfall + MinGain)
                 {
                     before = after;
+                    shed = true;
                     continue;
                 }
 
-                parent.Children.Insert(index, node);
+                Reattach(parent, node, state);
             }
+
+            return shed;
+        }
+
+        /// <summary>Takes out a part that carries exactly one other part and nothing else, re-homing
+        /// its passenger onto the slot it vacated.
+        ///
+        /// This is the half of pruning that removing leaves cannot reach, and it is where the waste
+        /// actually lives. A LaRue LT101 riser has one optional scope slot, -1 ergonomics and 0.11 kg,
+        /// and the optic sitting on it is in the filter of the slot the riser itself occupies - so the
+        /// riser is a pass-through that costs a part and gives nothing back. It is never a leaf, so a
+        /// leaf-only pass keeps it forever. Three of the six wasted parts found by audit were this
+        /// exact shape: a riser or mount bypassable in place.
+        ///
+        /// Only a single passenger, deliberately: a mount carrying two parts has nowhere to put the
+        /// second, and inventing a second home for it is a different move with different risks.
+        ///
+        /// A LOCKED pass-through is fair game, and that is the whole reason this finds anything. The
+        /// planner locks the parts it places, INCLUDING the intermediates it routes through - and an
+        /// intermediate is not a requirement, it is a route to one. If the passenger is legal in the
+        /// slot the intermediate is giving up, then the route was a slot longer than it needed to be
+        /// and every requirement is still satisfied one level higher. Three of the six wasted parts
+        /// found by audit were locked risers, and skipping locked nodes kept every one of them.
+        ///
+        /// What must NOT be dropped is a part the quest names, because nothing in Measure knows about
+        /// those - they are counted separately - so the guard here is the only thing standing between
+        /// this pass and a build that quietly loses one.</summary>
+        private bool Bypass(
+            MongoId weapon, Node root, SearchState state, List<MongoId> required, List<MongoId> buffer, ref Cost before)
+        {
+            var nodes = new List<Node>();
+            CollectNodes(root, nodes);
+
+            nodes.Sort((left, right) => right.Depth.CompareTo(left.Depth));
+
+            var bypassed = false;
+
+            foreach (var node in nodes)
+            {
+                if (node.Parent == null) continue;
+                if (node.Children.Count != 1) continue;
+
+                // Measure does not count named parts - Solve counts those separately - so this is the
+                // only thing that stops the pass dropping one.
+                if (required.Contains(node.Template)) continue;
+
+                var parent = node.Parent;
+                var child = node.Children[0];
+
+                if (!state.Reachable.TryGetValue(parent.Template, out var host)) continue;
+                if (node.SlotIndex < 0 || node.SlotIndex >= host.Slots.Length) continue;
+
+                // The passenger has to be legal in the slot the pass-through is giving up, or this is
+                // not a bypass, it is a build the modding screen refuses.
+                if (Array.IndexOf(host.Slots[node.SlotIndex].Candidates, child.Template) < 0) continue;
+
+                var slot = child.SlotIndex;
+                var name = child.SlotName;
+
+                // The passenger comes off its carrier BEFORE the carrier comes off the gun, and goes
+                // back on in the mirror order. The other way round leaves the passenger listed under
+                // the carrier as well as under its new host, and reverting then adds it a second time -
+                // which is how the ASh-12 ended up with two Cobra foregrips in one slot. The verifier
+                // caught that on the first boot after this pass was written; nothing else would have.
+                Detach(child, state);
+                Detach(node, state);
+
+                child.SlotIndex = node.SlotIndex;
+                child.SlotName = node.SlotName;
+                Redepth(child, parent.Depth + 1);
+
+                Attach(parent, child, state);
+
+                var after = Measure(weapon, root, state, buffer);
+
+                if (after.Gaps <= before.Gaps && after.Shortfall <= before.Shortfall + MinGain)
+                {
+                    before = after;
+                    bypassed = true;
+                    continue;
+                }
+
+                Detach(child, state);
+
+                child.SlotIndex = slot;
+                child.SlotName = name;
+
+                Reattach(parent, node, state);
+                Redepth(child, node.Depth + 1);
+                Attach(node, child, state);
+            }
+
+            return bypassed;
+        }
+
+        private static void Redepth(Node node, int depth)
+        {
+            node.Depth = depth;
+
+            foreach (var child in node.Children)
+                Redepth(child, depth + 1);
         }
 
         private static void CollectNodes(Node node, List<Node> into)
@@ -1607,6 +1807,10 @@ namespace QuestTreeServer
             /// <summary>Which categories each template belongs to, memoised.</summary>
             public Dictionary<MongoId, int> CategoryMasks { get; } = new();
 
+            /// <summary>How many parts each template drags onto the gun, memoised. Depends only on the
+            /// graph, so one pass serves every restart of one request.</summary>
+            public Dictionary<MongoId, int> Burdens { get; } = new();
+
             public int Nodes;
             public bool Exhausted;
 
@@ -1673,3 +1877,4 @@ namespace QuestTreeServer
         }
     }
 }
+

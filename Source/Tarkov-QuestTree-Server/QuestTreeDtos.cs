@@ -478,6 +478,15 @@ namespace QuestTreeServer
         /// measure available here and still be refused for its assembled size.</summary>
         public bool Satisfies { get; set; }
 
+        /// <summary>False when the condition constrains something nothing here can score - height or
+        /// width, in five of the vanilla quests.
+        ///
+        /// Satisfies on its own asserts more than it checks on those five. It means "everything that
+        /// CAN be checked is met", the difference is a constraint nobody verified, and a flag is the
+        /// only way to say so that does not depend on the reader noticing a list further down. A green
+        /// light that might be wrong has to look different from one that cannot be.</summary>
+        public bool FullyChecked { get; set; } = true;
+
         /// <summary>Set when the search ran out of budget. "No build found within the budget" is a
         /// different statement from "no build exists" and the client must not merge them.</summary>
         public bool HitBudget { get; set; }
