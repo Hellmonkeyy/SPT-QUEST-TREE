@@ -67,23 +67,31 @@ namespace QuestTreeServer
         /// is what stops a cyclic graph from the visited set's blind side.</summary>
         private const int MaxReachDepth = 12;
 
+        /// <summary>Largest build the part-count bound reasons about. The widest build on this install is
+        /// 19 parts; past this the bound simply declines to make a claim.</summary>
+        private const int MaxBudget = 28;
+
+        /// <summary>Stat per part used where the real ceiling is unavailable. Far above anything in the
+        /// game, so a bound resting on it can never prove a build minimal that is not.</summary>
+        private const double HugePerPart = 1_000_000d;
+
+        /// <summary>The tree knapsack, memoised per template and shared across every weapon: the answer
+        /// is a property of the subtree, not of the weapon the walk began at.</summary>
+        private readonly Dictionary<MongoId, double[]> _bestErgonomics = new();
+        private readonly Dictionary<MongoId, double[]> _bestRecoil = new();
+        private readonly HashSet<MongoId> _underway = new();
+
+        private double[]? _hugeErgonomics;
+        private double[]? _hugeRecoil;
+
         /// <summary>The fewest parts any satisfying build could have, and what forces it.
         ///
-        /// Two numbers, because two different claims are available and conflating them would overstate
-        /// one of them. <see cref="Parts"/> assumes nothing whatsoever: it allows the hypothetical
-        /// smaller build to fit the single best part in reach as many times as it likes, which the game
-        /// does permit. That makes it unarguable and very loose. <see cref="Distinct"/> adds one stated
-        /// assumption - that no HOST template appears twice on the gun, so each slot in the data is
-        /// available once - which is true of every build this solver produces and of essentially every
-        /// build anybody assembles, and it is sharper by a wide margin because the one slot whose best
-        /// occupant is worth +15 ergonomics is one slot, not twelve.</summary>
+        /// One number, and it assumes nothing: every argument behind it is generous to the hypothetical
+        /// smaller build, so a build matching it is minimal outright rather than minimal-if.</summary>
         public sealed class Floor
         {
             /// <summary>Unconditional. No build with fewer parts than this can satisfy the quest.</summary>
             public int Parts { get; set; }
-
-            /// <summary>The same, assuming no host template is fitted more than once.</summary>
-            public int Distinct { get; set; }
 
             public string Reason { get; set; } = "";
         }
@@ -97,6 +105,19 @@ namespace QuestTreeServer
             /// <summary>Constraints nothing here can score, so this verdict is silent on them. Never
             /// folded into Verified, in either direction.</summary>
             public List<string> Unverifiable { get; } = new();
+
+            /// <summary>Every part in the build is load-bearing: taking any one of them off, together
+            /// with whatever is mounted on it, breaks at least one requirement.
+            ///
+            /// A weaker claim than minimum and a stronger one than the solver could make for itself. It
+            /// says nothing about whether some entirely different, smaller arrangement exists - only that
+            /// THIS build has no fat on it - and it is checked here, by removing parts and re-deriving
+            /// everything, rather than inferred from the passes that built it.</summary>
+            public bool Irreducible { get; set; }
+
+            /// <summary>Parts whose removal changed nothing, which is a failure of the search rather than
+            /// an observation about the quest.</summary>
+            public List<string> Spare { get; } = new();
 
             /// <summary>Copies beyond the first of any template. Legal when each sits in its own slot,
             /// and worth counting anyway: two identical Kobra sights on one AKS-74N is what started
@@ -127,6 +148,7 @@ namespace QuestTreeServer
             CheckRequiredSlots(weapon, parts, verdict);
             CheckNamed(templates, mustInclude, mustIncludeCategories, verdict);
             CheckDuplicates(parts, verdict);
+            CheckIrreducible(weapon, parts, thresholds, mustInclude, mustIncludeCategories, verdict);
 
             return verdict;
         }
@@ -328,7 +350,6 @@ namespace QuestTreeServer
                 if (!named.Any(part => itemHelper.IsOfBaseclass(part, category))) uncovered++;
 
             floor.Parts = named.Count + uncovered;
-            floor.Distinct = floor.Parts;
             floor.Reason = floor.Parts > 0 ? "the parts and categories the quest names" : "nothing";
 
             // Every slot the game will not leave empty needs an occupant, that occupant may have
@@ -373,8 +394,6 @@ namespace QuestTreeServer
                 floor.Reason = "the slots the game will not leave empty, plus what the quest names";
             }
 
-            if (structural + extra > floor.Distinct) floor.Distinct = structural + extra;
-
             // A named part that sits four slots deep needs three parts under it, and a DEPTH LEVEL with
             // no named part at it must be occupied by something the quest did not name. Counting those
             // levels is the chain cost the earlier terms miss entirely, and it is why a bound that only
@@ -398,8 +417,6 @@ namespace QuestTreeServer
                 floor.Parts = routed;
                 floor.Reason = "the parts the quest names and the chains they hang off";
             }
-
-            if (routed > floor.Distinct) floor.Distinct = routed;
 
             var props = item.Properties!;
             var baseRecoil = (props.RecoilForceUp ?? 0d) + (props.RecoilForceBack ?? 0d);
@@ -486,16 +503,32 @@ namespace QuestTreeServer
                     _ => 0
                 };
 
-                var sharper = lower switch
+                // The exact tree bound, which supersedes the loose ones above wherever it applies.
+                //
+                // The parts the quest NAMES are counted separately and their contribution taken exactly,
+                // because that is where most of the work is: an ASh-12 suppressor costs 21 ergonomics and
+                // a build that must carry it starts 21 further from the threshold than a bare gun. A bound
+                // that asked only "how many parts to reach 40 from base" ignored that entirely, and it is
+                // the difference between proving five builds and proving most of them.
+                //
+                // The remaining parts are allowed the whole tree, which the named parts have in fact
+                // already taken slots out of - generous, and therefore still a bound.
+                var exact = lower switch
                 {
-                    "ergonomics" => Fill(value - (props.Ergonomics ?? 0d) - namedErgonomics, ergonomicSlots, named.Count, 1d),
+                    "ergonomics" => Reach(
+                        BestBelow(weapon, true, 0),
+                        value - (props.Ergonomics ?? 0d) - namedErgonomics,
+                        named.Count),
                     "recoil" => baseRecoil <= 0d
-                        ? named.Count
-                        : Fill(namedRecoil - (value / baseRecoil - 1d) * 100d, recoilSlots, named.Count, -1d),
-                    _ => needs
+                        ? 0
+                        : Reach(
+                            BestBelow(weapon, false, 0),
+                            namedRecoil - (value / baseRecoil - 1d) * 100d,
+                            named.Count),
+                    _ => 0
                 };
 
-                if (sharper > floor.Distinct) floor.Distinct = sharper;
+                if (exact > needs) needs = exact;
 
                 if (needs <= floor.Parts) continue;
 
@@ -504,6 +537,110 @@ namespace QuestTreeServer
             }
 
             return floor;
+        }
+
+        /// <summary>The most a build of at most k parts can add to one summed stat, for every k, worked
+        /// out exactly over the slot tree.
+        ///
+        /// THIS is what turns "unproven" into "proven". The other arguments in this file assume every
+        /// slot in the data is available at once, which is wildly generous - a gun has the slots its own
+        /// parts provide and no others - and that generosity is the whole reason they could only prove a
+        /// handful of builds. This respects the tree: a slot exists only if something is fitted to hold
+        /// it, so spending a part on a mount IS spending a part and the scope it carries costs another.
+        ///
+        /// A 0/1 knapsack per part over its slots, at every budget, where a slot's worth at cost c is the
+        /// best occupant plus the best use of c-1 parts beneath it. Exact for the relaxation "any legal
+        /// assembly of at most k parts, ignoring what the quest demands" - and ignoring the demands can
+        /// only raise the ceiling, so the bound stays a bound.
+        ///
+        /// Cached across every weapon on the install, because the answer depends on the item data and
+        /// not on which weapon the walk started from: the same handguard is worth the same wherever it
+        /// hangs. That is what makes it affordable - one pass over the distinct templates in the game
+        /// rather than one pass per quest.</summary>
+        private double[] BestBelow(MongoId template, bool ergonomics, int depth)
+        {
+            // Past the depth cap, hand back something deliberately unreachable rather than something
+            // small. A zero here would UNDERSTATE the ceiling, and an understated ceiling proves builds
+            // minimal that are not - the one failure mode this whole file exists to avoid. Not cached,
+            // so a template first met at the cap is still computed properly when met higher up.
+            if (depth > MaxReachDepth) return Unreachable(ergonomics);
+
+            var cache = ergonomics ? _bestErgonomics : _bestRecoil;
+
+            if (cache.TryGetValue(template, out var cached)) return cached;
+
+            // The visited set, and it hands back the generous answer for the same reason as the depth
+            // cap: a slot graph that admits its own host must not be scored as worth nothing.
+            if (!_underway.Add(template)) return Unreachable(ergonomics);
+
+            var best = new double[MaxBudget + 1];
+
+            if (Template(template, out var item))
+                foreach (var slot in item.Properties?.Slots ?? Enumerable.Empty<Slot>())
+                {
+                    var worth = new double[MaxBudget + 1];
+
+                    foreach (var filter in slot?.Properties?.Filters ?? Enumerable.Empty<SlotFilter>())
+                        foreach (var candidate in filter?.Filter ?? Enumerable.Empty<MongoId>())
+                        {
+                            if (!Template(candidate, out var part)) continue;
+
+                            var own = ergonomics
+                                ? part.Properties!.Ergonomics ?? 0d
+                                : -(part.Properties!.Recoil ?? 0d);
+
+                            var below = BestBelow(candidate, ergonomics, depth + 1);
+
+                            for (var cost = 1; cost <= MaxBudget; cost++)
+                            {
+                                var value = own + below[cost - 1];
+                                if (value > worth[cost]) worth[cost] = value;
+                            }
+                        }
+
+                    // A bigger budget is never worth less, and leaving the slot empty is always allowed.
+                    for (var cost = 1; cost <= MaxBudget; cost++)
+                        if (worth[cost] < worth[cost - 1]) worth[cost] = worth[cost - 1];
+
+                    // Fold the slot in, biggest budget first, so what is read on the right of the sum is
+                    // always the total WITHOUT this slot and no slot is spent twice.
+                    for (var budget = MaxBudget; budget >= 0; budget--)
+                    {
+                        var take = best[budget];
+
+                        for (var spend = 1; spend <= budget; spend++)
+                        {
+                            var value = worth[spend] + best[budget - spend];
+                            if (value > take) take = value;
+                        }
+
+                        best[budget] = take;
+                    }
+                }
+
+            _underway.Remove(template);
+            cache[template] = best;
+
+            return best;
+        }
+
+        /// <summary>A ceiling nothing can reach, for the two places where the honest answer is not
+        /// available and guessing low would prove something false.</summary>
+        private double[] Unreachable(bool ergonomics)
+        {
+            var unreachable = ergonomics ? _hugeErgonomics : _hugeRecoil;
+
+            if (unreachable != null) return unreachable;
+
+            unreachable = new double[MaxBudget + 1];
+
+            for (var budget = 0; budget <= MaxBudget; budget++)
+                unreachable[budget] = budget * HugePerPart;
+
+            if (ergonomics) _hugeErgonomics = unreachable;
+            else _hugeRecoil = unreachable;
+
+            return unreachable;
         }
 
         /// <summary>How many parts the slots below one template force onto the gun: for every slot it
@@ -543,21 +680,15 @@ namespace QuestTreeServer
             return total;
         }
 
-        /// <summary>How many of the best available SLOTS it takes to cover a shortfall, each slot
-        /// counted once. <paramref name="sign"/> is 1 for a stat where more is better and -1 for recoil,
-        /// whose entries are negative percentages.</summary>
-        private static int Fill(double shortfall, List<double> slots, int named, double sign)
+        /// <summary>The fewest parts in total whose ceiling covers what is wanted, given that
+        /// <paramref name="named"/> of them are already spoken for. int.MaxValue when no build within the
+        /// budget can reach it at all.</summary>
+        private static int Reach(double[] ceiling, double wanted, int named)
         {
-            if (shortfall <= 0d) return named;
+            if (wanted <= 0d) return named;
 
-            var covered = 0d;
-
-            for (var index = 0; index < slots.Count; index++)
-            {
-                covered += slots[index] * sign;
-
-                if (covered >= shortfall) return named + index + 1;
-            }
+            for (var budget = 0; budget < ceiling.Length; budget++)
+                if (ceiling[budget] >= wanted) return named + budget;
 
             return int.MaxValue;
         }
@@ -640,6 +771,96 @@ namespace QuestTreeServer
             return seen;
         }
 
+        /// <summary>Takes every part off in turn and confirms the build stops satisfying the quest.
+        ///
+        /// This is the proof that applies to ALL builds rather than the few whose size matches a bound:
+        /// not "no smaller build exists", which needs an argument about every build there could be, but
+        /// "nothing here is spare", which needs only this one. Both are worth having and they are not the
+        /// same claim, so they are reported separately and never merged.
+        ///
+        /// Whatever is mounted on a part comes off with it, because that is what removing it means. A
+        /// part whose removal changes nothing is a hole in the search, not a fact about the quest, so it
+        /// is named.</summary>
+        private void CheckIrreducible(
+            MongoId weapon,
+            IReadOnlyList<WeaponSolver.FittedPart> parts,
+            IReadOnlyList<(string Field, string Compare, double Value)> thresholds,
+            IReadOnlyCollection<MongoId> mustInclude,
+            IReadOnlyCollection<MongoId> mustIncludeCategories,
+            Verdict verdict)
+        {
+            // Only meaningful on a build that satisfies the quest in the first place.
+            if (!verdict.Verified) return;
+
+            verdict.Irreducible = true;
+
+            for (var index = 0; index < parts.Count; index++)
+            {
+                var without = new List<WeaponSolver.FittedPart>(parts.Count);
+                var gone = new HashSet<int> { index };
+
+                // Parents always precede children, so one forward pass closes the subtree.
+                for (var other = 0; other < parts.Count; other++)
+                {
+                    if (gone.Contains(other)) continue;
+
+                    if (parts[other].Parent >= 0 && gone.Contains(parts[other].Parent))
+                    {
+                        gone.Add(other);
+                        continue;
+                    }
+
+                    without.Add(parts[other]);
+                }
+
+                // Re-derived from scratch on the smaller build, exactly as for the real one. Seating and
+                // duplicates cannot break by REMOVING parts, so only the requirements are re-asked.
+                var lighter = new Verdict();
+
+                var templates = new List<MongoId>(without.Count);
+                foreach (var part in without) templates.Add(part.Template);
+
+                CheckThresholds(weapon, templates, thresholds, lighter);
+                CheckRequiredSlots(weapon, RenumberedWithout(parts, gone), lighter);
+                CheckNamed(templates, mustInclude, mustIncludeCategories, lighter);
+
+                if (!lighter.Verified) continue;
+
+                verdict.Irreducible = false;
+                verdict.Spare.Add($"{parts[index].Template} in '{parts[index].SlotName}' carries nothing the quest needs");
+            }
+        }
+
+        /// <summary>The build minus a subtree, with parent indices renumbered so the result is still a
+        /// tree that can be read the same way.</summary>
+        private static List<WeaponSolver.FittedPart> RenumberedWithout(
+            IReadOnlyList<WeaponSolver.FittedPart> parts, HashSet<int> gone)
+        {
+            var moved = new int[parts.Count];
+            var kept = new List<WeaponSolver.FittedPart>(parts.Count);
+
+            for (var index = 0; index < parts.Count; index++)
+            {
+                if (gone.Contains(index))
+                {
+                    moved[index] = -1;
+                    continue;
+                }
+
+                moved[index] = kept.Count;
+
+                kept.Add(new WeaponSolver.FittedPart
+                {
+                    SlotName = parts[index].SlotName,
+                    Template = parts[index].Template,
+                    Depth = parts[index].Depth,
+                    Parent = parts[index].Parent < 0 ? -1 : moved[parts[index].Parent]
+                });
+            }
+
+            return kept;
+        }
+
         /// <summary>Whether a slot's filters admit a template.
         ///
         /// ANY filter, not the first one. The graph reads only the first, which is right for every
@@ -703,4 +924,5 @@ namespace QuestTreeServer
         }
     }
 }
+
 

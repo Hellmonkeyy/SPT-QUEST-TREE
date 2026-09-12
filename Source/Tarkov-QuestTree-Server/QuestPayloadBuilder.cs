@@ -100,8 +100,8 @@ namespace QuestTreeServer
             // 9 parts against a solver floor of 10, which settles it. Only the verifier's number is a
             // bound, so only the verifier's number is reported as one.
             var proven = 0;
+            var irreducible = 0;
             var atFloor = 0;
-            var atDistinct = 0;
             var unproven = new List<string>();
             var unverifiable = 0;
             var disagreed = 0;
@@ -176,8 +176,10 @@ namespace QuestTreeServer
                     parts += result.Parts.Count;
                     proven += lowest.Parts;
 
+                    if (verdict.Irreducible) irreducible++;
+                    foreach (var spare in verdict.Spare) logger.Warning($"Quest Tracker: '{questName}' carries a spare part - {spare}. The search should not have left it.");
+
                     if (result.Parts.Count <= lowest.Parts) atFloor++;
-                    if (result.Parts.Count <= lowest.Distinct) atDistinct++;
                     else unproven.Add($"{questName} at {result.Parts.Count} parts, proven necessary {lowest.Parts} ({lowest.Reason}), solver floor {result.Floor}");
                     if (result.Parts.Count > widestBuild) widestBuild = result.Parts.Count;
 
@@ -231,8 +233,9 @@ namespace QuestTreeServer
                 (ceiling > 0 ? $", {ceiling} hit the search budget" : "") +
                 $" - {clock.ElapsedMilliseconds:N0} ms for all of them, {worst:N0} nodes for the worst one, " +
                 $"{(solved > 0 ? (double)parts / solved : 0d):0.##} parts per build ({parts} total), " +
-                $"{widestBuild} at most, {atFloor} of them PROVEN MINIMUM " +
-                $"({atDistinct} if no host template is fitted twice), {proven} of {parts} parts proven necessary" +
+                $"{widestBuild} at most, {atFloor} of them PROVEN MINIMUM, " +
+                $"{irreducible} PROVEN IRREDUCIBLE, " +
+                $"{proven} of {parts} parts proven necessary" +
                 (duplicates > 0 ? $", {duplicates} duplicated part(s)" : "") +
                 (unverifiable > 0
                     ? $", {unverifiable} constraint(s) across {unscorable} build(s) that nothing here can score"
@@ -987,6 +990,8 @@ namespace QuestTreeServer
         }
     }
 }
+
+
 
 
 
