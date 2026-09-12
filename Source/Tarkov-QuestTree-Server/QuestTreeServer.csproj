@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk">
+﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <!--
@@ -92,9 +92,30 @@
     Server mods live in SPT_Runtime\user\mods\<mod folder>\ in SPT 4.1 - NOT SPT\user\mods, which
     is the 4.0 location.
   -->
+  <!--
+    The trained build history, into the build output under cache\ so a release can be assembled from
+    bin\ alone - the same reason kappa-quests.json is an output item in the client project.
+  -->
+  <ItemGroup>
+    <None Include="weapon-builds.json" Link="cache\weapon-builds.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
   <Target Name="CopyToServerMods" AfterTargets="PostBuildEvent" Condition="'$(DeployToSpt)' == 'true'">
     <MakeDir Directories="$(ServerPath)\user\mods\QuestTree" />
     <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(ServerPath)\user\mods\QuestTree\" SkipUnchangedFiles="true" />
+
+    <!--
+      COPY-IF-ABSENT, never overwrite, exactly as the client project treats kappa-quests.json - and here
+      the reason is stronger than politeness. The file in the install is not a copy of ours: every launch
+      writes back whatever smaller builds it found, so a player's file is the accumulated result of their
+      own launches against THEIR item database. Ours is a head start for a first boot and nothing more,
+      and overwriting theirs on a rebuild would discard every round they have ever run.
+    -->
+    <MakeDir Directories="$(ServerPath)\user\mods\QuestTree\cache" />
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\weapon-builds.json"
+          DestinationFolder="$(ServerPath)\user\mods\QuestTree\cache\"
+          SkipUnchangedFiles="true"
+          Condition="!Exists('$(ServerPath)\user\mods\QuestTree\cache\weapon-builds.json')" />
   </Target>
 
 </Project>
