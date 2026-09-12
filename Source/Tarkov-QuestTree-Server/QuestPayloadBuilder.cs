@@ -120,7 +120,12 @@ namespace QuestTreeServer
                     continue;
                 }
 
-                failed.Add($"{questName} ({build.WeaponName}): {string.Join("; ", result.Unmet.Take(3))}");
+                // A bare template id does not say which part the search could not place, and that is
+                // the only question these lines get read to answer. The DTO already carries the
+                // names parallel to the ids, so the substitution costs nothing.
+                failed.Add(
+                    $"{questName} ({build.WeaponName}): " +
+                    string.Join("; ", result.Unmet.Take(8).Select(u => Named(u, build))));
 
                 foreach (var unmet in result.Unmet)
                 {
@@ -150,6 +155,18 @@ namespace QuestTreeServer
 
             foreach (var line in failed.Take(12))
                 logger.Info($"Quest Tracker: unsolved - {line}");
+        }
+
+        /// <summary>One unmet reason with every required-part id in it replaced by the part's
+        /// name.</summary>
+        private static string Named(string unmet, WeaponBuildDto build)
+        {
+            var count = Math.Min(build.RequiredItemIds.Count, build.RequiredItemNames.Count);
+
+            for (var i = 0; i < count; i++)
+                unmet = unmet.Replace(build.RequiredItemIds[i], build.RequiredItemNames[i], StringComparison.Ordinal);
+
+            return unmet;
         }
 
         /// <summary>Condition type that names another quest as a prerequisite.</summary>
