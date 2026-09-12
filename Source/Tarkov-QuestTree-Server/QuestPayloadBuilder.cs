@@ -45,7 +45,8 @@ namespace QuestTreeServer
         QuestFacts facts,
         ZoneStore zoneStore,
         WeaponStatModel weaponStatModel,
-        WeaponGraph weaponGraph) : IOnLoad
+        WeaponGraph weaponGraph,
+        WeaponSolver weaponSolver) : IOnLoad
     {
         /// <summary>Built while the server starts, for the reason MapMarkerPayloadBuilder gives:
         /// the client's request handler is synchronous on Unity's main thread, so paying for the
@@ -53,6 +54,10 @@ namespace QuestTreeServer
         /// <summary>Weapons named by a WeaponAssembly condition on this install, filled while the
         /// quests are mapped.</summary>
         private readonly HashSet<MongoId> _questWeapons = new();
+
+        /// <summary>Every build requirement on this install, paired with the quest that states it,
+        /// so the solver can be run over all of them at boot.</summary>
+        private readonly List<(string Quest, WeaponBuildDto Build)> _questBuilds = new();
 
         public Task OnLoadAsync(CancellationToken cancellationToken)
         {
@@ -62,8 +67,89 @@ namespace QuestTreeServer
             // Deliberately at boot: a cyclic slot graph is uncatchable at runtime, so the walk that
             // would meet one has to happen where a log line is read rather than inside a request.
             weaponGraph.Survey(_questWeapons);
+            SurveySolver();
 
             return Task.CompletedTask;
+        }
+
+        /// <summary>Runs the solver over every build requirement on this install, once, and says
+        /// how many it could satisfy.
+        ///
+        /// A search is either tractable on real data or it is not, and counting is the only way to
+        /// find out. This runs against the FULL parts list rather than what the player can buy,
+        /// deliberately: it is asking whether the search works, not whether this profile can afford
+        /// the answer, and conflating the two would make a solver bug look like a poor trader level.
+        ///
+        /// Debug, because it is a developer's question. The one-line summary is Info.</summary>
+        private void SurveySolver()
+        {
+            if (_questBuilds.Count == 0) return;
+
+            var solved = 0;
+            var ceiling = 0;
+            var failed = new List<string>();
+
+            // Why, not just how many. A pass rate with no cause behind it invites guessing at the
+            // algorithm, and the reasons separate three very different problems: a search too weak
+            // to place the parts a quest names, a search that places them and misses a number, and a
+            // model that cannot see the stat at all.
+            var reasons = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var (questName, build) in _questBuilds)
+            {
+                if (!build.WeaponTemplate.TryParseMongoId(out var weapon)) continue;
+
+                var thresholds = build.Thresholds
+                    .Select(t => (t.Field, t.Compare, t.Value))
+                    .ToList();
+
+                var mustInclude = new List<MongoId>();
+                foreach (var id in build.RequiredItemIds)
+                    if (id.TryParseMongoId(out var parsed)) mustInclude.Add(parsed);
+
+                var result = weaponSolver.Solve(weapon, thresholds, mustInclude, allowed: null);
+
+                if (result.HitCeiling) ceiling++;
+
+                if (result.Found)
+                {
+                    solved++;
+                    logger.Debug(
+                        $"Quest Tracker: solved '{questName}' ({build.WeaponName}) with {result.Parts.Count} parts " +
+                        $"in {result.NodesOpened:N0} nodes.");
+                    continue;
+                }
+
+                failed.Add($"{questName} ({build.WeaponName}): {string.Join("; ", result.Unmet.Take(3))}");
+
+                foreach (var unmet in result.Unmet)
+                {
+                    // The reason's first words identify its kind; the numbers after it are per
+                    // quest and would make every row unique.
+                    var kind = unmet.Contains("NOT REACHABLE", StringComparison.Ordinal)
+                        ? "required part not reachable (graph gap)"
+                        : unmet.StartsWith("could not fit", StringComparison.OrdinalIgnoreCase)
+                            ? "required part reachable but not placed (search gap)"
+                            : unmet.Contains("no value", StringComparison.OrdinalIgnoreCase)
+                                ? $"{unmet.Split(':')[0]}: nothing provides it"
+                                : unmet.Split(' ')[0];
+
+                    reasons[kind] = reasons.TryGetValue(kind, out var count) ? count + 1 : 1;
+                }
+            }
+
+            logger.Info(
+                $"Quest Tracker: weapon solver dry run - {solved} of {_questBuilds.Count} build requirement(s) " +
+                $"satisfied from the full parts list" +
+                (ceiling > 0 ? $", {ceiling} hit the search budget" : "") + ".");
+
+            if (reasons.Count > 0)
+                logger.Info(
+                    "Quest Tracker: solver misses by - " +
+                    string.Join(", ", reasons.OrderByDescending(r => r.Value).Take(6).Select(r => $"{r.Key} x{r.Value}")));
+
+            foreach (var line in failed.Take(12))
+                logger.Info($"Quest Tracker: unsolved - {line}");
         }
 
         /// <summary>Condition type that names another quest as a prerequisite.</summary>
@@ -495,6 +581,8 @@ namespace QuestTreeServer
                 // than re-derived later because this is the only pass that already knows which
                 // weapons the installed quests actually name.
                 if (weapon!.TryParseMongoId(out var weaponId)) _questWeapons.Add(weaponId);
+
+                _questBuilds.Add((ResolveQuestName(quest, quest.Id.ToString(), locale), build));
             }
 
             return builds;
