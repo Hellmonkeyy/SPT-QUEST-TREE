@@ -840,24 +840,20 @@ namespace QuestTreeServer
             return solution;
         }
 
-        /// <summary>Generations one boot runs without finding anything before it gives up.
+        /// <summary>Rounds a normal launch runs before the loop exits for good, after which the process
+        /// does no further optimisation for the rest of its life.
         ///
-        /// ONE on a normal start, and that is the whole shape of this: every boot contributes a single
-        /// round of fresh starting points, writes down anything smaller it finds, and stops. Nobody's
-        /// machine grinds, and the builds still improve for as long as people keep starting the server.
+        /// A COUNT rather than a time budget because it is stable across machines: twenty seconds bought a
+        /// fast box three times the rounds a slow one got, and how much work a launch does should not depend
+        /// on hardware.
         ///
-        /// TRAINING - a file called "training" in the cache folder - runs generation after generation
-        /// instead, because that is what produces the cache that ships. It is deliberately not a build
-        /// flag: an install that never creates the file can never be made to grind by accident.</summary>
-        /// <summary>Rounds a normal launch runs before the loop exits for good.
+        /// Bounded so completely that no politeness machinery is needed. This many rounds on the lowest
+        /// thread priority cannot disturb somebody playing, and detecting whether they are would have been
+        /// guesswork dressed up as a feature.
         ///
-        /// Ten, and then the process does no further optimisation for the rest of its life. A COUNT rather
-        /// than a time budget because it is stable across machines: twenty seconds bought a fast box three
-        /// times the rounds a slow one got, and how much work a launch does should not depend on hardware.
-        ///
-        /// Bounded so completely that no politeness machinery is needed. Ten rounds on the lowest thread
-        /// priority cannot disturb somebody playing, and detecting whether they are would have been
-        /// guesswork dressed up as a feature.</summary>
+        /// Training - the QUESTTREE_TRAIN environment variable - ignores this and runs until the server
+        /// stops, because that is what produces the history that ships. An environment variable and not a
+        /// file, so no release can carry the trigger by accident.</summary>
         private const int LaunchRounds = 10;
 
         /// <summary>Restarts a training round spends on a build that has never resisted, and the most it
@@ -900,7 +896,7 @@ namespace QuestTreeServer
         /// <summary>How long the search may run. Seconds on a normal start, minutes while training. This is
         /// CPU on the machine hosting the game, and a solver improving a build by one part does not get to
         /// cost somebody a raid.</summary>
-        /// <summary>Threads a normal launch uses. Two: ten rounds is brief and the machine belongs to
+        /// <summary>Threads a normal launch uses. Two, because LaunchRounds rounds is brief and the machine belongs to
         /// whoever is playing. Training keeps half the box, which is a session the user chose to spend.</summary>
         private static int LaunchThreads => Math.Max(1, Math.Min(2, Environment.ProcessorCount));
 
@@ -947,23 +943,25 @@ namespace QuestTreeServer
                     if (!training)
                         logger.Info(
                             $"Quest Tracker: looking for smaller weapon builds in the background - {LaunchRounds} " +
-                            "rounds on the lowest thread priority, then it stops for good. Anything it finds is " +
-                            "used from the next start. Set QUESTTREE_TRAIN=1 to search until the server stops.");
+                            $"round(s) across {Threads} thread(s) on the lowest thread priority, then it stops for " +
+                            "good. Anything it finds is used from the next start. Set QUESTTREE_TRAIN=1 to search " +
+                            "until the server stops.");
 
                     if (training)
                         logger.Warning(
-                            "Quest Tracker: TRAINING. This launch will keep looking for smaller weapon builds " +
-                            "FOR AS LONG AS IT RUNS, using a core to do it, and will not stop on its own. Stop the " +
-                            "server when you have had enough - every improvement is written down as it is found, " +
-                            "so nothing is lost by stopping. Unset QUESTTREE_TRAIN for a normal launch.");
+                            $"Quest Tracker: TRAINING. This launch will keep looking for smaller weapon builds FOR " +
+                            $"AS LONG AS IT RUNS, across {Threads} of this machine's {Environment.ProcessorCount} " +
+                            "thread(s) on the lowest priority, and will not stop on its own. Stop the server when " +
+                            "you have had enough - every improvement is written down as it is found, so nothing is " +
+                            "lost by stopping. Unset QUESTTREE_TRAIN for a normal launch.");
 
                     // Training has no budget and no patience limit: it runs until the server stops. A round is
                     // one set of fresh starting points across all sixty, the improvements worth having are
                     // often a dozen rounds apart, and there is no number of empty rounds that means there are
                     // none left - so the only sensible stopping condition is a person deciding to stop.
                     //
-                    // A normal launch does ten rounds and then nothing, ever. Whatever it finds goes in the
-                    // file for the next launch to pick up, so nothing is running while people are playing.
+                    // A normal launch does LaunchRounds rounds and then nothing, ever. Whatever it finds goes
+                    // in the file for the next launch to pick up, so nothing runs while people are playing.
                     while (!cancellationToken.IsCancellationRequested
                            && (training || rounds < LaunchRounds))
                     {
