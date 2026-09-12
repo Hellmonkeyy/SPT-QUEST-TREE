@@ -46,7 +46,8 @@ namespace QuestTreeServer
         ZoneStore zoneStore,
         WeaponStatModel weaponStatModel,
         WeaponGraph weaponGraph,
-        WeaponSolver weaponSolver) : IOnLoad
+        WeaponSolver weaponSolver,
+        WeaponBuildVerifier weaponBuildVerifier) : IOnLoad
     {
         /// <summary>Built while the server starts, for the reason MapMarkerPayloadBuilder gives:
         /// the client's request handler is synchronous on Unity's main thread, so paying for the
@@ -92,6 +93,10 @@ namespace QuestTreeServer
             // seventeen-part AKS-74N wearing two identical sights satisfied every threshold too.
             var parts = 0;
             var widestBuild = 0;
+            var duplicates = 0;
+            var floors = 0;
+            var unverifiable = 0;
+            var disagreed = 0;
             var failed = new List<string>();
 
             // The search has a wall-clock ceiling, so how much of it the worst request actually spends
@@ -130,10 +135,32 @@ namespace QuestTreeServer
                 if (result.HitCeiling) ceiling++;
                 if (result.NodesOpened > worst) worst = result.NodesOpened;
 
-                if (result.Found)
+                // THE SCORE IS THE VERIFIER'S, not the solver's. Asking the solver whether the solver
+                // is happy cannot find a bug living in the solver's own bookkeeping, and a pass rate
+                // measured that way is not evidence of anything.
+                var verdict = weaponBuildVerifier.Verify(
+                    weapon, result.Parts, thresholds, mustInclude, mustIncludeCategories);
+
+                duplicates += verdict.Duplicates;
+                unverifiable += verdict.Unverifiable.Count;
+
+                // Logged loudly and never resolved quietly in the solver's favour: the two agreeing is
+                // the only reason to believe either of them.
+                if (verdict.Verified != result.Found)
+                {
+                    disagreed++;
+                    logger.Warning(
+                        $"Quest Tracker: the solver and the verifier DISAGREE about '{questName}' " +
+                        $"({build.WeaponName}) - the solver says {result.Found}, the verifier says " +
+                        $"{verdict.Verified}. Solver: [{string.Join("; ", result.Unmet)}]. " +
+                        $"Verifier: [{string.Join("; ", verdict.Failures)}]. The verifier is right.");
+                }
+
+                if (verdict.Verified)
                 {
                     solved++;
                     parts += result.Parts.Count;
+                    floors += result.Floor;
                     if (result.Parts.Count > widestBuild) widestBuild = result.Parts.Count;
                     logger.Debug(
                         $"Quest Tracker: solved '{questName}' ({build.WeaponName}) with {result.Parts.Count} parts " +
@@ -157,9 +184,9 @@ namespace QuestTreeServer
                 // names parallel to the ids, so the substitution costs nothing.
                 failed.Add(
                     $"{questName} ({build.WeaponName}): " +
-                    string.Join("; ", result.Unmet.Take(8).Select(u => Named(u, build))));
+                    string.Join("; ", verdict.Failures.Take(8).Select(u => Named(u, build))));
 
-                foreach (var unmet in result.Unmet)
+                foreach (var unmet in verdict.Failures)
                 {
                     // The reason's first words identify its kind; the numbers after it are per
                     // quest and would make every row unique.
@@ -184,7 +211,10 @@ namespace QuestTreeServer
                 $"satisfied from the full parts list" +
                 (ceiling > 0 ? $", {ceiling} hit the search budget" : "") +
                 $" - {clock.ElapsedMilliseconds:N0} ms for all of them, {worst:N0} nodes for the worst one, " +
-                $"{(solved > 0 ? (double)parts / solved : 0d):0.#} parts per build, {widestBuild} at most.");
+                $"{(solved > 0 ? (double)parts / solved : 0d):0.#} parts per build, {widestBuild} at most" + $" against a floor of {(solved > 0 ? (double)floors / solved : 0d):0.#}" +
+                (duplicates > 0 ? $", {duplicates} duplicated part(s)" : "") +
+                (unverifiable > 0 ? $", {unverifiable} constraint(s) nothing here can score" : "") +
+                (disagreed > 0 ? $", SOLVER AND VERIFIER DISAGREED ON {disagreed}" : "") + ".");
 
             if (reasons.Count > 0)
                 logger.Info(
@@ -927,3 +957,4 @@ namespace QuestTreeServer
         }
     }
 }
+

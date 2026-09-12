@@ -147,6 +147,16 @@ namespace QuestTreeServer
             public string SlotName { get; init; } = "";
             public MongoId Template { get; init; }
             public int Depth { get; init; }
+
+            /// <summary>Position in Parts of the part this one is fitted TO, or -1 for one fitted
+            /// straight to the weapon.
+            ///
+            /// Here so that something other than the search can check the build. A flat list of
+            /// templates and slot names cannot say which slot on which INSTANCE a part occupies, so
+            /// "is this part even allowed in that slot" and "is that slot already taken" are both
+            /// unanswerable from it - and two copies of one template make the question sharper, not
+            /// softer.</summary>
+            public int Parent { get; init; } = -1;
         }
 
         public sealed class Result
@@ -166,6 +176,11 @@ namespace QuestTreeServer
             /// <summary>Constrained stats this model cannot score at all, so a pass on everything
             /// else does not mean the quest is satisfied.</summary>
             public List<string> Unchecked { get; } = new();
+
+            /// <summary>The fewest parts any build for this quest could have: the slots the game will
+            /// not leave empty, the parts the quest names, and one for each category it names. A build
+            /// AT the floor is provably minimal; one above it may or may not be.</summary>
+            public int Floor { get; set; }
 
             public int NodesOpened { get; set; }
         }
@@ -253,19 +268,25 @@ namespace QuestTreeServer
                 RecoilPerPercent = (bare?.Recoil ?? 0d) / 100d
             };
 
+            state.Measure(weapon);
+
             var required = new List<MongoId>();
             foreach (var id in mustInclude)
                 if (id != weapon && !required.Contains(id)) required.Add(id);
 
             Node? best = null;
-            var bestCost = double.PositiveInfinity;
+            var bestWhole = int.MaxValue;
+            var bestShortfall = double.PositiveInfinity;
+            var bestCount = int.MaxValue;
+            var floor = int.MaxValue;
 
             // Many starting points, because a climb is a local search and which optimum it reaches
-            // depends on where it starts. A greedily dressed gun is the better start most of the
-            // time; a gun wearing nothing but what the quest demands wins when the thresholds want
-            // LESS of something, where every part the dressing adds is a step away from the answer;
-            // and past those two, a randomised dressing is what gets out of a basin a single-slot
-            // move cannot leave.
+            // depends on where it starts. Starting from the FLOOR - the weapon, the parts the quest
+            // names, and nothing else but the slots the game refuses to leave empty - is the one that
+            // arrives lean, because the climb's moves only ever add a part that closes a shortfall.
+            // A fully dressed start still earns its place: it reaches builds the lean one cannot,
+            // and it is why the KRISS Vector solves at all. Past those, a randomised start is what
+            // gets out of a basin no single move can leave.
             for (var attempt = 0; attempt < Attempts; attempt++)
             {
                 var root = new Node { Template = weapon, Locked = true };
@@ -279,7 +300,15 @@ namespace QuestTreeServer
 
                 Plan(root, required, state);
 
-                if (attempt != 1) Fill(root, state, MaxDepth);
+                // Even attempts start at the floor, odd ones fully dressed.
+                var lean = attempt % 2 == 0;
+
+                Fill(root, state, MaxDepth, requiredOnly: lean);
+
+                // The smallest this quest could possibly be: what the plan had to place, the slots
+                // that cannot be empty, and one part for each category still unaccounted for. Reported
+                // so that "11 parts" can be read against something.
+                if (lean) floor = Math.Min(floor, CountParts(root) + UnmetCategories(root, state));
 
                 // The randomness belongs to the dressing only. The climb fills the sub-slots of every
                 // candidate it tries, and a random fill there would have it judging parts by a throw
@@ -287,27 +316,42 @@ namespace QuestTreeServer
                 state.Shuffle = null;
 
                 var climbed = Climb(weapon, root, state);
-                var missing = required.Count(part => Find(root, part) == null);
 
-                // A whole requirement outweighs any sum of shortfalls, whether it is a part the quest
-                // named, a category it named, or a slot the game will not let the player leave empty.
-                var cost = (climbed.Gaps + missing) * MissingPartPenalty + climbed.Shortfall;
+                // Pruned before it is compared, not after the winner is picked: a fat attempt that
+                // trims to nine parts should beat a lean one that settles at ten, and it cannot if
+                // only the winner is ever trimmed.
+                Prune(weapon, root, state, required);
 
-                if (cost < bestCost)
+                var whole = climbed.Gaps + required.Count(part => Find(root, part) == null);
+                var shortfall = Measure(weapon, root, state, new List<MongoId>()).Shortfall;
+                var count = CountParts(root);
+
+                // Whole requirements, then how far short the numbers are, then HOW MANY PARTS. The
+                // count is the objective once the rest is satisfied - a quest asks for a gun that
+                // meets its numbers, and the fewest parts that do it is the answer. Comparing attempts
+                // without it is exactly what made every build fat: the first attempt that passed won,
+                // and the first attempt was the fully dressed one.
+                if (whole < bestWhole
+                    || (whole == bestWhole && shortfall < bestShortfall - MinGain)
+                    || (whole == bestWhole && shortfall <= bestShortfall + MinGain && count < bestCount))
                 {
-                    bestCost = cost;
+                    bestWhole = whole;
+                    bestShortfall = shortfall;
+                    bestCount = count;
                     best = root;
                 }
 
-                if (bestCost <= 0d || state.Exhausted) break;
+                // Nothing left to want: everything satisfied, and at a size nothing could undercut.
+                if (bestWhole == 0 && bestShortfall <= 0d && bestCount <= floor) break;
+                if (state.Exhausted) break;
             }
+
+            result.Floor = floor == int.MaxValue ? 0 : floor;
 
             result.NodesOpened = state.Nodes;
             result.HitCeiling = state.Exhausted;
 
             if (best == null) return result;
-
-            Prune(weapon, best, state, required);
 
             var fitted = new List<MongoId>();
             CollectTemplates(best, fitted);
@@ -315,7 +359,7 @@ namespace QuestTreeServer
             var stats = model.Score(weapon, fitted);
 
             result.Stats = stats;
-            CollectParts(best, result.Parts);
+            CollectParts(best, result.Parts, -1);
 
             if (stats == null) return result;
 
@@ -405,6 +449,8 @@ namespace QuestTreeServer
         /// makes a node already on the gun, one slot away, the first thing tried.</summary>
         private void Plan(Node root, List<MongoId> required, SearchState state)
         {
+            PlanCategories(root, state);
+
             if (required.Count == 0) return;
 
             var order = new List<PlanPart>(required.Count);
@@ -443,6 +489,71 @@ namespace QuestTreeServer
                 foreach (var seat in Seatings(root, part))
                     if (Extend(seat, part.Steps[seat.Template] + RouteSlack, root, alone, 0, state)) break;
             }
+        }
+
+        /// <summary>Seats one part for each category the quest names that nothing on the gun already
+        /// satisfies.
+        ///
+        /// Categories used to be left to the climb, and the climb reaches them only by luck. Closing a
+        /// category gap is not a move any single slot offers when the part that would close it mounts
+        /// on a thread adapter - the adapter alone closes nothing, so it is judged on its stats and
+        /// rejected. The SVDS lost its Silencer for exactly that reason, in all sixteen restarts, and
+        /// had only ever passed because one particular randomised dressing happened to fit one.
+        ///
+        /// A category is a requirement, so the planner places it, and it places the member that costs
+        /// the fewest slots to reach - which is also what the count wants.</summary>
+        private void PlanCategories(Node root, SearchState state)
+        {
+            for (var index = 0; index < state.Categories.Count; index++)
+            {
+                if (Carries(root, index, state)) continue;
+
+                var choice = Nearest(index, state);
+                if (choice == null) continue;
+
+                var part = new PlanPart { Part = choice.Value, Steps = StepsTo(choice.Value, state) };
+                var alone = new List<PlanPart> { part };
+
+                foreach (var seat in Seatings(root, part))
+                    if (Extend(seat, part.Steps[seat.Template] + RouteSlack, root, alone, 0, state)) break;
+            }
+        }
+
+        private bool Carries(Node node, int category, SearchState state)
+        {
+            foreach (var child in node.Children)
+            {
+                if ((CategoryMask(child.Template, state) & (1 << category)) != 0) return true;
+                if (Carries(child, category, state)) return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>The member of one category that sits fewest slots from the weapon, and of those the
+        /// one the thresholds like best.</summary>
+        private MongoId? Nearest(int category, SearchState state)
+        {
+            MongoId? best = null;
+            var bestSteps = int.MaxValue;
+            var bestWorth = double.NegativeInfinity;
+
+            foreach (var (template, _) in state.Reachable)
+            {
+                if ((CategoryMask(template, state) & (1 << category)) == 0) continue;
+                if (!state.Distance.TryGetValue(template, out var steps)) continue;
+
+                var worth = Potential(template, state, 0);
+
+                if (steps > bestSteps) continue;
+                if (steps == bestSteps && worth <= bestWorth) continue;
+
+                bestSteps = steps;
+                bestWorth = worth;
+                best = template;
+            }
+
+            return best;
         }
 
         private bool PlanFrom(Node root, List<PlanPart> order, int index, SearchState state)
@@ -626,7 +737,7 @@ namespace QuestTreeServer
         /// Greedy and deliberately unambitious: this is the climb's starting point, and the climb
         /// scores the assembled gun, which is the only thing that can tell whether a part with -20
         /// ergonomics and -12% recoil is worth fitting.</summary>
-        private void Fill(Node node, SearchState state, int depthLimit)
+        private void Fill(Node node, SearchState state, int depthLimit, bool requiredOnly = false)
         {
             if (node.Depth >= depthLimit || node.Depth >= MaxDepth) return;
             if (state.OutOfBudget()) return;
@@ -635,6 +746,12 @@ namespace QuestTreeServer
             for (var index = 0; index < part.Slots.Length; index++)
             {
                 if (Occupant(node, index) != null) continue;
+
+                // The FLOOR: only the slots the game will not let the player leave empty. Nothing can
+                // be smaller than this plus the parts the quest names, so a climb that starts here and
+                // only adds what closes a shortfall arrives lean by construction instead of being
+                // trimmed down to lean afterwards.
+                if (requiredOnly && !part.Slots[index].Required) continue;
 
                 var choice = Choose(node, part.Slots[index], state);
                 if (choice == null) continue;
@@ -649,7 +766,7 @@ namespace QuestTreeServer
             }
 
             foreach (var child in node.Children)
-                Fill(child, state, depthLimit);
+                Fill(child, state, depthLimit, requiredOnly);
         }
 
         /// <summary>The best-scoring legal candidate for one slot, or null to leave it empty.
@@ -1042,7 +1159,10 @@ namespace QuestTreeServer
                 if (node.Parent == null) continue;
                 if (node.Children.Count > 0) continue;
 
-                // A part the quest named is not optional however little it contributes.
+                // A part the quest named is not optional however little it contributes, and neither
+                // is anything the planner placed - a locked part is there to satisfy a requirement, not
+                // to help a number.
+                if (node.Locked) continue;
                 if (required.Contains(node.Template)) continue;
 
                 var parent = node.Parent;
@@ -1262,6 +1382,37 @@ namespace QuestTreeServer
             return mask;
         }
 
+        /// <summary>How many parts are on the gun, the weapon itself excluded.</summary>
+        private static int CountParts(Node node)
+        {
+            var count = node.Children.Count;
+
+            foreach (var child in node.Children)
+                count += CountParts(child);
+
+            return count;
+        }
+
+        /// <summary>Required categories nothing on the gun belongs to yet. Each one needs at least one
+        /// more part, so it belongs in the floor.</summary>
+        private int UnmetCategories(Node root, SearchState state)
+        {
+            if (state.Categories.Count == 0) return 0;
+
+            var templates = new List<MongoId>();
+            CollectTemplates(root, templates);
+
+            var carried = 0;
+            foreach (var template in templates) carried |= CategoryMask(template, state);
+
+            var missing = 0;
+
+            for (var index = 0; index < state.Categories.Count; index++)
+                if ((carried & (1 << index)) == 0) missing++;
+
+            return missing;
+        }
+
         private static Node? Occupant(Node node, int slotIndex)
         {
             foreach (var child in node.Children)
@@ -1360,12 +1511,24 @@ namespace QuestTreeServer
             }
         }
 
-        private static void CollectParts(Node node, List<FittedPart> into)
+        /// <summary>Flattens the tree depth-first, each part carrying the POSITION of the part it is
+        /// fitted to. Depth-first and parent-before-child, so a parent's index is always lower than
+        /// its children's and a reader can rebuild the tree in one pass.</summary>
+        private static void CollectParts(Node node, List<FittedPart> into, int parent)
         {
             foreach (var child in node.Children)
             {
-                into.Add(new FittedPart { SlotName = child.SlotName, Template = child.Template, Depth = child.Depth });
-                CollectParts(child, into);
+                var index = into.Count;
+
+                into.Add(new FittedPart
+                {
+                    SlotName = child.SlotName,
+                    Template = child.Template,
+                    Depth = child.Depth,
+                    Parent = parent
+                });
+
+                CollectParts(child, into, index);
             }
         }
 
@@ -1433,6 +1596,11 @@ namespace QuestTreeServer
             /// the goals, so one pass over the graph serves every restart of one request.</summary>
             public Dictionary<MongoId, double> Potentials { get; } = new();
 
+            /// <summary>Slots from the weapon to each part it can reach, by the shortest chain.
+            /// One walk per request, and the only thing that can rank two candidates for a category by
+            /// how many parts seating them would cost.</summary>
+            public Dictionary<MongoId, int> Distance { get; } = new();
+
             /// <summary>Categories the quest insists a fitted part come from.</summary>
             public List<MongoId> Categories { get; } = new();
 
@@ -1446,6 +1614,35 @@ namespace QuestTreeServer
             {
                 Counts.Clear();
                 Counts[weapon] = 1;
+            }
+
+            /// <summary>Breadth-first distances from the weapon. The dictionary is the visited set, so
+            /// a cyclic slot graph closes on a part it has already measured instead of looping, and the
+            /// depth cap bounds it either way.</summary>
+            public void Measure(MongoId weapon)
+            {
+                Distance.Clear();
+                Distance[weapon] = 0;
+
+                var queue = new Queue<MongoId>();
+                queue.Enqueue(weapon);
+
+                while (queue.Count > 0)
+                {
+                    var current = queue.Dequeue();
+                    var depth = Distance[current];
+
+                    if (depth >= MaxDepth) continue;
+                    if (!Reachable.TryGetValue(current, out var part)) continue;
+
+                    foreach (var slot in part.Slots)
+                        foreach (var candidate in slot.Candidates)
+                        {
+                            if (!Distance.TryAdd(candidate, depth + 1)) continue;
+
+                            queue.Enqueue(candidate);
+                        }
+                }
             }
 
             public bool OutOfBudget()
