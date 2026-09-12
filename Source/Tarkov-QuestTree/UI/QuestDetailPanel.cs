@@ -395,30 +395,10 @@ namespace QuestTree.UI
             // Build - what a Gunsmith quest wants assembled. Ahead of Objectives because for those
             // quests it IS the objective: "Hand over the modified weapon" tells you nothing on its
             // own, and the thresholds under it are the whole task.
-            var buildLines = QuestSummary.WeaponBuildLines(node);
-
-            if (buildLines.Count > 0)
-            {
-                AuxLayout.AddSectionHeader(_content, ref y, "Build", _left, width);
-
-                // The weapon itself is the first line and is an item you can look at.
-                var weaponTemplate = node.WeaponBuild?.WeaponTemplate;
-
-                for (var i = 0; i < buildLines.Count; i++)
-                {
-                    if (i == 0 && !string.IsNullOrEmpty(weaponTemplate))
-                    {
-                        var captured = weaponTemplate;
-                        AuxLayout.AddClickableWrapped(_content, buildLines[i], _left, ref y, width,
-                            () => GameStyle.InspectItem(captured));
-                        continue;
-                    }
-
-                    AuxLayout.AddWrapped(_content, buildLines[i], _left, ref y, width);
-                }
-
-                y += 8f;
-            }
+            //
+            // Drawn from the DTO rather than from a pre-formatted list of strings, because the parts
+            // have template ids now and a row that knows its id can be opened.
+            if (node.WeaponBuild != null) BuildWeaponSection(node.WeaponBuild, width, ref y);
 
             // Bring - what to have on you before the raid, and how much of it you already hold.
             var bringLines = QuestSummary.ItemsToBringLines(node, profile);
@@ -528,6 +508,118 @@ namespace QuestTree.UI
                 foreach (var unlocked in node.Unlocks)
                     AddQuestLink(unlocked, width, ref y);
             }
+        }
+
+        /// <summary>What a Gunsmith quest asks for: the weapon, the numbers it is checked against,
+        /// the parts it insists on - and what this mod's own stat model makes of those parts.
+        ///
+        /// The model block is a verification instrument rather than a feature. WeaponStatModel
+        /// shipped a release before any build generator so it could be proven against the game
+        /// first, and then nothing ever called it - so the proof never happened and the generator
+        /// stayed unwritten. Fit the named parts, open the game's inspect screen, compare.</summary>
+        private void BuildWeaponSection(WeaponBuildDto build, float width, ref float y)
+        {
+            AuxLayout.AddSectionHeader(_content, ref y, "Build", _left, width);
+
+            if (!string.IsNullOrEmpty(build.WeaponName))
+            {
+                var weapon = build.WeaponTemplate;
+
+                if (!string.IsNullOrEmpty(weapon))
+                    AuxLayout.AddClickableWrapped(_content, $"<b>{GameStyle.Safe(build.WeaponName)}</b>",
+                        _left, ref y, width, () => GameStyle.InspectItem(weapon));
+                else
+                    AuxLayout.AddWrapped(_content, $"<b>{GameStyle.Safe(build.WeaponName)}</b>", _left, ref y, width);
+            }
+
+            foreach (var threshold in build.Thresholds ?? new List<WeaponBuildThresholdDto>())
+            {
+                if (threshold == null) continue;
+
+                // Durability is repair state, not something you assemble - phrased as advice,
+                // because handing in a correct build at 60% durability is a real way to fail these.
+                var text = string.Equals(threshold.Field, "durability", StringComparison.OrdinalIgnoreCase)
+                    ? $"<color=#FFFFFF80>hand in at {GameStyle.Safe(threshold.Compare)} {threshold.Value:0.##}% durability</color>"
+                    : $"{GameStyle.Safe(threshold.Field)}  <color=#{ColorUtility.ToHtmlStringRGB(GameStyle.AccentColor)}>{GameStyle.Safe(threshold.Compare)} {threshold.Value:0.##}</color>";
+
+                AuxLayout.AddWrapped(_content, text, _left, ref y, width);
+            }
+
+            // Parts the build must contain. The ids run parallel to the names, so a row can open the
+            // item even though the list the server sends is two lists rather than one.
+            var names = build.RequiredItemNames ?? new List<string>();
+            var ids = build.RequiredItemIds ?? new List<string>();
+
+            for (var i = 0; i < names.Count; i++)
+            {
+                var text = $"must include {GameStyle.Safe(names[i])}";
+
+                if (i < ids.Count && !string.IsNullOrEmpty(ids[i]))
+                {
+                    var captured = ids[i];
+                    AuxLayout.AddClickableWrapped(_content, text, _left, ref y, width,
+                        () => GameStyle.InspectItem(captured));
+                }
+                else
+                {
+                    AuxLayout.AddWrapped(_content, text, _left, ref y, width);
+                }
+            }
+
+            foreach (var category in build.RequiredCategoryNames ?? new List<string>())
+                AuxLayout.AddWrapped(_content, $"must include a {GameStyle.Safe(category)}", _left, ref y, width);
+
+            if (build.EmptyTacticalSlots > 0)
+                AuxLayout.AddWrapped(_content,
+                    $"leave {build.EmptyTacticalSlots:0} tactical slot(s) empty", _left, ref y, width);
+
+            AddModelCheck(build, width, ref y);
+
+            y += 8f;
+        }
+
+        /// <summary>The stat model's own numbers for the parts above, so they can be read against
+        /// the game.
+        ///
+        /// Deliberately says what it is and what to do with it. A number with no instruction beside
+        /// it is decoration, and this one exists to be acted on exactly once - after which, if it
+        /// agrees with the game, a build generator becomes writable.</summary>
+        private void AddModelCheck(WeaponBuildDto build, float width, ref float y)
+        {
+            var check = build.ModelCheck;
+            if (check == null) return;
+
+            y += 4f;
+
+            var parts = new List<string>
+            {
+                $"ergonomics {check.Ergonomics:0.##}",
+                $"recoil {check.Recoil:0.##}",
+                $"weight {check.Weight:0.###} kg"
+            };
+
+            if (check.MagazineCapacity != null) parts.Add($"magazine {check.MagazineCapacity}");
+            if (check.EffectiveDistance != null) parts.Add($"distance {check.EffectiveDistance:0}");
+
+            AuxLayout.AddWrapped(_content,
+                $"<color=#FFFFFF80>Model check - fit the {check.PartsNamed} part(s) above to this weapon and " +
+                "compare with the inspect screen:</color>", _left, ref y, width, 11);
+
+            AuxLayout.AddWrapped(_content,
+                $"<color=#{ColorUtility.ToHtmlStringRGB(GameStyle.AccentColor)}>{string.Join("   ", parts)}</color>",
+                _left, ref y, width, 11);
+
+            if (check.PartsScored < check.PartsNamed)
+                AuxLayout.AddWrapped(_content,
+                    $"<color=#{GameStyle.WarningHex}>only {check.PartsScored} of {check.PartsNamed} parts could be " +
+                    "scored - the rest are missing from the item table, so this comparison is incomplete.</color>",
+                    _left, ref y, width, 11);
+
+            if (check.Clamped != null && check.Clamped.Count > 0)
+                AuxLayout.AddWrapped(_content,
+                    $"<color=#{GameStyle.ErrorHex}>clamped: {GameStyle.Safe(string.Join("; ", check.Clamped))} - " +
+                    "these numbers are not the game's and the comparison is void.</color>",
+                    _left, ref y, width, 11);
         }
 
         /// <summary>A quest named as a row you can click to go to it: glyph and name in the status

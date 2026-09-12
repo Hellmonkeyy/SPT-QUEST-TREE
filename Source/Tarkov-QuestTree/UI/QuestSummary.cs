@@ -210,30 +210,6 @@ namespace QuestTree.UI
         /// These quests render their objective as "Handover the custom M4A1  0/1", which says
         /// nothing about the twelve numbers the game is really checking - so people fail them with a
         /// build that looks right and hand in a rifle two ergonomics short.</summary>
-        /// <summary>The build requirement as its own list, for a surface that lays out its own
-        /// sections rather than pouring Lines into one block.
-        ///
-        /// Exists because the detail panel could not reach this at all: AddWeaponBuild was private
-        /// and only ever called from Lines, whose sole caller is the map sidebar. So a Gunsmith
-        /// quest stated what it wanted only if you happened to open it from the Maps view - and
-        /// clicking one in the tree, which is where you actually click quests, said nothing about
-        /// the build.</summary>
-        internal static List<string> WeaponBuildLines(QuestNode node)
-        {
-            var lines = new List<string>();
-            AddWeaponBuild(lines, node);
-
-            // Lines uses a trailing blank to space its sections; a caller drawing its own header
-            // does not want it.
-            while (lines.Count > 0 && string.IsNullOrEmpty(lines[lines.Count - 1]))
-                lines.RemoveAt(lines.Count - 1);
-
-            // The "<b>Build</b>" heading is the caller's job too.
-            if (lines.Count > 0 && lines[0] == "<b>Build</b>") lines.RemoveAt(0);
-
-            return lines;
-        }
-
         /// <summary>What to carry into the raid, as its own list, for the same reason.</summary>
         internal static List<string> ItemsToBringLines(QuestNode node, ProfilePayloadDto profile)
         {
@@ -278,6 +254,9 @@ namespace QuestTree.UI
 
             foreach (var category in build.RequiredCategoryNames ?? new List<string>())
                 lines.Add($"  must include a {GameStyle.Safe(category)}");
+
+            if (build.EmptyTacticalSlots > 0)
+                lines.Add($"  leave {build.EmptyTacticalSlots:0} tactical slot(s) empty");
 
             lines.Add("");
         }

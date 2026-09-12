@@ -18,8 +18,10 @@ namespace QuestTreeServer
         /// <summary>Bumped whenever the shape below changes, so an old client paired with a new
         /// server (or the reverse) can say so plainly instead of silently mis-parsing.
         /// v2 (1.8.0): ObjectiveDto.FoundInRaid. v4 (1.9.0): QuestDto.DerivedLocations.
-        /// v5 (1.10.1): RewardDto.ShortName and RewardDto.Template.</summary>
-        public int SchemaVersion { get; set; } = 5;
+        /// v5 (1.10.1): RewardDto.ShortName and RewardDto.Template. v6 (1.10.2): the weapon build
+        /// keeps its template ids, records dropped zero thresholds and empty-slot counts, and carries
+        /// the stat model's own numbers for the quest's example parts.</summary>
+        public int SchemaVersion { get; set; } = 6;
 
         /// <summary>The server half's version, so a mismatch warning on the client can name it -
         /// the other three payloads already did.</summary>
@@ -381,6 +383,65 @@ namespace QuestTreeServer
         /// <summary>Categories one fitted part must come from - "Comb. tact. device" and the like.
         /// 16 of 32.</summary>
         public List<string> RequiredCategoryNames { get; set; } = new();
+
+        /// <summary>The same requirements as TEMPLATE IDS, parallel to the name lists above.
+        ///
+        /// The names are for reading and the ids are for working with, and until now only the names
+        /// survived: the parse resolved each id straight into a locale string and dropped it. That
+        /// is fine for a display and useless for anything that has to reason about the parts, which
+        /// is why a build generator could not be written against this DTO.</summary>
+        public List<string> RequiredItemIds { get; set; } = new();
+
+        public List<string> RequiredCategoryIds { get; set; } = new();
+
+        /// <summary>A slot the build must leave EMPTY - the condition's EmptyTacticalSlot. Never
+        /// read before, and Gunsmith quests use it.</summary>
+        public double? EmptyTacticalSlots { get; set; }
+
+        /// <summary>Threshold fields the condition named but whose value was zero, and which are
+        /// therefore not in Thresholds.
+        ///
+        /// Kept because "dropped as unconstrained noise" and "genuinely constrained to zero" look
+        /// identical once the row is gone, and a solver has to be able to tell them apart.</summary>
+        public List<string> ZeroThresholdFields { get; set; } = new();
+
+        /// <summary>What this mod's own stat model says the quest's OWN example parts score on this
+        /// weapon, or null when the condition names no parts.
+        ///
+        /// THE VERIFICATION INSTRUMENT. WeaponStatModel shipped a release before any solver
+        /// deliberately, to be proven against the running game first - but nothing ever called it,
+        /// so the check was never performed. Fit exactly the named parts to this weapon, open the
+        /// game's inspect screen, and compare these numbers. If they disagree the model is wrong and
+        /// no build generator may be written on it.</summary>
+        public WeaponModelCheckDto? ModelCheck { get; set; }
+    }
+
+    /// <summary>What the stat model believes about an exact, named set of parts.
+    ///
+    /// Partial by nature: it scores the weapon plus whatever the quest's condition happens to name,
+    /// which is usually a few leaf parts rather than a complete gun. That is enough to catch a wrong
+    /// COMBINING RULE - a sum where the game multiplies, a sum where it selects - which is the
+    /// failure this is arranged to prevent. It is not a proof that a finished build scores right.</summary>
+    public sealed class WeaponModelCheckDto
+    {
+        public double Ergonomics { get; set; }
+        public double Recoil { get; set; }
+        public double Weight { get; set; }
+
+        /// <summary>Null means the model does not claim to know, which must not be read as a pass.</summary>
+        public int? MagazineCapacity { get; set; }
+
+        public double? EffectiveDistance { get; set; }
+
+        /// <summary>How many of the named parts the model could actually price. A part missing from
+        /// the template table contributes nothing and would otherwise skew the comparison silently.</summary>
+        public int PartsScored { get; set; }
+
+        public int PartsNamed { get; set; }
+
+        /// <summary>Stats clamped on the way in, from WeaponStatModel. A clamp here means the
+        /// numbers below are not the game's and the comparison is void.</summary>
+        public List<string> Clamped { get; set; } = new();
     }
 
     public sealed class WeaponBuildThresholdDto

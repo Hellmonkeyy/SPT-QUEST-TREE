@@ -8,6 +8,7 @@ using System.Threading.Tasks;
 using SPTarkov.Common.Models.Logging;
 using SPTarkov.DI.Annotations;
 using SPTarkov.Server.Core.DI;
+using SPTarkov.Server.Core.Extensions;
 using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Eft.Common.Tables;
 using SPTarkov.Server.Core.Models.Enums;
@@ -42,7 +43,8 @@ namespace QuestTreeServer
         SeasonalEventService seasonalEventService,
         QuestConfig questConfig,
         QuestFacts facts,
-        ZoneStore zoneStore) : IOnLoad
+        ZoneStore zoneStore,
+        WeaponStatModel weaponStatModel) : IOnLoad
     {
         /// <summary>Built while the server starts, for the reason MapMarkerPayloadBuilder gives:
         /// the client's request handler is synchronous on Unity's main thread, so paying for the
@@ -415,7 +417,7 @@ namespace QuestTreeServer
         /// Without this such a quest renders as "Handover the custom M4A1  0/1", which tells you
         /// nothing about the twelve numbers it is really checking. 56 quests on this install carry
         /// one of these conditions.</summary>
-        private static WeaponBuildDto? MapWeaponBuild(Quest quest, Dictionary<string, string> locale)
+        private WeaponBuildDto? MapWeaponBuild(Quest quest, Dictionary<string, string> locale)
         {
             var conditions = quest.Conditions?.AvailableForFinish;
             if (conditions == null) return null;
@@ -432,7 +434,8 @@ namespace QuestTreeServer
                 var build = new WeaponBuildDto
                 {
                     WeaponTemplate = weapon!,
-                    WeaponName = ResolveItemName(weapon!, locale)
+                    WeaponName = ResolveItemName(weapon!, locale),
+                    EmptyTacticalSlots = condition.EmptyTacticalSlot?.Value
                 };
 
                 // Every threshold the condition states, by its own field name so a modded stat
@@ -448,22 +451,69 @@ namespace QuestTreeServer
                 AddThreshold(build, "base accuracy", condition.BaseAccuracy);
                 AddThreshold(build, "muzzle velocity", condition.MuzzleVelocity);
 
+                // Ids as well as names. The names are for reading; a solver needs the ids, and the
+                // old parse resolved each one straight into a locale string and dropped it.
                 foreach (var item in condition.ContainsItems ?? new List<string>())
                 {
                     if (string.IsNullOrWhiteSpace(item)) continue;
+
+                    build.RequiredItemIds.Add(item);
                     build.RequiredItemNames.Add(ResolveItemName(item, locale));
                 }
 
                 foreach (var category in condition.HasItemFromCategory ?? new List<string>())
                 {
                     if (string.IsNullOrWhiteSpace(category)) continue;
+
+                    build.RequiredCategoryIds.Add(category);
                     build.RequiredCategoryNames.Add(ResolveItemName(category, locale));
                 }
+
+                build.ModelCheck = CheckModel(build);
 
                 return build;
             }
 
             return null;
+        }
+
+        /// <summary>Scores the quest's own named parts on the quest's own weapon.
+        ///
+        /// This is the gate WeaponStatModel was written for and never received. The model shipped a
+        /// release before any solver precisely so it could be proven against the running game first
+        /// - and then nothing called it, so the proof never happened and the solver stayed unwritten
+        /// for two releases.
+        ///
+        /// Partial by nature, and that is worth being plain about: a condition's ContainsItems names
+        /// a few leaf parts, not a whole gun. What it can catch is a wrong COMBINING RULE - summing
+        /// where the game multiplies, summing where it selects - and that is the failure that would
+        /// otherwise reach a hand-in.</summary>
+        private WeaponModelCheckDto? CheckModel(WeaponBuildDto build)
+        {
+            if (build.RequiredItemIds.Count == 0) return null;
+
+            // TryParseMongoId, not the constructor: a modded condition can name something that is
+            // not an id at all, and MongoId's constructor does not politely decline.
+            var parts = new List<MongoId>();
+            foreach (var id in build.RequiredItemIds)
+                if (id.TryParseMongoId(out var parsed)) parts.Add(parsed);
+
+            if (!build.WeaponTemplate.TryParseMongoId(out var weapon)) return null;
+
+            var stats = weaponStatModel.Score(weapon, parts);
+            if (stats == null) return null;
+
+            return new WeaponModelCheckDto
+            {
+                Ergonomics = stats.Ergonomics,
+                Recoil = stats.Recoil,
+                Weight = stats.Weight,
+                MagazineCapacity = stats.MagazineCapacity,
+                EffectiveDistance = stats.EffectiveDistance,
+                PartsNamed = build.RequiredItemIds.Count,
+                PartsScored = parts.Count,
+                Clamped = stats.Clamped.ToList()
+            };
         }
 
         /// <summary>Adds a threshold, unless it is the unconstrained default.
@@ -476,7 +526,15 @@ namespace QuestTreeServer
         private static void AddThreshold(WeaponBuildDto build, string field, ValueCompare? compare)
         {
             var value = compare?.Value ?? 0d;
-            if (value == 0d) return;
+
+            if (value == 0d)
+            {
+                // Recorded rather than silently dropped. Once the row is gone, "unconstrained noise"
+                // and "genuinely constrained to zero" look identical, and a solver has to tell them
+                // apart - the field is only named here when the condition named it at all.
+                if (compare != null) build.ZeroThresholdFields.Add(field);
+                return;
+            }
 
             build.Thresholds.Add(new WeaponBuildThresholdDto
             {

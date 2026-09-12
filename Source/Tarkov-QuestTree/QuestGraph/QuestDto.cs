@@ -26,7 +26,7 @@ namespace QuestTree.QuestGraph
         /// QuestDto.DerivedLocations, which a v3 server simply never sends. v5 (1.10.1) adds
         /// RewardDto.ShortName and Template; without them a reward row keeps its full name
         /// and stops being clickable, which is exactly how it read before they existed.</summary>
-        public const int SupportedSchemaVersion = 5;
+        public const int SupportedSchemaVersion = 6;
 
         [JsonProperty("schemaVersion")]
         public int SchemaVersion { get; set; }
@@ -71,6 +71,58 @@ namespace QuestTree.QuestGraph
 
         [JsonProperty("requiredCategoryNames")]
         public List<string> RequiredCategoryNames { get; set; } = new List<string>();
+
+        /// <summary>The same requirements as template ids, parallel to the name lists. The names are
+        /// for reading; the ids are what a row needs to open the inspect window.</summary>
+        [JsonProperty("requiredItemIds")]
+        public List<string> RequiredItemIds { get; set; } = new List<string>();
+
+        [JsonProperty("requiredCategoryIds")]
+        public List<string> RequiredCategoryIds { get; set; } = new List<string>();
+
+        /// <summary>A slot the build must leave empty.</summary>
+        [JsonProperty("emptyTacticalSlots")]
+        public double? EmptyTacticalSlots { get; set; }
+
+        /// <summary>Fields the condition named with a value of zero, so not in Thresholds.</summary>
+        [JsonProperty("zeroThresholdFields")]
+        public List<string> ZeroThresholdFields { get; set; } = new List<string>();
+
+        /// <summary>What the server's stat model says the quest's own example parts score.</summary>
+        [JsonProperty("modelCheck")]
+        public WeaponModelCheckDto ModelCheck { get; set; }
+    }
+
+    /// <summary>What the stat model believes about the exact parts a quest names.
+    ///
+    /// Shown so it can be read against the game's own inspect screen. The model has to be proven
+    /// right before anything generates builds from it - a solver on a wrong model produces builds
+    /// that look right, pass our own check, and fail at the hand-in.</summary>
+    internal sealed class WeaponModelCheckDto
+    {
+        [JsonProperty("ergonomics")]
+        public double Ergonomics { get; set; }
+
+        [JsonProperty("recoil")]
+        public double Recoil { get; set; }
+
+        [JsonProperty("weight")]
+        public double Weight { get; set; }
+
+        [JsonProperty("magazineCapacity")]
+        public int? MagazineCapacity { get; set; }
+
+        [JsonProperty("effectiveDistance")]
+        public double? EffectiveDistance { get; set; }
+
+        [JsonProperty("partsScored")]
+        public int PartsScored { get; set; }
+
+        [JsonProperty("partsNamed")]
+        public int PartsNamed { get; set; }
+
+        [JsonProperty("clamped")]
+        public List<string> Clamped { get; set; } = new List<string>();
     }
 
     internal sealed class WeaponBuildThresholdDto
