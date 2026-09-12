@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.Linq;
 using SPTarkov.Common.Models.Logging;
@@ -62,6 +62,31 @@ namespace QuestTreeServer
         {
             "durability"
         };
+
+        /// <summary>How deep this walks a weapon's slots. Vanilla's deepest real chain is five; the cap
+        /// is what stops a cyclic graph from the visited set's blind side.</summary>
+        private const int MaxReachDepth = 12;
+
+        /// <summary>The fewest parts any satisfying build could have, and what forces it.
+        ///
+        /// Two numbers, because two different claims are available and conflating them would overstate
+        /// one of them. <see cref="Parts"/> assumes nothing whatsoever: it allows the hypothetical
+        /// smaller build to fit the single best part in reach as many times as it likes, which the game
+        /// does permit. That makes it unarguable and very loose. <see cref="Distinct"/> adds one stated
+        /// assumption - that no HOST template appears twice on the gun, so each slot in the data is
+        /// available once - which is true of every build this solver produces and of essentially every
+        /// build anybody assembles, and it is sharper by a wide margin because the one slot whose best
+        /// occupant is worth +15 ergonomics is one slot, not twelve.</summary>
+        public sealed class Floor
+        {
+            /// <summary>Unconditional. No build with fewer parts than this can satisfy the quest.</summary>
+            public int Parts { get; set; }
+
+            /// <summary>The same, assuming no host template is fitted more than once.</summary>
+            public int Distinct { get; set; }
+
+            public string Reason { get; set; } = "";
+        }
 
         public sealed class Verdict
         {
@@ -258,6 +283,363 @@ namespace QuestTreeServer
             }
         }
 
+        /// <summary>The fewest parts ANY satisfying build could have, and why.
+        ///
+        /// This is what turns "nothing can be removed from this build" into "no smaller build exists",
+        /// and the two are not the same claim. A build can be removal-closed and still carry one part
+        /// more than necessary, because every pass that shrinks a build works by editing THAT build -
+        /// none of them can see a different, smaller arrangement.
+        ///
+        /// So this argues from the other side, and never touches the build at all. Ergonomics is a sum
+        /// over fitted parts, so a build with n parts cannot score more than the weapon's base, plus
+        /// exactly what the parts the quest NAMES contribute, plus n minus those, each contributing at
+        /// most the best single contribution anywhere in reach. If that ceiling is below the threshold
+        /// then no build of n parts meets it, whatever it is made of. Recoil is the same argument
+        /// through the percentage. Magazine capacity and sighting range are selected rather than summed,
+        /// so they need one part that carries enough, and no number of parts substitutes for it.
+        ///
+        /// Deliberately generous at every step - duplicates allowed, slot feasibility ignored, the best
+        /// part assumed available in every slot - because a bound that errs the other way would prove
+        /// things that are not true. The cost of that generosity is that it proves fewer builds
+        /// minimal, not that it proves any of them wrongly.
+        ///
+        /// Weight, height and width contribute nothing here: fitting FEWER parts can only help a weight
+        /// limit, so no weight threshold ever forces a part.</summary>
+        public Floor LowestPossible(
+            MongoId weapon,
+            IReadOnlyList<(string Field, string Compare, double Value)> thresholds,
+            IReadOnlyCollection<MongoId> mustInclude,
+            IReadOnlyCollection<MongoId> mustIncludeCategories)
+        {
+            var floor = new Floor();
+
+            if (!Template(weapon, out var item)) return floor;
+
+            var reach = Reachable(weapon);
+
+            // Named parts are forced and distinct, so their contribution is exact rather than bounded.
+            var named = new List<MongoId>();
+            foreach (var part in mustInclude)
+                if (reach.ContainsKey(part) && !named.Contains(part)) named.Add(part);
+
+            // A category nothing named covers needs a part of its own.
+            var uncovered = 0;
+            foreach (var category in mustIncludeCategories)
+                if (!named.Any(part => itemHelper.IsOfBaseclass(part, category))) uncovered++;
+
+            floor.Parts = named.Count + uncovered;
+            floor.Distinct = floor.Parts;
+            floor.Reason = floor.Parts > 0 ? "the parts and categories the quest names" : "nothing";
+
+            // Every slot the game will not leave empty needs an occupant, that occupant may have
+            // required slots of its own, and so on down - so the forced count is a minimum over
+            // occupant choices rather than a count of the weapon's own slots. Counting only the top
+            // level understates it badly: an M1A forces a barrel, the barrel forces a muzzle device.
+            var forced = new Dictionary<MongoId, int>();
+            var structural = ForcedBelow(weapon, forced, 0);
+
+            // A named part or a category member that cannot fill ANY required slot anywhere in reach is
+            // a part on top of the forced ones rather than one of them, so the two counts add instead of
+            // competing. Anything that could fill one is left out of this sum, which keeps it a bound.
+            var fillers = new HashSet<MongoId>();
+
+            foreach (var (template, _) in reach)
+            {
+                if (!Template(template, out var host)) continue;
+
+                foreach (var slot in host.Properties?.Slots ?? Enumerable.Empty<Slot>())
+                {
+                    if (slot?.Required != true) continue;
+
+                    foreach (var filter in slot.Properties?.Filters ?? Enumerable.Empty<SlotFilter>())
+                        foreach (var candidate in filter?.Filter ?? Enumerable.Empty<MongoId>())
+                            fillers.Add(candidate);
+                }
+            }
+
+            var extra = named.Count(part => !fillers.Contains(part));
+
+            foreach (var category in mustIncludeCategories)
+            {
+                if (named.Any(part => itemHelper.IsOfBaseclass(part, category))) continue;
+                if (fillers.Any(filler => itemHelper.IsOfBaseclass(filler, category))) continue;
+
+                extra++;
+            }
+
+            if (structural + extra > floor.Parts)
+            {
+                floor.Parts = structural + extra;
+                floor.Reason = "the slots the game will not leave empty, plus what the quest names";
+            }
+
+            if (structural + extra > floor.Distinct) floor.Distinct = structural + extra;
+
+            // A named part that sits four slots deep needs three parts under it, and a DEPTH LEVEL with
+            // no named part at it must be occupied by something the quest did not name. Counting those
+            // levels is the chain cost the earlier terms miss entirely, and it is why a bound that only
+            // counted named parts came out far below the builds.
+            //
+            // Levels rather than paths, because the exact answer is the smallest subtree joining the
+            // weapon to every named part - a Steiner tree, and genuinely hard. This is the part of it
+            // that can be had for one pass.
+            var deepest = 0;
+            foreach (var part in named)
+                if (reach[part] > deepest) deepest = reach[part];
+
+            var chains = 0;
+            for (var level = 1; level <= deepest; level++)
+                if (!named.Any(part => reach[part] == level)) chains++;
+
+            var routed = named.Count + chains;
+
+            if (routed > floor.Parts)
+            {
+                floor.Parts = routed;
+                floor.Reason = "the parts the quest names and the chains they hang off";
+            }
+
+            if (routed > floor.Distinct) floor.Distinct = routed;
+
+            var props = item.Properties!;
+            var baseRecoil = (props.RecoilForceUp ?? 0d) + (props.RecoilForceBack ?? 0d);
+
+            // The best single contribution available anywhere in reach, which is what each part beyond
+            // the named ones is allowed to be worth.
+            var bestErgonomics = 0d;
+            var bestRecoil = 0d;
+            var bestMagazine = 0;
+            var bestRange = 0d;
+
+            foreach (var (template, _) in reach)
+            {
+                if (!Template(template, out var part)) continue;
+
+                var p = part.Properties!;
+
+                if ((p.Ergonomics ?? 0d) > bestErgonomics) bestErgonomics = p.Ergonomics ?? 0d;
+                if ((p.Recoil ?? 0d) < bestRecoil) bestRecoil = p.Recoil ?? 0d;
+
+                var capacity = p.Cartridges?.FirstOrDefault()?.MaxCount ?? 0;
+                if (capacity > bestMagazine) bestMagazine = (int)capacity;
+
+                if ((p.SightingRange ?? 0d) > bestRange) bestRange = p.SightingRange ?? 0d;
+            }
+
+            // The best occupant of each slot in reach, one entry per slot, biggest first. Every part
+            // beyond the named ones occupies a slot, and no two occupy the same one - so r parts can be
+            // worth no more than the r best slots, which is a far tighter statement than r times the
+            // best part on the gun.
+            var ergonomicSlots = new List<double>();
+            var recoilSlots = new List<double>();
+
+            foreach (var (template, _) in reach)
+            {
+                if (!Template(template, out var host)) continue;
+
+                foreach (var slot in host.Properties?.Slots ?? Enumerable.Empty<Slot>())
+                {
+                    var ergonomics = 0d;
+                    var recoil = 0d;
+
+                    foreach (var filter in slot?.Properties?.Filters ?? Enumerable.Empty<SlotFilter>())
+                        foreach (var candidate in filter?.Filter ?? Enumerable.Empty<MongoId>())
+                        {
+                            if (!Template(candidate, out var part)) continue;
+
+                            if ((part.Properties!.Ergonomics ?? 0d) > ergonomics) ergonomics = part.Properties!.Ergonomics ?? 0d;
+                            if ((part.Properties!.Recoil ?? 0d) < recoil) recoil = part.Properties!.Recoil ?? 0d;
+                        }
+
+                    if (ergonomics > 0d) ergonomicSlots.Add(ergonomics);
+                    if (recoil < 0d) recoilSlots.Add(recoil);
+                }
+            }
+
+            ergonomicSlots.Sort((left, right) => right.CompareTo(left));
+            recoilSlots.Sort();
+
+            var namedErgonomics = 0d;
+            var namedRecoil = 0d;
+
+            foreach (var template in named)
+            {
+                if (!Template(template, out var part)) continue;
+
+                namedErgonomics += part.Properties!.Ergonomics ?? 0d;
+                namedRecoil += part.Properties!.Recoil ?? 0d;
+            }
+
+            foreach (var (field, compare, value) in thresholds)
+            {
+                if (RepairState.Contains(field)) continue;
+                if (!compare.StartsWith(">", StringComparison.Ordinal) && field.ToLowerInvariant() != "recoil") continue;
+
+                var lower = field.ToLowerInvariant();
+
+                var needs = lower switch
+                {
+                    "ergonomics" => Spread(value - (props.Ergonomics ?? 0d) - namedErgonomics, bestErgonomics, named.Count),
+                    "recoil" => Percent(value, baseRecoil, namedRecoil, bestRecoil, named.Count),
+                    "magazine capacity" => Selected(value, bestMagazine, CapacityOf(item), named, CapacityOf),
+                    "effective distance" => Selected(value, bestRange, props.SightingRange ?? 0d, named, RangeOf),
+                    _ => 0
+                };
+
+                var sharper = lower switch
+                {
+                    "ergonomics" => Fill(value - (props.Ergonomics ?? 0d) - namedErgonomics, ergonomicSlots, named.Count, 1d),
+                    "recoil" => baseRecoil <= 0d
+                        ? named.Count
+                        : Fill(namedRecoil - (value / baseRecoil - 1d) * 100d, recoilSlots, named.Count, -1d),
+                    _ => needs
+                };
+
+                if (sharper > floor.Distinct) floor.Distinct = sharper;
+
+                if (needs <= floor.Parts) continue;
+
+                floor.Parts = needs;
+                floor.Reason = $"{field} {compare} {value:0.##}";
+            }
+
+            return floor;
+        }
+
+        /// <summary>How many parts the slots below one template force onto the gun: for every slot it
+        /// cannot leave empty, the cheapest occupant, plus whatever that occupant forces in turn.
+        ///
+        /// A minimum over occupant choices, so it is a bound rather than a guess. The dictionary is the
+        /// visited set and is written before descending, so a slot graph that admits its own host meets
+        /// its own marker instead of looping, and the depth cap bounds it regardless.</summary>
+        private int ForcedBelow(MongoId template, Dictionary<MongoId, int> forced, int depth)
+        {
+            if (depth > MaxReachDepth) return 0;
+            if (forced.TryGetValue(template, out var cached)) return cached;
+            if (!Template(template, out var item)) return 0;
+
+            forced[template] = 0;
+
+            var total = 0;
+
+            foreach (var slot in item.Properties?.Slots ?? Enumerable.Empty<Slot>())
+            {
+                if (slot?.Required != true) continue;
+
+                var cheapest = int.MaxValue;
+
+                foreach (var filter in slot.Properties?.Filters ?? Enumerable.Empty<SlotFilter>())
+                    foreach (var candidate in filter?.Filter ?? Enumerable.Empty<MongoId>())
+                    {
+                        var cost = 1 + ForcedBelow(candidate, forced, depth + 1);
+                        if (cost < cheapest) cheapest = cost;
+                    }
+
+                if (cheapest != int.MaxValue) total += cheapest;
+            }
+
+            forced[template] = total;
+
+            return total;
+        }
+
+        /// <summary>How many of the best available SLOTS it takes to cover a shortfall, each slot
+        /// counted once. <paramref name="sign"/> is 1 for a stat where more is better and -1 for recoil,
+        /// whose entries are negative percentages.</summary>
+        private static int Fill(double shortfall, List<double> slots, int named, double sign)
+        {
+            if (shortfall <= 0d) return named;
+
+            var covered = 0d;
+
+            for (var index = 0; index < slots.Count; index++)
+            {
+                covered += slots[index] * sign;
+
+                if (covered >= shortfall) return named + index + 1;
+            }
+
+            return int.MaxValue;
+        }
+
+        /// <summary>How many parts, each worth at most <paramref name="best"/>, it takes to cover a
+        /// shortfall. Unconditional, and loose precisely because it allows the same part twice.</summary>
+        private static int Spread(double shortfall, double best, int named)
+        {
+            if (shortfall <= 0d) return named;
+            if (best <= 0d) return int.MaxValue;
+
+            return named + (int)Math.Ceiling(shortfall / best);
+        }
+
+        /// <summary>The same argument through recoil's percentage.</summary>
+        private static int Percent(double threshold, double baseRecoil, double namedPercent, double bestPercent, int named)
+        {
+            if (baseRecoil <= 0d) return named;
+
+            // The build needs the summed percentage to be at least this negative.
+            var wanted = (threshold / baseRecoil - 1d) * 100d;
+            var shortfall = namedPercent - wanted;
+
+            if (shortfall <= 0d) return named;
+            if (bestPercent >= 0d) return int.MaxValue;
+
+            return named + (int)Math.Ceiling(shortfall / -bestPercent);
+        }
+
+        /// <summary>A selected stat needs ONE part that carries enough, and no number of lesser parts
+        /// substitutes. Zero extra when the weapon or a named part already carries it.</summary>
+        private static int Selected(
+            double threshold, double bestAvailable, double onWeapon, List<MongoId> named, Func<MongoId, double> of)
+        {
+            if (onWeapon >= threshold) return named.Count;
+
+            foreach (var part in named)
+                if (of(part) >= threshold) return named.Count;
+
+            return bestAvailable >= threshold ? named.Count + 1 : int.MaxValue;
+        }
+
+        private double RangeOf(MongoId template) =>
+            Template(template, out var item) ? item.Properties!.SightingRange ?? 0d : 0d;
+
+        private double CapacityOf(MongoId template) =>
+            Template(template, out var item) ? CapacityOf(item) : 0d;
+
+
+
+        private static double CapacityOf(TemplateItem item) =>
+            item.Properties?.Cartridges?.FirstOrDefault()?.MaxCount ?? 0d;
+
+        /// <summary>Every template the weapon's slots can reach, walked here rather than taken from the
+        /// graph so that the bound rests on the item data and not on the search's view of it.
+        ///
+        /// The visited set is what makes a cyclic slot graph terminate, and the depth cap bounds it even
+        /// if the set somehow did not.</summary>
+        private Dictionary<MongoId, int> Reachable(MongoId weapon)
+        {
+            var seen = new Dictionary<MongoId, int> { [weapon] = 0 };
+            var queue = new Queue<MongoId>();
+
+            queue.Enqueue(weapon);
+
+            while (queue.Count > 0)
+            {
+                var template = queue.Dequeue();
+                var depth = seen[template];
+
+                if (depth >= MaxReachDepth) continue;
+                if (!Template(template, out var item)) continue;
+
+                foreach (var slot in item.Properties?.Slots ?? Enumerable.Empty<Slot>())
+                    foreach (var filter in slot?.Properties?.Filters ?? Enumerable.Empty<SlotFilter>())
+                        foreach (var candidate in filter?.Filter ?? Enumerable.Empty<MongoId>())
+                            if (seen.TryAdd(candidate, depth + 1)) queue.Enqueue(candidate);
+            }
+
+            return seen;
+        }
+
         /// <summary>Whether a slot's filters admit a template.
         ///
         /// ANY filter, not the first one. The graph reads only the first, which is right for every
@@ -321,3 +703,4 @@ namespace QuestTreeServer
         }
     }
 }
+

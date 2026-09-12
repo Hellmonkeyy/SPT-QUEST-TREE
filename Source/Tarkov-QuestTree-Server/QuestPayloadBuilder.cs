@@ -95,8 +95,14 @@ namespace QuestTreeServer
             var widestBuild = 0;
             var duplicates = 0;
             var unscorable = 0;
+            // How many parts are PROVEN necessary, summed. NOT the solver's own floor, which is the size
+            // of one particular mandatory skeleton and is not a bound at all - Gunsmith 18 comes in at
+            // 9 parts against a solver floor of 10, which settles it. Only the verifier's number is a
+            // bound, so only the verifier's number is reported as one.
+            var proven = 0;
             var atFloor = 0;
-            var floors = 0;
+            var atDistinct = 0;
+            var unproven = new List<string>();
             var unverifiable = 0;
             var disagreed = 0;
             var failed = new List<string>();
@@ -143,6 +149,11 @@ namespace QuestTreeServer
                 var verdict = weaponBuildVerifier.Verify(
                     weapon, result.Parts, thresholds, mustInclude, mustIncludeCategories);
 
+                // PROOF, not the solver's opinion: the fewest parts any satisfying build could have,
+                // argued from the item data without looking at the build. A build that matches it is
+                // minimum; one above it is only as small as the passes could make it.
+                var lowest = weaponBuildVerifier.LowestPossible(weapon, thresholds, mustInclude, mustIncludeCategories);
+
                 duplicates += verdict.Duplicates;
                 unverifiable += verdict.Unverifiable.Count;
                 if (verdict.Unverifiable.Count > 0) unscorable++;
@@ -163,8 +174,11 @@ namespace QuestTreeServer
                 {
                     solved++;
                     parts += result.Parts.Count;
-                    floors += result.Floor;
-                    if (result.Parts.Count <= result.Floor) atFloor++;
+                    proven += lowest.Parts;
+
+                    if (result.Parts.Count <= lowest.Parts) atFloor++;
+                    if (result.Parts.Count <= lowest.Distinct) atDistinct++;
+                    else unproven.Add($"{questName} at {result.Parts.Count} parts, proven necessary {lowest.Parts} ({lowest.Reason}), solver floor {result.Floor}");
                     if (result.Parts.Count > widestBuild) widestBuild = result.Parts.Count;
 
                     logger.Debug(
@@ -216,12 +230,20 @@ namespace QuestTreeServer
                 $"satisfied from the full parts list" +
                 (ceiling > 0 ? $", {ceiling} hit the search budget" : "") +
                 $" - {clock.ElapsedMilliseconds:N0} ms for all of them, {worst:N0} nodes for the worst one, " +
-                $"{(solved > 0 ? (double)parts / solved : 0d):0.##} parts per build ({parts} total), {widestBuild} at most" + $", {atFloor} of them provably minimal (at the floor)" + $" against a floor of {(solved > 0 ? (double)floors / solved : 0d):0.##}" +
+                $"{(solved > 0 ? (double)parts / solved : 0d):0.##} parts per build ({parts} total), " +
+                $"{widestBuild} at most, {atFloor} of them PROVEN MINIMUM " +
+                $"({atDistinct} if no host template is fitted twice), {proven} of {parts} parts proven necessary" +
                 (duplicates > 0 ? $", {duplicates} duplicated part(s)" : "") +
                 (unverifiable > 0
                     ? $", {unverifiable} constraint(s) across {unscorable} build(s) that nothing here can score"
                     : "") +
                 (disagreed > 0 ? $", SOLVER AND VERIFIER DISAGREED ON {disagreed}" : "") + ".");
+
+            // Per quest, how far the build is above what can be PROVEN necessary. A gap is not waste -
+            // the bound omits the chains that named parts have to be routed through, and bounding
+            // those exactly is a Steiner tree - but it is the honest measure of what is still open.
+            foreach (var line in unproven)
+                logger.Debug($"Quest Tracker: minimality unproven - {line}");
 
             if (reasons.Count > 0)
                 logger.Info(
@@ -965,6 +987,11 @@ namespace QuestTreeServer
         }
     }
 }
+
+
+
+
+
 
 
 

@@ -187,9 +187,14 @@ namespace QuestTreeServer
             /// else does not mean the quest is satisfied.</summary>
             public List<string> Unchecked { get; } = new();
 
-            /// <summary>The fewest parts any build for this quest could have: the slots the game will
-            /// not leave empty, the parts the quest names, and one for each category it names. A build
-            /// AT the floor is provably minimal; one above it may or may not be.</summary>
+            /// <summary>The size of ONE mandatory skeleton: what the planner had to place, the slots the
+            /// game will not leave empty, and one part for each category still unaccounted for.
+            ///
+            /// NOT a lower bound, and it was reported as one until the data said otherwise - Gunsmith 18
+            /// comes in at 9 parts against a skeleton of 10, because a different plan and different
+            /// occupants make a different skeleton. It is what the search stops at, which is all it was
+            /// ever entitled to be. The only real bound lives in WeaponBuildVerifier, which argues from
+            /// the item data instead of from one arrangement of it.</summary>
             public int Floor { get; set; }
 
             public int NodesOpened { get; set; }
