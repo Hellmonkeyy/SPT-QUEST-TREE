@@ -226,9 +226,12 @@ namespace QuestTree.UI
 
         private static void AddWeaponBuild(List<string> lines, QuestNode node)
         {
-            var build = node.WeaponBuild;
-            if (build == null) return;
+            foreach (var build in node.WeaponBuilds)
+                if (build != null) AddOneWeaponBuild(lines, build);
+        }
 
+        private static void AddOneWeaponBuild(List<string> lines, WeaponBuildDto build)
+        {
             lines.Add("<b>Build</b>");
             lines.Add(GameStyle.Safe(build.WeaponName));
 

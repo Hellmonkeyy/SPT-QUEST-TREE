@@ -398,7 +398,9 @@ namespace QuestTree.UI
             //
             // Drawn from the DTO rather than from a pre-formatted list of strings, because the parts
             // have template ids now and a row that knows its id can be opened.
-            if (node.WeaponBuild != null) BuildWeaponSection(node.WeaponBuild, width, ref y);
+            // Every build the quest asks for, each as its own block headed by its weapon.
+            foreach (var build in node.WeaponBuilds)
+                if (build != null) BuildWeaponSection(build, width, ref y);
 
             // Bring - what to have on you before the raid, and how much of it you already hold.
             var bringLines = QuestSummary.ItemsToBringLines(node, profile);

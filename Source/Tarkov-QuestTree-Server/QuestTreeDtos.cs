@@ -20,8 +20,9 @@ namespace QuestTreeServer
         /// v2 (1.8.0): ObjectiveDto.FoundInRaid. v4 (1.9.0): QuestDto.DerivedLocations.
         /// v5 (1.10.1): RewardDto.ShortName and RewardDto.Template. v6 (1.10.2): the weapon build
         /// keeps its template ids, records dropped zero thresholds and empty-slot counts, and carries
-        /// the stat model's own numbers for the quest's example parts.</summary>
-        public int SchemaVersion { get; set; } = 6;
+        /// the stat model's own numbers for the quest's example parts. v7 (1.10.3): a quest carries
+        /// EVERY weapon build it asks for rather than only the first.</summary>
+        public int SchemaVersion { get; set; } = 7;
 
         /// <summary>The server half's version, so a mismatch warning on the client can name it -
         /// the other three payloads already did.</summary>
@@ -96,9 +97,10 @@ namespace QuestTreeServer
 
         public List<ObjectiveDto> Objectives { get; set; } = new();
 
-        /// <summary>The weapon-build requirement, when this quest states one. Null for the
-        /// other 774 quests. Schema v4.</summary>
-        public WeaponBuildDto? WeaponBuild { get; set; }
+        /// <summary>Every weapon-build requirement this quest states. Empty for the other 774
+        /// quests. Schema v4; a LIST since v7, because a quest can ask for several - "Old Friend's
+        /// Request" wants a T-5000M, a PP-19-01 and a Glock 17.</summary>
+        public List<WeaponBuildDto> WeaponBuilds { get; set; } = new();
 
         public List<RewardDto> Rewards { get; set; } = new();
     }

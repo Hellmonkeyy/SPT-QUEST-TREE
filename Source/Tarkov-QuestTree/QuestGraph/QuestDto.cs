@@ -26,7 +26,7 @@ namespace QuestTree.QuestGraph
         /// QuestDto.DerivedLocations, which a v3 server simply never sends. v5 (1.10.1) adds
         /// RewardDto.ShortName and Template; without them a reward row keeps its full name
         /// and stops being clickable, which is exactly how it read before they existed.</summary>
-        public const int SupportedSchemaVersion = 6;
+        public const int SupportedSchemaVersion = 7;
 
         [JsonProperty("schemaVersion")]
         public int SchemaVersion { get; set; }
@@ -184,9 +184,10 @@ namespace QuestTree.QuestGraph
         [JsonProperty("prerequisites")]
         public List<PrerequisiteDto> Prerequisites { get; set; }
 
-        /// <summary>The weapon-build requirement, when this quest states one. Schema v4.</summary>
-        [JsonProperty("weaponBuild")]
-        public WeaponBuildDto WeaponBuild { get; set; }
+        /// <summary>Every weapon-build requirement this quest states. Schema v4; a LIST since v7,
+        /// because a quest can ask for several.</summary>
+        [JsonProperty("weaponBuilds")]
+        public List<WeaponBuildDto> WeaponBuilds { get; set; } = new List<WeaponBuildDto>();
 
         [JsonProperty("objectives")]
         public List<ObjectiveDto> Objectives { get; set; }

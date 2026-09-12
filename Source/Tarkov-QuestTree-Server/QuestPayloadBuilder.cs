@@ -192,7 +192,7 @@ namespace QuestTreeServer
                 Prerequisites = MapPrerequisites(quest),
                 DerivedLocations = DeriveLocations(quest, zoneToMap, locale),
                 Objectives = MapObjectives(quest, locale),
-                WeaponBuild = MapWeaponBuild(quest, locale),
+                WeaponBuilds = MapWeaponBuilds(quest, locale),
                 Rewards = MapRewards(quest, locale)
             };
         }
@@ -412,15 +412,23 @@ namespace QuestTreeServer
         /// <summary>Condition type stating a weapon build requirement.</summary>
         private const string WeaponAssemblyType = "WeaponAssembly";
 
-        /// <summary>What a Gunsmith-style quest actually asks for, in words.
+        /// <summary>What a Gunsmith-style quest actually asks for, in words - EVERY build it asks
+        /// for, not the first.
         ///
         /// Without this such a quest renders as "Handover the custom M4A1  0/1", which tells you
         /// nothing about the twelve numbers it is really checking. 56 quests on this install carry
-        /// one of these conditions.</summary>
-        private WeaponBuildDto? MapWeaponBuild(Quest quest, Dictionary<string, string> locale)
+        /// one of these conditions.
+        ///
+        /// A quest can carry several. "Gunsmith - Old Friend's Request" wants a T-5000M, a PP-19-01
+        /// AND a Glock 17, each with its own thresholds and its own parts - and returning on the
+        /// first match showed the rifle and silently dropped the other two, so the panel described a
+        /// third of the task while the objectives listed all three.</summary>
+        private List<WeaponBuildDto> MapWeaponBuilds(Quest quest, Dictionary<string, string> locale)
         {
+            var builds = new List<WeaponBuildDto>();
+
             var conditions = quest.Conditions?.AvailableForFinish;
-            if (conditions == null) return null;
+            if (conditions == null) return builds;
 
             foreach (var condition in conditions)
             {
@@ -470,11 +478,10 @@ namespace QuestTreeServer
                 }
 
                 build.ModelCheck = CheckModel(build);
-
-                return build;
+                builds.Add(build);
             }
 
-            return null;
+            return builds;
         }
 
         /// <summary>Scores the quest's own named parts on the quest's own weapon.
