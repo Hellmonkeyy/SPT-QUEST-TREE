@@ -65,13 +65,9 @@ namespace QuestTreeServer
         /// search descends independently of the graph walk.</summary>
         private const int MaxDepth = 12;
 
-        /// <summary>Alternative routes onto the gun the planner will consider for one required
-        /// part.</summary>
-        private const int RoutesPerPart = 16;
-
-        /// <summary>Steps past the shortest a route may take. Two covers "scope on a riser on a
-        /// mount" where "scope on a mount" is shortest, and keeps the backward walk finite - the
-        /// number of routes through a 667-part graph is not bounded in any useful sense.</summary>
+        /// <summary>Slots past the shortest chain the planner may spend routing to a required part.
+        /// Two covers "scope on a riser on a mount" where "scope on a mount" is shortest and the
+        /// mount's slot is already taken.</summary>
         private const int RouteSlack = 2;
 
         /// <summary>Sweeps of the climb. It stops on its own as soon as a sweep finds no move, so
@@ -218,8 +214,6 @@ namespace QuestTreeServer
                 RecoilPerPercent = (bare?.Recoil ?? 0d) / 100d
             };
 
-            state.Measure(weapon);
-
             var required = new List<MongoId>();
             foreach (var id in mustInclude)
                 if (id != weapon && !required.Contains(id)) required.Add(id);
@@ -313,162 +307,218 @@ namespace QuestTreeServer
         // PLAN - the parts the quest names, placed into an explicit tree
         // ---------------------------------------------------------------------------------------
 
-        /// <summary>Places every required part, backtracking over routes when two of them want the
-        /// same slot.
+        /// <summary>Places every required part, backtracking when two of them want the same slot.
         ///
-        /// The previous version marked every template on a shortest route as "forced" and let the
-        /// greedy take any forced part it met. That loses on two shapes that both occur here: two
-        /// required parts whose shortest routes share one rail, and a forced part being claimed by
-        /// the first slot that happens to admit it rather than the slot its own route meant. Both
-        /// need the routes to be chosen TOGETHER, which is what this does.</summary>
-        private bool Plan(Node root, List<MongoId> required, SearchState state)
+        /// The first version of this marked every template on a shortest route as "forced" and let
+        /// the greedy take any forced part it met, which loses two ways: two required parts whose
+        /// shortest routes share one rail, and a forced part claimed by the first slot that happened
+        /// to admit it rather than the slot its own route meant.
+        ///
+        /// The second version chose whole routes from the bare weapon, together, with backtracking -
+        /// and still lost the AKS-74N, because a route list computed before anything is placed does
+        /// not know that another part's route has already fitted the very handguard this part hangs
+        /// off. There are more near-shortest routes through the graph than any cap will hold, and the
+        /// one that reused it simply was not in the list.
+        ///
+        /// So routing happens against the gun AS IT STANDS. Each required part carries a map of how
+        /// many slots every template is from it, which makes "extend from here" a local decision and
+        /// makes a node already on the gun, one slot away, the first thing tried.</summary>
+        private void Plan(Node root, List<MongoId> required, SearchState state)
         {
-            if (required.Count == 0) return true;
+            if (required.Count == 0) return;
 
-            var order = new List<(MongoId Part, List<List<MongoId>> Routes)>(required.Count);
+            var order = new List<PlanPart>(required.Count);
 
             foreach (var part in required)
-                order.Add((part, Routes(root.Template, part, state)));
+                order.Add(new PlanPart { Part = part, Steps = StepsTo(part, state) });
 
-            // Fewest routes first. A part with one way onto the gun has to get that way, and the old
-            // failure was exactly the reverse: a part with a dozen routes took the shared rail first
-            // and left the part with one route nowhere to go.
-            order.Sort((left, right) => left.Routes.Count.CompareTo(right.Routes.Count));
+            foreach (var part in order)
+            {
+                part.Seats = state.Hosts.TryGetValue(part.Part, out var hosts) ? hosts.Count : 0;
+                part.Carries = order.Count(other => other != part && other.Steps.ContainsKey(part.Part));
+            }
 
-            return PlanFrom(root, order, 0, state);
+            // A part that can CARRY another required part goes first: seat the foregrip first and it
+            // picks some other handguard, and the handguard the quest named then has nowhere to go.
+            // After that, fewest places to sit first - the Zenit PT-3 stock has exactly two hosts in
+            // the whole game and the Klesch illuminator has a hundred, and the one with two must not
+            // be asked to work around the one with a hundred.
+            order.Sort((left, right) =>
+            {
+                var carries = right.Carries.CompareTo(left.Carries);
+                return carries != 0 ? carries : left.Seats.CompareTo(right.Seats);
+            });
+
+            if (PlanFrom(root, order, 0, state)) return;
+
+            // Seating them all together failed. Seat what can be seated, one at a time, so the gun is
+            // still the right shape for the rest and the report names the part that would not fit
+            // rather than every part the unwinding took back off.
+            foreach (var part in order)
+            {
+                if (Find(root, part.Part) != null) continue;
+
+                var alone = new List<PlanPart> { part };
+
+                foreach (var seat in Seatings(root, part))
+                    if (Extend(seat, part.Steps[seat.Template] + RouteSlack, root, alone, 0, state)) break;
+            }
         }
 
-        private bool PlanFrom(
-            Node root, List<(MongoId Part, List<List<MongoId>> Routes)> order, int index, SearchState state)
+        private bool PlanFrom(Node root, List<PlanPart> order, int index, SearchState state)
         {
             if (index >= order.Count) return true;
             if (state.OutOfBudget()) return false;
 
-            var (part, routes) = order[index];
+            var part = order[index];
 
-            // An earlier part's route may already have brought this one along: two required parts on
-            // the same chain share it rather than competing for it.
-            if (Find(root, part) != null) return PlanFrom(root, order, index + 1, state);
+            // An earlier part's chain may already have brought this one along: two required parts on
+            // one chain share it rather than competing for it.
+            if (Find(root, part.Part) != null) return PlanFrom(root, order, index + 1, state);
 
-            foreach (var route in routes)
-            {
-                var added = new List<Node>();
-
-                if (Lay(root, route, 0, added, state) && PlanFrom(root, order, index + 1, state)) return true;
-
-                for (var i = added.Count - 1; i >= 0; i--) Detach(added[i], state);
-            }
+            foreach (var seat in Seatings(root, part))
+                if (Extend(seat, part.Steps[seat.Template] + RouteSlack, root, order, index, state)) return true;
 
             return false;
         }
 
-        /// <summary>Fits one route's templates in order, from the node they hang off, choosing a
-        /// slot for each and backtracking when a deeper step cannot be placed.</summary>
-        private bool Lay(Node parent, List<MongoId> route, int step, List<Node> added, SearchState state)
+        /// <summary>Where on the gun as it stands a part could be routed from, fewest slots away
+        /// first. Nearest wins because a node already fitted one slot from the part gives both the
+        /// shortest chain and the one that spends no slot the rest of the build needs.</summary>
+        private static List<Node> Seatings(Node root, PlanPart part)
         {
-            if (step >= route.Count) return true;
+            var seats = new List<Node>();
+
+            CollectSeats(root, part.Steps, seats);
+            seats.Sort((left, right) => part.Steps[left.Template].CompareTo(part.Steps[right.Template]));
+
+            return seats;
+        }
+
+        /// <summary>Builds a chain of slots from one node down to the required part and hands the gun
+        /// on to the next part, undoing its own work on the way back out - so a part that cannot be
+        /// seated leaves no trace, and a part sitting where another one needed to be can be moved.
+        ///
+        /// <paramref name="remaining"/> is how many slots the chain may still spend. It starts at the
+        /// shortest chain plus <see cref="RouteSlack"/>, because the shortest is sometimes taken and
+        /// the way round is a rail longer.</summary>
+        private bool Extend(Node node, int remaining, Node root, List<PlanPart> order, int index, SearchState state)
+        {
             if (state.OutOfBudget()) return false;
-            if (parent.Depth >= MaxDepth) return false;
+            if (remaining <= 0 || node.Depth >= MaxDepth) return false;
+            if (!state.Reachable.TryGetValue(node.Template, out var host)) return false;
 
-            var template = route[step];
+            var part = order[index];
+            var steps = new List<(int Slot, MongoId Candidate, int Left)>();
 
-            // The chain may already be half built by another part's route.
-            var existing = parent.Children.FirstOrDefault(child => child.Template == template);
-            if (existing != null) return Lay(existing, route, step + 1, added, state);
-
-            if (!state.Reachable.TryGetValue(parent.Template, out var host)) return false;
-            if (!Compatible(template, state)) return false;
-
-            // Narrowest slot first. A slot admitting three things is almost certainly the one this
-            // part was made for, and spending a general rail that admits eighty denies it to a part
-            // with nowhere else to go.
-            var slots = Enumerable.Range(0, host.Slots.Length)
-                .Where(index => Occupant(parent, index) == null && Array.IndexOf(host.Slots[index].Candidates, template) >= 0)
-                .OrderBy(index => host.Slots[index].Candidates.Length)
-                .ToList();
-
-            foreach (var index in slots)
+            for (var slot = 0; slot < host.Slots.Length; slot++)
             {
-                var node = new Node
+                if (Occupant(node, slot) != null) continue;
+
+                foreach (var candidate in host.Slots[slot].Candidates)
                 {
-                    Template = template,
-                    SlotName = host.Slots[index].Name,
-                    SlotIndex = index,
-                    Depth = parent.Depth + 1,
+                    // Anything that cannot reach the part, or cannot reach it inside what is left of
+                    // the chain, is not a step towards it.
+                    if (!part.Steps.TryGetValue(candidate, out var left) || left >= remaining) continue;
+
+                    steps.Add((slot, candidate, left));
+                }
+            }
+
+            // Closest to the part first, then through the narrowest slot that admits it: a slot
+            // taking three things is the one the part was made for, and spending a rail that admits
+            // eighty denies it to a part with nowhere else to go.
+            steps.Sort((left, right) =>
+            {
+                var closer = left.Left.CompareTo(right.Left);
+                if (closer != 0) return closer;
+
+                return host.Slots[left.Slot].Candidates.Length.CompareTo(host.Slots[right.Slot].Candidates.Length);
+            });
+
+            foreach (var (slot, candidate, left) in steps)
+            {
+                if (IsAncestor(node, candidate)) continue;
+                if (!Compatible(candidate, state)) continue;
+
+                var child = new Node
+                {
+                    Template = candidate,
+                    SlotName = host.Slots[slot].Name,
+                    SlotIndex = slot,
+                    Depth = node.Depth + 1,
                     Locked = true
                 };
 
-                Attach(parent, node, state);
-                added.Add(node);
+                Attach(node, child, state);
 
-                if (Lay(node, route, step + 1, added, state)) return true;
+                if (left == 0
+                        ? PlanFrom(root, order, index + 1, state)
+                        : Extend(child, remaining - 1, root, order, index, state))
+                    return true;
 
-                added.RemoveAt(added.Count - 1);
-                Detach(node, state);
+                Detach(child, state);
             }
 
             return false;
         }
 
-        /// <summary>Near-shortest routes from the weapon to one part, each a list of templates to
-        /// fit in order with the target last. Empty when there is no route.
+        /// <summary>How many slots each template is from one part, over the reversed slot graph.
         ///
-        /// More than one, because a single route is what the old search had and slot contention is
-        /// exactly where the shortest route is the wrong one - two required parts whose shortest
-        /// routes both want the same rail need one of them to take the longer way round.
-        ///
-        /// Shortest first, and never longer than the shortest plus <see cref="RouteSlack"/>: a long
-        /// route spends slots the rest of the build needs, and there is no useful bound on how many
-        /// routes exist through a 667-part graph.</summary>
-        private static List<List<MongoId>> Routes(MongoId weapon, MongoId target, SearchState state)
+        /// Computed once per required part, and then it answers every routing question about that
+        /// part from anywhere on the gun - which is what lets the planner route against the tree it
+        /// has rather than against a list of routes decided before the tree existed.</summary>
+        private static Dictionary<MongoId, int> StepsTo(MongoId target, SearchState state)
         {
-            var routes = new List<List<MongoId>>();
+            var steps = new Dictionary<MongoId, int> { [target] = 0 };
+            var queue = new Queue<MongoId>();
 
-            if (target == weapon || !state.Distance.TryGetValue(target, out var shortest)) return routes;
+            queue.Enqueue(target);
 
-            var limit = shortest + RouteSlack;
-            var path = new List<MongoId>();
-            var onPath = new HashSet<MongoId>();
-
-            // Backwards from the target, so the walk is over the parts that can actually reach it
-            // rather than over the whole graph. The visited set is what makes a cyclic slot graph
-            // terminate rather than loop, and the length prune is what keeps it finite.
-            void Walk(MongoId node)
+            // Breadth-first, and the dictionary is the visited set: a cyclic slot graph meets a
+            // template it has already measured and stops instead of looping.
+            while (queue.Count > 0)
             {
-                if (routes.Count >= RoutesPerPart) return;
-                if (path.Count > MaxDepth) return;
-                if (!state.Distance.TryGetValue(node, out var distance) || distance + path.Count > limit) return;
+                var current = queue.Dequeue();
+                var depth = steps[current];
 
-                path.Add(node);
-                onPath.Add(node);
+                if (depth >= MaxDepth) continue;
+                if (!state.Hosts.TryGetValue(current, out var hosts)) continue;
 
-                if (state.Hosts.TryGetValue(node, out var hosts))
-                    foreach (var host in hosts)
-                    {
-                        if (host == weapon)
-                        {
-                            var route = new List<MongoId>(path);
-                            route.Reverse();
-                            routes.Add(route);
-                        }
-                        else if (!onPath.Contains(host))
-                        {
-                            Walk(host);
-                        }
+                foreach (var host in hosts)
+                {
+                    if (!steps.TryAdd(host, depth + 1)) continue;
 
-                        if (routes.Count >= RoutesPerPart) break;
-                    }
-
-                path.RemoveAt(path.Count - 1);
-                onPath.Remove(node);
+                    queue.Enqueue(host);
+                }
             }
 
-            Walk(target);
-
-            return routes;
+            return steps;
         }
 
-        // ---------------------------------------------------------------------------------------
+        private static void CollectSeats(Node node, Dictionary<MongoId, int> steps, List<Node> into)
+        {
+            if (steps.TryGetValue(node.Template, out var left) && left >= 1) into.Add(node);
+
+            foreach (var child in node.Children)
+                CollectSeats(child, steps, into);
+        }
+
+        /// <summary>One required part, with everything the planner precomputes about it.</summary>
+        private sealed class PlanPart
+        {
+            public MongoId Part;
+
+            /// <summary>Slots from each template down to this part.</summary>
+            public Dictionary<MongoId, int> Steps = new();
+
+            /// <summary>Reachable parts with a slot that admits this one.</summary>
+            public int Seats;
+
+            /// <summary>Other required parts that could hang off this one.</summary>
+            public int Carries;
+        }
+
         // DRESS - the remaining slots, greedily
         // ---------------------------------------------------------------------------------------
 
@@ -922,14 +972,9 @@ namespace QuestTreeServer
             /// <summary>Points of this weapon's recoil one percent of mod recoil is worth.</summary>
             public double RecoilPerPercent { get; init; }
 
-            /// <summary>Slots from the weapon to each part, by the shortest chain. Computed once
-            /// because it does not depend on which part is being routed to.</summary>
-            public Dictionary<MongoId, int> Distance { get; } = new();
-
-            /// <summary>Parts that have a slot admitting a given part - the slot graph reversed, so
-            /// a route can be walked backwards from a target rather than forwards from the weapon
-            /// over everything. Nearest the weapon first, so the shortest routes are found
-            /// first.</summary>
+            /// <summary>Parts with a slot admitting a given part - the slot graph reversed. It is
+            /// what makes "how far is this template from that part" answerable by one walk per
+            /// required part instead of one per question.</summary>
             public Dictionary<MongoId, List<MongoId>> Hosts { get; } = new();
 
             /// <summary>How many of each template the build currently carries.</summary>
@@ -953,7 +998,7 @@ namespace QuestTreeServer
                 return true;
             }
 
-            /// <summary>Distances and reverse edges, in one pass each over the reachable set.</summary>
+            /// <summary>The reverse edges, in one pass over the reachable set.</summary>
             private void Index(IReadOnlyDictionary<MongoId, WeaponGraph.PartInfo> reachable)
             {
                 foreach (var (id, part) in reachable)
@@ -969,39 +1014,6 @@ namespace QuestTreeServer
                         }
             }
 
-            /// <summary>Breadth-first distances from the weapon. Separate from Index because it
-            /// needs to know which part is the weapon, and the reverse edges do not.</summary>
-            public void Measure(MongoId weapon)
-            {
-                Distance.Clear();
-                Distance[weapon] = 0;
-
-                var queue = new Queue<MongoId>();
-                queue.Enqueue(weapon);
-
-                while (queue.Count > 0)
-                {
-                    var current = queue.Dequeue();
-                    var depth = Distance[current];
-
-                    if (depth >= MaxDepth) continue;
-                    if (!Reachable.TryGetValue(current, out var part)) continue;
-
-                    foreach (var slot in part.Slots)
-                        foreach (var candidate in slot.Candidates)
-                        {
-                            if (!Distance.TryAdd(candidate, depth + 1)) continue;
-
-                            queue.Enqueue(candidate);
-                        }
-                }
-
-                foreach (var hosts in Hosts.Values)
-                    hosts.Sort((left, right) => Depth(left).CompareTo(Depth(right)));
-            }
-
-            private int Depth(MongoId template) =>
-                Distance.TryGetValue(template, out var depth) ? depth : int.MaxValue;
         }
     }
 }
