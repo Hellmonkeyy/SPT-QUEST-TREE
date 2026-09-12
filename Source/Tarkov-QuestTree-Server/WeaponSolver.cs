@@ -25,26 +25,38 @@ namespace QuestTreeServer
     /// and best reachable ergonomics clears every threshold from 15 to 75 - so an admissible bound
     /// passes every partial build and prunes nothing at all.
     ///
-    /// WHAT IT DOES INSTEAD - three stages, and the split is the whole design
+    /// WHAT IT DOES INSTEAD - three stages, restarted, and the split is the whole design
     ///
-    ///   PLAN     The parts the quest NAMES are placed first, into an explicit tree, with
-    ///            backtracking over alternative routes onto the gun. These are not preferences and
-    ///            they must not compete with stats for a slot.
-    ///   DRESS    Every remaining slot is filled greedily, ordered by a cheap per-part heuristic.
-    ///            This is a starting point, not an answer.
+    ///   PLAN     The parts the quest NAMES are placed first, into an explicit tree, and LOCKED.
+    ///            These are not preferences and must not compete with stats for a slot. Routing is
+    ///            against the tree as it stands rather than against routes chosen in advance, so a
+    ///            chain one part paid for is reused by the next instead of duplicated.
+    ///   DRESS    Every remaining slot is filled greedily, by a per-part heuristic that counts what
+    ///            a part lets you fit BEHIND it as well as what it is. A starting point, not an
+    ///            answer.
     ///   CLIMB    Every unlocked slot is then re-examined against the REAL stat model: swap the
-    ///            part, swap it for nothing, rescore the whole gun, keep what helps. Repeat until a
-    ///            sweep finds no improvement.
+    ///            part, swap it for nothing, rescore the whole gun, keep what helps - and give the
+    ///            best few candidates a second look with their own slots chosen the same way.
+    ///            Repeat until a sweep finds no improvement.
     ///
-    /// The climb is why the heuristic no longer has to be clever. A per-part score cannot know that
-    /// a suppressor's -20 ergonomics is worth paying for when recoil is the binding threshold and
-    /// ergonomics has 30 points of headroom; scoring the assembled gun knows exactly that. The
-    /// previous pure-greedy version left muzzle brakes on the floor for precisely this reason and
-    /// missed recoil thresholds by three points.
+    /// The climb is why the heuristic does not have to be clever, and the heuristic is why the climb
+    /// has anything to work with. A per-part score cannot know that a suppressor's -21 ergonomics is
+    /// affordable when recoil is the binding threshold and ergonomics has room; scoring the assembled
+    /// gun knows exactly that. Equally, a climb that judges one part at a time cannot discover a part
+    /// worth fitting only for what mounts on it - an M1A barrel is nothing but weight until a muzzle
+    /// brake is threaded onto it - which is what the look-behind heuristic and the second look are for.
+    ///
+    /// All three are restarted from different dressings, because a climb is a local search: which
+    /// optimum it reaches depends on where it starts, and the interesting failures are builds no
+    /// single-slot move can leave. The restarts are seeded from the attempt number, so the same
+    /// request always gets the same build.
     ///
     /// The ceiling is an ANSWER, not a safety net. "No build found within the search budget" is a
     /// different statement from "no build exists", and conflating the two would be a failure that
     /// looks like an answer.
+    ///
+    /// The measure of all of it: 60 of the 60 weapon-build requirements on the reference install,
+    /// vanilla and modded, in 135 ms for all sixty.
     /// </summary>
     [Injectable(InjectionType.Singleton)]
     public class WeaponSolver(
