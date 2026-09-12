@@ -75,14 +75,34 @@ namespace QuestTreeServer
         /// game, so a bound resting on it can never prove a build minimal that is not.</summary>
         private const double HugePerPart = 1_000_000d;
 
-        /// <summary>The tree knapsack, memoised per template and shared across every weapon: the answer
-        /// is a property of the subtree, not of the weapon the walk began at.</summary>
-        private readonly Dictionary<MongoId, double[]> _bestErgonomics = new();
-        private readonly Dictionary<MongoId, double[]> _bestRecoil = new();
+        /// <summary>Weightings of ergonomics against recoil that the bound is computed at.
+        ///
+        /// A build that satisfies two thresholds satisfies every non-negative COMBINATION of them, and
+        /// the combination is where the proof lives. Bounding each threshold on its own concedes the only
+        /// thing that makes a build big: the parts that buy ergonomics are not the parts that buy recoil,
+        /// so a gun needing both needs more parts than either needs alone. Gunsmith 10 sits at nine parts
+        /// against separate bounds of two and two.
+        ///
+        /// So the same knapsack is run over a WEIGHTED per-part stat, once per weighting, and the bound is
+        /// the best of them - which is the Lagrangian dual of the joint problem, evaluated on a grid
+        /// rather than optimised, because a grid is enough and is cheap. The ends of the grid are the two
+        /// single-stat bounds, so this can only ever be at least as good as what it replaces.
+        ///
+        /// The weights multiply raw ergonomics points against raw recoil PERCENT, with no weapon-specific
+        /// conversion between them, and that is deliberate: it keeps the knapsack a property of the item
+        /// data so one cache serves all 46 weapons. A conversion using each weapon's base recoil would be
+        /// sharper per weapon and would multiply the cost by 46.</summary>
+        private static readonly double[] ErgonomicsWeight = { 1d, 1d, 1d, 1d, 1d, 1d, 0d };
+        private static readonly double[] RecoilWeight = { 0d, 0.5d, 1d, 2d, 4d, 8d, 1d };
+
+        /// <summary>The tree knapsack, memoised per template and per weighting, shared across every
+        /// weapon: the answer is a property of the subtree, not of the weapon the walk began at.</summary>
+        private readonly Dictionary<MongoId, double[]>[] _best =
+            Enumerable.Range(0, ErgonomicsWeight.Length).Select(_ => new Dictionary<MongoId, double[]>()).ToArray();
+
         private readonly HashSet<MongoId> _underway = new();
 
-        private double[]? _hugeErgonomics;
-        private double[]? _hugeRecoil;
+        private double[]? _unreachable;
 
         /// <summary>The fewest parts any satisfying build could have, and what forces it.
         ///
@@ -388,10 +408,52 @@ namespace QuestTreeServer
                 extra++;
             }
 
-            if (structural + extra > floor.Parts)
+            // A magazine holding 30 and a sight seeing 500 metres are TWO parts, and neither of them is
+            // the gas block a required slot insists on. Selected stats were being folded in with a max,
+            // which threw that away - and it is most of the remaining gap, because a quest asking for a
+            // magazine, a sight and two filled slots asks for four parts before a single number is met.
+            //
+            // Summed only where the sets that could satisfy them are provably disjoint from each other
+            // and from the parts already counted: a template that could fill a required slot, or that the
+            // quest already names, is not an extra part.
+            var selected = 0;
+            var claimed = new HashSet<MongoId>();
+
+            foreach (var (field, compare, value) in thresholds)
             {
-                floor.Parts = structural + extra;
-                floor.Reason = "the slots the game will not leave empty, plus what the quest names";
+                if (!compare.StartsWith(">", StringComparison.Ordinal)) continue;
+
+                var provider = field.ToLowerInvariant() switch
+                {
+                    "magazine capacity" => Providers(reach, value, CapacityOf),
+                    "effective distance" => Providers(reach, value, RangeOf),
+                    _ => null
+                };
+
+                if (provider == null || provider.Count == 0) continue;
+
+                // Already carried by something counted: the weapon itself or a part the quest names. If
+                // the model cannot say, this does NOT get to assume an extra part is needed - a bound
+                // must fall back to claiming less, never more.
+                var carried = model.Score(weapon, named);
+                if (carried == null) continue;
+
+                if (Actual(carried, field) is { } already && Meets(already, compare, value)) continue;
+
+                if (fillers.Any(filler => provider.Contains(filler))) continue;
+
+                // Disjoint from every provider already counted, or it might be the same part twice.
+                if (provider.Any(claimed.Contains)) continue;
+
+                foreach (var template in provider) claimed.Add(template);
+
+                selected++;
+            }
+
+            if (structural + extra + selected > floor.Parts)
+            {
+                floor.Parts = structural + extra + selected;
+                floor.Reason = "the slots the game will not leave empty, plus what the quest names and selects";
             }
 
             // A named part that sits four slots deep needs three parts under it, and a DEPTH LEVEL with
@@ -487,6 +549,59 @@ namespace QuestTreeServer
                 namedRecoil += part.Properties!.Recoil ?? 0d;
             }
 
+            // What the parts OTHER than the named ones have to supply, in each stat's own units. Not
+            // clamped at zero: a threshold the bare weapon already meets contributes a negative amount,
+            // which weakens the combined requirement and therefore the bound - and weakening a bound is
+            // safe where strengthening it without cause is not.
+            var wantsErgonomics = false;
+            var wantsRecoil = false;
+            var needErgonomics = 0d;
+            var needRecoil = 0d;
+
+            foreach (var (field, compare, value) in thresholds)
+            {
+                switch (field.ToLowerInvariant())
+                {
+                    case "ergonomics" when compare.StartsWith(">", StringComparison.Ordinal):
+                        wantsErgonomics = true;
+                        needErgonomics = value - (props.Ergonomics ?? 0d) - namedErgonomics;
+                        break;
+
+                    case "recoil" when baseRecoil > 0d:
+                        wantsRecoil = true;
+                        needRecoil = namedRecoil - (value / baseRecoil - 1d) * 100d;
+                        break;
+                }
+            }
+
+            if (wantsErgonomics || wantsRecoil)
+            {
+                var joint = 0;
+
+                for (var weighting = 0; weighting < ErgonomicsWeight.Length; weighting++)
+                {
+                    // A weighting that leans on a threshold the quest does not state proves nothing: the
+                    // stat is unconstrained, so its contribution is free and the requirement is empty.
+                    if (!wantsErgonomics && ErgonomicsWeight[weighting] > 0d) continue;
+                    if (!wantsRecoil && RecoilWeight[weighting] > 0d) continue;
+
+                    var wanted = ErgonomicsWeight[weighting] * needErgonomics
+                                 + RecoilWeight[weighting] * needRecoil;
+
+                    var needs = Reach(BestBelow(weapon, weighting, 0), wanted, named.Count);
+
+                    if (needs > joint) joint = needs;
+                }
+
+                if (joint > floor.Parts)
+                {
+                    floor.Parts = joint;
+                    floor.Reason = wantsErgonomics && wantsRecoil
+                        ? "ergonomics and recoil together"
+                        : wantsErgonomics ? "ergonomics" : "recoil";
+                }
+            }
+
             foreach (var (field, compare, value) in thresholds)
             {
                 if (RepairState.Contains(field)) continue;
@@ -502,33 +617,6 @@ namespace QuestTreeServer
                     "effective distance" => Selected(value, bestRange, props.SightingRange ?? 0d, named, RangeOf),
                     _ => 0
                 };
-
-                // The exact tree bound, which supersedes the loose ones above wherever it applies.
-                //
-                // The parts the quest NAMES are counted separately and their contribution taken exactly,
-                // because that is where most of the work is: an ASh-12 suppressor costs 21 ergonomics and
-                // a build that must carry it starts 21 further from the threshold than a bare gun. A bound
-                // that asked only "how many parts to reach 40 from base" ignored that entirely, and it is
-                // the difference between proving five builds and proving most of them.
-                //
-                // The remaining parts are allowed the whole tree, which the named parts have in fact
-                // already taken slots out of - generous, and therefore still a bound.
-                var exact = lower switch
-                {
-                    "ergonomics" => Reach(
-                        BestBelow(weapon, true, 0),
-                        value - (props.Ergonomics ?? 0d) - namedErgonomics,
-                        named.Count),
-                    "recoil" => baseRecoil <= 0d
-                        ? 0
-                        : Reach(
-                            BestBelow(weapon, false, 0),
-                            namedRecoil - (value / baseRecoil - 1d) * 100d,
-                            named.Count),
-                    _ => 0
-                };
-
-                if (exact > needs) needs = exact;
 
                 if (needs <= floor.Parts) continue;
 
@@ -557,21 +645,21 @@ namespace QuestTreeServer
         /// not on which weapon the walk started from: the same handguard is worth the same wherever it
         /// hangs. That is what makes it affordable - one pass over the distinct templates in the game
         /// rather than one pass per quest.</summary>
-        private double[] BestBelow(MongoId template, bool ergonomics, int depth)
+        private double[] BestBelow(MongoId template, int weighting, int depth)
         {
             // Past the depth cap, hand back something deliberately unreachable rather than something
             // small. A zero here would UNDERSTATE the ceiling, and an understated ceiling proves builds
             // minimal that are not - the one failure mode this whole file exists to avoid. Not cached,
             // so a template first met at the cap is still computed properly when met higher up.
-            if (depth > MaxReachDepth) return Unreachable(ergonomics);
+            if (depth > MaxReachDepth) return Unreachable();
 
-            var cache = ergonomics ? _bestErgonomics : _bestRecoil;
+            var cache = _best[weighting];
 
             if (cache.TryGetValue(template, out var cached)) return cached;
 
             // The visited set, and it hands back the generous answer for the same reason as the depth
             // cap: a slot graph that admits its own host must not be scored as worth nothing.
-            if (!_underway.Add(template)) return Unreachable(ergonomics);
+            if (!_underway.Add(template)) return Unreachable();
 
             var best = new double[MaxBudget + 1];
 
@@ -580,16 +668,23 @@ namespace QuestTreeServer
                 {
                     var worth = new double[MaxBudget + 1];
 
+                    // A slot the game will not leave empty COSTS a part, and the part it costs is whatever
+                    // that slot admits - not whatever the gun would most like to be wearing. Modelling it
+                    // as optional is what kept this bound below the builds: it let the hypothetical smaller
+                    // gun spend every part on ergonomics and leave its gas block off.
+                    var mandatory = slot?.Required == true;
+
+                    if (mandatory) worth[0] = double.NegativeInfinity;
+
                     foreach (var filter in slot?.Properties?.Filters ?? Enumerable.Empty<SlotFilter>())
                         foreach (var candidate in filter?.Filter ?? Enumerable.Empty<MongoId>())
                         {
                             if (!Template(candidate, out var part)) continue;
 
-                            var own = ergonomics
-                                ? part.Properties!.Ergonomics ?? 0d
-                                : -(part.Properties!.Recoil ?? 0d);
+                            var own = ErgonomicsWeight[weighting] * (part.Properties!.Ergonomics ?? 0d)
+                                      + RecoilWeight[weighting] * -(part.Properties!.Recoil ?? 0d);
 
-                            var below = BestBelow(candidate, ergonomics, depth + 1);
+                            var below = BestBelow(candidate, weighting, depth + 1);
 
                             for (var cost = 1; cost <= MaxBudget; cost++)
                             {
@@ -598,7 +693,8 @@ namespace QuestTreeServer
                             }
                         }
 
-                    // A bigger budget is never worth less, and leaving the slot empty is always allowed.
+                    // A bigger budget is never worth less. Leaving the slot empty is an option only where
+                    // the game allows it, which is what the seeded minus-infinity expresses.
                     for (var cost = 1; cost <= MaxBudget; cost++)
                         if (worth[cost] < worth[cost - 1]) worth[cost] = worth[cost - 1];
 
@@ -606,10 +702,13 @@ namespace QuestTreeServer
                     // always the total WITHOUT this slot and no slot is spent twice.
                     for (var budget = MaxBudget; budget >= 0; budget--)
                     {
-                        var take = best[budget];
+                        var take = mandatory ? double.NegativeInfinity : best[budget];
 
                         for (var spend = 1; spend <= budget; spend++)
                         {
+                            if (double.IsNegativeInfinity(best[budget - spend])) continue;
+                            if (double.IsNegativeInfinity(worth[spend])) continue;
+
                             var value = worth[spend] + best[budget - spend];
                             if (value > take) take = value;
                         }
@@ -626,21 +725,16 @@ namespace QuestTreeServer
 
         /// <summary>A ceiling nothing can reach, for the two places where the honest answer is not
         /// available and guessing low would prove something false.</summary>
-        private double[] Unreachable(bool ergonomics)
+        private double[] Unreachable()
         {
-            var unreachable = ergonomics ? _hugeErgonomics : _hugeRecoil;
+            if (_unreachable != null) return _unreachable;
 
-            if (unreachable != null) return unreachable;
-
-            unreachable = new double[MaxBudget + 1];
+            _unreachable = new double[MaxBudget + 1];
 
             for (var budget = 0; budget <= MaxBudget; budget++)
-                unreachable[budget] = budget * HugePerPart;
+                _unreachable[budget] = budget * HugePerPart;
 
-            if (ergonomics) _hugeErgonomics = unreachable;
-            else _hugeRecoil = unreachable;
-
-            return unreachable;
+            return _unreachable;
         }
 
         /// <summary>How many parts the slots below one template force onto the gun: for every slot it
@@ -685,10 +779,13 @@ namespace QuestTreeServer
         /// budget can reach it at all.</summary>
         private static int Reach(double[] ceiling, double wanted, int named)
         {
-            if (wanted <= 0d) return named;
-
             for (var budget = 0; budget < ceiling.Length; budget++)
+            {
+                // Minus infinity is a budget too small to fill the slots the game insists on, which is
+                // not a build at all however good its numbers would have been.
+                if (double.IsNegativeInfinity(ceiling[budget])) continue;
                 if (ceiling[budget] >= wanted) return named + budget;
+            }
 
             return int.MaxValue;
         }
@@ -716,6 +813,18 @@ namespace QuestTreeServer
             if (bestPercent >= 0d) return int.MaxValue;
 
             return named + (int)Math.Ceiling(shortfall / -bestPercent);
+        }
+
+        /// <summary>Every reachable template that carries enough of a selected stat on its own.</summary>
+        private static HashSet<MongoId> Providers(
+            Dictionary<MongoId, int> reach, double threshold, Func<MongoId, double> of)
+        {
+            var providers = new HashSet<MongoId>();
+
+            foreach (var (template, _) in reach)
+                if (of(template) >= threshold) providers.Add(template);
+
+            return providers;
         }
 
         /// <summary>A selected stat needs ONE part that carries enough, and no number of lesser parts
