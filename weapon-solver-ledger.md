@@ -168,6 +168,51 @@ lists and bounds are invalidated by the same database fingerprint as the builds;
 periodically re-tests a random sample of stored no-goods and asserts they still fail. A sampled
 no-good that now succeeds is a reason to stop and report, not to work around.
 
+## The objective changed twice on 2026-09-12, and once more is pending
+
+Recorded because part-count bounds sitting beside a different objective read as drift otherwise.
+
+1. **Fewest parts.** What the search was built for. Reached 572 parts across 60 builds, 21 of them
+   proven minimal, with 566 million nodes of falsification evidence behind those proofs.
+2. **Fewest changes from the weapon's default preset** (`ed3e44e`) - swaps plus additions, with part count
+   kept as the tiebreak below it. The MP-133 evidence: the default ships a 510mm barrel and the search
+   picked the 510mm barrel *with rib* - same part count, same to every threshold, one already on the gun.
+   Current state: **488 changes across the 60 builds, 8.13 per build**, all 60 weapons have a preset.
+3. **Pending: `price + PerPurchase x purchases`**, with owned parts free and unobtainable parts excluded.
+   The MP-133 evidence again: the quest wants a combined tactical device, the search fitted a Zenit
+   Klesch-2P at 15,676 roubles, and the cheapest qualifying device is an NcSTAR laser at 4,100 - which is
+   what every community guide recommends. Price was invisible and headroom broke the tie.
+
+**Everything proven under objective 1 stays in the file, labelled as being about part count.** It is still
+true about part count. The count proven minimal over the new objective is reported as **zero**, because the
+knapsack bound answers a different question, and carrying 21 forward under a new meaning would be the
+clearest case yet of a number that reads as evidence and is not.
+
+**What a changes/price bound looks like, as a first estimate.** Much easier than the part-count bound. For
+each slot that must be filled, take the cheapest legal occupant and sum: that is a valid lower bound with
+no knapsack, no Lagrangian grid and no subset DP - and a kept default contributes zero. The part-count bound
+needed a subset-constrained DP over roughly 9.6 billion steps and stalled at 21 of 60. This is the next
+thing to measure.
+
+## Availability - the defect measured on 2026-09-12
+
+Before any pricing work: **how often does the mod recommend a part the player cannot get?** Measured against
+live trader assorts with loyalty and quest locks already applied by the server, on both profiles of this
+install:
+
+| profile | builds naming an unobtainable part | distinct parts | gated behind trader progress | sold by nobody |
+|---|---|---|---|---|
+| level 51 | **23 of 60** | 19 | 7 | 12 |
+| level 69 | **38 of 60** | 30 | 14 | 16 |
+
+With every trader at loyalty 1 - the player actually doing Gunsmith - **54 and 57 of 60** are out of trader
+reach. The higher-level profile scores worse because 179 relevant parts were already in the first profile's
+stash against 21 in the second, and a part you own needs no trader.
+
+Caveat that softens it: the flea market is deliberately not a source, because its offers are generated and
+its prices move every restart. Of fifteen unobtainable templates sampled, nine are vanilla and **all nine
+are flea-sellable**; six are modded and unknown. The gated ones are the unambiguous defect.
+
 ## The two gates
 
 They have different jobs and are kept separate. Losing the ability to detect a regression while reaching
