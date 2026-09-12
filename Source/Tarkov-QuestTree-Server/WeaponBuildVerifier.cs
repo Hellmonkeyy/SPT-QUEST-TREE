@@ -56,6 +56,18 @@ namespace QuestTreeServer
             "ergonomics", "recoil", "weight", "magazine capacity", "effective distance"
         };
 
+        /// <summary>The assembled grid footprint, which this verifier works out itself from the item data.
+        ///
+        /// These were the last constraints nothing checked. Five builds carried a height or width limit and
+        /// were reported as satisfying their quest anyway, with the limit listed as unverifiable - which is
+        /// the one place the count was asserting rather than checking. The stat model cannot produce them and
+        /// is not going to be changed to, so they are computed here instead, where things nothing else can
+        /// verify are supposed to live.</summary>
+        private static readonly HashSet<string> Sized = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "height", "width"
+        };
+
         /// <summary>Not a property of the assembly at all - it is the weapon's repair state, no
         /// arrangement of parts changes it, and it appears in all 32 vanilla conditions.</summary>
         private static readonly HashSet<string> RepairState = new(StringComparer.OrdinalIgnoreCase)
@@ -189,9 +201,33 @@ namespace QuestTreeServer
                 return;
             }
 
+            var size = Footprint(weapon, templates);
+
             foreach (var (field, compare, value) in thresholds)
             {
                 if (RepairState.Contains(field)) continue;
+
+                if (Sized.Contains(field))
+                {
+                    var extent = field.ToLowerInvariant() == "height" ? size.Height : size.Width;
+
+                    if (Meets(extent, compare, value)) continue;
+
+                    // A stock that folds or collapses takes room off the gun, and a player who needs it to
+                    // fit will fold or collapse it. Reported rather than quietly counted as a pass: whether
+                    // the hand-in measures the weapon in its reduced state is a question about the GAME, and
+                    // this cannot answer it from the item data. Counting it as a pass on a guess is exactly
+                    // the kind of assertion this check exists to remove.
+                    var reduced = field.ToLowerInvariant() == "height" ? size.ReducedHeight : size.ReducedWidth;
+
+                    verdict.Failures.Add(size.Reducible && Meets(reduced, compare, value)
+                        ? $"{field} is {extent} extended, needs {compare} {value:0.##} - it is {reduced} with the " +
+                          "stock folded or collapsed, and whether the hand-in measures it that way is not " +
+                          "something this can check from the item data"
+                        : $"{field} is {extent}, needs {compare} {value:0.##}");
+
+                    continue;
+                }
 
                 if (!Scoreable.Contains(field))
                 {
@@ -213,6 +249,78 @@ namespace QuestTreeServer
 
                 verdict.Failures.Add($"{field} is {actual.Value:0.##}, needs {compare} {value:0.##}");
             }
+        }
+
+        /// <summary>The grid the assembled weapon takes up, unfolded and folded.
+        ///
+        /// The receiver is 1x1 and every part extends it, which is why a height limit of one is a real
+        /// constraint rather than a formality: it says no fitted part may add vertical size at all. The rule
+        /// is the game's - each direction takes the LARGEST extension any one part asks for, except parts
+        /// marked ExtraSizeForceAdd which stack on top of it.
+        ///
+        /// SizeReduceRight is reported and NOT applied, which is a deliberate refusal to guess. 63 templates
+        /// carry it and only some of those are Foldable - an AKS-74U skeletonised stock and an AK-74M polymer
+        /// stock both reduce width without folding at all - so it is the property of a stock that folds or
+        /// collapses rather than a folded flag. What the item data does not say is whether the hand-in
+        /// measures a weapon extended or reduced, and that decides whether a build measuring 5 wide against a
+        /// limit of 4 is a real failure or a gun somebody needs to collapse. Applying it would risk calling a
+        /// failing build a pass, which is the one direction a verifier may not err in, so the extended figure
+        /// is the verdict and the reduced figure is said out loud beside it.</summary>
+        private (int Width, int Height, int ReducedWidth, int ReducedHeight, bool Reducible) Footprint(
+            MongoId weapon, List<MongoId> parts)
+        {
+            if (!Template(weapon, out var item)) return (0, 0, 0, 0, false);
+
+            var props = item.Properties!;
+
+            var width = props.Width ?? 1;
+            var height = props.Height ?? 1;
+
+            var up = 0;
+            var down = 0;
+            var left = 0;
+            var right = 0;
+
+            var forcedUp = 0;
+            var forcedDown = 0;
+            var forcedLeft = 0;
+            var forcedRight = 0;
+
+            var reduce = props.SizeReduceRight ?? 0;
+            var reducible = props.Foldable == true || reduce > 0;
+
+            foreach (var template in parts)
+            {
+                if (!Template(template, out var part)) continue;
+
+                var p = part.Properties!;
+
+                // Either makes the gun smaller in a state the player can choose: a folding stock and a
+                // collapsing one are the same thing to a size limit, and only checking Foldable would miss
+                // every carbine stock in the game.
+                if (p.Foldable == true || (p.SizeReduceRight ?? 0) > 0) reducible = true;
+
+                reduce += p.SizeReduceRight ?? 0;
+
+                if (p.ExtraSizeForceAdd == true)
+                {
+                    forcedUp += p.ExtraSizeUp ?? 0;
+                    forcedDown += p.ExtraSizeDown ?? 0;
+                    forcedLeft += p.ExtraSizeLeft ?? 0;
+                    forcedRight += p.ExtraSizeRight ?? 0;
+                    continue;
+                }
+
+                up = Math.Max(up, p.ExtraSizeUp ?? 0);
+                down = Math.Max(down, p.ExtraSizeDown ?? 0);
+                left = Math.Max(left, p.ExtraSizeLeft ?? 0);
+                right = Math.Max(right, p.ExtraSizeRight ?? 0);
+            }
+
+            var full = width + left + right + forcedLeft + forcedRight;
+            var tall = height + up + down + forcedUp + forcedDown;
+
+            return (full, tall, Math.Max(1, full - reduce), tall, reducible);
         }
 
         /// <summary>Every part must sit in a slot that exists on its parent, that admits it, and that
