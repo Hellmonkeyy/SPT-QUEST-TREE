@@ -73,6 +73,12 @@ namespace QuestTreeServer
         private int _seed;
         private int _improved;
 
+        /// <summary>The first proven bound seen for each requirement this boot, and how many later answers
+        /// disagreed with it. Concurrent because the training threads all write it.</summary>
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _bounds = new();
+
+        private int _boundsDisagreed;
+
         /// <summary>Where training is searching FROM for each build, which is not always what the cache
         /// holds: a wander round moves this without moving the answer.</summary>
         private readonly Dictionary<string, List<WeaponSolver.FittedPart>> _working = new();
@@ -195,6 +201,15 @@ namespace QuestTreeServer
                 // argued from the item data without looking at the build. A build that matches it is
                 // minimum; one above it is only as small as the passes could make it.
                 var lowest = weaponBuildVerifier.LowestPossible(weapon, thresholds, mustInclude, mustIncludeCategories);
+
+                // Seeded from the SURVEY, which runs before any training thread exists: these sixty are the
+                // single-threaded answers, and every concurrent recomputation for the rest of the boot is
+                // compared against them build by build. Sixty matching sixty, not one total matching another
+                // - two different wrong bounds can sum to the same number.
+                Crosscheck(
+                    WeaponBuildCache.KeyFor(weapon, thresholds, mustInclude, mustIncludeCategories),
+                    lowest.Parts,
+                    weapon);
 
                 duplicates += verdict.Duplicates;
                 unverifiable += verdict.Unverifiable.Count;
@@ -878,15 +893,19 @@ namespace QuestTreeServer
         /// one thing today and another tomorrow.</summary>
         private const int WanderEveryNthRound = 4;
 
-        /// <summary>Threads a training round spreads across. Half the machine, rounded down, never fewer
-        /// than one.
+        /// <summary>Threads a training round spreads across. Everything but one, never fewer than one.
         ///
-        /// The sixty requirements are independent problems and training was solving them one at a time: 330
-        /// rounds in 34 minutes on a sixteen-core machine, using one core. Half rather than all, because the
-        /// other half belongs to whoever is playing - this is a background optimisation and it does not get
-        /// to make a raid stutter.</summary>
+        /// The requirements are independent problems and training was solving them one at a time: 330 rounds
+        /// in 34 minutes on a sixteen-core machine, using one core.
+        ///
+        /// ALL BUT ONE rather than half, and the distinction is about which case is being protected. Half
+        /// the machine is right for work that happens while somebody is playing - and that case is the
+        /// normal launch, which has its own smaller number. A training launch is one a person deliberately
+        /// started, with a banner saying it will run until they stop the server; they are not in a raid,
+        /// they chose to spend the machine. The one core left over is what keeps the desktop responsive
+        /// enough to stop it.</summary>
         private int Threads => weaponBuildCache.Training
-            ? Math.Max(1, Environment.ProcessorCount / 2)
+            ? Math.Max(1, Environment.ProcessorCount - 1)
             : LaunchThreads;
 
         /// <summary>Rounds between progress lines while training. A run that goes on for hours has to say
@@ -896,8 +915,9 @@ namespace QuestTreeServer
         /// <summary>How long the search may run. Seconds on a normal start, minutes while training. This is
         /// CPU on the machine hosting the game, and a solver improving a build by one part does not get to
         /// cost somebody a raid.</summary>
-        /// <summary>Threads a normal launch uses. Two, because LaunchRounds rounds is brief and the machine belongs to
-        /// whoever is playing. Training keeps half the box, which is a session the user chose to spend.</summary>
+        /// <summary>Threads a normal launch uses. Two, because LaunchRounds rounds is brief and the machine
+        /// belongs to whoever is playing. Training takes all but one core, which is a session the user chose
+        /// to spend.</summary>
         private static int LaunchThreads => Math.Max(1, Math.Min(2, Environment.ProcessorCount));
 
         /// <summary>Pause between generations, so the search yields the machine rather than pinning a core
@@ -983,9 +1003,10 @@ namespace QuestTreeServer
                         if (training && rounds % TrainingReportEvery == 0)
                             logger.Info(
                                 $"Quest Tracker: training - {rounds} rounds in {clock.Elapsed.TotalMinutes:0.0} " +
-                                $"minutes, {total} smaller build(s) found so far. {_settled.Count} of " +
-                                $"{Requirements} are provably minimal and no longer searched. Stop the " +
-                                "server to finish.");
+                                $"minutes across {Threads} thread(s), {total} smaller build(s) found so far. " +
+                                $"{_settled.Count} of {Requirements} are provably minimal and no longer searched. " +
+                                $"{_bounds.Count} bound(s) cross-checked, {_boundsDisagreed} disagreement(s). " +
+                                "Stop the server to finish.");
 
                         if (found <= 0) continue;
 
@@ -1046,8 +1067,39 @@ namespace QuestTreeServer
             MongoId weapon,
             List<(string Field, string Compare, double Value)> thresholds,
             List<MongoId> mustInclude,
-            List<MongoId> mustIncludeCategories) =>
-            weaponBuildVerifier.LowestPossible(weapon, thresholds, mustInclude, mustIncludeCategories).Parts;
+            List<MongoId> mustIncludeCategories)
+        {
+            var bound = weaponBuildVerifier.LowestPossible(weapon, thresholds, mustInclude, mustIncludeCategories).Parts;
+
+            Crosscheck(WeaponBuildCache.KeyFor(weapon, thresholds, mustInclude, mustIncludeCategories), bound, weapon);
+
+            return bound;
+        }
+
+        /// <summary>Asserts that the proven lower bound for one requirement does not change within a boot.
+        ///
+        /// A bound is a property of the item data, so the same question must give the same answer however
+        /// many threads asked it and in whatever order they filled the shared tables. That is exactly the
+        /// property concurrency breaks, and breaking it does not crash or log: it silently proves a build
+        /// minimal that is not. So it is checked rather than argued, on every call, for the life of the
+        /// process - the cost is one dictionary lookup against a proof the whole feature rests on.
+        ///
+        /// A count of how many were checked is reported beside the count of disagreements, because zero
+        /// disagreements from a check nobody ran looks identical to zero from a check that passed.</summary>
+        private void Crosscheck(string key, int bound, MongoId weapon)
+        {
+            var first = _bounds.GetOrAdd(key, bound);
+
+            if (first == bound) return;
+
+            Interlocked.Increment(ref _boundsDisagreed);
+
+            logger.Warning(
+                $"Quest Tracker: the proven minimum for '{weapon}' came back as {bound} after coming back as " +
+                $"{first} earlier in this boot. A bound is a property of the item data and cannot depend on who " +
+                "asked - the proof tables are not order-independent, and no build should be called minimal " +
+                "until that is fixed.");
+        }
 
         /// <summary>Whether the VERIFIER agrees this build satisfies the requirement. Nothing reaches the
         /// history without passing through here.

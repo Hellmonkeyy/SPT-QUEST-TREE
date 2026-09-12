@@ -1,4 +1,5 @@
 ﻿using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using SPTarkov.Common.Models.Logging;
@@ -108,13 +109,26 @@ namespace QuestTreeServer
         private static readonly double[] RecoilWeight = { 0d, 0.5d, 1d, 2d, 4d, 8d, 1d };
 
         /// <summary>The tree knapsack, memoised per template and per weighting, shared across every
-        /// weapon: the answer is a property of the subtree, not of the weapon the walk began at.</summary>
-        private readonly Dictionary<MongoId, double[]>[] _best =
-            Enumerable.Range(0, ErgonomicsWeight.Length).Select(_ => new Dictionary<MongoId, double[]>()).ToArray();
+        /// weapon: the answer is a property of the subtree, not of the weapon the walk began at.
+        ///
+        /// CONCURRENT, because this is reached from every training thread at once and used to be a plain
+        /// Dictionary written without a lock. The class comment claimed the tables "have their own locks";
+        /// they had none. An unsynchronised Dictionary being written from fifteen threads does not merely
+        /// return stale values - a resize racing an insert can lose entries, spin, or throw - and these
+        /// tables are what every minimality proof rests on. Append-only and keyed by template, so a
+        /// concurrent map is the whole of what is needed: TryAdd keeps whichever thread finished first and
+        /// the values are a property of the item data, not of the caller.</summary>
+        private readonly ConcurrentDictionary<MongoId, double[]>[] _best =
+            Enumerable.Range(0, ErgonomicsWeight.Length)
+                .Select(_ => new ConcurrentDictionary<MongoId, double[]>())
+                .ToArray();
 
-        private readonly HashSet<MongoId> _underway = new();
-
-        private double[]? _unreachable;
+        /// <summary>The ceiling nothing can reach, built once at construction.
+        ///
+        /// Eager rather than lazy because a lazily built shared array is a race for no gain: two threads
+        /// would each build an identical copy and one would win, which works by luck rather than by
+        /// argument.</summary>
+        private readonly double[] _unreachable = Unreachable();
 
         /// <summary>The fewest parts any satisfying build could have, and what forces it.
         ///
@@ -728,7 +742,9 @@ namespace QuestTreeServer
                                     + RecoilWeight[weighting] * selectedRecoil;
 
                     var needs = Reach(
-                        BestBelow(weapon, weighting, 0), wanted - allowance, named.Count + selected);
+                        BestBelow(weapon, weighting, 0, new HashSet<MongoId>()),
+                        wanted - allowance,
+                        named.Count + selected);
 
                     if (needs > joint) joint = needs;
                 }
@@ -785,13 +801,22 @@ namespace QuestTreeServer
         /// not on which weapon the walk started from: the same handguard is worth the same wherever it
         /// hangs. That is what makes it affordable - one pass over the distinct templates in the game
         /// rather than one pass per quest.</summary>
-        private double[] BestBelow(MongoId template, int weighting, int depth)
+        /// <param name="underway">Templates on the path being descended RIGHT NOW, and nothing else. It
+        /// was an instance field shared by every thread, which conflated two different things: a graph that
+        /// admits its own host (a real cycle, which must be cut) and a template another thread happens to be
+        /// working on (not a cycle at all, and cutting it hands back the generous answer for no reason). One
+        /// set per descent is both correct and thread-safe without a lock.
+        ///
+        /// It does NOT replace the depth cap. A cyclic slot graph is an uncatchable StackOverflowException
+        /// that would take the server and every player's raid with it, so both guards stay: the visited set
+        /// closes the cycles it can see, and the cap catches anything it cannot.</param>
+        private double[] BestBelow(MongoId template, int weighting, int depth, HashSet<MongoId> underway)
         {
             // Past the depth cap, hand back something deliberately unreachable rather than something
             // small. A zero here would UNDERSTATE the ceiling, and an understated ceiling proves builds
             // minimal that are not - the one failure mode this whole file exists to avoid. Not cached,
             // so a template first met at the cap is still computed properly when met higher up.
-            if (depth > MaxReachDepth) return Unreachable();
+            if (depth > MaxReachDepth) return _unreachable;
 
             var cache = _best[weighting];
 
@@ -799,7 +824,7 @@ namespace QuestTreeServer
 
             // The visited set, and it hands back the generous answer for the same reason as the depth
             // cap: a slot graph that admits its own host must not be scored as worth nothing.
-            if (!_underway.Add(template)) return Unreachable();
+            if (!underway.Add(template)) return _unreachable;
 
             var best = new double[MaxBudget + 1];
 
@@ -824,7 +849,7 @@ namespace QuestTreeServer
                             var own = ErgonomicsWeight[weighting] * (part.Properties!.Ergonomics ?? 0d)
                                       + RecoilWeight[weighting] * -(part.Properties!.Recoil ?? 0d);
 
-                            var below = BestBelow(candidate, weighting, depth + 1);
+                            var below = BestBelow(candidate, weighting, depth + 1, underway);
 
                             for (var cost = 1; cost <= MaxBudget; cost++)
                             {
@@ -857,24 +882,26 @@ namespace QuestTreeServer
                     }
                 }
 
-            _underway.Remove(template);
-            cache[template] = best;
+            underway.Remove(template);
+
+            // TryAdd, not assignment: two threads may have computed the same subtree at once and the first
+            // answer is as good as the second. Nothing is ever overwritten, so a reader can never see a
+            // half-built array.
+            cache.TryAdd(template, best);
 
             return best;
         }
 
         /// <summary>A ceiling nothing can reach, for the two places where the honest answer is not
         /// available and guessing low would prove something false.</summary>
-        private double[] Unreachable()
+        private static double[] Unreachable()
         {
-            if (_unreachable != null) return _unreachable;
-
-            _unreachable = new double[MaxBudget + 1];
+            var ceiling = new double[MaxBudget + 1];
 
             for (var budget = 0; budget <= MaxBudget; budget++)
-                _unreachable[budget] = budget * HugePerPart;
+                ceiling[budget] = budget * HugePerPart;
 
-            return _unreachable;
+            return ceiling;
         }
 
         /// <summary>How many parts the slots below one template force onto the gun: for every slot it
