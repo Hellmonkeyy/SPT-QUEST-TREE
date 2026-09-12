@@ -890,7 +890,12 @@ namespace QuestTreeServer
         ///
         /// Training - the QUESTTREE_TRAIN environment variable - ignores this and runs until the server
         /// stops, because that is what produces the history that ships. An environment variable and not a
-        /// file, so no release can carry the trigger by accident.</summary>
+        /// file, so no release can carry the trigger by accident.
+        ///
+        /// THE NUMBER IS THE OLD TEN ROUNDS, and it is written here because 390 against a remembered
+        /// instruction of "ten" reads like drift: a round was one attempt per build that was not already
+        /// settled, 39 of the 60 today, so ten rounds is 390 attempts. It is a fixed CPU budget rather than
+        /// a derived one - if more builds settle, the same 390 buys more passes over what is left.</summary>
         private const int LaunchAttempts = 390;
 
         /// <summary>Restarts a training round spends on a build that has never resisted, and the most it
@@ -915,20 +920,59 @@ namespace QuestTreeServer
         /// one thing today and another tomorrow.</summary>
         private const int WanderEveryNthAttempt = 4;
 
-        /// <summary>Threads a training round spreads across. Everything but one, never fewer than one.
+        /// <summary>Threads training spreads across. Half the logical processors by default, and
+        /// QUESTTREE_TRAIN_THREADS overrides it for anyone who wants the whole machine.
         ///
-        /// The requirements are independent problems and training was solving them one at a time: 330 rounds
-        /// in 34 minutes on a sixteen-core machine, using one core.
+        /// It was ProcessorCount - 1 for one measurement, and that was wrong in a specific way:
+        /// ProcessorCount counts LOGICAL processors, so on an eight-core machine with SMT it asked for
+        /// fifteen threads across eight real cores and pinned every one of them at 100%.
         ///
-        /// ALL BUT ONE rather than half, and the distinction is about which case is being protected. Half
-        /// the machine is right for work that happens while somebody is playing - and that case is the
-        /// normal launch, which has its own smaller number. A training launch is one a person deliberately
-        /// started, with a banner saying it will run until they stop the server; they are not in a raid,
-        /// they chose to spend the machine. The one core left over is what keeps the desktop responsive
-        /// enough to stop it.</summary>
-        private int Threads => weaponBuildCache.Training
-            ? Math.Max(1, Environment.ProcessorCount - 1)
-            : LaunchThreads;
+        /// ThreadPriority.Lowest is why that is rude rather than harmful - the game wins every scheduling
+        /// contest - but priority schedules CPU time and nothing else. It does not protect L3 cache or
+        /// memory bandwidth, and on a chip whose whole appeal is a large L3 that is exactly what a game
+        /// wants. A saturated all-core workload also holds boost clocks down and raises package
+        /// temperature, which a player feels as frame pacing even while winning every contest.
+        ///
+        /// So the DEFAULT is the polite setting. This is a mod other people install, and the default is
+        /// what almost everybody runs; a person who wants the whole box can ask for it by name.</summary>
+        private int Threads => weaponBuildCache.Training ? TrainingThreads : LaunchThreads;
+
+        /// <summary>The training thread count, resolved once and reported in the banner rather than
+        /// described - garbage is ignored with a warning instead of throwing, because a typo in an
+        /// environment variable is not a reason to refuse to start.</summary>
+        private int TrainingThreads
+        {
+            get
+            {
+                if (_trainingThreads > 0) return _trainingThreads;
+
+                var half = Math.Max(1, Environment.ProcessorCount / 2);
+                var asked = Environment.GetEnvironmentVariable("QUESTTREE_TRAIN_THREADS");
+
+                if (string.IsNullOrWhiteSpace(asked)) return _trainingThreads = half;
+
+                if (!int.TryParse(asked, out var wanted) || wanted < 1)
+                {
+                    logger.Warning(
+                        $"Quest Tracker: QUESTTREE_TRAIN_THREADS is '{asked}', which is not a thread count - " +
+                        $"training is using the default {half}.");
+
+                    return _trainingThreads = half;
+                }
+
+                // Clamped rather than trusted: more threads than the machine has is slower, not faster.
+                var resolved = Math.Min(wanted, Environment.ProcessorCount);
+
+                if (resolved != wanted)
+                    logger.Warning(
+                        $"Quest Tracker: QUESTTREE_TRAIN_THREADS asked for {wanted} thread(s) and this machine " +
+                        $"has {Environment.ProcessorCount} - training is using {resolved}.");
+
+                return _trainingThreads = resolved;
+            }
+        }
+
+        private int _trainingThreads;
 
         /// <summary>How often training says what it is doing. TIME rather than a count of attempts,
         /// because the rate is now the thing being reported and a count-based cadence would speed up or slow
