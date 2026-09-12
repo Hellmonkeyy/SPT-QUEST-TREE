@@ -172,6 +172,52 @@ namespace QuestTreeServer
             }
         }
 
+        /// <summary>How many of a weapon's REQUIRED top-level slots a set of parts leaves empty.
+        ///
+        /// A quest's ContainsItems is a CONSTRAINT - "the build must contain these" - and not a
+        /// build. On some weapons it happens to name nearly everything; on the PP-19-01 it names a
+        /// sight, a grip, a stock and a suppressor and no magazine, dust cover or charging handle,
+        /// so those eight parts do not add up to a working gun at all.
+        ///
+        /// That distinction is invisible in a list of part names, and it is the whole explanation
+        /// for a model score that falls short of the quest's own threshold: the missing parts carry
+        /// ergonomics. Counting the gaps turns "these numbers look wrong" into "these numbers are
+        /// a floor".
+        ///
+        /// Top level only, and deliberately: a part fitted into another part's sub-slot is filling
+        /// a slot that would not exist without its parent, so counting those would make the answer
+        /// depend on assembly order rather than on the weapon.</summary>
+        public int UnfilledRequiredSlots(MongoId weapon, IReadOnlyCollection<MongoId> fitted, out int requiredTotal)
+        {
+            requiredTotal = 0;
+            EnsureBuilt();
+
+            if (!_parts.TryGetValue(weapon, out var part)) return 0;
+
+            var unfilled = 0;
+
+            foreach (var slot in part.Slots)
+            {
+                if (!slot.Required) continue;
+
+                requiredTotal++;
+
+                var filled = false;
+
+                foreach (var candidate in slot.Candidates)
+                {
+                    if (!fitted.Contains(candidate)) continue;
+
+                    filled = true;
+                    break;
+                }
+
+                if (!filled) unfilled++;
+            }
+
+            return unfilled;
+        }
+
         /// <summary>Walks a set of weapons and reports what the graph looks like, once, at boot.
         ///
         /// The warm-up is the lesser half. The real job is that a cyclic slot graph is the one

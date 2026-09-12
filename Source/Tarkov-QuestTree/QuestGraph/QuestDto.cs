@@ -26,7 +26,7 @@ namespace QuestTree.QuestGraph
         /// QuestDto.DerivedLocations, which a v3 server simply never sends. v5 (1.10.1) adds
         /// RewardDto.ShortName and Template; without them a reward row keeps its full name
         /// and stops being clickable, which is exactly how it read before they existed.</summary>
-        public const int SupportedSchemaVersion = 7;
+        public const int SupportedSchemaVersion = 8;
 
         [JsonProperty("schemaVersion")]
         public int SchemaVersion { get; set; }
@@ -123,6 +123,14 @@ namespace QuestTree.QuestGraph
 
         [JsonProperty("clamped")]
         public List<string> Clamped { get; set; } = new List<string>();
+
+        /// <summary>Required slots the named parts leave empty. When this is above zero the scores
+        /// are a floor, not a prediction - the missing parts carry stats of their own.</summary>
+        [JsonProperty("unfilledRequiredSlots")]
+        public int UnfilledRequiredSlots { get; set; }
+
+        [JsonProperty("requiredSlots")]
+        public int RequiredSlots { get; set; }
     }
 
     internal sealed class WeaponBuildThresholdDto

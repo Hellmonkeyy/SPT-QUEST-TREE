@@ -22,7 +22,7 @@ namespace QuestTreeServer
         /// keeps its template ids, records dropped zero thresholds and empty-slot counts, and carries
         /// the stat model's own numbers for the quest's example parts. v7 (1.10.3): a quest carries
         /// EVERY weapon build it asks for rather than only the first.</summary>
-        public int SchemaVersion { get; set; } = 7;
+        public int SchemaVersion { get; set; } = 8;
 
         /// <summary>The server half's version, so a mismatch warning on the client can name it -
         /// the other three payloads already did.</summary>
@@ -444,6 +444,17 @@ namespace QuestTreeServer
         /// <summary>Stats clamped on the way in, from WeaponStatModel. A clamp here means the
         /// numbers below are not the game's and the comparison is void.</summary>
         public List<string> Clamped { get; set; } = new();
+
+        /// <summary>Required slots on the weapon that the named parts leave empty, and how many
+        /// required slots it has.
+        ///
+        /// A quest names parts the build must CONTAIN, which on some weapons is close to a whole
+        /// gun and on others is a handful of attachments. When slots are left empty these numbers
+        /// are a floor rather than a prediction, and saying so is the difference between a reader
+        /// trusting the instrument and concluding it is broken.</summary>
+        public int UnfilledRequiredSlots { get; set; }
+
+        public int RequiredSlots { get; set; }
     }
 
     public sealed class WeaponBuildThresholdDto

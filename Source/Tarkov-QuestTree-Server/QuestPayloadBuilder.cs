@@ -526,8 +526,12 @@ namespace QuestTreeServer
             var stats = weaponStatModel.Score(weapon, parts);
             if (stats == null) return null;
 
+            var unfilled = weaponGraph.UnfilledRequiredSlots(weapon, parts, out var requiredSlots);
+
             return new WeaponModelCheckDto
             {
+                UnfilledRequiredSlots = unfilled,
+                RequiredSlots = requiredSlots,
                 Ergonomics = stats.Ergonomics,
                 Recoil = stats.Recoil,
                 Weight = stats.Weight,

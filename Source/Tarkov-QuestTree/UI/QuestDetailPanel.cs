@@ -603,9 +603,16 @@ namespace QuestTree.UI
             if (check.MagazineCapacity != null) parts.Add($"magazine {check.MagazineCapacity}");
             if (check.EffectiveDistance != null) parts.Add($"distance {check.EffectiveDistance:0}");
 
-            AuxLayout.AddWrapped(_content,
-                $"<color=#FFFFFF80>Model check - fit the {check.PartsNamed} part(s) above to this weapon and " +
-                "compare with the inspect screen:</color>", _left, ref y, width, 11);
+            // Whether those parts actually make a gun decides what the numbers below mean, so it
+            // is said first rather than as a footnote.
+            var lead = check.UnfilledRequiredSlots > 0
+                ? $"<color=#FFFFFF80>Model check - these {check.PartsNamed} part(s) leave " +
+                  $"{check.UnfilledRequiredSlots} of {check.RequiredSlots} required slots empty, so this is a " +
+                  "partial build and the scores below are a floor:</color>"
+                : $"<color=#FFFFFF80>Model check - fit the {check.PartsNamed} part(s) above to this weapon and " +
+                  "compare with the inspect screen:</color>";
+
+            AuxLayout.AddWrapped(_content, lead, _left, ref y, width, 11);
 
             AuxLayout.AddWrapped(_content,
                 $"<color=#{ColorUtility.ToHtmlStringRGB(GameStyle.AccentColor)}>{string.Join("   ", parts)}</color>",
