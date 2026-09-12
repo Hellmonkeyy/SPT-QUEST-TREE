@@ -26,7 +26,7 @@ namespace QuestTree.QuestGraph
         /// QuestDto.DerivedLocations, which a v3 server simply never sends. v5 (1.10.1) adds
         /// RewardDto.ShortName and Template; without them a reward row keeps its full name
         /// and stops being clickable, which is exactly how it read before they existed.</summary>
-        public const int SupportedSchemaVersion = 8;
+        public const int SupportedSchemaVersion = 9;
 
         [JsonProperty("schemaVersion")]
         public int SchemaVersion { get; set; }
@@ -91,6 +91,51 @@ namespace QuestTree.QuestGraph
         /// <summary>What the server's stat model says the quest's own example parts score.</summary>
         [JsonProperty("modelCheck")]
         public WeaponModelCheckDto ModelCheck { get; set; }
+
+        /// <summary>A build that satisfies this quest, worked out on the server. Null when none was
+        /// found, which is not the same as none existing - see HitBudget.</summary>
+        [JsonProperty("solution")]
+        public SolvedBuildDto Solution { get; set; }
+    }
+
+    /// <summary>A worked-out build: the parts, what it scores, and what about it is unverified.</summary>
+    internal sealed class SolvedBuildDto
+    {
+        /// <summary>Every threshold the model can score is met, every required slot is filled, and
+        /// every named part and category is present.
+        ///
+        /// NOT "this will be accepted". Height and width are real constraints in five vanilla quests
+        /// and the model scores neither, so a build can be complete by every measure available and
+        /// still be refused for its assembled size.</summary>
+        [JsonProperty("satisfies")]
+        public bool Satisfies { get; set; }
+
+        [JsonProperty("hitBudget")]
+        public bool HitBudget { get; set; }
+
+        [JsonProperty("parts")]
+        public List<SolvedPartDto> Parts { get; set; } = new List<SolvedPartDto>();
+
+        [JsonProperty("scores")]
+        public List<string> Scores { get; set; } = new List<string>();
+
+        [JsonProperty("unmet")]
+        public List<string> Unmet { get; set; } = new List<string>();
+
+        [JsonProperty("unchecked")]
+        public List<string> Unchecked { get; set; } = new List<string>();
+    }
+
+    internal sealed class SolvedPartDto
+    {
+        [JsonProperty("slot")]
+        public string Slot { get; set; }
+
+        [JsonProperty("template")]
+        public string Template { get; set; }
+
+        [JsonProperty("name")]
+        public string Name { get; set; }
     }
 
     /// <summary>What the stat model believes about the exact parts a quest names.

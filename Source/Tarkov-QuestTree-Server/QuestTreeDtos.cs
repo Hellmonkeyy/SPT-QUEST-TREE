@@ -22,7 +22,7 @@ namespace QuestTreeServer
         /// keeps its template ids, records dropped zero thresholds and empty-slot counts, and carries
         /// the stat model's own numbers for the quest's example parts. v7 (1.10.3): a quest carries
         /// EVERY weapon build it asks for rather than only the first.</summary>
-        public int SchemaVersion { get; set; } = 8;
+        public int SchemaVersion { get; set; } = 9;
 
         /// <summary>The server half's version, so a mismatch warning on the client can name it -
         /// the other three payloads already did.</summary>
@@ -407,6 +407,15 @@ namespace QuestTreeServer
         /// identical once the row is gone, and a solver has to be able to tell them apart.</summary>
         public List<string> ZeroThresholdFields { get; set; } = new();
 
+        /// <summary>A build that satisfies this quest, worked out from the parts that exist, or
+        /// null when none was found.
+        ///
+        /// Solved once while the payload is built rather than per request: the answer does not
+        /// depend on the profile, sixty of them take about 200ms, and the client's request handler
+        /// is synchronous on Unity's main thread. When this learns to restrict itself to parts the
+        /// player can buy it stops being profile-independent and moves to a route of its own.</summary>
+        public SolvedBuildDto? Solution { get; set; }
+
         /// <summary>What this mod's own stat model says the quest's OWN example parts score on this
         /// weapon, or null when the condition names no parts.
         ///
@@ -455,6 +464,44 @@ namespace QuestTreeServer
         public int UnfilledRequiredSlots { get; set; }
 
         public int RequiredSlots { get; set; }
+    }
+
+    /// <summary>A worked-out build: the parts, what it scores, and - said plainly - what about it
+    /// has not been checked.</summary>
+    public sealed class SolvedBuildDto
+    {
+        /// <summary>Whether every threshold the model can score is met, every required slot is
+        /// filled, and every named part and category is present.
+        ///
+        /// Not the same as "this will be accepted". Height and width are real constraints in five
+        /// vanilla quests and the model cannot score either, so a build can be complete by every
+        /// measure available here and still be refused for its assembled size.</summary>
+        public bool Satisfies { get; set; }
+
+        /// <summary>Set when the search ran out of budget. "No build found within the budget" is a
+        /// different statement from "no build exists" and the client must not merge them.</summary>
+        public bool HitBudget { get; set; }
+
+        public List<SolvedPartDto> Parts { get; set; } = new();
+
+        /// <summary>What the build scores, in the same terms the thresholds are written in.</summary>
+        public List<string> Scores { get; set; } = new();
+
+        /// <summary>Thresholds this build does not meet, with the margin.</summary>
+        public List<string> Unmet { get; set; } = new();
+
+        /// <summary>Constraints the model cannot score at all - height and width. Listed so a
+        /// player knows to eyeball the grid rather than assuming a green light.</summary>
+        public List<string> Unchecked { get; set; } = new();
+    }
+
+    public sealed class SolvedPartDto
+    {
+        /// <summary>The slot it goes in, as the game names it - "mod_muzzle", "mod_stock".</summary>
+        public string Slot { get; set; } = "";
+
+        public string Template { get; set; } = "";
+        public string Name { get; set; } = "";
     }
 
     public sealed class WeaponBuildThresholdDto

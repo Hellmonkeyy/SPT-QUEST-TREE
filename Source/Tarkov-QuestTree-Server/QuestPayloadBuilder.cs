@@ -636,6 +636,7 @@ namespace QuestTreeServer
                 }
 
                 build.ModelCheck = CheckModel(build);
+                build.Solution = SolveBuild(build, locale);
                 builds.Add(build);
 
                 // Remembered so the slot graphs can be walked once at boot. Collected here rather
@@ -647,6 +648,65 @@ namespace QuestTreeServer
             }
 
             return builds;
+        }
+
+        /// <summary>Works out a build that satisfies this quest, and puts it on the wire.
+        ///
+        /// Solved here, while the payload is built, because the answer does not depend on the
+        /// profile - the search runs against every part that exists - and sixty of them cost about
+        /// 200ms once at boot rather than a wait inside a request the game makes synchronously on
+        /// its main thread.
+        ///
+        /// That stops being true the moment the search is restricted to parts the player owns or can
+        /// buy, because then the answer is different for every profile and cannot be cached across
+        /// sessions. At that point this moves to a route of its own; until then, caching it with the
+        /// quest is both correct and free.</summary>
+        private SolvedBuildDto? SolveBuild(WeaponBuildDto build, Dictionary<string, string> locale)
+        {
+            if (!build.WeaponTemplate.TryParseMongoId(out var weapon)) return null;
+
+            var thresholds = build.Thresholds.Select(t => (t.Field, t.Compare, t.Value)).ToList();
+
+            var mustInclude = new List<MongoId>();
+            foreach (var id in build.RequiredItemIds)
+                if (id.TryParseMongoId(out var parsed)) mustInclude.Add(parsed);
+
+            var mustIncludeCategories = new List<MongoId>();
+            foreach (var id in build.RequiredCategoryIds)
+                if (id.TryParseMongoId(out var parsed)) mustIncludeCategories.Add(parsed);
+
+            var result = weaponSolver.Solve(weapon, thresholds, mustInclude, mustIncludeCategories, allowed: null);
+
+            if (result.Parts.Count == 0 && !result.Found) return null;
+
+            var solution = new SolvedBuildDto
+            {
+                Satisfies = result.Found,
+                HitBudget = result.HitCeiling
+            };
+
+            foreach (var part in result.Parts)
+                solution.Parts.Add(new SolvedPartDto
+                {
+                    Slot = part.SlotName,
+                    Template = part.Template.ToString(),
+                    Name = ResolveItemName(part.Template.ToString(), locale)
+                });
+
+            if (result.Stats is { } stats)
+            {
+                solution.Scores.Add($"ergonomics {stats.Ergonomics:0.##}");
+                solution.Scores.Add($"recoil {stats.Recoil:0.##}");
+                solution.Scores.Add($"weight {stats.Weight:0.###} kg");
+
+                if (stats.MagazineCapacity is { } magazine) solution.Scores.Add($"magazine {magazine}");
+                if (stats.EffectiveDistance is { } distance) solution.Scores.Add($"distance {distance:0}");
+            }
+
+            solution.Unmet.AddRange(result.Unmet);
+            solution.Unchecked.AddRange(result.Unchecked);
+
+            return solution;
         }
 
         /// <summary>Scores the quest's own named parts on the quest's own weapon.

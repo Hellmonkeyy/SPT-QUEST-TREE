@@ -575,9 +575,83 @@ namespace QuestTree.UI
                 AuxLayout.AddWrapped(_content,
                     $"leave {build.EmptyTacticalSlots:0} tactical slot(s) empty", _left, ref y, width);
 
+            AddSolution(build, width, ref y);
             AddModelCheck(build, width, ref y);
 
             y += 8f;
+        }
+
+        /// <summary>The build the mod worked out for this quest.
+        ///
+        /// The point of the whole exercise: the requirement above says what the game will check, and
+        /// this says what to fit to pass it. Every row opens the part, because a name alone does not
+        /// tell you what you are looking for in a trader's list.
+        ///
+        /// It states what it has NOT checked as plainly as what it has. Height and width are real
+        /// constraints in five quests and nothing here can score them, so a build that meets every
+        /// number available can still be refused for its assembled size - and a player who was not
+        /// told that would blame the mod rather than measure the gun.</summary>
+        private void AddSolution(WeaponBuildDto build, float width, ref float y)
+        {
+            var solution = build.Solution;
+            if (solution == null || solution.Parts.Count == 0) return;
+
+            y += 6f;
+
+            var headline = solution.Satisfies
+                ? $"<color=#{ColorUtility.ToHtmlStringRGB(GameStyle.AccentColor)}>Suggested build  ·  {solution.Parts.Count} parts</color>"
+                : $"<color=#{GameStyle.WarningHex}>Closest build found  ·  {solution.Parts.Count} parts</color>";
+
+            AuxLayout.AddWrapped(_content, headline, _left, ref y, width, 12);
+
+            foreach (var part in solution.Parts)
+            {
+                if (part == null || string.IsNullOrEmpty(part.Name)) continue;
+
+                var row = $"<color=#FFFFFF60>{GameStyle.Safe(SlotLabel(part.Slot))}</color>  {GameStyle.Safe(part.Name)}";
+
+                if (!string.IsNullOrEmpty(part.Template))
+                {
+                    var captured = part.Template;
+                    AuxLayout.AddClickableWrapped(_content, row, _left, ref y, width,
+                        () => GameStyle.InspectItem(captured));
+                }
+                else
+                {
+                    AuxLayout.AddWrapped(_content, row, _left, ref y, width);
+                }
+            }
+
+            if (solution.Scores.Count > 0)
+                AuxLayout.AddWrapped(_content,
+                    $"<color=#FFFFFF80>{string.Join("   ", solution.Scores)}</color>", _left, ref y, width, 11);
+
+            foreach (var unmet in solution.Unmet)
+                AuxLayout.AddWrapped(_content,
+                    $"<color=#{GameStyle.ErrorHex}>{GameStyle.Safe(unmet)}</color>", _left, ref y, width, 11);
+
+            // A budget exhausted is not a proof that nothing exists, and saying so is the difference
+            // between "this quest is hard" and "the mod gave up".
+            if (solution.HitBudget)
+                AuxLayout.AddWrapped(_content,
+                    $"<color=#{GameStyle.WarningHex}>the search ran out of budget - a build may exist that this " +
+                    "did not reach</color>", _left, ref y, width, 11);
+
+            if (solution.Unchecked.Count > 0)
+                AuxLayout.AddWrapped(_content,
+                    $"<color=#{GameStyle.WarningHex}>not checked: {GameStyle.Safe(string.Join(", ", solution.Unchecked))} " +
+                    "- eyeball these on the gun before handing in</color>", _left, ref y, width, 11);
+        }
+
+        /// <summary>"mod_muzzle" as "muzzle". The game's own slot names are readable once the prefix
+        /// is gone, and inventing a lookup would only drift from what a modded slot calls itself.</summary>
+        private static string SlotLabel(string slot)
+        {
+            if (string.IsNullOrEmpty(slot)) return "";
+
+            var trimmed = slot.StartsWith("mod_", StringComparison.OrdinalIgnoreCase) ? slot.Substring(4) : slot;
+
+            return trimmed.Replace('_', ' ');
         }
 
         /// <summary>The stat model's own numbers for the parts above, so they can be read against
