@@ -12,3 +12,6 @@ obj/
 # Packaged zips are build artifacts. The README they ship is versioned at the repo root
 # instead, so it cannot be lost with a cleared temp folder the way it nearly was.
 Releases/
+
+# Internal planning, kept locally rather than published.
+ROADMAP.md
