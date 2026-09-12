@@ -598,9 +598,20 @@ namespace QuestTree.UI
 
             y += 6f;
 
-            var headline = solution.Satisfies
-                ? $"<color=#{ColorUtility.ToHtmlStringRGB(GameStyle.AccentColor)}>Suggested build  ·  {solution.Parts.Count} parts</color>"
-                : $"<color=#{GameStyle.WarningHex}>Closest build found  ·  {solution.Parts.Count} parts</color>";
+            // Three states, not two. A build that meets every threshold the server can score is
+            // not the same claim as one that meets every threshold the quest sets, and the five
+            // height/width quests are the second kind. Saying "Suggested build" in accent green on
+            // those would be the mod asserting something it never checked - so they get their own
+            // wording, and the reason is spelled out in the unchecked line further down.
+            string headline;
+            if (!solution.Satisfies)
+                headline = $"<color=#{GameStyle.WarningHex}>Closest build found  ·  {solution.Parts.Count} parts</color>";
+            else if (!solution.FullyChecked)
+                headline = $"<color=#{GameStyle.WarningHex}>Build meets every checkable requirement  ·  " +
+                           $"{solution.Parts.Count} parts</color>";
+            else
+                headline = $"<color=#{ColorUtility.ToHtmlStringRGB(GameStyle.AccentColor)}>Suggested build  ·  " +
+                           $"{solution.Parts.Count} parts</color>";
 
             AuxLayout.AddWrapped(_content, headline, _left, ref y, width, 12);
 

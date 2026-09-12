@@ -95,6 +95,7 @@ namespace QuestTreeServer
             var widestBuild = 0;
             var duplicates = 0;
             var unscorable = 0;
+            var atFloor = 0;
             var floors = 0;
             var unverifiable = 0;
             var disagreed = 0;
@@ -163,6 +164,7 @@ namespace QuestTreeServer
                     solved++;
                     parts += result.Parts.Count;
                     floors += result.Floor;
+                    if (result.Parts.Count <= result.Floor) atFloor++;
                     if (result.Parts.Count > widestBuild) widestBuild = result.Parts.Count;
 
                     logger.Debug(
@@ -214,7 +216,7 @@ namespace QuestTreeServer
                 $"satisfied from the full parts list" +
                 (ceiling > 0 ? $", {ceiling} hit the search budget" : "") +
                 $" - {clock.ElapsedMilliseconds:N0} ms for all of them, {worst:N0} nodes for the worst one, " +
-                $"{(solved > 0 ? (double)parts / solved : 0d):0.##} parts per build ({parts} total), {widestBuild} at most" + $" against a floor of {(solved > 0 ? (double)floors / solved : 0d):0.##}" +
+                $"{(solved > 0 ? (double)parts / solved : 0d):0.##} parts per build ({parts} total), {widestBuild} at most" + $", {atFloor} of them provably minimal (at the floor)" + $" against a floor of {(solved > 0 ? (double)floors / solved : 0d):0.##}" +
                 (duplicates > 0 ? $", {duplicates} duplicated part(s)" : "") +
                 (unverifiable > 0
                     ? $", {unverifiable} constraint(s) across {unscorable} build(s) that nothing here can score"
@@ -963,6 +965,7 @@ namespace QuestTreeServer
         }
     }
 }
+
 
 
 

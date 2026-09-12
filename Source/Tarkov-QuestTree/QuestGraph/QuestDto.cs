@@ -110,6 +110,15 @@ namespace QuestTree.QuestGraph
         [JsonProperty("satisfies")]
         public bool Satisfies { get; set; }
 
+        /// <summary>False when the quest constrains something nothing on the server can score -
+        /// height or width, in five of the vanilla quests.
+        ///
+        /// Defaults TRUE so a payload from an older server, which does not send this, reads as fully
+        /// checked rather than flagging every build as doubtful. The server has always sent Unchecked
+        /// alongside, so the honest case degrades to the wordier one rather than to a false alarm.</summary>
+        [JsonProperty("fullyChecked")]
+        public bool FullyChecked { get; set; } = true;
+
         [JsonProperty("hitBudget")]
         public bool HitBudget { get; set; }
 

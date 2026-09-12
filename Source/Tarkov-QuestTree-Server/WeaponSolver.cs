@@ -129,9 +129,15 @@ namespace QuestTreeServer
         /// the wrong answer rather than a worse one.</summary>
         private const double MissingPartPenalty = 1000d;
 
-        /// <summary>Rounds of shedding and bypassing. Each round that changes anything takes a part
-        /// off, so this only bounds a build that started implausibly large.</summary>
+        /// <summary>Rounds of shedding, bypassing and condensing. Each round that changes anything
+        /// takes a part off, so this only bounds a build that started implausibly large.</summary>
         private const int PruneRounds = 8;
+
+        /// <summary>How many candidates per slot the condensing pass will try as a replacement for two
+        /// parts. It is pairs-of-parts times homes times this, which makes it the largest thing in the
+        /// solver, and the best few by the look-behind heuristic are where a single part that does the
+        /// work of two is actually found.</summary>
+        private const int CondenseCandidates = 8;
 
         /// <summary>Improvement a move must make to be taken. Guards the climb against oscillating
         /// on floating point noise.</summary>
@@ -338,7 +344,7 @@ namespace QuestTreeServer
                 // Pruned before it is compared, not after the winner is picked: a fat attempt that
                 // trims to nine parts should beat a lean one that settles at ten, and it cannot if
                 // only the winner is ever trimmed.
-                Prune(weapon, root, state, required);
+                Prune(weapon, root, state, required, floor);
 
                 var whole = climbed.Gaps + required.Count(part => Find(root, part) == null);
                 var shortfall = Measure(weapon, root, state, new List<MongoId>()).Shortfall;
@@ -1219,7 +1225,7 @@ namespace QuestTreeServer
         /// It cannot make a build worse, which is the whole reason it is safe to run on an answer
         /// that is already correct: a removal is kept only when gaps stay closed and shortfall does
         /// not rise. A part that was carrying a threshold pays for itself and stays.</summary>
-        private void Prune(MongoId weapon, Node root, SearchState state, List<MongoId> required)
+        private void Prune(MongoId weapon, Node root, SearchState state, List<MongoId> required, int floor)
         {
             var buffer = new List<MongoId>();
             var before = Measure(weapon, root, state, buffer);
@@ -1237,8 +1243,136 @@ namespace QuestTreeServer
                 var shed = Shed(weapon, root, state, required, buffer, ref before);
                 var bypassed = Bypass(weapon, root, state, required, buffer, ref before);
 
-                if (!shed && !bypassed) break;
+                // Only above the floor: at the floor the build is provably minimal and there is
+                // nothing for the expensive pass to find.
+                var condensed = before.Parts > floor
+                                && Condense(weapon, root, state, required, buffer, ref before);
+
+                if (!shed && !bypassed && !condensed) break;
             }
+        }
+
+        /// <summary>Tries to do with one part what the build is doing with two.
+        ///
+        /// Shedding and bypassing between them leave a build from which nothing can be REMOVED, and
+        /// that is not the same as the smallest build. If ergonomics is met by two +5 parts in two
+        /// slots and a single +10 part exists, every pass above keeps both: each one is individually
+        /// load-bearing, so no removal is ever safe, and nothing has asked whether one part could do
+        /// the work of both.
+        ///
+        /// So this asks. Take any two discretionary parts off, then try putting a single part anywhere
+        /// legal and see whether everything is satisfied again. One net part saved each time it works,
+        /// and the whole of Prune runs again afterwards because one saving can enable another.
+        ///
+        /// Leaves only, on both sides of the pair: a part with something mounted on it cannot come off
+        /// without rehoming its passenger, which is what Bypass is for, and the two passes reach the
+        /// combination between them across rounds.</summary>
+        private bool Condense(
+            MongoId weapon, Node root, SearchState state, List<MongoId> required, List<MongoId> buffer, ref Cost before)
+        {
+            var loose = new List<Node>();
+            CollectNodes(root, loose);
+
+            loose.RemoveAll(node =>
+                node.Parent == null || node.Locked || node.Children.Count > 0 || required.Contains(node.Template));
+
+            for (var first = 0; first < loose.Count; first++)
+            for (var second = first + 1; second < loose.Count; second++)
+            {
+                if (state.OutOfBudget()) return false;
+
+                var one = loose[first];
+                var other = loose[second];
+                var oneHost = one.Parent!;
+                var otherHost = other.Parent!;
+
+                Detach(one, state);
+                Detach(other, state);
+
+                if (Substitute(weapon, root, state, buffer, ref before)) return true;
+
+                Reattach(otherHost, other, state);
+                Reattach(oneHost, one, state);
+            }
+
+            return false;
+        }
+
+        /// <summary>Puts ONE part somewhere legal and keeps it if the build ends up satisfied and
+        /// smaller than it was. Filled to its required slots only - the point is the fewest parts, so a
+        /// replacement that drags a dressing along with it is not a replacement.</summary>
+        private bool Substitute(
+            MongoId weapon, Node root, SearchState state, List<MongoId> buffer, ref Cost before)
+        {
+            var hosts = new List<Node>();
+            CollectNodes(root, hosts);
+            hosts.Insert(0, root);
+
+            foreach (var host in hosts)
+            {
+                if (host.Depth >= MaxDepth) continue;
+                if (!state.Reachable.TryGetValue(host.Template, out var part)) continue;
+
+                for (var index = 0; index < part.Slots.Length; index++)
+                {
+                    if (Occupant(host, index) != null) continue;
+
+                    foreach (var candidate in Likeliest(part.Slots[index], host, state))
+                    {
+                        if (state.OutOfBudget()) return false;
+
+                        var trial = new Node
+                        {
+                            Template = candidate,
+                            SlotName = part.Slots[index].Name,
+                            SlotIndex = index,
+                            Depth = host.Depth + 1
+                        };
+
+                        Attach(host, trial, state);
+                        Fill(trial, state, MaxDepth, requiredOnly: true);
+
+                        var after = Measure(weapon, root, state, buffer);
+
+                        if (after.Gaps <= before.Gaps
+                            && after.Shortfall <= before.Shortfall + MinGain
+                            && after.Parts < before.Parts)
+                        {
+                            before = after;
+                            return true;
+                        }
+
+                        Detach(trial, state);
+                    }
+                }
+            }
+
+            return false;
+        }
+
+        /// <summary>The few candidates for one slot most worth trying as a replacement.</summary>
+        private List<MongoId> Likeliest(WeaponGraph.SlotInfo slot, Node host, SearchState state)
+        {
+            var ranked = new List<(MongoId Template, double Worth)>();
+
+            foreach (var candidate in slot.Candidates)
+            {
+                if (state.Allowed != null && !state.Allowed.Contains(candidate)) continue;
+                if (!state.Reachable.ContainsKey(candidate)) continue;
+                if (IsAncestor(host, candidate)) continue;
+                if (!Compatible(candidate, state)) continue;
+
+                ranked.Add((candidate, Potential(candidate, state, 0)));
+            }
+
+            ranked.Sort((left, right) => right.Worth.CompareTo(left.Worth));
+
+            var take = Math.Min(CondenseCandidates, ranked.Count);
+            var best = new List<MongoId>(take);
+
+            for (var index = 0; index < take; index++) best.Add(ranked[index].Template);
+
+            return best;
         }
 
         /// <summary>Takes off every part that carries nothing and pays for nothing.</summary>
