@@ -1048,6 +1048,39 @@ namespace QuestTreeServer
             List<MongoId> mustIncludeCategories) =>
             weaponBuildVerifier.LowestPossible(weapon, thresholds, mustInclude, mustIncludeCategories).Parts;
 
+        /// <summary>Whether the VERIFIER agrees this build satisfies the requirement. Nothing reaches the
+        /// history without passing through here.
+        ///
+        /// The history is the one artifact of this that outlives the process and gets published, so a build
+        /// the search believes in and the verifier rejects must never enter it. One did: training found a
+        /// five-wide MP-133 for a four-wide limit, believed it, wrote it down because it was one part smaller
+        /// than the valid build it replaced, and every later boot rejected it and paid a re-solve. The
+        /// training path was the hole - it skipped the audit entirely, so the only code that would have
+        /// caught this ran after the write.
+        ///
+        /// A disagreement is a WARNING, not a shrug. The two of them agreeing is the only reason to believe
+        /// either, and when they do not, the verifier is right by construction: it reads the item data
+        /// independently and has no stake in the answer.</summary>
+        private bool Sound(
+            MongoId weapon,
+            IReadOnlyList<WeaponSolver.FittedPart> parts,
+            List<(string Field, string Compare, double Value)> thresholds,
+            List<MongoId> mustInclude,
+            List<MongoId> mustIncludeCategories,
+            string what)
+        {
+            var audited = weaponBuildVerifier.Verify(weapon, parts, thresholds, mustInclude, mustIncludeCategories);
+
+            if (audited.Verified) return true;
+
+            logger.Warning(
+                $"Quest Tracker: the solver and the verifier DISAGREE about {what} for '{weapon}' - the solver " +
+                $"says it satisfies the requirement, the verifier says [{string.Join("; ", audited.Failures.Take(3))}]. " +
+                "It is NOT remembered. The verifier is right.");
+
+            return false;
+        }
+
         /// <summary>One sweep over every requirement from a fresh set of starting points, and how many
         /// builds it managed to shrink.</summary>
         /// <summary>One sweep over every requirement from a fresh set of starting points, and how many
@@ -1157,6 +1190,14 @@ namespace QuestTreeServer
                 return false;
             }
 
+            // Smaller AND legal, in that order. Smaller alone is what put an unassemblable build in the file
+            // for two hundred rounds of training to keep and every later boot to reject.
+            if (!Sound(weapon, result.Parts, thresholds, mustInclude, mustIncludeCategories, "a smaller build"))
+            {
+                weaponBuildCache.Held(key);
+                return false;
+            }
+
             weaponBuildCache.Put(key, result.Parts, result.Floor);
 
             lock (_working) _working[key] = result.Parts;
@@ -1197,23 +1238,30 @@ namespace QuestTreeServer
             //
             // Training is the exception and the reason the search still exists here: that mode is trying to
             // beat the build, so it has to run.
+            // The audit of a remembered build happens on EVERY path, training included. Training used to skip
+            // it and search from whatever it found, which is how an invalid entry survived two hundred rounds
+            // that were all looking at it: nothing in that mode ever asked whether the build it was trying to
+            // beat was legal in the first place.
+            if (incumbent != null
+                && !Sound(weapon, incumbent, thresholds, mustInclude, mustIncludeCategories, "a remembered build"))
+            {
+                incumbent = null;
+                rejected = true;
+            }
+
             if (incumbent != null && !weaponBuildCache.Training)
             {
                 var described = weaponSolver.Describe(
                     weapon, thresholds, mustInclude, mustIncludeCategories, incumbent);
 
-                // BOTH have to agree before a remembered build is served. The solver's own report re-reads
-                // the thresholds and the required slots, but it does not check that every part sits in a
-                // slot whose filter admits it, or that no template is claimed twice - and a history written
-                // on another install, or edited, or half-written, is exactly where that would go wrong.
+                // BOTH have to agree before a remembered build is served, and they still do: the verifier has
+                // just passed these parts above - seated legally, nothing claimed twice, every threshold met -
+                // and this adds the solver's own reading of the same build, which is what catches one that
+                // describes differently from how it was searched.
                 //
-                // This is the one failure mode a shipped history introduces, so it is the one the cold path
-                // is not allowed to take on trust. A rejected entry costs a search. It never reaches a
-                // panel.
-                var audited = weaponBuildVerifier.Verify(
-                    weapon, described.Parts, thresholds, mustInclude, mustIncludeCategories);
-
-                if (described.Found && audited.Verified)
+                // This is the one failure mode a shipped history introduces, so it is the one the cold path is
+                // not allowed to take on trust. A rejected entry costs a search. It never reaches a panel.
+                if (described.Found)
                 {
                     lock (_solved) _solved[key] = described;
                     return described;
@@ -1222,7 +1270,7 @@ namespace QuestTreeServer
                 logger.Info(
                     $"Quest Tracker: a remembered weapon build for '{weapon}' does not hold up on this install, " +
                     "so it is being solved again - " +
-                    string.Join("; ", audited.Failures.Concat(described.Unmet).Distinct().Take(3)) + ".");
+                    string.Join("; ", described.Unmet.Distinct().Take(3)) + ".");
 
                 incumbent = null;
                 rejected = true;
@@ -1237,7 +1285,9 @@ namespace QuestTreeServer
             // forever: the MP-133 was 5 wide against a limit of 4, was rejected and re-solved on EVERY boot,
             // and the valid build was never written because it was not SMALLER than the broken one. One
             // wasted re-solve per launch, for the life of the install.
-            if (result.Found && (remembered == null || rejected || result.Parts.Count < remembered.Parts.Count))
+            if (result.Found
+                && (remembered == null || rejected || result.Parts.Count < remembered.Parts.Count)
+                && Sound(weapon, result.Parts, thresholds, mustInclude, mustIncludeCategories, "a freshly solved build"))
             {
                 weaponBuildCache.Put(key, result.Parts, result.Floor);
                 _improved++;
