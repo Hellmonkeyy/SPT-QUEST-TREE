@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.Json;
@@ -51,6 +51,7 @@ namespace QuestTreeServer
         WeaponBuildCache weaponBuildCache,
         WeaponPresets weaponPresets,
         PartAvailability partAvailability,
+        ProfileBuilds profileBuilds,
         SPTarkov.Server.Core.Helpers.Profile.ProfileHelper profileHelper,
         SPTarkov.Server.Core.Servers.SaveServer saveServer) : IOnLoad
     {
@@ -857,6 +858,21 @@ namespace QuestTreeServer
                     build.RequiredCategoryNames.Add(ResolveItemName(category, locale));
                 }
 
+                // The requirement's identity on the wire, so the per-profile answer can be joined to it. The
+                // same hash the history is keyed on, computed from the same inputs.
+                if (weapon!.TryParseMongoId(out var keyWeapon))
+                {
+                    var keyThresholds = build.Thresholds.Select(t => (t.Field, t.Compare, t.Value)).ToList();
+                    var keyParts = build.RequiredItemIds
+                        .Select(id => id.TryParseMongoId(out var parsed) ? parsed : (MongoId?)null)
+                        .Where(id => id != null).Select(id => id!.Value).ToList();
+                    var keyCategories = build.RequiredCategoryIds
+                        .Select(id => id.TryParseMongoId(out var parsed) ? parsed : (MongoId?)null)
+                        .Where(id => id != null).Select(id => id!.Value).ToList();
+
+                    build.Key = WeaponBuildCache.KeyFor(keyWeapon, keyThresholds, keyParts, keyCategories);
+                }
+
                 build.ModelCheck = CheckModel(build);
                 build.Solution = SolveBuild(build, locale);
                 builds.Add(build);
@@ -1405,8 +1421,13 @@ namespace QuestTreeServer
                 var unsold = new HashSet<MongoId>();      // no trader offers it at any level
                 var earlyBlocked = 0;     // builds a profile with every trader at level one could not build
                 var affected = new List<string>();
-                var owned = 0;            // parts already in the stash
+                var owned = 0;            // parts held loose - genuinely free
+                var fittedStored = 0;     // parts held, but fitted to a stored weapon
+                var fittedEquipped = 0;   // parts held, but fitted to an equipped weapon
+                var inPlace = 0;          // parts already on a copy of the quest's own weapon
                 var priced = 0L;          // what the rest would cost at trader prices
+                var withFlea = 0;         // builds still blocked once the flea market is counted as a source
+                var fleaOnly = new HashSet<MongoId>();    // parts no trader sells that the flea lists
 
                 foreach (var (_, build) in requirements)
                 {
@@ -1428,6 +1449,7 @@ namespace QuestTreeServer
                     if (remembered == null) continue;
 
                     var blocked = false;
+                    var blockedWithFlea = false;
                     var earlyBlockedHere = false;
                     var defaults = weaponPresets.For(weapon);
 
@@ -1435,30 +1457,55 @@ namespace QuestTreeServer
                     {
                         if (!part.Template.TryParseMongoId(out var template)) continue;
 
-                        // A part the weapon already wears needs no trader at all.
-                        if (defaults != null && defaults.Occupants.Values.Contains(template)) continue;
+                        // The trader-only view, kept as the headline so the figure stays comparable with the
+                        // ones taken before the flea market was a tier. The flea view is counted beside it.
+                        var (tier, price) = sources.Classify(template, defaults, weapon);
 
-                        if (sources.Owned.Contains(template)) { owned++; continue; }
-
-                        if (sources.Buyable.TryGetValue(template, out var price))
+                        // Held but not loose: counted apart, because the ledger's "179 already in the stash"
+                        // could not tell a spare from a part bolted to the gun they raid with.
+                        if (tier is not (PartAvailability.Tier.Fitted or PartAvailability.Tier.InPlace or PartAvailability.Tier.Owned)
+                            && sources.Holdings.TryGetValue(template, out var holding) && holding.FittedAnywhere)
                         {
-                            priced += price;
-                            if (sources.Gated.TryGetValue(template, out var gate) && gate > 1) earlyBlockedHere = true;
-                            continue;
+                            if (holding.FittedToEquipped.Count > 0) fittedEquipped++;
+                            else fittedStored++;
                         }
 
-                        if (sources.Barter.Contains(template))
+                        switch (tier)
                         {
-                            if (sources.Gated.TryGetValue(template, out var gate) && gate > 1) earlyBlockedHere = true;
-                            continue;
+                            case PartAvailability.Tier.Fitted:
+                                continue;
+
+                            case PartAvailability.Tier.InPlace:
+                                inPlace++;
+                                continue;
+
+                            case PartAvailability.Tier.Owned:
+                                owned++;
+                                continue;
+
+                            case PartAvailability.Tier.Buyable:
+                                priced += price ?? 0;
+                                if (sources.Gated.TryGetValue(template, out var gate) && gate.Level > 1) earlyBlockedHere = true;
+                                continue;
+
+                            case PartAvailability.Tier.Barter:
+                                if (sources.Gated.TryGetValue(template, out var barterGate) && barterGate.Level > 1) earlyBlockedHere = true;
+                                continue;
+
                         }
 
+                        // Not obtainable from a trader. Whether the flea would supply it is counted as a
+                        // HYPOTHETICAL for every profile, access or not: the question being answered is
+                        // whether the advice has any acquisition route at all.
                         blocked = true;
                         missing.Add(template);
                         earlyBlockedHere = true;
 
                         if (sources.Gated.ContainsKey(template)) gatedOnly.Add(template);
                         else unsold.Add(template);
+
+                        if (sources.Flea.ContainsKey(template)) fleaOnly.Add(template);
+                        else blockedWithFlea = true;
                     }
 
                     if (blocked)
@@ -1466,6 +1513,7 @@ namespace QuestTreeServer
                         unbuildable++;
                         affected.Add(build.WeaponName);
                     }
+                    if (blockedWithFlea) withFlea++;
                     if (earlyBlockedHere) earlyBlocked++;
                 }
 
@@ -1474,9 +1522,27 @@ namespace QuestTreeServer
                     $"{sources.Traders} trader(s) read) - {unbuildable} of {requirements.Count} build(s) name a " +
                     $"part this profile cannot get, {missing.Count} distinct part(s): {gatedOnly.Count} sold but " +
                     $"locked behind trader progress, {unsold.Count} not sold by any trader at any level. " +
-                    $"{owned} part instance(s) are already in the stash and the rest would cost {priced:N0} " +
+                    $"{owned} part instance(s) are held loose (free), {inPlace} already on a copy of the quest's " +
+                    $"weapon, {fittedStored} held but fitted to a stored weapon and {fittedEquipped} fitted to an " +
+                    $"equipped one (both priced as purchases), and the rest would cost {priced:N0} " +
                     $"roubles at this profile's trader prices. With every trader at loyalty 1, " +
                     $"{earlyBlocked} of {requirements.Count} build(s) would be out of reach.");
+
+                // The flea question, answered in process against the merged database. Of the parts no trader
+                // sells this profile: listable with a price, refused by the game's flea rules, or with no
+                // route at all - and of those, which ship with the game and which a mod injected.
+                var fleaBanned = missing.Count(template => sources.FleaBanned.Contains(template));
+                var noRoute = missing.Where(template => !sources.Flea.ContainsKey(template)).ToList();
+                var noRouteModded = noRoute.Count(template => !sources.IsVanilla(template));
+
+                logger.Info(
+                    $"Quest Tracker: the flea market for profile {id} - " +
+                    $"{(sources.FleaAccess ? "OPEN" : $"CLOSED until level {sources.FleaLevel}")} at level {pmc.Info?.Level}. " +
+                    $"Of the {missing.Count} part(s) no trader sells this profile, {fleaOnly.Count} are flea-listable " +
+                    $"with a price, {fleaBanned} are refused by the game's flea rules, and {noRoute.Count} have no " +
+                    $"route at all ({noRouteModded} mod-injected, {noRoute.Count - noRouteModded} vanilla). If the flea " +
+                    $"counted as a source, {unbuildable - withFlea} of the {unbuildable} blocked build(s) would become " +
+                    $"buildable and {withFlea} would stay blocked regardless.");
 
                 if (missing.Count > 0)
                     logger.Info(
@@ -1485,6 +1551,37 @@ namespace QuestTreeServer
                         (missing.Count > 12 ? $" and {missing.Count - 12} more" : "") +
                         ". Affected: " + string.Join("; ", affected.Take(8)) + ".");
             }
+
+            // And then the answer for each profile is prepared, off the boot path: the shared build where
+            // every part is obtainable, a build searched within reach where it is not.
+            var handoff = new List<ProfileBuilds.Requirement>(requirements.Count);
+
+            foreach (var (questName, build) in requirements)
+            {
+                if (!build.WeaponTemplate.TryParseMongoId(out var weapon) || string.IsNullOrEmpty(build.Key)) continue;
+
+                IReadOnlyList<WeaponSolver.FittedPart>? baseline = null;
+
+                // What THIS boot serves, which in training mode can differ from the file.
+                lock (_solved)
+                    if (_solved.TryGetValue(build.Key, out var served) && served.Found) baseline = served.Parts;
+
+                if (baseline == null)
+                {
+                    var remembered = weaponBuildCache.Get(build.Key);
+                    if (remembered != null) baseline = Restore(remembered);
+                }
+
+                handoff.Add(new ProfileBuilds.Requirement
+                {
+                    Quest = questName,
+                    Key = build.Key,
+                    Build = build,
+                    Baseline = baseline
+                });
+            }
+
+            profileBuilds.Refresh(handoff);
         }
 
         /// <summary>Whether the VERIFIER agrees this build satisfies the requirement. Nothing reaches the

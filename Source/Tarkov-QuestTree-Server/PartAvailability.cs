@@ -1,13 +1,16 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using SPTarkov.Common.Models.Logging;
 using SPTarkov.DI.Annotations;
+using SPTarkov.Server.Core.Extensions;
 using SPTarkov.Server.Core.Helpers.Profile;
 using SPTarkov.Server.Core.Helpers.Traders;
 using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Eft.Common;
 using SPTarkov.Server.Core.Models.Eft.Common.Tables;
+using SPTarkov.Server.Core.Models.Spt.Tables;
+using SPTarkov.Server.Core.Services.Ragfair;
 
 namespace QuestTreeServer
 {
@@ -19,11 +22,15 @@ namespace QuestTreeServer
     /// assemble is worse than an expensive one. So the first thing this does is count it: how many of the
     /// sixty builds name a part this profile cannot buy.
     ///
-    /// FOUR TIERS, and the tiers matter more than the numbers:
+    /// SIX TIERS, and the tiers matter more than the numbers:
     ///
+    ///   FITTED   - already on the weapon's default preset. Nothing to do.
     ///   OWNED    - already in the stash. The best thing a panel can say is "you have this".
     ///   BUYABLE  - on a trader's list for THIS profile right now, at the price being asked.
     ///   BARTER   - offered, but not for money. No rouble price exists and inventing one would be a lie.
+    ///   FLEA     - sold by no trader this profile can use, but flea-listable, and the profile has flea
+    ///              access. The price is the server's flea price, which is GENERATED and moves between
+    ///              restarts - so it is carried as an estimate and ranked below a trader's fixed price.
     ///   ABSENT   - not obtainable. Not "expensive": absent.
     ///
     /// GetAssort(sessionId, trader, showLockedAssorts: false) is what makes this honest - the server has
@@ -31,19 +38,33 @@ namespace QuestTreeServer
     /// Trader ids come from the profile rather than a fixed list, so a modded trader counts as much as
     /// Prapor does.
     ///
-    /// Flea is deliberately NOT a source. Its offers are generated and its prices move every restart, so
-    /// counting it would make "obtainable" mean something different tomorrow.
+    /// The flea tier is switched by the profile's level against the game's own RagFair.MinUserLevel, read
+    /// from the globals rather than assumed to be fifteen, and by the template's CanSellOnRagfair flag. A
+    /// profile below the level has no flea tier at all, which is the honest answer for the player doing
+    /// Gunsmith early - the one this is most for.
     ///
     /// MULTI-PROFILE, because this is used with FIKA: a host serves a group, and this install already has
     /// two profiles. Everything here is per session and allocated per call - the only shared state is the
-    /// read-only currency set - so several sessions asking at once cannot interfere with each other.
+    /// read-only currency set and the read-only flea price map - so several sessions asking at once cannot
+    /// interfere with each other.
     /// </summary>
     [Injectable(InjectionType.Singleton)]
     public class PartAvailability(
         ISptLogger<PartAvailability> logger,
         ProfileHelper profileHelper,
-        TraderAssortHelper assortHelper)
+        TraderAssortHelper assortHelper,
+        TemplateTable templateTable,
+        GlobalTable globals,
+        RagfairPriceService fleaPrices,
+        SPTarkov.Server.Core.Helpers.Ragfair.RagfairServerHelper ragfairRules,
+        SPTarkov.Server.Core.Helpers.Items.ItemHelper itemHelper)
     {
+        /// <summary>The equipment slots a weapon in use sits in. A part under one of these is on a gun
+        /// the player is carrying into raids.</summary>
+        private static readonly HashSet<string> EquippedWeaponSlots = new(StringComparer.Ordinal)
+        {
+            "FirstPrimaryWeapon", "SecondPrimaryWeapon", "Holster"
+        };
         /// <summary>Currencies a cash price can be quoted in. A requirement naming anything else is a
         /// barter.</summary>
         private static readonly HashSet<string> Currencies = new(StringComparer.Ordinal)
@@ -53,9 +74,57 @@ namespace QuestTreeServer
             "569668774bdc2da2298b4568"  // euros
         };
 
+        public enum Tier
+        {
+            /// <summary>On the weapon's default preset. Nothing to obtain.</summary>
+            Fitted,
+
+            /// <summary>Already fitted to a copy of the QUEST'S weapon this profile owns. Not "owned
+            /// elsewhere" - already done.</summary>
+            InPlace,
+
+            /// <summary>Loose in the stash. The only ownership that is genuinely free.</summary>
+            Owned,
+
+            Buyable,
+            Barter,
+            Flea,
+            Absent
+        }
+
+        /// <summary>Where a profile's copies of one template are. THREE STATES, because "you own this" is
+        /// wrong advice when the copy is bolted to the gun they take into raids: loose in the stash is free;
+        /// fitted to a stored weapon costs stripping it; fitted to an equipped weapon costs disarming them.
+        /// Only the first is free to the optimiser. The other two are priced as purchases and REPORTED, by
+        /// weapon, so the player can decide in one glance whether to strip or buy.</summary>
+        public sealed class Holding
+        {
+            public int Loose;
+
+            /// <summary>Weapon templates this part is fitted to, in the stash and on the character.</summary>
+            public List<MongoId> FittedToStored { get; } = new();
+
+            public List<MongoId> FittedToEquipped { get; } = new();
+
+            public bool FittedAnywhere => FittedToStored.Count > 0 || FittedToEquipped.Count > 0;
+        }
+
+        /// <summary>One trader's lowest loyalty level for a part, counting offers the profile has not
+        /// unlocked. A diagnostic, never a source.</summary>
+        public readonly record struct Gate(int Level, MongoId Trader, long? Price);
+
         public sealed class Sources
         {
+            /// <summary>Templates with at least one LOOSE copy - the free ones.</summary>
             public HashSet<MongoId> Owned { get; } = new();
+
+            /// <summary>Every template the profile holds anywhere, with where. Loose, fitted to a stored
+            /// weapon, or fitted to an equipped one.</summary>
+            public Dictionary<MongoId, Holding> Holdings { get; } = new();
+
+            /// <summary>Weapon template to the part templates fitted on copies of it that this profile owns.
+            /// What makes "already on your MDR" sayable for the quest's own weapon.</summary>
+            public Dictionary<MongoId, HashSet<MongoId>> OwnedWeapons { get; } = new();
 
             /// <summary>Template to the cheapest cash price any trader is asking of this profile.</summary>
             public Dictionary<MongoId, long> Buyable { get; } = new();
@@ -64,19 +133,68 @@ namespace QuestTreeServer
             public HashSet<MongoId> Barter { get; } = new();
 
             /// <summary>Template to the LOWEST loyalty level at which some trader offers it, counting offers
-            /// this profile has not unlocked. Not a source - a diagnostic: it is what says whether a part is
-            /// missing because the game gates it behind trader progress or because it is not sold at all.</summary>
-            public Dictionary<MongoId, int> Gated { get; } = new();
+            /// this profile has not unlocked, and which trader. Not a source - a diagnostic: it is what says
+            /// whether a part is missing because the game gates it behind trader progress or because it is
+            /// not sold at all.</summary>
+            public Dictionary<MongoId, Gate> Gated { get; } = new();
+
+            /// <summary>Whether this profile may use the flea market at all, and the level that decides
+            /// it.</summary>
+            public bool FleaAccess { get; set; }
+
+            public int FleaLevel { get; set; }
+
+            /// <summary>Flea-listable templates and the server's price for each. Shared and read-only;
+            /// only consulted when FleaAccess is true.</summary>
+            public IReadOnlyDictionary<MongoId, long> Flea { get; set; } = new Dictionary<MongoId, long>();
+
+            /// <summary>Templates the game refuses on the flea - CanSellOnRagfair false, or on the server's
+            /// ragfair blacklist. Diagnostic: "flea-banned" is a different fact from "not sold".</summary>
+            public IReadOnlySet<MongoId> FleaBanned { get; set; } = new HashSet<MongoId>();
+
+            /// <summary>Whether a template ships with the game rather than arriving from a mod. Read from
+            /// the vanilla items file's keys, which is the one thing that file IS the authority on.</summary>
+            public Func<MongoId, bool> IsVanilla { get; set; } = _ => true;
 
             public int Traders { get; set; }
 
-            /// <summary>Loyalty levels and offer counts per trader, hashed. When this changes the profile can
-            /// buy things it could not before, which makes a cheapest-build answer stale - a QUALITY
-            /// invalidation, not a correctness one: the old build is still legal, just no longer cheapest.</summary>
+            /// <summary>Loyalty levels and offer counts per trader, plus flea access, hashed. When this
+            /// changes the profile can buy things it could not before, which makes a cheapest-build answer
+            /// stale - a QUALITY invalidation, not a correctness one: the old build is still legal, just no
+            /// longer cheapest.</summary>
             public string Fingerprint { get; set; } = "";
 
+            /// <summary>Obtainable by any means this profile has, the flea market included when it has
+            /// access.</summary>
             public bool Has(MongoId template) =>
+                Owned.Contains(template) || Buyable.ContainsKey(template) || Barter.Contains(template)
+                || (FleaAccess && Flea.ContainsKey(template));
+
+            /// <summary>Obtainable without the flea market. Kept separately because the flea is a generated
+            /// source whose prices move, and the ledger's earlier figures were taken without it.</summary>
+            public bool HasFromTraders(MongoId template) =>
                 Owned.Contains(template) || Buyable.ContainsKey(template) || Barter.Contains(template);
+
+            /// <summary>The tier a part falls in for this profile and what it costs there. A price is only
+            /// returned for Buyable and Flea; Fitted and Owned cost nothing, Barter and Absent have no rouble
+            /// figure and are never given one.</summary>
+            public (Tier Tier, long? Price) Classify(MongoId template, WeaponPresets.Defaults? defaults) =>
+                Classify(template, defaults, null);
+
+            /// <summary>As above, and with the quest's weapon named: a part already fitted to a copy of that
+            /// weapon the profile owns is in place rather than owned.</summary>
+            public (Tier Tier, long? Price) Classify(MongoId template, WeaponPresets.Defaults? defaults, MongoId? questWeapon)
+            {
+                if (defaults != null && defaults.Occupants.Values.Contains(template)) return (Tier.Fitted, 0);
+                if (questWeapon is { } owned && OwnedWeapons.TryGetValue(owned, out var onIt) && onIt.Contains(template))
+                    return (Tier.InPlace, 0);
+                if (Owned.Contains(template)) return (Tier.Owned, 0);
+                if (Buyable.TryGetValue(template, out var cash)) return (Tier.Buyable, cash);
+                if (Barter.Contains(template)) return (Tier.Barter, null);
+                if (FleaAccess && Flea.TryGetValue(template, out var flea)) return (Tier.Flea, flea);
+
+                return (Tier.Absent, null);
+            }
         }
 
         /// <summary>Everything this profile can get. Null when there is no profile to read, which is what a
@@ -92,9 +210,7 @@ namespace QuestTreeServer
         {
             var sources = new Sources();
 
-            foreach (var item in profile.Inventory?.Items ?? new List<Item>())
-                if (item != null)
-                    sources.Owned.Add(item.Template);
+            Hold(profile, sources);
 
             var stamp = new System.Text.StringBuilder();
 
@@ -113,11 +229,173 @@ namespace QuestTreeServer
                 }
             }
 
+            // The flea market, gated the way the game gates it. A missing globals entry means no flea
+            // tier at all rather than a guessed level: a source that might not exist must not be counted.
+            var minimum = globals.Configuration?.RagFair?.MinUserLevel;
+            var level = profile.Info?.Level ?? 0;
+
+            sources.FleaLevel = minimum ?? int.MaxValue;
+            sources.FleaAccess = minimum is { } needed && level >= needed;
+            sources.Flea = FleaPrices();
+            sources.FleaBanned = _banned ?? new HashSet<MongoId>();
+            sources.IsVanilla = template => Vanilla().Contains(template);
+
+            stamp.Append("flea:").Append(sources.FleaAccess ? 1 : 0).Append('|');
+
             sources.Fingerprint = Convert.ToHexString(
                 System.Security.Cryptography.SHA256.HashData(
                     System.Text.Encoding.UTF8.GetBytes(stamp.ToString())));
 
             return sources;
+        }
+
+        /// <summary>The same traders as a FRESH profile would see them: every trader at loyalty one, an
+        /// empty stash, no flea market. Derived from the locked-inclusive read rather than from any real
+        /// profile's state, so it can be measured on an install whose profiles are all long past that
+        /// point - which is what the player doing Gunsmith early looks like, and nobody here is one.
+        ///
+        /// A hypothetical, and labelled as one wherever it is reported. What it cannot know is quest locks:
+        /// an offer gated behind a quest a fresh profile has not done is counted by its loyalty level only,
+        /// so this reads as slightly MORE obtainable than a real fresh profile, never less.</summary>
+        public Sources Fresh(Sources real)
+        {
+            var fresh = new Sources
+            {
+                Traders = real.Traders,
+                FleaAccess = false,
+                FleaLevel = real.FleaLevel,
+                Flea = real.Flea,
+                FleaBanned = real.FleaBanned,
+                IsVanilla = real.IsVanilla,
+                Fingerprint = "fresh:" + real.Fingerprint
+            };
+
+            foreach (var (template, gate) in real.Gated)
+            {
+                fresh.Gated[template] = gate;
+
+                if (gate.Level != 1) continue;
+
+                if (gate.Price is { } cash) fresh.Buyable[template] = cash;
+                else fresh.Barter.Add(template);
+            }
+
+            return fresh;
+        }
+
+        /// <summary>Walks the inventory from its two roots and says where every copy of every template
+        /// is. Descent from the roots rather than a climb from each item, for the reason ProfileInventory
+        /// gives: a parent chain that loops is unreachable from a root and so cannot be entered. The same
+        /// CreateParentIdLookupCache, for the same reason: GenerateItemsMap throws on a duplicated id and
+        /// the throw would cost the whole answer.
+        ///
+        /// A part is FITTED when its slot is a mod slot and a weapon sits above it; loose otherwise. The
+        /// weapon is equipped when its own slot is one of the primary or holster slots on the equipment
+        /// root. Anything the walk cannot place - hideout stashes, the sorting table - counts as loose,
+        /// which is the generous reading and the one a mistaken classification should fall to.</summary>
+        private void Hold(PmcData profile, Sources sources)
+        {
+            var inventory = profile.Inventory;
+            var items = inventory?.Items;
+
+            if (inventory == null || items == null) return;
+
+            var children = items.CreateParentIdLookupCache(out _);
+            var placed = new HashSet<MongoId>();
+
+            void Descend(Item item, MongoId? weapon, bool equipped, int depth)
+            {
+                if (depth > 40 || !placed.Add(item.Id)) return;
+
+                var template = item.Template;
+                var slot = item.SlotId ?? "";
+
+                var isWeapon = IsWeapon(template);
+                var onWeapon = weapon;
+                var fitted = weapon != null && slot.StartsWith("mod_", StringComparison.Ordinal);
+
+                if (isWeapon)
+                {
+                    // A weapon is a holding too, and it starts a new chain: the parts under it are its.
+                    onWeapon = template;
+                    equipped = EquippedWeaponSlots.Contains(slot);
+
+                    if (!sources.OwnedWeapons.TryGetValue(template, out var onIt))
+                        sources.OwnedWeapons[template] = onIt = new HashSet<MongoId>();
+                }
+
+                if (!sources.Holdings.TryGetValue(template, out var holding))
+                    sources.Holdings[template] = holding = new Holding();
+
+                if (fitted && weapon is { } host)
+                {
+                    (equipped ? holding.FittedToEquipped : holding.FittedToStored).Add(host);
+                    sources.OwnedWeapons[host].Add(template);
+                }
+                else
+                {
+                    holding.Loose++;
+                    sources.Owned.Add(template);
+                }
+
+                if (!children.TryGetValue(item.Id, out var below) || below == null) return;
+
+                foreach (var child in below)
+                    if (child != null) Descend(child, onWeapon, equipped, depth + 1);
+            }
+
+            foreach (var item in items)
+            {
+                if (item == null) continue;
+                if (item.Id != inventory.Equipment && item.Id != inventory.Stash) continue;
+
+                if (!children.TryGetValue(item.Id, out var below) || below == null) continue;
+
+                foreach (var child in below)
+                    if (child != null) Descend(child, null, false, 0);
+            }
+
+            // Whatever the roots did not reach - hideout stashes, the sorting table, a profile with no
+            // named roots - counted as loose: the walk claims nothing about where it is.
+            foreach (var item in items)
+            {
+                if (item == null || placed.Contains(item.Id)) continue;
+                if (item.Id == inventory.Equipment || item.Id == inventory.Stash) continue;
+
+                if (!sources.Holdings.TryGetValue(item.Template, out var holding))
+                    sources.Holdings[item.Template] = holding = new Holding();
+
+                holding.Loose++;
+                sources.Owned.Add(item.Template);
+            }
+        }
+
+        /// <summary>The "Weapon" base class every gun descends from - checked against the vanilla items
+        /// file (_name "Weapon", parent "Item") rather than taken from an enum SPT does not expose.</summary>
+        private static readonly MongoId WeaponBaseClass = new("5422acb9af1c889c16000029");
+
+        private readonly Dictionary<MongoId, bool> _weapons = new();
+        private readonly object _weaponsLock = new();
+
+        private bool IsWeapon(MongoId template)
+        {
+            lock (_weaponsLock)
+            {
+                if (_weapons.TryGetValue(template, out var known)) return known;
+
+                bool weapon;
+
+                try
+                {
+                    weapon = itemHelper.IsOfBaseclass(template, WeaponBaseClass);
+                }
+                catch (Exception)
+                {
+                    weapon = false;
+                }
+
+                return _weapons[template] = weapon;
+            }
         }
 
         private void Read(MongoId sessionId, MongoId trader, Sources sources, System.Text.StringBuilder stamp, TraderInfo? info)
@@ -167,8 +445,13 @@ namespace QuestTreeServer
                     ? required
                     : 1;
 
-                if (!sources.Gated.TryGetValue(offer.Template, out var lowest) || level < lowest)
-                    sources.Gated[offer.Template] = level;
+                var cash = CashPrice(everything, offer.Id);
+
+                // Lowest level first; at the same level, a cash offer over a barter, and the cheaper cash.
+                if (!sources.Gated.TryGetValue(offer.Template, out var lowest)
+                    || level < lowest.Level
+                    || (level == lowest.Level && cash != null && (lowest.Price == null || cash < lowest.Price)))
+                    sources.Gated[offer.Template] = new Gate(level, trader, cash);
             }
         }
 
@@ -201,6 +484,124 @@ namespace QuestTreeServer
             }
 
             return cheapest;
+        }
+
+        private readonly object _fleaLock = new();
+        private Dictionary<MongoId, long>? _flea;
+        private HashSet<MongoId>? _banned;
+        private HashSet<MongoId>? _vanilla;
+
+        /// <summary>Every template the game lets a player list on the flea, with the server's price for it.
+        /// Built once: it is a property of the item data and the price table, not of any profile.
+        ///
+        /// Listable is the SERVER'S rule - RagfairServerHelper.IsItemValidRagfairItem, which applies the
+        /// ragfair blacklist as well as CanSellOnRagfair - rather than the flag alone, so a part the config
+        /// bans is banned here too. A template with no price is left out: GetFleaPriceForItem hands back 1
+        /// rouble when it has no price at all, and 1 rouble is not a price, it is the absence of one dressed
+        /// as a number. An unpriced part must never look cheap.</summary>
+        private Dictionary<MongoId, long> FleaPrices()
+        {
+            if (_flea != null) return _flea;
+
+            lock (_fleaLock)
+            {
+                if (_flea != null) return _flea;
+
+                var prices = new Dictionary<MongoId, long>();
+                var banned = new HashSet<MongoId>();
+                var unpriced = 0;
+
+                foreach (var pair in templateTable.Items ?? new Dictionary<MongoId, TemplateItem>())
+                {
+                    var (id, item) = pair;
+
+                    if (item?.Properties == null) continue;
+
+                    // Only things a player could fit to a gun are worth classifying; the rule is asked of
+                    // everything anyway because it is cheap and the counts are reported.
+                    bool valid;
+
+                    try
+                    {
+                        // The helper takes the (found, item) pair ItemHelper.GetItem returns, not the table's own.
+                        valid = item.Properties.CanSellOnRagfair == true
+                                && ragfairRules.IsItemValidRagfairItem(new KeyValuePair<bool, TemplateItem?>(true, item));
+                    }
+                    catch (Exception)
+                    {
+                        valid = false;
+                    }
+
+                    if (!valid)
+                    {
+                        banned.Add(id);
+                        continue;
+                    }
+
+                    double price;
+
+                    try
+                    {
+                        price = fleaPrices.GetFleaPriceForItem(id);
+                    }
+                    catch (Exception)
+                    {
+                        unpriced++;
+                        continue;
+                    }
+
+                    if (price <= 1d || double.IsNaN(price) || double.IsInfinity(price))
+                    {
+                        unpriced++;
+                        continue;
+                    }
+
+                    prices[id] = (long)Math.Round(price);
+                }
+
+                logger.Info(
+                    $"Quest Tracker: {prices.Count:N0} template(s) are flea-listable with a price, {unpriced:N0} " +
+                    $"listable but unpriced (not counted), {banned.Count:N0} refused by the game's flea rules.");
+
+                _banned = banned;
+
+                return _flea = prices;
+            }
+        }
+
+        /// <summary>The ids in the vanilla items file. NOT the item database - the live one is merged from
+        /// mods and is a third larger - and the one question this file can answer is which ids the game
+        /// itself ships, which is what "mod-injected" means.</summary>
+        private HashSet<MongoId> Vanilla()
+        {
+            if (_vanilla != null) return _vanilla;
+
+            lock (_fleaLock)
+            {
+                if (_vanilla != null) return _vanilla;
+
+                var ids = new HashSet<MongoId>();
+                var path = System.IO.Path.Combine(AppContext.BaseDirectory, "SPT_Data", "database", "templates", "items.json");
+
+                try
+                {
+                    using var stream = System.IO.File.OpenRead(path);
+                    using var document = System.Text.Json.JsonDocument.Parse(stream);
+
+                    foreach (var property in document.RootElement.EnumerateObject())
+                        if (property.Name.TryParseMongoId(out var id)) ids.Add(id);
+
+                    logger.Info($"Quest Tracker: {ids.Count:N0} template id(s) in the vanilla items file, for telling mod-injected parts apart.");
+                }
+                catch (Exception ex)
+                {
+                    // With no file every part reads as vanilla, which is the direction that claims LESS: it
+                    // never calls a shipped part mod-injected.
+                    logger.Warning($"Quest Tracker: could not read the vanilla items file ({ex.Message}) - mod-injected parts cannot be told apart.");
+                }
+
+                return _vanilla = ids;
+            }
         }
 
         private PmcData? TryGetProfile(MongoId sessionId)

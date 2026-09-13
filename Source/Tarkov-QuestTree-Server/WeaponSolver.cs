@@ -841,6 +841,10 @@ namespace QuestTreeServer
                 if ((CategoryMask(template, state) & (1 << category)) == 0) continue;
                 if (!state.Distance.TryGetValue(template, out var steps)) continue;
 
+                // A member the player cannot get does not satisfy the category for THEM. Without this a
+                // restricted search plans a silencer nobody sells, locks it, and reports the quest solved.
+                if (state.Allowed != null && !state.Allowed.Contains(template)) continue;
+
                 // The chain to reach it, plus whatever it forces once it is there. The thresholds only
                 // break a tie, because the requirement is "a part of this category" and any member
                 // satisfies it - so the one that costs fewest parts is the right one.
@@ -913,6 +917,12 @@ namespace QuestTreeServer
                     // Anything that cannot reach the part, or cannot reach it inside what is left of
                     // the chain, is not a step towards it.
                     if (!part.Steps.TryGetValue(candidate, out var left) || left >= remaining) continue;
+
+                    // A chain is parts the player has to obtain like any other, so a restricted search may
+                    // not route through one they cannot. The part being routed TO is exempt: the quest
+                    // names it, and whether the player can get it is reported, not searched around.
+                    if (state.Allowed != null && candidate != part.Part && !state.Allowed.Contains(candidate))
+                        continue;
 
                     steps.Add((slot, candidate, left, Potential(candidate, state, 0),
                         state.Shuffle?.Next() ?? 0));

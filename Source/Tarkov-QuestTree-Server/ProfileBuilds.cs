@@ -1,0 +1,649 @@
+using System;
+using System.Collections.Concurrent;
+using System.Collections.Generic;
+using System.Linq;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+using SPTarkov.Common.Models.Logging;
+using SPTarkov.DI.Annotations;
+using SPTarkov.Server.Core.Extensions;
+using SPTarkov.Server.Core.Helpers.Profile;
+using SPTarkov.Server.Core.Models.Common;
+using SPTarkov.Server.Core.Models.Eft.Common;
+using SPTarkov.Server.Core.Servers;
+using SPTarkov.Server.Core.Services.Locales;
+
+namespace QuestTreeServer
+{
+    /// <summary>
+    /// The sixty builds as THIS player can assemble them: what they already have, what they can buy and
+    /// for how much, and - where the shared build names something they cannot get - a build that avoids
+    /// it, or the plain statement that no build within their reach exists and why.
+    ///
+    /// FILTER AND REPAIR, not a solve per player. The shared baseline is solved once, trained for hours and
+    /// shipped; it is the best build known over every part that exists. For one profile the only question
+    /// is whether every part in it is obtainable, which is a dictionary lookup per part. Only a build that
+    /// fails that question is solved again, with the search confined to what the profile can get. So the
+    /// cost scales with how restricted the player is - a finished profile pays sixty lookups, a fresh one
+    /// pays a search per blocked build - and not with how many players there are.
+    ///
+    /// THAT MATTERS BECAUSE OF FIKA. Several profiles share one server and the host is playing while
+    /// serving their friends. So there is ONE worker for every profile, on the lowest priority, and it
+    /// exists only while the queue is non-empty. Six players are six entries in a queue, never six times
+    /// the cores. The thread budget is global by construction rather than by policy.
+    ///
+    /// EVERY REPAIRED BUILD GOES THROUGH THE VERIFIER, exactly as the shared baseline does. A restricted
+    /// search is the same search with fewer candidates, and the same search has produced an unassemblable
+    /// build before. A repair the verifier rejects is reported as a disagreement and the build as blocked,
+    /// never served.
+    ///
+    /// A BLOCKED BUILD SAYS WHY. "Your trader levels are too low" and "this quest is hard" are different
+    /// problems with different remedies, and the search can tell them apart by asking again with the parts
+    /// trader progress would unlock: if that solves, the answer names the trader and the level; if it does
+    /// not, no trader at any level sells what the quest needs. Either way the thresholds the closest
+    /// attempt missed are reported with the margin, so the player sees a number rather than a shrug.
+    ///
+    /// WHEN AN ANSWER GOES STALE. Trader progress changes what is buyable, so the answer is keyed on the
+    /// profile's trader fingerprint and recomputed when it moves - a quality change, since the old build
+    /// is still legal. Selling a part the build counted on is a correctness change, so on every request
+    /// each served build is re-checked part by part against the stash and the traders as they are now,
+    /// and a build that no longer holds up is queued again and served as stale until it is.
+    /// </summary>
+    [Injectable(InjectionType.Singleton)]
+    public class ProfileBuilds(
+        ISptLogger<ProfileBuilds> logger,
+        PartAvailability availability,
+        WeaponSolver solver,
+        WeaponBuildVerifier verifier,
+        WeaponPresets presets,
+        ProfileHelper profileHelper,
+        SaveServer saveServer,
+        LocaleService localeService)
+    {
+        /// <summary>One build requirement as the payload builder states it, with the shared build it
+        /// currently serves for it.</summary>
+        public sealed class Requirement
+        {
+            public string Quest { get; init; } = "";
+            public string Key { get; init; } = "";
+            public WeaponBuildDto Build { get; init; } = new();
+            public IReadOnlyList<WeaponSolver.FittedPart>? Baseline { get; init; }
+        }
+
+        private sealed class Answer
+        {
+            public string Fingerprint = "";
+            public List<ProfileBuildDto> Builds = new();
+            public int Level;
+            public bool FleaAccess;
+            public DateTime At;
+        }
+
+        private readonly object _lock = new();
+        private List<Requirement> _requirements = new();
+        private readonly ConcurrentDictionary<MongoId, Answer> _answers = new();
+
+        private readonly Queue<(MongoId Profile, bool Fresh)> _queue = new();
+        private readonly HashSet<(MongoId, bool)> _queued = new();
+        private bool _working;
+
+        /// <summary>How many repairs the verifier has passed and rejected, over the life of the process.
+        /// Reported together, because "0 rejected" from a check that never ran reads as a pass.</summary>
+        private int _verified;
+        private int _rejected;
+
+        /// <summary>The requirements and their shared builds, as of this boot. Every known profile is queued
+        /// for a pass, off the boot path.</summary>
+        public void Refresh(IReadOnlyList<Requirement> requirements)
+        {
+            lock (_lock) _requirements = requirements.ToList();
+
+            Dictionary<MongoId, SPTarkov.Server.Core.Models.Eft.Profile.SptProfile> profiles;
+
+            try
+            {
+                profiles = saveServer.GetProfiles();
+            }
+            catch (Exception ex)
+            {
+                logger.Info($"Quest Tracker: no profiles to prepare builds for ({ex.Message}).");
+                return;
+            }
+
+            foreach (var id in profiles.Keys) Enqueue(id);
+
+            // And the hypothetical that no profile on this install is: a fresh one. Queued last, behind
+            // every real player, and derived from the first real profile's trader read.
+            var first = profiles.Keys.FirstOrDefault();
+
+            if (!string.IsNullOrEmpty(first.ToString())) Enqueue(first, fresh: true);
+        }
+
+        public string GetPayloadJson(MongoId sessionId) =>
+            JsonSerializer.Serialize(Build(sessionId), WireJson.Options);
+
+        private ProfileBuildsDto Build(MongoId sessionId)
+        {
+            var payload = new ProfileBuildsDto();
+
+            var pmc = TryGetProfile(sessionId);
+
+            if (pmc == null) return payload;
+
+            payload.HasProfile = true;
+            payload.Level = pmc.Info?.Level ?? 0;
+
+            var sources = availability.For(sessionId, pmc);
+
+            if (sources == null) return payload;
+
+            payload.FleaAccess = sources.FleaAccess;
+            payload.FleaLevel = sources.FleaLevel == int.MaxValue ? 0 : sources.FleaLevel;
+
+            _answers.TryGetValue(sessionId, out var answer);
+
+            // Stale for a QUALITY reason (trader progress moved) or a CORRECTNESS reason (a part the answer
+            // counted on is no longer obtainable). Both queue a recompute; only the second is a build the
+            // player should not act on, and the flag says which.
+            var moved = answer == null || answer.Fingerprint != sources.Fingerprint;
+            var broken = answer != null && !StillObtainable(answer, sources);
+
+            if (moved || broken) Enqueue(sessionId);
+
+            if (answer == null)
+            {
+                payload.Ready = false;
+                return payload;
+            }
+
+            payload.Ready = !moved && !broken;
+            payload.Stale = moved || broken;
+            payload.Builds = answer.Builds;
+
+            return payload;
+        }
+
+        /// <summary>Whether every part an answer relies on is still obtainable as things stand now.</summary>
+        private bool StillObtainable(Answer answer, PartAvailability.Sources sources)
+        {
+            foreach (var build in answer.Builds)
+            {
+                if (build.Status is not ("ok" or "repaired")) continue;
+
+                foreach (var part in build.Parts)
+                {
+                    if (part.Tier == "fitted") continue;
+                    if (!part.Template.TryParseMongoId(out var template)) return false;
+                    if (!sources.Has(template)) return false;
+                }
+            }
+
+            return true;
+        }
+
+        private void Enqueue(MongoId profile, bool fresh = false)
+        {
+            lock (_lock)
+            {
+                if (!_queued.Add((profile, fresh))) return;
+
+                _queue.Enqueue((profile, fresh));
+
+                if (_working) return;
+
+                _working = true;
+                _ = Task.Run(Work);
+            }
+        }
+
+        /// <summary>The one worker. Drains the queue and exits; the next enqueue starts another.</summary>
+        private void Work()
+        {
+            try { Thread.CurrentThread.Priority = ThreadPriority.Lowest; }
+            catch (Exception) { /* not a reason to skip the work */ }
+
+            while (true)
+            {
+                (MongoId Profile, bool Fresh) item;
+
+                lock (_lock)
+                {
+                    if (_queue.Count == 0)
+                    {
+                        _working = false;
+                        return;
+                    }
+
+                    item = _queue.Dequeue();
+                }
+
+                try
+                {
+                    Compute(item.Profile, item.Fresh);
+                }
+                catch (Exception ex)
+                {
+                    logger.Warning($"Quest Tracker: could not prepare builds for profile {item.Profile} ({ex.Message}).");
+                }
+                finally
+                {
+                    lock (_lock) _queued.Remove(item);
+                }
+            }
+        }
+
+        private void Compute(MongoId profileId, bool fresh)
+        {
+            List<Requirement> requirements;
+            lock (_lock) requirements = _requirements;
+
+            if (requirements.Count == 0) return;
+
+            var pmc = TryGetProfile(profileId);
+            if (pmc == null) return;
+
+            var sources = availability.For(profileId, pmc);
+            if (sources == null) return;
+
+            if (fresh) sources = availability.Fresh(sources);
+
+            var who = fresh
+                ? "a FRESH profile (hypothetical: every trader at loyalty 1, empty stash, no flea market)"
+                : $"profile {profileId} (level {pmc.Info?.Level}, flea {(sources.FleaAccess ? "open" : "closed")})";
+
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            var locale = localeService.GetLocaleDb();
+            var answer = new Answer
+            {
+                Fingerprint = sources.Fingerprint,
+                Level = pmc.Info?.Level ?? 0,
+                FleaAccess = sources.FleaAccess,
+                At = DateTime.UtcNow
+            };
+
+            var ok = 0;
+            var repaired = 0;
+            var traderLevel = 0;
+            var unsold = 0;
+            var needsFlea = 0;
+            var unsolved = 0;
+            var verifiedHere = 0;
+            var rejectedHere = 0;
+            var nodes = 0L;
+            var cash = 0L;
+            var barters = 0;
+
+            // THE COST OF RESTRICTION, over the builds that were repaired: how many more parts and how many
+            // more roubles the obtainable build costs than the shared one it replaced. The shared build's
+            // absent parts have no price this profile can be quoted, so its priced cost is over the parts
+            // that could be priced and the count of those that could not is reported beside it - the
+            // comparison understates the shared build's cost, never the repaired one's.
+            var sharedParts = 0;
+            var repairedParts = 0;
+            var sharedCash = 0L;
+            var repairedCash = 0L;
+            var sharedUnpriced = 0;
+
+            foreach (var requirement in requirements)
+            {
+                var judged = Judge(requirement, sources, locale, fresh ? "fresh" : profileId.ToString(),
+                    ref verifiedHere, ref rejectedHere);
+
+                answer.Builds.Add(judged);
+                nodes += judged.Nodes;
+                cash += judged.Cash;
+                barters += judged.Barters;
+
+                switch (judged.Status)
+                {
+                    case "ok": ok++; break;
+                    case "repaired":
+                        repaired++;
+                        repairedParts += judged.Parts.Count;
+                        repairedCash += judged.Cash + judged.FleaEstimate;
+
+                        if (requirement.Baseline != null
+                            && requirement.Build.WeaponTemplate.TryParseMongoId(out var repairedWeapon))
+                        {
+                            var sharedDefaults = presets.For(repairedWeapon);
+
+                            sharedParts += requirement.Baseline.Count;
+
+                            foreach (var part in requirement.Baseline)
+                            {
+                                var (tier, price) = sources.Classify(part.Template, sharedDefaults);
+
+                                if (tier is PartAvailability.Tier.Buyable or PartAvailability.Tier.Flea) sharedCash += price ?? 0;
+                                else if (tier is PartAvailability.Tier.Absent or PartAvailability.Tier.Barter) sharedUnpriced++;
+                            }
+                        }
+
+                        break;
+                    case "unsolved": unsolved++; break;
+                    default:
+                        if (judged.Why.StartsWith("trader", StringComparison.Ordinal)) traderLevel++;
+                        else if (judged.Why.StartsWith("flea", StringComparison.Ordinal)) needsFlea++;
+                        else unsold++;
+                        break;
+                }
+            }
+
+            if (!fresh) _answers[profileId] = answer;
+
+            Interlocked.Add(ref _verified, verifiedHere);
+            Interlocked.Add(ref _rejected, rejectedHere);
+
+            logger.Info(
+                $"Quest Tracker: builds for {who} - {ok} of {requirements.Count} shared build(s) usable as " +
+                $"they are, {repaired} repaired within what this profile can get, {traderLevel} blocked by trader " +
+                $"level, {needsFlea} blocked until the flea market, {unsold} blocked because no trader sells what " +
+                $"they need, {unsolved} with no shared build to start from. {verifiedHere} repaired build(s) " +
+                $"passed the verifier and {rejectedHere} were rejected by it. {nodes:N0} node(s) in " +
+                $"{clock.Elapsed.TotalSeconds:0.0} s on one thread. Buying everything not owned or fitted would " +
+                $"cost {cash:N0} roubles plus {barters} barter(s).");
+
+            if (repaired > 0)
+                logger.Info(
+                    $"Quest Tracker: the cost of restriction for {who} - over the {repaired} repaired build(s), " +
+                    $"{(double)sharedParts / repaired:0.##} parts and {(double)sharedCash / repaired:N0} roubles per shared " +
+                    $"build (priced parts only; {sharedUnpriced} absent or barter part(s) carry no price) against " +
+                    $"{(double)repairedParts / repaired:0.##} parts and {(double)repairedCash / repaired:N0} roubles " +
+                    $"(trader prices plus flea estimates) per repaired build.");
+        }
+
+        /// <summary>One requirement for one profile: the shared build if every part is obtainable, else a
+        /// build searched from what is, else the reason there is none.</summary>
+        private ProfileBuildDto Judge(
+            Requirement requirement,
+            PartAvailability.Sources sources,
+            Dictionary<string, string> locale,
+            string who,
+            ref int verified,
+            ref int rejected)
+        {
+            var dto = JudgeQuietly(requirement, sources, locale, ref verified, ref rejected);
+
+            // Every build that is not simply the shared one, named, so the wording can be read against
+            // what a player would do with it. The ok ones are the majority and say nothing new.
+            if (dto.Status == "ok") return dto;
+
+            var defaults = requirement.Build.WeaponTemplate.TryParseMongoId(out var weapon) ? presets.For(weapon) : null;
+
+            var namedParts = new HashSet<MongoId>();
+            foreach (var id in requirement.Build.RequiredItemIds)
+                if (id.TryParseMongoId(out var parsed)) namedParts.Add(parsed);
+
+            var avoided = requirement.Baseline == null
+                ? new List<string>()
+                : requirement.Baseline
+                    .Where(part => !namedParts.Contains(part.Template)
+                                   && sources.Classify(part.Template, defaults, weapon).Tier == PartAvailability.Tier.Absent)
+                    .Select(part => QuestPayloadBuilder.ResolveItemName(part.Template.ToString(), locale))
+                    .Distinct().ToList();
+
+            logger.Info(
+                $"Quest Tracker: {who} - '{dto.QuestName}' ({dto.WeaponName}): {dto.Status}" +
+                (dto.Status == "repaired"
+                    ? $" - {dto.Parts.Count} part(s), {dto.Cash:N0} roubles + {dto.Barters} barter(s)" +
+                      (dto.FleaEstimate > 0 ? $" + about {dto.FleaEstimate:N0} on the flea" : "") +
+                      $", {dto.Nodes:N0} nodes; the shared build needed " +
+                      string.Join(", ", avoided.Take(4)) + (avoided.Count > 4 ? $" and {avoided.Count - 4} more" : "")
+                    : dto.Status == "blocked"
+                        ? $" - {dto.Why}" +
+                          (dto.Unmet.Count > 0 ? $"; closest attempt missed: {string.Join("; ", dto.Unmet.Take(3))}" : "") +
+                          $"; the shared build needed {string.Join(", ", avoided.Take(4))}"
+                        : ""));
+
+            return dto;
+        }
+
+        private ProfileBuildDto JudgeQuietly(
+            Requirement requirement,
+            PartAvailability.Sources sources,
+            Dictionary<string, string> locale,
+            ref int verified,
+            ref int rejected)
+        {
+            var build = requirement.Build;
+            var dto = new ProfileBuildDto
+            {
+                Key = requirement.Key,
+                QuestName = requirement.Quest,
+                WeaponTemplate = build.WeaponTemplate,
+                WeaponName = build.WeaponName
+            };
+
+            if (!build.WeaponTemplate.TryParseMongoId(out var weapon) || requirement.Baseline == null)
+            {
+                dto.Status = "unsolved";
+                return dto;
+            }
+
+            var defaults = presets.For(weapon);
+
+            var thresholds = build.Thresholds.Select(t => (t.Field, t.Compare, t.Value)).ToList();
+
+            var mustInclude = new List<MongoId>();
+            foreach (var id in build.RequiredItemIds)
+                if (id.TryParseMongoId(out var parsed)) mustInclude.Add(parsed);
+
+            var mustIncludeCategories = new List<MongoId>();
+            foreach (var id in build.RequiredCategoryIds)
+                if (id.TryParseMongoId(out var parsed)) mustIncludeCategories.Add(parsed);
+
+            var named = new HashSet<MongoId>(mustInclude);
+
+            // THE FILTER. Every part of the shared build, classified. Obtainable throughout means the shared
+            // build is this player's build too, and nothing is searched. A part the QUEST names is not a
+            // reason to search: no build can avoid it, so its row says what it is and the build stands.
+            var blocked = false;
+
+            foreach (var part in requirement.Baseline)
+            {
+                var row = Row(part, sources, defaults, locale, weapon, named);
+
+                if (row.Tier == "absent" && !row.Named) blocked = true;
+
+                dto.Parts.Add(row);
+            }
+
+            if (!blocked)
+            {
+                dto.Status = "ok";
+                Total(dto);
+                return dto;
+            }
+
+            // THE REPAIR. Everything the profile can get, plus what the weapon already wears, plus what the
+            // quest itself names - a named part is a fact about the quest, not a choice, and if the player
+            // cannot get it the report says so rather than searching around it. Owned means LOOSE: a part
+            // fitted to a gun they use is never assumed strippable.
+            var allowed = new HashSet<MongoId>(sources.Owned);
+            if (sources.OwnedWeapons.TryGetValue(weapon, out var inPlace)) allowed.UnionWith(inPlace);
+            allowed.UnionWith(sources.Buyable.Keys);
+            allowed.UnionWith(sources.Barter);
+            if (sources.FleaAccess) allowed.UnionWith(sources.Flea.Keys);
+            if (defaults != null) allowed.UnionWith(defaults.Occupants.Values);
+            allowed.UnionWith(mustInclude);
+
+            var result = solver.Solve(weapon, thresholds, mustInclude, mustIncludeCategories, allowed);
+
+            dto.Nodes = result.NodesOpened;
+
+            if (result.Found)
+            {
+                var verdict = verifier.Verify(weapon, result.Parts, thresholds, mustInclude, mustIncludeCategories);
+
+                if (verdict.Verified)
+                {
+                    verified++;
+
+                    dto.Status = "repaired";
+                    dto.Verified = true;
+                    dto.Parts.Clear();
+
+                    foreach (var part in result.Parts) dto.Parts.Add(Row(part, sources, defaults, locale, weapon, named));
+
+                    // A repaired build made only of obtainable parts, by construction, the quest's own named
+                    // parts aside; said out loud if that ever stops being true, rather than trusted.
+                    if (dto.Parts.Any(row => row.Tier == "absent" && !row.Named))
+                        logger.Warning(
+                            $"Quest Tracker: a repaired build for '{build.WeaponName}' names a part the profile " +
+                            "cannot get. The restricted search let one through.");
+
+                    Total(dto);
+                    return dto;
+                }
+
+                rejected++;
+
+                logger.Warning(
+                    $"Quest Tracker: the solver and the verifier DISAGREE about a repaired build for " +
+                    $"'{build.WeaponName}' - the solver says it satisfies the requirement, the verifier says " +
+                    $"[{string.Join("; ", verdict.Failures.Take(3))}]. It is NOT served. The verifier is right.");
+            }
+
+            // BLOCKED. The closest attempt from what the player can get, with the thresholds it missed and
+            // by how much - a number rather than a shrug - and then why: would trader progress fix it,
+            // would the flea market, or does nobody sell it.
+            dto.Status = "blocked";
+            dto.Unmet.AddRange(result.Unmet.Select(line => Named(line, locale)));
+            dto.Parts.Clear();
+
+            foreach (var part in result.Parts) dto.Parts.Add(Row(part, sources, defaults, locale, weapon, named));
+
+            Total(dto);
+
+            var withGated = new HashSet<MongoId>(allowed);
+            withGated.UnionWith(sources.Gated.Keys);
+
+            var gated = solver.Solve(weapon, thresholds, mustInclude, mustIncludeCategories, withGated);
+
+            dto.Nodes += gated.NodesOpened;
+
+            if (gated.Found
+                && verifier.Verify(weapon, gated.Parts, thresholds, mustInclude, mustIncludeCategories).Verified)
+            {
+                var needs = new List<string>();
+
+                foreach (var part in gated.Parts)
+                {
+                    if (allowed.Contains(part.Template)) continue;
+                    if (!sources.Gated.TryGetValue(part.Template, out var gate)) continue;
+
+                    needs.Add(
+                        $"{QuestPayloadBuilder.ResolveItemName(part.Template.ToString(), locale)} from " +
+                        $"{TraderName(gate.Trader, locale)} at loyalty {gate.Level}");
+                }
+
+                dto.Why = "trader level - " + string.Join("; ", needs.Distinct().Take(6));
+
+                return dto;
+            }
+
+            if (!sources.FleaAccess && sources.Flea.Count > 0)
+            {
+                var withFlea = new HashSet<MongoId>(withGated);
+                withFlea.UnionWith(sources.Flea.Keys);
+
+                var flea = solver.Solve(weapon, thresholds, mustInclude, mustIncludeCategories, withFlea);
+
+                dto.Nodes += flea.NodesOpened;
+
+                if (flea.Found
+                    && verifier.Verify(weapon, flea.Parts, thresholds, mustInclude, mustIncludeCategories).Verified)
+                {
+                    dto.Why = $"flea market - reachable once the flea market unlocks at level {sources.FleaLevel}";
+                    return dto;
+                }
+            }
+
+            dto.Why = "not sold - no trader at any level sells what this build needs";
+
+            return dto;
+        }
+
+        private static ProfilePartDto Row(
+            WeaponSolver.FittedPart part,
+            PartAvailability.Sources sources,
+            WeaponPresets.Defaults? defaults,
+            Dictionary<string, string> locale,
+            MongoId questWeapon,
+            HashSet<MongoId> named)
+        {
+            var (tier, price) = sources.Classify(part.Template, defaults, questWeapon);
+
+            var row = new ProfilePartDto
+            {
+                Slot = part.SlotName,
+                Template = part.Template.ToString(),
+                Name = QuestPayloadBuilder.ResolveItemName(part.Template.ToString(), locale),
+                Tier = tier.ToString().ToLowerInvariant(),
+                Price = price,
+                Named = named.Contains(part.Template)
+            };
+
+            if (tier == PartAvailability.Tier.Absent && sources.Gated.TryGetValue(part.Template, out var gate))
+                row.Gate = $"{TraderName(gate.Trader, locale)} at loyalty {gate.Level}";
+
+            // A copy they hold that is not loose: said, with the weapon, beside whatever the part costs to
+            // buy - so "strip it or buy another" is a decision they can make from the row.
+            if (tier is not (PartAvailability.Tier.Fitted or PartAvailability.Tier.InPlace or PartAvailability.Tier.Owned)
+                && sources.Holdings.TryGetValue(part.Template, out var holding) && holding.FittedAnywhere)
+            {
+                var equipped = holding.FittedToEquipped.FirstOrDefault();
+                var stored = holding.FittedToStored.FirstOrDefault();
+
+                row.Where = holding.FittedToEquipped.Count > 0
+                    ? $"fitted to your equipped {QuestPayloadBuilder.ResolveItemName(equipped.ToString(), locale)}"
+                    : $"fitted to your {QuestPayloadBuilder.ResolveItemName(stored.ToString(), locale)}";
+            }
+
+            return row;
+        }
+
+        /// <summary>A solver line with every template id in it replaced by the part's name. The search
+        /// reports ids; a player reads names.</summary>
+        private static string Named(string line, Dictionary<string, string> locale) =>
+            System.Text.RegularExpressions.Regex.Replace(line, "[0-9a-f]{24}",
+                match => QuestPayloadBuilder.ResolveItemName(match.Value, locale));
+
+        /// <summary>Cash, barters and flea estimates summed over what the player would have to obtain.</summary>
+        private static void Total(ProfileBuildDto dto)
+        {
+            dto.Cash = 0;
+            dto.Barters = 0;
+            dto.FleaEstimate = 0;
+
+            foreach (var part in dto.Parts)
+            {
+                switch (part.Tier)
+                {
+                    case "buyable": dto.Cash += part.Price ?? 0; break;
+                    case "barter": dto.Barters++; break;
+                    case "flea": dto.FleaEstimate += part.Price ?? 0; break;
+                }
+            }
+        }
+
+        private static string TraderName(MongoId trader, Dictionary<string, string> locale) =>
+            locale.TryGetValue($"{trader} Nickname", out var name) && !string.IsNullOrWhiteSpace(name)
+                ? name
+                : trader.ToString();
+
+        private PmcData? TryGetProfile(MongoId sessionId)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(sessionId.ToString())) return null;
+
+                return profileHelper.GetPmcProfile(sessionId);
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+    }
+}

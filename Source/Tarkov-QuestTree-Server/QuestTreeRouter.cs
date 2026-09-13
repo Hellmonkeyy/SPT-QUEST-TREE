@@ -29,10 +29,10 @@ namespace QuestTreeServer
             JsonUtil jsonUtil, ISptLogger<QuestTreeRouter> logger, QuestPayloadBuilder payloadBuilder,
             KappaPayloadBuilder kappaBuilder, ProfilePayloadBuilder profileBuilder,
             MapMarkerPayloadBuilder markerBuilder, ZoneStore zoneStore, QuestFacts facts,
-            RaidCheckPayloadBuilder raidCheckBuilder)
+            RaidCheckPayloadBuilder raidCheckBuilder, ProfileBuilds profileBuilds)
             : base(jsonUtil, BuildRoutes(
                 logger, payloadBuilder, kappaBuilder, profileBuilder, markerBuilder, zoneStore, facts,
-                raidCheckBuilder))
+                raidCheckBuilder, profileBuilds))
         {
         }
 
@@ -44,9 +44,19 @@ namespace QuestTreeServer
             ISptLogger<QuestTreeRouter> logger, QuestPayloadBuilder payloadBuilder,
             KappaPayloadBuilder kappaBuilder, ProfilePayloadBuilder profileBuilder,
             MapMarkerPayloadBuilder markerBuilder, ZoneStore zoneStore, QuestFacts facts,
-            RaidCheckPayloadBuilder raidCheckBuilder) =>
+            RaidCheckPayloadBuilder raidCheckBuilder, ProfileBuilds profileBuilds) =>
             new List<RouteAction>
             {
+                // Profile-scoped: the weapon builds as THIS player can assemble them. Answered from what
+                // the background pass has already worked out - never solved inside the request, which the
+                // client makes synchronously on the game's main thread - and a stale or missing answer
+                // says so rather than blocking.
+                new RouteAction<EmptyRequestData>(
+                    "/questtree/builds",
+                    (url, info, sessionId, output, cancellationToken) =>
+                        Guarded(logger, url, () => profileBuilds.GetPayloadJson(sessionId),
+                            () => new ProfileBuildsDto())),
+
                 // The one route with a body: the client's in-raid zone harvest (see ZoneHarvester
                 // in the client half). SPT deserializes the body into ZoneHarvestRequest for us.
                 // Rebuilding the markers here is deliberate - the client posts fire-and-forget,

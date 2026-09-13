@@ -1,4 +1,4 @@
-﻿using System.Collections.Generic;
+using System.Collections.Generic;
 
 namespace QuestTreeServer
 {
@@ -370,6 +370,11 @@ namespace QuestTreeServer
     /// "Handover the custom M4A1  0/1", which says nothing at all.</summary>
     public sealed class WeaponBuildDto
     {
+        /// <summary>Identifies this requirement across payloads: the same hash the build history is keyed
+        /// on, so the per-profile answer on /questtree/builds can be joined to this row. Two quests
+        /// stating the same requirement share it, which is correct - they share the answer too.</summary>
+        public string Key { get; set; } = "";
+
         /// <summary>The base weapon. Every vanilla condition names exactly one, which is measured
         /// rather than assumed.</summary>
         public string WeaponTemplate { get; set; } = "";
@@ -547,6 +552,109 @@ namespace QuestTreeServer
         public string Compare { get; set; } = "";
 
         public double Value { get; set; }
+    }
+
+    /// <summary>The weapon builds as one profile can assemble them. See ProfileBuilds.</summary>
+    public sealed class ProfileBuildsDto
+    {
+        /// <summary>1: first version.</summary>
+        public int SchemaVersion { get; set; } = 1;
+
+        public string ModVersion { get; set; } = ModInfo.Version;
+
+        /// <summary>False for an out-of-game request. The shape stays valid.</summary>
+        public bool HasProfile { get; set; }
+
+        /// <summary>True when Builds is current for this profile's traders and stash. False with an empty
+        /// list means the pass has not run yet; false with builds means they are STALE - see Stale - and a
+        /// recompute is queued.</summary>
+        public bool Ready { get; set; }
+
+        public bool Stale { get; set; }
+
+        public int Level { get; set; }
+
+        /// <summary>Whether this profile may use the flea market, and the level that gates it.</summary>
+        public bool FleaAccess { get; set; }
+
+        public int FleaLevel { get; set; }
+
+        public List<ProfileBuildDto> Builds { get; set; } = new();
+    }
+
+    public sealed class ProfileBuildDto
+    {
+        /// <summary>Joins to WeaponBuildDto.Key on the quest payload.</summary>
+        public string Key { get; set; } = "";
+
+        public string QuestName { get; set; } = "";
+
+        public string WeaponTemplate { get; set; } = "";
+
+        public string WeaponName { get; set; } = "";
+
+        /// <summary>"ok" - the shared build, every part obtainable; "repaired" - searched again within what
+        /// this profile can get, and passed the verifier; "blocked" - no build within reach, see Unmet and
+        /// Why; "unsolved" - no shared build exists to start from.</summary>
+        public string Status { get; set; } = "";
+
+        /// <summary>For ok and repaired, the build. For a build blocked by trader level, the build that
+        /// trader progress would unlock, with the gated parts marked absent and their gate named.</summary>
+        public List<ProfilePartDto> Parts { get; set; } = new();
+
+        /// <summary>Roubles at this profile's trader prices for every buyable part. Barters are counted, not
+        /// priced; flea parts are estimated separately because that price moves.</summary>
+        public long Cash { get; set; }
+
+        public int Barters { get; set; }
+
+        public long FleaEstimate { get; set; }
+
+        /// <summary>Blocked only: the thresholds the closest obtainable attempt missed, with the margin.</summary>
+        public List<string> Unmet { get; set; } = new();
+
+        /// <summary>Blocked only. Starts with "trader level" (naming the parts, traders and levels that would
+        /// unlock it), "flea market" (the level that unlocks it) or "not sold".</summary>
+        public string Why { get; set; } = "";
+
+        /// <summary>Repaired only: the independent verifier passed this build. Never true otherwise.</summary>
+        public bool Verified { get; set; }
+
+        /// <summary>Search nodes spent on this profile for this requirement. Zero for a build served as it
+        /// was.</summary>
+        public int Nodes { get; set; }
+    }
+
+    public sealed class ProfilePartDto
+    {
+        public string Slot { get; set; } = "";
+
+        public string Template { get; set; } = "";
+
+        public string Name { get; set; } = "";
+
+        /// <summary>"fitted" (on the default preset), "inplace" (already fitted to a copy of the quest's
+        /// weapon this profile owns), "owned" (loose in the stash), "buyable" (a trader sells it for cash,
+        /// see Price), "barter" (a trader offers it for goods - no price exists), "flea" (listable and the
+        /// profile has access - Price is the server's flea price, an estimate), "absent".</summary>
+        public string Tier { get; set; } = "";
+
+        /// <summary>Where a copy the profile holds is FITTED, when it is not loose: "fitted to your <weapon>"
+        /// or "fitted to your equipped <weapon>". Set alongside a priced tier, never instead of one - a
+        /// part on a gun in use is priced as a purchase, because stripping a working weapon is the
+        /// player's call and never the mod's assumption. Empty when there is no such copy.</summary>
+        public string Where { get; set; } = "";
+
+        /// <summary>True for a part the quest itself names. Its tier says whether the player can get it, but
+        /// no search can avoid it - the quest demands it - so a build is not "blocked" by it.</summary>
+        public bool Named { get; set; }
+
+        /// <summary>Roubles for buyable and flea; zero for fitted and owned; null for barter and absent. A
+        /// null is "no price exists", never "free".</summary>
+        public long? Price { get; set; }
+
+        /// <summary>Absent parts only: the trader and loyalty level that would sell it, if any does.</summary>
+        public string Gate { get; set; } = "";
     }
 
     public sealed class RaidCheckDto
