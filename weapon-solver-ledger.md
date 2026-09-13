@@ -12,6 +12,12 @@ means no history file (a stranger's first boot); warm means the trained history 
 **Stop rule.** If three consecutive changes measure no improvement, stop and say so rather than
 grinding. Report the negative result; do not keep a change out of momentum.
 
+**Stopped 2026-09-13 for release readiness**, by decision of the coordinator and the user, after item 3 landed
+and the sweep answered. Not started, deliberately: the price lower bound (item 4, drafted in the scratchpad
+as `edit_bound.py`, unapplied), the joint bound, and anything aimed at 60-of-60 provably minimal. The
+measurement that mattered most today - 23 and 38 of 60 builds naming a part the player could not buy - cost
+minutes; the hours went on minimality. The solver list is unbounded and the release list is short.
+
 ## The unit
 
 **An attempt is one search of one requirement.** Until 2026-09-12 the unit was a ROUND - one attempt for
@@ -71,6 +77,8 @@ run. The guard in `6a2f455` is what makes it harmless if it does.
 | 18 | Every expensive check leaves a durable record - bound, its stability, failed falsifications, nodes spent, search cost - invalidated by the item fingerprint (`94e74d1`, `447c84d`) | evidence accumulates across sessions; ~30% slower with the falsifier on | yes |
 | 19 | Per-profile filter-and-repair over the shared baseline (`c991646`): six availability tiers, three ownership states, the planner's `Extend`/`Nearest` made to honour `Allowed`, verifier on every repair, three-way diagnosis of a blocked build, `/questtree/builds` | see "Availability" below: a fresh profile goes from 6 of 60 reachable to 14 usable + 9 repaired (verifier 9 of 9), 37 blocked by trader level with the trader and level named; both real profiles 59 and 58 of 60 usable as shipped | yes |
 | 20 | Client reads `/questtree/builds` and lays it over the shared build; mirror catches up with `ed3e44e`, schema 9 -> 10 (`1c8a56c`) | compiles and degrades to the old panel on every missing input; **not yet seen on screen** | yes, unverified |
+| 21 | Objective `price + PerPurchase x purchases`, handbook-priced for the shared baseline and trader/flea/stash-priced per profile; the incumbent's cost measured live on every path (`7cff9fc`) | 10,554,732 roubles across 60 at handbook + 10k/purchase (175,912 per build), 0 unpriced purchases, 6,117 templates priced; the launch search found cheaper builds for 18 of 60 in its first 390 attempts; gate 8 of 9 (6a failed for defect 8, not the objective) | yes |
+| 22 | PerPurchase sweep, five cold solves compared per build against the 10k default | 0: 19 of 60 differ (614 parts, 435 changes); 5k: 11 (606); 10k: - (603, 421); 25k: 11 (600, 415); 50k: 13 (600, 413). Not theatre: the knob moves 11-19 builds and trades parts for purchases monotonically. 10k kept | measurement |
 
 ## Negative results - do not retry these without new information
 
@@ -153,7 +161,27 @@ independent check rather than a closer reading.
    compares against that zero until a normal boot describes it. The fix is to measure the incumbent's cost
    live rather than trust the file, which lands with the price objective.
 
-**The standing rule these seven share (2026-09-13):** any condition whose inputs can be structurally
+8. **A replacement discarded the requirement's evidence** (`535a160`, caught by the restated condition 6 on
+   `7cff9fc`). `Put` built a fresh entry, so the bound, its session count, the search cost and the
+   falsification evidence restarted at zero whenever a cheaper build replaced the remembered one; the next
+   survey re-derived the bound and the gate reported it moving "0 -> 6". Rare under the changes objective
+   (late improvements were few and the next attempt on the key re-recorded the bound before the snapshot),
+   constant under cost while the history was being rewritten - and it had already cost evidence: 5,022
+   recorded falsifications on the shipped file, 2,392 on the install's. The first defect the restated check
+   caught rather than let pass. The bound, its stability and the search cost now follow the requirement;
+   falsification evidence follows a replacement only of the same part count. Gate on `535a160` (clean
+   stamp): PASSED, all nine - 7,805 attempts, 0 disagreements, 0 rejections, 5,930 bound comparisons / 0
+   disagreements, 10,027,850 -> 9,986,014 roubles at 607 -> 609 parts, 60 bounds compared and 0 moved on
+   both transitions, file predicts 15 and both boots reported 15, cold 60 of 60.
+
+**The shipped history** (`Source/Tarkov-QuestTree-Server/weapon-builds.json`, copied from the install after
+that gate): generation 102,546, solver 9, 60 entries, 609 parts, 9,986,014 roubles at handbook prices plus
+10,000 per purchase, 409 changes, no entry with a zero cost or change count, 60 bounds recorded (15 at the
+part-count bound, the shortest-standing for 6 sessions), 2,392 failed falsification attacks over 67,951,402
+nodes, item fingerprint `7F63D6257473D0B58F7CF6C02358EFCB9E4C008745A1AAAEE7F30FCAC0C360E1`. On an install
+with a different item set it is carried over: every build re-verified before use, every proof reopened.
+
+**The standing rule these eight share (2026-09-13):** any condition whose inputs can be structurally
 constant must be proven able to fail before it counts as evidence. A field some code path never writes, a
 count with no denominator, a comparison against a value that is zero by default - each reads as a pass.
 Sweep candidates, not yet swept: every check in `regression.ps1` and `target.ps1` that compares a figure
@@ -197,7 +225,8 @@ Recorded because part-count bounds sitting beside a different objective read as 
    kept as the tiebreak below it. The MP-133 evidence: the default ships a 510mm barrel and the search
    picked the 510mm barrel *with rib* - same part count, same to every threshold, one already on the gun.
    Current state: **488 changes across the 60 builds, 8.13 per build**, all 60 weapons have a preset.
-3. **Pending: `price + PerPurchase x purchases`**, with owned parts free and unobtainable parts excluded.
+3. **Landed (`7cff9fc`): `price + PerPurchase x purchases`**, with parts on the default preset free, loose
+   stash parts free in the per-profile pass, and unobtainable parts excluded there (`c991646`).
    The MP-133 evidence again: the quest wants a combined tactical device, the search fitted a Zenit
    Klesch-2P at 15,676 roubles, and the cheapest qualifying device is an NcSTAR laser at 4,100 - which is
    what every community guide recommends. Price was invisible and headroom broke the tie.
