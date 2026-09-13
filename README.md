@@ -77,16 +77,36 @@ view. Without DynamicMaps you get the list alone.
 
 ## The tree
 
-The **Tree** button, top right, is the whole progression. Each quest is a box with a status bar on
-its left edge - green in progress, amber available, dark green completed, grey locked - and lines
-run through the column gaps to what it unlocks.
+The **Tree** button, top right, is the whole progression. Each quest is a box that says what it is
+without being clicked: a status mark and the name, then the trader, the level it wants and how many
+of its objectives are done - with a bar along the bottom for the one you are on. Marks on the right
+say what it pays out: experience, an item, reputation, a trader unlock.
 
-- **Zoom out** and the boxes simplify: title only, then a short code (`GUN-3`, `EM-4`) that keeps a
-  chain readable at any distance. Two-part titles ("Gunsmith - Part 3") take two lines.
-- **Hover a quest** and it lights up with everything it requires and unlocks, while the rest of the
-  tree fades away from it - harder the closer you are zoomed, softer in the overview.
-- **Focus (`X`)** cuts the tree down to the quests you can work on now, plus what they need and
-  what they unlock.
+**Five states, and each has a glyph as well as a colour**, so the tree still reads if you are
+colour-blind or the box is small: in progress, available to start, completed (dimmed and struck
+through, so finished work recedes), **level gated** - every prerequisite quest done but you are
+short a level, loyalty or standing - and locked behind another quest.
+
+Level-gated is its own state because it is the one that changes what you do: "another quest first"
+means write it off for now, "you need two more levels" means keep it in mind.
+
+**A box you cannot start says why**, in place of its trader line - `Needs Carbines III`, or `Lv 30`.
+That is the single most useful thing a blocked quest can tell you and it used to cost a click.
+
+- **The box is the same box at every zoom.** It does not swap to a title, or to a code, or to a
+  coloured bar - it scales, and nothing appears or disappears while you move.
+- **Rest on any box** and a card appears with the full name, the level and loyalty it wants, how
+  deep in its branch you are, every objective with its live count, and the rewards. No click, and
+  the detail panel stays on whatever you were comparing against.
+- **Hovering lights the whole chain** - every quest this one waits on, all the way back, and
+  everything that unlocks from it, all the way forward, with the rest of the tree fading away.
+- **Search highlights in place.** Matches light up, everything else dims, and nothing moves. The
+  count reads `12 matches - 830 quests shown`. `Enter` jumps to each in turn.
+- **Focus (`X`)** cuts the tree to what you can work on now and everything within four quests of
+  it. The reach is a setting, 1 to 10.
+- **A coloured slab down each box** says whose chain it is, with that trader's portrait beside the
+  quest their chains begin at. Modded traders get a colour of their own, chosen to avoid the status
+  colours - so a trader can never be mistaken for a state.
 - **Tabs** along the top: All, then one per trader, ordered by how many of their quests you can act
   on. The row scrolls.
 - **Badges** in a box's corner: a gold **K** for a quest on the Kappa list, a blue **C** for one
@@ -96,15 +116,103 @@ run through the column gaps to what it unlocks.
   and sharp - four direct requirements instead of a hundred and thirty-six. Settings chooses which
   mark the boxes wear, so you can have the wide one, the narrow one, or both.
 
-**Click a quest** for its detail: status, level and trader chips, why it is locked, the wiki page,
-then **Requires** (with "started is enough" or "N h after" where a prerequisite asks for that),
-**Route** (the whole chain between you and it, in the order you can do it), **Bring** - the items
-you have to be carrying, named properly, with how many you already hold and what happens to each
-(handed in, found in raid, left in place, planted) - **Objectives** with
-live progress and a "Show on the map" link where there is a pin, **Rewards** and **Unlocks**. Every
-quest named in there is a link; **Back** at the top retraces them, and returns to the list you came
-from. The box the panel is about is outlined in the accent colour. The panel collapses with the
+**Click a quest** for its detail: status, level and trader chips, why it is locked - and the quest
+in your way is a link straight to it - then the wiki page, and:
+
+- **Build**, for a Gunsmith-style quest: the weapon, every number the game will check it against,
+  the parts it insists on, and a worked-out build that meets them. Its own section below.
+- **Take with you** - the items you must be carrying, named properly, with how many you already
+  hold and what happens to each: handed in, found in raid, left in place, planted.
+- **Route** - the whole chain between you and this quest, in the order you can do it, each step a
+  link, carrying "started is enough" or "N h after" where a prerequisite asks for that.
+- **Objectives** with live progress bars, a "Show on the map" link where there is a pin, and each
+  one opening the item it names.
+- **Rewards**, each marked by kind and each opening the item it gives you. An unlocked trader offer
+  names the item rather than saying "a new offer".
+- **Unlocks** - what finishing it opens up.
+
+Every quest named in there is a link; **Back** at the top retraces them, and returns to the list you
+came from. The box the panel is about is outlined in the accent colour. The panel collapses with the
 chevron.
+
+## Gunsmith builds
+
+A Gunsmith quest tells you it wants ergonomics of at least 62 and recoil no worse than 250. It does
+not tell you which parts get you there, and working that out by hand across the hundreds of parts
+that fit a given weapon is the job people install a quest tracker to avoid.
+
+The **Build** section does it for you. For each weapon a quest names:
+
+- **What the game will check** - every threshold, the parts the quest insists on by name, and the
+  categories it insists on ("a suppressor", "a tactical device").
+- **A build that meets them**, part by part, with the slot each one goes in. **Every row opens the
+  game's own inspect window**, because a name alone does not tell you what to look for in a
+  trader's list.
+- **What that build scores** on each number the quest cares about, so you can see the margin.
+
+A quest can ask for more than one weapon, and each gets its own block.
+
+**The heading tells you how much to trust it**, which matters more than it sounds:
+
+- **Suggested build** - every requirement the mod can check is met, and there are none it cannot.
+- **Build meets every checkable requirement** - the numbers are met, but the quest also constrains
+  something the mod cannot score. Eyeball that one on the gun before you hand it in.
+- **Closest build found** - no complete build was found. It says which threshold it missed and by
+  how much, which separates "this quest is hard" from "your parts are limited".
+
+Two things worth knowing about how the builds are worked out:
+
+- **Nothing in a build is spare.** Every part is checked by taking it off and re-deriving the
+  quest's requirements on what is left; if the smaller gun still passes, the part goes. So a build
+  is not merely correct, it is stripped - which matters when you are the one buying the parts.
+- **Assembled size is measured extended.** Where a quest limits the grid size of the finished
+  weapon, a stock that folds or collapses is reported rather than assumed: the mod tells you the
+  reduction and judges on the extended figure. A build that fits extended fits whatever you then do
+  with the stock.
+
+### It only suggests parts you can actually get
+
+A build made of parts you cannot buy is not advice, it is a taunt. So the build is worked out
+against **what you specifically can obtain right now**:
+
+- **Parts already in your stash** are free, and the row says so. If the part is fitted to another
+  weapon it says which one - *"fitted to your equipped MDR"* - and still shows you the price,
+  because stripping the gun you raid with is your decision to make, not the mod's.
+- **Parts a trader will sell you at your current loyalty**, with the price. Locked assortments and
+  quest-locked offers are already excluded; nothing is suggested that the trader would refuse you.
+- **Parts on the flea**, if you have flea access, with the price marked as an estimate - a trader
+  price is a fact, a flea price is a guess.
+- **Anything else is left out of the build entirely** rather than quietly recommended.
+
+**When no build can be made from what you can get, it says why**, and the three cases it
+distinguishes are the three that change what you do:
+
+```
+'Gunsmith - Part 8' (AKS-74N): blocked - trader level -
+   AK Zenit PT Lock from Skier at loyalty 2
+   closest attempt missed: recoil 280.67, needs <= 275 (short by 5.67)
+```
+
+That is a goal, not a dead end. "You need Skier at loyalty 2" is worth knowing; "no build found" is
+not. Where a quest *names* a part you cannot buy, the row says the quest names it - nothing can
+avoid that one.
+
+The panel shows both: the build anyone could make, and the build **you** can make, with what it
+costs you in roubles and how many of the parts you already own.
+
+### It keeps getting better on its own
+
+The mod ships with a set of worked-out builds and keeps looking for cheaper ones - a small, fixed
+budget per server launch, in the background and off the startup path, so it never delays the server
+coming up. Anything it finds is written down and appears the next time you launch. It only ever
+replaces a build with a **better** one, so the answer never gets worse, and it never changes under
+you mid-session.
+
+To push it harder, set `QUESTTREE_TRAIN=1` in the shell you launch the server from. That turns a
+launch into a training session: it searches for as long as the server runs, using half your cores,
+and writes down every improvement as it finds it. `QUESTTREE_TRAIN_THREADS=N` overrides how many
+cores it uses. Entirely optional - a normal launch is unaffected, and stopping the server loses
+nothing, because every improvement is written as it is found.
 
 ## The other views
 
@@ -133,7 +241,7 @@ around it.
 | Mouse wheel | Zoom, anchored to the cursor (and scroll the tab row) |
 | `F` | Fit the current tab on screen; on the map, fit the floor |
 | `M` | Jump to the quests you can work on |
-| `X` | Focus: only what you can work on, and its neighbours |
+| `X` | Focus: only what you can work on, and everything within reach of it |
 | `/` | Focus the search box; `Enter` opens the first match, `Esc` leaves the box |
 | `[` `]` | On the map, the floor below or above |
 | `Esc` | Close the hint, then the quest detail, then the tracker |
@@ -145,17 +253,17 @@ around it.
 The Settings view, in four sections, and the same values in BepInEx's F12 menu. Every section has a
 "Reset this section to defaults" row.
 
-- **Tree** - compact layout, two-line titles, zoomed-out codes, prerequisite lines and their
-  opacity, hover dimming strength, the zoom levels the boxes simplify at, the visible-quest ceiling,
-  which quest badges the boxes wear (Kappa, Collector, or both), Focus, and the hide filters
+- **Tree** - compact layout, two-line titles, prerequisite lines and their opacity, hover dimming
+  strength, how far **Focus** reaches, the visible-quest ceiling, which quest badges the boxes wear
+  (Kappa, Collector, or both), the trader-card overview threshold, and the hide filters
   (unobtainable / completed / traderless).
 - **Behaviour** - open on the map or remember the last view, the open-tracker shortcut, tooltips,
   hover sounds, in-raid zone harvesting, the controls hint, and reloading `kappa-quests.json`.
 - **Map** - accepted quests only, which sidebar sections show, how many "do next" rows, which pins
   carry their name at rest (hover only / in progress and available / all), sidebar width, and the
   artwork rotation and mirror overrides.
-- **Colours** - the four status colours and the accent, with presets in-game and any hex colour in
-  F12.
+- **Colours** - the five status colours and the accent, with presets in-game and any hex colour in
+  F12, plus **Restore the pre-1.10 colours** for anyone who preferred the old palette.
 
 ## Notes
 
