@@ -59,7 +59,8 @@ namespace QuestTreeServer
         WeaponPresets presets,
         ProfileHelper profileHelper,
         SaveServer saveServer,
-        LocaleService localeService)
+        LocaleService localeService,
+        PartPrices partPrices)
     {
         /// <summary>One build requirement as the payload builder states it, with the shared build it
         /// currently serves for it.</summary>
@@ -461,13 +462,37 @@ namespace QuestTreeServer
             // fitted to a gun they use is never assumed strippable.
             var allowed = new HashSet<MongoId>(sources.Owned);
             if (sources.OwnedWeapons.TryGetValue(weapon, out var inPlace)) allowed.UnionWith(inPlace);
+
+            // THIS PROFILE'S PRICES. A trader's cash price is a fact; a flea price is an estimate; a barter
+            // and anything else is valued at the handbook for the objective only - the search needs a
+            // comparable number and the handbook is the game's own valuation, but no row ever shows it as
+            // a price. Loose in the stash or already on the quest weapon is free.
+            var free = new HashSet<MongoId>(sources.Owned);
+            if (inPlace != null) free.UnionWith(inPlace);
+
+            var pricing = new WeaponSolver.Pricing
+            {
+                PerPurchase = partPrices.PerPurchase,
+                Free = free,
+                Price = template =>
+                {
+                    var (tier, price) = sources.Classify(template, defaults, weapon);
+
+                    return tier switch
+                    {
+                        PartAvailability.Tier.Buyable => price,
+                        PartAvailability.Tier.Flea => price,
+                        _ => partPrices.Of(template)
+                    };
+                }
+            };
             allowed.UnionWith(sources.Buyable.Keys);
             allowed.UnionWith(sources.Barter);
             if (sources.FleaAccess) allowed.UnionWith(sources.Flea.Keys);
             if (defaults != null) allowed.UnionWith(defaults.Occupants.Values);
             allowed.UnionWith(mustInclude);
 
-            var result = solver.Solve(weapon, thresholds, mustInclude, mustIncludeCategories, allowed);
+            var result = solver.Solve(weapon, thresholds, mustInclude, mustIncludeCategories, allowed, pricing: pricing);
 
             dto.Nodes = result.NodesOpened;
 
@@ -518,7 +543,7 @@ namespace QuestTreeServer
             var withGated = new HashSet<MongoId>(allowed);
             withGated.UnionWith(sources.Gated.Keys);
 
-            var gated = solver.Solve(weapon, thresholds, mustInclude, mustIncludeCategories, withGated);
+            var gated = solver.Solve(weapon, thresholds, mustInclude, mustIncludeCategories, withGated, pricing: pricing);
 
             dto.Nodes += gated.NodesOpened;
 
@@ -547,7 +572,7 @@ namespace QuestTreeServer
                 var withFlea = new HashSet<MongoId>(withGated);
                 withFlea.UnionWith(sources.Flea.Keys);
 
-                var flea = solver.Solve(weapon, thresholds, mustInclude, mustIncludeCategories, withFlea);
+                var flea = solver.Solve(weapon, thresholds, mustInclude, mustIncludeCategories, withFlea, pricing: pricing);
 
                 dto.Nodes += flea.NodesOpened;
 

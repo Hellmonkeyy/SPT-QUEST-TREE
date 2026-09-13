@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Security.Cryptography;
@@ -80,6 +80,14 @@ namespace QuestTreeServer
             /// Remembered beside the part count because the write rule is lexicographic on both, so a boot
             /// has to know what the remembered build cost as well as how big it was.</summary>
             public int Changes { get; set; }
+
+            /// <summary>What this build costs under the handbook pricing it was last measured with - THE
+            /// OBJECTIVE - and the PerPurchase it was measured at. Informational: the write rule compares
+            /// against the incumbent's cost measured LIVE, never against this number, because a stored zero
+            /// once read as a perfect score and blocked every improvement (ledger, defect 7).</summary>
+            public long Cost { get; set; }
+
+            public long PerPurchase { get; set; }
 
             /// <summary>Boots that have tried to beat this build and failed. Not a promise that it is
             /// minimal - it is the amount of evidence that it might be, and the honest thing to show
@@ -205,15 +213,18 @@ namespace QuestTreeServer
         /// unchanged, and that boot measures it, so it knows the cost. Without this the field stays at zero
         /// for every build written before the objective existed - and zero does not mean "nothing to buy", it
         /// means "nobody has looked", which is the difference between a monotonicity check and a blank.</summary>
-        public void Changed(string key, int changes)
+        public void Changed(string key, int changes, long cost, long perPurchase)
         {
             lock (_lock)
             {
                 Load();
 
-                if (!_file!.Builds.TryGetValue(key, out var build) || build.Changes == changes) return;
+                if (!_file!.Builds.TryGetValue(key, out var build)) return;
+                if (build.Changes == changes && build.Cost == cost && build.PerPurchase == perPurchase) return;
 
                 build.Changes = changes;
+                build.Cost = cost;
+                build.PerPurchase = perPurchase;
                 _dirty = true;
             }
         }
@@ -374,7 +385,9 @@ namespace QuestTreeServer
             IReadOnlyList<WeaponSolver.FittedPart> parts,
             int floor,
             IReadOnlyCollection<string>? binding = null,
-            int changes = 0)
+            int changes = 0,
+            long cost = 0,
+            long perPurchase = 0)
         {
             lock (_lock)
             {
@@ -384,6 +397,8 @@ namespace QuestTreeServer
                 {
                     Floor = floor,
                     Changes = changes,
+                    Cost = cost,
+                    PerPurchase = perPurchase,
                     Binding = binding == null ? new List<string>() : binding.ToList(),
                     Parts = parts.Select(part => new CachedPart
                     {
@@ -517,6 +532,8 @@ namespace QuestTreeServer
                             // measures it, and a stale count would let a worse build hold its place under the
                             // lexicographic write rule.
                             build.Changes = 0;
+                            build.Cost = 0;
+                            build.PerPurchase = 0;
                             build.Bound = 0;
                             build.BoundSessions = 0;
                             build.Falsifications = 0;

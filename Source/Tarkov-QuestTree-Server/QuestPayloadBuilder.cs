@@ -52,6 +52,7 @@ namespace QuestTreeServer
         WeaponPresets weaponPresets,
         PartAvailability partAvailability,
         ProfileBuilds profileBuilds,
+        PartPrices partPrices,
         SPTarkov.Server.Core.Helpers.Profile.ProfileHelper profileHelper,
         SPTarkov.Server.Core.Servers.SaveServer saveServer) : IOnLoad
     {
@@ -174,6 +175,17 @@ namespace QuestTreeServer
         /// the answer, and conflating the two would make a solver bug look like a poor trader level.
         ///
         /// Debug, because it is a developer's question. The one-line summary is Info.</summary>
+        /// <summary>The shared baseline's pricing: the handbook, static and the same for everyone, so the
+        /// history it produces ships. Built once; PartPrices reads the environment for PerPurchase.</summary>
+        private WeaponSolver.Pricing Handbook =>
+            _handbook ??= new WeaponSolver.Pricing
+            {
+                Price = partPrices.Of,
+                PerPurchase = partPrices.PerPurchase
+            };
+
+        private WeaponSolver.Pricing? _handbook;
+
         private void SurveySolver()
         {
             if (_questBuilds.Count == 0) return;
@@ -202,6 +214,8 @@ namespace QuestTreeServer
             // beside the part count rather than replacing it, because the bounds and the proofs are over part
             // count and would read as claims about this number if it stood alone.
             var changes = 0;
+            var cost = 0L;
+            var unpriced = 0;
             var withDefaults = 0;
             var failed = new List<string>();
 
@@ -288,6 +302,8 @@ namespace QuestTreeServer
                     parts += result.Parts.Count;
                     proven += lowest.Parts;
                     changes += result.Changes;
+                    cost += result.Cost;
+                    unpriced += result.Unpriced;
                     if (weaponPresets.For(weapon) != null) withDefaults++;
 
                     if (verdict.Irreducible) irreducible++;
@@ -364,11 +380,12 @@ namespace QuestTreeServer
             // player has to buy, so the count of builds proven minimal on the objective is zero - not the
             // twenty-one carried over from a bound that answers a different question.
             logger.Info(
-                $"Quest Tracker: the objective - {changes} change(s) from the default presets across " +
-                $"{solved} build(s), {(solved > 0 ? (double)changes / solved : 0d):0.##} per build; " +
-                $"{withDefaults} of them have a default preset to be measured against. 0 of {solved} are " +
-                "proven minimal on changes: the bound that proves minimality is over PART COUNT, and no " +
-                "bound over changes exists yet.");
+                $"Quest Tracker: the objective - {cost:N0} roubles across {solved} build(s) at handbook prices " +
+                $"plus {partPrices.PerPurchase:N0} per purchase ({(solved > 0 ? cost / Math.Max(1, solved) : 0):N0} per " +
+                $"build), over {changes} change(s) from the default presets ({(solved > 0 ? (double)changes / solved : 0d):0.##} " +
+                $"per build), {unpriced} purchase(s) with no handbook price; {withDefaults} of them have a default preset " +
+                $"to be measured against; {partPrices.Count:N0} templates priced. 0 of {solved} are proven minimal on cost: " +
+                "the bound that proves minimality is over PART COUNT, and no bound over cost exists yet.");
 
             // Per quest, how far the build is above what can be PROVEN necessary. A gap is not waste -
             // the bound omits the chains that named parts have to be routed through, and bounding
@@ -1234,7 +1251,7 @@ namespace QuestTreeServer
                     $"Quest Tracker: {what} - {_attempts:N0} attempt(s) in {clock.Elapsed.TotalMinutes:0.0} " +
                     $"minute(s) across {Threads} thread(s) ({_attempts / minutes:N0}/min), {_improved} smaller " +
                     $"build(s) found. {_proven.Count} of {Requirements} are provably minimal ON PART COUNT, " +
-                    $"0 proven minimal on CHANGES - the objective - because no bound over changes exists yet. " +
+                    $"0 proven minimal on COST - the objective - because no bound over cost exists yet. " +
                     $"{_boundsChecked:N0} bound comparison(s) across {_bounds.Count} requirement(s), " +
                     $"{_boundsDisagreed} disagreement(s)." +
                     (Falsifying
@@ -1302,8 +1319,8 @@ namespace QuestTreeServer
         /// The single place the write rule is expressed, so the improvement loop and the boot solve cannot
         /// disagree about what an improvement is - which they did for a while, in the days when one of them
         /// required strictly smaller and the other did not.</summary>
-        private static bool Cheaper(int changes, int parts, int wasChanges, int wasParts) =>
-            changes < wasChanges || (changes == wasChanges && parts < wasParts);
+        private static bool Cheaper(long cost, int parts, long wasCost, int wasParts) =>
+            cost < wasCost || (cost == wasCost && parts < wasParts);
 
         private int Proven(
             MongoId weapon,
@@ -1695,11 +1712,11 @@ namespace QuestTreeServer
                 ? weaponSolver.Solve(
                     weapon, thresholds, mustInclude, mustIncludeCategories,
                     allowed: null, knownGood: null, seed: seed, restarts: restarts, ceiling: working.Count,
-                    binding: binding)
+                    binding: binding, pricing: Handbook)
                 : weaponSolver.Solve(
                     weapon, thresholds, mustInclude, mustIncludeCategories,
                     allowed: null, knownGood: working, seed: seed, restarts: restarts,
-                    binding: binding);
+                    binding: binding, pricing: Handbook);
 
             weaponBuildCache.Cost(key, result.NodesOpened);
 
@@ -1709,14 +1726,30 @@ namespace QuestTreeServer
                 return false;
             }
 
+            // THE INCUMBENT'S COST IS MEASURED, NEVER READ. A stored zero once read as a perfect score and
+            // blocked every improvement for a whole training run (ledger, defect 7); describing the remembered
+            // build is a handful of dictionary lookups and cannot be stale.
+            var incumbent = Restore(remembered);
+            var standing = incumbent == null
+                ? null
+                : weaponSolver.Describe(weapon, thresholds, mustInclude, mustIncludeCategories, incumbent, Handbook);
+
+            if (standing == null)
+            {
+                weaponBuildCache.Held(key);
+                return false;
+            }
+
+            weaponBuildCache.Changed(key, standing.Changes, standing.Cost, Handbook.PerPurchase);
+
             // Somewhere new that is no cheaper and no leaner: worth searching from, not worth serving.
             //
-            // LEXICOGRAPHIC ON (changes, parts), and the loosening from "strictly fewer parts" is deliberate
+            // LEXICOGRAPHIC ON (cost, parts), and the loosening from "strictly fewer parts" is deliberate
             // rather than a weakening. Both components can only ever improve, so the guarantee that matters -
             // a build never gets more expensive and never grows - holds exactly as before. What it admits is
-            // the build that costs one purchase less and happens to carry one part more, which under the old
-            // rule could never be written down at all.
-            if (!Cheaper(result.Changes, result.Parts.Count, remembered.Changes, remembered.Parts.Count))
+            // the build that costs less and happens to carry one part more, which under the old rule could
+            // never be written down at all.
+            if (!Cheaper(result.Cost, result.Parts.Count, standing.Cost, remembered.Parts.Count))
             {
                 if (result.Parts.Count <= working.Count)
                     lock (_working) _working[key] = result.Parts;
@@ -1733,7 +1766,8 @@ namespace QuestTreeServer
                 return false;
             }
 
-            weaponBuildCache.Put(key, result.Parts, result.Floor, result.Binding, result.Changes);
+            weaponBuildCache.Put(key, result.Parts, result.Floor, result.Binding, result.Changes, result.Cost,
+                Handbook.PerPurchase);
 
             lock (_working) _working[key] = result.Parts;
 
@@ -1777,7 +1811,7 @@ namespace QuestTreeServer
                 weapon, thresholds, mustInclude, mustIncludeCategories,
                 allowed: null, knownGood: null, seed: seed, restarts: MaxRestarts,
                 ceiling: remembered.Parts.Count - 1,
-                binding: remembered.Binding);
+                binding: remembered.Binding, pricing: Handbook);
 
             var key = WeaponBuildCache.KeyFor(weapon, thresholds, mustInclude, mustIncludeCategories);
 
@@ -1805,7 +1839,8 @@ namespace QuestTreeServer
                 ". The bound understates what is reachable, so no build should be reported as minimal until " +
                 "that is found and fixed.");
 
-            weaponBuildCache.Put(key, smaller.Parts, smaller.Floor, smaller.Binding, smaller.Changes);
+            weaponBuildCache.Put(key, smaller.Parts, smaller.Floor, smaller.Binding, smaller.Changes, smaller.Cost,
+                Handbook.PerPurchase);
 
             weaponBuildCache.Flush();
         }
@@ -1851,10 +1886,15 @@ namespace QuestTreeServer
                 rejected = true;
             }
 
-            if (incumbent != null && !weaponBuildCache.Training)
+            // THE INCUMBENT IS DESCRIBED ON EVERY PATH, training included, and its cost is what a candidate has
+            // to beat. Reading the stored figure instead is defect 7 in the ledger: every entry carried a zero
+            // that nothing in training ever wrote, and zero was unbeatable.
+            WeaponSolver.Result? standing = null;
+
+            if (incumbent != null)
             {
-                var described = weaponSolver.Describe(
-                    weapon, thresholds, mustInclude, mustIncludeCategories, incumbent);
+                standing = weaponSolver.Describe(
+                    weapon, thresholds, mustInclude, mustIncludeCategories, incumbent, Handbook);
 
                 // BOTH have to agree before a remembered build is served, and they still do: the verifier has
                 // just passed these parts above - seated legally, nothing claimed twice, every threshold met -
@@ -1863,33 +1903,37 @@ namespace QuestTreeServer
                 //
                 // This is the one failure mode a shipped history introduces, so it is the one the cold path is
                 // not allowed to take on trust. A rejected entry costs a search. It never reaches a panel.
-                if (described.Found)
+                if (standing.Found)
                 {
-                    // Every normal boot describes every remembered build, so this is where the hint comes
-                    // from for the builds that never change - which is most of them, and precisely the ones
-                    // a directed search is for.
-                    weaponBuildCache.Note(key, described.Binding);
+                    // Every boot describes every remembered build, so this is where the hint comes from for
+                    // the builds that never change - which is most of them, and precisely the ones a directed
+                    // search is for. And what it costs, so the file says what the objective is for it.
+                    weaponBuildCache.Note(key, standing.Binding);
+                    weaponBuildCache.Changed(key, standing.Changes, standing.Cost, Handbook.PerPurchase);
 
-                    // And what it costs, so the objective has a recorded value for a build nobody changed.
-                    weaponBuildCache.Changed(key, described.Changes);
-
-                    lock (_solved) _solved[key] = described;
-                    return described;
+                    if (!weaponBuildCache.Training)
+                    {
+                        lock (_solved) _solved[key] = standing;
+                        return standing;
+                    }
                 }
+                else
+                {
+                    logger.Info(
+                        $"Quest Tracker: a remembered weapon build for '{weapon}' does not hold up on this install, " +
+                        "so it is being solved again - " +
+                        string.Join("; ", standing.Unmet.Distinct().Take(3)) + ".");
 
-                logger.Info(
-                    $"Quest Tracker: a remembered weapon build for '{weapon}' does not hold up on this install, " +
-                    "so it is being solved again - " +
-                    string.Join("; ", described.Unmet.Distinct().Take(3)) + ".");
-
-                incumbent = null;
-                rejected = true;
+                    incumbent = null;
+                    standing = null;
+                    rejected = true;
+                }
             }
 
             var result = weaponSolver.Solve(
                 weapon, thresholds, mustInclude, mustIncludeCategories,
                 allowed: null, knownGood: incumbent, seed: _seed,
-                binding: remembered?.Binding);
+                binding: remembered?.Binding, pricing: Handbook);
 
             // A remembered entry that FAILED verification counts as absent, and that word "rejected" is
             // load-bearing. Without it an invalid entry that happens to be small blocks its own replacement
@@ -1897,11 +1941,12 @@ namespace QuestTreeServer
             // and the valid build was never written because it was not SMALLER than the broken one. One
             // wasted re-solve per launch, for the life of the install.
             if (result.Found
-                && (remembered == null || rejected
-                    || Cheaper(result.Changes, result.Parts.Count, remembered.Changes, remembered.Parts.Count))
+                && (remembered == null || rejected || standing == null
+                    || Cheaper(result.Cost, result.Parts.Count, standing.Cost, remembered.Parts.Count))
                 && Sound(weapon, result.Parts, thresholds, mustInclude, mustIncludeCategories, "a freshly solved build"))
             {
-                weaponBuildCache.Put(key, result.Parts, result.Floor, result.Binding, result.Changes);
+                weaponBuildCache.Put(key, result.Parts, result.Floor, result.Binding, result.Changes, result.Cost,
+                    Handbook.PerPurchase);
                 _improved++;
             }
             else if (remembered != null)

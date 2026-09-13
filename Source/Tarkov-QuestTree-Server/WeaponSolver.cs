@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Linq;
@@ -225,6 +225,16 @@ namespace QuestTreeServer
             /// count, which is what the two agree on exactly when there is no preset to differ about.</summary>
             public int Changes { get; set; }
 
+            /// <summary>THE OBJECTIVE, in roubles: the price of every part the player has to obtain plus
+            /// Pricing.PerPurchase for each one, with parts on the default preset and parts the caller lists
+            /// as free costing nothing. Changes stays beside it as the count the price is over.</summary>
+            public long Cost { get; set; }
+
+            /// <summary>Purchases charged with no price behind them - a part the price table does not know.
+            /// Charged PerPurchase alone, and counted here so an unpriced build is never mistaken for a
+            /// cheap one.</summary>
+            public int Unpriced { get; set; }
+
             /// <summary>Thresholds this build MEETS with almost nothing to spare.
             ///
             /// Why a build cannot get smaller is nearly always one or two of these, and it was computed on
@@ -244,6 +254,28 @@ namespace QuestTreeServer
             public int Floor { get; set; }
 
             public int NodesOpened { get; set; }
+        }
+
+        /// <summary>What a part costs the player this search is for, and what a trip to get one is worth
+        /// avoiding.
+        ///
+        /// THE OBJECTIVE IS price + PerPurchase x purchases. Two quantities in one currency, so money and
+        /// errands can be compared at all: at PerPurchase zero a build of thirty cheap parts beats one of two
+        /// dear ones; at fifty thousand the count dominates and price barely matters. The shared baseline is
+        /// priced from the handbook - static, profile-blind, the same for everyone, so its history ships;
+        /// a profile's own pass is priced from its traders, its flea and its stash.
+        ///
+        /// A part on the weapon's default preset costs nothing; so does one in Free, which is how a caller
+        /// says "loose in the stash". A part with no price is charged PerPurchase alone and COUNTED as
+        /// unpriced: returning zero for it would make the search prefer exactly the parts it knows least
+        /// about, and the count is what stops that reading as cheap.</summary>
+        public sealed class Pricing
+        {
+            public Func<MongoId, long?> Price { get; init; } = _ => null;
+
+            public long PerPurchase { get; init; }
+
+            public IReadOnlyCollection<MongoId>? Free { get; init; }
         }
 
         /// <summary>One threshold, reduced to what the search needs: which stat, which direction is
@@ -298,7 +330,8 @@ namespace QuestTreeServer
             int seed = 0,
             int restarts = 0,
             int ceiling = 0,
-            IReadOnlyCollection<string>? binding = null)
+            IReadOnlyCollection<string>? binding = null,
+            Pricing? pricing = null)
         {
             var result = new Result();
 
@@ -330,7 +363,11 @@ namespace QuestTreeServer
                     ? null
                     : new HashSet<string>(binding, StringComparer.OrdinalIgnoreCase),
 
-                Defaults = presets.For(weapon)
+                Defaults = presets.For(weapon),
+
+                // No pricing means every purchase costs one unit: the objective collapses to the change
+                // count, which is what it was before prices existed.
+                Pricing = pricing ?? new Pricing { PerPurchase = 1 }
             };
 
             state.Measure(weapon);
@@ -341,7 +378,7 @@ namespace QuestTreeServer
             var bestWhole = int.MaxValue;
             var bestShortfall = double.PositiveInfinity;
             var bestCount = int.MaxValue;
-            var bestChanges = int.MaxValue;
+            var bestCost = long.MaxValue;
 
             // THE FLOOR, worked out once before anything is searched: what the plan has to place, the
             // slots the game will not let the player leave empty, and one part for each category still
@@ -401,41 +438,42 @@ namespace QuestTreeServer
             if (ceiling > 0) state.PartCeiling = ceiling;
 
             var found = Search(
-                weapon, required, state, floor, ref bestWhole, ref bestShortfall, ref bestCount, ref bestChanges);
+                weapon, required, state, floor, ref bestWhole, ref bestShortfall, ref bestCount, ref bestCost);
 
             if (found != null) best = found;
 
-            // Squeeze the OBJECTIVE, not the part count: ask for a build that qualifies with one fewer
-            // purchase and keep going while the answer is yes. The part ceiling is released while this runs,
-            // because a cheaper build is allowed to be a larger one - that is the whole trade.
+            // Squeeze the OBJECTIVE, not the part count: ask for a build that qualifies for less than the best
+            // so far costs and keep going while the answer is yes. The part ceiling is released while this
+            // runs, because a cheaper build is allowed to be a larger one - that is the whole trade. Bounded
+            // by the search budget: every round is a full set of restarts, and the time ceiling ends it.
             while (best != null && bestWhole == 0 && bestShortfall <= 0d && !state.Exhausted
-                   && (bestChanges > 0 || bestCount > floor))
+                   && (bestCost > 0 || bestCount > floor))
             {
-                state.PartCeiling = bestChanges > 0 ? int.MaxValue : bestCount - 1;
-                state.ChangeCeiling = bestChanges > 0 ? bestChanges - 1 : bestChanges;
+                state.PartCeiling = bestCost > 0 ? int.MaxValue : bestCount - 1;
+                state.CostCeiling = bestCost > 0 ? bestCost - 1 : bestCost;
                 state.Incumbent = best;
 
                 var whole = int.MaxValue;
                 var shortfall = double.PositiveInfinity;
                 var count = int.MaxValue;
-                var changes = int.MaxValue;
+                var cost = long.MaxValue;
                 var cheaper = Search(
-                    weapon, required, state, floor, ref whole, ref shortfall, ref count, ref changes);
+                    weapon, required, state, floor, ref whole, ref shortfall, ref count, ref cost);
 
                 // Only a build that satisfies EVERYTHING counts. One that merely fits inside the ceiling
                 // while missing a threshold is the ceiling being too tight, which is the answer to the
                 // question rather than a better build.
                 if (cheaper == null || whole != 0 || shortfall > 0d) break;
-                if (changes > bestChanges || (changes == bestChanges && count >= bestCount)) break;
+                if (cost > bestCost || (cost == bestCost && count >= bestCount)) break;
 
                 best = cheaper;
                 bestWhole = whole;
                 bestShortfall = shortfall;
                 bestCount = count;
-                bestChanges = changes;
+                bestCost = cost;
             }
 
-            state.ChangeCeiling = int.MaxValue;
+            state.CostCeiling = long.MaxValue;
             state.PartCeiling = int.MaxValue;
             state.Incumbent = null;
 
@@ -460,7 +498,7 @@ namespace QuestTreeServer
             ref int bestWhole,
             ref double bestShortfall,
             ref int bestCount,
-            ref int bestChanges)
+            ref long bestCost)
         {
             Node? best = null;
 
@@ -523,24 +561,24 @@ namespace QuestTreeServer
                 // and the first attempt was the fully dressed one.
                 // The same ordering as Cost.Beats, and it has to be: an attempt comparison that disagreed
                 // with the cost function would throw away the build the climb just worked to prefer.
-                var changes = measured.Changes;
+                var cost = measured.Price;
                 var settled = whole == bestWhole && shortfall <= bestShortfall + MinGain;
 
                 if (whole < bestWhole
                     || (whole == bestWhole && shortfall < bestShortfall - MinGain)
-                    || (settled && changes < bestChanges)
-                    || (settled && changes == bestChanges && count < bestCount))
+                    || (settled && cost < bestCost)
+                    || (settled && cost == bestCost && count < bestCount))
                 {
                     bestWhole = whole;
                     bestShortfall = shortfall;
                     bestCount = count;
-                    bestChanges = changes;
+                    bestCost = cost;
                     best = root;
                 }
 
                 // Nothing left to want: everything satisfied, nothing to buy, and at a size nothing could
                 // undercut.
-                if (bestWhole == 0 && bestShortfall <= 0d && bestChanges == 0 && bestCount <= floor) break;
+                if (bestWhole == 0 && bestShortfall <= 0d && bestCost == 0 && bestCount <= floor) break;
                 if (state.Exhausted) break;
             }
 
@@ -604,7 +642,8 @@ namespace QuestTreeServer
             IReadOnlyList<(string Field, string Compare, double Value)> thresholds,
             IReadOnlyCollection<MongoId> mustInclude,
             IReadOnlyCollection<MongoId> mustIncludeCategories,
-            IReadOnlyList<FittedPart> parts)
+            IReadOnlyList<FittedPart> parts,
+            Pricing? pricing = null)
         {
             var result = new Result();
             var reachable = graph.Reachable(weapon, out _);
@@ -615,7 +654,8 @@ namespace QuestTreeServer
 
             var state = new SearchState(reachable, null, goals, mustIncludeCategories, Stopwatch.StartNew())
             {
-                Defaults = presets.For(weapon)
+                Defaults = presets.For(weapon),
+                Pricing = pricing ?? new Pricing { PerPurchase = 1 }
             };
 
             var required = Required(weapon, mustInclude);
@@ -647,6 +687,11 @@ namespace QuestTreeServer
 
             result.Stats = stats;
             result.Changes = Changed(best, state);
+
+            var (cost, unpriced) = Priced(best, state);
+            result.Cost = cost;
+            result.Unpriced = unpriced;
+
             CollectParts(best, result.Parts, -1);
 
             if (stats == null) return result;
@@ -1848,12 +1893,18 @@ namespace QuestTreeServer
 
             if (buffer.Count > state.PartCeiling) gaps += buffer.Count - state.PartCeiling;
 
-            // A build over the CHANGE ceiling counts as structurally wrong in the same way, which is what
-            // makes "find one that qualifies in three purchases" a question the climb can answer: getting
-            // under the limit outranks every threshold, so it is done first and never traded away for one.
-            var changed = Changed(root, state);
+            // A build over the COST ceiling counts as structurally wrong in the same way, which is what makes
+            // "find one that qualifies for less than this" a question the climb can answer: getting under the
+            // limit outranks every threshold, so it is done first and never traded away for one. The excess is
+            // charged in purchases - roubles over the line divided by what one purchase is worth - so a ceiling
+            // one rouble under the incumbent still reads as one gap, not a thousand.
+            var (priced, _) = Priced(root, state);
 
-            if (changed > state.ChangeCeiling) gaps += changed - state.ChangeCeiling;
+            if (priced > state.CostCeiling)
+            {
+                var unit = Math.Max(1L, state.Pricing.PerPurchase);
+                gaps += 1 + (int)Math.Min(int.MaxValue / 2, (priced - state.CostCeiling) / unit);
+            }
 
             if (state.Categories.Count > 0)
             {
@@ -1887,7 +1938,7 @@ namespace QuestTreeServer
                 else headroom += Math.Min(margin, state.Binds(goal.Field) ? BindingHeadroomCap : HeadroomCap);
             }
 
-            return new Cost(gaps, shortfall, changed, buffer.Count, headroom);
+            return new Cost(gaps, shortfall, priced, buffer.Count, headroom);
         }
 
         /// <summary>What a build is worth to the climb, in four ranks: how many requirements it
@@ -1905,7 +1956,7 @@ namespace QuestTreeServer
         /// than is left, no single move improves anything, and the gun settles at its BARE recoil with
         /// the threshold 64 points away. Ranked strictly below shortfall, so a build that passes always
         /// beats one that does not, however roomy.</summary>
-        private readonly struct Cost(int gaps, double shortfall, int changes, int parts, double headroom)
+        private readonly struct Cost(int gaps, double shortfall, long price, int parts, double headroom)
         {
             /// <summary>Required slots left empty plus required categories with nothing from them.
             /// Whole requirements, not degrees of one.</summary>
@@ -1915,17 +1966,14 @@ namespace QuestTreeServer
             /// threshold.</summary>
             public double Shortfall { get; } = shortfall;
 
-            /// <summary>Parts the player would have to go and get: a swap for something the slot does not
-            /// already hold, or an addition to an empty one.
+            /// <summary>What the player would have to spend: the price of every part not already on the gun
+            /// plus PerPurchase for each, see Pricing.
             ///
             /// THE OBJECTIVE, and it outranks part count. A gun of nine parts that needs five of them bought
             /// is worse to a player than a gun of eleven that needs two, and the count was only ever standing
             /// in for this. Part count stays directly below as the tiebreak, so among builds that cost the
-            /// same to assemble the leaner one still wins.
-            ///
-            /// Zero for a weapon the game ships no preset for, which makes this ordering collapse back to
-            /// the part count it replaces rather than a special case anybody has to remember.</summary>
-            public int Changes { get; } = changes;
+            /// same the leaner one still wins.</summary>
+            public long Price { get; } = price;
 
             /// <summary>How many parts are on the gun.
             ///
@@ -1959,7 +2007,7 @@ namespace QuestTreeServer
                 if (Shortfall > other.Shortfall + MinGain) return false;
 
                 // Equal on everything that must be true: the gun that costs least to assemble wins.
-                if (Changes != other.Changes) return Changes < other.Changes;
+                if (Price != other.Price) return Price < other.Price;
 
                 // Then, between two equally cheap builds, the leaner one.
                 if (Parts != other.Parts) return Parts < other.Parts;
@@ -1999,6 +2047,45 @@ namespace QuestTreeServer
                         changes++;
 
                     Count(child);
+                }
+            }
+        }
+
+        /// <summary>What the build costs under the search's pricing: for every part not already on the
+        /// default preset and not listed as free, its price plus PerPurchase - and the count of those charged
+        /// with no price at all.
+        ///
+        /// A part of the default that the build does not carry costs nothing, exactly as in Changed: taking a
+        /// part off is a trip to nowhere.</summary>
+        private static (long Cost, int Unpriced) Priced(Node root, SearchState state)
+        {
+            var pricing = state.Pricing;
+            var cost = 0L;
+            var unpriced = 0;
+
+            Walk(root);
+
+            return (cost, unpriced);
+
+            void Walk(Node node)
+            {
+                foreach (var child in node.Children)
+                {
+                    var stock = state.Defaults != null
+                                && state.Defaults.Occupants.TryGetValue((node.Template, child.SlotName), out var fitted)
+                                && fitted == child.Template;
+
+                    if (!stock && (pricing.Free == null || !pricing.Free.Contains(child.Template)))
+                    {
+                        var price = pricing.Price(child.Template);
+
+                        if (price is { } known && known > 0) cost += known;
+                        else unpriced++;
+
+                        cost += pricing.PerPurchase;
+                    }
+
+                    Walk(child);
                 }
             }
         }
@@ -2418,10 +2505,13 @@ namespace QuestTreeServer
             /// leaner than it has already found; unbounded the rest of the time.</summary>
             public int PartCeiling = int.MaxValue;
 
-            /// <summary>Changes a build may make before the search treats it as structurally wrong. The
-            /// objective's own ceiling, driven the way PartCeiling is: ask for one fewer than the best
-            /// answer so far, and see whether anything qualifies.</summary>
-            public int ChangeCeiling = int.MaxValue;
+            /// <summary>What a build may cost before the search treats it as structurally wrong. The
+            /// objective's own ceiling, driven the way PartCeiling is: ask for less than the best answer so
+            /// far costs, and see whether anything qualifies.</summary>
+            public long CostCeiling = long.MaxValue;
+
+            /// <summary>What parts cost the player this search is for. Never null once Solve has set it.</summary>
+            public Pricing Pricing = new() { PerPurchase = 1 };
 
             /// <summary>What the weapon ships with, or null when the game has no preset for it. Read once
             /// per search rather than once per measurement.</summary>
