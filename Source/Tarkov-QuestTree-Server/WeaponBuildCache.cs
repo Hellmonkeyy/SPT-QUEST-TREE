@@ -393,7 +393,9 @@ namespace QuestTreeServer
             {
                 Load();
 
-                _file!.Builds[key] = new CachedBuild
+                _file!.Builds.TryGetValue(key, out var previous);
+
+                var replacement = new CachedBuild
                 {
                     Floor = floor,
                     Changes = changes,
@@ -408,6 +410,30 @@ namespace QuestTreeServer
                         Parent = part.Parent
                     }).ToList()
                 };
+
+                // THE REQUIREMENT'S EVIDENCE OUTLIVES THE BUILD. The bound, how long it has stood and what a
+                // search of it costs are facts about the quest and the item data, not about the parts that
+                // happened to be remembered - and a replacement used to start them at zero, so the next survey
+                // re-derived the bound and the gate saw it "move" from 0 (ledger, defect 8). Falsification
+                // evidence is about one question - "is there a build with fewer parts than THIS many" - so it
+                // follows the replacement only when the count is the same; a replacement of a different size
+                // is a different question and starts its evidence again. Attempts is about the build that
+                // just lost, and starts at zero.
+                if (previous != null)
+                {
+                    replacement.Bound = previous.Bound;
+                    replacement.BoundSessions = previous.BoundSessions;
+                    replacement.Nodes = previous.Nodes;
+
+                    if (previous.Parts.Count == replacement.Parts.Count)
+                    {
+                        replacement.Falsifications = previous.Falsifications;
+                        replacement.FalsifyNodes = previous.FalsifyNodes;
+                        replacement.LastFalsifySeed = previous.LastFalsifySeed;
+                    }
+                }
+
+                _file.Builds[key] = replacement;
 
                 _dirty = true;
             }
