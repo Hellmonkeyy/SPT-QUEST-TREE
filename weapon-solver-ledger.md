@@ -69,6 +69,8 @@ run. The guard in `6a2f455` is what makes it harmless if it does.
 | 16 | Training default to half the LOGICAL processors, `QUESTTREE_TRAIN_THREADS` to override (`0c638ed`) | 15 threads on 8 cores pinned every processor at 100%; 8 is the polite default | yes |
 | 17 | `QUESTTREE_FALSIFY`: attack every build called minimal with the widest search there is (`de6a36d`) | 6,994 adversarial searches, **0 counterexamples** | yes |
 | 18 | Every expensive check leaves a durable record - bound, its stability, failed falsifications, nodes spent, search cost - invalidated by the item fingerprint (`94e74d1`, `447c84d`) | evidence accumulates across sessions; ~30% slower with the falsifier on | yes |
+| 19 | Per-profile filter-and-repair over the shared baseline (`c991646`): six availability tiers, three ownership states, the planner's `Extend`/`Nearest` made to honour `Allowed`, verifier on every repair, three-way diagnosis of a blocked build, `/questtree/builds` | see "Availability" below: a fresh profile goes from 6 of 60 reachable to 14 usable + 9 repaired (verifier 9 of 9), 37 blocked by trader level with the trader and level named; both real profiles 59 and 58 of 60 usable as shipped | yes |
+| 20 | Client reads `/questtree/builds` and lays it over the shared build; mirror catches up with `ed3e44e`, schema 9 -> 10 (`1c8a56c`) | compiles and degrades to the old panel on every missing input; **not yet seen on screen** | yes, unverified |
 
 ## Negative results - do not retry these without new information
 
@@ -139,6 +141,23 @@ independent check rather than a closer reading.
 4. **Training wrote builds the verifier never saw** (`6a2f455`). The audit lived only on the path that
    serves a build, which runs after the write and not in training at all. Two hundred rounds kept an
    unassemblable MP-133 because it was one part smaller than the legal build it replaced.
+7. **`Changes: 0` read as a perfect score** (found 2026-09-13 on `132e430`). Every history entry carried
+   `Changes: 0` - the field was added by `ed3e44e` and only the non-training served path ever records it
+   (`132e430`), and training never calls `Describe`. The write rule `Cheaper(changes, parts, 0, parts)` can
+   only be satisfied by a zero-change build with fewer parts, so the 8,219-attempt training phase of the
+   gate wrote nothing, and condition 5 (monotone) passed as "0 -> 0 changes, 572 -> 572 parts" - a check
+   whose inputs were structurally constant. The first non-training boot recorded real values, the launch
+   search then legitimately wrote cheaper, larger builds (572 -> 583 -> 587 parts, proven-on-part-count
+   21 -> 15), and condition 6 failed for the right reason measured the wrong way (below). **Still open for
+   the carried-over case**: a history from another install has its `Changes` reset to zero and training
+   compares against that zero until a normal boot describes it. The fix is to measure the incumbent's cost
+   live rather than trust the file, which lands with the price objective.
+
+**The standing rule these seven share (2026-09-13):** any condition whose inputs can be structurally
+constant must be proven able to fail before it counts as evidence. A field some code path never writes, a
+count with no denominator, a comparison against a value that is zero by default - each reads as a pass.
+Sweep candidates, not yet swept: every check in `regression.ps1` and `target.ps1` that compares a figure
+some launch mode does not produce.
 
 ## Queued, with what each is expected to be worth
 
@@ -194,24 +213,64 @@ no knapsack, no Lagrangian grid and no subset DP - and a kept default contribute
 needed a subset-constrained DP over roughly 9.6 billion steps and stalled at 21 of 60. This is the next
 thing to measure.
 
-## Availability - the defect measured on 2026-09-12
+## Availability - measured 2026-09-12, restricted 2026-09-13
 
-Before any pricing work: **how often does the mod recommend a part the player cannot get?** Measured against
-live trader assorts with loyalty and quest locks already applied by the server, on both profiles of this
-install:
+Before any pricing work: **how often does the mod recommend a part the player cannot get?** First measured
+on `187bd20` (stamp `d48f6ac-dirty`) and reproduced exactly on a clean build of `132e430`, against live
+trader assorts with loyalty and quest locks already applied by the server, on both profiles of this install,
+history at 572 parts:
 
 | profile | builds naming an unobtainable part | distinct parts | gated behind trader progress | sold by nobody |
 |---|---|---|---|---|
 | level 51 | **23 of 60** | 19 | 7 | 12 |
 | level 69 | **38 of 60** | 30 | 14 | 16 |
 
-With every trader at loyalty 1 - the player actually doing Gunsmith - **54 and 57 of 60** are out of trader
-reach. The higher-level profile scores worse because 179 relevant parts were already in the first profile's
-stash against 21 in the second, and a part you own needs no trader.
+With every trader at loyalty 1 - the player actually doing Gunsmith - **54 and 57 of 60** were out of trader
+reach. The figures move with the history: as the changes objective keeps more default parts, fewer have to
+be bought, and on the 587-part history of `c991646` they read 26 and 30 of 60 (loyalty 1: 54 and 57).
 
-Caveat that softens it: the flea market is deliberately not a source, because its offers are generated and
-its prices move every restart. Of fifteen unobtainable templates sampled, nine are vanilla and **all nine
-are flea-sellable**; six are modded and unknown. The gated ones are the unambiguous defect.
+**"Owned" was three things** (`c991646`). The level-51 profile looked better off because it "owned 179
+parts". Walked from the inventory roots and split: on the 585-part history, 64 loose in the stash (free),
+33 already fitted to a copy of the quest's own weapon (in place), **51 fitted to a stored weapon and 7 to an
+equipped one** - and those 58 are priced as purchases, because stripping a working gun is the player's call.
+Counted that way its blocked figure went from 17 to 26 of 60. The level-69 profile: 4 loose, 2 in place, 4
+stored, 10 equipped.
+
+**The flea, answered in process** (the file has 4,673 of the 6,567 templates and cannot). 4,822 templates are
+flea-listable with a price, 17 listable but unpriced, 1,728 refused by the game's own rule
+(`RagfairServerHelper.IsItemValidRagfairItem`, which applies the blacklist). `GetFleaPriceForItem` returns 1
+rouble for an unpriced item; 1 is treated as unpriced. Of the parts no trader sells the level-51 profile, 16
+of 17 are on the flea and 1 - mod-injected - has no route at all; level-69: 21 of 23, 2 with no route (1
+mod-injected, 1 vanilla). Both profiles are past `RagFair.MinUserLevel`, so with the flea as a tier **59 and
+58 of the 60 shared builds serve as they are** and the rest are repaired and verified (1 and 2 of 2).
+
+**The fresh profile** - the one neither real profile is - as a hypothetical derived from the locked-inclusive
+trader read (every trader at loyalty 1, empty stash, no flea; quest-locked offers count by loyalty only, so
+it reads slightly MORE obtainable than a real fresh profile): on `c991646`, **14 of 60 shared builds usable
+as they are, 9 repaired within reach (verifier 9 of 9, 0 rejected), 37 blocked by trader level, 0 by the
+flea, 0 that nothing sells.** 2.7 million nodes in 4.2 s on one thread. A quest-named part the profile
+cannot buy does not block a build - no search can avoid it - and its row says the quest names it.
+
+**The cost of restriction**, over the 9 repaired fresh builds: 10.33 parts and 14,202 priced roubles per
+shared build (36 parts absent or barter, unpriceable, so the shared cost is understated) against 12.11 parts
+and 30,000-odd roubles per repaired build. Roughly two parts and 15,000 roubles per build is the price of
+advice that can be followed.
+
+**What a blocked build says** (the wording the coordinator asked to check): *'Gunsmith - Part 1' (MP-133):
+blocked - trader level - Delta-Tek Sprut mount for pump-action shotguns from Jaeger at loyalty 2; closest
+attempt missed: width 5, needs <= 4 (short by 1)*. And *'Gunsmith - Part 8' (AKS-74N): trader level -
+AKS-74/AKS-74U Zenit PT Lock from Skier at loyalty 2; closest attempt missed: recoil 280.67, needs <= 275
+(short by 5.67); could not fit the required part AK Zenit PT-3 "Klassika" stock (reachable, not placed)* -
+the named stock mounts on the gated lock, and the diagnosis names the lock.
+
+**Two holes closed on the way:** the planner's `Extend` and the category chooser `Nearest` never consulted
+`Allowed`, so a restricted search could route a named part through an unobtainable intermediate or plan a
+suppressor nobody sells and report the quest solved. With `Allowed` null both are no-ops, so the shared
+baseline is unaffected by construction.
+
+**Expect the shared baseline's numbers to move when restriction is on**, and read it as the filter working:
+the search gravitates to mod-injected parts with better stats, which are often loot-only, and a restricted
+search is pushed back toward vanilla purchasable parts.
 
 ## The two gates
 
@@ -220,9 +279,20 @@ for a number is how the width defect survived as long as it did.
 
 **The regression gate** must always pass. 7,800 attempts of training (the old 200 rounds), then two warm
 boots and one cold one: the attempt budget completes, zero solver/verifier disagreements, zero rejected
-history entries, every bound identical under concurrency, the part count never rises, the proof count
-survives the parallelism, the history serves cleanly twice, all 60 satisfied and irreducible, and a cold
-solve scores what a warm one does.
+history entries, every bound identical under concurrency, the objective never worsens, **condition 6 (below)**,
+the history serves cleanly twice, all 60 satisfied and irreducible, and a cold solve scores what a warm
+one does.
+
+**Condition 6, restated 2026-09-13.** It read: *training said N settled; both warm boots must report N
+proven.* Under the changes objective a build legitimately grows past its part-count bound between boots,
+so on `132e430` it failed as "training said 21; boots said 21 and 15" - two different questions being
+compared, not a bound moving. It now reads: *(a) every recorded bound identical per build across the
+training run and both warm boots, naming any that moved; (b) each warm boot's reported proven count equals
+what the file it read predicts (parts <= bound).* Both are about the bound alone, which is a property of
+the item data whatever the objective, and (b) is the check that would have caught a served figure
+disagreeing with the file. Both were made to fail before they replaced the old form: `control6.ps1`
+corrupts one entry's bound to its part count and boots once - (a) fails naming the entry, (b) fails with
+the file predicting one more proven than the boot reported. Result on `c991646`: the gate PASSED in full - 8,284 attempts, 0 disagreements, 0 rejections, 6,151 bound comparisons with 0 disagreements, 412 -> 407 changes at 587 parts, (a) 60 compared and 0 moved on both transitions, (b) file predicts 16 and both boots reported 16, cold 60 of 60. `control6.ps1` on `1c8a56c`: (a) FAILED naming the corrupted entry (6 -> 4), (b) FAILED with the file predicting 17 against 16 reported - both checks can fail, which is what makes their passes evidence. The control's first run aborted on a stamp mismatch AFTER corrupting the file and booting, and left both behind; it now restores in a finally block, and the abort was the harness working.
 
 **The target gate** is the definition of done and fails today: five minutes of training, passing only at 60
 of 60 provably minimal. Its other five conditions exist because a gate that rewards a higher proven count
