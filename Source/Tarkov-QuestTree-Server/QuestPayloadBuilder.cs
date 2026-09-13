@@ -1773,6 +1773,9 @@ namespace QuestTreeServer
                     // a directed search is for.
                     weaponBuildCache.Note(key, described.Binding);
 
+                    // And what it costs, so the objective has a recorded value for a build nobody changed.
+                    weaponBuildCache.Changed(key, described.Changes);
+
                     lock (_solved) _solved[key] = described;
                     return described;
                 }

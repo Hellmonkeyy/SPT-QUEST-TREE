@@ -199,6 +199,25 @@ namespace QuestTreeServer
             }
         }
 
+        /// <summary>Records what a remembered build COSTS - the parts the weapon does not already wear.
+        ///
+        /// Needed for the same reason Note is: the common case is a boot that serves the remembered build
+        /// unchanged, and that boot measures it, so it knows the cost. Without this the field stays at zero
+        /// for every build written before the objective existed - and zero does not mean "nothing to buy", it
+        /// means "nobody has looked", which is the difference between a monotonicity check and a blank.</summary>
+        public void Changed(string key, int changes)
+        {
+            lock (_lock)
+            {
+                Load();
+
+                if (!_file!.Builds.TryGetValue(key, out var build) || build.Changes == changes) return;
+
+                build.Changes = changes;
+                _dirty = true;
+            }
+        }
+
         /// <summary>Records what the thresholds looked like on a build nobody changed.
         ///
         /// Separate from Put because the common case is a boot that serves the remembered build unchanged -
