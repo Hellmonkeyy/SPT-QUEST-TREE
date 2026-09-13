@@ -218,9 +218,10 @@ namespace QuestTree.UI
             ModSettings.Changed -= HandleSettingsChanged;
             ModSettings.Changed += HandleSettingsChanged;
 
-            // Both are profile-scoped and both can have moved while the panel was shut.
+            // All three are profile-scoped and all can have moved while the panel was shut.
             QuestDataClient.InvalidateKappa();
             QuestDataClient.InvalidateProfile();
+            QuestDataClient.InvalidateBuilds();
             _session = session; // kept for trader-avatar lookups on tab icons, independent of a graph rebuild
 
             // The tree's chain markers need the same avatars and have no session of their own.
@@ -488,9 +489,10 @@ namespace QuestTree.UI
             try
             {
                 // A quest turning in can hand over Collector items, and it also moves level, trader
-                // standing, objective counters and what is still locked - so both caches are stale.
+                // standing, objective counters and what is still locked - so all three caches are stale.
                 QuestDataClient.InvalidateKappa();
                 QuestDataClient.InvalidateProfile();
+                QuestDataClient.InvalidateBuilds();
 
                 if (_graph.HasFullQuestList)
                 {

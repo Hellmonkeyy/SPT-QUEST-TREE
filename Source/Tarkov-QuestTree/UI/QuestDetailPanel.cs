@@ -598,6 +598,24 @@ namespace QuestTree.UI
 
             y += 6f;
 
+            // YOUR build first, when the server has one: the shared build is solved over every part in
+            // the game and can name one you cannot get, and a build you cannot assemble is worse than an
+            // expensive one. The per-profile answer is either the shared build with every part confirmed
+            // obtainable, one searched again within what you can get, or the plain reason there is none.
+            var mine = QuestDataClient.GetBuilds();
+            var own = mine?.BuildFor(build.Key);
+
+            if (own != null && (own.Status == "ok" || own.Status == "repaired" || own.Status == "blocked"))
+            {
+                AddOwnBuild(own, solution, mine.Stale, width, ref y);
+                return;
+            }
+
+            if (mine != null && mine.HasProfile && !mine.Ready)
+                AuxLayout.AddWrapped(_content,
+                    "<color=#FFFFFF60>working out which of these you can get - reopen the quest in a moment</color>",
+                    _left, ref y, width, 11);
+
             // Three states, not two. A build that meets every threshold the server can score is
             // not the same claim as one that meets every threshold the quest sets, and the five
             // height/width quests are the second kind. Saying "Suggested build" in accent green on
@@ -652,6 +670,123 @@ namespace QuestTree.UI
                 AuxLayout.AddWrapped(_content,
                     $"<color=#{GameStyle.WarningHex}>not checked: {GameStyle.Safe(string.Join(", ", solution.Unchecked))} " +
                     "- eyeball these on the gun before handing in</color>", _left, ref y, width, 11);
+        }
+
+        /// <summary>The build as this player can assemble it. Every row says what the part costs THEM:
+        /// already on the gun, already in the stash, a price from a trader, a barter, a flea estimate -
+        /// or, on a blocked build, what would unlock it.
+        ///
+        /// A part they hold that is bolted to a weapon is priced as a purchase and says where it is,
+        /// because stripping a working gun is their call and never the mod's assumption.</summary>
+        private void AddOwnBuild(ProfileBuildDto own, SolvedBuildDto shared, bool stale, float width, ref float y)
+        {
+            var parts = own.Parts ?? new List<ProfilePartDto>();
+            var accent = ColorUtility.ToHtmlStringRGB(GameStyle.AccentColor);
+
+            string headline;
+
+            if (own.Status == "blocked")
+            {
+                headline = $"<color=#{GameStyle.WarningHex}>No build from what you can get  ·  closest attempt below</color>";
+            }
+            else
+            {
+                var cost = own.Cash > 0 ? $"{own.Cash:N0} ₽" : "nothing to buy";
+                if (own.Barters > 0) cost += $" + {own.Barters} barter{(own.Barters == 1 ? "" : "s")}";
+                if (own.FleaEstimate > 0) cost += $" + about {own.FleaEstimate:N0} ₽ on the flea";
+
+                var what = own.Status == "repaired" ? "Your build (within what you can get)" : "Your build";
+                var colour = shared.FullyChecked ? accent : GameStyle.WarningHex;
+
+                headline = $"<color=#{colour}>{what}  ·  {parts.Count} parts  ·  {cost}</color>";
+            }
+
+            AuxLayout.AddWrapped(_content, headline, _left, ref y, width, 12);
+
+            if (stale)
+                AuxLayout.AddWrapped(_content,
+                    "<color=#FFFFFF60>your traders or stash have changed since this was worked out - it is being redone</color>",
+                    _left, ref y, width, 11);
+
+            foreach (var part in parts)
+            {
+                if (part == null || string.IsNullOrEmpty(part.Name)) continue;
+
+                var row = $"<color=#FFFFFF60>{GameStyle.Safe(SlotLabel(part.Slot))}</color>  {GameStyle.Safe(part.Name)}" +
+                          $"  <color=#FFFFFF80>{TierLabel(part)}</color>";
+
+                if (!string.IsNullOrEmpty(part.Template))
+                {
+                    var captured = part.Template;
+                    AuxLayout.AddClickableWrapped(_content, row, _left, ref y, width,
+                        () => GameStyle.InspectItem(captured));
+                }
+                else
+                {
+                    AuxLayout.AddWrapped(_content, row, _left, ref y, width);
+                }
+            }
+
+            // The shared scores describe the shared parts. They still apply when the build IS the shared
+            // one, and say nothing about a repaired one, so they are shown only then.
+            if (own.Status == "ok" && shared.Scores.Count > 0)
+                AuxLayout.AddWrapped(_content,
+                    $"<color=#FFFFFF80>{string.Join("   ", shared.Scores)}</color>", _left, ref y, width, 11);
+
+            if (own.Status == "blocked")
+            {
+                foreach (var unmet in own.Unmet ?? new List<string>())
+                    AuxLayout.AddWrapped(_content,
+                        $"<color=#{GameStyle.ErrorHex}>{GameStyle.Safe(unmet)}</color>", _left, ref y, width, 11);
+
+                // The remedy, which is the whole point: a trader to level, the flea to unlock, or the
+                // plain fact that nobody sells it - three different problems a player must tell apart.
+                if (!string.IsNullOrEmpty(own.Why))
+                    AuxLayout.AddWrapped(_content,
+                        $"<color=#{GameStyle.WarningHex}>{GameStyle.Safe(WhyLabel(own.Why))}</color>", _left, ref y, width, 11);
+            }
+
+            if (shared.Unchecked.Count > 0)
+                AuxLayout.AddWrapped(_content,
+                    $"<color=#{GameStyle.WarningHex}>not checked: {GameStyle.Safe(string.Join(", ", shared.Unchecked))} " +
+                    "- eyeball these on the gun before handing in</color>", _left, ref y, width, 11);
+        }
+
+        /// <summary>What one part costs this player, in a few words beside its name.</summary>
+        private static string TierLabel(ProfilePartDto part)
+        {
+            string label;
+
+            switch (part.Tier)
+            {
+                case "fitted": label = "already on the gun"; break;
+                case "inplace": label = "already on yours"; break;
+                case "owned": label = "in your stash"; break;
+                case "buyable": label = part.Price.HasValue ? $"{part.Price.Value:N0} ₽" : "from a trader"; break;
+                case "barter": label = "barter"; break;
+                case "flea": label = part.Price.HasValue ? $"about {part.Price.Value:N0} ₽ on the flea" : "on the flea"; break;
+                case "absent": label = string.IsNullOrEmpty(part.Gate) ? "not sold" : $"needs {part.Gate}"; break;
+                default: label = ""; break;
+            }
+
+            if (!string.IsNullOrEmpty(part.Where)) label += (label.Length > 0 ? "  ·  " : "") + part.Where;
+            if (part.Named) label += (label.Length > 0 ? "  ·  " : "") + "the quest names this part";
+
+            return GameStyle.Safe(label);
+        }
+
+        /// <summary>The server's "trader level - ..." / "flea market - ..." / "not sold - ..." as a
+        /// sentence a player acts on.</summary>
+        private static string WhyLabel(string why)
+        {
+            if (why.StartsWith("trader level - ", StringComparison.Ordinal))
+                return "to build it you need: " + why.Substring("trader level - ".Length);
+            if (why.StartsWith("flea market - ", StringComparison.Ordinal))
+                return why.Substring("flea market - ".Length);
+            if (why.StartsWith("not sold - ", StringComparison.Ordinal))
+                return why.Substring("not sold - ".Length);
+
+            return why;
         }
 
         /// <summary>"mod_muzzle" as "muzzle". The game's own slot names are readable once the prefix

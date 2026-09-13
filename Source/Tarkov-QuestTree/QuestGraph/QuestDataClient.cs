@@ -26,6 +26,7 @@ namespace QuestTree.QuestGraph
         private const string ProfileRoute = "/questtree/profile";
         private const string MapMarkerRoute = "/questtree/mapmarkers";
         private const string RaidCheckRoute = "/questtree/raidcheck";
+        private const string BuildsRoute = "/questtree/builds";
 
         /// <summary>
         /// How long a request may hold the game. Every fetch here is synchronous on Unity's main
@@ -67,6 +68,95 @@ namespace QuestTree.QuestGraph
             if (_raidCheckAttempted && _raidCheck == null) _raidCheckAttempted = false;
             if (_markersAttempted && _markers == null) _markersAttempted = false;
             if (_profileAttempted && _profile == null) _profileAttempted = false;
+            if (_buildsAttempted && _builds == null) _buildsAttempted = false;
+        }
+
+        private static ProfileBuildsDto _builds;
+        private static bool _buildsAttempted;
+
+        /// <summary>The weapon builds as this player can assemble them, or null when the server half
+        /// is missing, older than this route, or had no profile to read - in which case the shared
+        /// build is shown, as it always was. Null is neutral.
+        ///
+        /// Cached with the profile's discipline and invalidated with it: trader progress and the stash
+        /// both move it, and both move the profile. Answered from what the server already has - it
+        /// never solves inside the request - so a not-ready answer is cheap to ask again for, which
+        /// InvalidateBuilds is for.</summary>
+        public static ProfileBuildsDto GetBuilds()
+        {
+            if (_buildsAttempted) return _builds;
+            _buildsAttempted = true;
+
+            try
+            {
+                var json = GetJson(BuildsRoute);
+                if (string.IsNullOrEmpty(json))
+                {
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: {BuildsRoute} returned nothing - the server half is missing or predates " +
+                        "this route, so builds are shown as the shared answer.");
+                    return null;
+                }
+
+                var payload = JsonConvert.DeserializeObject<ProfileBuildsDto>(json);
+                Sanitise(payload);
+
+                if (payload != null && payload.SchemaVersion != ProfileBuildsDto.SupportedSchemaVersion)
+                {
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: builds payload schema v{payload.SchemaVersion} ({SchemaNote(payload.SchemaVersion, ProfileBuildsDto.SupportedSchemaVersion)}) but this client expects " +
+                        $"v{ProfileBuildsDto.SupportedSchemaVersion} (server mod {payload.ModVersion}).");
+                }
+
+                // Not ready is not a failure and must not latch: the server is still working it out,
+                // and the next panel open should ask again rather than show the shared build all session.
+                if (payload != null && payload.HasProfile && !payload.Ready) _buildsAttempted = false;
+
+                _builds = payload;
+                return _builds;
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning($"QuestTree: could not reach {BuildsRoute} ({ex.Message}).");
+                return null;
+            }
+        }
+
+        /// <summary>Drops the cached builds so the next GetBuilds re-fetches. Paired with
+        /// InvalidateProfile - the same events move both.</summary>
+        public static void InvalidateBuilds()
+        {
+            _builds = null;
+            _buildsAttempted = false;
+        }
+
+        /// <summary>Every name here comes from the locale table and is rendered inside markup.</summary>
+        private static void Sanitise(ProfileBuildsDto payload)
+        {
+            if (payload?.Builds == null) return;
+
+            foreach (var build in payload.Builds)
+            {
+                if (build == null) continue;
+
+                build.QuestName = RichText.Safe(build.QuestName);
+                build.WeaponName = RichText.Safe(build.WeaponName);
+                build.Why = RichText.Safe(build.Why);
+
+                if (build.Unmet != null)
+                    for (var i = 0; i < build.Unmet.Count; i++) build.Unmet[i] = RichText.Safe(build.Unmet[i]);
+
+                if (build.Parts == null) continue;
+
+                foreach (var part in build.Parts)
+                {
+                    if (part == null) continue;
+
+                    part.Name = RichText.Safe(part.Name);
+                    part.Gate = RichText.Safe(part.Gate);
+                    part.Where = RichText.Safe(part.Where);
+                }
+            }
         }
 
         private static List<QuestDto> _cached;
@@ -416,6 +506,8 @@ namespace QuestTree.QuestGraph
             _kappaResult = null;
             _profile = null;
             _profileAttempted = false;
+            _builds = null;
+            _buildsAttempted = false;
         }
 
         // Every name the views will put inside rich text, made literal once here - see RichText.

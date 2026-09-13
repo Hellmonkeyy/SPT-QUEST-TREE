@@ -25,8 +25,11 @@ namespace QuestTree.QuestGraph
         /// ObjectiveDto.FoundInRaid, which the readers fall back from. v4 (1.9.0) adds
         /// QuestDto.DerivedLocations, which a v3 server simply never sends. v5 (1.10.1) adds
         /// RewardDto.ShortName and Template; without them a reward row keeps its full name
-        /// and stops being clickable, which is exactly how it read before they existed.</summary>
-        public const int SupportedSchemaVersion = 9;
+        /// and stops being clickable, which is exactly how it read before they existed. v10
+        /// (1.12.0): a solved build is a diff against the weapon's default preset (SolvedPartDto.Status
+        /// and Replaces, SolvedBuildDto.Changes and HasDefaults) and WeaponBuildDto carries the key the
+        /// per-profile /questtree/builds answer joins on.</summary>
+        public const int SupportedSchemaVersion = 10;
 
         [JsonProperty("schemaVersion")]
         public int SchemaVersion { get; set; }
@@ -57,6 +60,12 @@ namespace QuestTree.QuestGraph
     /// against. Null for a quest that states none.</summary>
     internal sealed class WeaponBuildDto
     {
+        /// <summary>Identifies this requirement across payloads - the per-profile answer on
+        /// /questtree/builds carries the same key. Empty from a server older than schema v10, in
+        /// which case there is no per-profile answer to join and the shared build shows as it did.</summary>
+        [JsonProperty("key")]
+        public string Key { get; set; }
+
         [JsonProperty("weaponTemplate")]
         public string WeaponTemplate { get; set; }
 
@@ -125,6 +134,17 @@ namespace QuestTree.QuestGraph
         [JsonProperty("parts")]
         public List<SolvedPartDto> Parts { get; set; } = new List<SolvedPartDto>();
 
+        /// <summary>Parts the player has to fit that the weapon does not already wear - swaps plus
+        /// additions. Meaningless without HasDefaults: zero on a weapon with no preset means "nothing
+        /// to compare against", not "nothing to buy".</summary>
+        [JsonProperty("changes")]
+        public int Changes { get; set; }
+
+        /// <summary>Whether the game ships a default preset for this weapon, and therefore whether the
+        /// part statuses and the change count mean anything. False for most modded weapons.</summary>
+        [JsonProperty("hasDefaults")]
+        public bool HasDefaults { get; set; }
+
         [JsonProperty("scores")]
         public List<string> Scores { get; set; } = new List<string>();
 
@@ -145,6 +165,16 @@ namespace QuestTree.QuestGraph
 
         [JsonProperty("name")]
         public string Name { get; set; }
+
+        /// <summary>"fitted" (the weapon already wears it), "swap" (something else is in that slot -
+        /// see Replaces) or "add" (the slot is empty on the default). Empty when the weapon has no
+        /// default preset, and the row then shows the way it always did.</summary>
+        [JsonProperty("status")]
+        public string Status { get; set; }
+
+        /// <summary>For a swap, the name of the part being taken off.</summary>
+        [JsonProperty("replaces")]
+        public string Replaces { get; set; }
     }
 
     /// <summary>What the stat model believes about the exact parts a quest names.
