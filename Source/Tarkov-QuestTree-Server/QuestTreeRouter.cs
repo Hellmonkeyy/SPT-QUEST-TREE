@@ -5,7 +5,9 @@ using System.Threading.Tasks;
 using SPTarkov.Common.Models.Logging;
 using SPTarkov.DI.Annotations;
 using SPTarkov.Server.Core.DI;
+using SPTarkov.Server.Core.Extensions;
 using SPTarkov.Server.Core.Models.Eft.Common;
+using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Utils;
 
 namespace QuestTreeServer
@@ -29,10 +31,11 @@ namespace QuestTreeServer
             JsonUtil jsonUtil, ISptLogger<QuestTreeRouter> logger, QuestPayloadBuilder payloadBuilder,
             KappaPayloadBuilder kappaBuilder, ProfilePayloadBuilder profileBuilder,
             MapMarkerPayloadBuilder markerBuilder, ZoneStore zoneStore, QuestFacts facts,
-            RaidCheckPayloadBuilder raidCheckBuilder, ProfileBuilds profileBuilds)
+            RaidCheckPayloadBuilder raidCheckBuilder, ProfileBuilds profileBuilds,
+            WeaponPresetWriter presetWriter)
             : base(jsonUtil, BuildRoutes(
                 logger, payloadBuilder, kappaBuilder, profileBuilder, markerBuilder, zoneStore, facts,
-                raidCheckBuilder, profileBuilds))
+                raidCheckBuilder, profileBuilds, presetWriter))
         {
         }
 
@@ -44,7 +47,8 @@ namespace QuestTreeServer
             ISptLogger<QuestTreeRouter> logger, QuestPayloadBuilder payloadBuilder,
             KappaPayloadBuilder kappaBuilder, ProfilePayloadBuilder profileBuilder,
             MapMarkerPayloadBuilder markerBuilder, ZoneStore zoneStore, QuestFacts facts,
-            RaidCheckPayloadBuilder raidCheckBuilder, ProfileBuilds profileBuilds) =>
+            RaidCheckPayloadBuilder raidCheckBuilder, ProfileBuilds profileBuilds,
+            WeaponPresetWriter presetWriter) =>
             new List<RouteAction>
             {
                 // Profile-scoped: the weapon builds as THIS player can assemble them. Answered from what
@@ -67,6 +71,18 @@ namespace QuestTreeServer
                         Guarded(logger, url,
                             () => AcceptHarvest(logger, request, zoneStore, markerBuilder, payloadBuilder, facts),
                             () => new ZoneHarvestResponse { Ok = false, Message = "failed" })),
+
+                // Writes one solved build into the player's own saved weapon builds, so the game's
+                // modding screen can load it - and offer to buy what is missing, which is the part we
+                // were never going to do well ourselves.
+                //
+                // On demand, per quest, because the alternative is thirty-two presets appearing in a
+                // list the player owns without being asked.
+                new RouteAction<SavePresetRequest>(
+                    "/questtree/build/save",
+                    (url, request, sessionId, output, cancellationToken) =>
+                        Guarded(logger, url, () => SavePreset(profileBuilds, presetWriter, sessionId, request),
+                            () => new SavePresetResponse { Reason = "the server could not save the preset" })),
 
                 new RouteAction<EmptyRequestData>(
                     "/questtree/quests",
@@ -113,6 +129,45 @@ namespace QuestTreeServer
         /// the client's to choose, and a set keyed on it would grow with every new bad name.</summary>
         private static readonly HashSet<string> RejectionsLogged = new(StringComparer.Ordinal);
         private const int MaxRejectionsLogged = 256;
+
+        /// <summary>Save one build as a preset, and say plainly why not when it cannot.
+        ///
+        /// Reads the answer the background pass already worked out rather than solving here: the tree
+        /// it holds is the build this player can actually assemble, which is the one worth writing, and
+        /// solving inside a request is what froze the game once already.</summary>
+        private static string SavePreset(
+            ProfileBuilds profileBuilds, WeaponPresetWriter presetWriter, MongoId sessionId,
+            SavePresetRequest? request)
+        {
+            static string Reply(SavePresetResponse r) => JsonSerializer.Serialize(r, WireJson.Options);
+
+            if (request == null || string.IsNullOrWhiteSpace(request.Key))
+                return Reply(new SavePresetResponse { Reason = "no build was named" });
+
+            var build = profileBuilds.Find(sessionId, request.Key);
+
+            if (build == null)
+                return Reply(new SavePresetResponse
+                {
+                    Reason = "your builds are still being worked out - try again in a moment"
+                });
+
+            if (build.Tree == null || build.Tree.Count == 0)
+                return Reply(new SavePresetResponse { Reason = "there is no build for this quest to save" });
+
+            if (!build.WeaponTemplate.TryParseMongoId(out var weapon))
+                return Reply(new SavePresetResponse { Reason = "this quest's weapon could not be identified" });
+
+            var outcome = presetWriter.Save(sessionId, build.QuestName, weapon, build.Tree)
+                .GetAwaiter().GetResult();
+
+            return Reply(new SavePresetResponse
+            {
+                Saved = outcome.Saved,
+                Name = outcome.Name,
+                Reason = outcome.Reason
+            });
+        }
 
         private static string AcceptHarvest(
             ISptLogger<QuestTreeRouter> logger, ZoneHarvestRequest? request, ZoneStore zoneStore,

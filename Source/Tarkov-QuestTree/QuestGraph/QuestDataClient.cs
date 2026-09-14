@@ -36,6 +36,50 @@ namespace QuestTree.QuestGraph
         /// </summary>
         private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(15);
 
+        /// <summary>What the server said about saving a preset.</summary>
+        public sealed class SavePresetResult
+        {
+            [JsonProperty("saved")]
+            public bool Saved { get; set; }
+
+            [JsonProperty("name")]
+            public string Name { get; set; }
+
+            [JsonProperty("reason")]
+            public string Reason { get; set; }
+        }
+
+        /// <summary>Ask the server to write one solved build into the player's saved weapon builds.
+        ///
+        /// Synchronous, like every other call here, and for the same reason: the player pressed a
+        /// button and is waiting to be told what happened. Never throws - a failed save is a sentence
+        /// on screen, not an exception into a UI rebuild.</summary>
+        public static SavePresetResult SavePreset(string key)
+        {
+            if (string.IsNullOrEmpty(key))
+                return new SavePresetResult { Reason = "no build was named" };
+
+            try
+            {
+                var body = JsonConvert.SerializeObject(new { key });
+
+                var task = Task.Run(() => RequestHandler.PostJsonAsync("/questtree/build/save", body));
+
+                if (!task.Wait(RequestTimeout))
+                    return new SavePresetResult { Reason = "the server did not answer in time" };
+
+                var reply = JsonConvert.DeserializeObject<SavePresetResult>(task.Result);
+
+                return reply ?? new SavePresetResult { Reason = "the server sent nothing back" };
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning($"QuestTree: could not save the weapon preset - {ex.Message}");
+
+                return new SavePresetResult { Reason = "the server could not be reached" };
+            }
+        }
+
         /// <summary>RequestHandler.GetJson with a deadline. Same mechanism SPT uses (the async call
         /// on a pool thread, waited on here), plus the wait having a limit.</summary>
         private static string GetJson(string route)

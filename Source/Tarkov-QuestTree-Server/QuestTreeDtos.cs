@@ -1,4 +1,6 @@
 using System.Collections.Generic;
+using System.Text.Json.Serialization;
+using SPTarkov.Server.Core.Models.Utils;
 
 namespace QuestTreeServer
 {
@@ -608,8 +610,37 @@ namespace QuestTreeServer
         public List<ProfileBuildDto> Builds { get; set; } = new();
     }
 
+    /// <summary>Asks for one solved build to be written into the player's saved weapon builds.</summary>
+    public sealed class SavePresetRequest : IRequestData
+    {
+        /// <summary>Joins to WeaponBuildDto.Key - which requirement to save.</summary>
+        [JsonPropertyName("key")]
+        public string Key { get; set; } = "";
+    }
+
+    public sealed class SavePresetResponse
+    {
+        public bool Saved { get; set; }
+
+        /// <summary>The preset's name as written, so the client can tell the player what to look for.</summary>
+        public string Name { get; set; } = "";
+
+        /// <summary>Why not, in a sentence a player can act on. Empty when it saved.</summary>
+        public string Reason { get; set; } = "";
+    }
+
     public sealed class ProfileBuildDto
     {
+        /// <summary>The fitted parts as a TREE, kept for writing a weapon preset and deliberately not
+        /// sent to the client.
+        ///
+        /// ProfilePartDto carries a slot and a template but no parent, so the rows on the wire cannot
+        /// be reassembled into the nested item list a saved build needs - a handguard and the sight
+        /// mounted on it are two flat rows there. The solver's own output does carry the parent, so
+        /// it is held here and the preset is built server-side from it.</summary>
+        [JsonIgnore]
+        public IReadOnlyList<WeaponSolver.FittedPart>? Tree { get; set; }
+
         /// <summary>Joins to WeaponBuildDto.Key on the quest payload.</summary>
         public string Key { get; set; } = "";
 

@@ -47,6 +47,45 @@ namespace QuestTree.UI
             public Action<QuestNode> OnShowOnMap { get; }
         }
 
+        /// <summary>What the last preset save said, and which build it was about. Static because the
+        /// views are rebuilt on every repaint, so a result would otherwise vanish before it was read -
+        /// the same reason the goal dropdown keeps its open flag in a static.</summary>
+        private static string _presetKey;
+        private static string _presetSaid;
+
+        /// <summary>Offer to write this build into the player's own saved weapon builds.
+        ///
+        /// The game's modding screen can then load the whole gun in one click, and - the part worth
+        /// having - it offers to BUY the parts that are missing, through the game's own purchase flow
+        /// rather than a server-side purchase that would desync the profile.</summary>
+        private static void AddSavePreset(Ctx ctx, string key, float width, ref float y)
+        {
+            if (string.IsNullOrEmpty(key)) return;
+
+            y += 2f;
+
+            AuxLayout.AddClickableRow(ctx.Parent,
+                $"<color=#{ColorUtility.ToHtmlStringRGB(GameStyle.AccentColor)}>⊞  Save as a weapon preset</color>",
+                ctx.X, ref y, width, false, () =>
+                {
+                    var result = QuestDataClient.SavePreset(key);
+
+                    _presetKey = key;
+                    _presetSaid = result.Saved
+                        ? $"Saved as \"{result.Name}\". It appears in the game's build list - you may need to " +
+                          "go back to the profile select for it to show."
+                        : result.Reason;
+
+                    ModSettings.RequestRepaint();
+                }, 22f);
+
+            if (_presetKey == key && !string.IsNullOrEmpty(_presetSaid))
+                AuxLayout.AddWrapped(ctx.Parent, $"<color=#FFFFFF80>{GameStyle.Safe(_presetSaid)}</color>",
+                    ctx.X, ref y, width, 11);
+
+            y += 6f;
+        }
+
         /// <summary>Draw the quest's sections at the cursor, and advance it past them.</summary>
         internal static void Render(
             RectTransform parent, ref float y, float x, float width,
@@ -305,6 +344,7 @@ namespace QuestTree.UI
                     $"leave {build.EmptyTacticalSlots:0} tactical slot(s) empty", ctx.X, ref y, width);
 
             AddSolution(ctx, build, width, ref y);
+            AddSavePreset(ctx, build.Key, width, ref y);
             AddModelCheck(ctx, build, width, ref y);
 
             y += 8f;

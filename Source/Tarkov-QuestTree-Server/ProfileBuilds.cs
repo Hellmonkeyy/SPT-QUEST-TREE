@@ -124,6 +124,16 @@ namespace QuestTreeServer
         public string GetPayloadJson(MongoId sessionId) =>
             JsonSerializer.Serialize(Build(sessionId), WireJson.Options);
 
+        /// <summary>This profile's answer for one requirement, tree included, or null when it has not
+        /// been worked out yet. The preset writer's way in.</summary>
+        public ProfileBuildDto? Find(MongoId sessionId, string key)
+        {
+            if (string.IsNullOrEmpty(key)) return null;
+            if (!_answers.TryGetValue(sessionId, out var answer) || answer == null) return null;
+
+            return answer.Builds.FirstOrDefault(b => b != null && b.Key == key);
+        }
+
         private ProfileBuildsDto Build(MongoId sessionId)
         {
             var payload = new ProfileBuildsDto();
@@ -442,6 +452,8 @@ namespace QuestTreeServer
 
             foreach (var part in requirement.Baseline)
             {
+                dto.Tree ??= requirement.Baseline;
+
                 var row = Row(part, sources, defaults, locale, weapon, named);
 
                 if (row.Tier == "absent" && !row.Named) blocked = true;
@@ -507,6 +519,7 @@ namespace QuestTreeServer
                     dto.Status = "repaired";
                     dto.Verified = true;
                     dto.Parts.Clear();
+                    dto.Tree = result.Parts;
 
                     foreach (var part in result.Parts) dto.Parts.Add(Row(part, sources, defaults, locale, weapon, named));
 
@@ -535,6 +548,7 @@ namespace QuestTreeServer
             dto.Status = "blocked";
             dto.Unmet.AddRange(result.Unmet.Select(line => Named(line, locale)));
             dto.Parts.Clear();
+            dto.Tree = result.Parts;
 
             foreach (var part in result.Parts) dto.Parts.Add(Row(part, sources, defaults, locale, weapon, named));
 
