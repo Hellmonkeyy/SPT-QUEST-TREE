@@ -1360,7 +1360,7 @@ namespace QuestTree.UI
                 {
                     QuestDataClient.InvalidateProfile();
                     RenderSelectedTab();
-                })
+                }, ShowOnMap)
                 : _selectedTraderId == MapsTabId
                 ? MapView.Build(_auxContent, _graph, RenderSelectedTab, () =>
                 {
@@ -1395,6 +1395,23 @@ namespace QuestTree.UI
                 });
 
             _auxContent.sizeDelta = new Vector2(0f, height);
+
+            // A view that expanded something in place asks to be scrolled back to it. The position
+            // was zeroed before the rebuild, and the clamp needs the finished height, so this is the
+            // only point where it can be honoured. Only scrolls when the row would otherwise be off
+            // screen, and leaves a good part of the viewport for the body underneath it.
+            if (DoNextView.PendingScroll is { } rowY && _auxPanel != null)
+            {
+                var viewport = _auxPanel.rect.height;
+                var reveal = viewport * 0.4f;
+
+                if (rowY + reveal > viewport)
+                {
+                    var maxScroll = Mathf.Max(0f, height - viewport);
+                    _auxContent.anchoredPosition =
+                        new Vector2(0f, Mathf.Clamp(rowY - reveal, 0f, maxScroll));
+                }
+            }
 
             _toolbar.SetNotice(NoticeForView(_selectedTraderId));
 

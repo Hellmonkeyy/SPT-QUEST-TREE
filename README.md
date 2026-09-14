@@ -237,6 +237,13 @@ around it.
   lower, with the gate named - a quest two levels away is worth knowing about before you vendor
   something it wants. It ranks rather than filters, so it stays useful whatever state your profile
   is in.
+
+  **Click a row and it opens in place** with everything you need to actually do the quest: its
+  objectives with live counts, the items to take and how many you already hold, where to go, what it
+  pays and what it unlocks - and, for a Gunsmith quest, the whole weapon build with prices and what
+  is already in your stash. Open as many as you like and compare them; the list stays where it was.
+  It is the same content the detail panel shows, drawn from the same code, so the two cannot
+  disagree.
 - **Items** - every item an unfinished quest will ask for, how many you hold, whether found-in-raid
   is required, and which quests want it. **This is the "do not sell that" list.** It deliberately
   includes items for quests you have not unlocked yet, because that is exactly when you would

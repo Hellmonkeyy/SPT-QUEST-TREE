@@ -63,8 +63,10 @@ namespace QuestTree.UI
 
         public static float Build(
             RectTransform parent, QuestGraphBuilder graph, Vector2 panelSize, Action<QuestNode> onQuestSelected,
-            Action onRefresh)
+            Action onRefresh, Action<QuestNode> onShowOnMap = null)
         {
+            PendingScroll = null;
+
             var x = AuxLayout.Padding;
             var width = Mathf.Min(AuxLayout.MaxContentWidth, panelSize.x - AuxLayout.Padding * 2f);
             var y = AuxLayout.Padding;
@@ -127,13 +129,31 @@ namespace QuestTree.UI
                     ? GameStyle.Safe(node.TraderName)
                     : $"{GameStyle.Safe(node.TraderName)}  ·  {GameStyle.Safe(where)}";
 
+                var open = Expanded.Contains(node.Id);
+                var rowY = y;
+
                 AuxLayout.AddClickableRow(parent,
-                    $"<color=#{hex}>{QuestNodeView.GlyphFor(node.Status)}</color>  {GameStyle.Safe(node.Name)}  <color=#FFFFFF60>{tail}</color>",
-                    x, ref y, width, false, () => onQuestSelected?.Invoke(captured));
+                    $"<color=#FFFFFF80>{(open ? "▾" : "▸")}</color> <color=#{hex}>{QuestNodeView.GlyphFor(node.Status)}</color>  {GameStyle.Safe(node.Name)}  <color=#FFFFFF60>{tail}</color>",
+                    x, ref y, width, open, () => Toggle(captured.Id, rowY));
 
                 var reason = Reason(entry, profile, graph);
                 if (!string.IsNullOrEmpty(reason))
                     AuxLayout.AddLabelAt(parent, $"<color=#FFFFFF60>{reason}</color>", x + 22f, ref y, 16f, 11, width - 22f);
+
+                if (!open) continue;
+
+                // The same sections the detail panel draws, from the same code, so the two can never
+                // disagree about what a quest involves.
+                AuxLayout.AddSpacer(ref y, 4f);
+                QuestBody.Render(parent, ref y, x + 22f, width - 22f, node, graph, profile,
+                    onQuestLink: target => onQuestSelected?.Invoke(target),
+                    onShowOnMap: onShowOnMap);
+
+                // The action the row click used to perform, now that the click expands instead.
+                AuxLayout.AddClickableRow(parent, "<color=#FFFFFF80>◇  Show in the tree</color>",
+                    x + 22f, ref y, width - 22f, false, () => onQuestSelected?.Invoke(captured));
+
+                AuxLayout.AddSpacer(ref y, 10f);
             }
 
             if (ranked.Count > shown.Count)
@@ -160,6 +180,23 @@ namespace QuestTree.UI
 
             return bottom;
         }
+
+        /// <summary>Quests whose body is open, by id. Several at once by design: the point of
+        /// expanding in place is to compare two quests without losing either.
+        ///
+        /// Static for the same reason the goal's open flag is - aux views are rebuilt from scratch on
+        /// every repaint, so there is nowhere else for a moment of UI state to live. Cleared by
+        /// Forget when the graph rebuilds, or the ids would outlive the quests they name.</summary>
+        private static readonly HashSet<string> Expanded = new(StringComparer.Ordinal);
+
+        /// <summary>Where the list should be scrolled to after this build, or null to leave it.
+        ///
+        /// The panel zeroes the scroll position before every rebuild, and toggling a row goes
+        /// through a rebuild - so without this, opening the ninth row throws you back to the first.
+        /// The row records its own cursor position as it is drawn, because at that moment the cursor
+        /// IS the offset that would put it at the top. QuestTreePanel applies it once the content
+        /// height is known, which is the only point at which it can be clamped.</summary>
+        internal static float? PendingScroll { get; private set; }
 
         /// <summary>Whether the goal list is open. Static because the aux views are rebuilt from
         /// scratch on every repaint, so there is nowhere else for a moment of UI state to live -
@@ -406,6 +443,8 @@ namespace QuestTree.UI
         /// <summary>Drops the cached ranking - called when the graph is rebuilt.</summary>
         internal static void Forget()
         {
+            Expanded.Clear();
+            PendingScroll = null;
             _rankedGraph = null;
             _rankedProfile = null;
             _ranked = null;
@@ -437,6 +476,18 @@ namespace QuestTree.UI
                 .ThenByDescending(e => e.Score?.Total ?? 0f)
                 .ThenBy(e => e.Node.Name, StringComparer.OrdinalIgnoreCase)
                 .ToList();
+        }
+
+        /// <summary>Open or close one quest's body, and remember where the row was so the list
+        /// does not jump when it is rebuilt.</summary>
+        private static void Toggle(string questId, float rowY)
+        {
+            if (string.IsNullOrEmpty(questId)) return;
+
+            if (!Expanded.Remove(questId)) Expanded.Add(questId);
+
+            PendingScroll = rowY;
+            ModSettings.RequestRepaint();
         }
 
         /// <summary>The goal to rank for. Balanced before settings are bound, which is the first
