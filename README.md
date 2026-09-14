@@ -53,9 +53,8 @@ The tracker opens on **Maps**, on the map you have picked in the matchmaker when
 one (the sidebar says "Your next raid"), otherwise on the busiest map. Pick a map and a floor at the
 top; the map fills the panel and a column on the right lists what you can do there:
 
-- **Do next here** - the map's unfinished quests ranked the way you would act on them (in
-  progress, then ready to hand in, then closest to complete), with the one fact that matters per
-  row.
+- **Do next here** - the map's unfinished quests, ranked by the same score the **Do next** tab uses
+  and following whichever goal you picked there, with the one fact that matters per row.
 - **Quests on the map** - every quest with an objective or item on this map, one row each. Click a
   row for its objectives and rewards inline, and the map flies to its pins.
 - **Items to find here** - quest items that spawn on this map, and whether you already hold them.
@@ -219,9 +218,25 @@ nothing, because every improvement is written as it is found.
 Whole screens, next to Tree. Every quest row in them opens that quest's detail with the tree framed
 around it.
 
-- **Do next** - every unfinished quest, ranked: in progress first, then ones you already hold every
-  item for, then partial holdings, then the rest by nearest gate. It ranks rather than filters, so
-  it stays useful whatever state your profile is in.
+- **Do next** - every unfinished quest, scored and ranked. Quests you have accepted come first,
+  then everything else in order of what it is worth doing: what the quest pays, how much of the tree
+  it opens, whether your traders can reach the offers it unlocks, how close it is to done, how close
+  it is to startable, whether Kappa needs it, and how much work it looks like.
+
+  **Pick what you are playing for** from the selector at the top - Balanced, Kappa path, Fast
+  levelling, Trader unlocks, Item hoarding - and the order changes with it. A quest paying 200k
+  experience and opening nothing tops Fast levelling and sits near the bottom of Kappa path, which
+  is the whole reason it is a choice rather than a fixed answer.
+
+  **Every row says why it is there** - *"unlocks 12 · 96k XP · 80% ready"*. A ranking has nothing to
+  be checked against, so the test is whether a row's reason justifies its position; if it does not,
+  you can see that rather than having to trust a number.
+
+  Rows name their map, and one line tells you when several of your top ten are in the same place,
+  because travel between maps is the real cost. Quests you cannot start yet are included and ranked
+  lower, with the gate named - a quest two levels away is worth knowing about before you vendor
+  something it wants. It ranks rather than filters, so it stays useful whatever state your profile
+  is in.
 - **Items** - every item an unfinished quest will ask for, how many you hold, whether found-in-raid
   is required, and which quests want it. **This is the "do not sell that" list.** It deliberately
   includes items for quests you have not unlocked yet, because that is exactly when you would
@@ -257,6 +272,7 @@ The Settings view, in four sections, and the same values in BepInEx's F12 menu. 
   strength, how far **Focus** reaches, the visible-quest ceiling, which quest badges the boxes wear
   (Kappa, Collector, or both), the trader-card overview threshold, and the hide filters
   (unobtainable / completed / traderless).
+- **Do next** - which goal the ranking optimises for, and how many rows the tab lists.
 - **Behaviour** - open on the map or remember the last view, the open-tracker shortcut, tooltips,
   hover sounds, in-raid zone harvesting, the controls hint, and reloading `kappa-quests.json`.
 - **Map** - accepted quests only, which sidebar sections show, how many "do next" rows, which pins

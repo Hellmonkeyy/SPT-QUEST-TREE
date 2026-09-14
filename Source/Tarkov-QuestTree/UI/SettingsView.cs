@@ -62,6 +62,8 @@ namespace QuestTree.UI
 
             BuildTreeSection(left, ref leftY, columnWidth, deferred);
             AuxLayout.AddSpacer(ref leftY, 18f);
+            BuildDoNextSection(left, ref leftY, columnWidth, deferred);
+            AuxLayout.AddSpacer(ref leftY, 18f);
             BuildBehaviourSection(left, ref leftY, columnWidth, onShowIntro, onKappaListReloaded);
 
             BuildMapSection(right, ref rightY, columnWidth, deferred);
@@ -181,6 +183,42 @@ namespace QuestTree.UI
         }
 
         // ------------------------------------------------------------------ Behaviour
+
+        /// <summary>The Do next tab's ranking.
+        ///
+        /// The goal lives here as well as on the tab itself, because it is a setting in the sense
+        /// that it persists and belongs in the config file - but it is also the one setting a player
+        /// changes mid-session while looking at the list it reorders, which is why the tab carries
+        /// its own copy of the control rather than sending anyone here.</summary>
+        private static void BuildDoNextSection(
+            RectTransform column, ref float y, float width, List<Func<float>> deferred)
+        {
+            Header(column, ref y, "Do next", width);
+
+            AuxLayout.AddText(column, ref y,
+                "<color=#FFFFFF80>What the ranking optimises for. The same quest is not equally worth doing "
+                + "under all of these - one paying 200k experience and opening nothing tops Fast levelling "
+                + "and sits near the bottom of Kappa path.</color>", 46f, 11);
+
+            Dropdown(column, ref y, width, deferred, "Ranking goal", GoalLabels,
+                (int)ModSettings.DoNextGoal.Value,
+                index => ModSettings.DoNextGoal.Value = (RankGoal)index);
+
+            Stepper(column, ref y, "Rows listed", ModSettings.DoNextMaxRows, 10, 10, 200,
+                "How many quests the tab lists before it stops and counts the rest.");
+
+            ResetLink(column, ref y, width, ModSettings.DoNextGoal, ModSettings.DoNextMaxRows);
+        }
+
+        /// <summary>In RankGoal order, so the selected index is the enum value.</summary>
+        private static readonly string[] GoalLabels =
+        {
+            "Balanced",
+            "Kappa path",
+            "Fast levelling",
+            "Trader unlocks",
+            "Item hoarding"
+        };
 
         private static void BuildBehaviourSection(
             RectTransform column, ref float y, float width, Action onShowIntro, Action onKappaListReloaded)
