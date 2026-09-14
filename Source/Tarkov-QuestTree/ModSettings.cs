@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using BepInEx.Configuration;
+using QuestTree.QuestGraph;
 using UnityEngine;
 
 namespace QuestTree
@@ -65,6 +66,10 @@ namespace QuestTree
 
         public static bool ShowCollectorBadge =>
             !Ready || QuestBadges.Value == BadgeMode.Both || QuestBadges.Value == BadgeMode.Collector;
+
+        // --- Do next ---
+        public static ConfigEntry<RankGoal> DoNextGoal { get; private set; }
+        public static ConfigEntry<int> DoNextMaxRows { get; private set; }
 
         // --- Map look ---
         public static ConfigEntry<int> SidebarWidth { get; private set; }
@@ -433,6 +438,17 @@ namespace QuestTree
                 new ConfigDescription("Width of the quest column beside the map, in pixels.",
                     new AcceptableValueRange<int>(380, 520)));
 
+            DoNextGoal = config.Bind(
+                "Do next", "Ranking goal", RankGoal.Balanced,
+                "What the Do next list ranks for. The same quest is not equally worth doing under all "
+                + "of these: one paying 200k experience and opening nothing tops Fast levelling and sits "
+                + "near the bottom of Kappa path.");
+
+            DoNextMaxRows = config.Bind(
+                "Do next", "Rows listed", 40,
+                new ConfigDescription("How many quests the Do next tab lists before it stops and counts the rest.",
+                    new AcceptableValueRange<int>(10, 200)));
+
             DoNextRows = config.Bind(
                 "Map", "Do next rows", 8,
                 new ConfigDescription("How many quests the map sidebar's 'Do next here' section lists. 0 hides the section.",
@@ -499,7 +515,8 @@ namespace QuestTree
                 HideUnobtainable, HideCompleted, HideTraderless, MarkStartedOnly, MapArtworkRotation,
                 MirrorMapArtwork, ShowMapGuides, DrawEdges, FocusFrontier, CompactLayout, MaxVisibleNodes,
                 OpenOnMap, HarvestZones, EdgeOpacity, HoverDimStrength, TallTitles,
-                OverviewBelowZoom, FocusRadius, QuestBadges, SidebarWidth, DoNextRows, ShowItemsSection,
+                OverviewBelowZoom, FocusRadius, QuestBadges, DoNextGoal, DoNextMaxRows,
+                SidebarWidth, DoNextRows, ShowItemsSection,
                 ShowTakeWithYou, CountUnacceptedQuests, ShowTraderColours,
                 TraderColours, ShowCredits,
                 PinLabels, ColorActive, ColorAvailable, ColorCompleted, ColorLocked, ColorGated, ColorAccent, Tooltips,
@@ -508,6 +525,8 @@ namespace QuestTree
 
             // One handler per entry rather than a single global hook, so this only fires for
             // settings this mod actually owns.
+            DoNextGoal.SettingChanged += Raise;
+            DoNextMaxRows.SettingChanged += Raise;
             HideUnobtainable.SettingChanged += Raise;
             HideCompleted.SettingChanged += Raise;
             HideTraderless.SettingChanged += Raise;

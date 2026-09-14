@@ -77,6 +77,15 @@ namespace QuestTree.QuestGraph
         /// 1 + max(depth of prerequisites). Drives the node's horizontal column.</summary>
         public int Depth;
 
+        /// <summary>How many quests this one eventually opens - the whole downstream closure, not
+        /// just the direct successors in Unlocks.
+        ///
+        /// Direct successors barely tell you anything: the median quest has one, and a quest that
+        /// opens one which opens fifty looks identical to a dead end. The closure separates them -
+        /// Saving the Mole reaches 246 where the median reaches 2 - which is what makes it worth
+        /// computing rather than reading Unlocks.Count.</summary>
+        public int UnlockReach;
+
         public ENodeStatus Status;
 
         /// <summary>On the canonical Kappa list - Collector's start conditions in SPT's shipped

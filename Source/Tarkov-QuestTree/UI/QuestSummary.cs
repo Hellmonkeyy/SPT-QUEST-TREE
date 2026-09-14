@@ -275,7 +275,7 @@ namespace QuestTree.UI
         ///
         /// OnYou falls back to the stash-inclusive total when the server cannot say where things
         /// are, which is the honest reading of an older payload: it knew how many, not where.</summary>
-        private static (int OnYou, int InStash, int Elsewhere) HeldCount(
+        internal static (int OnYou, int InStash, int Elsewhere) HeldCount(
             ProfilePayloadDto profile, List<string> templates, bool foundInRaid, bool placesKnown)
         {
             if (profile?.ItemsOwned == null || templates == null) return (0, 0, 0);
@@ -305,7 +305,7 @@ namespace QuestTree.UI
 
         /// <summary>The condition's own flag when the server sends one (schema v2); the English
         /// sentence as the fallback for an older server.</summary>
-        private static bool NeedsFoundInRaid(ObjectiveDto objective) =>
+        internal static bool NeedsFoundInRaid(ObjectiveDto objective) =>
             objective.FoundInRaid || MentionsFoundInRaid(objective.Text);
 
         /// <summary>What is done with the item, from the condition type - the difference between

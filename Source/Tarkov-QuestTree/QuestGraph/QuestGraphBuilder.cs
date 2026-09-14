@@ -98,6 +98,8 @@ namespace QuestTree.QuestGraph
             foreach (var node in _byId.Values)
                 node.Depth = depths[node.Id];
 
+            ComputeUnlockReach(_byId);
+
             // A prerequisite the list does not contain is skipped by the depth walk, so such a
             // quest draws as a root. Said once per build: it is the symptom of a half-updated
             // install or a quest mod referencing a quest another mod removed.
@@ -423,6 +425,54 @@ namespace QuestTree.QuestGraph
         /// not order-free. A prerequisite outside the loaded set is skipped, as before, so such a
         /// quest draws as a root rather than not at all.
         /// </summary>
+        /// <summary>How many quests each one eventually opens, by walking the unlock edges forward
+        /// from every node.
+        ///
+        /// A breadth-first walk per node rather than anything cleverer, because the graph is small
+        /// (about 830 nodes over 740 edges, so this is well under a million steps once per build) and
+        /// because a reverse-topological accumulation would need the graph to be acyclic, which a
+        /// modded install does not guarantee.
+        ///
+        /// The visited set is what makes a cycle harmless - a quest mod pointing two quests at each
+        /// other would otherwise spin here forever. The depth cap is the second line: it costs
+        /// nothing and it means a pathological graph degrades to a wrong number rather than a hung
+        /// client.</summary>
+        private static void ComputeUnlockReach(Dictionary<string, QuestNode> byId)
+        {
+            const int MaxDepth = 512;
+
+            var seen = new HashSet<string>();
+            var queue = new Queue<(QuestNode Node, int Depth)>();
+
+            foreach (var root in byId.Values)
+            {
+                seen.Clear();
+                queue.Clear();
+
+                seen.Add(root.Id);
+                queue.Enqueue((root, 0));
+
+                var reach = 0;
+
+                while (queue.Count > 0)
+                {
+                    var (node, depth) = queue.Dequeue();
+                    if (depth >= MaxDepth) continue;
+
+                    foreach (var next in node.Unlocks)
+                    {
+                        if (next == null) continue;
+                        if (!seen.Add(next.Id)) continue;
+
+                        reach++;
+                        queue.Enqueue((next, depth + 1));
+                    }
+                }
+
+                root.UnlockReach = reach;
+            }
+        }
+
         private static Dictionary<string, int> ComputeDepths(Dictionary<string, QuestNode> byId)
         {
             var depth = new Dictionary<string, int>(byId.Count);
