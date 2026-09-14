@@ -197,7 +197,7 @@ namespace QuestTree.UI
             y += 6f;
 
             // --- objectives, with the counter where the profile has one
-            var objectives = node.NecessaryObjectives.Take(8).ToList();
+            var objectives = node.StatedObjectives.Take(8).ToList();
 
             if (objectives.Count > 0)
             {

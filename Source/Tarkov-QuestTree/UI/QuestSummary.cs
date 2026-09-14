@@ -88,7 +88,7 @@ namespace QuestTree.UI
             // Available for a locked quest too, not just an accepted one: the objective text
             // arrives with the companion mod's payload rather than being read off a live Quest
             // instance the game only creates once the quest is unlocked.
-            var objectives = node.NecessaryObjectives.Select(o => FormatObjective(o, profile)).ToList();
+            var objectives = node.StatedObjectives.Select(o => FormatObjective(o, profile)).ToList();
             if (objectives.Count > 0)
             {
                 lines.Add("<b>Objectives</b>");
@@ -132,7 +132,7 @@ namespace QuestTree.UI
         /// </summary>
         private static void AddItemsToBring(List<string> lines, QuestNode node, ProfilePayloadDto profile)
         {
-            var objectives = node.NecessaryObjectives;
+            var objectives = node.StatedObjectives;
             if (objectives == null) return;
 
             var order = new List<string>();

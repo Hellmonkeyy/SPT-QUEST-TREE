@@ -113,7 +113,7 @@ namespace QuestTree.QuestGraph
         /// have never been harvested - better silent than wrong, since a false entry would drag a
         /// false readiness verdict with it.
         ///
-        /// Never null, matching NecessaryObjectives: QuestGraphBuilder synthesises DTOs when the
+        /// Never null, matching StatedObjectives: QuestGraphBuilder synthesises DTOs when the
         /// server half is absent, and a null here would be a crash rather than a quiet degrade.</summary>
         public IEnumerable<DerivedLocationDto> DerivedLocations =>
             Dto.DerivedLocations == null
@@ -162,7 +162,7 @@ namespace QuestTree.QuestGraph
             foreach (var reward in Rewards) parts.Add(reward?.Name);
             foreach (var unlock in Unlocks) parts.Add(unlock?.Name);
 
-            foreach (var objective in NecessaryObjectives)
+            foreach (var objective in StatedObjectives)
             {
                 if (objective?.TargetItemNames == null) continue;
                 foreach (var item in objective.TargetItemNames) parts.Add(item);
@@ -197,7 +197,7 @@ namespace QuestTree.QuestGraph
             foreach (var unlock in Unlocks)
                 if (Contains(unlock?.Name, needle)) return $"unlocks: {unlock.Name}";
 
-            foreach (var objective in NecessaryObjectives)
+            foreach (var objective in StatedObjectives)
             {
                 if (objective?.TargetItemNames == null) continue;
 
@@ -240,14 +240,30 @@ namespace QuestTree.QuestGraph
             }
         }
 
-        /// <summary>The objectives worth showing - the necessary ones. Unlike the old
-        /// template-reading version, this works for a quest that has never been unlocked, because
-        /// the objective text arrives with the payload rather than being read out of a live
-        /// instance the game has not created.</summary>
-        public IEnumerable<ObjectiveDto> NecessaryObjectives =>
+        /// <summary>Every objective the quest states in words.
+        ///
+        /// This used to filter on IsNecessary and was called NecessaryObjectives, which hid the
+        /// objectives of **42% of quests**. The flag does not mean what the name assumed: across the
+        /// 1,606 finish conditions in the shipped database it is absent 1,080 times, explicitly
+        /// false 526 times, and **true not once**. The absent ones survive because the server maps
+        /// `IsNecessary ?? true`; the explicit false ones were dropped on the floor.
+        ///
+        /// So the flag carries no positive signal and filtering on it could only ever hide things -
+        /// 173 vanilla quests and 38 modded ones showed NO objectives at all, and 149 more showed a
+        /// partial list. Sanitary Investigation - Part 5 marks all six false and the text reads
+        /// "Plant the modified 1GPhone at the first set of TerraGroup..." - which IS the quest.
+        ///
+        /// Nothing is marked optional in the result either: a flag that is false on 526 conditions
+        /// and true on none does not mean optional, it means nothing.
+        ///
+        /// The empty-text guard stays. An objective the quest author wrote no sentence for has
+        /// nothing to show a reader. Unlike the old template-reading version this works for a quest
+        /// that has never been unlocked, because the text arrives with the payload rather than being
+        /// read out of a live instance the game has not created.</summary>
+        public IEnumerable<ObjectiveDto> StatedObjectives =>
             Dto.Objectives == null
                 ? Enumerable.Empty<ObjectiveDto>()
-                : Dto.Objectives.Where(o => o != null && o.IsNecessary && !string.IsNullOrEmpty(o.Text));
+                : Dto.Objectives.Where(o => o != null && !string.IsNullOrEmpty(o.Text));
 
         /// <summary>The weapon-build requirement this quest states, or null for the 774 quests
         /// that state none.</summary>

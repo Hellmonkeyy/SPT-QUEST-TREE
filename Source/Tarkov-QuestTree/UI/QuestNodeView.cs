@@ -690,7 +690,7 @@ namespace QuestTree.UI
             done = 0;
             total = 0;
 
-            foreach (var objective in Node.NecessaryObjectives)
+            foreach (var objective in Node.StatedObjectives)
             {
                 total++;
 

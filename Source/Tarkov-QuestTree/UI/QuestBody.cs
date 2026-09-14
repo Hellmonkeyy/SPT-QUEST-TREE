@@ -142,7 +142,7 @@ namespace QuestTree.UI
 
             // Objectives - with the live counter as a bar where the profile has one, and the way to
             // the map when the quest happens somewhere.
-            var objectives = node.NecessaryObjectives.ToList();
+            var objectives = node.StatedObjectives.ToList();
             if (objectives.Count > 0)
             {
                 AuxLayout.AddSectionHeader(ctx.Parent, ref y, "Objectives", ctx.X, width);
@@ -175,16 +175,20 @@ namespace QuestTree.UI
                         AuxLayout.AddProgressBar(ctx.Parent, (float)current / target, ctx.X, ref y, width, QuestNodeView.ColorFor(ENodeStatus.Completed));
                 }
 
-                // MapKeys, not LocationKey: a quest declaring "any" whose objectives were placed on
-                // a real map has somewhere to show, and testing the declaration alone hid the link
-                // on precisely the quests this release taught the mod to place.
-                var hasPlace = node.MapKeys.Any(k => !string.IsNullOrEmpty(k));
-                if (hasPlace && ctx.OnShowOnMap != null)
-                {
-                    y += 2f;
-                    AuxLayout.AddClickableRow(ctx.Parent, $"<color=#{ColorUtility.ToHtmlStringRGB(GameStyle.AccentColor)}>◎  Show on the map</color>",
-                        ctx.X, ref y, width, false, () => ctx.OnShowOnMap(node), 22f);
-                }
+                y += 8f;
+            }
+
+            // Outside the objectives block, deliberately. It used to live inside it, so a quest whose
+            // objectives were all filtered away lost the way to the map as well - the reader was told
+            // neither what to do nor where to go, which is the pair of things this section exists for.
+            //
+            // MapKeys, not LocationKey: a quest declaring "any" whose objectives were placed on a real
+            // map has somewhere to show, and testing the declaration alone hid the link on precisely
+            // the quests this release taught the mod to place.
+            if (node.MapKeys.Any(k => !string.IsNullOrEmpty(k)) && ctx.OnShowOnMap != null)
+            {
+                AuxLayout.AddClickableRow(ctx.Parent, $"<color=#{ColorUtility.ToHtmlStringRGB(GameStyle.AccentColor)}>◎  Show on the map</color>",
+                    ctx.X, ref y, width, false, () => ctx.OnShowOnMap(node), 22f);
 
                 y += 8f;
             }
