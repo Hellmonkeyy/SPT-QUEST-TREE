@@ -24,7 +24,7 @@ namespace QuestTreeServer
         /// EVERY weapon build it asks for rather than only the first. v10 (1.12.0): a solved build is a
         /// DIFF against the weapon's default preset - every part says whether it is already fitted, a
         /// swap or an addition, and the build carries the number of changes.</summary>
-        public int SchemaVersion { get; set; } = 10;
+        public int SchemaVersion { get; set; } = 11;
 
         /// <summary>The server half's version, so a mismatch warning on the client can name it -
         /// the other three payloads already did.</summary>
@@ -187,8 +187,34 @@ namespace QuestTreeServer
         /// Lets the client open the game's own inspect window on it.</summary>
         public string Template { get; set; } = "";
 
-        /// <summary>Set for trader-scoped rewards (standing, unlocks, assort unlocks).</summary>
+        /// <summary>Set for trader-scoped rewards (standing, unlocks, assort unlocks).
+        ///
+        /// Standing and trader-unlock rewards name their trader in Target, not TraderId, which is why
+        /// this is resolved per type rather than read from one field. Reading TraderId for all of them
+        /// left every one of the 508 standing rewards without a trader, and the client rendered them
+        /// as a bare "Reputation +0.02".</summary>
         public string TraderId { get; set; } = "";
+
+        /// <summary>What this reward is worth in roubles, or null when that cannot be known.
+        ///
+        /// Null and zero are different answers and the ranking needs to tell them apart: a reward
+        /// whose item has no handbook price is unvalued, and scoring it as worthless would push every
+        /// modded reward to the bottom for a reason that is about our data rather than the reward.</summary>
+        public long? RoubleValue { get; set; }
+
+        /// <summary>True when the reward IS money rather than an item worth money. 455 of the 1,472
+        /// item rewards are cash, and a player weighs the two differently - roubles are fungible and
+        /// gear is not.</summary>
+        public bool IsCurrency { get; set; }
+
+        /// <summary>The loyalty level an unlocked offer appears at, for AssortmentUnlock and
+        /// ProductionScheme. Zero when the reward is not an unlock. An offer unlocked at LL4 is worth
+        /// less to someone at LL2 than one they can buy today.</summary>
+        public int LoyaltyLevel { get; set; }
+
+        /// <summary>Whether an item reward arrives flagged found-in-raid. Matters because a
+        /// found-in-raid item can settle a quest requirement that a bought one cannot.</summary>
+        public bool FoundInRaid { get; set; }
     }
 
     /// <summary>The Kappa container checklist returned by /questtree/kappa - the Collector quest's

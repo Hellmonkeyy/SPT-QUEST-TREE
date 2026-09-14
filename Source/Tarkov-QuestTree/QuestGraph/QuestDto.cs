@@ -29,7 +29,7 @@ namespace QuestTree.QuestGraph
         /// (1.12.0): a solved build is a diff against the weapon's default preset (SolvedPartDto.Status
         /// and Replaces, SolvedBuildDto.Changes and HasDefaults) and WeaponBuildDto carries the key the
         /// per-profile /questtree/builds answer joins on.</summary>
-        public const int SupportedSchemaVersion = 10;
+        public const int SupportedSchemaVersion = 11;
 
         [JsonProperty("schemaVersion")]
         public int SchemaVersion { get; set; }
@@ -363,6 +363,27 @@ namespace QuestTree.QuestGraph
 
         [JsonProperty("traderId")]
         public string TraderId { get; set; }
+
+        /// <summary>What this reward is worth in roubles, or null when it cannot be priced.
+        ///
+        /// Null and zero are different answers and the ranking must not merge them: an item with no
+        /// handbook price is unvalued, not worthless, and scoring it as worthless would sink every
+        /// modded reward for a reason that is about our data rather than the reward. Null for
+        /// experience, standing and skills, which are not worth roubles at all.</summary>
+        [JsonProperty("roubleValue")]
+        public long? RoubleValue { get; set; }
+
+        /// <summary>True when the reward IS money rather than an item worth money.</summary>
+        [JsonProperty("isCurrency")]
+        public bool IsCurrency { get; set; }
+
+        /// <summary>The loyalty level an unlocked offer appears at; 0 when this is not an unlock.</summary>
+        [JsonProperty("loyaltyLevel")]
+        public int LoyaltyLevel { get; set; }
+
+        /// <summary>Whether an item reward arrives flagged found-in-raid.</summary>
+        [JsonProperty("foundInRaid")]
+        public bool FoundInRaid { get; set; }
 
         /// <summary>The name to print in a LIST, where every row competes for the same width.
         /// Prefers the short name; falls back to the full one when there is no short name.</summary>

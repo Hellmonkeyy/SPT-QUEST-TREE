@@ -2053,7 +2053,22 @@ namespace QuestTreeServer
             });
         }
 
-        private static List<RewardDto> MapRewards(Quest quest, Dictionary<string, string> locale)
+        /// <summary>The three currencies, by template. Taken from the same verified list the item
+        /// watchlist uses rather than inferred from names.</summary>
+        private static readonly HashSet<string> CurrencyTemplates = new()
+        {
+            "5449016a4bdc2d6f028b456f", // roubles
+            "5696686a4bdc2d88308b456a", // dollars
+            "569668774bdc2da2298b4568"  // euros
+        };
+
+        /// <summary>Reward types that name their trader in Target rather than TraderId.</summary>
+        private static readonly HashSet<string> TraderInTarget = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "TraderStanding", "TraderUnlock", "TraderStandingRestore"
+        };
+
+        private List<RewardDto> MapRewards(Quest quest, Dictionary<string, string> locale)
         {
             var rewards = new List<RewardDto>();
 
@@ -2067,21 +2082,58 @@ namespace QuestTreeServer
                 if (reward.IsHidden == true) continue;
 
                 var template = reward.Items?.FirstOrDefault()?.Template.ToString() ?? "";
+                var type = reward.Type?.ToString() ?? "";
+                var value = reward.Value ?? 0d;
+                var currency = CurrencyTemplates.Contains(template);
 
                 rewards.Add(new RewardDto
                 {
-                    Type = reward.Type?.ToString() ?? "",
-                    Value = reward.Value ?? 0d,
+                    Type = type,
+                    Value = value,
                     Name = ResolveRewardName(reward, locale),
                     ShortName = ResolveShortName(template, locale),
                     Template = template,
                     // Trader names are deliberately left to the client, which resolves them from
                     // the live session and so gets modded traders right for free.
-                    TraderId = reward.TraderId?.ToString() ?? ""
+                    TraderId = ResolveRewardTrader(reward, type),
+                    IsCurrency = currency,
+                    RoubleValue = RewardWorth(template, value, currency),
+                    LoyaltyLevel = reward.LoyaltyLevel ?? 0,
+                    FoundInRaid = reward.FindInRaid ?? false
                 });
             }
 
             return rewards;
+        }
+
+        /// <summary>Which field holds this reward's trader, which depends on the type.
+        ///
+        /// Standing and trader unlocks put it in Target; assort and production unlocks put it in
+        /// TraderId. Reading one field for both is the bug this replaces.</summary>
+        private static string ResolveRewardTrader(Reward reward, string type) =>
+            TraderInTarget.Contains(type)
+                ? reward.Target ?? ""
+                : reward.TraderId?.ToString() ?? "";
+
+        /// <summary>What a reward is worth in roubles, or null when it cannot be priced.
+        ///
+        /// Cash is worth its face value. An item is worth its handbook price times the quantity -
+        /// PartPrices returns null rather than zero for an item it has no price for, and that null is
+        /// carried through deliberately so the client can tell "worth nothing" from "worth unknown".
+        /// Everything that is not an item - experience, standing, a skill - has no rouble value at all
+        /// and is scored on its own terms.</summary>
+        private long? RewardWorth(string template, double value, bool currency)
+        {
+            if (currency) return (long)Math.Max(0d, value);
+            if (string.IsNullOrWhiteSpace(template)) return null;
+            if (!template.TryParseMongoId(out var parsed)) return null;
+
+            var unit = partPrices.Of(parsed);
+            if (unit == null) return null;
+
+            var count = (long)Math.Max(1d, value);
+
+            return unit.Value * count;
         }
 
         /// <summary>Item rewards are the only ones whose display name the client cannot work out for
