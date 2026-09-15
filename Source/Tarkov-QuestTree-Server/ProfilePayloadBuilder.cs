@@ -199,7 +199,8 @@ namespace QuestTreeServer
                         Total = held.Total,
                         OnPerson = held.OnPerson,
                         OnPersonFoundInRaid = held.OnPersonFoundInRaid,
-                        InStash = held.InStash
+                        InStash = held.InStash,
+                        InTaskItems = held.InTaskItems
                     };
                 }
             }

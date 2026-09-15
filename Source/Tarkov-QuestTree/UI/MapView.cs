@@ -550,7 +550,16 @@ namespace QuestTree.UI
             if (verdict.Empty) return "<color=#FFFFFF80>Nothing to bring for this map.</color>";
 
             if (verdict.State == RaidCheckView.Have.OnYou)
-                return $"<color=#{GameStyle.SuccessHex}>Ready - everything this map needs is on you</color>";
+            {
+                // "or in your task items" only when one actually is, rather than always: a player who
+                // has packed everything themselves should not be left wondering which of it the game is
+                // carrying for them.
+                var tail = verdict.Lines.Any(l => l.InTaskItems >= l.Needed)
+                    ? " or in your task items"
+                    : "";
+
+                return $"<color=#{GameStyle.SuccessHex}>Ready - everything this map needs is on you{tail}</color>";
+            }
 
             if (verdict.State == RaidCheckView.Have.Missing)
             {
@@ -561,11 +570,23 @@ namespace QuestTree.UI
                        $"{verdict.Lines.Count}: {missing.Name}{tail}</color>";
             }
 
-            // Amber, and deliberately not "in your stash": 330 of the reference profile's items are
-            // in hideout stashes, the sorting table or quest stashes, so the summary must not claim
-            // the stash when the rows themselves say "elsewhere".
-            return $"<color=#{GameStyle.WarningHex}>{verdict.ToPackCount} to pack - you own it all, " +
-                   "none of it is on you</color>";
+            // Amber, and deliberately not "in your stash": 325 of the reference profile's items are
+            // chiefly in hideout stashes, so the summary must not claim the stash when the rows
+            // themselves say "elsewhere".
+            //
+            // "none of it is on you" is conditional now, and has to be. This branch fires on
+            // ToPackCount > 0 and says nothing about the OTHER lines, which before task items counted
+            // as held was a distinction without a difference - every off-person line was ToPack. Now a
+            // map with one task item and one stash item printed "none of it is on you" directly above a
+            // green row reading "1 of 1 - task item", and a mixed map is the common case rather than an
+            // edge one.
+            var held = verdict.Lines.Count - verdict.ToPackCount;
+
+            var nothing = held == 0
+                ? " - you own it all, none of it is on you"
+                : $" - you own it all, and have {held} of {verdict.Lines.Count} already";
+
+            return $"<color=#{GameStyle.WarningHex}>{verdict.ToPackCount} to pack{nothing}</color>";
         }
 
         /// <summary>One row: state colour, name, how many of how many, and where it is.</summary>
@@ -576,7 +597,19 @@ namespace QuestTree.UI
                 line.State == RaidCheckView.Have.ToPack ? GameStyle.WarningHex :
                 GameStyle.ErrorHex;
 
+            // A task item is reported as what it is. It cannot be put in a rig, so "on you" would send
+            // the player looking for it somewhere it can never be - which is the softer half of the bug
+            // that had this row saying "elsewhere" and the cue asking for it to be packed.
+            //
+            // Not on a found-in-raid line, because InTaskItems has no found-in-raid split. Green there
+            // is decided by OnPersonFoundInRaid, so a player carrying the one qualifying copy in their
+            // rig while a non-found-in-raid copy sat in the task container would be told the game was
+            // carrying it - about the only copy the quest will refuse. That split is real on the
+            // reference profile, where one of the five task-container items is found-in-raid and four
+            // are not. "on you" is the weaker word and the true one.
             var where =
+                line.State == RaidCheckView.Have.OnYou &&
+                    !line.NeedsFoundInRaid && line.InTaskItems >= line.Needed ? "task item" :
                 line.State == RaidCheckView.Have.OnYou ? "on you" :
                 line.State == RaidCheckView.Have.Missing ? "not owned" :
                 line.InStash >= line.Needed ? "in stash" :

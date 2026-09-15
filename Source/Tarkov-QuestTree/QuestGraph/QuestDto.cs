@@ -468,7 +468,10 @@ namespace QuestTree.QuestGraph
     /// because level, loyalty and objective counters all change as you play.</summary>
     internal sealed class ProfilePayloadDto
     {
-        /// <summary>2 (1.9.0): the per-location counts on HeldItemDto, and InventoryLocationsKnown.</summary>
+        /// <summary>2 (1.9.0): the per-location counts on HeldItemDto, and InventoryLocationsKnown.
+        /// HeldItemDto.InTaskItems (1.12.1) joined v2 rather than making a v3: this constant is read
+        /// through a >= gate, so a bump would have failed a new client against a 1.12.0 server and cost
+        /// it the whole location split in order to say one word differently.</summary>
         public const int SupportedSchemaVersion = 2;
 
         [JsonProperty("schemaVersion")]
@@ -539,9 +542,24 @@ namespace QuestTree.QuestGraph
         [JsonProperty("inStash")]
         public int InStash { get; set; }
 
-        /// <summary>Copies that are neither on the character nor in the stash - a hideout area
-        /// stash, the sorting table, a quest stash. 330 of them on the reference profile, so the
-        /// row says "1 elsewhere" rather than implying the item has to be bought.</summary>
+        /// <summary>Copies in the game's task-item containers - "Task items on character" and "Task
+        /// items in stash" on its own screen. Already counted inside OnPerson: this says WHICH kind of
+        /// on-you it is, and is read for nothing but the wording.
+        ///
+        /// Not gated on a schema bump, because there isn't one. An older server sends nothing, this
+        /// reads 0, and the row says "on you" - which is the same verdict, one word blunter. Those
+        /// items used to land in Elsewhere, and the row asked the player to pack a quest item that
+        /// cannot be put in a rig at all.</summary>
+        [JsonProperty("inTaskItems")]
+        public int InTaskItems { get; set; }
+
+        /// <summary>Copies that are neither on the character nor in the stash - chiefly a hideout area
+        /// stash; see the server's Bucket.Elsewhere for the full breakdown. 325 of them on the reference
+        /// profile, so the row says "1 elsewhere" rather than implying the item has to be bought.
+        ///
+        /// Still Total - OnPerson - InStash with no term for task items, and that is correct rather
+        /// than an oversight: they are inside OnPerson, so subtracting them again would take them off
+        /// twice.</summary>
         public int Elsewhere => Math.Max(0, Total - OnPerson - InStash);
     }
 

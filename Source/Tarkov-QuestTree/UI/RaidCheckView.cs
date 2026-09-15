@@ -18,12 +18,26 @@ namespace QuestTree.UI
         /// <summary>How much of a requirement the player has, and where it is.</summary>
         internal enum Have
         {
-            /// <summary>Enough of it is on the character. Green.</summary>
+            /// <summary>Enough of it is on the character. Green.
+            ///
+            /// Includes the game's task-item containers, which are on the character in the only sense
+            /// this cue cares about: you will have them in the raid, and there is no packing step you
+            /// could forget. Line.InTaskItems is what tells the row to say so.</summary>
             OnYou,
 
             /// <summary>Owned and reachable, but not on you. Amber - a to-do rather than a problem,
-            /// and the common case: on the reference profile 10 of the 19 folded rows are here,
-            /// because quest items live in the stash until you deliberately pack them.</summary>
+            /// and the common case, because the items quests ask you to carry live in the stash until
+            /// you deliberately pack them.
+            ///
+            /// A row count used to be quoted here. It was measured before task items counted as held,
+            /// which moves rows out of this state, so it is dropped rather than restated from a
+            /// measurement the same change invalidated.
+            ///
+            /// A task item held in FULL is never here - it is OnYou. A partial one still can be, since
+            /// StateOf compares OnPerson against Needed and knows nothing about which of the shortfall
+            /// is packable: two of a quest-item template with one in the task container and one in a
+            /// hideout stash lands here, and the row does ask for something half unpackable. It takes a
+            /// modded condition wanting two or more, since every vanilla plant wants one.</summary>
             ToPack,
 
             /// <summary>Not owned at all; you have to go and get one. Red.</summary>
@@ -48,6 +62,10 @@ namespace QuestTree.UI
             public int InStash;
             public int Total;
             public int Elsewhere;
+
+            /// <summary>The part of OnPerson that is in the task-item containers. Wording only - it is
+            /// already inside OnPerson, so adding it to any sum would count it twice.</summary>
+            public int InTaskItems;
 
             /// <summary>The found-in-raid subsets, summed the same way. Only read when a condition
             /// demands found-in-raid, which no vanilla one does.</summary>
@@ -221,6 +239,7 @@ namespace QuestTree.UI
 
                 line.OnPerson += held.OnPerson;
                 line.InStash += held.InStash;
+                line.InTaskItems += held.InTaskItems;
                 line.Total += held.Total;
                 line.Elsewhere += held.Elsewhere;
                 line.OnPersonFoundInRaid += held.OnPersonFoundInRaid;
@@ -291,10 +310,12 @@ namespace QuestTree.UI
 
             if (onPerson >= line.Needed) return Have.OnYou;
 
-            // Against TOTAL, not OnPerson + InStash. The reference profile holds 330 items that are
-            // neither on the character nor in the stash - hideout area stashes, the sorting table,
-            // the quest stashes - and calling those Missing would tell the player to go and buy a
-            // marker they already own.
+            // Against TOTAL, not OnPerson + InStash. The reference profile holds 325 items that are
+            // neither on the character nor in the stash - chiefly hideout area stashes - and calling
+            // those Missing would tell the player to go and buy a marker they already own.
+            //
+            // Nothing here needed changing for task items, which is the point of counting them inside
+            // OnPerson: the branch above already returns green for them.
             return owned >= line.Needed ? Have.ToPack : Have.Missing;
         }
 

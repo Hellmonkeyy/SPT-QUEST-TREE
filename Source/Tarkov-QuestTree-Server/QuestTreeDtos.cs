@@ -285,7 +285,9 @@ namespace QuestTreeServer
     public sealed class ProfilePayloadDto
     {
         /// <summary>2 (1.9.0): HeldItemDto.OnPerson/OnPersonFoundInRaid/InStash, and
-        /// InventoryLocationsKnown beside them.</summary>
+        /// InventoryLocationsKnown beside them. HeldItemDto.InTaskItems (1.12.1) was added WITHIN v2
+        /// rather than bumping to 3 - see its own comment for why - so v2 is not a fixed field list and
+        /// a reader finding it absent is looking at an older server, not a broken one.</summary>
         public int SchemaVersion { get; set; } = 2;
 
         public string ModVersion { get; set; } = ModInfo.Version;
@@ -342,6 +344,16 @@ namespace QuestTreeServer
 
         /// <summary>Copies in the stash, for the "1 in stash" hint. Schema v2.</summary>
         public int InStash { get; set; }
+
+        /// <summary>Copies in the task-item containers, which the game's own screen calls "Task items
+        /// on character" and "Task items in stash". A SUBSET of OnPerson, never a separate place.
+        ///
+        /// Additive, and the profile schema stays at 2 on purpose. No v2 field changes meaning, so an
+        /// old server paired with a new client sends 0 here and the wording falls back to "on you" -
+        /// still the right answer. Bumping would instead fail the client's >= SupportedSchemaVersion
+        /// gate and collapse InventoryLocationsKnown, costing the whole location split to say one
+        /// word differently.</summary>
+        public int InTaskItems { get; set; }
     }
 
     public sealed class TraderStateDto
@@ -780,7 +792,7 @@ namespace QuestTreeServer
         public List<RaidCheckMapDto> Maps { get; set; } = new();
 
         /// <summary>Template -> what the profile holds, for every template mentioned above. Reuses
-        /// the profile payload's own type rather than restating five counts per row: an item wanted
+        /// the profile payload's own type rather than restating its six counts per row: an item wanted
         /// by six conditions is held exactly once.</summary>
         public Dictionary<string, HeldItemDto> Held { get; set; } = new();
 

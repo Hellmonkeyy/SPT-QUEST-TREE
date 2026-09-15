@@ -22,28 +22,56 @@ namespace QuestTreeServer
         /// held is the one failure that check exists to prevent.</summary>
         internal enum Bucket
         {
-            /// <summary>Neither on the character nor in the stash: hideout area stashes, the sorting
-            /// table, the quest stashes. 330 items on the reference profile, so not an edge case.
+            /// <summary>Neither on the character nor in the stash. 325 items on the reference
+            /// profile, so not an edge case, and chiefly the hideout: 304 sit inside a hideout area
+            /// stash and 5 are those stashes themselves, 9 are hideout-customization posters and
+            /// statuettes whose parent is not in the item list at all, 4 are the skipped root
+            /// containers, 1 is the empty sorting table and 2 are strays.
             ///
             /// Pinned to 0 deliberately - Count falls back to it for an item the walk never
             /// classified, and if a later edit reorders this enum that fallback silently becomes
             /// OnPerson, which is a false "you are carrying it" on every unclassified item.</summary>
             Elsewhere = 0,
             OnPerson = 1,
-            InStash = 2
+            InStash = 2,
+
+            /// <summary>The task-item containers - questRaidItems and questStashItems, which the game's
+            /// own screen calls "Task items on character" and "Task items in stash".
+            ///
+            /// Counted as OnPerson as well as here, which is the whole point of the value existing.
+            /// An item whose template sets QuestItem cannot be dragged into a rig at all, so it can
+            /// never appear under the equipment root - and the pre-raid check therefore asked the
+            /// player to pack something there is no way to pack. The game moves these into the in-raid
+            /// container on deploy: a plant quest that grants its own item as a Started reward, which is
+            /// how the reported case works, is completable no other way.
+            ///
+            /// So the readiness answer is "you will have it", and that is OnPerson's meaning to every
+            /// caller. This value exists only so the wording can say WHICH kind of on-you it is.
+            ///
+            /// The transfer itself is INFERRED, not observed, and it is the one premise holding up a
+            /// green verdict - which is the single outcome the rest of this feature is built to avoid.
+            /// It rests on the game's own labels for the two containers ("on character" in-raid, "in
+            /// stash" off-raid), on QuestItem forbidding the rig, and on the reported quest granting its
+            /// own plant item, which leaves no other way to finish it. Strong, and still inference: if
+            /// some item in questStashItems is NOT carried in, this reads green and should not. Anyone
+            /// who watches it happen, or finds a case where it does not, should replace this paragraph
+            /// with what they saw.</summary>
+            TaskItems = 3
         }
 
         /// <summary>How many of an item the profile holds, split by found-in-raid status and by
         /// where it is.</summary>
         internal readonly struct Held
         {
-            public Held(int foundInRaid, int total, int onPerson, int onPersonFoundInRaid, int inStash)
+            public Held(
+                int foundInRaid, int total, int onPerson, int onPersonFoundInRaid, int inStash, int inTaskItems)
             {
                 FoundInRaid = foundInRaid;
                 Total = total;
                 OnPerson = onPerson;
                 OnPersonFoundInRaid = onPersonFoundInRaid;
                 InStash = inStash;
+                InTaskItems = inTaskItems;
             }
 
             /// <summary>Found-in-raid copies anywhere in the profile. Split out because quest
@@ -70,16 +98,38 @@ namespace QuestTreeServer
             /// stash" and "missing" call for completely different actions.</summary>
             public int InStash { get; }
 
+            /// <summary>Copies in the task-item containers. A SUBSET of OnPerson, not a fourth
+            /// partition alongside it - and that distinction is load-bearing.
+            ///
+            /// Total, OnPerson and InStash stay a partition, so the client's derived
+            /// Elsewhere = Total - OnPerson - InStash is still right and every caller that sums the
+            /// three - CanHandIn, ReadyScore, HeldCount - keeps working untouched. Made a fourth
+            /// partition instead, task items would have silently vanished from all three sums, which
+            /// is a quieter bug than the one being fixed.
+            ///
+            /// Read it only to choose a word: "task item" rather than "on you".</summary>
+            public int InTaskItems { get; }
+
             // Argument order matches the constructor's, and both lead with foundInRaid as the
             // shipped version did. Two adjacent ints with no type to tell them apart is a swap
             // waiting to happen, so the two places that take them agree rather than each reading
             // well alone.
-            public Held Plus(int foundInRaid, int count, Bucket bucket) => new(
-                FoundInRaid + foundInRaid,
-                Total + count,
-                OnPerson + (bucket == Bucket.OnPerson ? count : 0),
-                OnPersonFoundInRaid + (bucket == Bucket.OnPerson ? foundInRaid : 0),
-                InStash + (bucket == Bucket.InStash ? count : 0));
+            public Held Plus(int foundInRaid, int count, Bucket bucket)
+            {
+                // TaskItems counts toward OnPerson too - see the enum's own comment. Written as an
+                // explicit local rather than repeated in two ternaries so the two cannot drift apart:
+                // OnPerson including task items while OnPersonFoundInRaid did not would go amber on a
+                // found-in-raid plant condition for no reason a reader could see.
+                var carried = bucket == Bucket.OnPerson || bucket == Bucket.TaskItems;
+
+                return new Held(
+                    FoundInRaid + foundInRaid,
+                    Total + count,
+                    OnPerson + (carried ? count : 0),
+                    OnPersonFoundInRaid + (carried ? foundInRaid : 0),
+                    InStash + (bucket == Bucket.InStash ? count : 0),
+                    InTaskItems + (bucket == Bucket.TaskItems ? count : 0));
+            }
         }
 
         /// <summary>The last count per profile, kept for a few seconds. The Kappa and profile
@@ -158,8 +208,9 @@ namespace QuestTreeServer
             return owned;
         }
 
-        /// <summary>Classifies each item as on the character, in the stash, or neither, by
-        /// descending from the two roots the profile names rather than climbing from every item.
+        /// <summary>Classifies each item as on the character, in the stash, in the task-item
+        /// containers, or none of those, by descending from the roots the profile names rather than
+        /// climbing from every item.
         ///
         /// Descent is what makes this safe as well as short. A profile is not obliged to be sane,
         /// and a parent chain that loops would spin a bottom-up walk forever; a cycle is by
@@ -169,8 +220,8 @@ namespace QuestTreeServer
         ///
         /// The root containers themselves are skipped - the equipment container is an item too, and
         /// counting its template as something you are carrying is meaningless. They therefore fall
-        /// to Elsewhere, which is why that bucket holds 330 rather than 328 on the reference
-        /// profile.
+        /// to Elsewhere, which is why that bucket holds 325 rather than 321 on the reference
+        /// profile - four roots skipped now rather than two.
         /// </summary>
         private static Dictionary<MongoId, Bucket> ClassifyByRoot(BotBaseInventory inventory, out bool known)
         {
@@ -180,7 +231,7 @@ namespace QuestTreeServer
             var items = inventory.Items;
             if (items == null) return buckets;
 
-            // One cache, both roots found in one pass.
+            // One cache, all four roots found in one pass.
             //
             // GenerateItemsMap was used here first and must not be: it is a ToDictionary, so a
             // single duplicated item id throws - and the throw unwinds through CountByTemplate and
@@ -191,22 +242,26 @@ namespace QuestTreeServer
             // baseItemId is deliberately not passed. Verified by decompiling ItemExtensions: it does
             // NOT scope the returned dictionary - the cache always holds every parented item and the
             // parameter only selects which item is reported back as rootItem. So one unscoped build
-            // serves both descents, and calling it twice would walk the whole inventory twice to
-            // throw one result away.
+            // serves every descent, and calling it once per root would walk the whole inventory four
+            // times to throw three results away.
             var childrenByParent = items.CreateParentIdLookupCache(out _);
 
             Item? equipmentRoot = null;
             Item? stashRoot = null;
+            Item? questRaidRoot = null;
+            Item? questStashRoot = null;
 
-            // Compared directly against the fields, with no null test on them: Equipment and Stash
-            // are MongoId?, and MongoId declares op_Equality(MongoId, MongoId?) which is false when
-            // the nullable has no value. So a root the profile does not name matches no item, the
-            // local stays null, and that is already the "absent" signal `known` reports.
+            // Compared directly against the fields, with no null test on them: all four are MongoId?,
+            // and MongoId declares op_Equality(MongoId, MongoId?) which is false when the nullable has
+            // no value. So a root the profile does not name matches no item, the local stays null, and
+            // for the first two that is already the "absent" signal `known` reports.
             foreach (var item in items)
             {
                 if (item == null) continue;
                 if (item.Id == inventory.Equipment) equipmentRoot = item;
                 else if (item.Id == inventory.Stash) stashRoot = item;
+                else if (item.Id == inventory.QuestRaidItems) questRaidRoot = item;
+                else if (item.Id == inventory.QuestStashItems) questStashRoot = item;
             }
 
             void Mark(Item? root, Bucket bucket)
@@ -217,15 +272,32 @@ namespace QuestTreeServer
                     if (item != null && item.Id != root.Id) buckets[item.Id] = bucket;
             }
 
+            // The task-item roots FIRST, so equipment and stash overwrite them rather than the other
+            // way round. Mark is a plain indexer assignment and the last write wins.
+            //
+            // Verified disjoint rather than assumed: all five container ids on both profiles on this
+            // machine are unparented siblings, so no item is reachable from two roots and the order
+            // cannot matter today. It is chosen for the case where that stops being true. An equipment
+            // overlap would otherwise report a rifle in your rig as a task item, which is the false
+            // green this whole feature exists to avoid; a stash overlap re-creates the original bug
+            // (bucket replaced outright, so OnPerson and InTaskItems both read 0 and the row goes back
+            // to amber "in stash"), which is merely the status quo returning for one item.
+            Mark(questRaidRoot, Bucket.TaskItems);
+            Mark(questStashRoot, Bucket.TaskItems);
+
             Mark(equipmentRoot, Bucket.OnPerson);
             Mark(stashRoot, Bucket.InStash);
 
             // BOTH roots, not either. The flag is plural on the wire and the client reads it as
             // "both splits are trustworthy": with Equipment resolved and Stash not, every one of the
-            // 3,206 stash items on the reference profile falls to Elsewhere, InStash reads 0 for the
+            // 3,226 stash items on the reference profile falls to Elsewhere, InStash reads 0 for the
             // whole profile, and the amber "in stash" state - which this feature's own measurement
             // calls the primary content - collapses into a bare red MISSING while the flag says the
             // answer is sound.
+            //
+            // The task-item roots are deliberately NOT part of it. A profile that names no task
+            // containers has nothing in them either, so requiring them would turn a complete answer
+            // into an unknown one and cost the stash split on every such profile.
             known = equipmentRoot != null && stashRoot != null;
             return buckets;
         }

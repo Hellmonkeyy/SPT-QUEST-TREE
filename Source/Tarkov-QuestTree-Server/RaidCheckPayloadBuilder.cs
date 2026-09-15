@@ -96,10 +96,15 @@ namespace QuestTreeServer
 
             payload.Maps = maps.Values.OrderBy(m => m.Name, StringComparer.OrdinalIgnoreCase).ToList();
 
+            // The task-item tally is here rather than in a test because it is only ever interesting
+            // against a real profile: it is what tells you whether a green row went green for the right
+            // reason, on an install whose quest mods put items in those containers.
             logger.Debug(
                 $"Quest Tracker: raid check - {payload.Maps.Sum(m => m.Requirements.Count)} carry conditions " +
                 $"across {payload.Maps.Count(m => m.Requirements.Count > 0)} maps, " +
-                $"{payload.ConditionsWithNoMap} placeable nowhere.");
+                $"{payload.ConditionsWithNoMap} placeable nowhere, " +
+                $"{payload.Held.Values.Count(h => h.InTaskItems > 0)} of {payload.Held.Count} items in the " +
+                "task-item containers.");
 
             return payload;
         }
@@ -213,7 +218,8 @@ namespace QuestTreeServer
                 Total = held.Total,
                 OnPerson = held.OnPerson,
                 OnPersonFoundInRaid = held.OnPersonFoundInRaid,
-                InStash = held.InStash
+                InStash = held.InStash,
+                InTaskItems = held.InTaskItems
             };
         }
 

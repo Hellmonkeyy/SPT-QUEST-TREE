@@ -190,8 +190,15 @@ namespace QuestTree.UI
                 // "Held" was the stash-inclusive total, which told you that you hold a marker
                 // sitting at home - the same falsehood the pre-raid cue exists to prevent, one
                 // screen further in. It counts what is ON YOU now, and says where the rest is.
+                // "in task items" ahead of "on you", for the same items and the same reason as the
+                // pre-raid list: a quest item is not somewhere you put it, and saying "on you" invites
+                // the player to go looking in a rig it can never be in.
+                //
+                // Not on a found-in-raid line - InTaskItems has no found-in-raid split, so see the
+                // longer note in MapView.TakeWithYouRow.
                 var where =
                     !placesKnown ? "held" :
+                    enough && !item.FoundInRaid && held.InTaskItems >= item.Need ? "in task items" :
                     enough ? "on you" :
                     held.Elsewhere > 0 && held.InStash == 0 ? $"on you, {held.Elsewhere} elsewhere" :
                     held.InStash > 0 ? $"on you, {held.InStash} in stash" :
@@ -274,15 +281,20 @@ namespace QuestTree.UI
         /// quest will refuse is not stock.
         ///
         /// OnYou falls back to the stash-inclusive total when the server cannot say where things
-        /// are, which is the honest reading of an older payload: it knew how many, not where.</summary>
-        internal static (int OnYou, int InStash, int Elsewhere) HeldCount(
+        /// are, which is the honest reading of an older payload: it knew how many, not where.
+        ///
+        /// InTaskItems is part OF OnYou, not a fourth place beside it, so callers that sum the parts
+        /// must keep summing three. Added as a named member rather than by widening any existing one,
+        /// which is what keeps the three call sites compiling unchanged.</summary>
+        internal static (int OnYou, int InStash, int Elsewhere, int InTaskItems) HeldCount(
             ProfilePayloadDto profile, List<string> templates, bool foundInRaid, bool placesKnown)
         {
-            if (profile?.ItemsOwned == null || templates == null) return (0, 0, 0);
+            if (profile?.ItemsOwned == null || templates == null) return (0, 0, 0, 0);
 
             var onYou = 0;
             var inStash = 0;
             var elsewhere = 0;
+            var inTaskItems = 0;
 
             foreach (var template in templates)
             {
@@ -298,9 +310,10 @@ namespace QuestTree.UI
                 onYou += foundInRaid ? held.OnPersonFoundInRaid : held.OnPerson;
                 inStash += held.InStash;
                 elsewhere += held.Elsewhere;
+                inTaskItems += held.InTaskItems;
             }
 
-            return (onYou, inStash, elsewhere);
+            return (onYou, inStash, elsewhere, inTaskItems);
         }
 
         /// <summary>The condition's own flag when the server sends one (schema v2); the English

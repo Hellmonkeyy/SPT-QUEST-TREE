@@ -1,3 +1,26 @@
+# Quest Tracker 1.12.1
+
+## Task items count as items you have
+
+The pre-raid check told you to pack a task item - and there is no way to pack one. Quest items live in
+the game's own task-item containers ("Task items on character" and "Task items in stash"), and they
+cannot be dragged into a rig at all; the game carries them into the raid for you. The mod was only
+looking in your gear and your stash, so a plan handed to you by the quest that grants it read
+**"0 of 1 - elsewhere"**, and the ready-up button said **1 TO PACK** about something you already had
+and could never lose.
+
+Those containers now count as held on you, and the rows say **task item** rather than "on you", so it
+is clear which part of your kit the game is carrying for you.
+
+## Also
+
+- The map's amber pre-raid summary no longer says "none of it is on you" on a map where something
+  already is - it now says how much of the list you have.
+- Both halves' assembly version was still stamped 1.11.0 while the mod reported 1.12.0. They agree
+  again.
+
+---
+
 # Quest Tracker 1.12.0
 
 ## Send the build straight to your gun
