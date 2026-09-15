@@ -252,6 +252,83 @@ namespace QuestTree.QuestGraph
             return trader != null && trader.LoyaltyLevel >= reward.LoyaltyLevel;
         }
 
+        /// <summary>Whether the payload can say WHERE the profile's items are.
+        ///
+        /// Both halves of the contract, which the two callers here were only honouring one of. The
+        /// per-location counts arrived in schema 2, and reading them from an older payload gives zero
+        /// rather than unknown - and zero reads exactly like "carrying nothing" on a full rig.
+        /// QuestSummary.AddItemsToBring has always checked both; the version check was missing here.
+        ///
+        /// It matters more now than it did: a wrong answer used to nudge a ranking number, and now it
+        /// flips a flat claim that a quest is ready to hand in.</summary>
+        private static bool PlacesKnown(ProfilePayloadDto profile) =>
+            profile != null &&
+            profile.SchemaVersion >= ProfilePayloadDto.SupportedSchemaVersion &&
+            profile.InventoryLocationsKnown;
+
+        /// <summary>Whether this quest could be handed in right now: accepted, and every item it
+        /// asks for already held.
+        ///
+        /// Deliberately NOT part of the score. The score already values readiness; this is about
+        /// SAYING it, and it is the most actionable thing the tab can print - a trip to a trader for
+        /// experience already earned.
+        ///
+        /// It exists because the row could not say it. Detail short-circuits an accepted quest to
+        /// ObjectiveProgress, which counts an objective done only through ConditionProgress - and item
+        /// objectives have no ConditionProgress entry at all. So a quest whose items you hold in full
+        /// read "0/3 objectives": the row that should have said "walk to the trader" was the one that
+        /// understated hardest.
+        ///
+        /// An ALL-of check over whole objectives, not a ratio. ReadyScore blends item progress and
+        /// counter progress into one fraction, which is right for ranking and wrong for this: a quest
+        /// at 0.99 cannot be handed in, and one at 0.5 whose remaining half is a kill counter cannot
+        /// either.</summary>
+        internal static bool CanHandIn(QuestNode node, ProfilePayloadDto profile)
+        {
+            if (node == null || node.Status != ENodeStatus.Active) return false;
+
+            var objectives = node.Dto?.Objectives;
+            if (objectives == null || objectives.Count == 0) return false;
+
+            var placesKnown = PlacesKnown(profile);
+            var judged = false;
+
+            foreach (var objective in objectives)
+            {
+                if (objective == null) continue;
+
+                if (objective.TargetItems == null || objective.TargetItems.Count == 0)
+                {
+                    // A counter that is finished does not block a hand-in, and a quest made only of
+                    // finished counters IS ready - an earlier version of this required at least one
+                    // ITEM objective, which drew the mark on one finished quest and not on another for
+                    // reasons invisible to the reader.
+                    //
+                    // Unreadable counts as NOT done. TryProgress returns false when the profile has no
+                    // entry for the condition, which means unknown rather than complete, and the whole
+                    // point of this check is that it is asserted rather than estimated.
+                    if (!QuestSummary.TryProgress(objective, profile, out var current, out var target)) return false;
+                    if (target > 0 && current < target) return false;
+
+                    judged = true;
+                    continue;
+                }
+
+                judged = true;
+
+                // Every alternative template counts toward the same requirement, and all three places
+                // count: when the server cannot say WHERE things are, HeldCount puts the lot in OnYou
+                // and leaves the other two at zero, so reading OnYou alone would be right by accident
+                // on an old payload and wrong on a new one.
+                var have = QuestSummary.HeldCount(
+                    profile, objective.TargetItems, QuestSummary.NeedsFoundInRaid(objective), placesKnown);
+
+                if (have.OnYou + have.InStash + have.Elsewhere < Mathf.Max(1, objective.Count)) return false;
+            }
+
+            return judged;
+        }
+
         /// <summary>How close the quest is to being finished right now - items already held and
         /// objectives already ticked.
         ///
@@ -262,7 +339,7 @@ namespace QuestTree.QuestGraph
             var objectives = node.Dto?.Objectives;
             if (objectives == null || objectives.Count == 0) return null;
 
-            var placesKnown = profile != null && profile.InventoryLocationsKnown;
+            var placesKnown = PlacesKnown(profile);
             var required = 0;
             var held = 0;
             var measured = 0;

@@ -132,8 +132,19 @@ namespace QuestTree.UI
                 var open = Expanded.Contains(node.Id);
                 var rowY = y;
 
+                // Said on the row as well as in the reason line: a quest that needs nothing but a walk
+                // to a trader should be visible while scanning, not only while reading.
+                //
+                // Through GlyphFor, never a literal. The mark it returns has been checked against the
+                // font actually loaded and falls back to "+" where a tick cannot be drawn - writing the
+                // character directly is the bug that fallback exists to prevent, and it would have
+                // shown a tofu box beside a status glyph that had correctly degraded.
+                var ready = QuestScore.CanHandIn(node, profile)
+                    ? $"<color=#{QuestNodeView.HexFor(ENodeStatus.Completed)}>{QuestNodeView.GlyphFor(ENodeStatus.Completed)}</color> "
+                    : "";
+
                 AuxLayout.AddClickableRow(parent,
-                    $"<color=#FFFFFF80>{(open ? "▾" : "▸")}</color> <color=#{hex}>{QuestNodeView.GlyphFor(node.Status)}</color>  {GameStyle.Safe(node.Name)}  <color=#FFFFFF60>{tail}</color>",
+                    $"<color=#FFFFFF80>{(open ? "▾" : "▸")}</color> <color=#{hex}>{QuestNodeView.GlyphFor(node.Status)}</color> {ready} {GameStyle.Safe(node.Name)}  <color=#FFFFFF60>{tail}</color>",
                     x, ref y, width, open, () => Toggle(captured.Id, rowY));
 
                 var reason = Reason(entry, profile, graph);
@@ -281,6 +292,14 @@ namespace QuestTree.UI
 
         private static string Detail(Ranked entry, ProfilePayloadDto profile, QuestGraphBuilder graph)
         {
+            // Ahead of everything, including the in-progress short-circuit below, because it is
+            // the one line that names an action rather than a state - and because that short-circuit
+            // is exactly what used to hide it. ObjectiveProgress counts an objective done only via
+            // ConditionProgress, which item objectives never have, so a quest holding every item it
+            // needs announced itself as "0/3 objectives".
+            if (QuestScore.CanHandIn(entry.Node, profile))
+                return "  ·  ready to hand in";
+
             // A quest already accepted has no lock reason, so it fell through to "level 12" -
             // the requirement of a quest you are already doing. What it is is objective progress.
             if (entry.Bucket == Bucket.InProgress)
