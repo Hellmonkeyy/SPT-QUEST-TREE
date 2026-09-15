@@ -13,7 +13,7 @@ namespace QuestTree
     /// </summary>
     internal static class ModInfo
     {
-        public const string Version = "1.11.0";
+        public const string Version = "1.12.0";
 
         private static string _stamp;
 

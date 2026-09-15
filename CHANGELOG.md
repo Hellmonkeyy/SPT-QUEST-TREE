@@ -1,3 +1,55 @@
+# Quest Tracker 1.12.0
+
+## Send the build straight to your gun
+
+A Gunsmith quest now has **Save as a weapon preset**. Press it and the build lands in the game's own
+build list, ready to load onto the weapon in one click at the workbench - and the game's preset screen
+offers to **buy the parts you are missing**, through its own purchase flow.
+
+It appears immediately; no restart, no going back to profile select. Nothing is written unless you
+press the button, and every preset is named `QT: <quest>` so it is obvious which are the mod's and
+re-saving replaces its own rather than piling up.
+
+## Do next actually ranks now
+
+The tab sorted into four tiers and then, in practice, **alphabetically** - on a profile with seventy-nine
+accepted quests the tiers were all ties, so the quest's name decided the order.
+
+It now scores every quest on what it is worth doing: what it pays, how much of the tree it opens,
+trader unlocks you can actually reach, how close it is to done, how close it is to startable, whether
+Kappa needs it, and how much work it looks like.
+
+**Pick what you are playing for** - Balanced, Kappa path, Fast levelling, Trader unlocks, Item
+hoarding - and the order changes with it. **Every row says why it is where it is**: *"unlocks 12 ·
+96k XP · 80% ready"*. Rows name their map, and a line tells you when several of your top ten are in
+the same place, because travel between maps is the real cost.
+
+## Click a quest and it opens where you are
+
+Rows expand in place, as many as you like, with everything needed to do the quest: objectives and
+live counts, what to take and how much you already hold, where to go, what it pays and unlocks, and
+the full weapon build for a Gunsmith quest. The list keeps your place when you open one.
+
+## Objectives were missing on 42% of quests
+
+A quest could open and show requirements, rewards and unlocks but **no objectives at all** - no what
+to do, no where to go. 173 vanilla quests and 38 modded ones showed none, and 149 more showed part of
+the list.
+
+The mod was filtering on a flag that is set on nothing: across the 1,606 objectives in the quest
+database it is absent 1,080 times, false 526 times and **true not once**. Fixed, which also restores
+objectives to the detail panel, the hover card, the node's progress count, the map sidebar, the
+"take with you" list and search.
+
+## Also
+
+- Rewards know what they are worth in roubles, whether they are cash or gear, and which loyalty level
+  an unlocked offer appears at.
+- Trader reputation rewards name their trader. All 508 of them were being read from the wrong field
+  and showed as a bare "Reputation +0.02".
+
+---
+
 # Quest Tracker 1.11.0 — what's new since 1.8.5
 
 ## Gunsmith builds you can actually make

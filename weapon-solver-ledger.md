@@ -341,3 +341,23 @@ is an incentive to loosen the prover, and that is the one direction a prover may
 Route to 60 is bound work, not build work: 572 parts against 503 proven necessary, and the gap is
 thresholds bounded independently of each other (Gunsmith 10 sits at 9 parts against a bound of 2). The
 subset-constrained joint bound is the next real lever.
+
+
+---
+
+## The hand-in, 14 September 2026 - PASSED
+
+A build this solver produced was assembled in game and **accepted by the trader**.
+
+Every gate in this ledger tested the solver against other code that shares its assumptions: the
+verifier re-reads the item data but reads the same item data; the irreducibility proof removes parts
+and re-derives the same requirements; the falsifier attacks the bound with the same search. All of it
+could have been consistently wrong together, and no amount of it could have told us.
+
+A trader accepting the gun is the only test outside that circle, and it is the one that was missing
+from the day the solver was written. It passes.
+
+**What it does not settle**, because one hand-in is one data point: the extended-versus-collapsed
+question for grid size is only answered for a build that did not turn on it, and the other 59 builds
+have not been through a trader. The `WeaponStatModel` remains the thing to leave alone - it is now
+verified by hand at the workbench twice over, once by arithmetic and once by outcome.
