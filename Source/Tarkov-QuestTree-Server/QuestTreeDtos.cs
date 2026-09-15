@@ -636,15 +636,20 @@ namespace QuestTreeServer
     {
         public bool Saved { get; set; }
 
-        /// <summary>The build as written, echoed back so the client can insert it into the game's
-        /// in-memory build list at once.
+        /// <summary>The build's items as JSON, in the game's own on-the-wire shape, echoed back so
+        /// the client can insert the build into the game's in-memory list at once.
         ///
-        /// The game reads its builds from the server once at session start and caches them, so a
-        /// preset written afterwards is invisible until something asks again - and nothing does,
-        /// short of going back to profile select. Echoing the build is what lets the client close
-        /// that gap, and the ids are the ones SPT minted rather than the ones we proposed, so the
-        /// client's copy and the profile agree.</summary>
-        public List<PresetItemDto> Items { get; set; } = new();
+        /// A STRING rather than a structured list, and that is the fix for a real bug. The client used
+        /// to rebuild these by hand and could only fill the fields it knew - `_id`, `_tpl`, `parentId`,
+        /// `slotId` - leaving `upd` and `location` null, because both are UnparsedData wrapping a raw
+        /// JToken that only Newtonsoft fills. So every item in the in-memory build had no durability,
+        /// no fire mode, no spawned-in-session flag, while the copy written to the profile had all of
+        /// them: well-formed on disk and malformed in memory, which is what the build screen choked on.
+        ///
+        /// Sending the JSON lets the client deserialise it exactly as the game does when it loads
+        /// builds at session start, so our in-memory build is indistinguishable from one the game
+        /// read itself.</summary>
+        public string ItemsJson { get; set; } = "";
 
         /// <summary>The id of the weapon item, which is the build's root.</summary>
         public string Root { get; set; } = "";

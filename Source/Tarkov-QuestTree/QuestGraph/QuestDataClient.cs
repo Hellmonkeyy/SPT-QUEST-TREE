@@ -36,22 +36,6 @@ namespace QuestTree.QuestGraph
         /// </summary>
         private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(15);
 
-        /// <summary>One item of a saved preset, as the server wrote it.</summary>
-        public sealed class SavedPresetItem
-        {
-            [JsonProperty("id")]
-            public string Id { get; set; }
-
-            [JsonProperty("tpl")]
-            public string Tpl { get; set; }
-
-            [JsonProperty("parentId")]
-            public string ParentId { get; set; }
-
-            [JsonProperty("slotId")]
-            public string SlotId { get; set; }
-        }
-
         /// <summary>What the server said about saving a preset.</summary>
         public sealed class SavePresetResult
         {
@@ -73,8 +57,10 @@ namespace QuestTree.QuestGraph
             [JsonProperty("root")]
             public string Root { get; set; }
 
-            [JsonProperty("items")]
-            public List<SavedPresetItem> Items { get; set; } = new List<SavedPresetItem>();
+            /// <summary>The items as raw JSON in the game's own shape, deserialised by the game's own
+            /// converters rather than rebuilt by hand - see the server-side comment on ItemsJson.</summary>
+            [JsonProperty("itemsJson")]
+            public string ItemsJson { get; set; }
         }
 
         /// <summary>Ask the server to write one solved build into the player's saved weapon builds.

@@ -173,14 +173,9 @@ namespace QuestTreeServer
             {
                 reply.Root = outcome.Items[0].Id.ToString();
 
-                foreach (var item in outcome.Items)
-                    reply.Items.Add(new PresetItemDto
-                    {
-                        Id = item.Id.ToString(),
-                        Tpl = item.Template.ToString(),
-                        ParentId = item.ParentId ?? "",
-                        SlotId = item.SlotId ?? ""
-                    });
+                // Serialised as SPT's own Item, whose property names are the game's - _id, _tpl,
+                // parentId, slotId, upd - so the client can hand the string straight to Newtonsoft.
+                reply.ItemsJson = JsonSerializer.Serialize(outcome.Items, WireJson.Options);
             }
 
             return Reply(reply);

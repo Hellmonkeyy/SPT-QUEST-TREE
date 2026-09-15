@@ -1,6 +1,7 @@
 using System;
 using EFT;
 using EFT.UI.Builds;
+using Newtonsoft.Json;
 using QuestTree.QuestGraph;
 
 namespace QuestTree.UI
@@ -29,7 +30,7 @@ namespace QuestTree.UI
         internal static bool Insert(QuestDataClient.SavePresetResult saved)
         {
             if (saved == null || !saved.Saved) return false;
-            if (saved.Items == null || saved.Items.Count == 0) return false;
+            if (string.IsNullOrEmpty(saved.ItemsJson)) return false;
             if (string.IsNullOrEmpty(saved.Root) || string.IsNullOrEmpty(saved.Id)) return false;
 
             try
@@ -37,24 +38,18 @@ namespace QuestTree.UI
                 var storage = Session?.Invoke()?.WeaponBuildsStorage;
                 if (storage == null) return false;
 
-                var items = new JsonType.FlatItem[saved.Items.Count];
+                // Deserialised, never hand-built. The fields we could not fill by hand - upd and
+                // location, both UnparsedData wrapping a raw JToken - are exactly the ones the build
+                // screen needs, and only Newtonsoft can fill them.
+                var items = JsonConvert.DeserializeObject<JsonType.FlatItem[]>(saved.ItemsJson);
 
-                for (var i = 0; i < saved.Items.Count; i++)
-                {
-                    var item = saved.Items[i];
-                    if (item == null || string.IsNullOrEmpty(item.Id) || string.IsNullOrEmpty(item.Tpl)) return false;
+                if (items == null || items.Length == 0) return false;
 
-                    items[i] = new JsonType.FlatItem
-                    {
-                        _id = new MongoID(item.Id),
-                        _tpl = new MongoID(item.Tpl),
-
-                        // The weapon itself has neither, and the game's tree builder treats a null
-                        // parent as the root rather than as an error.
-                        parentId = string.IsNullOrEmpty(item.ParentId) ? (MongoID?)null : new MongoID(item.ParentId),
-                        slotId = string.IsNullOrEmpty(item.SlotId) ? null : item.SlotId
-                    };
-                }
+                // A repeat save would otherwise leave two entries with the same name in the in-memory
+                // list, where the profile keeps one - the game de-duplicates on its way in, and this
+                // list does not.
+                var existing = storage.FindByName(saved.Name);
+                if (existing != null) storage.RemoveBuild(existing.Id);
 
                 storage.InsertBuild(new WeaponBuild(
                     new MongoID(saved.Id), saved.Name, new MongoID(saved.Root), items));
