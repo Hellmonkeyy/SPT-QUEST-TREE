@@ -13,5 +13,9 @@ obj/
 # instead, so it cannot be lost with a cleared temp folder the way it nearly was.
 Releases/
 
-# Internal planning, kept locally rather than published.
+# Internal planning and engineering log, kept locally rather than published. Both are
+# working notes about how the work was done - stop rules, negative results, what was tried
+# and retracted - and they are for whoever is doing the work, not for whoever installs the
+# mod. The ledger in particular is only useful next to the scratchpad it cites.
 ROADMAP.md
+weapon-solver-ledger.md
