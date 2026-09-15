@@ -71,10 +71,22 @@ namespace QuestTree.UI
                     var result = QuestDataClient.SavePreset(key);
 
                     _presetKey = key;
-                    _presetSaid = result.Saved
-                        ? $"Saved as \"{result.Name}\". It appears in the game's build list - you may need to " +
-                          "go back to the profile select for it to show."
-                        : result.Reason;
+
+                    if (!result.Saved)
+                    {
+                        _presetSaid = result.Reason;
+                    }
+                    else
+                    {
+                        // Written to the profile either way; this only decides whether the player has
+                        // to go and fetch it.
+                        var shown = WeaponPresetLoader.Insert(result);
+
+                        _presetSaid = shown
+                            ? $"Saved as \"{result.Name}\" - it is in the game's build list now."
+                            : $"Saved as \"{result.Name}\". Go back to the profile select for it to appear " +
+                              "in the game's build list.";
+                    }
 
                     ModSettings.RequestRepaint();
                 }, 22f);

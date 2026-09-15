@@ -46,6 +46,11 @@ namespace QuestTreeServer
             public string Name { get; init; } = "";
             public string Reason { get; init; } = "";
 
+            /// <summary>The preset's id and the items as actually written - SPT mints fresh ids inside
+            /// SaveWeaponBuild, so these are read back after the call rather than the ones proposed.</summary>
+            public MongoId Id { get; init; }
+            public IReadOnlyList<Item> Items { get; init; } = Array.Empty<Item>();
+
             public static Outcome No(string reason) => new() { Reason = reason };
         }
 
@@ -60,11 +65,16 @@ namespace QuestTreeServer
 
             var name = Prefix + (string.IsNullOrWhiteSpace(questName) ? "build" : questName.Trim());
 
+            var presetId = new MongoId();
+
             try
             {
+                // ReplaceIDs inside this call mutates the list in place and re-parents as it goes, so
+                // after it returns `items` holds the ids that were actually written - which is what the
+                // client needs to insert the same build into the game's in-memory list.
                 buildController.SaveWeaponBuild(sessionId, new PresetBuildActionRequestData
                 {
-                    Id = new MongoId(),
+                    Id = presetId,
                     Name = name,
                     Root = items[0].Id,
                     Items = items
@@ -76,7 +86,7 @@ namespace QuestTreeServer
 
                 logger.Info($"Quest Tracker: saved the weapon preset '{name}' for {sessionId}.");
 
-                return new Outcome { Saved = true, Name = name };
+                return new Outcome { Saved = true, Name = name, Id = presetId, Items = items };
             }
             catch (Exception ex)
             {

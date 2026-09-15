@@ -600,6 +600,10 @@ namespace QuestTree.UI
 
             BuildTabRow(root);
             _detail.Build(root, _graph, FocusNode, ShowOnMap, () => _session);
+
+            // The preset loader needs the live session to reach the game's build storage, and it is
+            // called from a click handler too deep to be given one.
+            WeaponPresetLoader.Session = () => _session;
             _detail.OnHidden = () => _graphView.SetSelectedNode(null);
             _detail.CanGoBack = () => _history.Count > 0;
             _detail.GoBack = GoBack;

@@ -618,9 +618,39 @@ namespace QuestTreeServer
         public string Key { get; set; } = "";
     }
 
+    /// <summary>One item of a saved preset, in the shape the GAME's own build type wants, so the
+    /// client can hand it straight to WeaponBuildsStorage without rebuilding the tree itself.</summary>
+    public sealed class PresetItemDto
+    {
+        public string Id { get; set; } = "";
+        public string Tpl { get; set; } = "";
+
+        /// <summary>Empty for the weapon itself, which has no parent.</summary>
+        public string ParentId { get; set; } = "";
+
+        /// <summary>Empty for the weapon itself, which sits in no slot.</summary>
+        public string SlotId { get; set; } = "";
+    }
+
     public sealed class SavePresetResponse
     {
         public bool Saved { get; set; }
+
+        /// <summary>The build as written, echoed back so the client can insert it into the game's
+        /// in-memory build list at once.
+        ///
+        /// The game reads its builds from the server once at session start and caches them, so a
+        /// preset written afterwards is invisible until something asks again - and nothing does,
+        /// short of going back to profile select. Echoing the build is what lets the client close
+        /// that gap, and the ids are the ones SPT minted rather than the ones we proposed, so the
+        /// client's copy and the profile agree.</summary>
+        public List<PresetItemDto> Items { get; set; } = new();
+
+        /// <summary>The id of the weapon item, which is the build's root.</summary>
+        public string Root { get; set; } = "";
+
+        /// <summary>The preset's id.</summary>
+        public string Id { get; set; } = "";
 
         /// <summary>The preset's name as written, so the client can tell the player what to look for.</summary>
         public string Name { get; set; } = "";

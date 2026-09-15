@@ -161,12 +161,29 @@ namespace QuestTreeServer
             var outcome = presetWriter.Save(sessionId, build.QuestName, weapon, build.Tree)
                 .GetAwaiter().GetResult();
 
-            return Reply(new SavePresetResponse
+            var reply = new SavePresetResponse
             {
                 Saved = outcome.Saved,
                 Name = outcome.Name,
-                Reason = outcome.Reason
-            });
+                Reason = outcome.Reason,
+                Id = outcome.Id.ToString()
+            };
+
+            if (outcome.Saved && outcome.Items.Count > 0)
+            {
+                reply.Root = outcome.Items[0].Id.ToString();
+
+                foreach (var item in outcome.Items)
+                    reply.Items.Add(new PresetItemDto
+                    {
+                        Id = item.Id.ToString(),
+                        Tpl = item.Template.ToString(),
+                        ParentId = item.ParentId ?? "",
+                        SlotId = item.SlotId ?? ""
+                    });
+            }
+
+            return Reply(reply);
         }
 
         private static string AcceptHarvest(
