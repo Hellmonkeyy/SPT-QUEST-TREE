@@ -241,10 +241,29 @@ namespace QuestTree.QuestGraph
             return found ? Mathf.Clamp01(score) : (float?)null;
         }
 
-        /// <summary>Whether the player's loyalty with that trader already reaches the offer.</summary>
+        /// <summary>Whether the player's loyalty with that trader already reaches the offer.
+        ///
+        /// A reward with no trader is not gated by one, and that is the ProductionScheme case. A hideout
+        /// craft unlock carries a hideout AREA and the LEVEL of it the craft needs - verified against the
+        /// shipped data, where all 31 of them name area 10, 2, 7 or 11, every one a real hideout area
+        /// type, with levels 1 to 3. Nothing about a trader.
+        ///
+        /// It used to arrive in TraderId, so this matched an area number against the trader list, never
+        /// found one, returned false, and scored every hideout-craft unlock 0.08 where a reachable unlock
+        /// scores 0.25 - the "Do next" order was wrong for those quests and nothing said so. The server no
+        /// longer sends an area id as a trader; this is the half that stops an absent trader reading as an
+        /// unreachable one.
+        ///
+        /// The hideout level genuinely is not checked: the mod models no hideout state. Counting the
+        /// unlock as reachable is the better of the two available errors, since the craft is permanent and
+        /// the area is buildable, where 0.08 said "you effectively cannot have this".
+        ///
+        /// An older server still sends the area id here, the lookup still fails, and the score degrades to
+        /// what it has always been rather than to something new.</summary>
         private static bool ReachableLoyalty(RewardDto reward, ProfilePayloadDto profile)
         {
             if (reward.LoyaltyLevel <= 0) return true;
+            if (string.IsNullOrEmpty(reward.TraderId)) return true;
             if (profile?.Traders == null) return false;
 
             var trader = profile.Traders.FirstOrDefault(t => t != null && t.Id == reward.TraderId);

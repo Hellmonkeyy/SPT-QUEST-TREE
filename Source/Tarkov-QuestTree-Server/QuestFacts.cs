@@ -29,6 +29,22 @@ namespace QuestTreeServer
         LocationTable locationTable,
         QuestHelper questHelper)
     {
+        /// <summary>Whether the game is currently hiding this quest because it belongs to an event.
+        ///
+        /// SPT's own gate, asked rather than reimplemented, and that distinction had already cost two
+        /// bugs. The gate has three branches - Christmas, Halloween, and any event whose season is None
+        /// behind showNonSeasonalEventQuests - and each of the first two is conditional on the event
+        /// being ACTIVE. A copy that checked only the season, which is what the payload builder had,
+        /// was wrong twice over: it missed the 16 None-season quests entirely, and it went on calling
+        /// the 6 Christmas and 3 Halloween ones unavailable during the very weeks the game shows them,
+        /// while ResolveLockReason - which calls this gate directly, one method below - correctly
+        /// reported no event lock. Two fields in one payload, answering one question, disagreeing for
+        /// six weeks a year.
+        ///
+        /// Everything about which events exist and when they run therefore stays SPT's business, which
+        /// includes the event types this mod has never heard of.</summary>
+        public bool IsHiddenEventQuest(MongoId questId) => !questHelper.ShowEventQuestToPlayer(questId);
+
         /// <summary>The literal a quest uses when it declines to name a map. Kept apart from the
         /// "unknown location" case on purpose: the client tests for this exact string in three
         /// places and is right to, whereas an unrecognised id means nothing to anyone.</summary>

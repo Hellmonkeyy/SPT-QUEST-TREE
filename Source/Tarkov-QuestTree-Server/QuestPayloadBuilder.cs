@@ -40,7 +40,6 @@ namespace QuestTreeServer
         ISptLogger<QuestPayloadBuilder> logger,
         TemplateTable templateTable,
         LocaleService localeService,
-        SeasonalEventService seasonalEventService,
         QuestConfig questConfig,
         QuestFacts facts,
         ZoneStore zoneStore,
@@ -130,6 +129,19 @@ namespace QuestTreeServer
         /// so that count is reported as zero rather than inheriting this one's number.</summary>
         private readonly HashSet<string> _proven = new();
 
+        /// <summary>Requirements this boot could prove NO lower bound for, which is the opposite end of
+        /// _proven rather than a weaker version of it.
+        ///
+        /// Kept for two reasons, both learned the hard way. It keeps the Warning to one line per key, since
+        /// Proven is re-entered on every search for a key that never becomes proven. And it is what tells
+        /// the falsifier to attack these: they are the requirements with nothing standing between them and
+        /// a smaller build, so they want the adversarial search MORE than a proved one does, and the first
+        /// attempt at making their unprovability honest accidentally exempted them from it.
+        ///
+        /// A ConcurrentDictionary-backed set would be tidier; this is guarded by the same lock as _proven
+        /// at every touch, which is the convention the rest of this file already follows.</summary>
+        private readonly HashSet<string> _unbounded = new();
+
         /// <summary>Searches spent this boot. The unit the progress line and both gates count in, since a
         /// round stopped existing when the barrier did.</summary>
         private int _attempts;
@@ -206,6 +218,14 @@ namespace QuestTreeServer
             var proven = 0;
             var irreducible = 0;
             var atFloor = 0;
+
+            // Requirements no bound could be argued for. Reported rather than inferred from a gap between
+            // two other numbers: this used to be indistinguishable from a bound of int.MaxValue, which is
+            // to say indistinguishable from a proof.
+            //
+            // Counted over every requirement surveyed, where atFloor is counted only over the ones that
+            // solved - so the two are not fractions of the same denominator and the log line says which.
+            var unbounded = 0;
             var unproven = new List<string>();
             var unverifiable = 0;
             var disagreed = 0;
@@ -272,13 +292,22 @@ namespace QuestTreeServer
                 // - two different wrong bounds can sum to the same number.
                 var boundKey = WeaponBuildCache.KeyFor(weapon, thresholds, mustInclude, mustIncludeCategories);
 
-                Crosscheck(boundKey, lowest.Parts, weapon);
+                // Same rule as Proven: an unbounded floor is recorded nowhere and cross-checked against
+                // nothing, because it is the absence of a claim rather than a weak one.
+                if (!lowest.Unbounded)
+                {
+                    Crosscheck(boundKey, lowest.Parts, weapon);
 
-                // Recorded HERE as well as in Proven, and the first version of this missed it: the survey is
-                // the only place a bound is computed on a boot that does no training, so without this the
-                // evidence line reported zeros on every normal launch - a denominator of nothing, which is
-                // the exact failure it was added to prevent.
-                weaponBuildCache.Bound(boundKey, lowest.Parts);
+                    // Recorded HERE as well as in Proven, and the first version of this missed it: the survey
+                    // is the only place a bound is computed on a boot that does no training, so without this
+                    // the evidence line reported zeros on every normal launch - a denominator of nothing,
+                    // which is the exact failure it was added to prevent.
+                    weaponBuildCache.Bound(boundKey, lowest.Parts);
+                }
+                else
+                {
+                    unbounded++;
+                }
 
                 duplicates += verdict.Duplicates;
                 unverifiable += verdict.Unverifiable.Count;
@@ -309,7 +338,10 @@ namespace QuestTreeServer
                     if (verdict.Irreducible) irreducible++;
                     foreach (var spare in verdict.Spare) logger.Warning($"Quest Tracker: '{questName}' carries a spare part - {spare}. The search should not have left it.");
 
-                    if (result.Parts.Count <= lowest.Parts) atFloor++;
+                    // Explicitly, not by relying on Parts being zeroed: this counts the PROVEN MINIMUM
+                    // line, and it read every unbounded floor as a match while the absence of a bound was
+                    // carried as int.MaxValue.
+                    if (!lowest.Unbounded && result.Parts.Count <= lowest.Parts) atFloor++;
                     else unproven.Add(
                         $"{questName} at {result.Parts.Count} parts, proven necessary {lowest.Parts} " +
                         $"({lowest.Reason}), solver floor {result.Floor}, binding " +
@@ -367,6 +399,7 @@ namespace QuestTreeServer
                 $" - {clock.ElapsedMilliseconds:N0} ms for all of them, {worst:N0} nodes for the worst one, " +
                 $"{(solved > 0 ? (double)parts / solved : 0d):0.##} parts per build ({parts} total), " +
                 $"{widestBuild} at most, {atFloor} of them PROVEN MINIMUM, " +
+                (unbounded > 0 ? $"{unbounded} of all {_questBuilds.Count} with NO PROVABLE BOUND, " : "") +
                 $"{irreducible} PROVEN IRREDUCIBLE, " +
                 $"{proven} of {parts} parts proven necessary" +
                 (duplicates > 0 ? $", {duplicates} duplicated part(s)" : "") +
@@ -618,9 +651,11 @@ namespace QuestTreeServer
             return quest.Side ?? "";
         }
 
-        private bool IsEventQuest(MongoId questId) =>
-            seasonalEventService.IsQuestRelatedToEvent(questId, SeasonalEventType.Christmas) ||
-            seasonalEventService.IsQuestRelatedToEvent(questId, SeasonalEventType.Halloween);
+        /// <summary>Whether the game is hiding this quest because it belongs to an event.
+        ///
+        /// Delegated to the gate itself - see QuestFacts.IsHiddenEventQuest for what the hand-rolled
+        /// copy that used to live here got wrong, and why the copy existing at all was the bug.</summary>
+        private bool IsEventQuest(MongoId questId) => facts.IsHiddenEventQuest(questId);
 
         /// <summary>True when the quest carries any game-edition restriction at all - an entry in
         /// the exclusive whitelist, or in any edition's inclusive blacklist.</summary>
@@ -1312,7 +1347,6 @@ namespace QuestTreeServer
             get { lock (_questBuilds) return _questBuilds.Count; }
         }
 
-        /// <summary>The proven lower bound for one requirement, worked out once and kept.</summary>
         /// <summary>Whether one build beats another on the objective: fewer purchases, or the same number
         /// of purchases and fewer parts.
         ///
@@ -1322,23 +1356,60 @@ namespace QuestTreeServer
         private static bool Cheaper(long cost, int parts, long wasCost, int wasParts) =>
             cost < wasCost || (cost == wasCost && parts < wasParts);
 
-        private int Proven(
+        /// <summary>The proven lower bound for one requirement, worked out once and kept. NULL when no
+        /// bound could be argued, which is not a bound of any size - see Floor.Unbounded.</summary>
+        private int? Proven(
             MongoId weapon,
             List<(string Field, string Compare, double Value)> thresholds,
             List<MongoId> mustInclude,
             List<MongoId> mustIncludeCategories)
         {
-            var bound = weaponBuildVerifier.LowestPossible(weapon, thresholds, mustInclude, mustIncludeCategories).Parts;
+            var floor = weaponBuildVerifier.LowestPossible(weapon, thresholds, mustInclude, mustIncludeCategories);
             var key = WeaponBuildCache.KeyFor(weapon, thresholds, mustInclude, mustIncludeCategories);
 
-            Crosscheck(key, bound, weapon);
+            // No number is written when there is no claim to write. Nothing stored is withdrawn either:
+            // a bound already on file cannot have outlived its evidence, because Load() zeroes every Bound
+            // when the item fingerprint changes and KeyFor hashes the thresholds into the key - so the two
+            // ways a bound could go stale both invalidate it already. Wiping it here would only throw away
+            // the 16-to-39 sessions of stability the file actually holds.
+            //
+            // But a key that WAS bounded and now is not is a disagreement, and it is exactly the kind
+            // Crosscheck exists for: BestBelow memoises on template alone while its value depends on which
+            // descent hit a cycle cut first, so two threads can legitimately reach different answers for
+            // one key. Routing this case silently around the check would hide the one failure the check
+            // was built to catch.
+            if (floor.Unbounded)
+            {
+                if (_bounds.TryGetValue(key, out var earlier))
+                {
+                    Interlocked.Increment(ref _boundsDisagreed);
+
+                    logger.Warning(
+                        $"Quest Tracker: the proven minimum for '{weapon}' came back as UNPROVABLE after coming back " +
+                        $"as {earlier} earlier in this boot - {floor.Reason}. A bound is a property of the item data " +
+                        "and cannot depend on who asked.");
+                }
+                else if (AddUnbounded(key))
+                {
+                    // Once per key per boot. Proven is re-entered on every Shrink for a key that never
+                    // becomes proven, so logging unconditionally would put hundreds of identical lines in a
+                    // training run's log.
+                    logger.Warning(
+                        $"Quest Tracker: no lower bound could be proven for '{weapon}' - {floor.Reason}. This build " +
+                        "is not called minimal, and the falsifier is turned loose on it below.");
+                }
+
+                return null;
+            }
+
+            Crosscheck(key, floor.Parts, weapon);
 
             // Written down rather than recomputed from nothing next time, and with its own history: a bound
             // that has not moved in fifty sessions is a different object from one that improved last
             // session.
-            weaponBuildCache.Bound(key, bound);
+            weaponBuildCache.Bound(key, floor.Parts);
 
-            return bound;
+            return floor.Parts;
         }
 
         /// <summary>Asserts that the proven lower bound for one requirement does not change within a boot.
@@ -1351,6 +1422,14 @@ namespace QuestTreeServer
         ///
         /// A count of how many were checked is reported beside the count of disagreements, because zero
         /// disagreements from a check nobody ran looks identical to zero from a check that passed.</summary>
+        /// <summary>Records a requirement as unprovable, answering whether this boot had not already.
+        /// Under _proven's lock, because the two sets are read together and a torn answer would either
+        /// duplicate a Warning or drop a falsification.</summary>
+        private bool AddUnbounded(string key)
+        {
+            lock (_proven) return _unbounded.Add(key);
+        }
+
         private void Crosscheck(string key, int bound, MongoId weapon)
         {
             var first = _bounds.GetOrAdd(key, bound);
@@ -1673,7 +1752,13 @@ namespace QuestTreeServer
             var proven = false;
             lock (_proven) proven = _proven.Contains(key);
 
-            if (!proven && remembered.Parts.Count <= Proven(weapon, thresholds, mustInclude, mustIncludeCategories))
+            // "is at most the bound" AND "there is a bound". The second half is new and is the whole
+            // point: Proven used to hand back int.MaxValue when it could prove nothing, and every build
+            // compares as at most that - so the requirements nothing could bound were exactly the ones
+            // marked minimal, and the falsifier below was switched off for them.
+            if (!proven &&
+                Proven(weapon, thresholds, mustInclude, mustIncludeCategories) is { } bound &&
+                remembered.Parts.Count <= bound)
             {
                 lock (_proven) _proven.Add(key);
                 proven = true;
@@ -1686,7 +1771,18 @@ namespace QuestTreeServer
             //
             // Effort follows IGNORANCE where it does spend: a bound already attacked this hard has all the
             // evidence another search would add, and one never attacked has none.
-            if (proven && Falsifying && remembered.Falsifications < FalsifyEnough)
+            //
+            // "proven OR unprovable", and the second half is the correction to a fix that got this exactly
+            // backwards. Falsify searches adversarially for a SMALLER build, so the requirements with no
+            // bound at all are the ones it is most worth pointing at - there is no proof standing between
+            // them and a smaller answer. Gating on `proven` alone meant that making the absence of a bound
+            // honest also made it unfalsified, which is the opposite of what this comment says the policy
+            // is. It happened to be masked before, because an unprovable bound arrived as int.MaxValue,
+            // compared as satisfied, and so entered this branch by accident.
+            bool unprovable;
+            lock (_proven) unprovable = _unbounded.Contains(key);
+
+            if ((proven || unprovable) && Falsifying && remembered.Falsifications < FalsifyEnough)
                 Falsify(build, weapon, thresholds, mustInclude, mustIncludeCategories, remembered, seed);
 
             // Counted HERE and not in the loop, so an attempt means a search that happened. A settled
@@ -2068,6 +2164,23 @@ namespace QuestTreeServer
             "TraderStanding", "TraderUnlock", "TraderStandingRestore"
         };
 
+        /// <summary>Reward types whose TraderId is NOT a trader, so nothing may read it as one.
+        ///
+        /// SPT's own model documents Reward.TraderId as "Hideout area id", and for ProductionScheme that
+        /// is exactly what it holds: all 31 vanilla ProductionScheme rewards carry 10, 2, 7 or 11 - area
+        /// numbers, not MongoIds. AssortmentUnlock is the type the field really does mean a trader for,
+        /// and its 231 rewards carry real trader ids, which is why one comment covered both and was only
+        /// half right.
+        ///
+        /// The cost of getting it wrong was silent and entirely in the client: QuestScore.ReachableLoyalty
+        /// matches the value against the profile's traders, never found one, and scored every
+        /// hideout-craft unlock 0.08 where it should have been 0.25. The "Do next" order was wrong for
+        /// those quests with nothing logged anywhere.</summary>
+        private static readonly HashSet<string> TraderIdIsNotATrader = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "ProductionScheme"
+        };
+
         private List<RewardDto> MapRewards(Quest quest, Dictionary<string, string> locale)
         {
             var rewards = new List<RewardDto>();
@@ -2108,12 +2221,20 @@ namespace QuestTreeServer
 
         /// <summary>Which field holds this reward's trader, which depends on the type.
         ///
-        /// Standing and trader unlocks put it in Target; assort and production unlocks put it in
-        /// TraderId. Reading one field for both is the bug this replaces.</summary>
-        private static string ResolveRewardTrader(Reward reward, string type) =>
-            TraderInTarget.Contains(type)
-                ? reward.Target ?? ""
-                : reward.TraderId?.ToString() ?? "";
+        /// Standing and trader unlocks put it in Target; an assort unlock puts it in TraderId. Reading
+        /// one field for both was the first bug here.
+        ///
+        /// And some rewards have no trader at all, which is the second. ProductionScheme's TraderId is a
+        /// hideout AREA id - SPT's own model says so - so passing it on left the client matching "10"
+        /// against a trader list forever. Empty is the honest answer, and the client already treats an
+        /// empty trader as "this reward does not come from one".</summary>
+        private static string ResolveRewardTrader(Reward reward, string type)
+        {
+            if (TraderInTarget.Contains(type)) return reward.Target ?? "";
+            if (TraderIdIsNotATrader.Contains(type)) return "";
+
+            return reward.TraderId?.ToString() ?? "";
+        }
 
         /// <summary>What a reward is worth in roubles, or null when it cannot be priced.
         ///

@@ -175,17 +175,60 @@ namespace QuestTreeServer
             return payload;
         }
 
-        /// <summary>Whether every part an answer relies on is still obtainable as things stand now.</summary>
+        /// <summary>Whether every part an answer relies on is still obtainable as things stand now.
+        ///
+        /// The three tiers skipped are ones Sources.Has cannot speak for, and skipping only "fitted" made
+        /// this answer false on ordinary profiles. Has covers Owned, Buyable, Barter and Flea; it does NOT
+        /// cover a part already on a weapon you own (InPlace), which the repair path deliberately allows -
+        /// it adds OwnedWeapons[weapon] to the permitted set - nor a part the QUEST names that no trader
+        /// stocks yet (Absent with Named), which JudgeQuietly deliberately does not treat as blocking.
+        ///
+        /// So a level-12 profile doing an early Gunsmith - a non-default handguard already on its M4A1, a
+        /// suppressor Peacekeeper only sells at loyalty 3 - had every request answer "broken". Ready was
+        /// always false, Stale always true, and Enqueue fired on every single request, so the panel never
+        /// left the stale state while a background thread re-solved all sixty requirements in a loop. The
+        /// player this feature is most for was the one it worked worst for.
+        ///
+        /// Unnamed Absent is still treated as broken, deliberately. It should not occur - the restricted
+        /// search only draws from tiers Classify recognises - and if it ever does, saying so is the point.
+        ///
+        /// InPlace is RE-CHECKED rather than skipped, and the difference matters more than it looks. This is
+        /// the only thing in the request path that reads the inventory at all: the availability fingerprint
+        /// is built from trader assorts and flea access only - Hold() runs before the stamp exists - so
+        /// `moved` cannot notice a gun leaving the stash. Skipping the row outright would mean a player who
+        /// took that M4A1 into Labs and did not come back with it kept being told the build was Ready, with
+        /// a part they no longer own priced at zero, until some unrelated trader level-up happened. Losing a
+        /// gun in a raid is an ordinary Tuesday.</summary>
         private bool StillObtainable(Answer answer, PartAvailability.Sources sources)
         {
             foreach (var build in answer.Builds)
             {
                 if (build.Status is not ("ok" or "repaired")) continue;
 
+                var onOwnedWeapon =
+                    build.WeaponTemplate.TryParseMongoId(out var weapon) &&
+                    sources.OwnedWeapons.TryGetValue(weapon, out var fitted)
+                        ? fitted
+                        : null;
+
                 foreach (var part in build.Parts)
                 {
+                    // On the weapon's default preset: nothing to go and get, ever.
                     if (part.Tier == "fitted") continue;
+
+                    // Named by the quest and stocked by nobody. The build is allowed to contain it and is
+                    // not wrong for doing so, so its absence is not a change in circumstances.
+                    if (part.Tier == "absent" && part.Named) continue;
+
                     if (!part.Template.TryParseMongoId(out var template)) return false;
+
+                    // Still on a weapon this profile owns is still in place. Falling through to Has for an
+                    // InPlace part is what made this answer false on ordinary profiles: Has covers Owned,
+                    // Buyable, Barter and Flea, and a part bolted to a gun you already have is in none of
+                    // them.
+                    if (part.Tier == "inplace" && onOwnedWeapon != null && onOwnedWeapon.Contains(template))
+                        continue;
+
                     if (!sources.Has(template)) return false;
                 }
             }

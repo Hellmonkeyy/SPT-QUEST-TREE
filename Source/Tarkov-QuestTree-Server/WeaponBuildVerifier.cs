@@ -136,8 +136,44 @@ namespace QuestTreeServer
         /// smaller build, so a build matching it is minimal outright rather than minimal-if.</summary>
         public sealed class Floor
         {
-            /// <summary>Unconditional. No build with fewer parts than this can satisfy the quest.</summary>
+            /// <summary>Unconditional. No build with fewer parts than this can satisfy the quest. Only
+            /// meaningful while Unbounded is false.</summary>
             public int Parts { get; set; }
+
+            /// <summary>No bound could be argued at all, so Parts states nothing.
+            ///
+            /// This exists because the absence of a bound used to be carried as int.MaxValue in Parts,
+            /// and every consumer read it as the strongest possible claim instead of the weakest. The
+            /// gate was "build parts is at most bound", which is unconditionally true against
+            /// int.MaxValue - so a requirement nothing could reach marked its build provably minimal,
+            /// cached that as a bound, counted it in the "N of 60 are minimal" line, and switched OFF
+            /// the falsifier for it. The one check that tests a proof against reality was disabled by
+            /// the proof being unavailable.
+            ///
+            /// A separate flag rather than a nullable Parts or another sentinel: a sentinel is what
+            /// failed, and it failed in the direction that looks like success.
+            ///
+            /// Parts is zeroed alongside it, and that is deliberately conservative rather than merely
+            /// tidy. The floor is a max over thresholds, so the bound from the thresholds that COULD be
+            /// argued is still sound, and leaning on it would be defensible. It is declined anyway,
+            /// because whatever the reason, the answer and the build in hand cannot both be right:
+            ///
+            /// Spread, Percent and Selected come back empty when NOTHING reachable moves the stat the
+            /// required way - no positively-ergonomic part, no recoil-reducing part, no magazine that
+            /// holds enough. Taken at face value that says no build satisfies the requirement, and yet a
+            /// build exists that the verifier passed.
+            ///
+            /// Reach is different and weaker: it searches budgets 0 to MaxBudget, so empty means "not
+            /// within 28 parts", NOT "impossible". The sound inference there would be a bound of
+            /// MaxBudget + 1 - except that a bound of 29 against a 19-part build in hand says the same
+            /// contradiction out loud, and would pass the "at most the bound" gate and call that build
+            /// minimal. A bigger number is not a safer one.
+            ///
+            /// So in every case the honest state is "no claim", and zeroing Parts means no reader can
+            /// mistake a partial bound for a whole one. What it does NOT mean is that the quest has been
+            /// shown to be impossible - the reach tables are generous in some places and incomplete in
+            /// others, and this is not the evidence for that.</summary>
+            public bool Unbounded { get; set; }
 
             public string Reason { get; set; } = "";
         }
@@ -746,7 +782,26 @@ namespace QuestTreeServer
                         wanted - allowance,
                         named.Count + selected);
 
-                    if (needs > joint) joint = needs;
+                    // Unreachable is not a big number, it is the absence of one, and it cannot be maxed
+                    // into a bound. Each weighting is a relaxation every satisfying build must meet, so
+                    // one that nothing reaches says the requirement is unsatisfiable - which is a claim
+                    // about the data disagreeing with itself, since the solver found a build the verifier
+                    // passed. Either way there is no part count to state, so state none.
+                    if (needs == null)
+                    {
+                        floor.Unbounded = true;
+                        floor.Parts = 0;
+                        // The WEIGHTING is named, not the pair: weighting 0 leans entirely on ergonomics and
+                        // the last entirely on recoil, so "both together" would be wrong for either end of
+                        // the range even when the quest does constrain both stats.
+                        floor.Reason =
+                            $"no build of at most {MaxBudget} parts reaches the ergonomics/recoil combination " +
+                            $"at weighting {weighting}";
+
+                        return floor;
+                    }
+
+                    if (needs > joint) joint = needs.Value;
                 }
 
                 if (joint > floor.Parts)
@@ -774,9 +829,18 @@ namespace QuestTreeServer
                     _ => 0
                 };
 
+                if (needs == null)
+                {
+                    floor.Unbounded = true;
+                    floor.Parts = 0;
+                    floor.Reason = $"nothing reachable can satisfy {field} {compare} {value:0.##}";
+
+                    return floor;
+                }
+
                 if (needs <= floor.Parts) continue;
 
-                floor.Parts = needs;
+                floor.Parts = needs.Value;
                 floor.Reason = $"{field} {compare} {value:0.##}";
             }
 
@@ -942,9 +1006,9 @@ namespace QuestTreeServer
         }
 
         /// <summary>The fewest parts in total whose ceiling covers what is wanted, given that
-        /// <paramref name="named"/> of them are already spoken for. int.MaxValue when no build within the
-        /// budget can reach it at all.</summary>
-        private static int Reach(double[] ceiling, double wanted, int named)
+        /// <paramref name="named"/> of them are already spoken for. NULL when no build within the budget
+        /// can reach it at all - which is "I cannot bound this", not "the bound is enormous".</summary>
+        private static int? Reach(double[] ceiling, double wanted, int named)
         {
             for (var budget = 0; budget < ceiling.Length; budget++)
             {
@@ -954,21 +1018,22 @@ namespace QuestTreeServer
                 if (ceiling[budget] >= wanted) return named + budget;
             }
 
-            return int.MaxValue;
+            return null;
         }
 
         /// <summary>How many parts, each worth at most <paramref name="best"/>, it takes to cover a
-        /// shortfall. Unconditional, and loose precisely because it allows the same part twice.</summary>
-        private static int Spread(double shortfall, double best, int named)
+        /// shortfall. Unconditional, and loose precisely because it allows the same part twice. Null when
+        /// nothing reachable moves the stat in the right direction at all.</summary>
+        private static int? Spread(double shortfall, double best, int named)
         {
             if (shortfall <= 0d) return named;
-            if (best <= 0d) return int.MaxValue;
+            if (best <= 0d) return null;
 
             return named + (int)Math.Ceiling(shortfall / best);
         }
 
-        /// <summary>The same argument through recoil's percentage.</summary>
-        private static int Percent(double threshold, double baseRecoil, double namedPercent, double bestPercent, int named)
+        /// <summary>The same argument through recoil's percentage. Null on the same terms as Spread.</summary>
+        private static int? Percent(double threshold, double baseRecoil, double namedPercent, double bestPercent, int named)
         {
             if (baseRecoil <= 0d) return named;
 
@@ -977,7 +1042,7 @@ namespace QuestTreeServer
             var shortfall = namedPercent - wanted;
 
             if (shortfall <= 0d) return named;
-            if (bestPercent >= 0d) return int.MaxValue;
+            if (bestPercent >= 0d) return null;
 
             return named + (int)Math.Ceiling(shortfall / -bestPercent);
         }
@@ -995,8 +1060,9 @@ namespace QuestTreeServer
         }
 
         /// <summary>A selected stat needs ONE part that carries enough, and no number of lesser parts
-        /// substitutes. Zero extra when the weapon or a named part already carries it.</summary>
-        private static int Selected(
+        /// substitutes. Zero extra when the weapon or a named part already carries it. Null when nothing
+        /// reachable carries enough - a 100-round magazine requirement with no such magazine in reach.</summary>
+        private static int? Selected(
             double threshold, double bestAvailable, double onWeapon, List<MongoId> named, Func<MongoId, double> of)
         {
             if (onWeapon >= threshold) return named.Count;
@@ -1004,7 +1070,7 @@ namespace QuestTreeServer
             foreach (var part in named)
                 if (of(part) >= threshold) return named.Count;
 
-            return bestAvailable >= threshold ? named.Count + 1 : int.MaxValue;
+            return bestAvailable >= threshold ? named.Count + 1 : (int?)null;
         }
 
         private double RangeOf(MongoId template) =>

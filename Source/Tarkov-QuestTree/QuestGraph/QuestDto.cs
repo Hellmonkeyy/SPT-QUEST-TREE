@@ -377,7 +377,12 @@ namespace QuestTree.QuestGraph
         [JsonProperty("isCurrency")]
         public bool IsCurrency { get; set; }
 
-        /// <summary>The loyalty level an unlocked offer appears at; 0 when this is not an unlock.</summary>
+        /// <summary>The loyalty level an unlocked offer appears at; 0 when this is not an unlock.
+        ///
+        /// For a ProductionScheme reward it is not a loyalty level at all - it is the LEVEL of a hideout
+        /// area, and the area itself used to arrive in TraderId. Read it together with TraderId: empty
+        /// there means this number is not about a trader, and QuestScore.ReachableLoyalty stops asking
+        /// the trader list about it.</summary>
         [JsonProperty("loyaltyLevel")]
         public int LoyaltyLevel { get; set; }
 
