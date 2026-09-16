@@ -99,6 +99,15 @@ namespace QuestTree.UI
         }
 
         /// <summary>Draw the quest's sections at the cursor, and advance it past them.</summary>
+        /// <summary>Forgets the last preset message. Called wherever the graph is rebuilt, because these
+        /// are statics and a profile switch would otherwise replay the previous character's "Saved as ..."
+        /// line under a build with the same key.</summary>
+        internal static void Forget()
+        {
+            _presetKey = null;
+            _presetSaid = null;
+        }
+
         internal static void Render(
             RectTransform parent, ref float y, float x, float width,
             QuestNode node, QuestGraphBuilder graph, ProfilePayloadDto profile,

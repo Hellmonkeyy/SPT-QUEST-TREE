@@ -2043,7 +2043,12 @@ namespace QuestTreeServer
             {
                 weaponBuildCache.Put(key, result.Parts, result.Floor, result.Binding, result.Changes, result.Cost,
                     Handbook.PerPurchase);
-                _improved++;
+
+                // Interlocked, like the other writer of this counter. Rebuild() reaches Solve() from the
+                // zone-harvest POST thread while the training workers are running, so a plain ++ could lose
+                // an increment - only in the boot log's "N improvements found" line, but that line is the
+                // evidence the training did anything.
+                Interlocked.Increment(ref _improved);
             }
             else if (remembered != null)
             {

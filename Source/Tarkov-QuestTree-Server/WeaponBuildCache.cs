@@ -23,8 +23,9 @@ namespace QuestTreeServer
     /// WHAT MAKES A CACHED ANSWER STILL VALID, because getting this wrong ships a stale build
     ///
     /// The answer depends on the quest's own terms and on every part that exists. So the file carries
-    /// a FINGERPRINT of the item database - every template's id and the five numbers a build is judged
-    /// on, plus its slots - and any entry saved under a different fingerprint is discarded unread.
+    /// a FINGERPRINT of the item database - every template's id, the numbers a build is judged on, the
+    /// conflicts and footprint that decide whether it assembles at all, plus its slots - and any entry
+    /// saved under a different fingerprint is discarded unread.
     /// Installing a weapon mod changes the fingerprint, which is exactly right: the new parts may make
     /// a smaller build possible, and a cache that kept serving the old one would quietly hide it.
     ///
@@ -592,10 +593,20 @@ namespace QuestTreeServer
 
         /// <summary>What the item database looks like, as far as a build can tell.
         ///
-        /// Every template's id, the five numbers a build is judged on, and the shape of its slots. A new
-        /// weapon mod changes it and every cached answer is discarded - which is the point: new parts may
-        /// make a smaller build possible, and serving the old one would hide that rather than be stale in
-        /// some visible way.</summary>
+        /// Every template's id, the numbers a build is judged on, its conflicts and grid footprint, and the
+        /// shape of its slots. A new weapon mod changes it and every cached answer is discarded - which is
+        /// the point: new parts may make a smaller build possible, and serving the old one would hide that
+        /// rather than be stale in some visible way.
+        ///
+        /// Conflicts and footprint were added after a review: neither changes a build's SCORE, which is why
+        /// they were missed, but both change whether it can be built - and a cached build the modding screen
+        /// refuses is worse than a stale one.
+        ///
+        /// Adding them moves the hash, so every existing install pays the carry-over branch once. That keeps
+        /// Parts - the builds themselves survive - and zeroes the evidence around them: Bound, BoundSessions,
+        /// Falsifications, FalsifyNodes, Nodes, Cost and Binding. On the shipped cache that is seventeen
+        /// sessions of bound stability across sixty builds. Worth the invalidation, and worth stating rather
+        /// than calling it a re-solve.</summary>
         private string Fingerprint()
         {
             if (_fingerprint != null) return _fingerprint;
@@ -621,6 +632,28 @@ namespace QuestTreeServer
                     .Append(':').Append(props.Cartridges?.FirstOrDefault()?.MaxCount ?? 0)
                     .Append(':').Append((props.RecoilForceUp ?? 0d).ToString("R"))
                     .Append(':').Append((props.RecoilForceBack ?? 0d).ToString("R"));
+
+                // Conflicts, and the grid footprint the size check reads. Neither was here, and both decide
+                // whether a cached build still ASSEMBLES: a mod update that introduces a conflict between a
+                // handguard and a foregrip a stored build uses together left this hash unchanged, so Load()
+                // took the fast path, Sound() passed - the verifier has no opinion on conflicts - and the
+                // game's modding screen refused the build. The ExtraSize half was caught only because the
+                // verifier recomputes the footprint, which costs a re-solve per boot instead of an
+                // invalidation.
+                foreach (var conflict in (props.ConflictingItems ?? Enumerable.Empty<MongoId>())
+                             .Select(c => c.ToString())
+                             .OrderBy(c => c, StringComparer.Ordinal))
+                    text.Append('x').Append(conflict);
+
+                // 1, not 0, because that is what WeaponGraph and the verifier read a null as - defaulting
+                // to 0 here would hash an absent Width the same as an explicit 0 while the two behave
+                // differently everywhere else.
+                text.Append(':').Append(props.Width ?? 1).Append('x').Append(props.Height ?? 1)
+                    .Append(':').Append(props.ExtraSizeUp ?? 0)
+                    .Append(':').Append(props.ExtraSizeDown ?? 0)
+                    .Append(':').Append(props.ExtraSizeLeft ?? 0)
+                    .Append(':').Append(props.ExtraSizeRight ?? 0)
+                    .Append(props.ExtraSizeForceAdd == true ? "!" : "");
 
                 foreach (var slot in props.Slots ?? Enumerable.Empty<SPTarkov.Server.Core.Models.Eft.Common.Tables.Slot>())
                 {

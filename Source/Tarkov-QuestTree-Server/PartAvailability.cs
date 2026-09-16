@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Linq;
 using SPTarkov.Common.Models.Logging;
@@ -47,6 +48,11 @@ namespace QuestTreeServer
     /// two profiles. Everything here is per session and allocated per call - the only shared state is the
     /// read-only currency set and the read-only flea price map - so several sessions asking at once cannot
     /// interfere with each other.
+    ///
+    /// THAT CHANGED, and the difference is the one to know before writing to a Sources: For memoises the
+    /// whole object for a few seconds, so one instance is now shared between request threads and the
+    /// background worker. It is treated as immutable once returned, and every consumer today reads it or
+    /// copies out of it - see the note on Recent, and on Sources itself.
     /// </summary>
     [Injectable(InjectionType.Singleton)]
     public class PartAvailability(
@@ -113,6 +119,18 @@ namespace QuestTreeServer
         /// unlocked. A diagnostic, never a source.</summary>
         public readonly record struct Gate(int Level, MongoId Trader, long? Price);
 
+        /// <summary>Everything one profile can get, as of one moment.
+        ///
+        /// IMMUTABLE ONCE RETURNED. Nothing may write to an instance, or to the collections it holds, after
+        /// For has handed it out.
+        ///
+        /// Not enforceable in the type - every member is settable or a mutable collection, and Fresh() is
+        /// code that sets exactly those, on its own new instance. The rule exists because For memoises each
+        /// answer for a few seconds, so one instance is shared between request threads and the background
+        /// worker: a write would land in another request's copy with nothing wrong at the write site to see.
+        ///
+        /// A consumer that needs to change something copies out. ProfileBuilds builds its allowed-set into
+        /// fresh collections for precisely this reason.</summary>
         public sealed class Sources
         {
             /// <summary>Templates with at least one LOOSE copy - the free ones.</summary>
@@ -185,7 +203,8 @@ namespace QuestTreeServer
             /// weapon the profile owns is in place rather than owned.</summary>
             public (Tier Tier, long? Price) Classify(MongoId template, WeaponPresets.Defaults? defaults, MongoId? questWeapon)
             {
-                if (defaults != null && defaults.Occupants.Values.Contains(template)) return (Tier.Fitted, 0);
+                // Slot-blind, and OccupiesAnySlot's own comment says what that costs.
+                if (defaults != null && defaults.OccupiesAnySlot(template)) return (Tier.Fitted, 0);
                 if (questWeapon is { } owned && OwnedWeapons.TryGetValue(owned, out var onIt) && onIt.Contains(template))
                     return (Tier.InPlace, 0);
                 if (Owned.Contains(template)) return (Tier.Owned, 0);
@@ -206,7 +225,46 @@ namespace QuestTreeServer
             return profile == null ? null : For(sessionId, profile);
         }
 
+        /// <summary>The last answer per profile, kept for a few seconds.
+        ///
+        /// Every call generates each of the profile's traders' assorts TWICE - once as the profile sees
+        /// them and once including what is locked, for the Gated diagnostic - and walks the whole
+        /// inventory. Measured rather than guessed: the shipped database ships twelve traders that all have
+        /// an assort, so a stock install is about twenty-four generations, and both profiles on this machine
+        /// carry fourteen TradersInfo entries, so roughly twenty-eight here. ProfileBuilds asks for it on
+        /// EVERY /questtree/builds GET, and GetBuilds re-asks on every render while the answer is not ready.
+        /// WeaponGraph's own comment sets the rule this was breaking: a request handler must not pay for
+        /// work like this.
+        ///
+        /// Safe to share rather than merely cheap: nothing mutates a Sources after For returns it - its
+        /// consumers read it to build an allowed-set and to classify rows - and the correctness of a
+        /// stale read is already handled a level up, where Fingerprint decides whether the answer needs
+        /// recomputing. A few seconds behind is the same trade ProfileInventory makes for the same reason.
+        ///
+        /// Deliberately short, and deliberately not invalidated on purchase: trader stock moving is what
+        /// Fingerprint is for, and the panel asks again.</summary>
+        private static readonly ConcurrentDictionary<string, (DateTime At, Sources Sources)> Recent = new();
+
+        private static readonly TimeSpan CacheFor = TimeSpan.FromSeconds(5);
+
         public Sources? For(MongoId sessionId, PmcData profile)
+        {
+            var key = sessionId.ToString();
+
+            if (!string.IsNullOrEmpty(key) && Recent.TryGetValue(key, out var recent) &&
+                DateTime.UtcNow - recent.At < CacheFor)
+            {
+                return recent.Sources;
+            }
+
+            var sources = Build(sessionId, profile);
+
+            if (!string.IsNullOrEmpty(key)) Recent[key] = (DateTime.UtcNow, sources);
+
+            return sources;
+        }
+
+        private Sources Build(MongoId sessionId, PmcData profile)
         {
             var sources = new Sources();
 

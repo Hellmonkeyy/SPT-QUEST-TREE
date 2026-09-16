@@ -468,6 +468,7 @@ namespace QuestTree.UI
             // The cached ranking holds this panel's graph and profile; the panel dies with the
             // menu after every raid, and nothing else would drop it until the next tracker open.
             DoNextView.Forget();
+            QuestBody.Forget();
         }
 
         private void Unsubscribe()
@@ -512,6 +513,7 @@ namespace QuestTree.UI
                     // this hand-in just unlocked would never appear. Rebuild instead. A hidden
                     // panel is left alone; it rebuilds on Show (see there).
                     DoNextView.Forget();
+                    QuestBody.Forget();
                     _graph.Build(_questController, _session);
                     BuildTabs();
                     RenderSelectedTab();
@@ -879,6 +881,7 @@ namespace QuestTree.UI
             _graph.Build(questController, session);
 
             DoNextView.Forget();
+            QuestBody.Forget();
 
             // The nodes the history pointed at belong to the graph just replaced. A pending
             // settings change is moot for the same reason, except that pooled boxes built to the

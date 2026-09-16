@@ -552,6 +552,14 @@ namespace QuestTreeServer
                 var file = JsonSerializer.Deserialize<ZoneFile>(System.IO.File.ReadAllText(path), FileOptions);
                 if (file == null) return null;
 
+                // Filled in rather than dereferenced. Files this server wrote always carry both arrays, but
+                // a hand-edited or third-party seed with "triggers": null threw into the catch below and was
+                // reported as unreadable - discarding the questItems it did have, and telling the player to
+                // raid the map again to fix a file that was fine. BuildIndexes guards for exactly this
+                // shape; this path did not.
+                file.Triggers ??= new List<HarvestedTrigger>();
+                file.QuestItems ??= new List<HarvestedQuestItem>();
+
                 logger.Info(
                     $"Quest Tracker: {file.Triggers.Count} zones and {file.QuestItems.Count} quest items " +
                     $"known for '{key}' (harvested {file.HarvestedAt}).");

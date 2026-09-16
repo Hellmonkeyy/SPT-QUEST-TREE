@@ -38,6 +38,25 @@ namespace QuestTreeServer
                 new Dictionary<(MongoId, string), MongoId>();
 
             public int Count => Occupants.Count;
+
+            /// <summary>Whether this template is the default in ANY slot, ignoring which.
+            ///
+            /// The slot-blind question, named so its looseness is visible at the call site. Classify has to
+            /// ask it - it is handed a template and no slot - and the answer is wrong in one direction: a
+            /// build carrying TWO copies of a part that is the default in one slot shows both rows as fitted
+            /// and free, while WeaponSolver.Priced keys on (host, slot) and charges for the second. So the
+            /// display can under-report what the search itself optimised against.
+            ///
+            /// A set rather than the Values.Contains scan it replaces, which was O(n) per part per
+            /// classify. Built with the object rather than lazily: one Defaults is cached per weapon and
+            /// read by every training thread at once - however many that is, which is half the processor
+            /// count and not the fifteen this comment first claimed - so a `??=` here would let one of them
+            /// publish a half-built HashSet to the others.</summary>
+            public bool OccupiesAnySlot(MongoId template) => AnySlot.Contains(template);
+
+            /// <summary>Occupants' values as a set. Assigned beside Occupants, never derived from it after
+            /// the fact, for the reason above.</summary>
+            public IReadOnlySet<MongoId> AnySlot { get; init; } = new HashSet<MongoId>();
         }
 
         /// <summary>Cached per weapon, and the miss is cached too - a weapon with no preset must not be
@@ -88,7 +107,13 @@ namespace QuestTreeServer
                     occupants.TryAdd((host, item.SlotId!), item.Template);
                 }
 
-                return occupants.Count == 0 ? null : new Defaults { Occupants = occupants };
+                return occupants.Count == 0
+                    ? null
+                    : new Defaults
+                    {
+                        Occupants = occupants,
+                        AnySlot = new HashSet<MongoId>(occupants.Values)
+                    };
             }
             catch (System.Exception ex)
             {

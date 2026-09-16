@@ -184,9 +184,21 @@ namespace QuestTree.UI
                 var listBottom = AuxLayout.AddDropdownList(parent, goalTop, GoalLabels, (int)Goal(),
                     index =>
                     {
+                        // Whether the pick changes anything, decided BEFORE the write. BepInEx raises
+                        // SettingChanged from ConfigEntry.Value's setter only when the value differs, so
+                        // picking the goal already selected set _goalOpen false and then repainted nothing,
+                        // leaving the open plate and its five rows painted over the list until some
+                        // unrelated repaint cleared them.
+                        //
+                        // Asked here rather than repainting unconditionally: Changed re-renders the whole
+                        // tab synchronously, so an unconditional call would rebuild the list twice for one
+                        // click on every real change.
+                        var unchanged = !ModSettings.Ready || index == (int)Goal();
+
                         _goalOpen = false;
                         if (ModSettings.Ready) ModSettings.DoNextGoal.Value = (RankGoal)index;
-                        else ModSettings.RequestRepaint();
+
+                        if (unchanged) ModSettings.RequestRepaint();
                     }, 220f, x);
 
                 bottom = Mathf.Max(bottom, listBottom + AuxLayout.Padding);

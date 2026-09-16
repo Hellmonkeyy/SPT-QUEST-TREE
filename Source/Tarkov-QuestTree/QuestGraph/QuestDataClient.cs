@@ -220,6 +220,18 @@ namespace QuestTree.QuestGraph
         private static List<QuestDto> _cached;
         private static bool _attempted;
 
+        /// <summary>Set off the main thread by InvalidateQuests, read and cleared on the main thread by
+        /// TryFetchAll. The same shape as _markersStale, for the same reason and one release late.
+        ///
+        /// InvalidateQuests is called from the harvester's pool thread, one line after
+        /// InvalidateMapMarkers, and used to write the two fields above directly. Neither is volatile, so
+        /// the main thread could go on seeing _attempted true and keep serving the pre-harvest quest list
+        /// for the rest of the session - the harvested map gaining its pins, because those go through the
+        /// volatile flag, and never gaining its derived map entry. That is the exact in-the-list-without-
+        /// pins split derived locations exist to prevent. It could also tear outright, with _cached nulled
+        /// while the main thread was inside TryFetchAll reading it.</summary>
+        private static volatile bool _questsStale;
+
         /// <summary>Drops the cached quest list so the next fetch asks again.
         ///
         /// Needed since 1.9.0, and the comment it replaces was made false by the same change: the
@@ -228,11 +240,7 @@ namespace QuestTree.QuestGraph
         /// map's zones are, and the server rebuilds its quest payload accordingly. Without this the
         /// client would keep serving the pre-harvest answer for the rest of the session, so the
         /// quest would gain its pins and never gain its map.</summary>
-        public static void InvalidateQuests()
-        {
-            _attempted = false;
-            _cached = null;
-        }
+        public static void InvalidateQuests() => _questsStale = true;
 
         /// <summary>The full quest list, or null when the companion server mod is not installed or
         /// did not answer. Fetched once per game session and after a harvest - see
@@ -240,6 +248,15 @@ namespace QuestTree.QuestGraph
         /// <see cref="ResetSession"/> is for.</summary>
         public static List<QuestDto> TryFetchAll()
         {
+            // Cleared here rather than by the caller that asked for it: this is the main thread, which is
+            // the only thread allowed to touch the pair below.
+            if (_questsStale)
+            {
+                _questsStale = false;
+                _attempted = false;
+                _cached = null;
+            }
+
             if (_attempted) return _cached;
             _attempted = true;
 
@@ -425,8 +442,9 @@ namespace QuestTree.QuestGraph
         private static bool _markersAttempted;
 
         /// <summary>Set from the harvester's pool thread, read and cleared on the main thread by
-        /// GetMapMarkers. The one field in this class touched off the main thread, so it is the
-        /// one field that is volatile; the pair above is only ever written on the main thread.</summary>
+        /// GetMapMarkers. One of TWO fields in this class touched off the main thread - see _questsStale,
+        /// which was the same situation going unnoticed - and the pair above is only ever written on the
+        /// main thread.</summary>
         private static volatile bool _markersStale;
 
         /// <summary>When an empty answer may be asked about again. Since 1.8.1 the server answers
@@ -566,6 +584,13 @@ namespace QuestTree.QuestGraph
             _profileAttempted = false;
             _builds = null;
             _buildsAttempted = false;
+
+            // Both off-thread flags too, for consistency with the pairs above rather than to fix a known
+            // ordering: every field they guard is nulled here, and each flag is consumed at the top of the
+            // first fetch after this, before anything has been fetched to throw away. Cleared so the flags
+            // cannot outlive the state they describe.
+            _questsStale = false;
+            _markersStale = false;
         }
 
         // Every name the views will put inside rich text, made literal once here - see RichText.

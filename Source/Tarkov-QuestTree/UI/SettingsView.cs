@@ -360,6 +360,17 @@ namespace QuestTree.UI
                     {
                         _openDropdown = null;
                         onSelect(index);
+
+                        // Only when the pick changed NOTHING. Every caller here sets a ConfigEntry and
+                        // leans on SettingChanged to repaint, and BepInEx raises that only when the value
+                        // differs - so re-picking the current quest-badge style, pin-label mode or sidebar
+                        // width closed the dropdown in state and left the plate painted over the page.
+                        //
+                        // Conditional rather than unconditional, because Changed has one subscriber and it
+                        // re-renders the whole tab synchronously: repainting after a real change would
+                        // rebuild the page twice for one click, in a batch whose subject is cost.
+                        // `selected` is the currently-chosen index, so this is exactly the no-op case.
+                        if (index == selected) ModSettings.RequestRepaint();
                     },
                     width: dropdownWidth,
                     x: AuxLayout.Padding));

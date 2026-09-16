@@ -1081,9 +1081,9 @@ namespace QuestTree.UI
                 if (!names.ContainsKey(marker.Template)) names[marker.Template] = marker.ItemName;
             }
 
-            var items = ItemWatchlistView.Collect(graph, profile)
-                .Where(i => templates.Contains(i.Template))
-                .ToList();
+            // The template set goes IN rather than being applied to the result - see Collect's own
+            // note on why filtering afterwards was the expensive way round.
+            var items = ItemWatchlistView.Collect(graph, profile, templates);
 
             foreach (var item in items)
                 if (names.TryGetValue(item.Template, out var name)) item.Name = name;
@@ -2023,10 +2023,21 @@ namespace QuestTree.UI
             y += height;
         }
 
+        /// <summary>How actionable a status is, lowest first: in progress, startable, then everything
+        /// still to come, and finished last.
+        ///
+        /// Completed used to fall into the same bucket as Locked and Gated, so BestQuestFor's claim of
+        /// "Active over Available over Locked over Completed" was false, and a pin serving one completed and
+        /// one locked quest chose between them by enumeration order - deciding whether it said "nothing left
+        /// to do here" or named the quest still waiting.
+        ///
+        /// The sidebar list is unaffected either way: GroupByMap skips Completed, so it has never held
+        /// one.</summary>
         private static int StatusRank(ENodeStatus status) => status switch
         {
             ENodeStatus.Active => 0,
             ENodeStatus.Available => 1,
+            ENodeStatus.Completed => 3,
             _ => 2
         };
     }

@@ -568,6 +568,15 @@ namespace QuestTreeServer
 
                     // A repaired build made only of obtainable parts, by construction, the quest's own named
                     // parts aside; said out loud if that ever stops being true, rather than trusted.
+                    //
+                    // And it cannot currently fire, which is worth writing down rather than leaving as a
+                    // guard a reader will trust. `allowed` is built from exactly the six sets Classify
+                    // recognises, so a part that came through the search is never Absent; the only Absent
+                    // rows are the quest's own named parts, which this predicate excludes. To make it
+                    // reachable, `allowed` would have to gain something Classify does not know about - which
+                    // is precisely what the two hypothetical searches below do, and neither of their results
+                    // is passed through here. Kept because that is a plausible future edit and this is where
+                    // it would show up, not because it is watching anything today.
                     if (dto.Parts.Any(row => row.Tier == "absent" && !row.Named))
                         logger.Warning(
                             $"Quest Tracker: a repaired build for '{build.WeaponName}' names a part the profile " +

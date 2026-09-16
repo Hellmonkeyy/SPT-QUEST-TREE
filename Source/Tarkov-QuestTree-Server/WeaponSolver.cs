@@ -428,6 +428,11 @@ namespace QuestTreeServer
                 bestCount = CountParts(state.Incumbent);
                 best = state.Incumbent;
 
+                // The incumbent's PRICE too, not only its size. Left at long.MaxValue, the shrink loop's
+                // first iteration set a cost ceiling of long.MaxValue - 1, which is no ceiling at all, and
+                // burned a full round of restarts against the time budget before any real one applied.
+                (bestCost, _) = Priced(state.Incumbent, state);
+
                 state.PartCeiling = bestCount - 1;
             }
 
@@ -578,6 +583,14 @@ namespace QuestTreeServer
 
                 // Nothing left to want: everything satisfied, nothing to buy, and at a size nothing could
                 // undercut.
+                //
+                // bestCost == 0 makes this all but unreachable, and that is a deliberate trade rather than an
+                // oversight. Under handbook pricing every purchase costs PerPurchase, so a zero-cost build is
+                // one assembled entirely from the default preset and parts already owned - which a Gunsmith
+                // quest naming specific parts essentially never is. Weakening it to "no cheaper build is
+                // possible" needs a lower bound over PRICE, which does not exist; stopping on size alone
+                // would abandon the objective the search is actually minimising. So the restarts run and the
+                // budget is what stops them.
                 if (bestWhole == 0 && bestShortfall <= 0d && bestCost == 0 && bestCount <= floor) break;
                 if (state.Exhausted) break;
             }

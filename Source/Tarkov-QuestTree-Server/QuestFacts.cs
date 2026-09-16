@@ -247,10 +247,47 @@ namespace QuestTreeServer
         /// buckets.</summary>
         public IReadOnlyDictionary<string, string> LocationIdsByKey() => BuildLocationLookups().keyToId;
 
-        /// <summary>Every real location's internal name - QuestDto.LocationKey's keyspace, which is
-        /// NOT the canonical one: factory4_night and Sandbox_high are separate entries here and
-        /// fold away under ZoneStore.Canonical.</summary>
-        public IReadOnlyList<string> AllLocationKeys() => BuildLocationLookups().keyToId.Keys.ToList();
+        /// <summary>Internal names nobody can raid, so nothing should offer them as a map.
+        ///
+        /// The locations table holds nineteen entries on a stock install and six of them are not places:
+        /// the hideout, the development scene, and four stubs BSG has never shipped. They were reaching the
+        /// raid check as maps - inert on screen, because the client matches by key and never asks about
+        /// them - but IsRealLocation reads the same table, so they were also accepted as zone-harvest
+        /// targets, which is a write.
+        ///
+        /// Matched by internal name rather than by id: the names are stable and legible, where the ids are
+        /// neither. A named list rather than a rule, because the obvious rules are both wrong:
+        ///
+        /// NOT Enabled. factory4_night and Labyrinth both ship Enabled = false and are real maps with five
+        /// and one exits - filtering on that flag would have removed two places people raid.
+        ///
+        /// The measurement that says the list is complete: of the nineteen locations on a stock install,
+        /// exactly these six have no exits at all (hideout, Private Area, Suburbs, Terminal, Town) or are
+        /// the Arena development scene (develop). Every other entry has between one and twelve. So
+        /// "exits == 0" would also have worked for five of the six, and is the reason to believe nothing
+        /// real is being dropped - it is just not what is tested, since a modded map is free to declare
+        /// its exits however it likes and being wrong about one costs a real map its raid check.
+        ///
+        /// A mod adding its own non-place is therefore not covered, and that is the safe direction: it
+        /// keeps an empty row, which is what happens today.</summary>
+        private static readonly HashSet<string> NotPlaces = new(StringComparer.OrdinalIgnoreCase)
+        {
+            "develop", "hideout", "Private Area", "Suburbs", "Terminal", "Town"
+        };
+
+        /// <summary>Whether this internal name is somewhere a player can actually be.</summary>
+        public bool IsPlayableLocation(string? internalName) =>
+            !string.IsNullOrWhiteSpace(internalName) && !NotPlaces.Contains(internalName!);
+
+        /// <summary>Every internal name the raid check should offer: every location a player can actually
+        /// raid, which is the locations table minus the six NotPlaces entries.
+        ///
+        /// NOT the canonical keyspace - factory4_night and Sandbox_high are separate entries here and fold
+        /// away under ZoneStore.Canonical. Nor, since the filter, quite QuestDto.LocationKey's keyspace
+        /// either: keyToId still holds all nineteen names and a quest is free to declare a filtered
+        /// one.</summary>
+        public IReadOnlyList<string> AllLocationKeys() =>
+            BuildLocationLookups().keyToId.Keys.Where(IsPlayableLocation).ToList();
 
         /// <summary>The display name for a map, by its internal name. The locale table keys these
         /// by location ID rather than by internal name, which is the step that makes this worth
@@ -291,7 +328,9 @@ namespace QuestTreeServer
         /// because that is what a harvest posts, and case-insensitively because a client's casing
         /// is its own business.</summary>
         public bool IsRealLocation(string? map) =>
-            !string.IsNullOrWhiteSpace(map) && BuildLocationLookups().keyToId.ContainsKey(map);
+            !string.IsNullOrWhiteSpace(map)
+            && BuildLocationLookups().keyToId.ContainsKey(map)
+            && IsPlayableLocation(map);
 
         /// <summary>Whether a quest's declared location tells us nothing, so its zones may speak
         /// instead.

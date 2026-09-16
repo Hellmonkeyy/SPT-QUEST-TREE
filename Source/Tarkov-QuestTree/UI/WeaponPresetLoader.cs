@@ -79,11 +79,10 @@ namespace QuestTree.UI
             catch (Exception ex)
             {
                 // Deliberately swallowed. The build is already written and safe; all that is lost is
-                // the convenience, and a throw here would land inside a UI rebuild.
-                Plugin.LogSource?.LogWarning(
-                    $"QuestTree: saved the preset but could not show it without a reload - {ex.Message}.");
-
-                return false;
+                // the convenience, and a throw here would land inside a UI rebuild. Through Gave for the
+                // wording, so the sentence lives in one place and cannot drift between the guards and the
+                // exception.
+                return Gave(ex.Message);
             }
         }
 

@@ -142,7 +142,16 @@ namespace QuestTree.UI
         /// quests that are still locked: knowing an item matters BEFORE the quest unlocks is the
         /// entire point, since that is when you would otherwise sell it.
         /// </summary>
-        internal static List<WatchedItem> Collect(QuestGraphBuilder graph, ProfilePayloadDto profile)
+        /// <param name="only">Templates the caller will keep, or null for every one.
+        ///
+        /// Not a convenience. The map sidebar knows the handful of templates its pins carry BEFORE it
+        /// asks, and used to filter afterwards - so every repaint of the Maps tab, including opening and
+        /// closing the floor dropdown, walked every quest and built one WatchedItem per distinct template
+        /// to discard all but a few. Measured on the shipped database: 927 item-condition objectives across
+        /// 558 quests, collapsing to 376 distinct non-currency templates - so a few hundred allocations per
+        /// repaint, not the objective count. The Items tab passes null because it wants all of them.</param>
+        internal static List<WatchedItem> Collect(
+            QuestGraphBuilder graph, ProfilePayloadDto profile, ISet<string> only = null)
         {
             var byTemplate = new Dictionary<string, WatchedItem>();
             var owned = profile.ItemsOwned ?? new Dictionary<string, HeldItemDto>();
@@ -161,6 +170,7 @@ namespace QuestTree.UI
                     var template = objective.TargetItems[0];
                     if (string.IsNullOrWhiteSpace(template)) continue;
                     if (Currency.Contains(template)) continue;
+                    if (only != null && !only.Contains(template)) continue;
 
                     if (!byTemplate.TryGetValue(template, out var watched))
                     {
