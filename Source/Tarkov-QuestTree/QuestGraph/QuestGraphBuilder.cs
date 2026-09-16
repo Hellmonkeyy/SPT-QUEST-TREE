@@ -82,6 +82,41 @@ namespace QuestTree.QuestGraph
                 }
             }
 
+            // Seeded here rather than special-cased wherever a trader name is displayed (tab
+            // labels, node subtitles, the detail panel), so every one of those gets a friendly
+            // string instead of QuestNode.NoTraderId's raw "__no_trader__" sentinel leaking out.
+            var traderNames = new Dictionary<string, string> { [QuestNode.NoTraderId] = "No Trader" };
+            if (session?.Traders != null)
+            {
+                foreach (var trader in session.Traders)
+                {
+                    if (trader?.Id == null) continue;
+                    // LocalizedName can be null (locale not yet loaded, or a modded trader missing
+                    // a locale key) - falling back to the id here, not just where it's read back
+                    // out, means every consumer (tab labels included) gets a non-null string to
+                    // work with instead of needing its own null guard.
+                    traderNames[trader.Id] = RichText.Safe(string.IsNullOrEmpty(trader.LocalizedName) ? trader.Id : trader.LocalizedName);
+                }
+            }
+
+            foreach (var node in _byId.Values)
+            {
+                node.TraderName = traderNames.TryGetValue(node.TraderId, out var name)
+                    ? name
+                    : node.TraderId; // unresolved trader (e.g. not yet loaded) - fall back to the raw id rather than blank
+            }
+
+            // BEFORE the two things that read it, which is the whole point of it being here.
+            //
+            // This block used to sit two hundred lines further down, after both. TraderNames was
+            // therefore still the empty dictionary it is declared with, and two features were
+            // quietly dead for it: Prime got an empty enumerable and returned immediately, leaving
+            // every trader colour to be resolved lazily in whatever order boxes happened to bind -
+            // the exact instability its own doc comment says is worse than grey - and every node's
+            // search text was built with a null trader name, so typing a trader into a box whose
+            // placeholder reads "Search quests or traders" matched nothing at all.
+            TraderNames = traderNames;
+
             // Trader colours, assigned once per graph in a fixed order - see TraderPalette.Prime
             // for why lazily resolving them would make a modded trader's colour depend on which
             // quest drew first.
@@ -114,35 +149,10 @@ namespace QuestTree.QuestGraph
             RefreshKappaFlags();
             RefreshCollectorClosure();
 
-            // Seeded here rather than special-cased wherever a trader name is displayed (tab
-            // labels, node subtitles, the detail panel), so every one of those gets a friendly
-            // string instead of QuestNode.NoTraderId's raw "__no_trader__" sentinel leaking out.
-            var traderNames = new Dictionary<string, string> { [QuestNode.NoTraderId] = "No Trader" };
-            if (session?.Traders != null)
-            {
-                foreach (var trader in session.Traders)
-                {
-                    if (trader?.Id == null) continue;
-                    // LocalizedName can be null (locale not yet loaded, or a modded trader missing
-                    // a locale key) - falling back to the id here, not just where it's read back
-                    // out, means every consumer (tab labels included) gets a non-null string to
-                    // work with instead of needing its own null guard.
-                    traderNames[trader.Id] = RichText.Safe(string.IsNullOrEmpty(trader.LocalizedName) ? trader.Id : trader.LocalizedName);
-                }
-            }
-
-            foreach (var node in _byId.Values)
-            {
-                node.TraderName = traderNames.TryGetValue(node.TraderId, out var name)
-                    ? name
-                    : node.TraderId; // unresolved trader (e.g. not yet loaded) - fall back to the raw id rather than blank
-            }
-
             RefreshStatusesInternal();
             ApplyLockGates();
 
             Nodes = _byId.Values.ToArray();
-            TraderNames = traderNames;
             Version++;
         }
 

@@ -522,13 +522,43 @@ namespace QuestTreeServer
 
             var locale = localeService.GetLocaleDb();
 
+            // Every real map, for the quests that do not name one. Materialised once: LocationIdsByKey
+            // is memoised, but Distinct over it per quest would not be.
+            var everyLocationId = facts.LocationIdsByKey().Values
+                .Where(id => !string.IsNullOrWhiteSpace(id))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
             foreach (var quest in quests.Values)
             {
-                var location = quest?.Location;
-                if (quest == null || string.IsNullOrWhiteSpace(location)) continue;
+                if (quest == null) continue;
 
                 var conditions = quest.Conditions?.AvailableForFinish;
                 if (conditions == null) continue;
+
+                // A quest that names its own map is filed there. One that does not - blank, "any", or a
+                // string that is no location - is filed on EVERY map, and that is deliberate rather
+                // than lazy.
+                //
+                // The obvious alternative, deriving the map from the quest's objective zones the way
+                // QuestsByLocation does, was tried first and does not work here: MapKeysOfQuest reads
+                // zone ids off the conditions, and a FindItem or HandoverItem condition carries none.
+                // Measured on the shipped database, seven of the affected quests - Lend-Lease - Part 1
+                // and Vitamins - Part 1 among them - have zero zone ids across every finish condition,
+                // so they resolved to no map at all and nothing changed for them; ten more resolved to
+                // a map that does not have the item. The two passes need different rules because they
+                // answer different questions: where the quest is, versus where its items are.
+                //
+                // Filing broadly is safe because this dictionary does not decide anything. It is a
+                // FILTER that the per-map passes intersect with map-local spawn data - CollectMarkers
+                // walks that map's own SpawnpointsForced and emits nothing for a template that is not
+                // in it, and HarvestedMarkersFor reads that map's own harvest. So a wrong map cannot
+                // produce a pin; it can only fail to produce one. The cost is that every map now reads
+                // its forced-spawn list rather than only maps with a named find-item quest, which is
+                // once per payload build, and the payload is cached.
+                var locationIds = facts.IsUselessLocation(quest.Location)
+                    ? everyLocationId
+                    : (IReadOnlyList<string>)new[] { quest.Location! };
 
                 string id;
                 string name;
@@ -567,19 +597,22 @@ namespace QuestTreeServer
                             continue;
                         }
 
-                        if (!byLocation.TryGetValue(location!, out var wanted))
+                        foreach (var locationId in locationIds)
                         {
-                            wanted = new Dictionary<string, WantedBy>(StringComparer.OrdinalIgnoreCase);
-                            byLocation[location!] = wanted;
-                        }
+                            if (!byLocation.TryGetValue(locationId, out var wanted))
+                            {
+                                wanted = new Dictionary<string, WantedBy>(StringComparer.OrdinalIgnoreCase);
+                                byLocation[locationId] = wanted;
+                            }
 
-                        if (!wanted.TryGetValue(target, out var wanting))
-                        {
-                            wanting = new WantedBy();
-                            wanted[target] = wanting;
-                        }
+                            if (!wanted.TryGetValue(target, out var wanting))
+                            {
+                                wanting = new WantedBy();
+                                wanted[target] = wanting;
+                            }
 
-                        wanting.Add(name, id);
+                            wanting.Add(name, id);
+                        }
                     }
                 }
             }

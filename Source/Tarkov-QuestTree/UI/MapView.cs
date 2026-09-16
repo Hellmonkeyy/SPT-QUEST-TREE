@@ -519,8 +519,11 @@ namespace QuestTree.UI
         /// <summary>The folded raid check for a map, or null when there is nothing to say.
         ///
         /// Null is the NEUTRAL case - the server half missing, no profile, an unreadable inventory,
-        /// a map the server does not recognise, or one whose requirements could not be placed. It is
-        /// never drawn as "you are ready".</summary>
+        /// or a map the server does not recognise. It is never drawn as "you are ready".
+        ///
+        /// A requirement that could not be placed is NOT in that list any more. It comes back as a
+        /// Caveat on a verdict that otherwise stands, because voiding the map over it threw away every
+        /// other requirement on it.</summary>
         private static RaidCheckView.Verdict RaidCheckFor(string locationKey, QuestGraphBuilder graph)
         {
             if (string.IsNullOrEmpty(locationKey)) return null;
@@ -531,7 +534,7 @@ namespace QuestTree.UI
             var countUnaccepted = !ModSettings.Ready || ModSettings.CountUnacceptedQuests.Value;
             var verdict = RaidCheckView.Fold(payload, locationKey, graph, countUnaccepted);
 
-            // One Info line a session naming the cause, because six different causes all render as
+            // One Info line a session naming the cause, because five different causes all render as
             // the same silence and telling them apart otherwise means another play session.
             if (verdict.State == null && !_raidCheckReasonLogged)
             {
@@ -539,10 +542,23 @@ namespace QuestTree.UI
                 Plugin.LogSource?.LogInfo($"QuestTree: the raid check is neutral - {verdict.Reason}.");
             }
 
+            // The caveat gets its own line, and needs one. It used to travel as a neutral Reason and so
+            // was logged by the branch above - which is the only reason anyone found out that an
+            // unplaceable requirement was blanking a whole map. Now that it keeps its rows, nothing
+            // else would say so: the caveat shows on screen only where a green light was withheld, so
+            // on a red or amber map it would otherwise be entirely silent.
+            if (verdict.Caveat != null && !_raidCheckCaveatLogged)
+            {
+                _raidCheckCaveatLogged = true;
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: the raid check cannot confirm this map - {verdict.Caveat}.");
+            }
+
             return verdict;
         }
 
         private static bool _raidCheckReasonLogged;
+        private static bool _raidCheckCaveatLogged;
 
         /// <summary>The one-line answer, in the same three states as the ready-up button.</summary>
         private static string SummaryLine(RaidCheckView.Verdict verdict)
@@ -557,6 +573,16 @@ namespace QuestTree.UI
                 var tail = verdict.Lines.Any(l => l.InTaskItems >= l.Needed)
                     ? " or in your task items"
                     : "";
+
+                // Amber and stated when the green was not earned. Only this branch consults the
+                // caveat: red and amber are already not-green, and the server calls over-listing the
+                // safe direction, so a requirement placed by assumption cannot make either of them
+                // wrong in the dangerous direction.
+                if (!verdict.Confirmed)
+                {
+                    return $"<color=#{GameStyle.WarningHex}>Everything listed is on you{tail} - but " +
+                           $"{GameStyle.Safe(verdict.Caveat)}</color>";
+                }
 
                 return $"<color=#{GameStyle.SuccessHex}>Ready - everything this map needs is on you{tail}</color>";
             }

@@ -98,10 +98,24 @@ namespace QuestTree.UI
             public int MissingCount;
             public int ToPackCount;
 
-            /// <summary>Why neutral, or null when the verdict stands. Six causes are
+            /// <summary>Why neutral, or null when the verdict stands. Five causes are
             /// indistinguishable on screen, which is exactly why this is recorded rather than
             /// inferred.</summary>
             public string Reason;
+
+            /// <summary>Why this map cannot be called READY, while every row on it still stands.
+            /// Null when the answer can be confirmed.
+            ///
+            /// Distinct from Reason, and the distinction is the whole point: Reason means "do not
+            /// believe any of this", and this means "believe the list, do not believe the green".
+            /// Conflating them is what made a map with one unplaceable requirement draw no summary
+            /// line, no "Take with you" section and a dead ready-up button - discarding N honest
+            /// requirements to avoid overstating one.</summary>
+            public string Caveat;
+
+            /// <summary>Whether the green light has been earned. Every surface that would paint one
+            /// asks this rather than testing State alone.</summary>
+            public bool Confirmed => Caveat == null;
 
             /// <summary>Nothing to carry here - a real answer, not a failure. Rendered as "nothing
             /// to bring for this map" rather than as a green light.</summary>
@@ -139,12 +153,20 @@ namespace QuestTree.UI
                 return verdict;
             }
 
+            // A caveat, not a verdict, and the server has always said so. Its own comment where
+            // the counter is raised reads: "The row still appears - over-listing costs a false amber,
+            // which is the safe direction - but the map can no longer go green." The row appearing is
+            // half of that rule and this end never implemented it: returning here threw away every
+            // OTHER requirement on the map, so one condition placed by assumption silently cost the
+            // whole pre-raid check - no summary, no list, a plain button - with nothing on screen
+            // saying why. It fires on the developer's own Customs.
+            //
+            // Recorded and carried instead, so the list stands and only the green light is withheld.
             if (map.UnplaceableConditions > 0)
             {
-                verdict.Reason =
+                verdict.Caveat =
                     $"{map.UnplaceableConditions} of this map's requirements were placed by assumption " +
-                    "rather than by a harvested zone";
-                return verdict;
+                    "rather than by a harvested zone, so one of them may belong to another map";
             }
 
             if (!map.ZonesHarvested)

@@ -236,8 +236,15 @@ namespace QuestTree.Patches
         {
             if (verdict.Empty) return ButtonLabel;
 
+            // "READY?" rather than "READY" when the map carries a caveat - the question mark is
+            // doing real work, and the sidebar spells out what it means. The alternative considered
+            // and rejected was downgrading the state to ToPack, which would have printed "0 TO PACK".
             if (verdict.State == RaidCheckView.Have.OnYou)
-                return $"<color=#{GameStyle.SuccessHex}>{ButtonLabel} - READY</color>";
+            {
+                return verdict.Confirmed
+                    ? $"<color=#{GameStyle.SuccessHex}>{ButtonLabel} - READY</color>"
+                    : $"<color=#{GameStyle.WarningHex}>{ButtonLabel} - READY?</color>";
+            }
 
             // Red wins the button when both apply, and both counts appear: you can pack a stash
             // item before loading in, and you cannot conjure one you do not own.

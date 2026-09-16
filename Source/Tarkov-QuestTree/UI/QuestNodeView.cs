@@ -678,9 +678,16 @@ namespace QuestTree.UI
 
         /// <summary>How many of this quest's necessary objectives are done.
         ///
-        /// Counted from ConditionProgress, which the server already sends and the detail panel
-        /// already reads through QuestSummary.TryProgress - so this is the same arithmetic the
-        /// panel does, on the same numbers, and the two cannot disagree.
+        /// Counters come from ConditionProgress, which the server already sends and the detail panel
+        /// already reads through QuestSummary.TryProgress - so this is the same arithmetic the panel
+        /// does, on the same numbers.
+        ///
+        /// ITEM objectives are counted a different way, and have to be. They have no ConditionProgress
+        /// entry at all - QuestScore says so in as many words - so counting them through TryProgress
+        /// scored every hand-over as not done, however full the stash. A quest asking only for items
+        /// read "0/2" with an empty bar on its box while the Do next row for the same quest said "ready
+        /// to hand in", because that row goes through CanHandIn. Two surfaces, one quest, opposite
+        /// answers, and the box was the wrong one.
         ///
         /// The profile simply has no entry for an objective that has not started, so "no counter"
         /// reads as not done. A completed quest is all of them by definition, whatever the counters
@@ -690,15 +697,18 @@ namespace QuestTree.UI
             done = 0;
             total = 0;
 
+            // Only a quest you have ACCEPTED can have progress. ObjectiveSatisfied answers from
+            // what the profile holds, which on an unaccepted quest is coincidence rather than progress:
+            // on the reference profile 58 unstarted quests would otherwise show a count and five would
+            // show a full one - "A Key to Salvation 7/7" on a quest never taken from a trader is a
+            // worse falsehood than the "0/2" this replaced.
+            var accepted = Node.Status == ENodeStatus.Active;
+
             foreach (var objective in Node.StatedObjectives)
             {
                 total++;
 
-                if (QuestSummary.TryProgress(objective, profile, out var current, out var target) &&
-                    target > 0 && current >= target)
-                {
-                    done++;
-                }
+                if (accepted && QuestScore.ObjectiveSatisfied(objective, profile)) done++;
             }
 
             if (Node.Status == ENodeStatus.Completed) done = total;

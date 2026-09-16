@@ -65,7 +65,10 @@ namespace QuestTree.UI
             RectTransform parent, QuestGraphBuilder graph, Vector2 panelSize, Action<QuestNode> onQuestSelected,
             Action onRefresh, Action<QuestNode> onShowOnMap = null)
         {
-            PendingScroll = null;
+            // PendingScroll is deliberately NOT cleared here. Toggle sets it and then repaints
+            // synchronously, so this line - the first statement of Build - destroyed the value one
+            // statement after it was written, and the panel read null every time. The mechanism had
+            // never once worked. It is consumed by the panel instead, through TakePendingScroll.
 
             var x = AuxLayout.Padding;
             var width = Mathf.Min(AuxLayout.MaxContentWidth, panelSize.x - AuxLayout.Padding * 2f);
@@ -206,8 +209,25 @@ namespace QuestTree.UI
         /// through a rebuild - so without this, opening the ninth row throws you back to the first.
         /// The row records its own cursor position as it is drawn, because at that moment the cursor
         /// IS the offset that would put it at the top. QuestTreePanel applies it once the content
-        /// height is known, which is the only point at which it can be clamped.</summary>
-        internal static float? PendingScroll { get; private set; }
+        /// height is known, which is the only point at which it can be clamped.
+        ///
+        /// Read through TakePendingScroll, never directly. Consume-once is the contract: Toggle
+        /// writes it, exactly one build honours it, and it is gone. Build must not clear it - doing
+        /// so was the bug, since Toggle repaints synchronously and Build runs before the panel
+        /// looks.</summary>
+        private static float? PendingScroll { get; set; }
+
+        /// <summary>The pending scroll offset, cleared as it is handed over.
+        ///
+        /// A method rather than a property because the clearing is the point: a caller that merely
+        /// peeked would leave the offset to fire again on an unrelated later build, scrolling the
+        /// list for no reason the player did anything to cause.</summary>
+        internal static float? TakePendingScroll()
+        {
+            var pending = PendingScroll;
+            PendingScroll = null;
+            return pending;
+        }
 
         /// <summary>Whether the goal list is open. Static because the aux views are rebuilt from
         /// scratch on every repaint, so there is nowhere else for a moment of UI state to live -

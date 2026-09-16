@@ -1404,7 +1404,15 @@ namespace QuestTree.UI
             // was zeroed before the rebuild, and the clamp needs the finished height, so this is the
             // only point where it can be honoured. Only scrolls when the row would otherwise be off
             // screen, and leaves a good part of the viewport for the body underneath it.
-            if (DoNextView.PendingScroll is { } rowY && _auxPanel != null)
+            // Only for the tab that arms it. This runs for every aux tab, and consume-once means
+            // whichever build gets here first takes the offset - so without the guard, a row click that
+            // somehow did not reach its own rebuild would scroll Maps or Settings to a Do-next row's
+            // position. _auxPanel is not re-tested: ShowAuxTab returned on null long before here.
+            var pendingScroll = _selectedTraderId == DoNextTabId
+                ? DoNextView.TakePendingScroll()
+                : null;
+
+            if (pendingScroll is { } rowY)
             {
                 var viewport = _auxPanel.rect.height;
                 var reveal = viewport * 0.4f;

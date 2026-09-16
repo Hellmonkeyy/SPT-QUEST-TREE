@@ -290,43 +290,59 @@ namespace QuestTree.QuestGraph
             var objectives = node.Dto?.Objectives;
             if (objectives == null || objectives.Count == 0) return false;
 
-            var placesKnown = PlacesKnown(profile);
             var judged = false;
 
             foreach (var objective in objectives)
             {
                 if (objective == null) continue;
 
-                if (objective.TargetItems == null || objective.TargetItems.Count == 0)
-                {
-                    // A counter that is finished does not block a hand-in, and a quest made only of
-                    // finished counters IS ready - an earlier version of this required at least one
-                    // ITEM objective, which drew the mark on one finished quest and not on another for
-                    // reasons invisible to the reader.
-                    //
-                    // Unreadable counts as NOT done. TryProgress returns false when the profile has no
-                    // entry for the condition, which means unknown rather than complete, and the whole
-                    // point of this check is that it is asserted rather than estimated.
-                    if (!QuestSummary.TryProgress(objective, profile, out var current, out var target)) return false;
-                    if (target > 0 && current < target) return false;
-
-                    judged = true;
-                    continue;
-                }
-
                 judged = true;
-
-                // Every alternative template counts toward the same requirement, and all three places
-                // count: when the server cannot say WHERE things are, HeldCount puts the lot in OnYou
-                // and leaves the other two at zero, so reading OnYou alone would be right by accident
-                // on an old payload and wrong on a new one.
-                var have = QuestSummary.HeldCount(
-                    profile, objective.TargetItems, QuestSummary.NeedsFoundInRaid(objective), placesKnown);
-
-                if (have.OnYou + have.InStash + have.Elsewhere < Mathf.Max(1, objective.Count)) return false;
+                if (!ObjectiveSatisfied(objective, profile)) return false;
             }
 
             return judged;
+        }
+
+        /// <summary>Whether ONE objective is already satisfied - the single rule, so no surface has to
+        /// invent its own.
+        ///
+        /// Extracted from CanHandIn because a second surface needed it and got it wrong on its own.
+        /// The node box's "N/M objectives" counted every objective through ConditionProgress, which
+        /// item objectives do not have, so a quest asking only for hand-overs read 0/2 with an empty
+        /// bar while the Do next row for the same quest, going through CanHandIn, said "ready to hand
+        /// in". Two surfaces disagreeing about one quest is the thing the shared fold exists to stop,
+        /// and this is the same argument one level down.
+        ///
+        /// A completed quest is not special-cased here. Callers that know the quest is finished say so
+        /// themselves - the box does - because this answers only what the numbers support.</summary>
+        internal static bool ObjectiveSatisfied(ObjectiveDto objective, ProfilePayloadDto profile)
+        {
+            if (objective == null) return false;
+
+            if (objective.TargetItems == null || objective.TargetItems.Count == 0)
+            {
+                // A counter that is finished does not block a hand-in, and a quest made only of
+                // finished counters IS ready - an earlier version of this required at least one
+                // ITEM objective, which drew the mark on one finished quest and not on another for
+                // reasons invisible to the reader.
+                //
+                // Unreadable counts as NOT done. TryProgress returns false when the profile has no
+                // entry for the condition, which means unknown rather than complete, and the whole
+                // point of this check is that it is asserted rather than estimated.
+                if (!QuestSummary.TryProgress(objective, profile, out var current, out var target)) return false;
+
+                return target <= 0 || current >= target;
+            }
+
+            // Every alternative template counts toward the same requirement, and all three places
+            // count: when the server cannot say WHERE things are, HeldCount puts the lot in OnYou
+            // and leaves the other two at zero, so reading OnYou alone would be right by accident
+            // on an old payload and wrong on a new one.
+            var have = QuestSummary.HeldCount(
+                profile, objective.TargetItems, QuestSummary.NeedsFoundInRaid(objective),
+                PlacesKnown(profile));
+
+            return have.OnYou + have.InStash + have.Elsewhere >= Mathf.Max(1, objective.Count);
         }
 
         /// <summary>How close the quest is to being finished right now - items already held and

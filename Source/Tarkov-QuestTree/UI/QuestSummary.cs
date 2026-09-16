@@ -505,7 +505,16 @@ namespace QuestTree.UI
 
         /// <summary>A quest in progress in one line: objectives done of total, and the live count
         /// of the one counter still moving when there is exactly one - "1/3 objectives · 7/15".
-        /// An objective the game keeps no counter for reads as not done, which is what it is.</summary>
+        ///
+        /// Done is QuestScore.ObjectiveSatisfied, the same rule the node box uses, and it has to be.
+        /// This used to count through TryProgress alone, which item objectives have no entry for, so a
+        /// quest holding one satisfied hand-over and one kill counter at 3/10 printed "0/2 objectives ·
+        /// 3/10" here while its box printed "1/2" - the two-surfaces-one-quest disagreement that fix
+        /// existed to end, surviving in the mixed case because CanHandIn only short-circuits the row
+        /// when EVERY objective is done.
+        ///
+        /// Only reached for a quest already accepted (DoNextView's InProgress bucket is
+        /// ENodeStatus.Active), which is what makes reading the stash legitimate here.</summary>
         internal static string ObjectiveProgress(QuestNode node, ProfilePayloadDto profile)
         {
             var objectives = node?.Dto?.Objectives;
@@ -521,12 +530,16 @@ namespace QuestTree.UI
                 if (objective == null) continue;
                 total++;
 
-                if (!TryProgress(objective, profile, out var current, out var target)) continue;
-                if (current >= target)
+                if (QuestScore.ObjectiveSatisfied(objective, profile))
                 {
                     done++;
                     continue;
                 }
+
+                // The one counter still moving, for the tail. Only a counter objective can supply it -
+                // an item objective has no ConditionProgress entry to read - so an unsatisfied item
+                // objective simply contributes nothing here, as before.
+                if (!TryProgress(objective, profile, out var current, out var target)) continue;
 
                 moving++;
                 counter = $"{current}/{target}";
