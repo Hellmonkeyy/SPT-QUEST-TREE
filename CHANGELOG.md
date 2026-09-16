@@ -1,3 +1,33 @@
+# Quest Tracker 1.12.2
+
+## Weapon presets appear without restarting the game
+
+**Save as a weapon preset** wrote the preset correctly but could not show it, so it only turned up
+after a trip back to profile select - which is what the button was built to avoid. It said so rather
+than pretending ("Go back to the profile select for it to appear"), but saying so is not the feature.
+
+The server echoes the saved build back to the client so it can drop it into the list the game is
+already reading from. It was echoing it with the mod's own JSON settings instead of SPT's, and SPT
+attaches item ids to a converter registered in its serializer rather than to the type - so every
+`_id`, `_tpl` and `parentId` in that echo came out as an empty object. Not mis-shaped: **missing.**
+The client threw on the first one.
+
+It now serialises with SPT's own serializer, the same one that wrote the profile, so what the client
+inserts and what is on disk agree by construction.
+
+A second fault was sitting behind the first, and the same change fixes it: the item's `upd` block was
+being renamed as well, so had only the ids been patched, presets would have loaded with no durability,
+no fire mode and no found-in-raid flag - quietly, with nothing to see.
+
+## Also
+
+- Every reason a preset cannot be shown immediately is now written to the log. Four of them used to
+  fail silently, and the only reason this bug was diagnosable is that it happened to land in the one
+  case that spoke up.
+- A successful insert says so in the log too.
+
+---
+
 # Quest Tracker 1.12.1
 
 ## Task items count as items you have

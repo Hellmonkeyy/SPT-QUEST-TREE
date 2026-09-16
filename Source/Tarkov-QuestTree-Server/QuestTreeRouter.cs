@@ -34,8 +34,8 @@ namespace QuestTreeServer
             RaidCheckPayloadBuilder raidCheckBuilder, ProfileBuilds profileBuilds,
             WeaponPresetWriter presetWriter)
             : base(jsonUtil, BuildRoutes(
-                logger, payloadBuilder, kappaBuilder, profileBuilder, markerBuilder, zoneStore, facts,
-                raidCheckBuilder, profileBuilds, presetWriter))
+                jsonUtil, logger, payloadBuilder, kappaBuilder, profileBuilder, markerBuilder, zoneStore,
+                facts, raidCheckBuilder, profileBuilds, presetWriter))
         {
         }
 
@@ -44,7 +44,7 @@ namespace QuestTreeServer
         private const int MaxHarvestEntries = 20_000;
 
         private static IEnumerable<RouteAction> BuildRoutes(
-            ISptLogger<QuestTreeRouter> logger, QuestPayloadBuilder payloadBuilder,
+            JsonUtil jsonUtil, ISptLogger<QuestTreeRouter> logger, QuestPayloadBuilder payloadBuilder,
             KappaPayloadBuilder kappaBuilder, ProfilePayloadBuilder profileBuilder,
             MapMarkerPayloadBuilder markerBuilder, ZoneStore zoneStore, QuestFacts facts,
             RaidCheckPayloadBuilder raidCheckBuilder, ProfileBuilds profileBuilds,
@@ -81,7 +81,7 @@ namespace QuestTreeServer
                 new RouteAction<SavePresetRequest>(
                     "/questtree/build/save",
                     (url, request, sessionId, output, cancellationToken) =>
-                        Guarded(logger, url, () => SavePreset(profileBuilds, presetWriter, sessionId, request),
+                        Guarded(logger, url, () => SavePreset(jsonUtil, profileBuilds, presetWriter, sessionId, request),
                             () => new SavePresetResponse { Reason = "the server could not save the preset" })),
 
                 new RouteAction<EmptyRequestData>(
@@ -136,8 +136,8 @@ namespace QuestTreeServer
         /// it holds is the build this player can actually assemble, which is the one worth writing, and
         /// solving inside a request is what froze the game once already.</summary>
         private static string SavePreset(
-            ProfileBuilds profileBuilds, WeaponPresetWriter presetWriter, MongoId sessionId,
-            SavePresetRequest? request)
+            JsonUtil jsonUtil, ProfileBuilds profileBuilds, WeaponPresetWriter presetWriter,
+            MongoId sessionId, SavePresetRequest? request)
         {
             static string Reply(SavePresetResponse r) => JsonSerializer.Serialize(r, WireJson.Options);
 
@@ -173,9 +173,31 @@ namespace QuestTreeServer
             {
                 reply.Root = outcome.Items[0].Id.ToString();
 
-                // Serialised as SPT's own Item, whose property names are the game's - _id, _tpl,
-                // parentId, slotId, upd - so the client can hand the string straight to Newtonsoft.
-                reply.ItemsJson = JsonSerializer.Serialize(outcome.Items, WireJson.Options);
+                // SPT's serializer, not ours, and the distinction was worth a released bug. TWO of them,
+                // stacked, which is the part worth reading before "simplifying" this back.
+                //
+                // The first is the ids. MongoId is a struct whose only public property is IsEmpty, and
+                // its string form comes from StringToMongoIdConverter, which SPT registers in its
+                // OPTIONS rather than hanging on the type. WireJson.Options registers no converters, so
+                // every _id and _tpl serialised as {"isEmpty":false} - not mis-shaped, ABSENT - and the
+                // client's Newtonsoft threw on the first one.
+                //
+                // The second was hidden behind that throw. Item pins its own wire names with
+                // JsonPropertyName, so those survived any naming policy - but the nested Upd does NOT
+                // pin its, so WireJson's camelCase renamed the lot: "repairable", "spawnedInSession".
+                // The client hands upd through verbatim as a raw JToken, and the game reads it in
+                // ItemDeserializer.CreateItem through a CASE-SENSITIVE member lookup. So even with the
+                // ids fixed in place, every preset would have arrived with no durability, no fire mode
+                // and no spawned-in-session flag - silently, which is the exact defect sending JSON at
+                // all was meant to end. Adding one converter to WireJson.Options is therefore NOT the
+                // smaller version of this fix; it is the half of it that fails quietly.
+                //
+                // The injected instance, never JsonUtil's public static options: those are nullable and
+                // only filled once a JsonUtil has been constructed. Serializing this way also reproduces
+                // what SPT itself wrote into the profile - SaveServer serialises with the same JsonUtil -
+                // down to parentId being OMITTED on the root rather than null, which is the shape the
+                // game's own /client/builds answer has and the shape the client's reader was built for.
+                reply.ItemsJson = jsonUtil.Serialize(outcome.Items) ?? "";
             }
 
             return Reply(reply);
