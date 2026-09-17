@@ -1026,8 +1026,6 @@ namespace QuestTree.UI
             rect.offsetMax = new Vector2(-right, -top);
         }
 
-        /// <summary>Dim state for the chain highlight. Alpha only - the node keeps its layout,
-        /// its position and its ability to be clicked.</summary>
         /// <summary>Sets how thick one screen pixel is in content units at the current zoom - the
         /// graph's sweep calls this on every built view whenever the zoom moves. Goes through
         /// RefreshStatus so the outline keeps its one writer.</summary>
@@ -1101,6 +1099,8 @@ namespace QuestTree.UI
                 new Vector2(-24f - slot * (LayoutMetrics.KappaBadgeSize + BadgeGap), -4f);
         }
 
+        /// <summary>Dim state for the chain highlight. Alpha only - the node keeps its layout,
+        /// its position and its ability to be clicked.</summary>
         public void SetDimmed(bool dimmed) => SetDimAlpha(dimmed ? DimmedAlpha : 1f);
 
         /// <summary>A specific alpha, for the distance-based dimming around a hovered quest.</summary>

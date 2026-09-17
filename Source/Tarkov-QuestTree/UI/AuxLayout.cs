@@ -333,10 +333,12 @@ namespace QuestTree.UI
             return label;
         }
 
-        /// <summary>Prose: wraps at the width, and takes the height it needs. Sized from TMP's own
-        /// preferred height, because wrapped text has no height until measured - otherwise every
-        /// line after a wrapped one is drawn on top of it. Empty text is spacing.</summary>
-        /// <summary>The one wrapped-text row in this mod. MapView carried a byte-identical copy
+        /// <summary>Prose: wraps at the width, and takes the height it needs.
+        ///
+        /// Sized from TMP's own preferred height, because wrapped text has no height until measured -
+        /// otherwise every line after a wrapped one is drawn on top of it. Empty text is spacing.
+        ///
+        /// The one wrapped-text row in this mod. MapView carried a byte-identical copy
         /// called AddDetailLine until 1.9.0; two copies of a layout rule is how the two sidebars
         /// came to need the same fix twice.</summary>
         public static void AddWrapped(

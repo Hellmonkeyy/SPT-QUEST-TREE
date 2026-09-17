@@ -208,8 +208,9 @@ namespace QuestTree.UI
         /// not be reached at all, and a setting could push it below MinZoom entirely.
         ///
         /// So it is pinned clear of the floor, and only then allowed to track BarOnlyZoom. There is
-        /// real travel either side of it now.</summary>
-        /// <summary>Zero means the overview never takes over, which is the default.</summary>
+        /// real travel either side of it now.
+        ///
+        /// Zero means the overview never takes over, which is the default.</summary>
         private float CollapseZoom => LayoutMetrics.OverviewZoom;
 
         /// <summary>Hysteresis, so the tier does not flip back and forth while the zoom sits on the
@@ -819,28 +820,6 @@ namespace QuestTree.UI
             _edgeLayout = edges.ToArray();
         }
 
-        /// <summary>
-        /// Builds views for the nodes and edges inside the viewport and releases the ones that have
-        /// left it, recycling both through pools.
-        ///
-        /// The visible region is obtained by asking Unity to convert the viewport's world corners
-        /// into content-local space, rather than deriving it from anchors, pivots and scale by hand.
-        /// That keeps it correct under pan, zoom and window resize with no coordinate maths of our
-        /// own - which matters, because hand-rolled rect maths in this hierarchy has already cost
-        /// this project two rounds of debugging.
-        /// </summary>
-        /// <summary>Ranks the nodes worth labelling and hands them to the label layer.
-        ///
-        /// Ranked, not arbitrary, and the ranking is the design:
-        ///
-        /// 1. the selected quest and its chain, so "what does this lead to" survives zooming out -
-        ///    the one question only a tree can answer, and the one zoom currently destroys;
-        /// 2. search matches, so finding a quest ends with it named in context rather than lost
-        ///    among identical boxes;
-        /// 3. quests that are actually actionable, so the overview answers "what next" at a glance.
-        ///
-        /// Ties inside a rank break on distance from the viewport centre, so the labels that do
-        /// appear are the ones nearest what you are looking at.</summary>
         /// <summary>Hands every built node and edge back to its pool, for the switch into the
         /// collapsed tier. The pools are what make switching back cheap.</summary>
         private void ReleaseAllViews()
@@ -942,6 +921,28 @@ namespace QuestTree.UI
             return collapse;
         }
 
+        /// <summary>
+        /// Builds views for the nodes and edges inside the viewport and releases the ones that have
+        /// left it, recycling both through pools.
+        ///
+        /// The visible region is obtained by asking Unity to convert the viewport's world corners
+        /// into content-local space, rather than deriving it from anchors, pivots and scale by hand.
+        /// That keeps it correct under pan, zoom and window resize with no coordinate maths of our
+        /// own - which matters, because hand-rolled rect maths in this hierarchy has already cost
+        /// this project two rounds of debugging.
+        /// </summary>
+        /// <summary>Ranks the nodes worth labelling and hands them to the label layer.
+        ///
+        /// Ranked, not arbitrary, and the ranking is the design:
+        ///
+        /// 1. the selected quest and its chain, so "what does this lead to" survives zooming out -
+        ///    the one question only a tree can answer, and the one zoom currently destroys;
+        /// 2. search matches, so finding a quest ends with it named in context rather than lost
+        ///    among identical boxes;
+        /// 3. quests that are actually actionable, so the overview answers "what next" at a glance.
+        ///
+        /// Ties inside a rank break on distance from the viewport centre, so the labels that do
+        /// appear are the ones nearest what you are looking at.</summary>
         private void RefreshVisibleNodes()
         {
             if (_layoutOrder.Length == 0 && _edgeViews.Count == 0) return;
@@ -1083,8 +1084,6 @@ namespace QuestTree.UI
             }
         }
 
-        /// <summary>Recentres on the quest nearest a point, keeping the current zoom, then rebuilds
-        /// the visible set. Used only as the never-empty recovery above.</summary>
         /// <summary>
         /// Lights up a quest, everything it requires and everything it unlocks, and dims the rest -
         /// the quickest way to read a chain out of a dense graph.
@@ -1310,6 +1309,8 @@ namespace QuestTree.UI
             RepaintEmphasis();
         }
 
+        /// <summary>Recentres on the quest nearest a point, keeping the current zoom, then rebuilds
+        /// the visible set. Used only as the never-empty recovery above.</summary>
         private void SnapToNearestNode(Vector2 target)
         {
             QuestNode nearest = null;

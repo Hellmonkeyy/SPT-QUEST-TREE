@@ -1034,10 +1034,11 @@ namespace QuestTree.UI
             return lookup;
         }
 
-        /// <summary>Distinct trader ids from `nodes`, ordered by display name - shared by BuildTabs
-        /// and RenderSelectedTab's "All" branch so the two can't drift out of sync.</summary>
-        /// <summary>Traders with something to do first, so the useful tabs are on screen without
-        /// scrolling the row; alphabetical within that.</summary>
+        /// <summary>Distinct trader ids from `nodes` - shared by BuildTabs and RenderSelectedTab's
+        /// "All" branch so the two cannot drift out of sync.
+        ///
+        /// Traders with something to do come first, so the useful tabs are on screen without scrolling
+        /// the row; alphabetical by display name within that.</summary>
         private List<string> OrderedTraderIds(IEnumerable<QuestNode> nodes)
         {
             var list = nodes.ToList();
@@ -1162,7 +1163,6 @@ namespace QuestTree.UI
         /// trader-by-trader reading of the tree survives following a link out of it.</summary>
         private void FocusNode(QuestNode node) => FocusNode(node, pushHistory: true);
 
-        /// <summary>The tabs that are not the quest graph, and so ignore search and filters.</summary>
         /// <summary>The non-graph views, in the order they appear right-to-left from Close. Kappa
         /// sits innermost because it is the one you open most often.</summary>
         private void FocusNode(QuestNode node, bool pushHistory)
@@ -1247,6 +1247,7 @@ namespace QuestTree.UI
             SelectTab(_selectedTraderId == tabId ? _tabBeforeSettings : tabId);
         }
 
+        /// <summary>The tabs that are not the quest graph, and so ignore search and filters.</summary>
         private static bool IsAuxTab(string tabId) =>
             tabId == KappaTabId || tabId == SettingsTabId || tabId == ItemsTabId ||
             tabId == MapsTabId || tabId == DoNextTabId;

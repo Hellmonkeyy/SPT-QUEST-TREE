@@ -55,9 +55,6 @@ namespace QuestTreeServer
         SPTarkov.Server.Core.Helpers.Profile.ProfileHelper profileHelper,
         SPTarkov.Server.Core.Servers.SaveServer saveServer) : IOnLoad
     {
-        /// <summary>Built while the server starts, for the reason MapMarkerPayloadBuilder gives:
-        /// the client's request handler is synchronous on Unity's main thread, so paying for the
-        /// first build there froze the game on the first panel open.</summary>
         /// <summary>Weapons named by a WeaponAssembly condition on this install, filled while the
         /// quests are mapped.</summary>
         private readonly HashSet<MongoId> _questWeapons = new();
@@ -143,6 +140,9 @@ namespace QuestTreeServer
         /// round stopped existing when the barrier did.</summary>
         private int _attempts;
 
+        /// <summary>Built while the server starts, for the reason MapMarkerPayloadBuilder gives:
+        /// the client's request handler is synchronous on Unity's main thread, so paying for the
+        /// first build there froze the game on the first panel open.</summary>
         public Task OnLoadAsync(CancellationToken cancellationToken)
         {
             // Before anything is solved: every boot searches from starting points no previous boot used,

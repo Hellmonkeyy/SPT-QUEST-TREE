@@ -410,7 +410,6 @@ namespace QuestTree.UI
                 ModSettings.ColorLocked, ModSettings.ColorGated, ModSettings.ColorAccent);
         }
 
-        /// <summary>One colour: a swatch of the current value, its name, and the preset chips.</summary>
         /// <summary>A colour row per trader, built from the traders the graph actually has.
         ///
         /// Generated rather than listed, which is the whole point: this install runs several trader
@@ -522,6 +521,7 @@ namespace QuestTree.UI
             y += rowHeight;
         }
 
+        /// <summary>One colour: a swatch of the current value, its name, and the preset chips.</summary>
         private static void ColourRow(
             RectTransform column, ref float y, float width, string label, ConfigEntry<string> entry, Color current)
         {
