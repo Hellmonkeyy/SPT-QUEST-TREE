@@ -599,10 +599,23 @@ namespace QuestTreeServer
             // against 6. Every one of them reasoned through the WEIGHTED block, so the mount was not the only
             // thing wrong with it.
             //
-            // What the knapsack fixed was the double charge. What it could not fix is that BestBelow is
-            // truncated by a depth cap, and a truncated ceiling UNDERSTATES what r parts can reach, which
-            // pushes the floor up exactly as the double charge did. That second error has nothing to do with
-            // named mounts; the withdrawal was hiding it.
+            // What the knapsack fixed was reaching the mount twice. What it did not fix - and this was
+            // first written down as a depth-cap problem, which was wrong - is that BestBelow charges the free
+            // budget for every REQUIRED slot, whether or not a named part is what fills it. So the mount is
+            // still charged twice: once for being reached, and once for occupying.
+            //
+            // The Glock 17 is the whole argument in one gun. Its required slots are mod_barrel and
+            // mod_reciever; the quest NAMES the barrel; the satisfying build is five named parts plus a
+            // slide, so r is 1. But ceiling[1] is negative infinity, because the ceiling insists the free
+            // budget buy a barrel AND a slide - and the barrel is already paid for in named.Count. Reach
+            // skips budget 1 and answers 5 + 2 = 7 against a verified build of 6.
+            //
+            // Worse, Combine made this bigger rather than leaving it alone. BestBelow(host)[0] is negative
+            // infinity for any host with a required slot, so combining RAISES the infeasible prefix instead
+            // of lowering it. On The Enemy's Mind Part 20 the weapon-only ceiling gives 18, under a 19-part
+            // build, and would have passed unnoticed; Combine pushed it to 20 and tripped the alarm. The
+            // docstring that function carried claimed the infinity propagation was deliberate and safe. It
+            // was the defect, described as a feature.
             //
             // So this stays until the weighted block's own ceiling is sound, and the cost of it is honest:
             // Gunsmith names handguards and mounts constantly, so provably-minimal-on-part-count reads 0 of
@@ -954,9 +967,20 @@ namespace QuestTreeServer
         /// it, so spending a part on a mount IS spending a part and the scope it carries costs another.
         ///
         /// A 0/1 knapsack per part over its slots, at every budget, where a slot's worth at cost c is the
-        /// best occupant plus the best use of c-1 parts beneath it. Exact for the relaxation "any legal
-        /// assembly of at most k parts, ignoring what the quest demands" - and ignoring the demands can
+        /// best occupant plus the best use of c-1 parts beneath it. An UPPER BOUND for the relaxation "any
+        /// legal assembly of at most k parts, ignoring what the quest demands" - and ignoring the demands can
         /// only raise the ceiling, so the bound stays a bound.
+        ///
+        /// Not exact, and it said "exact" for a long time. worth[] is seeded at zero and only worth[0] is set
+        /// to negative infinity for a mandatory slot, so a required slot whose every occupant needs three
+        /// parts still reports worth[1] = 0 - "filled for free with one part". That is the loose direction and
+        /// therefore safe. The consequence worth knowing is that the infinity prefix equals the required slots
+        /// sitting DIRECTLY on the template, not the transitive ForcedBelow count: two for the Glock, four for
+        /// the STM-9, against a ForcedBelow of six.
+        ///
+        /// And the prefix is why this cannot be used for a bound when the quest names parts. It charges the
+        /// budget for required slots that named parts already fill - see the withdrawal in LowestPossible,
+        /// which exists because of exactly this.
         ///
         /// Cached across every weapon on the install, because the answer depends on the item data and
         /// not on which weapon the walk started from: the same handguard is worth the same wherever it

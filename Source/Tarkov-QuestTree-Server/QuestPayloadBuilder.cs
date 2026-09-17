@@ -250,6 +250,11 @@ namespace QuestTreeServer
             var irreducible = 0;
             var atFloor = 0;
 
+            // Floors a verified build refutes outright. Counted and reported, never folded into atFloor or
+            // unbounded: "the bound is wrong" is a third state, and the two it would otherwise hide in are
+            // "the bound holds" and "there is no bound".
+            var refutedFloors = 0;
+
             // Requirements no bound could be argued for. Reported rather than inferred from a gap between
             // two other numbers: this used to be indistinguishable from a bound of int.MaxValue, which is
             // to say indistinguishable from a proof.
@@ -333,9 +338,21 @@ namespace QuestTreeServer
                 // - two different wrong bounds can sum to the same number.
                 var boundKey = WeaponBuildCache.KeyFor(weapon, thresholds, mustInclude, mustIncludeCategories);
 
+                // A floor the build in hand ALREADY REFUTES is not a weak bound, it is a wrong one, and it
+                // must not be recorded, cross-checked or counted. Without this the alarm below shouted while
+                // the scoreboard ignored it: all six refuted floors still incremented the PROVEN MINIMUM
+                // count and were written to weapon-builds.json as bounds for later boots, so the evidence
+                // line reported sixteen proofs of which six were simultaneously reported as refuted.
+                //
+                // Ordered before Bound deliberately. verdict and result are both in scope here, so there is
+                // no reason for the wrong number to reach the cache first and be corrected afterwards.
+                var refuted = !lowest.Unbounded && verdict.Verified && lowest.Parts > result.Parts.Count;
+
+                if (refuted) refutedFloors++;
+
                 // Same rule as Proven: an unbounded floor is recorded nowhere and cross-checked against
                 // nothing, because it is the absence of a claim rather than a weak one.
-                if (!lowest.Unbounded)
+                if (!lowest.Unbounded && !refuted)
                 {
                     Crosscheck(boundKey, lowest.Parts, weapon);
 
@@ -397,14 +414,14 @@ namespace QuestTreeServer
                     // Nothing shouted about this before, and it is exactly the failure the named-mount
                     // withdrawal existed to avoid - so removing that withdrawal without adding this would
                     // have traded a claim given up for a claim nothing checks.
-                    if (!lowest.Unbounded && lowest.Parts > result.Parts.Count)
+                    if (refuted)
                         logger.Error(
                             $"Quest Tracker: the part floor for '{questName}' is UNSOUND - it claims no " +
                             $"satisfying build has fewer than {lowest.Parts} part(s) ({lowest.Reason}), and " +
                             $"the verifier just passed one with {result.Parts.Count}. Every minimality claim " +
                             "over part count is suspect until this is explained.");
 
-                    if (!lowest.Unbounded && result.Parts.Count <= lowest.Parts) atFloor++;
+                    if (!lowest.Unbounded && !refuted && result.Parts.Count <= lowest.Parts) atFloor++;
                     else unproven.Add(
                         $"{questName} at {result.Parts.Count} parts, proven necessary {lowest.Parts} " +
                         $"({lowest.Reason}), solver floor {result.Floor}, binding " +
@@ -463,6 +480,7 @@ namespace QuestTreeServer
                 $"{(solved > 0 ? (double)parts / solved : 0d):0.##} parts per build ({parts} total), " +
                 $"{widestBuild} at most, {atFloor} of them PROVEN MINIMUM, " +
                 (unbounded > 0 ? $"{unbounded} of all {_questBuilds.Count} with NO PROVABLE BOUND, " : "") +
+                (refutedFloors > 0 ? $"{refutedFloors} FLOOR(S) REFUTED BY A VERIFIED BUILD, " : "") +
                 $"{irreducible} PROVEN IRREDUCIBLE, " +
                 $"{proven} of {parts} parts proven necessary" +
                 (duplicates > 0 ? $", {duplicates} duplicated part(s)" : "") +
@@ -1845,11 +1863,23 @@ namespace QuestTreeServer
             // compares as at most that - so the requirements nothing could bound were exactly the ones
             // marked minimal, and the falsifier below was switched off for them.
             if (!proven &&
-                Proven(weapon, thresholds, mustInclude, mustIncludeCategories) is { } bound &&
-                remembered.Parts.Count <= bound)
+                Proven(weapon, thresholds, mustInclude, mustIncludeCategories) is { } bound)
             {
-                lock (_proven) _proven.Add(key);
-                proven = true;
+                // REFUTED here too, and this path had no such check while the survey's did. The survey covers
+                // the same sixty keys on a boot, so a floor wrong from the start is caught there - but a
+                // build that gets SMALLER later in the run, which is the entire purpose of training, can dip
+                // below a bound with nothing to notice. Proven writes that bound to the cache, so it would
+                // have been recorded as a proof for the life of the process and in the file.
+                if (bound > remembered.Parts.Count)
+                    logger.Error(
+                        $"Quest Tracker: the part floor for '{key}' is UNSOUND - it claims no " +
+                        $"satisfying build has fewer than {bound} part(s), and a verified build of " +
+                        $"{remembered.Parts.Count} is in hand. Not counted as a proof.");
+                else
+                {
+                    lock (_proven) _proven.Add(key);
+                    proven = true;
+                }
             }
 
             // And the same question over the OBJECTIVE, which is the one that was reported as an
