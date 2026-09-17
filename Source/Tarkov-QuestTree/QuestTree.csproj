@@ -1,0 +1,216 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>netstandard2.1</TargetFramework>
+    <RootNamespace>QuestTree</RootNamespace>
+    <AssemblyName>QuestTree</AssemblyName>
+    <Nullable>disable</Nullable>
+    <!--
+      XML doc generation, on for ONE reason: it is what turns the doc-comment analysers on. Nothing
+      reads the .xml.
+
+      This codebase treats doc comments as documentation - they carry measurements, negative results
+      and the reasons a thing is the way it is - so a comment with a dangling paramref, an unresolvable
+      cref, raw angle brackets read as tags, or params documented for some arguments and not others is
+      a real defect. Eight of those had accumulated invisibly across both halves, because with no doc
+      file the compiler never raises CS1570-CS1574 or CS1734 at all.
+
+      What it does NOT catch, and the reason a manual pass is still owed: a doc block carrying two
+      <summary> elements raises nothing. Twenty-eight of those remain.
+
+      DocumentationFile is deliberately NOT set. The SDK's own default for GenerateDocumentationFile
+      already writes it under obj\; naming it here put it in the project ROOT instead - untracked, in
+      the source tree, 375 KB, one `git add -A` from being committed - because $(IntermediateOutputPath)
+      is not defined until Sdk.targets and evaluates to empty in this PropertyGroup.
+
+      The SDK then copies it to the output directory as well, which DropDocXmlFromOutput below undoes:
+      this project's convention is that a release can be assembled from bin\ alone, so bin\ holds
+      exactly what ships.
+
+      CS1591 is suppressed: it wants a summary on every public member, a different and much weaker rule
+      than the one being enforced here, and it would bury the useful warnings under hundreds.
+    -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <LangVersion>latest</LangVersion>
+    <!-- MSBuild cannot read the C# constant, so this is the one copy that has to be updated by
+         hand: keep it equal to ModInfo.Version in ModInfo.cs, which everything else derives from. -->
+    <AssemblyVersion>1.13.0</AssemblyVersion>
+    <FileVersion>$(AssemblyVersion)</FileVersion>
+    <Version>$(AssemblyVersion)</Version>
+    <Deterministic>true</Deterministic>
+    <Title>QuestTree</Title>
+    <Product>QuestTree</Product>
+    <Description>Adds a live, full-game quest progression tree to the Tasks screen.</Description>
+  </PropertyGroup>
+
+  <!--
+    Path to the root of the SPT install (the folder containing BepInEx\ and
+    EscapeFromTarkov_Data\). Resolution order:
+      1) -p:SptPath="C:\Path\To\SPT" on the build command line
+      2) the SPT_PATH environment variable
+      3) two folders up, i.e. this project sitting in [SPT root]\Development\Tarkov-QuestTree\
+  -->
+  <PropertyGroup>
+    <SptPath Condition="'$(SptPath)' == '' AND '$(SPT_PATH)' != ''">$(SPT_PATH)</SptPath>
+    <SptPath Condition="'$(SptPath)' == ''">$(MSBuildProjectDirectory)\..\..</SptPath>
+
+    <!--
+      Whether a build also installs itself into the SPT folder. OFF by default: the install is
+      managed outside this repo (a mod manager, a reinstall), and a build that silently puts back
+      a mod the user had removed is a surprise nobody asked for. Pass -p:DeployToSpt=true to get
+      the old behaviour. SptPath is still resolved either way - the compile needs the game's and
+      the server's DLLs to reference.
+    -->
+    <DeployToSpt Condition="'$(DeployToSpt)' == ''">false</DeployToSpt>
+    <ManagedPath>$(SptPath)\EscapeFromTarkov_Data\Managed</ManagedPath>
+  </PropertyGroup>
+
+  <!-- The two-folders-up fallback resolves to SOMETHING on any machine - on this repo's layout,
+       the desktop - and the build then fails on a missing reference four screens later. Say what
+       is actually wrong, first. -->
+  <Target Name="CheckSptPath" BeforeTargets="ResolveAssemblyReferences">
+    <Error Condition="!Exists('$(ManagedPath)\Assembly-CSharp.dll')"
+           Text="SptPath '$(SptPath)' is not an SPT install (no EscapeFromTarkov_Data\Managed\Assembly-CSharp.dll). Pass -p:SptPath=&quot;C:\Path\To\SPT&quot; or set SPT_PATH." />
+  </Target>
+
+  <ItemGroup>
+    <Reference Include="BepInEx">
+      <HintPath>$(SptPath)\BepInEx\core\BepInEx.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="0Harmony">
+      <HintPath>$(SptPath)\BepInEx\core\0Harmony.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="spt-common">
+      <HintPath>$(SptPath)\BepInEx\plugins\spt\spt-common.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="spt-reflection">
+      <HintPath>$(SptPath)\BepInEx\plugins\spt\spt-reflection.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+
+    <Reference Include="Assembly-CSharp">
+      <HintPath>$(ManagedPath)\Assembly-CSharp.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Comfort">
+      <HintPath>$(ManagedPath)\Comfort.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Comfort.Unity">
+      <HintPath>$(ManagedPath)\Comfort.Unity.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Newtonsoft.Json">
+      <HintPath>$(ManagedPath)\Newtonsoft.Json.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <!-- UIElement (base class of the vanilla screens this mod patches/extends) derives from
+         SerializedMonoBehaviour, so the compiler needs to see its inherited members. -->
+    <Reference Include="Sirenix.Serialization">
+      <HintPath>$(ManagedPath)\Sirenix.Serialization.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Sirenix.OdinInspector.Attributes">
+      <HintPath>$(ManagedPath)\Sirenix.OdinInspector.Attributes.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="Unity.TextMeshPro">
+      <HintPath>$(ManagedPath)\Unity.TextMeshPro.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+
+    <Reference Include="UnityEngine">
+      <HintPath>$(ManagedPath)\UnityEngine.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>$(ManagedPath)\UnityEngine.CoreModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <!-- Animator (MenuTaskBarPatch disables the cloned toggle's animator when it keeps driving the
+         button label back to invisible) lives here, not CoreModule. -->
+    <Reference Include="UnityEngine.AnimationModule">
+      <HintPath>$(ManagedPath)\UnityEngine.AnimationModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <!-- Collider, for the zone harvester's trigger extents. -->
+    <Reference Include="UnityEngine.PhysicsModule">
+      <HintPath>$(ManagedPath)\UnityEngine.PhysicsModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <!-- UnityEngine.Input (Escape-to-close in QuestTreePanel.Update) lives here, not CoreModule. -->
+    <Reference Include="UnityEngine.InputLegacyModule">
+      <HintPath>$(ManagedPath)\UnityEngine.InputLegacyModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <!-- Texture2D.LoadImage, for reading DynamicMaps' marker PNGs, is an extension method
+         that lives here rather than in CoreModule. -->
+    <Reference Include="UnityEngine.ImageConversionModule">
+      <HintPath>$(ManagedPath)\UnityEngine.ImageConversionModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.TextRenderingModule">
+      <HintPath>$(ManagedPath)\UnityEngine.TextRenderingModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <!-- SVG rasterising for the Maps view. The game already ships this package, so map images can
+         be rendered with Unity's own API rather than a bundled third-party renderer. -->
+    <Reference Include="Unity.VectorGraphics">
+      <HintPath>$(ManagedPath)\Unity.VectorGraphics.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UI">
+      <HintPath>$(ManagedPath)\UnityEngine.UI.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="UnityEngine.UIModule">
+      <HintPath>$(ManagedPath)\UnityEngine.UIModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+  </ItemGroup>
+
+  <!-- Git's short hash, and "-dirty" when the tree has uncommitted changes, appended to the
+       informational version (1.7.1+0c50f09-dirty) so two builds that both say 1.7.1 can be told
+       apart from the log line. Tolerates no git at all: the stamp is then just the version. -->
+  <Target Name="ReadGitStamp" BeforeTargets="GetAssemblyVersion" Condition="'$(SourceRevisionId)' == ''">
+    <Exec Command="git describe --always --dirty --exclude &quot;*&quot;"
+          WorkingDirectory="$(MSBuildProjectDirectory)"
+          ConsoleToMSBuild="true" ContinueOnError="true" IgnoreExitCode="true"
+          StandardOutputImportance="low" StandardErrorImportance="low">
+      <Output TaskParameter="ConsoleOutput" PropertyName="SourceRevisionId" />
+    </Exec>
+  </Target>
+
+  <!-- Into the build output too, so a release is assembled from bin\ alone. It used to be placed
+       into the archive by hand, which is the kind of step that gets forgotten. -->
+  <ItemGroup>
+    <None Include="kappa-quests.json" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!--
+    Copy the built plugin into BepInEx\plugins\QuestTree\. The folder is created first so the copy
+    doesn't silently fail if it's missing on a first build.
+  -->
+  <Target Name="CopyToPlugins" AfterTargets="PostBuildEvent" Condition="'$(DeployToSpt)' == 'true'">
+    <MakeDir Directories="$(SptPath)\BepInEx\plugins\QuestTree" />
+    <Copy SourceFiles="$(TargetPath)" DestinationFolder="$(SptPath)\BepInEx\plugins\QuestTree\" SkipUnchangedFiles="true" />
+    <!-- Only copied if it doesn't already exist there, so a user's edited Kappa list is never
+         overwritten by a rebuild. -->
+    <Copy SourceFiles="$(MSBuildProjectDirectory)\kappa-quests.json"
+          DestinationFolder="$(SptPath)\BepInEx\plugins\QuestTree\"
+          SkipUnchangedFiles="true"
+          Condition="!Exists('$(SptPath)\BepInEx\plugins\QuestTree\kappa-quests.json')" />
+  </Target>
+
+
+  <!-- See the DocumentationFile note above: the .xml exists to make the compiler check the comments,
+       and nothing ships it, so it does not belong beside the DLL. -->
+  <Target Name="DropDocXmlFromOutput" AfterTargets="CopyFilesToOutputDirectory">
+    <Delete Files="$(OutDir)$(AssemblyName).xml" ContinueOnError="true" />
+  </Target>
+
+</Project>
