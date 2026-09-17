@@ -649,6 +649,21 @@ namespace QuestTreeServer
         /// <summary>Joins to WeaponBuildDto.Key - which requirement to save.</summary>
         [JsonPropertyName("key")]
         public string Key { get; set; } = "";
+
+        /// <summary>The client half's version, and ABSENT means a client older than 1.13.2.
+        ///
+        /// That absence is the whole point. Up to 1.13.1 the client saved a preset by removing the
+        /// same-named build and inserting a new one, and the removal is a POST to /client/builds/delete
+        /// that deletes from the profile. It was harmless only because the server minted a fresh id
+        /// every save, so the id the old client deleted was always one the profile had already
+        /// superseded. From 1.13.2 the server REUSES the id - which turns that same call into "delete
+        /// the preset the server just wrote", every second save, silently.
+        ///
+        /// The old client cannot be fixed; it is already published. But it does send this route a body
+        /// with no version in it, and it renders whatever Reason comes back - so the server can
+        /// recognise it exactly and answer with a sentence instead of destroying the preset.</summary>
+        [JsonPropertyName("clientVersion")]
+        public string ClientVersion { get; set; } = "";
     }
 
     /// <summary>One item of a saved preset, in the shape the GAME's own build type wants, so the

@@ -43,6 +43,14 @@ namespace QuestTreeServer
         /// triggers. Anything past this is not a raid, it is a bug or a prank.</summary>
         private const int MaxHarvestEntries = 20_000;
 
+        /// <summary>Declines logged this boot, and the ceiling on them. Same reasoning as
+        /// MaxRejectionsLogged below: the save route is unauthenticated HTTP, so a caller in a loop must
+        /// not be able to rotate the real diagnostics out of a 10 MB x 10 log. A player pressing the
+        /// button never approaches this.</summary>
+        private const int MaxDeclinesLogged = 256;
+
+        private static int _declinesLogged;
+
         private static IEnumerable<RouteAction> BuildRoutes(
             JsonUtil jsonUtil, ISptLogger<QuestTreeRouter> logger, QuestPayloadBuilder payloadBuilder,
             KappaPayloadBuilder kappaBuilder, ProfilePayloadBuilder profileBuilder,
@@ -81,7 +89,7 @@ namespace QuestTreeServer
                 new RouteAction<SavePresetRequest>(
                     "/questtree/build/save",
                     (url, request, sessionId, output, cancellationToken) =>
-                        Guarded(logger, url, () => SavePreset(jsonUtil, profileBuilds, presetWriter, sessionId, request),
+                        Guarded(logger, url, () => SavePreset(logger, jsonUtil, profileBuilds, presetWriter, sessionId, request),
                             () => new SavePresetResponse { Reason = "the server could not save the preset" })),
 
                 new RouteAction<EmptyRequestData>(
@@ -136,13 +144,79 @@ namespace QuestTreeServer
         /// it holds is the build this player can actually assemble, which is the one worth writing, and
         /// solving inside a request is what froze the game once already.</summary>
         private static string SavePreset(
-            JsonUtil jsonUtil, ProfileBuilds profileBuilds, WeaponPresetWriter presetWriter,
-            MongoId sessionId, SavePresetRequest? request)
+            ISptLogger<QuestTreeRouter> logger, JsonUtil jsonUtil, ProfileBuilds profileBuilds,
+            WeaponPresetWriter presetWriter, MongoId sessionId, SavePresetRequest? request)
         {
-            static string Reply(SavePresetResponse r) => JsonSerializer.Serialize(r, WireJson.Options);
+            string Reply(SavePresetResponse r)
+            {
+                // EVERY decline says so in the log, and none of them used to. Eleven paths reach the
+                // player through here - five in this method, four from Flatten, two more from Save itself
+                // - and every one left both logs completely silent, so "the button did nothing" and "the
+                // server refused, and here is why" were indistinguishable afterwards. (A twelfth reaches
+                // the player without passing through here: Guarded's own fallback reply. That one was
+                // never silent - Guarded logs it at Error.)
+                //
+                // That cost real time: a reproducible bug in this very feature had to be diagnosed from
+                // the GAME's Player.log, because this mod's own logs had nothing to say about a save the
+                // player had just watched fail.
+                //
+                // INFO, and the first version of this said Debug on the reasoning that a refusal is the
+                // player's answer rather than the server's news. That reasoning was fine and the level was
+                // still wrong: SPT_Runtime\sptLogger.json ships logLevel "Information" on all three sinks,
+                // so a Debug line is discarded on a default install - which is every install that has not
+                // been hand-edited. The line would have been written for diagnosability and then filtered
+                // out of exactly the situation it was written for. A decline is one player button press,
+                // so Info costs nothing.
+                //
+                // Worse than silent is the empty-Reason case: a response shape the client cannot read
+                // arrives as Saved=false with no reason, prints nothing on screen, and would otherwise log
+                // nothing either - so it is named explicitly rather than logged as a blank.
+                // CLAMPED, STRIPPED AND CAPPED, because the key is the caller's text on a route every
+                // Fika peer can post to unauthenticated - the same premise the harvest route states forty
+                // lines below, where it already caps its own rejection logging for this reason.
+                // Unbounded it fills a 10 MB x 10 rolling log and rotates the real diagnostics away;
+                // with newlines in it, it forges log lines. The cap applies to the LOGGING only - the
+                // player still gets every reason on screen, always.
+                if (!r.Saved && System.Threading.Interlocked.Increment(ref _declinesLogged) <= MaxDeclinesLogged)
+                {
+                    var key = request?.Key ?? "";
+
+                    if (key.Length > 64) key = key.Substring(0, 64) + "...";
+
+                    key = key.Replace((char)13, ' ').Replace((char)10, ' ');
+
+                    logger.Info(
+                        $"Quest Tracker: declined to save a preset for {sessionId} - " +
+                        (string.IsNullOrEmpty(r.Reason) ? "NO REASON GIVEN, which is itself a bug" : r.Reason) +
+                        $" (build key '{key}')." +
+                        (_declinesLogged == MaxDeclinesLogged ? " Further declines will not be logged." : ""));
+                }
+
+                return JsonSerializer.Serialize(r, WireJson.Options);
+            }
 
             if (request == null || string.IsNullOrWhiteSpace(request.Key))
                 return Reply(new SavePresetResponse { Reason = "no build was named" });
+
+            // REFUSE a client too old to be saved for safely, and this is a data-safety gate rather than
+            // version pedantry. Up to 1.13.1 the client removed the same-named build before inserting,
+            // and that removal POSTs /client/builds/delete. It was harmless while the server minted a
+            // fresh id per save - the id it deleted was always superseded - and it stopped being
+            // harmless the moment the server started REUSING the id, because then it deletes the preset
+            // written seconds earlier. Every second save, with the panel reporting success.
+            //
+            // Absence is the test, not a comparison: 1.13.1 and earlier send a body carrying only `key`,
+            // so an empty ClientVersion identifies them exactly and no version parsing is needed. A
+            // newer client always sends one. The old client renders whatever Reason comes back, so it
+            // shows this sentence rather than losing the preset.
+            if (string.IsNullOrWhiteSpace(request.ClientVersion))
+                return Reply(new SavePresetResponse
+                {
+                    Reason =
+                        "the Quest Tracker plugin is older than the server half - update QuestTree.dll " +
+                        "in BepInEx/plugins/QuestTree to match, or saving would delete the preset it " +
+                        "just wrote"
+                });
 
             var build = profileBuilds.Find(sessionId, request.Key);
 

@@ -22,8 +22,14 @@ namespace QuestTreeServer
     /// parts you are missing. So the build stays ours and the delivery becomes the game's, which also
     /// avoids a server-side purchase that would desync the profile.
     ///
-    /// It goes through SPT's own BuildController rather than writing the profile directly, so ids are
-    /// minted and de-duplication happens exactly as the game does it.</summary>
+    /// It goes through SPT's own BuildController rather than writing the profile directly, so the
+    /// profile is mutated the way SPT mutates it. Two things this used to say and should not:
+    ///
+    /// Not "so ids are minted" - SaveWeaponBuild stores `Id = request.Id` verbatim and mints nothing, so
+    /// the id is ours to choose; see the note in Save about choosing it consistently. And not
+    /// "de-duplication exactly as the game does it" - SPT de-duplicates on `Name == || Id ==`, while the
+    /// GAME de-duplicates on id alone. The name half is the half this mod leans on, and the difference
+    /// is why ExistingId has to check both.</summary>
     [Injectable(InjectionType.Singleton)]
     public class WeaponPresetWriter(
         ISptLogger<WeaponPresetWriter> logger,
@@ -66,8 +72,15 @@ namespace QuestTreeServer
             public string Name { get; init; } = "";
             public string Reason { get; init; } = "";
 
-            /// <summary>The preset's id and the items as actually written - SPT mints fresh ids inside
-            /// SaveWeaponBuild, so these are read back after the call rather than the ones proposed.</summary>
+            /// <summary>The preset's id, and the items as actually written.
+            ///
+            /// The items really are read back: ReplaceIDs inside SaveWeaponBuild mutates the list in
+            /// place, so after the call `Items` holds the ids that were written.
+            ///
+            /// The ID is not, and this comment used to claim it was. SaveWeaponBuild stores
+            /// `Id = request.Id` verbatim - it mints nothing - so the id here is the one proposed, and it
+            /// matches the profile because we chose it rather than because we re-read it. Which id to
+            /// propose is the whole of the fix in Save; see the note there.</summary>
             public MongoId Id { get; init; }
             public IReadOnlyList<Item> Items { get; init; } = Array.Empty<Item>();
 
@@ -86,7 +99,24 @@ namespace QuestTreeServer
 
             var name = NameFor(questName, weaponName);
 
-            var presetId = new MongoId();
+            // REUSE the id a preset of this name already has, and only mint one for a genuinely new name.
+            //
+            // NOT the fix for the empty BUILD SELECTION window, and it was written believing it was. That
+            // crash is entirely client-side - WeaponPresetLoader inserted a handbook node without the
+            // dictionary entry its id resolves through - and it is fixed there, with OverrideWeaponBuild.
+            // Re-read this file's history before treating a stable id as the cure for anything.
+            //
+            // Kept because it is independently right. SaveWeaponBuild matches on
+            // `build.Name == request.Name || build.Id == request.Id` and, on a match, removes the old
+            // build and adds the new one under the id we passed - so a fresh id per save meant re-saving
+            // the same quest's preset changed that preset's identity every time. Nothing in the profile
+            // broke, but every consumer of an id got a new one for what the player sees as one preset:
+            // the in-memory storage keyed it afresh, the handbook node was rebuilt under a new key, and
+            // anything that had remembered the old id was left holding a stale one.
+            //
+            // Re-saving a preset is an edit of that preset, not a different preset. The id should say so.
+            var existing = ExistingId(sessionId, name);
+            var presetId = existing ?? new MongoId();
 
             try
             {
@@ -105,7 +135,16 @@ namespace QuestTreeServer
                 // within a minute, but a player who presses a button and then quits should not lose it.
                 await saveServer.SaveProfileAsync(sessionId).ConfigureAwait(false);
 
-                logger.Info($"Quest Tracker: saved the weapon preset '{name}' for {sessionId}.");
+                // Which of the two it was, because it is the one thing about a save that the server can
+                // see and nobody else records. It is NOT evidence about the preset window: an id change
+                // strands nothing, since OverrideWeaponBuild writes the dictionary before it makes the
+                // node and never drops the old entry, so both ids keep resolving. An earlier version of
+                // this comment claimed the opposite and would have sent the next reader looking in the
+                // one place the crash cannot be.
+                logger.Info(
+                    $"Quest Tracker: saved the weapon preset '{name}' for {sessionId} - " +
+                    (existing == null ? $"new, id {presetId}" : $"replaced in place, keeping id {presetId}") +
+                    $", {items.Count} item(s).");
 
                 return new Outcome { Saved = true, Name = name, Id = presetId, Items = items };
             }
@@ -116,6 +155,79 @@ namespace QuestTreeServer
                 logger.Error($"Quest Tracker: could not save the weapon preset '{name}': {ex}");
 
                 return Outcome.No("the server could not write the preset - see the server log");
+            }
+        }
+
+        /// <summary>The id the profile already holds for a preset of this name, or null when there is
+        /// none and a new one has to be minted.
+        ///
+        /// Matched on NAME, because the name is the half of SaveWeaponBuild's test we can answer before
+        /// choosing an id. Its full test is `build.Name == request.Name || build.Id == request.Id`, and
+        /// the id half is circular here - it is the very thing being decided - so the rule this has to
+        /// satisfy is "find whatever SaveWeaponBuild would replace", and on a name match that is the
+        /// FIRST one. Ordinal, since the name is one we built from a fixed prefix and the game compares
+        /// it with `==`, which is ordinal too.
+        ///
+        /// Never throws. A profile that cannot be read is answered as "no existing preset", which mints a
+        /// new id and behaves exactly as this did before - the old behaviour is the safe fallback rather
+        /// than a reason to fail the save.</summary>
+        private MongoId? ExistingId(MongoId sessionId, string name)
+        {
+            try
+            {
+                var builds = saveServer.GetProfile(sessionId)?.UserBuildData?.WeaponBuilds;
+
+                if (builds == null) return null;
+
+                foreach (var build in builds)
+                {
+                    if (!string.Equals(build?.Name, name, StringComparison.Ordinal)) continue;
+
+                    // An EMPTY id is not an id to reuse. UserBuild.Id is a non-nullable struct, so a
+                    // profile can hold `default`, and `existing ?? new MongoId()` would keep it - the ??
+                    // fires on null, not on empty. SaveWeaponBuild then writes it verbatim, MongoId
+                    // renders it as "", and next session the game parses the build list through
+                    // `new MongoID(string)`, which throws ArgumentOutOfRangeException on anything not 24
+                    // characters - inside Newtonsoft deserialising the WHOLE response. That is the "takes
+                    // down the player's entire build list" failure Flatten below refuses to risk, reached
+                    // by a different road. (This one really is inside the parse. The DUPLICATE-ID failure
+                    // below is not: BuildsResponse.WeaponBuilds is a List, so Newtonsoft never sees a key
+                    // collision - the throw comes afterwards, from ToDictionary in RequestBuilds.)
+                    //
+                    // RETURN, not continue, and the difference is a third road to the same disaster. This
+                    // scan has to find whatever SaveWeaponBuild would REPLACE, and that is its FIRST name
+                    // match - it has no empty-id check of its own. Skipping on to a later match and
+                    // returning ITS id means SPT removes the first build and adds ours under the second's
+                    // id, leaving two builds sharing one id; the game then deserialises the list into a
+                    // Dictionary<MongoID, WeaponBuild>, hits the duplicate key, and throws while parsing
+                    // the whole response. Stopping here mints a fresh id and lets SaveWeaponBuild replace
+                    // the empty-id entry by name, which is the outcome that keeps the profile consistent.
+                    if (build!.Id.IsEmpty) return null;
+
+                    // AND NOT AN ID SOMETHING ELSE ALSO HOLDS, or reusing it destroys the player's own
+                    // build. SaveWeaponBuild matches `Name == request.Name || Id == request.Id` and takes
+                    // the FIRST hit: propose an id that a differently-named build carries and it matches
+                    // THAT one, on the id half, before it ever reaches ours. It removes their build,
+                    // appends ours under the same id, and the profile ends up holding two builds with one
+                    // id - which next session makes RequestBuilds' ToDictionary(x => x.Id) throw
+                    // ArgumentException and takes the whole build list with it.
+                    //
+                    // Minting fresh instead costs nothing: SaveWeaponBuild still finds ours by NAME and
+                    // replaces it. This only declines to reuse an id, never to save.
+                    foreach (var other in builds)
+                        if (other != null
+                            && other.Id == build.Id
+                            && !string.Equals(other.Name, name, StringComparison.Ordinal))
+                            return null;
+
+                    return build.Id;
+                }
+
+                return null;
+            }
+            catch (Exception)
+            {
+                return null;
             }
         }
 

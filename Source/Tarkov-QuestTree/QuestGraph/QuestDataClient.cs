@@ -48,8 +48,10 @@ namespace QuestTree.QuestGraph
             [JsonProperty("reason")]
             public string Reason { get; set; }
 
-            /// <summary>The preset's id, and the build as actually written - the ids are SPT's own,
-            /// minted inside the save, so inserting these into the game's list keeps the client's copy
+            /// <summary>The preset's id, and the build as actually written. The ITEM and ROOT ids are
+            /// SPT's own, minted by ReplaceIDs inside the save; the PRESET id is one the SERVER chose,
+            /// and this said otherwise for a long time. Inserting these into the game's list keeps the
+            /// client's copy
             /// and the profile in agreement.</summary>
             [JsonProperty("id")]
             public string Id { get; set; }
@@ -75,7 +77,10 @@ namespace QuestTree.QuestGraph
 
             try
             {
-                var body = JsonConvert.SerializeObject(new { key });
+                // The version travels with the save, and a server that reuses preset ids refuses any
+                // client that does not send it - see SavePresetRequest.ClientVersion. Anything before
+                // 1.13.2 would delete the preset the server had just written.
+                var body = JsonConvert.SerializeObject(new { key, clientVersion = ModInfo.Version });
 
                 var task = Task.Run(() => RequestHandler.PostJsonAsync("/questtree/build/save", body));
 
