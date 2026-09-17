@@ -326,7 +326,12 @@ namespace QuestTreeServer
                 {
                     solved++;
                     parts += result.Parts.Count;
-                    proven += lowest.Parts;
+
+                    // Guarded the way atFloor below is, and for the same reason: an unbounded floor
+                    // carries Parts = 0 deliberately, so adding it unconditionally folded "no bound could
+                    // be proven" into the same total as "zero parts are provably necessary". The evidence
+                    // line would have understated itself with nothing to show it had.
+                    if (!lowest.Unbounded) proven += lowest.Parts;
                     changes += result.Changes;
                     cost += result.Cost;
                     unpriced += result.Unpriced;

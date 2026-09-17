@@ -522,9 +522,18 @@ namespace QuestTreeServer
 
             var locale = localeService.GetLocaleDb();
 
-            // Every real map, for the quests that do not name one. Materialised once: LocationIdsByKey
-            // is memoised, but Distinct over it per quest would not be.
-            var everyLocationId = facts.LocationIdsByKey().Values
+            // Every RAIDABLE map, for the quests that do not name one. Through AllLocationKeys, which is
+            // already the playable subset - LocationIdsByKey.Values is all nineteen entries including the
+            // six nobody can raid, and fanning every unlocated quest's items onto the hideout and the
+            // development scene allocates a WantedBy per quest per non-place for maps CollectMarkers can
+            // never produce a pin on. (The filtered accessor arrived after this code did, in a later pass;
+            // this is the one caller that was left reading the unfiltered list.)
+            //
+            // Materialised once: the lookups are memoised, but the join and Distinct would not be.
+            var keyToId = facts.LocationIdsByKey();
+
+            var everyLocationId = facts.AllLocationKeys()
+                .Select(key => keyToId.TryGetValue(key, out var id) ? id : "")
                 .Where(id => !string.IsNullOrWhiteSpace(id))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();

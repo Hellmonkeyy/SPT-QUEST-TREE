@@ -251,10 +251,16 @@ namespace QuestTreeServer
         {
             var key = sessionId.ToString();
 
-            if (!string.IsNullOrEmpty(key) && Recent.TryGetValue(key, out var recent) &&
-                DateTime.UtcNow - recent.At < CacheFor)
+            if (!string.IsNullOrEmpty(key) && Recent.TryGetValue(key, out var recent))
             {
-                return recent.Sources;
+                if (DateTime.UtcNow - recent.At < CacheFor) return recent.Sources;
+
+                // Dropped rather than left to be overwritten. Overwriting keeps the memory of whichever
+                // profile asked; removing releases it, which is what matters for a profile that asked once
+                // and never came back. Each entry pins that profile's whole Owned/Buyable/Barter/Gated
+                // picture, so on a long-lived server rotating sessions - Fika, or a developer switching
+                // profiles all day - the map only ever grew.
+                Recent.TryRemove(key, out _);
             }
 
             var sources = Build(sessionId, profile);
