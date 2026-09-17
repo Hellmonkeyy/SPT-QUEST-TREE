@@ -1870,12 +1870,17 @@ namespace QuestTreeServer
                 // build that gets SMALLER later in the run, which is the entire purpose of training, can dip
                 // below a bound with nothing to notice. Proven writes that bound to the cache, so it would
                 // have been recorded as a proof for the life of the process and in the file.
+                // THREE states, spelled out, because collapsing them to two is how this broke. The first
+                // version of this alarm kept the refutation test and replaced the proof test with "else" -
+                // which is bound <= Parts.Count, the near-NEGATION of the proof it replaced. Every build at
+                // or ABOVE its bound was then marked minimal, and the progress line read 60 of 60 against a
+                // survey reporting 8 of 60 on the same data. A check that cannot fail, again.
                 if (bound > remembered.Parts.Count)
                     logger.Error(
                         $"Quest Tracker: the part floor for '{key}' is UNSOUND - it claims no " +
                         $"satisfying build has fewer than {bound} part(s), and a verified build of " +
                         $"{remembered.Parts.Count} is in hand. Not counted as a proof.");
-                else
+                else if (remembered.Parts.Count <= bound)
                 {
                     lock (_proven) _proven.Add(key);
                     proven = true;
