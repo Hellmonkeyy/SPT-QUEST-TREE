@@ -497,6 +497,17 @@ namespace QuestTreeServer
 
                 foreach (var conflict in conflicts)
                 {
+                    // A part listing ITSELF is not a conflict, and the data does it: five items in
+                    // WTT-ContentBackport's stock config name their own id among 54 others, and on this
+                    // install that rejected a build the solver had just produced - "6984b82c... and
+                    // 6984b82c... conflict", the same id twice, on Weapon Acquisition V.
+                    //
+                    // The solver never tripped on it because Compatible tests a candidate before it enters
+                    // Counts, so it never sees itself; this walks the finished gun, where it does. What the
+                    // flag means for one instance is nothing - and two copies of one part is what
+                    // CheckDuplicates already answers, on the slots rather than on this list.
+                    if (conflict == template) continue;
+
                     if (!present.Contains(conflict)) continue;
 
                     // One line per unordered pair. With both directions scanned, a symmetric pair would
