@@ -1369,8 +1369,25 @@ namespace QuestTreeServer
             List<MongoId> mustInclude,
             List<MongoId> mustIncludeCategories)
         {
-            var floor = weaponBuildVerifier.LowestPossible(weapon, thresholds, mustInclude, mustIncludeCategories);
             var key = WeaponBuildCache.KeyFor(weapon, thresholds, mustInclude, mustIncludeCategories);
+
+            // Asked BEFORE the work, because the work is the expensive part and for most requirements its
+            // answer is already known. Proven is re-entered on every attempt for any key that never becomes
+            // proven, and withholding the bound whenever a quest names a mount left 37 of 60 requirements in
+            // exactly that state - so nearly two thirds of all attempts were running a full LowestPossible,
+            // including its breadth-first walk of the weapon's whole slot graph, and discarding the result.
+            //
+            // Sound on the same premise everything else here rests on: a bound is a property of the item
+            // data, so a requirement that could not be bounded once this boot cannot be bounded later in it.
+            // What it gives up is noticing a key that went unbounded and then bounded again, which would be
+            // a contradiction rather than news - and the first unbounded answer still goes through the full
+            // path below, where Crosscheck compares it against any bound recorded earlier.
+            bool known;
+            lock (_proven) known = _unbounded.Contains(key);
+
+            if (known) return null;
+
+            var floor = weaponBuildVerifier.LowestPossible(weapon, thresholds, mustInclude, mustIncludeCategories);
 
             // No number is written when there is no claim to write. Nothing stored is withdrawn either:
             // a bound already on file cannot have outlived its evidence, because Load() zeroes every Bound

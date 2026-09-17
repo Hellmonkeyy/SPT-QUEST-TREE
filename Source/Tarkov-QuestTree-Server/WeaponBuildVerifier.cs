@@ -1204,7 +1204,25 @@ namespace QuestTreeServer
         ///
         /// The visited set is what makes a cyclic slot graph terminate, and the depth cap bounds it even
         /// if the set somehow did not.</summary>
-        private Dictionary<MongoId, int> Reachable(MongoId weapon)
+        /// <summary>Every template reachable from a weapon's slots, by shortest depth - walked once per
+        /// weapon and then shared.
+        ///
+        /// It was walked afresh on every call, and its one caller is LowestPossible, which training enters
+        /// on every attempt: at two thousand attempts a minute that is two thousand breadth-first walks of a
+        /// graph whose widest weapon reaches 667 parts. Nothing about it can change while the server runs,
+        /// which is the same argument the bound itself rests on.
+        ///
+        /// Shared rather than copied, which is safe because nothing writes to the result: the sole reader
+        /// takes depths out of it and never puts any in. A ConcurrentDictionary because sixteen training
+        /// threads ask at once; a duplicate walk on a race is wasted work, never a wrong answer, since two
+        /// walks of the same graph agree.</summary>
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<MongoId, Dictionary<MongoId, int>>
+            _reachable = new();
+
+        private Dictionary<MongoId, int> Reachable(MongoId weapon) =>
+            _reachable.GetOrAdd(weapon, WalkReachable);
+
+        private Dictionary<MongoId, int> WalkReachable(MongoId weapon)
         {
             var seen = new Dictionary<MongoId, int> { [weapon] = 0 };
             var queue = new Queue<MongoId>();
