@@ -212,8 +212,10 @@ namespace QuestTreeServer
             /// <summary>Parts that are not what the weapon ships with: a swap for a different part in a
             /// slot the default preset fills, plus an addition to a slot it leaves empty.
             ///
-            /// THE OBJECTIVE. What a player pays in roubles and trader trips, which is the thing they are
-            /// actually trying to keep small - not the part count, which was a proxy for it.
+            /// NOT the objective, despite saying so here for several releases. Cost is - see below - and
+            /// Cost.Beats ranks price first and part count second, reading Changes nowhere at all. This is
+            /// the count the price is over, and it is reported because a player reads "four changes" more
+            /// easily than a rouble total; it decides nothing.
             ///
             /// Minimise changes, never "maximise defaults kept": the second sounds the same and is a trap,
             /// because keeping every stock part while bolting ten more on scores perfectly by it. Counting
@@ -295,9 +297,13 @@ namespace QuestTreeServer
             public double Margin(double actual) => HigherIsBetter ? actual - Value : Value - actual;
         }
 
-        /// <summary>Stats the model scores. Anything else a quest constrains is reported as
-        /// unchecked rather than assumed to pass - height, width, base accuracy, muzzle velocity and
-        /// the empty-tactical-slot count are all real constraints this cannot see.</summary>
+        /// <summary>Stats this solver scores. Anything else a quest constrains is reported as unchecked
+        /// rather than assumed to pass - base accuracy, muzzle velocity and the empty-tactical-slot count
+        /// are real constraints nothing here can see.
+        ///
+        /// Height and width ARE in this set, and used to be named above as things it could not see. They
+        /// are not scored by the stat model - see WeaponStatModel, which still cannot - but by Sized below,
+        /// off the assembled grid. The comment outlived the code that made it true.</summary>
         private static readonly HashSet<string> Scored = new(StringComparer.OrdinalIgnoreCase)
         {
             "ergonomics", "recoil", "weight", "magazine capacity", "effective distance", "height", "width"
@@ -305,9 +311,13 @@ namespace QuestTreeServer
 
         /// <summary>Goals measured from the assembled grid rather than from the stat model.
         ///
-        /// Computed here independently of the verifier's own version, and deliberately so: the verifier is
-        /// only a second opinion while it is a SEPARATE opinion, and sharing one implementation of the rule
-        /// would have meant neither could catch the other being wrong about it.</summary>
+        /// Computed here as well as in the verifier, in separate code - but NOT independently, and the
+        /// difference matters. Both are the same algorithm: max per direction, ExtraSizeForceAdd stacking,
+        /// no reduction. They agree because they were written to agree, so neither catches the other being
+        /// wrong about the RULE - only about applying it. The one real difference is that the verifier also
+        /// computes the reduced extent and reports it, which is the half that adds information.
+        ///
+        /// Worth knowing before trusting "the solver and the verifier both say so" about a size threshold.</summary>
         private static readonly HashSet<string> Sized = new(StringComparer.OrdinalIgnoreCase)
         {
             "height", "width"

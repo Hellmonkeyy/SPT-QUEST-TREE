@@ -147,6 +147,14 @@ namespace QuestTreeServer
         /// on Customs". Falls back to the condition type when the locale has no entry.</summary>
         public string Text { get; set; } = "";
 
+        /// <summary>The condition's own isNecessary flag, defaulted to TRUE when absent - and a field with
+        /// no positive signal at all, so nothing may filter on it.
+        ///
+        /// Measured on the shipped database: across 1,606 finish conditions it is absent 1,080 times,
+        /// explicitly false 526 times, and true ZERO times. The client filtered on it once and hid the
+        /// objectives of 173 vanilla and 38 modded quests - 42% of them showing requirements, rewards and
+        /// unlocks with no what-to-do and no where-to-go. The client mirror carries the warning; this is the
+        /// end that produces the value, so it carries it too.</summary>
         public bool IsNecessary { get; set; }
 
         /// <summary>The condition's raw type (HandoverItem, FindItem, CounterCreator, ...).</summary>

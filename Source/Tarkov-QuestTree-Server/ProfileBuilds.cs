@@ -270,6 +270,13 @@ namespace QuestTreeServer
                     }
 
                     item = _queue.Dequeue();
+
+                    // Dropped from the in-flight set HERE, before the work rather than after it. Removing
+                    // it in the finally below meant a request arriving DURING a compute was refused by
+                    // Enqueue's Add and then forgotten, so the answer stayed one generation stale until
+                    // something else happened to ask. Releasing the key first can cost one redundant
+                    // compute back to back, which is the right side of that trade.
+                    _queued.Remove(item);
                 }
 
                 try
@@ -279,10 +286,6 @@ namespace QuestTreeServer
                 catch (Exception ex)
                 {
                     logger.Warning($"Quest Tracker: could not prepare builds for profile {item.Profile} ({ex.Message}).");
-                }
-                finally
-                {
-                    lock (_lock) _queued.Remove(item);
                 }
             }
         }

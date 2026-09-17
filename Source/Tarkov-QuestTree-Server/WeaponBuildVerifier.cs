@@ -739,18 +739,34 @@ namespace QuestTreeServer
             var needErgonomics = 0d;
             var needRecoil = 0d;
 
+            // MAX, not assignment, in both cases. A condition stating two thresholds on one stat used to
+            // keep whichever came last in the list, which is a weaker requirement than the quest's whenever
+            // the last one is not the strongest - and a floor argued from a weakened requirement can come
+            // out too low, which is the direction that proves builds minimal that are not.
+            //
+            // And recoil only when the quest wants it LOWER. The formula below inverts a "recoil at most X"
+            // into "the summed percentage must be at least this negative", which is the only reading that
+            // makes sense of it; a modded "recoil >= X" asks the opposite and this relaxation says nothing
+            // about it. Reading every recoil threshold through it computed the bound from the wrong side.
+            // WeaponSolver.Goals takes the direction from the data for exactly this reason, noting that the
+            // same stat points both ways across quests.
             foreach (var (field, compare, value) in thresholds)
             {
+                var wantsLess = compare.StartsWith("<", StringComparison.Ordinal);
+                var wantsMore = compare.StartsWith(">", StringComparison.Ordinal);
+
                 switch (field.ToLowerInvariant())
                 {
-                    case "ergonomics" when compare.StartsWith(">", StringComparison.Ordinal):
+                    case "ergonomics" when wantsMore:
                         wantsErgonomics = true;
-                        needErgonomics = value - (props.Ergonomics ?? 0d) - namedErgonomics;
+                        needErgonomics = Math.Max(
+                            needErgonomics, value - (props.Ergonomics ?? 0d) - namedErgonomics);
                         break;
 
-                    case "recoil" when baseRecoil > 0d:
+                    case "recoil" when wantsLess && baseRecoil > 0d:
                         wantsRecoil = true;
-                        needRecoil = namedRecoil - (value / baseRecoil - 1d) * 100d;
+                        needRecoil = Math.Max(
+                            needRecoil, namedRecoil - (value / baseRecoil - 1d) * 100d);
                         break;
                 }
             }

@@ -38,8 +38,12 @@ namespace QuestTreeServer
     /// Two things deliberately absent. Durability is not a build property at all - it is the
     /// weapon's repair state, it appears in all 32 vanilla conditions, and no assembly can change
     /// it. Height and width are the assembled grid size, which folding stocks change; they are real
-    /// in five quests each and are NOT modelled here, so any solver must treat them as unmodelled
-    /// rather than assume they pass.
+    /// in five quests each and are NOT modelled here.
+    ///
+    /// That is a statement about THIS class, not an instruction to its callers. It used to end "so any
+    /// solver must treat them as unmodelled rather than assume they pass", and both the solver and the
+    /// verifier now score them off the assembled grid instead - see WeaponSolver.Sized. Judging them is
+    /// fine; judging them from these numbers is what is not available.
     /// </summary>
     [Injectable(InjectionType.Singleton)]
     public class WeaponStatModel(ISptLogger<WeaponStatModel> logger, TemplateTable templateTable)

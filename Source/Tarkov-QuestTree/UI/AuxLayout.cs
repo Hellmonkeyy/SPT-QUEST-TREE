@@ -7,10 +7,11 @@ using UnityEngine.UI;
 namespace QuestTree.UI
 {
     /// <summary>
-    /// Small builders shared by the Kappa and Settings tabs. Both are plain vertical stacks, laid
-    /// out with a running y-cursor rather than a VerticalLayoutGroup - the same fully-manual
-    /// approach the rest of this panel settled on after Unity's automatic layout components cost
-    /// two rounds of debugging here.
+    /// Small builders shared by every aux view - Do next, Items, Kappa, Maps and Settings - plus the
+    /// quest body, the hover card and the intro panel. (It said "the Kappa and Settings tabs" when there
+    /// were two.) All are plain vertical stacks, laid out with a running y-cursor rather than a
+    /// VerticalLayoutGroup - the same fully-manual approach the rest of this panel settled on after
+    /// Unity's automatic layout components cost two rounds of debugging here.
     ///
     /// Every method returns the height it consumed, so a caller can keep its own cursor without
     /// having to know how any individual row is built.
