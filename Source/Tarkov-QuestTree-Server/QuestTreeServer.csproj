@@ -10,10 +10,37 @@
     <RootNamespace>QuestTreeServer</RootNamespace>
     <AssemblyName>QuestTreeServer</AssemblyName>
     <Nullable>enable</Nullable>
+    <!--
+      XML doc generation, on for ONE reason: it is what turns the doc-comment analysers on. Nothing
+      reads the .xml.
+
+      This codebase treats doc comments as documentation - they carry measurements, negative results
+      and the reasons a thing is the way it is - so a comment with a dangling paramref, an unresolvable
+      cref, raw angle brackets read as tags, or params documented for some arguments and not others is
+      a real defect. Eight of those had accumulated invisibly across both halves, because with no doc
+      file the compiler never raises CS1570-CS1574 or CS1734 at all.
+
+      What it does NOT catch, and the reason a manual pass is still owed: a doc block carrying two
+      <summary> elements raises nothing. Twenty-eight of those remain.
+
+      DocumentationFile is deliberately NOT set. The SDK's own default for GenerateDocumentationFile
+      already writes it under obj\; naming it here put it in the project ROOT instead - untracked, in
+      the source tree, 375 KB, one `git add -A` from being committed - because $(IntermediateOutputPath)
+      is not defined until Sdk.targets and evaluates to empty in this PropertyGroup.
+
+      The SDK then copies it to the output directory as well, which DropDocXmlFromOutput below undoes:
+      this project's convention is that a release can be assembled from bin\ alone, so bin\ holds
+      exactly what ships.
+
+      CS1591 is suppressed: it wants a summary on every public member, a different and much weaker rule
+      than the one being enforced here, and it would bury the useful warnings under hundreds.
+    -->
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
     <LangVersion>latest</LangVersion>
     <!-- MSBuild cannot read the C# constant, so this is the one copy that has to be updated by
          hand: keep it equal to ModInfo.Version in ModInfo.cs, which everything else derives from. -->
-    <AssemblyVersion>1.12.2</AssemblyVersion>
+    <AssemblyVersion>1.13.0</AssemblyVersion>
     <FileVersion>$(AssemblyVersion)</FileVersion>
     <Version>$(AssemblyVersion)</Version>
     <Title>QuestTreeServer</Title>
@@ -116,6 +143,13 @@
           DestinationFolder="$(ServerPath)\user\mods\QuestTree\cache\"
           SkipUnchangedFiles="true"
           Condition="!Exists('$(ServerPath)\user\mods\QuestTree\cache\weapon-builds.json')" />
+  </Target>
+
+
+  <!-- See the DocumentationFile note above: the .xml exists to make the compiler check the comments,
+       and nothing ships it, so it does not belong beside the DLL. -->
+  <Target Name="DropDocXmlFromOutput" AfterTargets="CopyFilesToOutputDirectory">
+    <Delete Files="$(OutDir)$(AssemblyName).xml" ContinueOnError="true" />
   </Target>
 
 </Project>

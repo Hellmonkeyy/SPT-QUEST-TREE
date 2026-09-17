@@ -40,6 +40,26 @@ namespace QuestTreeServer
         /// quest rather than piling up, and makes the mod's presets obvious in a list they own.</summary>
         private const string Prefix = "QT: ";
 
+        /// <summary>The preset's name: the prefix, the quest, and THE WEAPON.
+        ///
+        /// The weapon is not decoration. SaveWeaponBuild de-duplicates on name, and a quest can ask for
+        /// more than one - Gunsmith - Part 21 wants two, Old Friend's Request wants three - so naming a
+        /// preset after the quest alone meant saving the second weapon silently deleted the first, while
+        /// the panel said "it is in the game's build list now". The build key is per weapon; the name has
+        /// to be too, or re-saving one weapon and replacing another are the same operation.
+        ///
+        /// Only appended when it adds something: for the overwhelming majority of quests, which name one
+        /// weapon, "QT: Gunsmith - Part 6" reads better than the same with a rifle bolted on. So the
+        /// weapon is included whenever it is known, and the QUEST alone is never the whole name for a
+        /// multi-weapon quest, which is the case that mattered.</summary>
+        private static string NameFor(string questName, string weaponName)
+        {
+            var quest = string.IsNullOrWhiteSpace(questName) ? "build" : questName.Trim();
+            var gun = weaponName?.Trim();
+
+            return string.IsNullOrEmpty(gun) ? Prefix + quest : $"{Prefix}{quest} - {gun}";
+        }
+
         public sealed class Outcome
         {
             public bool Saved { get; init; }
@@ -56,14 +76,15 @@ namespace QuestTreeServer
 
         /// <summary>Turn one solved build into a saved preset.</summary>
         public async Task<Outcome> Save(
-            MongoId sessionId, string questName, MongoId weapon, IReadOnlyList<WeaponSolver.FittedPart> tree)
+            MongoId sessionId, string questName, string weaponName, MongoId weapon,
+            IReadOnlyList<WeaponSolver.FittedPart> tree)
         {
             if (tree == null || tree.Count == 0) return Outcome.No("there is no build to save yet");
 
             var items = Flatten(weapon, tree, out var why);
             if (items == null) return Outcome.No(why);
 
-            var name = Prefix + (string.IsNullOrWhiteSpace(questName) ? "build" : questName.Trim());
+            var name = NameFor(questName, weaponName);
 
             var presetId = new MongoId();
 

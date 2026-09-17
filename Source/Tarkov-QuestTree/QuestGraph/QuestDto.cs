@@ -28,7 +28,13 @@ namespace QuestTree.QuestGraph
         /// and stops being clickable, which is exactly how it read before they existed. v10
         /// (1.12.0): a solved build is a diff against the weapon's default preset (SolvedPartDto.Status
         /// and Replaces, SolvedBuildDto.Changes and HasDefaults) and WeaponBuildDto carries the key the
-        /// per-profile /questtree/builds answer joins on.</summary>
+        /// per-profile /questtree/builds answer joins on. v11 adds RewardDto.RoubleValue, IsCurrency,
+        /// LoyaltyLevel and FoundInRaid, and fixes TraderId - a v10 server leaves the ranking to score
+        /// rewards on experience alone.
+        ///
+        /// v2, v3, v6, v7, v8 and v9 have no entry here, and the server's copy of this history is missing
+        /// a different set again (v3, v8, v9). Neither can be reconstructed; the next bump gets a line in
+        /// both. The bracketed release numbers are approximate - see the server's copy.</summary>
         public const int SupportedSchemaVersion = 11;
 
         [JsonProperty("schemaVersion")]

@@ -20,7 +20,12 @@ containing `EscapeFromTarkov.exe`) and let them merge. You should end up with:
 [SPT folder]\BepInEx\plugins\QuestTree\kappa-quests.json
 [SPT folder]\SPT_Runtime\user\mods\QuestTree\QuestTreeServer.dll
 [SPT folder]\SPT_Runtime\user\mods\QuestTree\zones\*.json
+[SPT folder]\SPT_Runtime\user\mods\QuestTree\cache\weapon-builds.json
 ```
+
+The `zones` and `cache` files are data the mod ships so a fresh install starts with map zones already
+known and weapon builds already solved. Nothing breaks without them, but they come back slowly: a map's
+zones are learned by raiding it, and the builds improve a little on each server start. Keep them.
 
 Start the server first, then the game. A **Quest Tracker** button appears in the bottom taskbar, and
 **Ctrl+Q** opens the tracker from anywhere in the menu - including the raid ready-up screen, where
@@ -199,6 +204,28 @@ avoid that one.
 The panel shows both: the build anyone could make, and the build **you** can make, with what it
 costs you in roubles and how many of the parts you already own.
 
+### Send the build to your gun
+
+**Save as a weapon preset** puts the build into the game's own build list, so you can load it onto the
+weapon in one click at the workbench - and the game's preset screen will offer to **buy the parts you
+are missing**, through its own purchase flow rather than anything the mod does to your profile.
+
+It appears immediately - no restart - unless the game's build list cannot be reached, in which case
+the line under the button says to go back to profile select. Nothing is written unless you press the
+button.
+
+Every preset the mod saves is named `QT: <quest> - <weapon>`, and each part of that earns its place:
+
+- The prefix makes the mod's presets obvious in a list that is otherwise yours, and keeps them clear of
+  one you named yourself. The game de-duplicates saved builds **by name**, so a preset called
+  "Gunsmith" would have silently replaced yours.
+- The weapon is there because a quest can ask for more than one, and each gets its own build. Without
+  it, saving the second would have replaced the first.
+- Saving the same build again replaces the mod's own preset rather than piling up a second.
+
+**This is the one thing the mod writes to your profile**, and the presets are ordinary saved builds
+once written - see *Uninstalling* below.
+
 ### It keeps getting better on its own
 
 The mod ships with a set of worked-out builds and keeps looking for cheaper ones - a small, fixed
@@ -324,5 +351,14 @@ The Settings view, in four sections, and the same values in BepInEx's F12 menu. 
 
 ## Uninstalling
 
-Delete `BepInEx\plugins\QuestTree` and `SPT_Runtime\user\mods\QuestTree`. Nothing is written to your
-profile.
+Delete `BepInEx\plugins\QuestTree` and `SPT_Runtime\user\mods\QuestTree`.
+
+Nothing the mod writes is needed to play, and nothing breaks by removing it. Two things outlive the
+two folders:
+
+- **Any weapon preset you saved** with *Save as a weapon preset*. Those are ordinary saved builds in
+  your profile, named `QT: <quest> - <weapon>`. Delete them in the game's own build list.
+- **`BepInEx\config\com.takov.questtree.cfg`**, your settings. Harmless, and deleting it is optional.
+
+Everything else - the harvested map zones, the solved weapon builds - lives in the two folders above
+and goes with them.

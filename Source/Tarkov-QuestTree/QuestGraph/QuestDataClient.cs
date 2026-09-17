@@ -541,7 +541,7 @@ namespace QuestTree.QuestGraph
         ///
         /// Cached, including failures. It reports the live stash, so it must not be cached
         /// *forever* - but it was previously re-fetched on every panel re-render, and
-        /// <see cref="QuestTreePanel"/> re-renders on every search keystroke and settings toggle.
+        /// QuestTreePanel re-renders on every search keystroke and settings toggle.
         /// With the Kappa tab open that meant a blocking HTTP request per keystroke, each of which
         /// walks the whole profile inventory server-side. Caching the failure matters just as much:
         /// an unregistered route fails fast, so a missing server half produced the tightest retry

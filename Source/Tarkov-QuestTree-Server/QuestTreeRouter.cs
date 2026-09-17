@@ -158,7 +158,9 @@ namespace QuestTreeServer
             if (!build.WeaponTemplate.TryParseMongoId(out var weapon))
                 return Reply(new SavePresetResponse { Reason = "this quest's weapon could not be identified" });
 
-            var outcome = presetWriter.Save(sessionId, build.QuestName, weapon, build.Tree)
+            // WeaponName as well as QuestName: the preset is named after both, because a quest can ask
+            // for several weapons and the game de-duplicates saved builds by name.
+            var outcome = presetWriter.Save(sessionId, build.QuestName, build.WeaponName, weapon, build.Tree)
                 .GetAwaiter().GetResult();
 
             var reply = new SavePresetResponse

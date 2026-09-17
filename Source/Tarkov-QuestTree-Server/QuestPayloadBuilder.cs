@@ -113,9 +113,6 @@ namespace QuestTreeServer
         /// holds: a wander round moves this without moving the answer.</summary>
         private readonly Dictionary<string, List<WeaponSolver.FittedPart>> _working = new();
 
-        /// <summary>Builds whose size equals a proven lower bound. No search can improve them, so spending
-        /// a third of every round on them - which is what uniform effort did - is arithmetic nobody needs
-        /// repeated.</summary>
         /// <summary>Requirements whose build matches the fewest PARTS any satisfying build could have.
         ///
         /// It used to be a skip list - a build at its bound could not get smaller, so it was never searched
@@ -1157,9 +1154,12 @@ namespace QuestTreeServer
         /// <summary>How long the search may run. Seconds on a normal start, minutes while training. This is
         /// CPU on the machine hosting the game, and a solver improving a build by one part does not get to
         /// cost somebody a raid.</summary>
-        /// <summary>Threads a normal launch uses. Two, because LaunchRounds rounds is brief and the machine
-        /// belongs to whoever is playing. Training takes all but one core, which is a session the user chose
-        /// to spend.</summary>
+        /// <summary>Threads a normal launch uses. Two, because a normal launch is brief and the machine
+        /// belongs to whoever is playing. Training takes half the cores, which is a session the user chose
+        /// to spend.
+        ///
+        /// It said "because LaunchRounds rounds is brief" for three releases after LaunchRounds was deleted
+        /// - rounds stopped existing when the barrier did, and the budget is LaunchAttempts now.</summary>
         private static int LaunchThreads => Math.Max(1, Math.Min(2, Environment.ProcessorCount));
 
         /// <summary>Pause between attempts on a NORMAL launch, so the search yields the machine rather
@@ -1412,6 +1412,14 @@ namespace QuestTreeServer
             return floor.Parts;
         }
 
+        /// <summary>Records a requirement as unprovable, answering whether this boot had not already.
+        /// Under _proven's lock, because the two sets are read together and a torn answer would either
+        /// duplicate a Warning or drop a falsification.</summary>
+        private bool AddUnbounded(string key)
+        {
+            lock (_proven) return _unbounded.Add(key);
+        }
+
         /// <summary>Asserts that the proven lower bound for one requirement does not change within a boot.
         ///
         /// A bound is a property of the item data, so the same question must give the same answer however
@@ -1422,14 +1430,6 @@ namespace QuestTreeServer
         ///
         /// A count of how many were checked is reported beside the count of disagreements, because zero
         /// disagreements from a check nobody ran looks identical to zero from a check that passed.</summary>
-        /// <summary>Records a requirement as unprovable, answering whether this boot had not already.
-        /// Under _proven's lock, because the two sets are read together and a torn answer would either
-        /// duplicate a Warning or drop a falsification.</summary>
-        private bool AddUnbounded(string key)
-        {
-            lock (_proven) return _unbounded.Add(key);
-        }
-
         private void Crosscheck(string key, int bound, MongoId weapon)
         {
             var first = _bounds.GetOrAdd(key, bound);
@@ -1713,8 +1713,6 @@ namespace QuestTreeServer
             return false;
         }
 
-        /// <summary>One sweep over every requirement from a fresh set of starting points, and how many
-        /// builds it managed to shrink.</summary>
         /// <summary>One sweep over every requirement from a fresh set of starting points, and how many
         /// builds it managed to shrink.
         ///
@@ -2129,8 +2127,8 @@ namespace QuestTreeServer
         /// <summary>Adds a threshold, unless it is the unconstrained default.
         ///
         /// Skipped on the VALUE being zero, never on the field name. In the first vanilla condition
-        /// effectiveDistance, weight, baseAccuracy and muzzleVelocity are all ">= 0" and pure noise
-        /// on screen - but height and width are "<= 1" and "<= 4" and entirely real, in 5 quests
+        /// effectiveDistance, weight, baseAccuracy and muzzleVelocity are all "&gt;= 0" and pure noise
+        /// on screen - but height and width are "&lt;= 1" and "&lt;= 4" and entirely real, in 5 quests
         /// each. Writing those two off by name, which an earlier reading of one example suggested,
         /// would have dropped a genuine constraint.</summary>
         private static void AddThreshold(WeaponBuildDto build, string field, ValueCompare? compare)

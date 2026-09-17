@@ -442,10 +442,10 @@ namespace QuestTree.UI
         /// <summary>Reports how much of the tab the current filters and search are showing. Since
         /// virtualization removed the render cap this is a plain count rather than a truncation
         /// warning - what is laid out is what you can reach by panning.</summary>
-        /// <param name="searchMatches">How many of the laid-out quests the search matched, or -1
-        /// when nothing is being searched for. Its own number because search no longer removes
-        /// anything from the layout: "805 of 830 shown" described a tree with 25 quests missing,
-        /// and there is no longer such a tree to describe.</param>
+        /// <remarks>searchMatches is how many of the laid-out quests the search matched, or -1 when
+        /// nothing is being searched for. Its own number because search no longer removes anything from
+        /// the layout: "805 of 830 shown" described a tree with 25 quests missing, and there is no longer
+        /// such a tree to describe.</remarks>
         public void UpdateRenderNotice(int matchingCount, int tabTotal, bool focused = false, int searchMatches = -1)
         {
             RefreshFocusState();

@@ -271,10 +271,6 @@ namespace QuestTreeServer
             }
         }
 
-        /// <summary>Unions this harvest into the map's file. Returns what was written, or null
-        /// when the union would pass the per-map ceiling and nothing was changed.
-        /// <paramref name="added"/> is how many entries were new - zero when every Fika client
-        /// in a raid posts the same scene, which is the case the caller must not rebuild for.</summary>
         /// <summary>Maps already warned about their ceiling this boot, so a client that keeps
         /// posting is heard once rather than filling the log.</summary>
         private readonly HashSet<string> OverflowReported = new(StringComparer.OrdinalIgnoreCase);
@@ -419,6 +415,18 @@ namespace QuestTreeServer
             return Save(request, out added);
         }
 
+        /// <summary>Unions this harvest into the map's file, and writes it when the union changed anything.
+        /// A post that adds nothing new - every Fika client in a raid sending the same scene - returns the
+        /// file it already had without touching the disk.
+        ///
+        /// ALWAYS returns a file when it got that far - it cannot return null for a full map any more.
+        /// It used to, and the summary saying so outlived the behaviour by three releases: DropOverflow sheds
+        /// the excess and keeps the rest, because refusing the post bricked a map permanently. Anyone
+        /// reading the router's "map file full" rejection should know it now answers only for the
+        /// in-memory BUFFER being full, never the file.
+        ///
+        /// `added` is how many entries were new - zero when every Fika client in a raid posts the same
+        /// scene, which is the case the caller must not rebuild for.</summary>
         public ZoneFile? Save(ZoneHarvestRequest request, out int added)
         {
             added = 0;

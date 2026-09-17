@@ -1,3 +1,77 @@
+# Quest Tracker 1.13.0
+
+A whole-project code review, and what it found. Five features did not work at all, four of them
+failing silently - nothing logged, nothing crashed, the screen just quietly did nothing.
+
+## Five things that now work
+
+**The pre-raid check comes back.** If one of a map's requirements had been placed by guesswork rather
+than from a harvested zone, the whole map went dark: no summary, no "take with you" list, and a plain
+ready-up button - throwing away every *other* requirement on that map to avoid overstating one. Those
+rows are back. Only the green light is withheld, the button says **READY?**, and the sidebar says how
+many of the map's requirements it could not place.
+
+**Search finds traders.** The box has always said *"Search quests or traders"* and typing a trader
+matched nothing, because the trader names were attached to the quests after the search index was
+built. Typing `Prapor` works. The same bug was quietly randomising trader colours between sessions.
+
+**21 quests get their item pins.** A quest that does not name its own map - *Lend-Lease - Part 1*,
+*Vitamins - Part 1*, *Secret Benefactor*, *Delivery From the Past* and 17 more - was filed under a map
+key that matches nothing, so its items were never pinned even though the server knew the exact spawn
+coordinates. All 21 are pinned now, on the maps their items actually spawn on.
+
+**Clicking a Do-next row keeps your place.** Opening the ninth row threw you back to the top of the
+list, with the row you opened off screen.
+
+**Quest boxes stop reading 0/2 on a quest you could hand in.** The tree counted hand-over objectives as
+never done, however full your stash - while the Do-next row for the same quest correctly said "ready to
+hand in". One rule serves both now.
+
+## The weapon builder tells the truth about its own proofs
+
+The verifier used a magic number to mean *"I cannot prove a lower bound for this"*, and every reader
+took it for the strongest possible proof. A requirement nothing could bound was therefore marked
+**provably minimal**, cached that way, counted in the boot log's total, and the adversarial search that
+exists to disprove exactly such claims ran on the wrong set. That number is gone rather than guarded,
+and requirements with no bound are the ones the falsifier now attacks hardest.
+
+**Builds stop being permanently stale.** A profile doing Gunsmith early - a part already on a gun you
+own, a part a trader only sells at a higher loyalty - had every request answer "this build is broken".
+The panel never left the stale state while a background thread re-solved all sixty requirements in a
+loop. That is the player the feature is most for.
+
+## Also
+
+- Hideout-craft unlocks were systematically under-ranked in **Do next**: the reward carries a hideout
+  area where the mod read a trader, so the ranking scored all 31 of them as good as unreachable.
+- 16 seasonal quests were not flagged as seasonal, and 9 more were called permanently unavailable
+  during the very weeks the game shows them. The mod asks the game now instead of reimplementing it.
+- Weapon presets appear without restarting the game (also fixed in 1.12.2).
+- Opening the Maps tab, or its floor dropdown, no longer rebuilds the whole item watchlist.
+- The builds panel no longer regenerates every trader's stock on every request.
+- A dropdown re-picking its current value no longer stays painted over the page.
+- A pin serving a finished quest and an unfinished one stops claiming there is nothing left to do.
+- A hand-edited or third-party map-zone file with a missing list no longer costs that map its whole
+  harvest.
+- The six locations nobody can raid - the hideout, the Arena scene, four unshipped stubs - stop
+  appearing as maps.
+- A cached weapon build is now invalidated when a mod update makes it unassemblable, rather than being
+  refused at the workbench.
+
+## Documentation
+
+**The README said nothing is written to your profile.** That stopped being true in 1.12.0: presets you
+save yourself are ordinary saved builds and they survive uninstalling. The uninstall section says so,
+and *Save as a weapon preset* is documented at last. The mod also points at its own page in the
+launcher's mod list now.
+
+Internally, the build enables the compiler's documentation analysers, which caught eight malformed doc
+comments on the first run - one of them written during this very review. They do not catch every kind:
+twenty-eight comment blocks carrying two summaries between them are still owed a pass, because that
+particular mistake raises no warning at all.
+
+---
+
 # Quest Tracker 1.12.2
 
 ## Weapon presets appear without restarting the game
@@ -98,8 +172,9 @@ objectives to the detail panel, the hover card, the node's progress count, the m
 
 - Rewards know what they are worth in roubles, whether they are cash or gear, and which loyalty level
   an unlocked offer appears at.
-- Trader reputation rewards name their trader. All 508 of them were being read from the wrong field
-  and showed as a bare "Reputation +0.02".
+- Trader reputation rewards name their trader. All 532 of them were being read from the wrong field
+  and showed as a bare "Reputation +0.02". (Said 508 here until 1.13.0, which is the count of
+  experience rewards.)
 
 ---
 

@@ -32,10 +32,10 @@ namespace QuestTreeServer
 
         public Dictionary<string, Range>? ModDependencies { get; init; }
 
-        /// <summary>Shown in the launcher's mod list. Left null deliberately - there is no mod page
-        /// yet, and a placeholder URL is worse than none. Set it when there is somewhere real to
-        /// point at.</summary>
-        public string? Url { get; init; }
+        /// <summary>Shown in the launcher's mod list, which is where someone goes to find out where a
+        /// mod came from. Left null until there was somewhere real to point at, which there is as of
+        /// 1.12.1.</summary>
+        public string? Url { get; init; } = "https://github.com/Hellmonkeyy/SPT-QUEST-TREE";
 
         public bool HasPrepatcher { get; init; }
 

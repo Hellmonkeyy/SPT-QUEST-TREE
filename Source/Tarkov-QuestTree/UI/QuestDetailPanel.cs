@@ -72,11 +72,10 @@ namespace QuestTree.UI
         /// switch merely takes it off screen. The tree unmarks its selected box from this.</summary>
         public Action OnHidden;
 
-        /// <param name="focusNode">Selects and frames a quest in the graph - what a prerequisite,
-        /// route or unlock row does when clicked.</param>
-        /// <param name="showOnMap">Switches to the map with this quest selected.</param>
-        /// <param name="session">The live session, for the trader's portrait. A function, since the
-        /// session arrives with Show and the panel is built before it.</param>
+        /// <remarks>focusNode selects and frames a quest in the graph - what a prerequisite, route or
+        /// unlock row does when clicked. showOnMap switches to the map with this quest selected. session
+        /// is the live session, for the trader's portrait: a function, since the session arrives with Show
+        /// and the panel is built before it.</remarks>
         public void Build(
             RectTransform root, QuestGraphBuilder graph, Action<QuestNode> focusNode,
             Action<QuestNode> showOnMap, Func<IEftSession> session)

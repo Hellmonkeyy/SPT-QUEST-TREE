@@ -19,13 +19,27 @@ namespace QuestTreeServer
     {
         /// <summary>Bumped whenever the shape below changes, so an old client paired with a new
         /// server (or the reverse) can say so plainly instead of silently mis-parsing.
+        ///
+        /// v3, v8 and v9 have no entry below and cannot get one: they were bumped without being written
+        /// down, which is the failure this comment's own contract exists to prevent, and the shapes are no
+        /// longer recoverable. Said out loud rather than left as a gap a reader might take for a numbering
+        /// quirk. (v1 needs no entry - it is the original shape, not a bump.)
+        ///
         /// v2 (1.8.0): ObjectiveDto.FoundInRaid. v4 (1.9.0): QuestDto.DerivedLocations.
         /// v5 (1.10.1): RewardDto.ShortName and RewardDto.Template. v6 (1.10.2): the weapon build
         /// keeps its template ids, records dropped zero thresholds and empty-slot counts, and carries
         /// the stat model's own numbers for the quest's example parts. v7 (1.10.3): a quest carries
         /// EVERY weapon build it asks for rather than only the first. v10 (1.12.0): a solved build is a
         /// DIFF against the weapon's default preset - every part says whether it is already fitted, a
-        /// swap or an addition, and the build carries the number of changes.</summary>
+        /// swap or an addition, and the build carries the number of changes. v11: RewardDto gains
+        /// RoubleValue, IsCurrency, LoyaltyLevel, FoundInRaid, and a TraderId resolved per reward type
+        /// instead of read from one field.
+        ///
+        /// The release numbers above are approximate and at least two are wrong - v10 and v11 both landed
+        /// between the 1.11.0 and 1.12.0 archives, so the labels make the list read as though v11 came
+        /// first. They are kept because they are roughly useful and removing them loses the only dating
+        /// there is; trust the ORDER of the entries, not the bracketed version, and check git for a date
+        /// that matters. New entries go without a release number until the release is cut.</summary>
         public int SchemaVersion { get; set; } = 11;
 
         /// <summary>The server half's version, so a mismatch warning on the client can name it -
@@ -193,8 +207,9 @@ namespace QuestTreeServer
         ///
         /// Standing and trader-unlock rewards name their trader in Target, not TraderId, which is why
         /// this is resolved per type rather than read from one field. Reading TraderId for all of them
-        /// left every one of the 508 standing rewards without a trader, and the client rendered them
-        /// as a bare "Reputation +0.02".</summary>
+        /// left every one of the 532 standing rewards without a trader, and the client rendered them
+        /// as a bare "Reputation +0.02". (508 was the figure here for two releases; it is the Experience
+        /// reward count, borrowed from a line further down.)</summary>
         public string TraderId { get; set; } = "";
 
         /// <summary>What this reward is worth in roubles, or null when that cannot be known.
@@ -204,9 +219,9 @@ namespace QuestTreeServer
         /// modded reward to the bottom for a reason that is about our data rather than the reward.</summary>
         public long? RoubleValue { get; set; }
 
-        /// <summary>True when the reward IS money rather than an item worth money. 455 of the 1,472
-        /// item rewards are cash, and a player weighs the two differently - roubles are fungible and
-        /// gear is not.</summary>
+        /// <summary>True when the reward IS money rather than an item worth money. 392 of the 1,472
+        /// success-phase item rewards name a currency, and a player weighs the two differently - roubles
+        /// are fungible and gear is not. (455 was the figure here; it was never the cash count.)</summary>
         public bool IsCurrency { get; set; }
 
         /// <summary>The loyalty level an unlocked offer appears at, for AssortmentUnlock and
@@ -324,8 +339,6 @@ namespace QuestTreeServer
         public Dictionary<string, HeldItemDto> ItemsOwned { get; set; } = new();
     }
 
-    /// <summary>How many of an item the profile holds. Found-in-raid is separate because most
-    /// quest hand-ins only accept found-in-raid copies.</summary>
     /// <summary>How many of an item the profile holds. Found-in-raid is separate because most quest
     /// hand-ins only accept found-in-raid copies; location is separate (schema v2) because a pre-raid
     /// check has to know what is on your character rather than what you own.</summary>
@@ -743,8 +756,8 @@ namespace QuestTreeServer
         /// profile has access - Price is the server's flea price, an estimate), "absent".</summary>
         public string Tier { get; set; } = "";
 
-        /// <summary>Where a copy the profile holds is FITTED, when it is not loose: "fitted to your <weapon>"
-        /// or "fitted to your equipped <weapon>". Set alongside a priced tier, never instead of one - a
+        /// <summary>Where a copy the profile holds is FITTED, when it is not loose: "fitted to your
+        /// &lt;weapon&gt;" or "fitted to your equipped &lt;weapon&gt;". Set alongside a priced tier, never instead of one - a
         /// part on a gun in use is priced as a purchase, because stripping a working weapon is the
         /// player's call and never the mod's assumption. Empty when there is no such copy.</summary>
         public string Where { get; set; } = "";

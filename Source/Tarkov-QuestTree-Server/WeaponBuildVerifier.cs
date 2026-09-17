@@ -865,7 +865,7 @@ namespace QuestTreeServer
         /// not on which weapon the walk started from: the same handguard is worth the same wherever it
         /// hangs. That is what makes it affordable - one pass over the distinct templates in the game
         /// rather than one pass per quest.</summary>
-        /// <param name="underway">Templates on the path being descended RIGHT NOW, and nothing else. It
+        /// <remarks>underway is the templates on the path being descended RIGHT NOW, and nothing else. It
         /// was an instance field shared by every thread, which conflated two different things: a graph that
         /// admits its own host (a real cycle, which must be cut) and a template another thread happens to be
         /// working on (not a cycle at all, and cutting it hands back the generous answer for no reason). One
@@ -873,7 +873,7 @@ namespace QuestTreeServer
         ///
         /// It does NOT replace the depth cap. A cyclic slot graph is an uncatchable StackOverflowException
         /// that would take the server and every player's raid with it, so both guards stay: the visited set
-        /// closes the cycles it can see, and the cap catches anything it cannot.</param>
+        /// closes the cycles it can see, and the cap catches anything it cannot.</remarks>
         private double[] BestBelow(MongoId template, int weighting, int depth, HashSet<MongoId> underway)
         {
             // Past the depth cap, hand back something deliberately unreachable rather than something
