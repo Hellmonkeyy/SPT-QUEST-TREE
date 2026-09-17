@@ -389,6 +389,21 @@ namespace QuestTreeServer
                     // Explicitly, not by relying on Parts being zeroed: this counts the PROVEN MINIMUM
                     // line, and it read every unbounded floor as a match while the absence of a bound was
                     // carried as int.MaxValue.
+                    // THE PART FLOOR AGAINST REALITY, and the twin of the cost floor's alarm. A floor is a
+                    // claim that no satisfying build has fewer parts; a satisfying build in hand with fewer
+                    // than that is the claim refuted. The verifier has just passed this build, so the two
+                    // cannot both be right.
+                    //
+                    // Nothing shouted about this before, and it is exactly the failure the named-mount
+                    // withdrawal existed to avoid - so removing that withdrawal without adding this would
+                    // have traded a claim given up for a claim nothing checks.
+                    if (!lowest.Unbounded && lowest.Parts > result.Parts.Count)
+                        logger.Error(
+                            $"Quest Tracker: the part floor for '{questName}' is UNSOUND - it claims no " +
+                            $"satisfying build has fewer than {lowest.Parts} part(s) ({lowest.Reason}), and " +
+                            $"the verifier just passed one with {result.Parts.Count}. Every minimality claim " +
+                            "over part count is suspect until this is explained.");
+
                     if (!lowest.Unbounded && result.Parts.Count <= lowest.Parts) atFloor++;
                     else unproven.Add(
                         $"{questName} at {result.Parts.Count} parts, proven necessary {lowest.Parts} " +

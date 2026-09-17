@@ -581,36 +581,22 @@ namespace QuestTreeServer
             foreach (var part in mustInclude)
                 if (reach.ContainsKey(part) && !named.Contains(part)) named.Add(part);
 
-            // NO MINIMALITY CLAIM when a named part carries slots of its own, and this is the honest
-            // answer to a real unsoundness rather than a precaution.
+            // A named part that carries slots of its own used to withdraw the bound entirely, and the
+            // unsoundness it was avoiding is real: the threshold terms below subtract the named parts'
+            // contributions from what is wanted and then ask BestBelow how much an assembly of at most r
+            // parts ROOTED AT THE WEAPON can add. Those two do not line up when a non-named part hangs off a
+            // named mount. The real build pays for that mount once, as a named part; a weapon-rooted
+            // assembly has to spend budget reaching it again. So the ceiling understated what r parts can
+            // achieve, Reach asked for more of them, and the floor came out ABOVE the true minimum - a false
+            // proof, in the direction that looks like success.
             //
-            // The threshold terms below subtract the named parts' contributions from what is wanted, and
-            // then ask BestBelow how much an assembly of at most r parts ROOTED AT THE WEAPON can add. Those
-            // two do not line up when a non-named part hangs off a named mount: the real build pays for that
-            // mount once, as a named part, while a weapon-rooted assembly of r parts has to spend budget
-            // reaching it again. So the ceiling understates what r parts can really achieve, Reach asks for
-            // more of them, and the floor comes out ABOVE the true minimum - which passes the "at most the
-            // bound" gate on a build that is not minimal. A false proof, in the direction that looks like
-            // success.
+            // Withdrawing was the honest answer while nothing charged the mount correctly. It also gave up
+            // the claim on exactly the quests that matter most: Gunsmith names handguards and mounts
+            // constantly, and the count of builds proven minimal on this install was 0 of 60.
             //
-            // Fixable in principle by charging the mount once instead of twice; declined because every
-            // version of that changes what the word proven means here, and this file's history is of
-            // corrections that were confidently wrong. Gunsmith names handguards and mounts often, so this
-            // gives up a real claim on exactly the quests that matter most - and a claim given up is worth
-            // more than one that cannot be trusted.
-            foreach (var part in named)
-            {
-                if (!Template(part, out var namedItem)) continue;
-                if (namedItem.Properties?.Slots?.Any() != true) continue;
-
-                floor.Unbounded = true;
-                floor.Parts = 0;
-                floor.Reason =
-                    $"the quest names {part}, which carries slots of its own - no lower bound over part " +
-                    "count can be argued while a part may hang off a named host";
-
-                return floor;
-            }
+            // The mount is now charged ONCE, which is the fix that comment called possible and declined. See
+            // the weighted block below: the ceiling is a knapsack over the weapon AND every named host, so an
+            // assembly may be rooted at anything already paid for. Nothing here has to withdraw any more.
 
             // A category nothing named covers needs a part of its own.
             var uncovered = 0;
@@ -776,39 +762,11 @@ namespace QuestTreeServer
                 if ((p.SightingRange ?? 0d) > bestRange) bestRange = p.SightingRange ?? 0d;
             }
 
-            // The best occupant of each slot in reach, one entry per slot, biggest first. Every part
-            // beyond the named ones occupies a slot, and no two occupy the same one - so r parts can be
-            // worth no more than the r best slots, which is a far tighter statement than r times the
-            // best part on the gun.
-            var ergonomicSlots = new List<double>();
-            var recoilSlots = new List<double>();
-
-            foreach (var (template, _) in reach)
-            {
-                if (!Template(template, out var host)) continue;
-
-                foreach (var slot in host.Properties?.Slots ?? Enumerable.Empty<Slot>())
-                {
-                    var ergonomics = 0d;
-                    var recoil = 0d;
-
-                    foreach (var filter in slot?.Properties?.Filters ?? Enumerable.Empty<SlotFilter>())
-                        foreach (var candidate in filter?.Filter ?? Enumerable.Empty<MongoId>())
-                        {
-                            if (!Template(candidate, out var part)) continue;
-
-                            if ((part.Properties!.Ergonomics ?? 0d) > ergonomics) ergonomics = part.Properties!.Ergonomics ?? 0d;
-                            if ((part.Properties!.Recoil ?? 0d) < recoil) recoil = part.Properties!.Recoil ?? 0d;
-                        }
-
-                    if (ergonomics > 0d) ergonomicSlots.Add(ergonomics);
-                    if (recoil < 0d) recoilSlots.Add(recoil);
-                }
-            }
-
-            ergonomicSlots.Sort((left, right) => right.CompareTo(left));
-            recoilSlots.Sort();
-
+            // A per-slot ceiling was built here - the best occupant of every slot in reach, sorted, on the
+            // argument that r parts occupy r distinct slots and so can be worth no more than the r best. It
+            // was computed, sorted, and never read by anything: BestBelow supersedes it, being exact over the
+            // slot TREE where this was blind to whether a slot exists at all. Removed rather than left,
+            // because a dead ceiling whose comment claims to be the bound is worse than no comment.
             var namedErgonomics = 0d;
             var namedRecoil = 0d;
 
@@ -883,10 +841,25 @@ namespace QuestTreeServer
                     var allowance = ErgonomicsWeight[weighting] * selectedErgonomics
                                     + RecoilWeight[weighting] * selectedRecoil;
 
-                    var needs = Reach(
-                        BestBelow(weapon, weighting, 0, new HashSet<MongoId>()),
-                        wanted - allowance,
-                        named.Count + selected);
+                    // Rooted at the weapon OR at any named part, because a named part is already paid
+                    // for in named.Count and must not be paid for again in budget. This is what lets the
+                    // bound survive a quest that names a mount, and it is sound in the one direction that
+                    // matters: Combine may over-count a subtree that both arrays can see, which RAISES the
+                    // ceiling, lowers the answer Reach gives, and so weakens the bound. A bound that is too
+                    // weak proves fewer builds minimal; a bound that is too strong proves builds minimal
+                    // that are not.
+                    var ceiling = BestBelow(weapon, weighting, 0, new HashSet<MongoId>());
+
+                    foreach (var host in named)
+                    {
+                        if (!Template(host, out var hostItem)) continue;
+                        if (hostItem.Properties?.Slots?.Any() != true) continue;
+
+                        ceiling = Combine(
+                            ceiling, BestBelow(host, weighting, 0, new HashSet<MongoId>()));
+                    }
+
+                    var needs = Reach(ceiling, wanted - allowance, named.Count + selected);
 
                     // Unreachable is not a big number, it is the absence of one, and it cannot be maxed
                     // into a bound. Each weighting is a relaxation every satisfying build must meet, so
@@ -1118,6 +1091,43 @@ namespace QuestTreeServer
             forced[template] = total;
 
             return total;
+        }
+
+        /// <summary>Two budget ceilings merged into one: the most that r parts can add when they may be
+        /// placed under EITHER host, for every r.
+        ///
+        /// A knapsack over the split, which is what charges a named mount once. The real build's non-named
+        /// parts form subtrees hanging off the weapon's slots or off a named part's slots, and the budget is
+        /// divided between them; this takes the best division at every total.
+        ///
+        /// Over-counting is possible and safe. A named mount hanging off the weapon is inside the weapon's
+        /// own tree, so a subtree beneath it can be seen by both arrays and counted twice - which can only
+        /// make the ceiling too HIGH, so Reach answers with too FEW parts and the floor comes out too low. A
+        /// floor that is too low proves fewer builds minimal. The error that matters runs the other way.
+        ///
+        /// Negative infinity is a budget too small to fill the slots the game insists on, and it propagates
+        /// through the addition on purpose: a split that cannot make a legal gun is not a split.</summary>
+        private static double[] Combine(double[] left, double[] right)
+        {
+            var merged = new double[left.Length];
+
+            for (var budget = 0; budget < merged.Length; budget++)
+            {
+                var best = double.NegativeInfinity;
+
+                for (var split = 0; split <= budget; split++)
+                {
+                    if (split >= left.Length || budget - split >= right.Length) continue;
+
+                    var combined = left[split] + right[budget - split];
+
+                    if (combined > best) best = combined;
+                }
+
+                merged[budget] = best;
+            }
+
+            return merged;
         }
 
         /// <summary>The fewest parts in total whose ceiling covers what is wanted, given that
