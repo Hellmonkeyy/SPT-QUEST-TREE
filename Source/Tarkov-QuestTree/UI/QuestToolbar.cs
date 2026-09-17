@@ -439,6 +439,29 @@ namespace QuestTree.UI
         /// <summary>The trimmed, lowercased search text - the needle every node is tested against.</summary>
         public string SearchNeedle => _searchNeedle;
 
+        /// <summary>Quests completed across the whole game, counted once per graph rather than once per
+        /// notice.
+        ///
+        /// This ran over all ~830 nodes on every notice update, and the notice updates from the render path
+        /// - so it was a full scan per repaint for a number that can only change when the graph does.
+        /// Version is bumped by QuestGraphBuilder.Build and by nothing else, which is exactly the event that
+        /// can move it.</summary>
+        private int CompletedCount()
+        {
+            if (_graph == null) return 0;
+            if (_completedVersion == _graph.Version) return _completed;
+
+            var completed = 0;
+            foreach (var node in _graph.Nodes)
+                if (node.Status == ENodeStatus.Completed) completed++;
+
+            _completedVersion = _graph.Version;
+            return _completed = completed;
+        }
+
+        private int _completed;
+        private int _completedVersion = -1;
+
         /// <summary>Reports how much of the tab the current filters and search are showing. Since
         /// virtualization removed the render cap this is a plain count rather than a truncation
         /// warning - what is laid out is what you can reach by panning.</summary>
@@ -477,9 +500,7 @@ namespace QuestTree.UI
             // One sentence, not two numbers side by side: "787 of 812 quests   5 / 812 completed"
             // read as a contradiction. Overall progress is across the whole game, not just this
             // tab - the one number most people actually want from a quest tracker.
-            var completed = 0;
-            foreach (var node in _graph.Nodes)
-                if (node.Status == ENodeStatus.Completed) completed++;
+            var completed = CompletedCount();
 
             var shown = matchingCount < tabTotal
                 ? $"{matchingCount:N0} of {tabTotal:N0} shown"

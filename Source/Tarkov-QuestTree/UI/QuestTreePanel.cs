@@ -953,17 +953,18 @@ namespace QuestTree.UI
             _graph.TraderNames.TryGetValue(traderId, out var name) ? name : traderId;
 
         /// <summary>Completion per trader, so the row itself says where there is work left rather
-        /// than requiring a click into each one - plus the loyalty level when known.</summary>
+        /// than requiring a click into each one - plus the loyalty level when known.
+        ///
+        /// Read from a tally built in ONE pass over the nodes, cached until the graph changes. This walked
+        /// every node per trader and BuildTabs calls it per trader, so a tab rebuild was O(traders x nodes) -
+        /// about 8,300 iterations - and RefreshTabLabels repeats it after every hand-in.</summary>
         private string TraderSuffix(string traderId)
         {
-            var total = 0;
-            var done = 0;
-            foreach (var node in _graph.Nodes)
-            {
-                if (node.TraderId != traderId) continue;
-                total++;
-                if (node.Status == ENodeStatus.Completed) done++;
-            }
+            var tally = TraderTallies();
+            var counts = tally.TryGetValue(traderId, out var found) ? found : (Done: 0, Total: 0);
+
+            var total = counts.Total;
+            var done = counts.Done;
 
             var loyaltySuffix = _loyaltyByTrader.TryGetValue(traderId, out var level) && level > 0
                 ? $"  LL{level}"
@@ -971,6 +972,33 @@ namespace QuestTree.UI
 
             return $"{done}/{total}{loyaltySuffix}";
         }
+
+        /// <summary>Done/total per trader id, in one pass, cached until the graph is rebuilt.
+        ///
+        /// Keyed on QuestGraphBuilder.Version, which Build bumps and nothing else does - so a hand-in that
+        /// re-runs the graph invalidates this, and a repaint that does not cannot see a stale number.</summary>
+        private Dictionary<string, (int Done, int Total)> TraderTallies()
+        {
+            if (_traderTallies != null && _traderTallyVersion == _graph.Version) return _traderTallies;
+
+            var tallies = new Dictionary<string, (int Done, int Total)>(StringComparer.Ordinal);
+
+            foreach (var node in _graph.Nodes)
+            {
+                tallies.TryGetValue(node.TraderId, out var counts);
+
+                counts.Total++;
+                if (node.Status == ENodeStatus.Completed) counts.Done++;
+
+                tallies[node.TraderId] = counts;
+            }
+
+            _traderTallyVersion = _graph.Version;
+            return _traderTallies = tallies;
+        }
+
+        private Dictionary<string, (int Done, int Total)> _traderTallies;
+        private int _traderTallyVersion = -1;
 
         /// <summary>Rewrites the trader tabs' done/total in place - what a hand-in changes -
         /// without rebuilding the tab objects. Loyalty is the lookup BuildTabs made, not a fresh

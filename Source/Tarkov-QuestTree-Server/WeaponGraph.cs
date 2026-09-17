@@ -124,27 +124,60 @@ namespace QuestTreeServer
             return reached;
         }
 
-        /// <summary>Descends one part's slots, adding everything it can reach.
+        /// <summary>Walks the slot tree from one part, adding everything it can reach.
         ///
-        /// Returns whether a cap stopped it, so a caller can say the answer is partial rather than
-        /// quietly presenting it as complete. The visited set is the dictionary being filled: a
-        /// template already in it has already been descended, so a cycle closes instead of looping.</summary>
+        /// BREADTH-first, and that is a correctness requirement rather than a preference. It was
+        /// depth-first with this dictionary as the visited set, which is sound on its own and unsound
+        /// together with a depth cap: a template first met at depth 12 was added with its own children cut
+        /// off, and a later path arriving at depth 2 found it already present and did not descend it again.
+        /// The reachable set therefore depended on the order the candidate lists happened to be in.
+        ///
+        /// What that cost: a subtree missing from the graph, and the solver reporting a part as "NOT
+        /// REACHABLE from this weapon's slots" when it plainly is. Worse, the verifier's own reachability is
+        /// breadth-first with a shortest-depth map and has never had the flaw - so the two could disagree
+        /// about the same weapon, which is the class of thing Crosscheck exists to shout about and this
+        /// would have made it shout about honestly.
+        ///
+        /// Breadth-first removes the problem rather than working around it: the first time a template is
+        /// dequeued is at its minimum depth, so descending it exactly once is correct and the visited set
+        /// stays the whole cycle guard. Vanilla's deepest chain is 5 against a cap of 12, so nothing on a
+        /// stock install ever hit it - this is for the modded weapon graphs that do.
+        ///
+        /// Returns whether a cap stopped it, so a caller can say the answer is partial rather than quietly
+        /// presenting it as complete.</summary>
         private bool Walk(MongoId template, Dictionary<MongoId, PartInfo> reached, int depth, List<string> warnings)
         {
-            if (depth > MaxSlotDepth) return true;
-            if (reached.Count >= MaxReachable) return true;
-
-            if (!_parts.TryGetValue(template, out var part)) return false;
-
-            // Already descended. This is the cycle guard, and it is the whole of it: a graph that
-            // points back at itself finds its own template here and stops.
-            if (!reached.TryAdd(template, part)) return false;
-
             var truncated = false;
+            var queue = new Queue<(MongoId Template, int Depth)>();
 
-            foreach (var slot in part.Slots)
-                foreach (var candidate in slot.Candidates)
-                    truncated |= Walk(candidate, reached, depth + 1, warnings);
+            queue.Enqueue((template, depth));
+
+            while (queue.Count > 0)
+            {
+                var (current, at) = queue.Dequeue();
+
+                if (reached.Count >= MaxReachable)
+                {
+                    truncated = true;
+                    break;
+                }
+
+                if (!_parts.TryGetValue(current, out var part)) continue;
+
+                // The cycle guard, and the whole of it: a graph that points back at itself finds its own
+                // template already here. Safe to treat as final now that the first arrival is the shallowest.
+                if (!reached.TryAdd(current, part)) continue;
+
+                if (at >= MaxSlotDepth)
+                {
+                    truncated = true;
+                    continue;
+                }
+
+                foreach (var slot in part.Slots)
+                    foreach (var candidate in slot.Candidates)
+                        queue.Enqueue((candidate, at + 1));
+            }
 
             return truncated;
         }

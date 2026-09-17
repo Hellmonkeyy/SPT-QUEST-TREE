@@ -2295,6 +2295,19 @@ namespace QuestTreeServer
                 var index = Array.FindIndex(info.Slots, slot => slot.Name == part.SlotName);
                 if (index < 0 || Occupant(host, index) != null) return null;
 
+                // The part must still BE something this slot accepts, and must still be compatible with
+                // what is already on the gun. Neither was checked: the slot's name existing and being free
+                // was the whole test, so a stored build survived a mod update that removed the part from
+                // the slot's filter or introduced a conflict with another part it uses - and survived it
+                // silently, because nothing downstream re-measures an incumbent.
+                //
+                // Returning null is the right failure. It is what every other check here does, and the
+                // caller treats a null incumbent as "no history worth keeping" and searches from scratch,
+                // which is exactly the outcome a build that can no longer be assembled deserves.
+                if (!state.Reachable.ContainsKey(part.Template)) return null;
+                if (Array.IndexOf(info.Slots[index].Candidates, part.Template) < 0) return null;
+                if (!Compatible(part.Template, state)) return null;
+
                 var node = new Node
                 {
                     Template = part.Template,

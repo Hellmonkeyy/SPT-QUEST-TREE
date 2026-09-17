@@ -229,6 +229,7 @@ namespace QuestTreeServer
             CheckSeating(weapon, parts, verdict);
             CheckRequiredSlots(weapon, parts, verdict);
             CheckNamed(templates, mustInclude, mustIncludeCategories, verdict);
+            CheckConflicts(weapon, templates, verdict);
             CheckDuplicates(parts, verdict);
             CheckIrreducible(weapon, parts, thresholds, mustInclude, mustIncludeCategories, verdict);
 
@@ -467,6 +468,53 @@ namespace QuestTreeServer
         /// <summary>A template may appear twice only by occupying two distinct slots, which
         /// <see cref="CheckSeating"/> has already established both admit it. Anything else is one
         /// physical part claimed twice.</summary>
+        /// <summary>No two parts on the gun refuse each other.
+        ///
+        /// The verifier had no opinion on conflicts at all, which is the one gap that could pass a build the
+        /// game itself rejects. Every other failure here is "the numbers do not add up"; this one is "the
+        /// modding screen will not let you build it", and the player meets it at the workbench holding a
+        /// preset the mod told them was verified.
+        ///
+        /// It matters most for a build restored from the cache. The fingerprint now covers ConflictingItems
+        /// so a mod update invalidates the file - but Rebuild takes a stored build as the incumbent without
+        /// re-measuring it, so within one boot this is the check standing between a conflicting pair and a
+        /// saved preset.
+        ///
+        /// BOTH directions, because ConflictingItems is not symmetric in the data - the solver's Compatible
+        /// says so and is right. Scanning every part's own list against the set of everything present gets
+        /// both for free: A naming B is found while looking at A, and B naming A while looking at B.
+        ///
+        /// The weapon is in the set too. A part that refuses the receiver it is being bolted to is the same
+        /// refusal, and nothing else here would catch it.</summary>
+        private void CheckConflicts(MongoId weapon, List<MongoId> templates, Verdict verdict)
+        {
+            var present = new HashSet<MongoId>(templates) { weapon };
+            var said = new HashSet<string>(StringComparer.Ordinal);
+
+            foreach (var template in present)
+            {
+                if (!Template(template, out var item)) continue;
+
+                var conflicts = item.Properties?.ConflictingItems;
+                if (conflicts == null) continue;
+
+                foreach (var conflict in conflicts)
+                {
+                    if (!present.Contains(conflict)) continue;
+
+                    // One line per unordered pair. With both directions scanned, a symmetric pair would
+                    // otherwise be reported twice and read as two problems.
+                    var first = string.CompareOrdinal(template.ToString(), conflict.ToString()) <= 0;
+                    var key = first ? $"{template}|{conflict}" : $"{conflict}|{template}";
+
+                    if (!said.Add(key)) continue;
+
+                    verdict.Failures.Add(
+                        $"{template} and {conflict} conflict, so the gun cannot be assembled");
+                }
+            }
+        }
+
         private static void CheckDuplicates(IReadOnlyList<WeaponSolver.FittedPart> parts, Verdict verdict)
         {
             foreach (var group in parts.GroupBy(part => part.Template).Where(group => group.Count() > 1))
