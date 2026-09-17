@@ -1,0 +1,665 @@
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using QuestTree.QuestGraph;
+using UnityEngine;
+
+namespace QuestTree.UI
+{
+    /// <summary>
+    /// Everything worth saying about one quest, as rich-text lines.
+    ///
+    /// This was private to <see cref="QuestDetailPanel"/> until the Maps tab needed the same facts.
+    /// It is a list of strings rather than a widget tree deliberately: the two callers lay their
+    /// text out differently - the detail panel pours the whole list into a single TMP, the map list
+    /// renders it row by row through <see cref="AuxLayout"/> - and only the CONTENT is shared. That
+    /// is also why nothing here touches a RectTransform.
+    /// </summary>
+    internal static class QuestSummary
+    {
+        /// <summary>How many route steps a summary or the detail panel lists before "+N more". A
+        /// route on a late Kappa quest can run to dozens - past this it stops being a plan you
+        /// can read.</summary>
+        internal const int RouteSteps = 12;
+
+        /// <summary>The fallback found-in-raid test for a server that predates the objective's
+        /// own flag: the English objective sentence. Shared by the Do next ranking and the Items
+        /// watchlist, which each had a copy.</summary>
+        internal static bool MentionsFoundInRaid(string objectiveText) =>
+            !string.IsNullOrEmpty(objectiveText) &&
+            objectiveText.IndexOf("found in raid", StringComparison.OrdinalIgnoreCase) >= 0;
+
+        /// <summary>
+        /// The quest's full story, top to bottom: identity, why it is blocked, what it requires, the
+        /// route to it, objectives, rewards, and what it opens up.
+        ///
+        /// Nulls are left in the list rather than skipped, so a caller that joins the lines can drop
+        /// them in one pass and a caller that renders them individually can too - see the
+        /// <c>Where(l =&gt; l != null)</c> at both call sites.
+        /// </summary>
+        public static List<string> Lines(
+            QuestNode node, QuestGraphBuilder graph, ProfilePayloadDto profile, bool includeHeader = true)
+        {
+            if (node == null) return new List<string>();
+
+            // The header is for a surface that shows nothing else about the quest; a row that
+            // was just clicked already says its name and trader.
+            var lines = new List<string>
+            {
+                includeHeader ? $"<b>{GameStyle.Safe(node.Name)}</b>" : null,
+                includeHeader ? node.TraderName : null,
+                node.Level > 0 ? $"Level {node.Level}" : null,
+                node.IsKappaRequired ? $"<color=#{GameStyle.WarningHex}>Kappa required</color>" : null,
+                node.IsCollectorPrerequisite
+                    ? $"<color=#{ColorUtility.ToHtmlStringRGB(GameStyle.CollectorBlue)}>Needed to unlock Collector</color>"
+                    : null,
+                // Faction- and edition-locked quests are shown rather than hidden, so this is what
+                // stops one reading as a bug in the tree.
+                node.UnobtainableReason != null ? $"<color=#{GameStyle.ErrorHex}>{node.UnobtainableReason}</color>" : null,
+                // The single gate actually stopping you, computed server-side against your level,
+                // loyalty and standing. Until this existed a locked quest was a grey box with no
+                // explanation of what to go and do about it.
+                FormatLockReason(node, graph, profile),
+                ""
+            };
+
+            if (node.PrerequisiteIds.Count > 0)
+            {
+                // Named here rather than drawn as a line, since a prerequisite from another trader
+                // won't have a node in whatever tab is currently rendered (QuestGraphView.Render
+                // only draws edges within the current tab's node set) - this is the one place that
+                // relationship still surfaces when it crosses tabs.
+                lines.Add("<b>Requires</b>");
+                foreach (var prereqId in node.PrerequisiteIds)
+                {
+                    var note = PrerequisiteNote(node, prereqId);
+                    var suffix = note == null ? "" : $"  <color=#FFFFFF60>{note}</color>";
+                    lines.Add(graph != null && graph.NodesById.TryGetValue(prereqId, out var prereq)
+                        ? $"{GameStyle.Safe(prereq.Name)} ({GameStyle.Safe(prereq.TraderName)}){suffix}"
+                        : prereqId + suffix);
+                }
+                lines.Add("");
+            }
+
+            AddRoute(lines, node, graph);
+            AddWeaponBuild(lines, node);
+            AddItemsToBring(lines, node, profile);
+
+            // Available for a locked quest too, not just an accepted one: the objective text
+            // arrives with the companion mod's payload rather than being read off a live Quest
+            // instance the game only creates once the quest is unlocked.
+            var objectives = node.StatedObjectives.Select(o => FormatObjective(o, profile)).ToList();
+            if (objectives.Count > 0)
+            {
+                lines.Add("<b>Objectives</b>");
+                lines.AddRange(objectives);
+                lines.Add("");
+            }
+
+            var rewards = node.Rewards
+                .Select(r => FormatReward(r, graph))
+                .Where(r => !string.IsNullOrEmpty(r))
+                .ToList();
+
+            if (rewards.Count > 0)
+            {
+                lines.Add("<b>Rewards</b>");
+                lines.AddRange(rewards);
+                lines.Add("");
+            }
+
+            if (node.Unlocks.Count > 0)
+            {
+                lines.Add("<b>Unlocks</b>");
+                lines.AddRange(node.Unlocks.Select(
+                    u => u.TraderId == node.TraderId ? u.Name : $"{u.Name} ({u.TraderName})"));
+            }
+
+            return lines;
+        }
+
+        /// <summary>
+        /// What you have to be carrying, and how much of it you already hold.
+        ///
+        /// The objective sentences say this in prose - "Mark the first trading post with an MS2000
+        /// Marker on Shoreline" - which is exactly the sort of thing a player reads on the map
+        /// screen, walks into a raid, and discovers they left in the stash. Pulled out as its own
+        /// short list above the objectives, with the held count beside each item, it is answerable
+        /// at a glance.
+        ///
+        /// Grouped by item rather than listed per objective: two objectives wanting the same marker
+        /// need two of it, not two lines about it.
+        /// </summary>
+        private static void AddItemsToBring(List<string> lines, QuestNode node, ProfilePayloadDto profile)
+        {
+            var objectives = node.StatedObjectives;
+            if (objectives == null) return;
+
+            var order = new List<string>();
+            var wanted = new Dictionary<string,
+                (List<string> Templates, string Name, int Need, bool FoundInRaid, string Verb)>();
+
+            foreach (var objective in objectives)
+            {
+                if (objective?.TargetItems == null || objective.TargetItems.Count == 0) continue;
+
+                // Keyed on every template the condition accepts, not on the first of them, and
+                // held counts sum across all of them - the same rule the map sidebar's raid check
+                // folds by. They render one above the other in the same column, and the old rule
+                // (name the first, count only that one) made them disagree: a player carrying seven
+                // grenades of five kinds would read "7 on you" in one section and "0" in the other,
+                // because Confidential Info's first template is a V40 they own none of.
+                var templates = objective.TargetItems.Where(t => !string.IsNullOrWhiteSpace(t)).ToList();
+                if (templates.Count == 0) continue;
+
+                var key = string.Join("|", templates.ToArray());
+                var need = Mathf.Max(1, objective.Count);
+
+                if (wanted.TryGetValue(key, out var existing))
+                {
+                    wanted[key] = (existing.Templates, existing.Name, existing.Need + need,
+                        existing.FoundInRaid || NeedsFoundInRaid(objective), existing.Verb);
+                    continue;
+                }
+
+                order.Add(key);
+                wanted[key] = (templates, ItemName(objective, 0), need, NeedsFoundInRaid(objective), Verb(objective));
+            }
+
+            if (order.Count == 0) return;
+
+            lines.Add("<b>Bring</b>");
+
+            // Whether the server can say where things are. Below schema v2, or with the roots
+            // unread, on-person counts are UNKNOWN rather than zero - and zero reads exactly like
+            // "carrying nothing" on a full rig.
+            var placesKnown = profile != null &&
+                              profile.SchemaVersion >= ProfilePayloadDto.SupportedSchemaVersion &&
+                              profile.InventoryLocationsKnown;
+
+            foreach (var key in order)
+            {
+                var item = wanted[key];
+                var held = HeldCount(profile, item.Templates, item.FoundInRaid, placesKnown);
+
+                var enough = held.OnYou >= item.Need;
+                var colour = enough ? "#" + QuestNodeView.HexFor(ENodeStatus.Completed) : "#" + GameStyle.WarningHex;
+                var fir = item.FoundInRaid ? " found in raid" : "";
+                var count = item.Need > 1 ? $" x{item.Need}" : "";
+
+                // "Held" was the stash-inclusive total, which told you that you hold a marker
+                // sitting at home - the same falsehood the pre-raid cue exists to prevent, one
+                // screen further in. It counts what is ON YOU now, and says where the rest is.
+                // "in task items" ahead of "on you", for the same items and the same reason as the
+                // pre-raid list: a quest item is not somewhere you put it, and saying "on you" invites
+                // the player to go looking in a rig it can never be in.
+                //
+                // Not on a found-in-raid line - InTaskItems has no found-in-raid split, so see the
+                // longer note in MapView.TakeWithYouRow.
+                var where =
+                    !placesKnown ? "held" :
+                    enough && !item.FoundInRaid && held.InTaskItems >= item.Need ? "in task items" :
+                    enough ? "on you" :
+                    held.Elsewhere > 0 && held.InStash == 0 ? $"on you, {held.Elsewhere} elsewhere" :
+                    held.InStash > 0 ? $"on you, {held.InStash} in stash" :
+                    "on you";
+
+                lines.Add(
+                    $"{GameStyle.Safe(item.Name)}{count}  <color={colour}>{held.OnYou} of {item.Need} {where}{fir}</color>" +
+                    $"  <color=#FFFFFF60>{item.Verb}</color>");
+            }
+
+            lines.Add("");
+        }
+
+        /// <summary>What a weapon-build quest actually asks for, in words.
+        ///
+        /// These quests render their objective as "Handover the custom M4A1  0/1", which says
+        /// nothing about the twelve numbers the game is really checking - so people fail them with a
+        /// build that looks right and hand in a rifle two ergonomics short.</summary>
+        /// <summary>What to carry into the raid, as its own list, for the same reason.</summary>
+        internal static List<string> ItemsToBringLines(QuestNode node, ProfilePayloadDto profile)
+        {
+            var lines = new List<string>();
+            AddItemsToBring(lines, node, profile);
+
+            while (lines.Count > 0 && string.IsNullOrEmpty(lines[lines.Count - 1]))
+                lines.RemoveAt(lines.Count - 1);
+
+            if (lines.Count > 0 && lines[0].StartsWith("<b>", StringComparison.Ordinal)) lines.RemoveAt(0);
+
+            return lines;
+        }
+
+        private static void AddWeaponBuild(List<string> lines, QuestNode node)
+        {
+            foreach (var build in node.WeaponBuilds)
+                if (build != null) AddOneWeaponBuild(lines, build);
+        }
+
+        private static void AddOneWeaponBuild(List<string> lines, WeaponBuildDto build)
+        {
+            lines.Add("<b>Build</b>");
+            lines.Add(GameStyle.Safe(build.WeaponName));
+
+            foreach (var threshold in build.Thresholds ?? new List<WeaponBuildThresholdDto>())
+            {
+                if (threshold == null) continue;
+
+                // Durability is NOT a build property - it is the weapon's repair state, and it
+                // appears in all 32 vanilla conditions. Phrased as advice rather than as something
+                // to assemble, because handing in a correct build at 60% durability is a real and
+                // baffling way to fail these.
+                if (string.Equals(threshold.Field, "durability", StringComparison.OrdinalIgnoreCase))
+                {
+                    lines.Add($"<color=#FFFFFF80>hand in at {Compare(threshold)}% durability</color>");
+                    continue;
+                }
+
+                lines.Add($"  {GameStyle.Safe(threshold.Field)} {Compare(threshold)}");
+            }
+
+            foreach (var item in build.RequiredItemNames ?? new List<string>())
+                lines.Add($"  must include {GameStyle.Safe(item)}");
+
+            foreach (var category in build.RequiredCategoryNames ?? new List<string>())
+                lines.Add($"  must include a {GameStyle.Safe(category)}");
+
+            if (build.EmptyTacticalSlots > 0)
+                lines.Add($"  leave {build.EmptyTacticalSlots:0} tactical slot(s) empty");
+
+            lines.Add("");
+        }
+
+        /// <summary>"&gt;= 62". The compare method is printed as the quest data writes it rather
+        /// than translated, so a modded comparison nobody anticipated still reads correctly.</summary>
+        private static string Compare(WeaponBuildThresholdDto threshold) =>
+            $"{GameStyle.Safe(threshold.Compare)} {threshold.Value:0.##}";
+
+        /// <summary>What the profile holds of a condition's templates, summed across all of
+        /// them, counting only found-in-raid copies when the objective insists on them - a stack the
+        /// quest will refuse is not stock.
+        ///
+        /// OnYou falls back to the stash-inclusive total when the server cannot say where things
+        /// are, which is the honest reading of an older payload: it knew how many, not where.
+        ///
+        /// InTaskItems is part OF OnYou, not a fourth place beside it, so callers that sum the parts
+        /// must keep summing three. Added as a named member rather than by widening any existing one,
+        /// which is what keeps the three call sites compiling unchanged.</summary>
+        internal static (int OnYou, int InStash, int Elsewhere, int InTaskItems) HeldCount(
+            ProfilePayloadDto profile, List<string> templates, bool foundInRaid, bool placesKnown)
+        {
+            if (profile?.ItemsOwned == null || templates == null) return (0, 0, 0, 0);
+
+            var onYou = 0;
+            var inStash = 0;
+            var elsewhere = 0;
+            var inTaskItems = 0;
+
+            foreach (var template in templates)
+            {
+                if (string.IsNullOrWhiteSpace(template)) continue;
+                if (!profile.ItemsOwned.TryGetValue(template, out var held) || held == null) continue;
+
+                if (!placesKnown)
+                {
+                    onYou += foundInRaid ? held.FoundInRaid : held.Total;
+                    continue;
+                }
+
+                onYou += foundInRaid ? held.OnPersonFoundInRaid : held.OnPerson;
+                inStash += held.InStash;
+                elsewhere += held.Elsewhere;
+                inTaskItems += held.InTaskItems;
+            }
+
+            return (onYou, inStash, elsewhere, inTaskItems);
+        }
+
+        /// <summary>The condition's own flag when the server sends one (schema v2); the English
+        /// sentence as the fallback for an older server.</summary>
+        internal static bool NeedsFoundInRaid(ObjectiveDto objective) =>
+            objective.FoundInRaid || MentionsFoundInRaid(objective.Text);
+
+        /// <summary>What is done with the item, from the condition type - the difference between
+        /// carrying a marker in and handing a graphics card over, which is the whole reason a
+        /// player cares about this list before a raid rather than after one.</summary>
+        private static string Verb(ObjectiveDto objective) => objective.ConditionType switch
+        {
+            "LeaveItemAtLocation" => "leave it in place",
+            "PlaceBeacon" => "plant it",
+            "HandoverItem" => "hand it in",
+            "FindItem" => "find it",
+            _ => ""
+        };
+
+        /// <summary>
+        /// The display name of one of an objective's target items.
+        ///
+        /// The server resolves these from the locale table (schema v3). The fallback below is what
+        /// every reader used to do on its own: take whatever follows the last colon in the objective
+        /// sentence. That works for "Find in raid and hand over: Bitcoin" and fails completely for a
+        /// sentence with no colon, where it returns the entire sentence as the item's name.
+        /// </summary>
+        internal static string ItemName(ObjectiveDto objective, int index)
+        {
+            if (objective == null) return "";
+
+            var names = objective.TargetItemNames;
+            if (names != null && index < names.Count && !string.IsNullOrWhiteSpace(names[index]))
+                return names[index];
+
+            var template = objective.TargetItems != null && index < objective.TargetItems.Count
+                ? objective.TargetItems[index]
+                : "";
+
+            var text = objective.Text;
+            if (string.IsNullOrEmpty(text)) return template;
+
+            var colon = text.LastIndexOf(':');
+            if (colon < 0 || colon >= text.Length - 1) return string.IsNullOrEmpty(template) ? text : template;
+
+            return text.Substring(colon + 1).Trim();
+        }
+
+        /// <summary>
+        /// The full route to a locked quest: everything it transitively requires that is still
+        /// outstanding, in the order it can be done.
+        ///
+        /// This is the question "Requires" above cannot answer. That line names only the quest
+        /// immediately before this one, which on a deep chain is nearly useless - the real answer
+        /// is the twelve quests behind that one. Ordered by depth, so it reads top to bottom as a
+        /// plan rather than a set.
+        ///
+        /// Gated on the route itself being non-empty rather than on the quest reading as Locked.
+        /// Those are not the same test: a node is only Locked when the client has no live instance
+        /// for it, so on a profile where everything is unlocked at once nothing would ever qualify
+        /// and this section would silently never appear. Asking whether anything is outstanding
+        /// works on any profile - a normally-available quest has its prerequisites done, so the
+        /// route comes back empty and the section hides itself.
+        /// </summary>
+        private static void AddRoute(List<string> lines, QuestNode node, QuestGraphBuilder graph)
+        {
+            // A quest already handed in is not somewhere you are trying to get to.
+            if (node.Status == ENodeStatus.Completed || graph == null) return;
+
+            var route = QuestRoute.Remaining(node, graph);
+
+            // A single step is already spelled out by "Requires" directly above; repeating it as a
+            // one-item route would be noise.
+            if (route.Count < 2) return;
+
+            lines.Add($"<b>Route</b>  <color=#FFFFFF60>{route.Count} quests</color>");
+
+            foreach (var step in route.Take(RouteSteps))
+            {
+                var hex = ColorUtility.ToHtmlStringRGB(QuestNodeView.ColorFor(step.Status));
+
+                lines.Add($"<color=#{hex}>{QuestNodeView.GlyphFor(step.Status)}</color>  {step.Name}" +
+                          $"  <color=#FFFFFF60>{step.TraderName}</color>");
+            }
+
+            if (route.Count > RouteSteps)
+                lines.Add($"<color=#FFFFFF60>+{route.Count - RouteSteps} more</color>");
+
+            lines.Add("");
+        }
+
+        /// <summary>
+        /// The one gate blocking this quest, phrased as something to act on. Trader-scoped gates are
+        /// named from the client's own trader list rather than the server guessing a display name,
+        /// and a prerequisite names the actual quest, since the client has the graph to resolve it.
+        /// </summary>
+        /// <summary>The quest actually standing in the way, when one is, so a caller can offer to
+        /// take you there rather than only naming it.
+        ///
+        /// LockReasonDetail resolves the same ids and then throws them away into a joined string,
+        /// which is why the banner was dead text while every other mention of the same quest in the
+        /// panel was a link.</summary>
+        internal static QuestNode BlockingQuest(QuestNode node, QuestGraphBuilder graph, ProfilePayloadDto profile)
+        {
+            if (profile?.LockReasons == null || graph == null) return null;
+            if (!profile.LockReasons.TryGetValue(node.Id, out var reason) || reason == null) return null;
+            if (reason.Kind != "Prerequisite" || reason.BlockingQuestIds == null) return null;
+
+            foreach (var id in reason.BlockingQuestIds)
+                if (graph.NodesById.TryGetValue(id, out var blocker)) return blocker;
+
+            return null;
+        }
+
+        internal static string FormatLockReason(
+            QuestNode node, QuestGraphBuilder graph, ProfilePayloadDto profile)
+        {
+            var detail = LockReasonDetail(node, graph, profile);
+            return detail == null ? null : $"<color=#{GameStyle.WarningHex}>Locked - {detail}</color>";
+        }
+
+        /// <summary>The gate as plain text, for a row that has its own colour and prefix - the
+        /// Do next reason line used to show the server's raw detail here, without the trader's
+        /// name or the "(you are N)" the detail panel adds.</summary>
+        internal static string LockReasonDetail(
+            QuestNode node, QuestGraphBuilder graph, ProfilePayloadDto profile)
+        {
+            if (profile?.LockReasons == null) return null;
+            if (!profile.LockReasons.TryGetValue(node.Id, out var reason) || reason == null) return null;
+
+            var detail = reason.Detail;
+
+            if (!string.IsNullOrEmpty(reason.TraderId) && graph != null &&
+                graph.TraderNames.TryGetValue(reason.TraderId, out var traderName))
+            {
+                detail = $"{traderName}: {detail}";
+            }
+
+            if (reason.Kind == "Level" && reason.CurrentValue > 0)
+                detail = $"{detail} (you are {reason.CurrentValue})";
+
+            // The profile carries every trader's loyalty level; "requires loyalty level 3" was
+            // shown without the "you are LL2" that says how far off that is.
+            if (reason.Kind == "Loyalty" && !string.IsNullOrEmpty(reason.TraderId) && profile.Traders != null)
+            {
+                var trader = profile.Traders.FirstOrDefault(t => t != null && t.Id == reason.TraderId);
+                if (trader != null && trader.LoyaltyLevel > 0)
+                    detail = $"{detail} (you are LL{trader.LoyaltyLevel})";
+            }
+
+            if (reason.Kind == "Prerequisite" && reason.BlockingQuestIds != null && graph != null)
+            {
+                var names = reason.BlockingQuestIds
+                    .Select(id => graph.NodesById.TryGetValue(id, out var n) ? n.Name : null)
+                    .Where(n => !string.IsNullOrEmpty(n))
+                    .ToList();
+
+                if (names.Count > 0) detail = $"Requires: {string.Join(", ", names)}";
+            }
+
+            return detail;
+        }
+
+        /// <summary>What a prerequisite actually asks for, when it is not the usual "complete
+        /// it": "(started is enough)" for a chain that opens on accepting the earlier quest, and
+        /// "(N h after)" for a timed gate. Both were in the payload from the start and never
+        /// shown, so a time-gated quest read as flatly locked. The gate is in seconds - the SPT
+        /// wiki's quest sheet says so, whatever the server DTO's old comment said.</summary>
+        internal static string PrerequisiteNote(QuestNode node, string prerequisiteId)
+        {
+            var dto = node?.Dto?.Prerequisites?.FirstOrDefault(p => p != null && p.Target == prerequisiteId);
+            if (dto == null) return null;
+
+            var notes = new List<string>();
+
+            if (dto.Status != null && dto.Status.Count > 0 &&
+                !dto.Status.Any(s => string.Equals(s, "Success", StringComparison.OrdinalIgnoreCase)))
+            {
+                notes.Add("started is enough");
+            }
+
+            if (dto.AvailableAfter > 0) notes.Add($"{Duration(dto.AvailableAfter)} after");
+
+            return notes.Count == 0 ? null : $"({string.Join(", ", notes)})";
+        }
+
+        private static string Duration(int seconds) =>
+            seconds >= 3600 ? $"{seconds / 3600} h" : $"{Math.Max(1, seconds / 60)} min";
+
+        /// <summary>A quest in progress in one line: objectives done of total, and the live count
+        /// of the one counter still moving when there is exactly one - "1/3 objectives · 7/15".
+        ///
+        /// Done is QuestScore.ObjectiveSatisfied, the same rule the node box uses, and it has to be.
+        /// This used to count through TryProgress alone, which item objectives have no entry for, so a
+        /// quest holding one satisfied hand-over and one kill counter at 3/10 printed "0/2 objectives ·
+        /// 3/10" here while its box printed "1/2" - the two-surfaces-one-quest disagreement that fix
+        /// existed to end, surviving in the mixed case because CanHandIn only short-circuits the row
+        /// when EVERY objective is done.
+        ///
+        /// Only reached for a quest already accepted (DoNextView's InProgress bucket is
+        /// ENodeStatus.Active), which is what makes reading the stash legitimate here.</summary>
+        internal static string ObjectiveProgress(QuestNode node, ProfilePayloadDto profile)
+        {
+            var objectives = node?.Dto?.Objectives;
+            if (objectives == null || objectives.Count == 0) return "in progress";
+
+            var total = 0;
+            var done = 0;
+            var moving = 0;
+            string counter = null;
+
+            foreach (var objective in objectives)
+            {
+                if (objective == null) continue;
+                total++;
+
+                if (QuestScore.ObjectiveSatisfied(objective, profile))
+                {
+                    done++;
+                    continue;
+                }
+
+                // The one counter still moving, for the tail. Only a counter objective can supply it -
+                // an item objective has no ConditionProgress entry to read - so an unsatisfied item
+                // objective simply contributes nothing here, as before.
+                if (!TryProgress(objective, profile, out var current, out var target)) continue;
+
+                moving++;
+                counter = $"{current}/{target}";
+            }
+
+            var text = $"{done}/{total} objectives";
+            return moving == 1 ? $"{text}  ·  {counter}" : text;
+        }
+
+        /// <summary>An objective with its live counter where the game is tracking one. Counters only
+        /// exist for quests actually in progress, so most objectives render unchanged.</summary>
+        /// <summary>The live counter behind an objective, when the profile payload has one.</summary>
+        internal static bool TryProgress(ObjectiveDto objective, ProfilePayloadDto profile, out int current, out int target)
+        {
+            current = 0;
+            target = 0;
+
+            if (objective == null || profile?.ConditionProgress == null || string.IsNullOrEmpty(objective.Id)) return false;
+            if (!profile.ConditionProgress.TryGetValue(objective.Id, out var done)) return false;
+
+            target = Mathf.Max(1, objective.Count);
+            current = Mathf.Clamp((int)done, 0, target);
+            return true;
+        }
+
+        internal static string FormatObjective(ObjectiveDto objective, ProfilePayloadDto profile)
+        {
+            if (objective == null) return "";
+            if (profile?.ConditionProgress == null || string.IsNullOrEmpty(objective.Id)) return objective.Text;
+            if (!profile.ConditionProgress.TryGetValue(objective.Id, out var done)) return objective.Text;
+
+            var target = Mathf.Max(1, objective.Count);
+            var current = Mathf.Clamp((int)done, 0, target);
+
+            var color = current >= target ? "#" + QuestNodeView.HexFor(ENodeStatus.Completed) : "#FFFFFF80";
+            return $"{objective.Text}  <color={color}>{current}/{target}</color>";
+        }
+
+        /// <summary>Turns one payload reward into a display line. Trader-scoped rewards are named
+        /// from the live session's trader list rather than from the payload, so a modded trader
+        /// reads correctly without the server mod having to know about it.</summary>
+        /// <summary>Whether a name is really a raw id that failed to resolve.
+        ///
+        /// ResolveRewardName falls back to the reward's Target when the locale has no entry for the
+        /// item, and for an assortment unlock that Target is the assort's own id - a 24-character
+        /// hex string. Printing "Aishi starts selling 5c0e531d86f7747fa23f4d42" is worse than not
+        /// naming it at all, so an unresolved name is treated as no name.</summary>
+        private static bool LooksLikeId(string text)
+        {
+            if (string.IsNullOrEmpty(text) || text.Length != 24) return false;
+
+            foreach (var c in text)
+                if (!Uri.IsHexDigit(c)) return false;
+
+            return true;
+        }
+
+        internal static string FormatReward(RewardDto reward, QuestGraphBuilder graph)
+        {
+            if (reward == null) return null;
+
+            // TraderNames is sanitised where the trader list is built; the raw TraderId fallback
+            // is not, and it is printed whenever a modded reward names a trader the graph has never
+            // heard of - a third unsanitised sink in this one function.
+            var trader = !string.IsNullOrEmpty(reward.TraderId) && graph != null &&
+                         graph.TraderNames.TryGetValue(reward.TraderId, out var traderName)
+                ? traderName
+                : GameStyle.Safe(reward.TraderId);
+
+            switch (reward.Type)
+            {
+                case "Experience":
+                    return $"+{reward.Value:N0} XP";
+
+                case "TraderStanding":
+                    return string.IsNullOrEmpty(trader)
+                        ? $"Reputation {reward.Value:+0.00;-0.00}"
+                        : $"{trader} Rep {reward.Value:+0.00;-0.00}";
+
+                case "TraderUnlock":
+                    return string.IsNullOrEmpty(trader) ? "Unlocks a trader" : $"Unlocks {trader}";
+
+                case "Item":
+                    if (string.IsNullOrEmpty(reward.ListName)) return null;
+                    return reward.Value >= 2 ? $"{reward.Value:N0}x {reward.ListName}" : reward.ListName;
+
+                case "Skill":
+                    return string.IsNullOrEmpty(reward.Name) ? null : $"{reward.Name} +{reward.Value:N0}";
+
+                case "AchievementUnlock":
+                    return string.IsNullOrEmpty(reward.Name) ? null : $"Achievement: {reward.Name}";
+
+                case "AssortmentUnlock":
+                    // The item, when we know it. The server already resolves an assortment unlock's
+                    // item name into Name - ResolveRewardName reads reward.Items[0] for every reward
+                    // type - and this branch was the one place that ignored it, so two quests each
+                    // unlocking something different from the same trader both read "Unlocks a new
+                    // Aishi offer" and neither said what.
+                    var offer = LooksLikeId(reward.ListName) ? null : reward.ListName;
+
+                    if (string.IsNullOrEmpty(offer))
+                        return string.IsNullOrEmpty(trader) ? "Unlocks a new trader offer" : $"Unlocks a new {trader} offer";
+
+                    // "Unlocks AFAK at Aishi" rather than "Aishi starts selling AFAK tactical
+                    // individual first aid kit". A reward list is read down the left edge, so the
+                    // verb belongs at the front and the sentence wants to end before it wraps -
+                    // every wrapped row costs a blank-looking line under the one above it.
+                    return string.IsNullOrEmpty(trader) ? $"Unlocks {offer}" : $"Unlocks {offer} at {trader}";
+
+                default:
+                    // Unknown/rare reward types (StashRows, Achievement, ...) still say something
+                    // rather than silently vanishing, but only when there is a name worth showing.
+                    //
+                    // Type is wrapped HERE rather than at ingest: the switch above compares it
+                    // against string literals, so wrapping it earlier would send every modded type
+                    // into this branch. This is the only place it reaches the screen.
+                    return string.IsNullOrEmpty(reward.Name)
+                        ? null
+                        : $"{GameStyle.Safe(reward.Type)}: {reward.Name}";
+            }
+        }
+    }
+}
