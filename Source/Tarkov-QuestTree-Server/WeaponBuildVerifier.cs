@@ -570,6 +570,37 @@ namespace QuestTreeServer
             foreach (var part in mustInclude)
                 if (reach.ContainsKey(part) && !named.Contains(part)) named.Add(part);
 
+            // NO MINIMALITY CLAIM when a named part carries slots of its own, and this is the honest
+            // answer to a real unsoundness rather than a precaution.
+            //
+            // The threshold terms below subtract the named parts' contributions from what is wanted, and
+            // then ask BestBelow how much an assembly of at most r parts ROOTED AT THE WEAPON can add. Those
+            // two do not line up when a non-named part hangs off a named mount: the real build pays for that
+            // mount once, as a named part, while a weapon-rooted assembly of r parts has to spend budget
+            // reaching it again. So the ceiling understates what r parts can really achieve, Reach asks for
+            // more of them, and the floor comes out ABOVE the true minimum - which passes the "at most the
+            // bound" gate on a build that is not minimal. A false proof, in the direction that looks like
+            // success.
+            //
+            // Fixable in principle by charging the mount once instead of twice; declined because every
+            // version of that changes what the word proven means here, and this file's history is of
+            // corrections that were confidently wrong. Gunsmith names handguards and mounts often, so this
+            // gives up a real claim on exactly the quests that matter most - and a claim given up is worth
+            // more than one that cannot be trusted.
+            foreach (var part in named)
+            {
+                if (!Template(part, out var namedItem)) continue;
+                if (namedItem.Properties?.Slots?.Any() != true) continue;
+
+                floor.Unbounded = true;
+                floor.Parts = 0;
+                floor.Reason =
+                    $"the quest names {part}, which carries slots of its own - no lower bound over part " +
+                    "count can be argued while a part may hang off a named host";
+
+                return floor;
+            }
+
             // A category nothing named covers needs a part of its own.
             var uncovered = 0;
             foreach (var category in mustIncludeCategories)

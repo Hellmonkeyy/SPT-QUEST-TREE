@@ -107,6 +107,29 @@ namespace QuestTree.UI
             _presetSaid = null;
         }
 
+        /// <summary>How many parts of a build are the player's to choose, phrased for a headline.
+        ///
+        /// Parts the quest names by id are excluded from the count and reported separately, because they are
+        /// not a choice: the quest will not accept the gun without them. Named CATEGORIES are not excluded -
+        /// "a suppressor" still leaves you picking which one, so that part is a decision.
+        ///
+        /// Falls back to the plain total when the quest names nothing, which is most of them.</summary>
+        private static string ChosenCount(WeaponBuildDto build, SolvedBuildDto solution)
+        {
+            var required = build?.RequiredItemIds;
+            var total = solution.Parts.Count;
+
+            if (required == null || required.Count == 0) return $"{total} parts";
+
+            var forced = 0;
+            foreach (var part in solution.Parts)
+                if (part != null && required.Contains(part.Template)) forced++;
+
+            if (forced == 0) return $"{total} parts";
+
+            return $"{total - forced} parts to pick  ·  {forced} the quest names";
+        }
+
         /// <summary>Draw the quest's sections at the cursor, and advance it past them.</summary>
         internal static void Render(
             RectTransform parent, ref float y, float x, float width,
@@ -420,15 +443,26 @@ namespace QuestTree.UI
             // height/width quests are the second kind. Saying "Suggested build" in accent green on
             // those would be the mod asserting something it never checked - so they get their own
             // wording, and the reason is spelled out in the unchecked line further down.
+            // The parts you CHOOSE, not every part on the gun. A part the quest names by id is not a
+            // decision - you will be fitting it whatever else you do - so counting it in the headline told
+            // you a build was bigger than the work it actually represents. "Gunsmith - Part 6, 11 parts"
+            // reads as eleven things to think about when three of them were dictated.
+            //
+            // The search is deliberately NOT changed to match, and that is not an inconsistency: every
+            // candidate build for one requirement contains the same named parts, so subtracting a constant
+            // from both sides of any comparison the solver makes cannot change which build it prefers.
+            // Only the number reported to a reader moves.
+            var chosen = ChosenCount(build, solution);
+
             string headline;
             if (!solution.Satisfies)
-                headline = $"<color=#{GameStyle.WarningHex}>Closest build found  ·  {solution.Parts.Count} parts</color>";
+                headline = $"<color=#{GameStyle.WarningHex}>Closest build found  ·  {chosen}</color>";
             else if (!solution.FullyChecked)
                 headline = $"<color=#{GameStyle.WarningHex}>Build meets every checkable requirement  ·  " +
-                           $"{solution.Parts.Count} parts</color>";
+                           $"{chosen}</color>";
             else
                 headline = $"<color=#{ColorUtility.ToHtmlStringRGB(GameStyle.AccentColor)}>Suggested build  ·  " +
-                           $"{solution.Parts.Count} parts</color>";
+                           $"{chosen}</color>";
 
             AuxLayout.AddWrapped(ctx.Parent, headline, ctx.X, ref y, width, 12);
 
