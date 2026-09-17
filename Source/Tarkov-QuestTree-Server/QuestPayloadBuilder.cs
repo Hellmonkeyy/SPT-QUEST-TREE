@@ -2157,15 +2157,6 @@ namespace QuestTreeServer
             });
         }
 
-        /// <summary>The three currencies, by template. Taken from the same verified list the item
-        /// watchlist uses rather than inferred from names.</summary>
-        private static readonly HashSet<string> CurrencyTemplates = new()
-        {
-            "5449016a4bdc2d6f028b456f", // roubles
-            "5696686a4bdc2d88308b456a", // dollars
-            "569668774bdc2da2298b4568"  // euros
-        };
-
         /// <summary>Reward types that name their trader in Target rather than TraderId.</summary>
         private static readonly HashSet<string> TraderInTarget = new(StringComparer.OrdinalIgnoreCase)
         {
@@ -2205,7 +2196,7 @@ namespace QuestTreeServer
                 var template = reward.Items?.FirstOrDefault()?.Template.ToString() ?? "";
                 var type = reward.Type?.ToString() ?? "";
                 var value = reward.Value ?? 0d;
-                var currency = CurrencyTemplates.Contains(template);
+                var currency = Currencies.All.Contains(template);
 
                 rewards.Add(new RewardDto
                 {

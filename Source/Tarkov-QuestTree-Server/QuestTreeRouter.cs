@@ -155,6 +155,20 @@ namespace QuestTreeServer
             if (build.Tree == null || build.Tree.Count == 0)
                 return Reply(new SavePresetResponse { Reason = "there is no build for this quest to save" });
 
+            // Status, not just "is there a tree". A blocked answer HAS a tree - JudgeQuietly stores the
+            // closest attempt so the panel can say which threshold it missed and by how much - and it
+            // reaches that same line when the solver did find a build but the independent verifier rejected
+            // it. Either way the parts do not satisfy the quest, and writing them as a preset means the
+            // player loads a gun the trader will refuse while the panel says it saved fine.
+            //
+            // The same test StillObtainable uses, deliberately: "ok" or "repaired" is what this codebase
+            // means by a build worth acting on.
+            if (build.Status is not ("ok" or "repaired"))
+                return Reply(new SavePresetResponse
+                {
+                    Reason = "this build does not meet the quest yet, so there is nothing worth saving"
+                });
+
             if (!build.WeaponTemplate.TryParseMongoId(out var weapon))
                 return Reply(new SavePresetResponse { Reason = "this quest's weapon could not be identified" });
 

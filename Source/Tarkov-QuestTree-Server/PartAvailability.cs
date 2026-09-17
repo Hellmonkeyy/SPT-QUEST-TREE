@@ -71,15 +71,6 @@ namespace QuestTreeServer
         {
             "FirstPrimaryWeapon", "SecondPrimaryWeapon", "Holster"
         };
-        /// <summary>Currencies a cash price can be quoted in. A requirement naming anything else is a
-        /// barter.</summary>
-        private static readonly HashSet<string> Currencies = new(StringComparer.Ordinal)
-        {
-            "5449016a4bdc2d6f028b456f", // roubles
-            "5696686a4bdc2da3298b456a", // dollars
-            "569668774bdc2da2298b4568"  // euros
-        };
-
         public enum Tier
         {
             /// <summary>On the weapon's default preset. Nothing to obtain.</summary>
@@ -302,7 +293,12 @@ namespace QuestTreeServer
             sources.FleaAccess = minimum is { } needed && level >= needed;
             sources.Flea = FleaPrices();
             sources.FleaBanned = _banned ?? new HashSet<MongoId>();
-            sources.IsVanilla = template => Vanilla().Contains(template);
+            // Empty means the file could not be READ, not that no vanilla items exist - so the empty
+            // case answers true rather than asking the set, which would answer false for every template.
+            // Asking it directly made every part read as mod-injected on an install where nothing was: the
+            // exact inversion of the direction Vanilla()'s own catch says it takes.
+            var vanilla = Vanilla();
+            sources.IsVanilla = vanilla.Count == 0 ? _ => true : template => vanilla.Contains(template);
 
             stamp.Append("flea:").Append(sources.FleaAccess ? 1 : 0).Append('|');
 
@@ -539,7 +535,7 @@ namespace QuestTreeServer
                 var requirement = scheme[0];
 
                 if (requirement?.Template == null) continue;
-                if (!Currencies.Contains(requirement.Template.ToString())) continue;
+                if (!Currencies.All.Contains(requirement.Template.ToString())) continue;
 
                 var price = (long)Math.Round(requirement.Count ?? 0d);
 
@@ -659,8 +655,11 @@ namespace QuestTreeServer
                 }
                 catch (Exception ex)
                 {
-                    // With no file every part reads as vanilla, which is the direction that claims LESS: it
-                    // never calls a shipped part mod-injected.
+                    // Left EMPTY, and the caller turns that into "every part reads as vanilla" - the
+                    // direction that claims LESS, since it never calls a shipped part mod-injected. Doing
+                    // it at the caller rather than by filling this set with something is deliberate: there
+                    // is nothing honest to fill it with, and an empty set asked directly says the opposite
+                    // of what this comment promises. See where IsVanilla is assigned.
                     logger.Warning($"Quest Tracker: could not read the vanilla items file ({ex.Message}) - mod-injected parts cannot be told apart.");
                 }
 

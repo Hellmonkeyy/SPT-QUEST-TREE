@@ -24,10 +24,16 @@ namespace QuestTree.UI
         /// sell your roubles" is not advice - the list is about items you would otherwise vendor
         /// without realising a quest wanted them. Verified against the objective text ("Hand over
         /// RUB"/"EUR") rather than assumed from the ids.</summary>
+        /// Hand-mirrored from QuestTreeServer.Currencies, the way the DTOs are, because the two halves
+        /// are separate assemblies on different frameworks. Keep them equal.
+        ///
+        /// The Dollars id here was "5696686a4bdc2d88308b456a" until 1.13.0 - not a real template at all -
+        /// so dollars were never recognised as money and this list advised players not to sell them. Four
+        /// vanilla objectives hand dollars over, so the row really did appear.
         private static readonly HashSet<string> Currency = new()
         {
             "5449016a4bdc2d6f028b456f", // Roubles
-            "5696686a4bdc2d88308b456a", // Dollars
+            "5696686a4bdc2da3298b456a", // Dollars
             "569668774bdc2da2298b4568"  // Euros
         };
 
