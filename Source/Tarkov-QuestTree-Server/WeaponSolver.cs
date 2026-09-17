@@ -255,6 +255,16 @@ namespace QuestTreeServer
             /// the item data instead of from one arrangement of it.</summary>
             public int Floor { get; set; }
 
+            /// <summary>The least any satisfying build could cost to assemble, and what forces it.
+            ///
+            /// A REAL lower bound, unlike Floor above: it is argued from what the quest names rather than
+            /// from one arrangement of the gun, so a build that reaches it is provably minimal on the
+            /// objective. Zero is the honest answer for a requirement that names nothing which has to be
+            /// bought, and it proves nothing.</summary>
+            public long CostFloor { get; set; }
+
+            public string CostFloorReason { get; set; } = "";
+
             public int NodesOpened { get; set; }
         }
 
@@ -410,6 +420,17 @@ namespace QuestTreeServer
 
             result.Floor = floor;
 
+            // THE COST FLOOR, worked out once for the same reason the part floor is: it is what the restart
+            // loop below stops at, and a bound that moved while the search ran would let the loop break on
+            // whatever build happened to match the loosest version of it.
+            var costFloor = CheapestCost(
+                weapon, state.Reachable, state.Defaults, state.Pricing, mustInclude, mustIncludeCategories,
+                out var costReason);
+
+            state.CostFloor = costFloor;
+            result.CostFloor = costFloor;
+            result.CostFloorReason = costReason;
+
             // Search once for a build that works, then keep asking for one part fewer until the answer
             // is no. The climb only ever ADDS a part that closes a shortfall and the pruning passes only
             // ever take off what carries nothing, so between them they find a build that cannot be made
@@ -461,11 +482,18 @@ namespace QuestTreeServer
             // so far costs and keep going while the answer is yes. The part ceiling is released while this
             // runs, because a cheaper build is allowed to be a larger one - that is the whole trade. Bounded
             // by the search budget: every round is a full set of restarts, and the time ceiling ends it.
+            // Against the COST FLOOR rather than against zero, which is the whole of what the bound buys
+            // here. "bestCost > 0" asked for a cheaper build on every requirement whose build costs anything
+            // at all - which is all but a handful - so every attempt paid for one full round of restarts whose
+            // only result was "nothing cheaper exists". The loop did still break on that round rather than
+            // running to the time budget; what it could not do was know in advance that the round was
+            // pointless. At the floor there is nothing cheaper to find, so the loop drops straight through to
+            // squeezing part count, the same way it always did once cost reached zero.
             while (best != null && bestWhole == 0 && bestShortfall <= 0d && !state.Exhausted
-                   && (bestCost > 0 || bestCount > floor))
+                   && (bestCost > costFloor || bestCount > floor))
             {
-                state.PartCeiling = bestCost > 0 ? int.MaxValue : bestCount - 1;
-                state.CostCeiling = bestCost > 0 ? bestCost - 1 : bestCost;
+                state.PartCeiling = bestCost > costFloor ? int.MaxValue : bestCount - 1;
+                state.CostCeiling = bestCost > costFloor ? bestCost - 1 : bestCost;
                 state.Incumbent = best;
 
                 var whole = int.MaxValue;
@@ -486,6 +514,46 @@ namespace QuestTreeServer
                 bestShortfall = shortfall;
                 bestCount = count;
                 bestCost = cost;
+            }
+
+            // THE BOUND AGAINST REALITY, and the only reason to trust anything above. A floor is a claim
+            // that no satisfying build costs less; a satisfying build in hand that costs less is that claim
+            // refuted, and the one thing that must never pass in silence. Every other consumer reads the
+            // floor as a proof, so if it is ever wrong this is where it has to say so.
+            //
+            // Deliberately a comparison that CAN fail: it is checked against the build the search actually
+            // returned, under the pricing the search actually used, and nothing about the way the floor is
+            // derived guarantees the answer. Every term in CheapestCost is an independent argument about what
+            // must be bought, and Priced is an independent walk of what was bought.
+            if (best != null && bestWhole == 0 && bestShortfall <= 0d && bestCost < costFloor)
+            {
+                // WHICH of the two it is, because the guard above cannot tell them apart and the wrong
+                // accusation is expensive. bestWhole is Cost.Gaps, and Measure counts gaps for empty required
+                // slots, the ceilings and unmet categories - it never counts a MISSING NAMED PART, which is
+                // enforced by Plan's locked nodes and checked only by the verifier. So a prune pass that drops
+                // a named part produces a build the solver calls complete, costing less than a floor that
+                // charged for that part, and the floor is not what is wrong.
+                //
+                // This file's history is of alarms that pointed at the wrong thing, so it says which.
+                var fitted = new List<MongoId>();
+                CollectTemplates(best, fitted);
+
+                var dropped = new List<MongoId>();
+                foreach (var part in mustInclude)
+                    if (part != weapon && !fitted.Contains(part)) dropped.Add(part);
+
+                if (dropped.Count > 0)
+                    logger.Error(
+                        $"Quest Tracker: the search for '{weapon}' returned a build it calls complete that is " +
+                        $"MISSING {dropped.Count} part(s) the quest names ({string.Join(", ", dropped)}), which " +
+                        $"is why it costs {bestCost:N0} against a floor of {costFloor:N0}. The floor is not the " +
+                        "problem; the build is, and the verifier will reject it.");
+                else
+                    logger.Error(
+                        $"Quest Tracker: the cost floor for '{weapon}' is UNSOUND - it claims no satisfying " +
+                        $"build costs less than {costFloor:N0} ({costReason}), and this search returned a " +
+                        $"build at {bestCost:N0} carrying every part the quest names. Every minimality claim " +
+                        "over cost is suspect until this is explained.");
             }
 
             state.CostCeiling = long.MaxValue;
@@ -591,17 +659,18 @@ namespace QuestTreeServer
                     best = root;
                 }
 
-                // Nothing left to want: everything satisfied, nothing to buy, and at a size nothing could
-                // undercut.
+                // Nothing left to want: everything satisfied, at a price nothing could undercut, and at a
+                // size nothing could undercut either.
                 //
-                // bestCost == 0 makes this all but unreachable, and that is a deliberate trade rather than an
-                // oversight. Under handbook pricing every purchase costs PerPurchase, so a zero-cost build is
-                // one assembled entirely from the default preset and parts already owned - which a Gunsmith
-                // quest naming specific parts essentially never is. Weakening it to "no cheaper build is
-                // possible" needs a lower bound over PRICE, which does not exist; stopping on size alone
-                // would abandon the objective the search is actually minimising. So the restarts run and the
-                // budget is what stops them.
-                if (bestWhole == 0 && bestShortfall <= 0d && bestCost == 0 && bestCount <= floor) break;
+                // Against state.CostFloor, where this used to read bestCost == 0. That was all but
+                // unreachable and said so: under handbook pricing every purchase costs PerPurchase, so a
+                // zero-cost build is one assembled entirely from the default preset and parts already owned,
+                // which a Gunsmith quest naming specific parts essentially never is. The comment here then
+                // said weakening it needed "a lower bound over PRICE, which does not exist". CheapestCost is
+                // that bound, so the condition is now what it always wanted to be: stop when no cheaper build
+                // is POSSIBLE, not merely when the build is free.
+                if (bestWhole == 0 && bestShortfall <= 0d && bestCost <= state.CostFloor
+                    && bestCount <= floor) break;
                 if (state.Exhausted) break;
             }
 
@@ -682,6 +751,19 @@ namespace QuestTreeServer
             };
 
             var required = Required(weapon, mustInclude);
+
+            // THE COST FLOOR HERE TOO, and leaving it out made the count that reports it a check that could
+            // not fail. A normal boot never searches: the survey restores the shipped build, describes it, and
+            // returns early because training is off - so every Result a shipped install sees comes from this
+            // method, CostFloor stayed at its default of zero, the "floor > 0" guard rejected all sixty, and
+            // the new line printed the same unconditional zero as the hardcoded one it replaced, under a
+            // comment claiming the number was now measured.
+            state.CostFloor = CheapestCost(
+                weapon, reachable, state.Defaults, state.Pricing, mustInclude, mustIncludeCategories,
+                out var costReason);
+
+            result.CostFloor = state.CostFloor;
+            result.CostFloorReason = costReason;
 
             var root = Rebuild(weapon, parts, state);
 
@@ -2113,6 +2195,158 @@ namespace QuestTreeServer
             }
         }
 
+        /// <summary>The least any satisfying build could cost to assemble, and what forces it.
+        ///
+        /// The objective is price, and until this existed there was no bound over it - so the restart loop
+        /// could only ever stop at a cost of ZERO, which under handbook pricing means a build assembled
+        /// entirely from the default preset and parts already owned. A Gunsmith quest naming specific parts
+        /// essentially never is that, so every attempt paid for one full round of restarts to be told
+        /// "nothing cheaper exists", and nothing was ever proven minimal on the thing being minimised.
+        ///
+        /// Argued from what the quest NAMES, never from the build. Every part in mustInclude is in every
+        /// satisfying build by definition, so what those parts cost is a floor under what any of them costs.
+        ///
+        /// Generous at every step, because a bound that errs the other way proves things that are not true:
+        ///
+        /// - A part on the default preset in ANY slot is charged nothing, though Priced keys on (host, slot)
+        ///   and would charge for that same part fitted somewhere else. Charging LESS than the real cost
+        ///   function is what keeps this a bound.
+        /// - A named part out of reach is charged nothing rather than treated as impossible.
+        /// - A part with no price is charged PerPurchase alone, matching Priced.
+        /// - Categories are summed only where their member sets are provably disjoint, and the largest taken
+        ///   otherwise, because one part can satisfy two overlapping categories.
+        /// - A category with any free or stock member is charged nothing at all.
+        ///
+        /// THRESHOLDS CONTRIBUTE NOTHING, and that is a real limit rather than an oversight. An ergonomics or
+        /// recoil deficit says some part must supply the difference; it does not say that part has to be
+        /// BOUGHT, because the default preset's own parts are free and already fitted. Turning a deficit into
+        /// money needs an argument about what is reachable for nothing, and no such argument is made here.
+        ///
+        /// What this does NOT inherit is the named-mount hole that makes the part-count floor withhold on 37
+        /// of the 60 requirements on this install. That hole comes from subtracting a named part's stat
+        /// contribution and then asking what a weapon-rooted assembly of r parts can add - a budget
+        /// reachability argument this has none of. Here a part hanging off a named mount is simply charged
+        /// nothing, which lowers the bound and cannot raise it. So this bound stands exactly where the other
+        /// one gives up.</summary>
+        public long CheapestCost(
+            MongoId weapon,
+            IReadOnlyCollection<MongoId> mustInclude,
+            IReadOnlyCollection<MongoId> mustIncludeCategories,
+            Pricing pricing,
+            out string reason)
+        {
+            reason = "the weapon's slot graph could not be walked";
+
+            var reachable = graph.Reachable(weapon, out _);
+
+            if (reachable == null) return 0;
+
+            return CheapestCost(
+                weapon, reachable, presets.For(weapon), pricing, mustInclude, mustIncludeCategories,
+                out reason);
+        }
+
+        private long CheapestCost(
+            MongoId weapon,
+            IReadOnlyDictionary<MongoId, WeaponGraph.PartInfo> reachable,
+            WeaponPresets.Defaults? defaults,
+            Pricing pricing,
+            IReadOnlyCollection<MongoId> mustInclude,
+            IReadOnlyCollection<MongoId> mustIncludeCategories,
+            out string reason)
+        {
+            // Exactly what Priced would charge for one part, read DOWN wherever the two could differ.
+            long Charge(MongoId template)
+            {
+                if (defaults != null && defaults.OccupiesAnySlot(template)) return 0;
+                if (pricing.Free != null && pricing.Free.Contains(template)) return 0;
+
+                var price = pricing.Price(template);
+
+                return (price is { } known && known > 0 ? known : 0) + pricing.PerPurchase;
+            }
+
+            // The weapon itself is never charged, the same exclusion Required makes and for the same reason:
+            // Priced walks a node's CHILDREN, so the root is free by construction. WeaponGraph.Walk puts the
+            // root in reachable, so without this a condition naming its own target would charge the whole
+            // weapon's price into a floor no build can reach - an over-charge, which is the one direction a
+            // bound must never err in. No vanilla condition does that today; the asymmetry with Required two
+            // hundred lines up is what would make it a bug later.
+            var named = new List<MongoId>();
+            foreach (var part in mustInclude)
+                if (part != weapon && reachable.ContainsKey(part) && !named.Contains(part)) named.Add(part);
+
+            var cost = 0L;
+            var charged = 0;
+
+            foreach (var part in named)
+            {
+                var charge = Charge(part);
+
+                if (charge <= 0) continue;
+
+                cost += charge;
+                charged++;
+            }
+
+            // A category no named part covers needs a part of its own, and the cheapest member of it is a
+            // floor under whatever that part turns out to be.
+            var groups = new List<(HashSet<MongoId> Members, long Cheapest)>();
+
+            foreach (var category in mustIncludeCategories)
+            {
+                if (named.Any(part => itemHelper.IsOfBaseclass(part, category))) continue;
+
+                var members = new HashSet<MongoId>();
+                var cheapest = long.MaxValue;
+
+                foreach (var (template, _) in reachable)
+                {
+                    if (template == weapon) continue;
+                    if (!itemHelper.IsOfBaseclass(template, category)) continue;
+
+                    members.Add(template);
+                    cheapest = Math.Min(cheapest, Charge(template));
+                }
+
+                // Nothing reachable covers it, or something free does: claim nothing either way.
+                if (members.Count == 0 || cheapest <= 0) continue;
+
+                groups.Add((members, cheapest));
+            }
+
+            var disjoint = true;
+
+            for (var i = 0; i < groups.Count && disjoint; i++)
+                for (var j = i + 1; j < groups.Count; j++)
+                    if (groups[i].Members.Overlaps(groups[j].Members))
+                    {
+                        disjoint = false;
+                        break;
+                    }
+
+            if (groups.Count > 0)
+            {
+                if (disjoint)
+                    foreach (var group in groups)
+                    {
+                        cost += group.Cheapest;
+                        charged++;
+                    }
+                else
+                {
+                    cost += groups.Max(group => group.Cheapest);
+                    charged++;
+                }
+            }
+
+            reason = charged == 0
+                ? "nothing the quest names has to be bought"
+                : $"{charged} part(s) the quest names that are neither on the default preset nor already held";
+
+            return cost;
+        }
+
         private static (int Width, int Height) Footprint(Node root, SearchState state)
         {
             if (!state.Reachable.TryGetValue(root.Template, out var weapon)) return (1, 1);
@@ -2545,6 +2779,10 @@ namespace QuestTreeServer
             /// objective's own ceiling, driven the way PartCeiling is: ask for less than the best answer so
             /// far costs, and see whether anything qualifies.</summary>
             public long CostCeiling = long.MaxValue;
+
+            /// <summary>The least any satisfying build could cost. What the restart loop stops AT, the way
+            /// Floor is what the part-count search stops at - see CheapestCost.</summary>
+            public long CostFloor;
 
             /// <summary>What parts cost the player this search is for. Never null once Solve has set it.</summary>
             public Pricing Pricing = new() { PerPurchase = 1 };

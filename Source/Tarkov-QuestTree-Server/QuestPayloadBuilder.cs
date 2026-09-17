@@ -119,8 +119,8 @@ namespace QuestTreeServer
         ///
         /// What it still is: a true statement about part count, produced by a bound that cost 566 million
         /// nodes to establish, and the set the falsifier attacks. What it is NOT is a count of builds proven
-        /// minimal over the new objective - that needs a lower bound over CHANGES, which does not exist yet,
-        /// so that count is reported as zero rather than inheriting this one's number.</summary>
+        /// minimal over the objective - that is _provenCost, counted separately against its own bound, and
+        /// neither number may be reported as the other.</summary>
         private readonly HashSet<string> _proven = new();
 
         /// <summary>Requirements this boot could prove NO lower bound for, which is the opposite end of
@@ -135,6 +135,40 @@ namespace QuestTreeServer
         /// A ConcurrentDictionary-backed set would be tidier; this is guarded by the same lock as _proven
         /// at every touch, which is the convention the rest of this file already follows.</summary>
         private readonly HashSet<string> _unbounded = new();
+
+        /// <summary>Requirements whose build is proven minimal on COST - the objective - as opposed to
+        /// _proven, which is over part count and answers a different question.
+        ///
+        /// Separate from _proven rather than folded into it, because the two are independent: a build can sit
+        /// at its cost floor while carrying a part more than necessary, and it can be the leanest possible
+        /// build while costing more than the cheapest one. Reporting either number as the other is the
+        /// mistake the line this feeds used to make by reporting zero.
+        ///
+        /// Guarded by _proven's lock at every touch, the convention _unbounded already follows.</summary>
+        private readonly HashSet<string> _provenCost = new();
+
+        /// <summary>Each requirement's cost floor, worked out once.
+        ///
+        /// The floor is a function of the item data, the handbook and PerPurchase, and none of the three
+        /// moves while the server runs - PartPrices memoises PerPurchase on its first read, so the environment
+        /// cannot change it underneath this. So recomputing per attempt would repeat a slot-graph walk for an
+        /// answer that cannot change, which is exactly the waste Proven was carrying before _unbounded was put
+        /// in front of it. Not keyed on PerPurchase for that reason, and this comment is the reason it is
+        /// safe not to be.</summary>
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _costFloors = new();
+
+        /// <summary>Requirements whose remembered cost was re-priced by THIS install, which is the only cost a
+        /// floor computed from this install's handbook may be compared against.
+        ///
+        /// The shipped history carries the cost each build had where it was found, and 12 of the 32 shipped
+        /// entries price differently here - one stores 135,454 against 70,856 on this install. Comparing a
+        /// foreign number to a local floor is comparing two different objectives, and it errs in both
+        /// directions, so the proof waits for the local number instead of trusting the stored one.
+        ///
+        /// PerPurchase alone does not settle this: two installs agreeing on PerPurchase can still disagree on
+        /// every part price, and the survey's own cost refresh is what makes the figure local. Recorded at the
+        /// two places that refresh it, both of which describe the build under Handbook first.</summary>
+        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _repriced = new();
 
         /// <summary>Searches spent this boot. The unit the progress line and both gates count in, since a
         /// round stopped existing when the barrier did.</summary>
@@ -234,6 +268,16 @@ namespace QuestTreeServer
             var cost = 0L;
             var unpriced = 0;
             var withDefaults = 0;
+
+            // Builds sitting at their COST floor, which is a different claim from atFloor above and counted
+            // separately: that one is over part count, this one is over the objective.
+            var atCostFloor = 0;
+
+            // Requirements the floor could say nothing about, reported rather than folded into the gap between
+            // two other numbers - the same discipline unbounded follows for part count. CostFloorReason is
+            // where a zero becomes legible: "nothing the quest names has to be bought" is a different fact
+            // from a floor that failed to compute.
+            var noCostBound = new List<string>();
             var failed = new List<string>();
 
             // The search has a wall-clock ceiling, so how much of it the worst request actually spends
@@ -334,6 +378,8 @@ namespace QuestTreeServer
                     if (!lowest.Unbounded) proven += lowest.Parts;
                     changes += result.Changes;
                     cost += result.Cost;
+                    if (result.CostFloor > 0 && result.Cost <= result.CostFloor) atCostFloor++;
+                    if (result.CostFloor <= 0) noCostBound.Add($"{questName} ({result.CostFloorReason})");
                     unpriced += result.Unpriced;
                     if (weaponPresets.For(weapon) != null) withDefaults++;
 
@@ -410,17 +456,24 @@ namespace QuestTreeServer
                     : "") +
                 (disagreed > 0 ? $", SOLVER AND VERIFIER DISAGREED ON {disagreed}" : "") + ".");
 
-            // The objective's own line, and the statement about what is NOT proven about it. Every bound and
-            // every proof in this file is over part count; none of them says anything about how many parts a
-            // player has to buy, so the count of builds proven minimal on the objective is zero - not the
-            // twenty-one carried over from a bound that answers a different question.
+            // The objective's own line. It used to end by saying no bound over cost existed and reporting an
+            // unconditional zero; WeaponSolver.CheapestCost is that bound, so the number is now measured.
+            // Still NOT the part-count figure carried over - the two bounds answer different questions and a
+            // build can satisfy either without the other.
             logger.Info(
                 $"Quest Tracker: the objective - {cost:N0} roubles across {solved} build(s) at handbook prices " +
                 $"plus {partPrices.PerPurchase:N0} per purchase ({(solved > 0 ? cost / Math.Max(1, solved) : 0):N0} per " +
                 $"build), over {changes} change(s) from the default presets ({(solved > 0 ? (double)changes / solved : 0d):0.##} " +
                 $"per build), {unpriced} purchase(s) with no handbook price; {withDefaults} of them have a default preset " +
-                $"to be measured against; {partPrices.Count:N0} templates priced. 0 of {solved} are proven minimal on cost: " +
-                "the bound that proves minimality is over PART COUNT, and no bound over cost exists yet.");
+                $"to be measured against; {partPrices.Count:N0} templates priced. {atCostFloor} of {solved} are at " +
+                $"their COST FLOOR, so no cheaper build exists for them; {noCostBound.Count} have no cost bound at " +
+                "all. The floor is argued from the parts the quest names, and says nothing about thresholds.");
+
+            if (noCostBound.Count > 0)
+                logger.Debug(
+                    "Quest Tracker: build requirement(s) with no cost bound - " +
+                    string.Join("; ", noCostBound.Take(10)) +
+                    (noCostBound.Count > 10 ? $" and {noCostBound.Count - 10} more" : "") + ".");
 
             // Per quest, how far the build is above what can be PROVEN necessary. A gap is not waste -
             // the bound omits the chains that named parts have to be routed through, and bounding
@@ -1291,7 +1344,7 @@ namespace QuestTreeServer
                     $"Quest Tracker: {what} - {_attempts:N0} attempt(s) in {clock.Elapsed.TotalMinutes:0.0} " +
                     $"minute(s) across {Threads} thread(s) ({_attempts / minutes:N0}/min), {_improved} smaller " +
                     $"build(s) found. {_proven.Count} of {Requirements} are provably minimal ON PART COUNT, " +
-                    $"0 proven minimal on COST - the objective - because no bound over cost exists yet. " +
+                    $"{_provenCost.Count} of {Requirements} proven minimal on COST - the objective. " +
                     $"{_boundsChecked:N0} bound comparison(s) across {_bounds.Count} requirement(s), " +
                     $"{_boundsDisagreed} disagreement(s)." +
                     (Falsifying
@@ -1784,6 +1837,30 @@ namespace QuestTreeServer
                 proven = true;
             }
 
+            // And the same question over the OBJECTIVE, which is the one that was reported as an
+            // unconditional zero because no bound over cost existed. CheapestCost is that bound.
+            //
+            // Gated twice, because a remembered cost is only comparable to a local floor if it IS a local
+            // cost. PerPurchase must match - it is read from the environment, so a history written under a
+            // different one measures a different objective - and the entry must have been re-priced by this
+            // install, see _repriced. The shipped history stores whatever each build cost where it was found,
+            // and on this install 12 of 32 of those figures are wrong for it.
+            bool provenCost;
+            lock (_proven) provenCost = _provenCost.Contains(key);
+
+            if (!provenCost && remembered.PerPurchase == partPrices.PerPurchase && _repriced.ContainsKey(key))
+            {
+                var costFloor = _costFloors.GetOrAdd(
+                    key,
+                    _ => weaponSolver.CheapestCost(
+                        weapon, mustInclude, mustIncludeCategories, Handbook, out _));
+
+                // At most the floor, and a floor of zero proves nothing: it is what a requirement naming
+                // nothing purchasable produces, and every build is at most zero only when it is free.
+                if (costFloor > 0 && remembered.Cost <= costFloor)
+                    lock (_proven) _provenCost.Add(key);
+            }
+
             // AND THEN IT KEEPS SEARCHING, which is the change the new objective forces. A build at its
             // part-count bound cannot get smaller; it can still get cheaper to assemble, and cheaper is what
             // is being minimised. The early return that used to live here would have frozen 21 of the 60 at
@@ -1857,6 +1934,7 @@ namespace QuestTreeServer
             }
 
             weaponBuildCache.Changed(key, standing.Changes, standing.Cost, Handbook.PerPurchase);
+            _repriced[key] = 1;
 
             // Somewhere new that is no cheaper and no leaner: worth searching from, not worth serving.
             //
@@ -2026,6 +2104,7 @@ namespace QuestTreeServer
                     // search is for. And what it costs, so the file says what the objective is for it.
                     weaponBuildCache.Note(key, standing.Binding);
                     weaponBuildCache.Changed(key, standing.Changes, standing.Cost, Handbook.PerPurchase);
+                    _repriced[key] = 1;
 
                     if (!weaponBuildCache.Training)
                     {
