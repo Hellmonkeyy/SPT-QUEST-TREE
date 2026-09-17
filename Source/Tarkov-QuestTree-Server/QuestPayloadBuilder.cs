@@ -90,6 +90,11 @@ namespace QuestTreeServer
         private int _falsifyTries;
         private int _falsified;
 
+        /// <summary>Adversarial searches a single bound needs before the budget moves elsewhere. Evidence
+        /// has diminishing returns: the thousandth failed attack on one build says far less than the first
+        /// attack on a build nobody has tested.</summary>
+        private const int FalsifyEnough = 2_000;
+
         /// <summary>Whether this launch tries to DISPROVE its own minimality proofs.
         ///
         /// A gate that rewards a higher proven count is an incentive to loosen the prover, and loosening it
@@ -101,11 +106,6 @@ namespace QuestTreeServer
         ///
         /// Off by default because it is pure cost on a player's machine: nothing it finds makes a build
         /// smaller, it only says whether a claim is false.</summary>
-        /// <summary>Adversarial searches a single bound needs before the budget moves elsewhere. Evidence
-        /// has diminishing returns: the thousandth failed attack on one build says far less than the first
-        /// attack on a build nobody has tested.</summary>
-        private const int FalsifyEnough = 2_000;
-
         private static bool Falsifying =>
             Environment.GetEnvironmentVariable("QUESTTREE_FALSIFY") is "1" or "true" or "TRUE" or "yes";
 
@@ -175,15 +175,6 @@ namespace QuestTreeServer
             return Task.CompletedTask;
         }
 
-        /// <summary>Runs the solver over every build requirement on this install, once, and says
-        /// how many it could satisfy.
-        ///
-        /// A search is either tractable on real data or it is not, and counting is the only way to
-        /// find out. This runs against the FULL parts list rather than what the player can buy,
-        /// deliberately: it is asking whether the search works, not whether this profile can afford
-        /// the answer, and conflating the two would make a solver bug look like a poor trader level.
-        ///
-        /// Debug, because it is a developer's question. The one-line summary is Info.</summary>
         /// <summary>The shared baseline's pricing: the handbook, static and the same for everyone, so the
         /// history it produces ships. Built once; PartPrices reads the environment for PerPurchase.</summary>
         private WeaponSolver.Pricing Handbook =>
@@ -193,6 +184,15 @@ namespace QuestTreeServer
                 PerPurchase = partPrices.PerPurchase
             };
 
+        /// <summary>Runs the solver over every build requirement on this install, once, and says
+        /// how many it could satisfy.
+        ///
+        /// A search is either tractable on real data or it is not, and counting is the only way to
+        /// find out. This runs against the FULL parts list rather than what the player can buy,
+        /// deliberately: it is asking whether the search works, not whether this profile can afford
+        /// the answer, and conflating the two would make a solver bug look like a poor trader level.
+        ///
+        /// Debug, because it is a developer's question. The one-line summary is Info.</summary>
         private WeaponSolver.Pricing? _handbook;
 
         private void SurveySolver()

@@ -62,7 +62,6 @@ namespace QuestTree.UI
         private (QuestNode From, QuestNode To, Vector2 FromPoint, Vector2 ToPoint)[] _edgeLayout =
             Array.Empty<(QuestNode, QuestNode, Vector2, Vector2)>();
 
-        /// <summary>Edges currently on screen, keyed by their layout index.</summary>
         /// <summary>
         /// Edge colours. The resting line is quiet - at 0.25 alpha, a few hundred of them were the
         /// loudest thing on the screen - and an edge into a quest you can act on is drawn heavier
@@ -70,6 +69,7 @@ namespace QuestTree.UI
         /// somewhere are the ones you see. Dimmed is everything outside the hovered chain.
         /// </summary>
         private static Color EdgeColor => new(1f, 1f, 1f, EdgeOpacityScale * 0.14f);
+        /// <summary>Edges currently on screen, keyed by their layout index.</summary>
         private static Color EdgeToLockedColor => new(1f, 1f, 1f, EdgeOpacityScale * 0.08f);
 
         /// <summary>The Settings opacity as a multiplier on the resting alphas (14% is 1.0).</summary>
@@ -1367,8 +1367,6 @@ namespace QuestTree.UI
         public void RefreshNotice() =>
             _toolbar?.UpdateRenderNotice(_layoutOrder.Length, _lastCandidateCount, _lastFocused);
 
-        /// <summary>The first quest in layout order - the top of the first column, which is the
-        /// earliest match in the chain - or null when nothing is laid out.</summary>
         /// <summary>A keystroke in the search box.
         ///
         /// Repaints; does not re-render. This used to be wired straight to a full RenderSelectedTab,
@@ -1394,6 +1392,8 @@ namespace QuestTree.UI
             RepaintEmphasis();
         }
 
+        /// <summary>The first quest in layout order - the top of the first column, which is the
+        /// earliest match in the chain - or null when nothing is laid out.</summary>
         public QuestNode FirstMatch()
         {
             if (_layoutOrder.Length == 0) return null;

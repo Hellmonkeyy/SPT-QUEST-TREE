@@ -265,15 +265,6 @@ namespace QuestTreeServer
             return ids;
         }
 
-        /// <summary>
-        /// The player's profile, or null if there isn't one to read.
-        ///
-        /// ProfileHelper.GetPmcProfile THROWS on an empty session id ("session id provided was
-        /// empty, did you restart the server while the game was running?") rather than returning
-        /// null, and an empty id is exactly what arrives for a request made outside a game session.
-        /// The checklist is still worth serving in that case, just with nothing marked as owned, so
-        /// this degrades instead of failing the whole route.
-        /// </summary>
         /// <summary>PmcData rather than BotBase, since 1.9.0: the shared QuestFacts helpers need the
         /// PMC-shaped profile, and GetPmcProfile returns one anyway - the wider type was only ever
         /// what ProfileInventory.CountByTemplate happened to accept.</summary>
@@ -291,6 +282,15 @@ namespace QuestTreeServer
             }
         }
 
+        /// <summary>
+        /// The player's profile, or null if there isn't one to read.
+        ///
+        /// ProfileHelper.GetPmcProfile THROWS on an empty session id ("session id provided was
+        /// empty, did you restart the server while the game was running?") rather than returning
+        /// null, and an empty id is exactly what arrives for a request made outside a game session.
+        /// The checklist is still worth serving in that case, just with nothing marked as owned, so
+        /// this degrades instead of failing the whole route.
+        /// </summary>
         private Quest? FindCollectorQuest()
         {
             var quests = templateTable.Quests;

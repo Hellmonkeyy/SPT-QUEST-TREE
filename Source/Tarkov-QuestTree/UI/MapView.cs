@@ -286,10 +286,6 @@ namespace QuestTree.UI
             return true;
         }
 
-        /// <summary>Prepares the view to open on a quest: its map, its floor, its row expanded and
-        /// its pin flown to. The caller switches to the Maps view afterwards; the next Build does
-        /// the rest. If the accepted-only filter would hide the quest, the filter is lifted - it
-        /// makes no sense to be sent to a pin that is then not drawn.</summary>
         /// <summary>The map "show this quest" should open, or null when the quest is on none.
         ///
         /// A derived quest declares "any", so its own LocationKey names no map - the answer is the
@@ -304,6 +300,10 @@ namespace QuestTree.UI
             return null;
         }
 
+        /// <summary>Prepares the view to open on a quest: its map, its floor, its row expanded and
+        /// its pin flown to. The caller switches to the Maps view afterwards; the next Build does
+        /// the rest. If the accepted-only filter would hide the quest, the filter is lifted - it
+        /// makes no sense to be sent to a pin that is then not drawn.</summary>
         public static void ShowQuest(QuestNode node)
         {
             // A derived quest's own LocationKey is "any", which is no map at all - so the first of
@@ -1878,8 +1878,6 @@ namespace QuestTree.UI
         private static int MarkerCountFor(DynamicMapsLibrary.MapEntry entry) =>
             MarkerSetFor(entry)?.Markers?.Count ?? 0;
 
-        /// <summary>A panel behind a column, so its text reads as a block rather than as words lying
-        /// loose on whatever is behind them.</summary>
         /// <summary>The map's own author credit, shown because the images are someone else's work
         /// (tarkov.dev, via DynamicMaps) and their licence is only satisfied with attribution.</summary>
         private static void AddCredit(
@@ -1904,6 +1902,8 @@ namespace QuestTree.UI
                 x, ref y, 15f, 10, width);
         }
 
+        /// <summary>A panel behind a column, so its text reads as a block rather than as words lying
+        /// loose on whatever is behind them.</summary>
         private static string CoverageLine(MapMarkerSetDto set)
         {
             if (set == null || string.IsNullOrEmpty(set.HarvestedAt))

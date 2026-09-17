@@ -465,9 +465,6 @@ namespace QuestTreeServer
                     verdict.Failures.Add($"the quest names the category {category} and no fitted part belongs to it");
         }
 
-        /// <summary>A template may appear twice only by occupying two distinct slots, which
-        /// <see cref="CheckSeating"/> has already established both admit it. Anything else is one
-        /// physical part claimed twice.</summary>
         /// <summary>No two parts on the gun refuse each other.
         ///
         /// The verifier had no opinion on conflicts at all, which is the one gap that could pass a build the
@@ -515,6 +512,9 @@ namespace QuestTreeServer
             }
         }
 
+        /// <summary>A template may appear twice only by occupying two distinct slots, which
+        /// <see cref="CheckSeating"/> has already established both admit it. Anything else is one
+        /// physical part claimed twice.</summary>
         private static void CheckDuplicates(IReadOnlyList<WeaponSolver.FittedPart> parts, Verdict verdict)
         {
             foreach (var group in parts.GroupBy(part => part.Template).Where(group => group.Count() > 1))

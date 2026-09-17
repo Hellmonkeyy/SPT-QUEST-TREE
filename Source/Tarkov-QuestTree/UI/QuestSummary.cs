@@ -212,11 +212,6 @@ namespace QuestTree.UI
             lines.Add("");
         }
 
-        /// <summary>What a weapon-build quest actually asks for, in words.
-        ///
-        /// These quests render their objective as "Handover the custom M4A1  0/1", which says
-        /// nothing about the twelve numbers the game is really checking - so people fail them with a
-        /// build that looks right and hand in a rifle two ergonomics short.</summary>
         /// <summary>What to carry into the raid, as its own list, for the same reason.</summary>
         internal static List<string> ItemsToBringLines(QuestNode node, ProfilePayloadDto profile)
         {
@@ -231,6 +226,11 @@ namespace QuestTree.UI
             return lines;
         }
 
+        /// <summary>What a weapon-build quest actually asks for, in words.
+        ///
+        /// These quests render their objective as "Handover the custom M4A1  0/1", which says
+        /// nothing about the twelve numbers the game is really checking - so people fail them with a
+        /// build that looks right and hand in a rifle two ergonomics short.</summary>
         private static void AddWeaponBuild(List<string> lines, QuestNode node)
         {
             foreach (var build in node.WeaponBuilds)
@@ -405,11 +405,6 @@ namespace QuestTree.UI
             lines.Add("");
         }
 
-        /// <summary>
-        /// The one gate blocking this quest, phrased as something to act on. Trader-scoped gates are
-        /// named from the client's own trader list rather than the server guessing a display name,
-        /// and a prerequisite names the actual quest, since the client has the graph to resolve it.
-        /// </summary>
         /// <summary>The quest actually standing in the way, when one is, so a caller can offer to
         /// take you there rather than only naming it.
         ///
@@ -428,6 +423,11 @@ namespace QuestTree.UI
             return null;
         }
 
+        /// <summary>
+        /// The one gate blocking this quest, phrased as something to act on. Trader-scoped gates are
+        /// named from the client's own trader list rather than the server guessing a display name,
+        /// and a prerequisite names the actual quest, since the client has the graph to resolve it.
+        /// </summary>
         internal static string FormatLockReason(
             QuestNode node, QuestGraphBuilder graph, ProfilePayloadDto profile)
         {
@@ -549,8 +549,6 @@ namespace QuestTree.UI
             return moving == 1 ? $"{text}  ·  {counter}" : text;
         }
 
-        /// <summary>An objective with its live counter where the game is tracking one. Counters only
-        /// exist for quests actually in progress, so most objectives render unchanged.</summary>
         /// <summary>The live counter behind an objective, when the profile payload has one.</summary>
         internal static bool TryProgress(ObjectiveDto objective, ProfilePayloadDto profile, out int current, out int target)
         {
@@ -565,6 +563,8 @@ namespace QuestTree.UI
             return true;
         }
 
+        /// <summary>An objective with its live counter where the game is tracking one. Counters only
+        /// exist for quests actually in progress, so most objectives render unchanged.</summary>
         internal static string FormatObjective(ObjectiveDto objective, ProfilePayloadDto profile)
         {
             if (objective == null) return "";
@@ -578,9 +578,6 @@ namespace QuestTree.UI
             return $"{objective.Text}  <color={color}>{current}/{target}</color>";
         }
 
-        /// <summary>Turns one payload reward into a display line. Trader-scoped rewards are named
-        /// from the live session's trader list rather than from the payload, so a modded trader
-        /// reads correctly without the server mod having to know about it.</summary>
         /// <summary>Whether a name is really a raw id that failed to resolve.
         ///
         /// ResolveRewardName falls back to the reward's Target when the locale has no entry for the
@@ -597,6 +594,9 @@ namespace QuestTree.UI
             return true;
         }
 
+        /// <summary>Turns one payload reward into a display line. Trader-scoped rewards are named
+        /// from the live session's trader list rather than from the payload, so a modded trader
+        /// reads correctly without the server mod having to know about it.</summary>
         internal static string FormatReward(RewardDto reward, QuestGraphBuilder graph)
         {
             if (reward == null) return null;

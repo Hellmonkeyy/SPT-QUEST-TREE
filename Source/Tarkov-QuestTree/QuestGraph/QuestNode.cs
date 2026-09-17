@@ -265,13 +265,13 @@ namespace QuestTree.QuestGraph
                 ? Enumerable.Empty<ObjectiveDto>()
                 : Dto.Objectives.Where(o => o != null && !string.IsNullOrEmpty(o.Text));
 
-        /// <summary>The weapon-build requirement this quest states, or null for the 774 quests
-        /// that state none.</summary>
         /// <summary>Every weapon build this quest asks for. Usually one; "Old Friend's Request"
         /// asks for three.</summary>
         public List<WeaponBuildDto> WeaponBuilds =>
             Dto.WeaponBuilds ?? new List<WeaponBuildDto>();
 
+        /// <summary>The weapon-build requirement this quest states, or null for the 774 quests
+        /// that state none.</summary>
         public IEnumerable<RewardDto> Rewards =>
             Dto.Rewards == null ? Enumerable.Empty<RewardDto>() : Dto.Rewards.Where(r => r != null);
 

@@ -1155,9 +1155,6 @@ namespace QuestTree.UI
             }
         }
 
-        /// <summary>The tabs that are not the quest graph, and so ignore search and filters.</summary>
-        /// <summary>The non-graph views, in the order they appear right-to-left from Close. Kappa
-        /// sits innermost because it is the one you open most often.</summary>
         /// <summary>Selects and frames a quest in the graph, switching to a tab that contains it
         /// first if the current one does not - a prerequisite from another trader is not in that
         /// trader's tab, and the map is not a tab at all. The tab chosen is the narrowest that
@@ -1165,6 +1162,9 @@ namespace QuestTree.UI
         /// trader-by-trader reading of the tree survives following a link out of it.</summary>
         private void FocusNode(QuestNode node) => FocusNode(node, pushHistory: true);
 
+        /// <summary>The tabs that are not the quest graph, and so ignore search and filters.</summary>
+        /// <summary>The non-graph views, in the order they appear right-to-left from Close. Kappa
+        /// sits innermost because it is the one you open most often.</summary>
         private void FocusNode(QuestNode node, bool pushHistory)
         {
             if (node == null) return;
