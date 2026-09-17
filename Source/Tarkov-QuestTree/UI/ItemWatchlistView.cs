@@ -20,17 +20,20 @@ namespace QuestTree.UI
     /// </summary>
     internal static class ItemWatchlistView
     {
-        /// <summary>Currency is excluded. Roubles alone are asked for by 52 quests here, and "do not
-        /// sell your roubles" is not advice - the list is about items you would otherwise vendor
-        /// without realising a quest wanted them. Verified against the objective text ("Hand over
-        /// RUB"/"EUR") rather than assumed from the ids.</summary>
-        /// Hand-mirrored from QuestTreeServer.Currencies, the way the DTOs are, because the two halves
-        /// are separate assemblies on different frameworks. Keep them equal.
+        /// <summary>Currency is excluded. Five vanilla quests hand roubles over and would otherwise get a
+        /// row, and "do not sell your roubles" is not advice - the list is about items you would vendor
+        /// without realising a quest wanted them.
+        ///
+        /// Hand-mirrored from QuestTreeServer.Currencies, the way the DTOs are, because the two halves are
+        /// separate assemblies on different frameworks. Keep them equal - including the COMPARER, which is
+        /// OrdinalIgnoreCase there and here; template ids are hex, so case can only ever be two spellings
+        /// of one id.
         ///
         /// The Dollars id here was "5696686a4bdc2d88308b456a" until 1.13.0 - not a real template at all -
-        /// so dollars were never recognised as money and this list advised players not to sell them. Four
-        /// vanilla objectives hand dollars over, so the row really did appear.
-        private static readonly HashSet<string> Currency = new()
+        /// so dollars were never recognised as money and this list advised players not to sell them. Three
+        /// vanilla objectives hand dollars over (Spa Tour - Part 6, Friend From the West - Part 2, Overseas
+        /// Trust - Part 2), so the row really did appear.</summary>
+        private static readonly HashSet<string> Currency = new(StringComparer.OrdinalIgnoreCase)
         {
             "5449016a4bdc2d6f028b456f", // Roubles
             "5696686a4bdc2da3298b456a", // Dollars

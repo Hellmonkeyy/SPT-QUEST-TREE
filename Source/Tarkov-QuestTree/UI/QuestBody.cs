@@ -365,7 +365,16 @@ namespace QuestTree.UI
                     $"leave {build.EmptyTacticalSlots:0} tactical slot(s) empty", ctx.X, ref y, width);
 
             AddSolution(ctx, build, width, ref y);
-            AddSavePreset(ctx, build.Key, width, ref y);
+
+            // Only for a build worth saving. The server refuses a blocked one - its tree is the closest
+            // attempt, or one the independent verifier rejected - so offering the button there taught the
+            // player that by clicking it. The same two statuses the server accepts, and no button at all
+            // until the per-profile answer has arrived, since a preset is written from THAT tree.
+            var saveable = QuestDataClient.GetBuilds()?.BuildFor(build.Key);
+
+            if (saveable != null && (saveable.Status == "ok" || saveable.Status == "repaired"))
+                AddSavePreset(ctx, build.Key, width, ref y);
+
             AddModelCheck(ctx, build, width, ref y);
 
             y += 8f;

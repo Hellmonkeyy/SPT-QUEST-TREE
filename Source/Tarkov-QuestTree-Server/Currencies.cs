@@ -14,10 +14,13 @@ namespace QuestTreeServer
     /// What that cost, measured on the shipped database. 63 quest rewards pay dollars - Car Repair,
     /// The Extortionist, The Punisher Parts 3 and 5 - and every one of them was emitted with
     /// IsCurrency false, so the ranking priced them through the handbook instead of at face value and
-    /// the client drew them as a generic item drop rather than as cash. Worse on the other side: four
-    /// objectives hand dollars OVER (Spa Tour - Part 6, Friend From the West - Part 2, Overseas Trust -
-    /// Part 2, Building Foundations), and with dollars unrecognised the item watchlist stopped excluding
-    /// them - so the "do not sell that" list advised players to hold onto their money.
+    /// the client drew them as a generic item drop rather than as cash. Worse on the other side: THREE
+    /// objectives hand dollars OVER - Spa Tour - Part 6, Friend From the West - Part 2 and Overseas Trust -
+    /// Part 2 - and with dollars unrecognised the item watchlist stopped excluding them, so the "do not
+    /// sell that" list advised players to hold onto their money.
+    ///
+    /// Not four: Building Foundations and Key Partner name the currencies too, but as SellItemToTrader,
+    /// which IsAnyItemCondition does not admit, so they never reach a watchlist row at all.
     ///
     /// The client half cannot reference this file: it is a separate assembly against a different
     /// framework. Its copy is hand-mirrored the way the DTOs are, and says so at both ends.

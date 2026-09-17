@@ -832,11 +832,20 @@ namespace QuestTreeServer
             foreach (var (field, compare, value) in thresholds)
             {
                 if (RepairState.Contains(field)) continue;
-                if (!compare.StartsWith(">", StringComparison.Ordinal) && field.ToLowerInvariant() != "recoil") continue;
+                // Every stat here is bounded by a ">=" threshold except recoil, which is bounded by "<=" -
+                // so recoil is admitted on the OPPOSITE comparator rather than exempted from the test.
+                // Exempting it let a modded "recoil >= X" through to Percent, which inverts its argument as
+                // though every recoil threshold meant "at most", arguing the bound from the wrong side. The
+                // weighted block above was given this guard already; this loop was missed.
+                var lowerField = field.ToLowerInvariant();
 
-                var lower = field.ToLowerInvariant();
+                var bounded = lowerField == "recoil"
+                    ? compare.StartsWith("<", StringComparison.Ordinal)
+                    : compare.StartsWith(">", StringComparison.Ordinal);
 
-                var needs = lower switch
+                if (!bounded) continue;
+
+                var needs = lowerField switch
                 {
                     "ergonomics" => Spread(value - (props.Ergonomics ?? 0d) - namedErgonomics, bestErgonomics, named.Count),
                     "recoil" => Percent(value, baseRecoil, namedRecoil, bestRecoil, named.Count),

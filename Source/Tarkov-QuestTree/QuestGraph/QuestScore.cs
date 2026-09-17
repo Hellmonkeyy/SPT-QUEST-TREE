@@ -479,8 +479,15 @@ namespace QuestTree.QuestGraph
             foreach (var objective in objectives)
             {
                 if (objective == null) continue;
-                if (!objective.IsNecessary) continue;
 
+                // NOT filtered on IsNecessary, and the flag is why this comment exists. It is true on zero
+                // of the 1,606 finish conditions in the quest database - absent 1,080 times, explicitly
+                // false 526 - so filtering on it can only ever hide work. It hid the OBJECTIVES of 42% of
+                // quests once and that was fixed; this consumer kept the filter, so 173 quests whose every
+                // condition is explicitly false scored a cost of zero, returned null here, and had the
+                // effort term dropped from their score entirely - a twenty-kill grind ranking as though it
+                // cost nothing. Shootout Picnic, Operation Aquarius, The Punisher - Part 1 and Spa Tour -
+                // Part 1 are among them, with 100 more merely understated.
                 cost += 1f;
 
                 if (QuestSummary.NeedsFoundInRaid(objective)) cost += 1f;
