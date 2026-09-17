@@ -561,8 +561,13 @@ namespace QuestTree.UI
 
         /// <summary>One band per trader: where its quests are, and how they stand.
         ///
-        /// Built with the layout rather than per frame - the bounds only move when the layout does,
-        /// and the counts only when a status changes, which forces a rebuild anyway.</summary>
+        /// Built with the layout rather than per frame, which is right for the BOUNDS - they only move
+        /// when the layout does.
+        ///
+        /// It used to claim the same of the counts, "which forces a rebuild anyway". It does not: after a
+        /// hand-in, RefreshAfterStatusChange only re-renders behind a status-dependent filter, so on default
+        /// settings neither the bands nor the cards were rebuilt and both showed pre-hand-in numbers.
+        /// TreeOverview.Draw now compares the counts it last drew instead of trusting that.</summary>
         private void BuildBands(IReadOnlyList<QuestNode> nodes)
         {
             _bands.Clear();

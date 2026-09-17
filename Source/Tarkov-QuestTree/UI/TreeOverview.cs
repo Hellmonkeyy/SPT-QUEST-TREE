@@ -48,6 +48,29 @@ namespace QuestTree.UI
             public int Remaining;
         }
 
+        /// <summary>Whether any band's counts differ from what the cards were built with.
+        ///
+        /// Kept as a separate tally rather than read back off the labels: the label is markup by then, and
+        /// parsing a number out of the string it was formatted into is not a comparison, it is a second
+        /// format with a chance to disagree.</summary>
+        private bool CountsMoved(IReadOnlyList<Band> bands)
+        {
+            if (_drawnCounts == null || _drawnCounts.Count != bands.Count) return true;
+
+            for (var index = 0; index < bands.Count; index++)
+            {
+                var band = bands[index];
+                var was = _drawnCounts[index];
+
+                if (band.Active != was.Active || band.Available != was.Available || band.Remaining != was.Remaining)
+                    return true;
+            }
+
+            return false;
+        }
+
+        private List<(int Active, int Available, int Remaining)> _drawnCounts;
+
         // Card geometry, in SCREEN pixels. Converted to content units per frame, so a card is the
         // same size on screen however far out the tree is - which is the whole point of the tier.
         private const float CardWidth = 300f;
@@ -86,7 +109,12 @@ namespace QuestTree.UI
 
             Active = true;
 
-            if (_cards.Count != bands.Count) Rebuild(bands, onPick);
+            // Rebuilt when the band COUNT changes or when any band's numbers have, not on the count
+            // alone. Create bakes "3 in progress  2 available  11 left" into the label once, so matching
+            // only on the count meant a hand-in left the old figures painted on the card: the band it came
+            // from still existed, so nothing here noticed. Cheap to compare - one pass over a dozen
+            // traders against the tally this drew last time.
+            if (_cards.Count != bands.Count || CountsMoved(bands)) Rebuild(bands, onPick);
 
             // Screen pixels into content units. Everything below is laid out in content units so it
             // holds a constant size on screen as the zoom moves.
@@ -137,8 +165,15 @@ namespace QuestTree.UI
         {
             Clear();
 
+            // Recorded as the cards are built, so the next Draw compares against what is actually painted
+            // rather than against whatever the bands hold by then.
+            _drawnCounts = new List<(int Active, int Available, int Remaining)>(bands.Count);
+
             foreach (var band in bands)
+            {
                 _cards.Add(Create(band, onPick));
+                _drawnCounts.Add((band.Active, band.Available, band.Remaining));
+            }
         }
 
         private GameObject Create(Band band, Action<Band> onPick)

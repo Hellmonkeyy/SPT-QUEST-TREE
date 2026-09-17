@@ -143,6 +143,17 @@ namespace QuestTree.QuestGraph
         public static ProfileBuildsDto GetBuilds()
         {
             if (_buildsAttempted) return _builds;
+
+            // A not-ready answer is re-asked for, but not on every call. Un-latching alone meant the next
+            // caller went straight back out to the server, and AddSolution calls this once per weapon-build
+            // it draws - three for Old Friend's Request - each one a GetJson that blocks Unity's main thread
+            // for up to fifteen seconds. Three sequential round trips inside one panel open, repeated on
+            // every repaint, for an answer that cannot have changed between them.
+            //
+            // The same shape as the marker retry above, and the same reason: the server answers a not-ready
+            // build cheaply, so asking again is right - just not thousands of times.
+            if (DateTime.UtcNow < _buildsRetryAt) return _builds;
+
             _buildsAttempted = true;
 
             try
@@ -168,7 +179,12 @@ namespace QuestTree.QuestGraph
 
                 // Not ready is not a failure and must not latch: the server is still working it out,
                 // and the next panel open should ask again rather than show the shared build all session.
-                if (payload != null && payload.HasProfile && !payload.Ready) _buildsAttempted = false;
+                // Held off for a moment rather than released immediately - see the note at the top.
+                if (payload != null && payload.HasProfile && !payload.Ready)
+                {
+                    _buildsAttempted = false;
+                    _buildsRetryAt = DateTime.UtcNow + NotReadyRetry;
+                }
 
                 _builds = payload;
                 return _builds;
@@ -186,6 +202,10 @@ namespace QuestTree.QuestGraph
         {
             _builds = null;
             _buildsAttempted = false;
+
+            // And the not-ready hold-off, or an explicit invalidation would wait out a timer it has no
+            // reason to respect: the caller is saying the answer HAS changed.
+            _buildsRetryAt = DateTime.MinValue;
         }
 
         /// <summary>Every name here comes from the locale table and is rendered inside markup.</summary>
@@ -447,6 +467,14 @@ namespace QuestTree.QuestGraph
         /// main thread.</summary>
         private static volatile bool _markersStale;
 
+        /// <summary>How long a not-ready builds answer stands before this asks again. Long enough that one
+        /// panel open cannot make several round trips, short enough that a build finishing is noticed within
+        /// a couple of repaints - the panel repaints on any settings change or search keystroke anyway, and
+        /// InvalidateBuilds bypasses this entirely for the events that really move the answer.</summary>
+        private static readonly TimeSpan NotReadyRetry = TimeSpan.FromSeconds(2);
+
+        private static DateTime _buildsRetryAt = DateTime.MinValue;
+
         /// <summary>When an empty answer may be asked about again. Since 1.8.1 the server answers
         /// empty, uncached, for a minute after a failed marker build; keeping that for the session
         /// would mean no pins after the server had healed.</summary>
@@ -591,6 +619,7 @@ namespace QuestTree.QuestGraph
             // cannot outlive the state they describe.
             _questsStale = false;
             _markersStale = false;
+            _buildsRetryAt = DateTime.MinValue;
         }
 
         // Every name the views will put inside rich text, made literal once here - see RichText.
