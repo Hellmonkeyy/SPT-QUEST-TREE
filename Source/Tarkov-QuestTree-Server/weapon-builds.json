@@ -1,0 +1,4822 @@
+{
+  "SchemaVersion": 1,
+  "SolverVersion": 9,
+  "Generation": 102546,
+  "Items": "7F63D6257473D0B58F7CF6C02358EFCB9E4C008745A1AAAEE7F30FCAC0C360E1",
+  "Builds": {
+    "17332CC29F5F084A3ACF701F1D0161F5B08A6B47B8F13EFBB0E470F73FDF6D0E": {
+      "Parts": [
+        {
+          "Slot": "mod_mount_000",
+          "Template": "55d48ebc4bdc2d8c2f8b456c",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_tactical_003",
+          "Template": "5cc9c20cd7f00c001336c65d",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "55d4491a4bdc2d882f8b456e",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "55d45d3f4bdc2d972f8b456c",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "55d484b44bdc2d1d4e8b456d",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "56083a334bdc2dc8488b4571",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 3,
+      "Cost": 43198,
+      "PerPurchase": 10000,
+      "Attempts": 269,
+      "Floor": 6,
+      "Bound": 5,
+      "BoundSessions": 7,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 170343,
+      "Binding": [
+        "ergonomics",
+        "recoil",
+        "height",
+        "width"
+      ]
+    },
+    "B8D6027404CA24FDADAE85F3F5088679B868DA9251F3C8B70940BE4AA2E191F7": {
+      "Parts": [
+        {
+          "Slot": "mod_gas_block",
+          "Template": "59d36a0086f7747e673f3946",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "57ffa9f4245977728561e844",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "6984b690b457c5047e0c01fa",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5947f92f86f77427344a76b1",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "57dc334d245977597164366f",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "55d482194bdc2d1d4e8b456b",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 4,
+      "Cost": 76763,
+      "PerPurchase": 10000,
+      "Attempts": 270,
+      "Floor": 3,
+      "Bound": 4,
+      "BoundSessions": 8,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 397720,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity",
+        "height",
+        "width"
+      ]
+    },
+    "4B3BE9A7FFC4A9B29EB0F2AD9239C0B0DD8876183ADB7E2C980E3165BAB3854D": {
+      "Parts": [
+        {
+          "Slot": "mod_reciever",
+          "Template": "5926f2e086f7745aae644231",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5926d33d86f77410de68ebc0",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_mount",
+          "Template": "59c63b4486f7747afb151c1c",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_tactical_000",
+          "Template": "5cc9c20cd7f00c001336c65d",
+          "Depth": 4,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "5926f34786f77469195bfe92",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_sight_rear",
+          "Template": "5926d2be86f774134d668e4e",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5926d3c686f77410de68ebc8",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "5a351711c4a282000b1521a4",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_charge",
+          "Template": "5926c32286f774616e42de99",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 8,
+      "Cost": 156007,
+      "PerPurchase": 10000,
+      "Attempts": 268,
+      "Floor": 7,
+      "Bound": 8,
+      "BoundSessions": 7,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 219153,
+      "Binding": [
+        "ergonomics",
+        "recoil",
+        "magazine capacity",
+        "effective distance"
+      ]
+    },
+    "ECAC93A3FF88967D699A03B1B159197845CD3088D49E77ABE343136198045910": {
+      "Parts": [
+        {
+          "Slot": "mod_barrel",
+          "Template": "5888956924597752983e182d",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "5888976c24597754281f93f5",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_tactical_000",
+          "Template": "5d10b49bd7ad1a1a560708b0",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5888996c24597754281f9419",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "62811f461d5df4475f46a332",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "5aa66be6e5b5b0214e506e97",
+          "Depth": 2,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "58889d0c2459775bc215d981",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "57c55f172459772d27602381",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 3,
+      "Cost": 136255,
+      "PerPurchase": 10000,
+      "Attempts": 268,
+      "Floor": 5,
+      "Bound": 5,
+      "BoundSessions": 7,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 125928,
+      "Binding": [
+        "recoil",
+        "effective distance"
+      ]
+    },
+    "BEB2DAEDB53F909D3A256DDDCF8A7DBE2482F243738B22EC23A81BCE6B64995E": {
+      "Parts": [
+        {
+          "Slot": "mod_barrel",
+          "Template": "5a34fae7c4a2826c6e06d760",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5fbe7618d6fa9c00c571bb6c",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "5a34fbadc4a28200741e230a",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5c0faeddd174af02a962601f",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock_000",
+          "Template": "602e620f9b513876d4338d9a",
+          "Depth": 2,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "6171407e50224f204c1da3c5",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_scope_000",
+          "Template": "5b3b99475acfc432ff4dcbee",
+          "Depth": 2,
+          "Parent": 5
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5a339805c4a2826c6e06d73d",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "5a329052c4a28200741e22d3",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 5,
+      "Cost": 158664,
+      "PerPurchase": 10000,
+      "Attempts": 172,
+      "Floor": 6,
+      "Bound": 6,
+      "BoundSessions": 7,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 1765878,
+      "Binding": [
+        "effective distance"
+      ]
+    },
+    "BD5B70740883A7BFD855BD801FABE37583806BDE0A2B45C30DC98983F853A2C9": {
+      "Parts": [
+        {
+          "Slot": "mod_reciever",
+          "Template": "55d355e64bdc2d962f8b4569",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "55d3632e4bdc2d972f8b4569",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "696fc5ed64572d85f30aac10",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "63d3ce281fe77d0f2801859e",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "5ae30db85acfc408fb139a05",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "637f57a68d137b27f70c4968",
+          "Depth": 3,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "2322ee962f6c77a1284abc1e",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5649be884bdc2d79388b4577",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock_000",
+          "Template": "602e620f9b513876d4338d9a",
+          "Depth": 2,
+          "Parent": 7
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "6761b213607f9a6f79017d46",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_charge",
+          "Template": "55d44fd14bdc2d962f8b456e",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "69f0d28ca0c7d37d9130aab8",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 6,
+      "Cost": 135454,
+      "PerPurchase": 10000,
+      "Attempts": 181,
+      "Floor": 8,
+      "Bound": 9,
+      "BoundSessions": 7,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 1396091,
+      "Binding": [
+        "ergonomics",
+        "recoil",
+        "magazine capacity",
+        "effective distance"
+      ]
+    },
+    "479337BA3D7C28AD6EE2121C25BCD2D87894D87E34E94FEF217DC37F735A39AE": {
+      "Parts": [
+        {
+          "Slot": "mod_handguard",
+          "Template": "5a788068c5856700137e4c8f",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_mount_000",
+          "Template": "669a6a4a525be1d2d004b8eb",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_tactical",
+          "Template": "560d657b4bdc2da74d8b4572",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "5b7be4895acfc400170e2dd5",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "6984b690b457c5047e0c01fa",
+          "Depth": 3,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "5a787f7ac5856700177af660",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5c0111ab0db834001966914d",
+          "Depth": 2,
+          "Parent": 5
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "59fb137a86f7740adb646af1",
+          "Depth": 3,
+          "Parent": 6
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5a7880d0c5856700142fdd9d",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "5a7882dcc5856700177af662",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 7,
+      "Cost": 115799,
+      "PerPurchase": 10000,
+      "Attempts": 268,
+      "Floor": 8,
+      "Bound": 7,
+      "BoundSessions": 7,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 415183,
+      "Binding": [
+        "ergonomics"
+      ]
+    },
+    "E203FB2ADD8B635C53332392407E0D84AB4120E0AF3AD80F9E04639C6369793B": {
+      "Parts": [
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5a9fbacda2750c00141e080f",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "59d6272486f77466146386ff",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "59d64ec286f774171d1e0a42",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "5cbda392ae92155f3c17c39f",
+          "Depth": 2,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "59f8a37386f7747af3328f06",
+          "Depth": 3,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "5d2c76ed48f03532f2136169",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "2322ee962f6c77a1284abc1e",
+          "Depth": 2,
+          "Parent": 5
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "688cbdc341e2a57a8f0c1c6c",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5894a13e86f7742405482982",
+          "Depth": 2,
+          "Parent": 7
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "59e62cc886f77440d40b52a1",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 8,
+      "Cost": 163009,
+      "PerPurchase": 10000,
+      "Attempts": 122,
+      "Floor": 6,
+      "Bound": 6,
+      "BoundSessions": 7,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 878744,
+      "Binding": [
+        "ergonomics",
+        "recoil",
+        "effective distance"
+      ]
+    },
+    "9FECB358FE9520853BAD101B17282F49E9D534B3593656DC2378F144A6FCA53C": {
+      "Parts": [
+        {
+          "Slot": "mod_gas_block",
+          "Template": "59c6633186f7740cf0493bb9",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "5efaf417aeb21837e749c7f2",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "5c1bc4812e22164bef5cfde7",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_tactical_000",
+          "Template": "5a5f1ce64f39f90b401987bc",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5649ab884bdc2ded0b8b457f",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "5649af884bdc2d1b2b8b4589",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5649ae4a4bdc2d1b2b8b4588",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "59ecc28286f7746d7a68aa8c",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "59ecc3dd86f7746dc827481c",
+          "Depth": 2,
+          "Parent": 7
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "5bed61680db834001d2c45ab",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 9,
+      "Cost": 181053,
+      "PerPurchase": 10000,
+      "Attempts": 700,
+      "Floor": 10,
+      "Bound": 10,
+      "BoundSessions": 29,
+      "Falsifications": 240,
+      "FalsifyNodes": 23103335,
+      "LastFalsifySeed": 49698000,
+      "Nodes": 127851,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity",
+        "height",
+        "width"
+      ]
+    },
+    "1BD48340DFF5AEB8694B2329A0382AB8F3319FC04F7D57E3585FCBF16D9DCAC1": {
+      "Parts": [
+        {
+          "Slot": "mod_muzzle",
+          "Template": "593d493f86f7745e6b2ceb22",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "59c6633186f7740cf0493bb9",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "647dba3142c479dde701b654",
+          "Depth": 2,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "69f9ec80aae020b0db02f670",
+          "Depth": 3,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "69f9f0e4df2c2358a904186b",
+          "Depth": 4,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "6984b690b457c5047e0c01fa",
+          "Depth": 3,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "55d482194bdc2d1d4e8b456b",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "651580dc71a4f10aec4b6056",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5ac50c185acfc400163398d4",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "5ac50da15acfc4001718d287",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 7,
+      "Cost": 166307,
+      "PerPurchase": 10000,
+      "Attempts": 242,
+      "Floor": 3,
+      "Bound": 4,
+      "BoundSessions": 7,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 1602174,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity",
+        "effective distance",
+        "height"
+      ]
+    },
+    "9A1F12CB4F79389997679E9E6042693B7DEB10FB4E0533CB59A277F5CB7490C3": {
+      "Parts": [
+        {
+          "Slot": "mod_mount_004",
+          "Template": "5a7c74b3e899ef0014332c29",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5a69a2ed8dc32e000d46d1f1",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock_000",
+          "Template": "5a9eb32da2750c00171b3f9c",
+          "Depth": 2,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "57c44dd02459772d2e0ae249",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_mount_000",
+          "Template": "57a3459f245977764a01f703",
+          "Depth": 2,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_tactical",
+          "Template": "544909bb4bdc2d6f028b4577",
+          "Depth": 3,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "5a9e81fba2750c00164f6b11",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "651178336cad06c37c049eb4",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 6,
+      "Cost": 134188,
+      "PerPurchase": 10000,
+      "Attempts": 270,
+      "Floor": 7,
+      "Bound": 7,
+      "BoundSessions": 8,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 90596,
+      "Binding": [
+        "ergonomics",
+        "recoil",
+        "magazine capacity"
+      ]
+    },
+    "8D8AF4CB26861859069A970C74AC8C209C37B8B39DB3572B91EDCAD51AECF1D0": {
+      "Parts": [
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5e21ca18e4d47f0da15e77dd",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5f6372e2865db925d54f3869",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5f6339d53ada5942720e2dc3",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "5c0548ae0db834001966a3c2",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5beec8b20db834001961942a",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5bfe86df0db834001b734685",
+          "Depth": 2,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "59c6633186f7740cf0493bb9",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "5f6331e097199b7db2128dc2",
+          "Depth": 2,
+          "Parent": 6
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "588226ef24597767af46e39c",
+          "Depth": 3,
+          "Parent": 7
+        },
+        {
+          "Slot": "mod_tactical_001",
+          "Template": "5b3a337e5acfc4704b4a19a0",
+          "Depth": 3,
+          "Parent": 7
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "2322ee962f6c77a1284abc1e",
+          "Depth": 3,
+          "Parent": 7
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "5ac50da15acfc4001718d287",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5947f92f86f77427344a76b1",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 11,
+      "Cost": 194290,
+      "PerPurchase": 10000,
+      "Attempts": 180,
+      "Floor": 10,
+      "Bound": 9,
+      "BoundSessions": 7,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 886284,
+      "Binding": [
+        "ergonomics",
+        "recoil",
+        "effective distance",
+        "height",
+        "width"
+      ]
+    },
+    "A88D223974C169A55055FAC966AE90AC762E89F27B0DA7FF3286E7F5C8D88A75": {
+      "Parts": [
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5b07db875acfc40dc528a5f6",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "5894a5b586f77426d2590767",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "5894a2c386f77427140b8342",
+          "Depth": 2,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5b3a16655acfc40016387a2a",
+          "Depth": 3,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "5894a42086f77426d2590762",
+          "Depth": 2,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_mount_000",
+          "Template": "58a56f8d86f774651579314c",
+          "Depth": 3,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_tactical",
+          "Template": "5b07dd285acfc4001754240d",
+          "Depth": 4,
+          "Parent": 5
+        },
+        {
+          "Slot": "mod_sight_rear",
+          "Template": "5894a81786f77427140b8347",
+          "Depth": 2,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_charge",
+          "Template": "58949edd86f77409483e16a9",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5c5db6ee2e221600113fba54",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 4,
+      "Cost": 78091,
+      "PerPurchase": 10000,
+      "Attempts": 270,
+      "Floor": 8,
+      "Bound": 8,
+      "BoundSessions": 8,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 546378,
+      "Binding": [
+        "recoil",
+        "effective distance"
+      ]
+    },
+    "F4A6746EB1C63A0BA61A7200FEAE49337DD26155C7EF4AFB0E10694DF8715E70": {
+      "Parts": [
+        {
+          "Slot": "mod_gas_block",
+          "Template": "59d64ec286f774171d1e0a42",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "57cff947245977638e6f2a19",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_mount_003",
+          "Template": "57cffb66245977632f391a99",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5b30ac585acfc433000eb79c",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "59d6272486f77466146386ff",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5a9fbacda2750c00141e080f",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5b0e794b5acfc47a877359b2",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "5d2c76ed48f03532f2136169",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "5c07dd120db834001c39092d",
+          "Depth": 2,
+          "Parent": 7
+        }
+      ],
+      "Changes": 8,
+      "Cost": 233160,
+      "PerPurchase": 10000,
+      "Attempts": 415,
+      "Floor": 10,
+      "Bound": 9,
+      "BoundSessions": 18,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 71012,
+      "Binding": [
+        "ergonomics",
+        "effective distance"
+      ]
+    },
+    "7AFBEDD8D4992EA69E92F363951DB6A4FB4B2BA45F5440589518A570227A3E00": {
+      "Parts": [
+        {
+          "Slot": "mod_stock",
+          "Template": "5addbf175acfc408fb13965b",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_mount",
+          "Template": "5addbfbb5acfc400194dbcf7",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "5b31163c5acfc400153b71cb",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "58d399e486f77442e0016fe7",
+          "Depth": 4,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_tactical",
+          "Template": "57fd23e32459772d0805bcf1",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_mount",
+          "Template": "5addbfef5acfc400185c2857",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "5aa66c72e5b5b00016327c93",
+          "Depth": 2,
+          "Parent": 5
+        },
+        {
+          "Slot": "mod_scope_000",
+          "Template": "5aa66be6e5b5b0214e506e97",
+          "Depth": 3,
+          "Parent": 6
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "5aaf9d53e5b5b00015042a52",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5aafa1c2e5b5b00015042a56",
+          "Depth": 2,
+          "Parent": 8
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "5aaf8a0be5b5b00015693243",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 9,
+      "Cost": 279844,
+      "PerPurchase": 10000,
+      "Attempts": 270,
+      "Floor": 10,
+      "Bound": 7,
+      "BoundSessions": 8,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 116084,
+      "Binding": [
+        "recoil",
+        "magazine capacity"
+      ]
+    },
+    "7D8E0EBDAFFD6F506D1181FBE057DBE335C7D733838BB71A5C66BA0A7A7B3F46": {
+      "Parts": [
+        {
+          "Slot": "mod_reciever",
+          "Template": "55d355e64bdc2d962f8b4569",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "55d3632e4bdc2d972f8b4569",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "56ea8180d2720bf2698b456a",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "57dbb57e2459774673234890",
+          "Depth": 4,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "56eabcd4d2720b66698b4574",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "5b2cfa535acfc432ff4db7a0",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "5a1ead28fcdbcb001912fa9f",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "5a1eaa87fcdbcb001865f75e",
+          "Depth": 3,
+          "Parent": 6
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5649be884bdc2d79388b4577",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock_003",
+          "Template": "698b338649b46ae2d0092e82",
+          "Depth": 2,
+          "Parent": 8
+        },
+        {
+          "Slot": "mod_charge",
+          "Template": "55d44fd14bdc2d962f8b456e",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "55802f5d4bdc2dac148b458f",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "69f0d28ca0c7d37d9130aab8",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 9,
+      "Cost": 561153,
+      "PerPurchase": 10000,
+      "Attempts": 174,
+      "Floor": 12,
+      "Bound": 10,
+      "BoundSessions": 7,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 1078436,
+      "Binding": [
+        "ergonomics",
+        "recoil",
+        "magazine capacity"
+      ]
+    },
+    "2A13A30D6E804CD8D039E9196ED9EFEF67C756F55D11F151BAE90945032EFF24": {
+      "Parts": [
+        {
+          "Slot": "mod_barrel",
+          "Template": "634eff66517ccc8a960fc735",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "593d490386f7745ee97a1555",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_mount_000",
+          "Template": "634f05a21f9f536910079b56",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "634f036a517ccc8a960fc746",
+          "Depth": 3,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_mount_000",
+          "Template": "634f03d40384a3ba4f06f874",
+          "Depth": 4,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5d0236dad7ad1a0940739d29",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5947f92f86f77427344a76b1",
+          "Depth": 2,
+          "Parent": 5
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "6415c694da439c6a97048b56",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "696958420d2309811a0fd1d5",
+          "Depth": 2,
+          "Parent": 7
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "587df583245977373c4f1129",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 6,
+      "Cost": 149496,
+      "PerPurchase": 10000,
+      "Attempts": 225,
+      "Floor": 6,
+      "Bound": 8,
+      "BoundSessions": 7,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 1677199,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity",
+        "effective distance"
+      ]
+    },
+    "7ABE9CDE0B4B413B39F35DBB6BB3F1D0CD062A49C3D5F7DB370249DE8E8468CB": {
+      "Parts": [
+        {
+          "Slot": "mod_tactical",
+          "Template": "5a7b483fe899ef0016170d15",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5c00076d0db834001d23ee1f",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "5c0009510db834001966907f",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "587de4282459771bca0ec90b",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5c6beec32e221601da3578f2",
+          "Depth": 2,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "5c920e902e221644f31c3c99",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 6,
+      "Cost": 90396,
+      "PerPurchase": 10000,
+      "Attempts": 700,
+      "Floor": 4,
+      "Bound": 6,
+      "BoundSessions": 29,
+      "Falsifications": 240,
+      "FalsifyNodes": 5646825,
+      "LastFalsifySeed": 49707000,
+      "Nodes": 47080,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
+    },
+    "9BE33D2FB03BA2DA630BC29169A1E8D83B61490CAB9B179FC1B014B03F2972E7": {
+      "Parts": [
+        {
+          "Slot": "mod_barrel",
+          "Template": "5fbbc383d5cb881a7363194a",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5c6165902e22160010261b28",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_mount",
+          "Template": "5fbb978207e8a97d1f0902d3",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "5f6340d3ca442212f4047eb2",
+          "Depth": 2,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5fb655b748c711690e3a8d5a",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock_000",
+          "Template": "57ade1442459771557167e15",
+          "Depth": 2,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "630767c37d50ff5e8a1ea71a",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_sight_rear",
+          "Template": "5fb6564947ce63734e3fa1da",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_sight_front",
+          "Template": "5fb6567747ce63734e3fa1dc",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 7,
+      "Cost": 130237,
+      "PerPurchase": 10000,
+      "Attempts": 415,
+      "Floor": 4,
+      "Bound": 8,
+      "BoundSessions": 19,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 252368,
+      "Binding": [
+        "ergonomics",
+        "recoil",
+        "magazine capacity",
+        "effective distance"
+      ]
+    },
+    "04DFCA713C01BF4B7AF91152CC71E6EE8B8DE59D42AB408CBE74EB51D55B45E9": {
+      "Parts": [
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5d15cf3bd7ad1a67e71518b2",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5947eab886f77475961d96c5",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "5bb20d53d4351e4502010a69",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "5bb20d92d4351e00853263eb",
+          "Depth": 2,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5c6d710d2e22165df16b81e7",
+          "Depth": 3,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5ea17bbc09aa976f2e7a51cd",
+          "Depth": 4,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "5bb20dcad4351e3bac1212da",
+          "Depth": 3,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "558022b54bdc2dac148b458d",
+          "Depth": 2,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "6a15b13db507e45a68038de8",
+          "Depth": 2,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "5fce0cf655375d18a253eff0",
+          "Depth": 3,
+          "Parent": 8
+        },
+        {
+          "Slot": "mod_tactical_000",
+          "Template": "5c06595c0db834001a66af6c",
+          "Depth": 3,
+          "Parent": 8
+        },
+        {
+          "Slot": "mod_sight_rear",
+          "Template": "6a1578658d059ca69c0a7853",
+          "Depth": 2,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_charge",
+          "Template": "5bb20dbcd4351e44f824c04e",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "55d4887d4bdc2d962f8b4570",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 12,
+      "Cost": 279621,
+      "PerPurchase": 10000,
+      "Attempts": 249,
+      "Floor": 13,
+      "Bound": 13,
+      "BoundSessions": 7,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 407496,
+      "Binding": [
+        "recoil",
+        "weight",
+        "magazine capacity"
+      ]
+    },
+    "060D74A30A5D58481A70B3E251E29722BF44E81690C6476AB00F6E0BD4E1A4F1": {
+      "Parts": [
+        {
+          "Slot": "mod_barrel",
+          "Template": "5c471cb32e221602b177afaa",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5c471bfc2e221602b21d4e17",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5e01e9e273d8eb11426f5bc3",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5e01ea19e9dc277128008c0b",
+          "Depth": 4,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "5c471c842e221615214259b5",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_mount_001",
+          "Template": "5dfcd0e547101c39625f66f9",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "57c69dd424597774c03b7bbc",
+          "Depth": 2,
+          "Parent": 5
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "57c5ac0824597754771e88a9",
+          "Depth": 3,
+          "Parent": 6
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "6197b229af1f5202c57a9bea",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5947e98b86f774778f1448bc",
+          "Depth": 2,
+          "Parent": 8
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "6516b129609aaf354b34b3a8",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistolgrip",
+          "Template": "5b30ac585acfc433000eb79c",
+          "Depth": 2,
+          "Parent": 10
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "5dfce88fe9dc277128008b2e",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "5c471c442e221602b542a6f8",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 10,
+      "Cost": 234268,
+      "PerPurchase": 10000,
+      "Attempts": 415,
+      "Floor": 14,
+      "Bound": 9,
+      "BoundSessions": 19,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 431938,
+      "Binding": [
+        "magazine capacity",
+        "effective distance"
+      ]
+    },
+    "C7806D0657E319A89891F04186E88EA7DA64A3DF286B79E7216837B6AD825381": {
+      "Parts": [
+        {
+          "Slot": "mod_stock",
+          "Template": "5cde739cd7f00c0010373bd3",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "5cde7afdd7f00c000d36b89d",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5d120a10d7ad1a4e1026ba85",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "55d4b9964bdc2d1d4e8b456e",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_mount",
+          "Template": "5cde7b43d7f00c000d36b93e",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "6567e751a715f85433025998",
+          "Depth": 2,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "5b3b99475acfc432ff4dcbee",
+          "Depth": 3,
+          "Parent": 5
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "5bfebc320db8340019668d79",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "6932af0bbe542622170428bd",
+          "Depth": 2,
+          "Parent": 7
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "5d25a4a98abbc30b917421a4",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 9,
+      "Cost": 183737,
+      "PerPurchase": 10000,
+      "Attempts": 131,
+      "Floor": 5,
+      "Bound": 6,
+      "BoundSessions": 6,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 1745984,
+      "Binding": [
+        "recoil",
+        "magazine capacity",
+        "effective distance"
+      ]
+    },
+    "9F71E8656ED700FE8FEE8A9DA189F9B5D1203FC3EC29922D05AA854DE403EC0A": {
+      "Parts": [
+        {
+          "Slot": "mod_mount_001",
+          "Template": "5ef369b08cef260c0642acaf",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_tactical",
+          "Template": "560d657b4bdc2da74d8b4572",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5ef366938cef260c0642acad",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "5e81edc13397a21db957f6a1",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5ef61964ec7f42238c31e0c1",
+          "Depth": 2,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_sight_front",
+          "Template": "5e81ee213397a21db957f6a6",
+          "Depth": 2,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "5e81c4ca763d9f754677befa",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_trigger",
+          "Template": "5e81c6a2ac2bb513793cdc7f",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_hammer",
+          "Template": "5e81c550763d9f754677befd",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "5e81c519cb2b95385c177551",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_catch",
+          "Template": "5e81c539cb2b95385c177553",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 4,
+      "Cost": 65576,
+      "PerPurchase": 10000,
+      "Attempts": 415,
+      "Floor": 10,
+      "Bound": 10,
+      "BoundSessions": 19,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 51374,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity",
+        "effective distance"
+      ]
+    },
+    "F6726E8170D083D61DC0121B4D091C9AFC08F77947BEFB07EBE8CB768C1DF2F7": {
+      "Parts": [
+        {
+          "Slot": "mod_reciever",
+          "Template": "606587a88900dc2d9a55b659",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "5d00ef6dd7ad1a0940739b16",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_tactical_001",
+          "Template": "5a800961159bd4315e3a1657",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "59f9d81586f7744c7506ee62",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "6065878ac9cf8012264142fd",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "6932af0bbe542622170428bd",
+          "Depth": 3,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "5dfa3d45dfc58d14537c20b0",
+          "Depth": 3,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_sight_rear",
+          "Template": "5bc09a18d4351e003562b68e",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_stock_001",
+          "Template": "606587e18900dc2d9a55b65f",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock_000",
+          "Template": "606587d11246154cad35d635",
+          "Depth": 2,
+          "Parent": 8
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "55802f5d4bdc2dac148b458f",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_charge",
+          "Template": "606587bd6d0bd7580617bacc",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "5c6175362e221600133e3b94",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 7,
+      "Cost": 208582,
+      "PerPurchase": 10000,
+      "Attempts": 270,
+      "Floor": 10,
+      "Bound": 10,
+      "BoundSessions": 8,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 946438,
+      "Binding": [
+        "ergonomics",
+        "recoil",
+        "magazine capacity",
+        "effective distance"
+      ]
+    },
+    "DB8DBA834B5E71A3363672573DFE4A1784DAA05676D497DA6ABBA64F185484D5": {
+      "Parts": [
+        {
+          "Slot": "mod_reciever",
+          "Template": "5df8e4080b92095fd441e594",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "6932aec6cccd2b808a043856",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_mount",
+          "Template": "5649a2464bdc2d91118b45a8",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "577d128124597739d65d0e56",
+          "Depth": 4,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "577d141e24597739c5255e01",
+          "Depth": 5,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "5b057b4f5acfc4771e1bd3e9",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_tactical_001",
+          "Template": "5d2369418abbc306c62e0c80",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "5df917564a9f347bc92edca3",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5dfa3cd1b33c0951220c079b",
+          "Depth": 3,
+          "Parent": 7
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5dfa3d2b0dee1b22f862eade",
+          "Depth": 4,
+          "Parent": 8
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "5dfa3d45dfc58d14537c20b0",
+          "Depth": 3,
+          "Parent": 7
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "5d1b5e94d7ad1a2b865a96b0",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5d025cc1d7ad1a53845279ef",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5649be884bdc2d79388b4577",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock_000",
+          "Template": "5ae30c9a5acfc408fb139a03",
+          "Depth": 2,
+          "Parent": 13
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "5df8f541c41b2312ea3335e3",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_charge",
+          "Template": "5df8e053bb49d91fb446d6a6",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 9,
+      "Cost": 362426,
+      "PerPurchase": 10000,
+      "Attempts": 414,
+      "Floor": 18,
+      "Bound": 14,
+      "BoundSessions": 19,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 765421,
+      "Binding": [
+        "effective distance"
+      ]
+    },
+    "BE73FEA7007490D672A5E790DF68C12DD69EA9BB65340D66D3EC7FAA44C1EB9D": {
+      "Parts": [
+        {
+          "Slot": "mod_handguard",
+          "Template": "6491c6f6ef312a876705191b",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_tactical_001",
+          "Template": "544909bb4bdc2d6f028b4577",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "6492d7847363b8a52206bc52",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistolgrip_000",
+          "Template": "59e62cc886f77440d40b52a1",
+          "Depth": 2,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "646371faf2404ab67905c8e9",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "6492ef63cfcf7c89e701abf1",
+          "Depth": 2,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "5cf638cbd7f00c06595bc936",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_tactical",
+          "Template": "5cf639aad7f00c065703d455",
+          "Depth": 2,
+          "Parent": 6
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "646372518610c40fc20204e8",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistolgrip",
+          "Template": "5f6341043ada5942720e2dc5",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 9,
+      "Cost": 198379,
+      "PerPurchase": 10000,
+      "Attempts": 270,
+      "Floor": 9,
+      "Bound": 8,
+      "BoundSessions": 8,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 291155,
+      "Binding": [
+        "ergonomics"
+      ]
+    },
+    "33225F622D6CA86CC2D2B1A8B03CCF44CFDB2308A844AF206B406D86A048E4BF": {
+      "Parts": [
+        {
+          "Slot": "mod_stock",
+          "Template": "611a31ce5b7ffe001b4649d1",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "5580169d4bdc2d9d138b4585",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 1,
+      "Cost": 12800,
+      "PerPurchase": 10000,
+      "Attempts": 2691,
+      "Floor": 1,
+      "Bound": 1,
+      "BoundSessions": 29,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 4749,
+      "Binding": [
+        "ergonomics"
+      ]
+    },
+    "2190933030382CA1B77FF02ACBF0A0B4C97FADCF278CD58DCF3EB244BB78F911": {
+      "Parts": [
+        {
+          "Slot": "mod_reciever",
+          "Template": "55d355e64bdc2d962f8b4569",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "58491f3324597764bc48fa02",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "55d3632e4bdc2d972f8b4569",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "5ae30e795acfc408fb139a0b",
+          "Depth": 3,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "5ae30db85acfc408fb139a05",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5649be884bdc2d79388b4577",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock_000",
+          "Template": "66f4a8d75a44076e9b2909d2",
+          "Depth": 2,
+          "Parent": 5
+        },
+        {
+          "Slot": "mod_stock_003",
+          "Template": "6984b82c5aab442620032fe8",
+          "Depth": 2,
+          "Parent": 5
+        },
+        {
+          "Slot": "mod_charge",
+          "Template": "55d44fd14bdc2d962f8b456e",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "55d4b9964bdc2d1d4e8b456e",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 3,
+      "Cost": 68684,
+      "PerPurchase": 10000,
+      "Attempts": 265,
+      "Floor": 9,
+      "Bound": 8,
+      "BoundSessions": 7,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 1670717,
+      "Binding": [
+        "ergonomics"
+      ]
+    },
+    "6C4F49F8F7E933CC9417DD8A44CBDA16F76B69D092CA175C37347A9623978EDD": {
+      "Parts": [
+        {
+          "Slot": "mod_barrel",
+          "Template": "5df256570dee1b22f862e9c4",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "6a158e63060f61ca2c03e096",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "6a158e4abf497aade10030e0",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5df35e59c41b2312ea3334d5",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "5df25d3bfd6b4e6e2276dc9a",
+          "Depth": 2,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_bipod",
+          "Template": "5888961624597754281f93f3",
+          "Depth": 3,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "5df36948bb49d91fb446d5ad",
+          "Depth": 3,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5df38a5fb74cd90030650cb6",
+          "Depth": 2,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_stock_axis",
+          "Template": "5df35ddddfc58d14537c2036",
+          "Depth": 2,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_mount",
+          "Template": "5df35e970b92095fd441e4d2",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "5aa66c72e5b5b00016327c93",
+          "Depth": 2,
+          "Parent": 9
+        },
+        {
+          "Slot": "mod_scope_000",
+          "Template": "5aa66be6e5b5b0214e506e97",
+          "Depth": 3,
+          "Parent": 10
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "5df25b6c0b92095fd441e4cf",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 5,
+      "Cost": 227680,
+      "PerPurchase": 10000,
+      "Attempts": 270,
+      "Floor": 12,
+      "Bound": 9,
+      "BoundSessions": 8,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 114188,
+      "Binding": [
+        "magazine capacity"
+      ]
+    },
+    "4F80D8147ADD36CAE9AEE0EC9C8F1291F45C4804BD582C715F7F2A266C223702": {
+      "Parts": [
+        {
+          "Slot": "mod_reciever",
+          "Template": "59985a6c86f77414ec448d17",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "58d39d3d86f77445bb794ae7",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "58d39b0386f77443380bf13c",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "58d399e486f77442e0016fe7",
+          "Depth": 4,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5649ae4a4bdc2d1b2b8b4588",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "59bfc5c886f7743bf6794e62",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5ac78eaf5acfc4001926317a",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "59ecc3dd86f7746dc827481c",
+          "Depth": 2,
+          "Parent": 6
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "65ae4f57e343f0acc00824da",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "5c1bc7752e221602b1779b34",
+          "Depth": 2,
+          "Parent": 8
+        },
+        {
+          "Slot": "mod_tactical",
+          "Template": "560d657b4bdc2da74d8b4572",
+          "Depth": 2,
+          "Parent": 8
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "544909bb4bdc2d6f028b4577",
+          "Depth": 2,
+          "Parent": 8
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "599860ac86f77436b225ed1a",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 12,
+      "Cost": 251038,
+      "PerPurchase": 10000,
+      "Attempts": 270,
+      "Floor": 15,
+      "Bound": 11,
+      "BoundSessions": 8,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 69603,
+      "Binding": [
+        "magazine capacity"
+      ]
+    },
+    "3A96B22EF581206DED2116635E78733423AEC0921FF907E7C482FAC8D6D05A9B": {
+      "Parts": [
+        {
+          "Slot": "mod_barrel",
+          "Template": "5a6b5e468dc32e001207faf5",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5a6b592c8dc32e00094b97bf",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5a7b4960e899ef197b331a2d",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "5a718da68dc32e000d46d264",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_tactical",
+          "Template": "560d657b4bdc2da74d8b4572",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "5a6f5e048dc32e00094b97da",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 5,
+      "Cost": 75085,
+      "PerPurchase": 10000,
+      "Attempts": 413,
+      "Floor": 6,
+      "Bound": 7,
+      "BoundSessions": 18,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 61163,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
+    },
+    "BE39D256B2365EF7154B90F3C7D9FFC840C58D009FA003222C470E1F91DC9F59": {
+      "Parts": [
+        {
+          "Slot": "mod_barrel",
+          "Template": "6698c89bfbc8142e60024b0e",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle_001",
+          "Template": "5c6165902e22160010261b28",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_muzzle_000",
+          "Template": "6698c9ba29e062525d0ad8b1",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_mount_000",
+          "Template": "6698c90829e062525d0ad8ad",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "58491f3324597764bc48fa02",
+          "Depth": 2,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "6699249f3c4fda6471005cba",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "66993149558c59581e03c028",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "669946c157df3e2b4e0a0dc5",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 6,
+      "Cost": 124246,
+      "PerPurchase": 10000,
+      "Attempts": 268,
+      "Floor": 5,
+      "Bound": 5,
+      "BoundSessions": 7,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 210421,
+      "Binding": [
+        "ergonomics",
+        "recoil",
+        "effective distance"
+      ]
+    },
+    "1BF7E1BCAC460A344C8DC8477D3A8C4A3E4FB0610C6E9EBD34D175708C15AB71": {
+      "Parts": [
+        {
+          "Slot": "mod_tactical",
+          "Template": "5a7ad74e51dfba0015068f45",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_tactical",
+          "Template": "56def37dd2720bec348b456a",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5a7b4960e899ef197b331a2d",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "5a718da68dc32e000d46d264",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "5a6f5e048dc32e00094b97da",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "5a6b5f868dc32e000a311389",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 4,
+      "Cost": 97996,
+      "PerPurchase": 10000,
+      "Attempts": 413,
+      "Floor": 6,
+      "Bound": 6,
+      "BoundSessions": 18,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 53922,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
+    },
+    "28A3DF18E199D0341A23D9E8B4034CD49D53A9EA5E17ED8EFA04E46CC15461B9": {
+      "Parts": [
+        {
+          "Slot": "mod_reciever",
+          "Template": "59985a6c86f77414ec448d17",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "570fd721d2720bc5458b4596",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "59ccd11386f77428f24a488f",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "57cffd8224597763b03fc609",
+          "Depth": 2,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "59bfc5c886f7743bf6794e62",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "599860ac86f77436b225ed1a",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "599851db86f77467372f0a18",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5998517986f7746017232f7e",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 4,
+      "Cost": 86644,
+      "PerPurchase": 10000,
+      "Attempts": 413,
+      "Floor": 6,
+      "Bound": 7,
+      "BoundSessions": 18,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 304189,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
+    },
+    "483AD97CDCB66AC7C03807FB770DCB46705408DF5C71E57C3ED49BB328EC5716": {
+      "Parts": [
+        {
+          "Slot": "mod_stock",
+          "Template": "5649b0fc4bdc2d17108b4588",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5a0c59791526d8dba737bba7",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5f633f68f5750b524b45f112",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "5d2c76ed48f03532f2136169",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "57e3dba62459770f0c32322b",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "64b9cf0ac12b9c38db26923a",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "59d64ec286f774171d1e0a42",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "5c9a07572e221644f31c4b32",
+          "Depth": 2,
+          "Parent": 6
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "696fc803cf7469bf38051731",
+          "Depth": 3,
+          "Parent": 7
+        }
+      ],
+      "Changes": 8,
+      "Cost": 130478,
+      "PerPurchase": 10000,
+      "Attempts": 413,
+      "Floor": 8,
+      "Bound": 9,
+      "BoundSessions": 18,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 373445,
+      "Binding": [
+        "magazine capacity"
+      ]
+    },
+    "665F9D87C4A84C3177120808B902A7D64E54934C184907D5149131A3B4D22645": {
+      "Parts": [
+        {
+          "Slot": "mod_reciever",
+          "Template": "602e63fb6335467b0c5ac94d",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "6034e3cb0ddce744014cb870",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "5b7be4895acfc400170e2dd5",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "588226d124597767ad33f787",
+          "Depth": 4,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "603372b4da11d6478d5a07ff",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5a32a064c4a28200741e22de",
+          "Depth": 3,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "58491f3324597764bc48fa02",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_stock_001",
+          "Template": "5c793fb92e221644f31bfb64",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock_000",
+          "Template": "602e620f9b513876d4338d9a",
+          "Depth": 2,
+          "Parent": 7
+        },
+        {
+          "Slot": "mod_tactical_000",
+          "Template": "602f85fd9b513876d4338d9c",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "5a7ad2e851dfba0016153692",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "602e71bd53a60014f9705bfa",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_charge",
+          "Template": "5b2240bf5acfc40dc528af69",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 7,
+      "Cost": 157419,
+      "PerPurchase": 10000,
+      "Attempts": 697,
+      "Floor": 14,
+      "Bound": 17,
+      "BoundSessions": 29,
+      "Falsifications": 239,
+      "FalsifyNodes": 13961878,
+      "LastFalsifySeed": 49725000,
+      "Nodes": 105271,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
+    },
+    "75CC65385B19B33A5F36D6B71FA7AC8F05B3CADC49410C4CABA88081AAA2F1F8": {
+      "Parts": [
+        {
+          "Slot": "mod_scope",
+          "Template": "65f1b1176dbd6c5ba2082eed",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_mount",
+          "Template": "65f1b2a5c14a07890801fc70",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "6477772ea8a38bb2050ed4db",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "645123013d52156624001fd1",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "64527a3a7da7133e5a09ca99",
+          "Depth": 2,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_mount",
+          "Template": "57a3459f245977764a01f703",
+          "Depth": 3,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_tactical",
+          "Template": "56def37dd2720bec348b456a",
+          "Depth": 4,
+          "Parent": 5
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "6448f2f6d4928d46d30be3f6",
+          "Depth": 2,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "6452519e3d52156624001fd5",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "6450ec2e7da7133e5a09ca96",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 5,
+      "Cost": 92671,
+      "PerPurchase": 10000,
+      "Attempts": 697,
+      "Floor": 10,
+      "Bound": 10,
+      "BoundSessions": 29,
+      "Falsifications": 239,
+      "FalsifyNodes": 3815498,
+      "LastFalsifySeed": 49726000,
+      "Nodes": 33290,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
+    },
+    "90B666752A0B1257ED34D9EBAD3F990DED7EA86FA58D0E9ADA91709C6781493E": {
+      "Parts": [
+        {
+          "Slot": "mod_scope",
+          "Template": "5dff77c759400025ea5150cf",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "5dff772da3651922b360bf91",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "61faa91878830f069b6b7967",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "559ba5b34bdc2d1f1a8b4582",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 2,
+      "Cost": 36118,
+      "PerPurchase": 10000,
+      "Attempts": 697,
+      "Floor": 4,
+      "Bound": 4,
+      "BoundSessions": 29,
+      "Falsifications": 239,
+      "FalsifyNodes": 3972663,
+      "LastFalsifySeed": 49727000,
+      "Nodes": 30685,
+      "Binding": []
+    },
+    "7F2150537B1E8E134BA651DBA6800FD76C63F127A7E38CF06BDAD4895D55FBF4": {
+      "Parts": [
+        {
+          "Slot": "mod_handguard",
+          "Template": "5beec3e30db8340019619424",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "59f8a37386f7747af3328f06",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_mount_000",
+          "Template": "5beecbb80db834001d2c465e",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_tactical_000",
+          "Template": "56def37dd2720bec348b456a",
+          "Depth": 3,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "58491f3324597764bc48fa02",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "55d482194bdc2d1d4e8b456b",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock_001",
+          "Template": "5beec8b20db834001961942a",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5a9eb32da2750c00171b3f9c",
+          "Depth": 2,
+          "Parent": 6
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "5beec1bd0db834001e6006f3",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "593d493f86f7745e6b2ceb22",
+          "Depth": 2,
+          "Parent": 8
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "5beec91a0db834001961942d",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5beec8ea0db834001a6f9dbf",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 6,
+      "Cost": 172219,
+      "PerPurchase": 10000,
+      "Attempts": 413,
+      "Floor": 11,
+      "Bound": 9,
+      "BoundSessions": 19,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 244839,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
+    },
+    "6BBFF1FA17F602C5EE57BD05B91756D3CE54D1945C7E71AF43B6E5048BD64591": {
+      "Parts": [
+        {
+          "Slot": "mod_muzzle",
+          "Template": "64c196ad26a15b84aa07132f",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "649ec2f3961514b22506b111",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "5c0517910db83400232ffee5",
+          "Depth": 2,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "649ec127c93611967b034957",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "5f6340d3ca442212f4047eb2",
+          "Depth": 2,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_stock_001",
+          "Template": "649ec87d8007560a9001ab36",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5a9eb32da2750c00171b3f9c",
+          "Depth": 2,
+          "Parent": 5
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "649ec107961514b22506b10c",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5beec8ea0db834001a6f9dbf",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "649ec30cb013f04a700e60fb",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 4,
+      "Cost": 141409,
+      "PerPurchase": 10000,
+      "Attempts": 413,
+      "Floor": 12,
+      "Bound": 8,
+      "BoundSessions": 19,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 371860,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
+    },
+    "8EB1009BF8C72CFC16437A5CB50C17282FAF3CBFB852E5E3EF38D45D2848C5FB": {
+      "Parts": [
+        {
+          "Slot": "mod_stock_000",
+          "Template": "628b9a40717774443b15e9f2",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "6516e91f609aaf354b34b3e2",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_stock_000",
+          "Template": "6516e9bc5901745209404287",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "6087e663132d4d12c81fd96b",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5649ab884bdc2ded0b8b457f",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_charge",
+          "Template": "5648ac824bdc2ded0b8b457d",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "628b8d83717774443b15e248",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "628b916469015a4e1711ed8d",
+          "Depth": 2,
+          "Parent": 6
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "628b9be6cff66b70c002b14c",
+          "Depth": 3,
+          "Parent": 7
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "5c07dd120db834001c39092d",
+          "Depth": 4,
+          "Parent": 8
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "5b7be4895acfc400170e2dd5",
+          "Depth": 3,
+          "Parent": 7
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "6984b690b457c5047e0c01fa",
+          "Depth": 4,
+          "Parent": 10
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "55d480c04bdc2d1d4e8b456a",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 8,
+      "Cost": 176933,
+      "PerPurchase": 10000,
+      "Attempts": 413,
+      "Floor": 11,
+      "Bound": 10,
+      "BoundSessions": 19,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 285938,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
+    },
+    "1A2295B1575E58471CA014C6DD869B1979F16D02318820D1B3DAFF59A5B2C89E": {
+      "Parts": [
+        {
+          "Slot": "mod_barrel",
+          "Template": "5888945a2459774bf43ba385",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "58889c7324597754281f9439",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_bipod",
+          "Template": "5888961624597754281f93f3",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "57c69dd424597774c03b7bbc",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "5b3b99475acfc432ff4dcbee",
+          "Depth": 2,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "6113cc78d3a39d50044c065a",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "58889d0c2459775bc215d981",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "5888988e24597752fe43a6fa",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 6,
+      "Cost": 168053,
+      "PerPurchase": 10000,
+      "Attempts": 696,
+      "Floor": 7,
+      "Bound": 9,
+      "BoundSessions": 29,
+      "Falsifications": 239,
+      "FalsifyNodes": 958914,
+      "LastFalsifySeed": 49731000,
+      "Nodes": 8055,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
+    },
+    "1D43749E59B39EFAF7730F2A66F665AFA9716B1EAE9F692DB9E6016AD8CB4904": {
+      "Parts": [
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5a69a2ed8dc32e000d46d1f1",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock_000",
+          "Template": "5a9eb32da2750c00171b3f9c",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "57c44dd02459772d2e0ae249",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_mount_000",
+          "Template": "59eb7ebe86f7740b373438ce",
+          "Depth": 2,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "5c1cd46f2e22164bef5cfedb",
+          "Depth": 3,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_mount_000",
+          "Template": "67069cbbb29a2cd33803338c",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "64785e7c19d732620e045e15",
+          "Depth": 2,
+          "Parent": 5
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "5a9e81fba2750c00164f6b11",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "651178336cad06c37c049eb4",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "57c44f4f2459772d2c627113",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 7,
+      "Cost": 156866,
+      "PerPurchase": 10000,
+      "Attempts": 269,
+      "Floor": 10,
+      "Bound": 9,
+      "BoundSessions": 7,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 170909,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
+    },
+    "AF1FB0115A4D87CEB007A43A7AE8BBCE1010CA892D8976D45EE444D0C169B7B4": {
+      "Parts": [
+        {
+          "Slot": "mod_mount",
+          "Template": "5a27b281c4a28200741e1e52",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_mount",
+          "Template": "5a27b3d0c4a282000d721ec1",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5a27b6bec4a282000e496f78",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "59f99a7d86f7745b134aa97b",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 3,
+      "Cost": 66141,
+      "PerPurchase": 10000,
+      "Attempts": 696,
+      "Floor": 3,
+      "Bound": 4,
+      "BoundSessions": 29,
+      "Falsifications": 239,
+      "FalsifyNodes": 1301226,
+      "LastFalsifySeed": 49733000,
+      "Nodes": 9370,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
+    },
+    "BE437EB92AB7A66EC6C5D0F21D60ADD4D6AC55B3EBB7CBFF98C00AEF14C48999": {
+      "Parts": [
+        {
+          "Slot": "mod_handguard",
+          "Template": "637ba19df7ca6372bf2613d7",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_mount_000",
+          "Template": "62ed1921b3608410ef5a2c04",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_tactical",
+          "Template": "5cc9c20cd7f00c001336c65d",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_pistolgrip",
+          "Template": "637ba29bf7ca6372bf2613db",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "62e27a7865f0b1592a49e17b",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_mount",
+          "Template": "62ff9920fe938a24c90c10d2",
+          "Depth": 2,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "62e2a7138e1ac9380579c122",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "62e2969582ebf260c20539c2",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "62e153bcdb1a5c41971c1b5b",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 8,
+      "Cost": 130550,
+      "PerPurchase": 10000,
+      "Attempts": 696,
+      "Floor": 8,
+      "Bound": 12,
+      "BoundSessions": 29,
+      "Falsifications": 239,
+      "FalsifyNodes": 4591288,
+      "LastFalsifySeed": 49734000,
+      "Nodes": 33317,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
+    },
+    "755559E6AC75FCB21C6C398B2207C5222067E8FF81D36DD51C603EC14A18D778": {
+      "Parts": [
+        {
+          "Slot": "mod_handguard",
+          "Template": "637ba19df7ca6372bf2613d7",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_mount_000",
+          "Template": "62ed1921b3608410ef5a2c04",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_tactical",
+          "Template": "560d657b4bdc2da74d8b4572",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "62e27a7865f0b1592a49e17b",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_mount",
+          "Template": "62e281349ecd3f493f6df954",
+          "Depth": 2,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "616554fe50224f204c1da2aa",
+          "Depth": 3,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "61657230d92c473c770213d7",
+          "Depth": 4,
+          "Parent": 5
+        },
+        {
+          "Slot": "mod_pistolgrip",
+          "Template": "637ba29bf7ca6372bf2613db",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "62e2a7138e1ac9380579c122",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "62e2969582ebf260c20539c2",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "62e153bcdb1a5c41971c1b5b",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 10,
+      "Cost": 178176,
+      "PerPurchase": 10000,
+      "Attempts": 696,
+      "Floor": 10,
+      "Bound": 14,
+      "BoundSessions": 29,
+      "Falsifications": 239,
+      "FalsifyNodes": 4623760,
+      "LastFalsifySeed": 49735000,
+      "Nodes": 39033,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
+    },
+    "C2079B6E0D698D9FAE40093064794B8668F3F1ABAF499D77BA0170A8EA168D79": {
+      "Parts": [
+        {
+          "Slot": "mod_muzzle",
+          "Template": "57838c962459774a1651ec63",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_mount_000",
+          "Template": "59eb7ebe86f7740b373438ce",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "5b057b4f5acfc4771e1bd3e9",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_tactical_000",
+          "Template": "61605d88ffa6e502ac5e7eeb",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_mount_004",
+          "Template": "5e569a2e56edd02abe09f280",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "5aa66c72e5b5b00016327c93",
+          "Depth": 2,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_scope_000",
+          "Template": "5aa66be6e5b5b0214e506e97",
+          "Depth": 3,
+          "Parent": 5
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "578395e82459774a0e553c7b",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "6565bb7eb4b12a56eb04b084",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "57838f0b2459774a256959b2",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "578395402459774a256959b5",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 6,
+      "Cost": 205641,
+      "PerPurchase": 10000,
+      "Attempts": 258,
+      "Floor": 11,
+      "Bound": 8,
+      "BoundSessions": 7,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 115282,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
+    },
+    "5E5E9A19536F48E7FEFBFD77CA2535A07048BCA28F17A4EA0415419B56493505": {
+      "Parts": [
+        {
+          "Slot": "mod_muzzle",
+          "Template": "615d8e9867085e45ef1409c6",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5dfa3cd1b33c0951220c079b",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5dfa3d2b0dee1b22f862eade",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "59d64ec286f774171d1e0a42",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "5c17664f2e2216398b5a7e3c",
+          "Depth": 2,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_mount_000",
+          "Template": "5a9d6d13a2750c00164f6b03",
+          "Depth": 3,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "5c791e872e2216001219c40a",
+          "Depth": 4,
+          "Parent": 5
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "5cfe8010d7ad1a59283b14c6",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "6087e663132d4d12c81fd96b",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5b0e794b5acfc47a877359b2",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_charge",
+          "Template": "6130ca3fd92c473c77020dbd",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "5d2c76ed48f03532f2136169",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "58491f3324597764bc48fa02",
+          "Depth": 2,
+          "Parent": 11
+        }
+      ],
+      "Changes": 12,
+      "Cost": 304880,
+      "PerPurchase": 10000,
+      "Attempts": 269,
+      "Floor": 14,
+      "Bound": 11,
+      "BoundSessions": 7,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 159511,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
+    },
+    "6DA82260FC3D47E28CC2998F440207328346C8B029DDB4AEEA8F61B17616B370": {
+      "Parts": [
+        {
+          "Slot": "mod_stock",
+          "Template": "669924a69950f5f4cd060295",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "66993149558c59581e03c028",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_mount_000",
+          "Template": "6698c90829e062525d0ad8ad",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "60a23797a37c940de7062d02",
+          "Depth": 2,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "6698c8ab29e062525d0ad8ab",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "66993733f74fef4dfd0b04ff",
+          "Depth": 2,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "676176a162e0497044079f46",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "669946c157df3e2b4e0a0dc5",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 6,
+      "Cost": 158861,
+      "PerPurchase": 10000,
+      "Attempts": 696,
+      "Floor": 7,
+      "Bound": 8,
+      "BoundSessions": 29,
+      "Falsifications": 239,
+      "FalsifyNodes": 5976015,
+      "LastFalsifySeed": 49738000,
+      "Nodes": 41093,
+      "Binding": [
+        "magazine capacity"
+      ]
+    },
+    "13254425DBB0B49EBDDDB8A0124B781CBB1A1692D87C653870D0A3AEB616F641": {
+      "Parts": [
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5c4eec9b2e2216398b5aaba2",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5c4eecc32e221602b412b440",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_tactical",
+          "Template": "5c4eecde2e221602b3140418",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "623b2e9d11c3296b440d1638",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "6087e663132d4d12c81fd96b",
+          "Depth": 2,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "623c3c1f37b4b31470357737",
+          "Depth": 2,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_mount_000",
+          "Template": "67112695fe5c8bf33f02476d",
+          "Depth": 3,
+          "Parent": 5
+        },
+        {
+          "Slot": "mod_bipod",
+          "Template": "5888961624597754281f93f3",
+          "Depth": 4,
+          "Parent": 6
+        },
+        {
+          "Slot": "mod_stock_000",
+          "Template": "624c29ce09cd027dff2f8cd7",
+          "Depth": 2,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "5aa66c72e5b5b00016327c93",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_scope_000",
+          "Template": "5aa66be6e5b5b0214e506e97",
+          "Depth": 2,
+          "Parent": 9
+        },
+        {
+          "Slot": "mod_scope_001",
+          "Template": "61605d88ffa6e502ac5e7eeb",
+          "Depth": 2,
+          "Parent": 9
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "559ba5b34bdc2d1f1a8b4582",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 12,
+      "Cost": 335607,
+      "PerPurchase": 10000,
+      "Attempts": 269,
+      "Floor": 11,
+      "Bound": 9,
+      "BoundSessions": 7,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 106093,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
+    },
+    "AF06AACBBC62FE5665DAB349AFDE9097CE2C24D345F8C28198C0F001A8FF7401": {
+      "Parts": [
+        {
+          "Slot": "mod_handguard",
+          "Template": "6568a6bf2c5fb7afc70bc424",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "5649a2464bdc2d91118b45a8",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "5a33b2c9c4a282000c5a9511",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "5a32aa8bc4a2826c6e06d737",
+          "Depth": 4,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_tactical",
+          "Template": "6267c6396b642f77f56f5c1c",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_flashlight",
+          "Template": "59d790f486f77403cb06aec6",
+          "Depth": 3,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_mount_000",
+          "Template": "67069c8cee8138ed2f05ad34",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_tactical",
+          "Template": "5cc9c20cd7f00c001336c65d",
+          "Depth": 2,
+          "Parent": 6
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "57ac965c24597706be5f975c",
+          "Depth": 2,
+          "Parent": 6
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "65144ff50e00edc79406836f",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5a69a2ed8dc32e000d46d1f1",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock_000",
+          "Template": "56eabf3bd2720b75698b4569",
+          "Depth": 2,
+          "Parent": 10
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "58d2912286f7744e27117493",
+          "Depth": 3,
+          "Parent": 11
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "65329ebcc0d50d0c9204ace1",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "57c44f4f2459772d2c627113",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "5a9e81fba2750c00164f6b11",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 14,
+      "Cost": 271535,
+      "PerPurchase": 10000,
+      "Attempts": 269,
+      "Floor": 15,
+      "Bound": 16,
+      "BoundSessions": 7,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 73175,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
+    },
+    "C19EF93F3949C45D3B3199BCFD7EDB76EB6BDC207C26D8009414D14548052E14": {
+      "Parts": [
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5caf187cae92157c28402e43",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "5c07dd120db834001c39092d",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "5cdaa99dd7f00c002412d0b2",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "5c791e872e2216001219c40a",
+          "Depth": 2,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "5caf1109ae9215753c44119f",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_sight_rear",
+          "Template": "66ba297b859e57cf91e38a5d",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_sight_front",
+          "Template": "66ba2a6be18ed84221edd72d",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 6,
+      "Cost": 177189,
+      "PerPurchase": 10000,
+      "Attempts": 269,
+      "Floor": 5,
+      "Bound": 4,
+      "BoundSessions": 7,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 125909,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
+    },
+    "9A6629389E5A52142F86A2587DE6505E78BAA27DFDAF6312A009E9AC316D5135": {
+      "Parts": [
+        {
+          "Slot": "mod_mount_001",
+          "Template": "5dfcd0e547101c39625f66f9",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "618b9643526131765025ab35",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_mount",
+          "Template": "618b9671d14d6d5ab879c5ea",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "5b3b99475acfc432ff4dcbee",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "5a9d6d13a2750c00164f6b03",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "5b057b4f5acfc4771e1bd3e9",
+          "Depth": 3,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "6197b229af1f5202c57a9bea",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5c793fc42e221600114ca25d",
+          "Depth": 2,
+          "Parent": 6
+        },
+        {
+          "Slot": "mod_stock_000",
+          "Template": "56eabf3bd2720b75698b4569",
+          "Depth": 3,
+          "Parent": 7
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "58d2912286f7744e27117493",
+          "Depth": 4,
+          "Parent": 8
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "6516b129609aaf354b34b3a8",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistolgrip",
+          "Template": "6087e663132d4d12c81fd96b",
+          "Depth": 2,
+          "Parent": 10
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "5dfce88fe9dc277128008b2e",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "5c471cb32e221602b177afaa",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5c471bfc2e221602b21d4e17",
+          "Depth": 2,
+          "Parent": 13
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5e01e9e273d8eb11426f5bc3",
+          "Depth": 3,
+          "Parent": 14
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5e01ea19e9dc277128008c0b",
+          "Depth": 4,
+          "Parent": 15
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "5c471c842e221615214259b5",
+          "Depth": 2,
+          "Parent": 13
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "5c88f24b2e22160bc12c69a6",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 16,
+      "Cost": 368268,
+      "PerPurchase": 10000,
+      "Attempts": 269,
+      "Floor": 18,
+      "Bound": 18,
+      "BoundSessions": 7,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 229511,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
+    },
+    "2912B61C85307E1CA66778BD351E7F6790DAE57495A66297E6011BD848092527": {
+      "Parts": [
+        {
+          "Slot": "mod_reciever",
+          "Template": "5c0e2f26d174af02a9625114",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "5c0e2f94d174af029f650d56",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "5ae30e795acfc408fb139a0b",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "69694eed0d2309811a0fd1d3",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "5c0e2f5cd174af02a012cfc9",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_sight_rear",
+          "Template": "55d5f46a4bdc2d1b198b4567",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5c0faeddd174af02a962601f",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock_000",
+          "Template": "66f4a8d75a44076e9b2909d2",
+          "Depth": 2,
+          "Parent": 6
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "ebd108b0a8c45420f7624a3f",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_charge",
+          "Template": "5c0faf68d174af02a96260b8",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "6a1579afcbb8d0c82606c541",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 5,
+      "Cost": 71408,
+      "PerPurchase": 10000,
+      "Attempts": 179,
+      "Floor": 7,
+      "Bound": 9,
+      "BoundSessions": 7,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 1287998,
+      "Binding": [
+        "ergonomics",
+        "recoil",
+        "magazine capacity"
+      ]
+    },
+    "989F0A9D688D1F08B2FD39A8F88B77AB2B80796D74F63D4ACEB9EDD11A17B7C7": {
+      "Parts": [
+        {
+          "Slot": "mod_magazine",
+          "Template": "59c1383d86f774290a37e0ca",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "68109a1f327033533604170a",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_mount_003",
+          "Template": "6269220d70b6c02e665f2635",
+          "Depth": 2,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_mount_000",
+          "Template": "57cffb66245977632f391a99",
+          "Depth": 2,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "680f87118c5d2ff9020005cd",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "609269c3b0e443224b421cc1",
+          "Depth": 2,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "618b9643526131765025ab35",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_mount",
+          "Template": "618b9671d14d6d5ab879c5ea",
+          "Depth": 2,
+          "Parent": 6
+        },
+        {
+          "Slot": "mod_sight_rear",
+          "Template": "5bc09a18d4351e003562b68e",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5dcbd6dddbd3d91b3e5468de",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 2,
+      "Cost": 42456,
+      "PerPurchase": 10000,
+      "Attempts": 286,
+      "Floor": 4,
+      "Bound": 6,
+      "BoundSessions": 12,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 1998171,
+      "Binding": [
+        "ergonomics",
+        "weight",
+        "magazine capacity",
+        "effective distance"
+      ]
+    },
+    "3322F092DA9085311283A0D167C878E5FB8A893212D416371F7A8DF92D0F5C8E": {
+      "Parts": [
+        {
+          "Slot": "mod_barrel",
+          "Template": "5bfebc320db8340019668d79",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5fbe7618d6fa9c00c571bb6c",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5cde739cd7f00c0010373bd3",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "5cde7afdd7f00c000d36b89d",
+          "Depth": 2,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "627254cc9c563e6e442c398f",
+          "Depth": 2,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "ebd108b0a8c45420f7624a3f",
+          "Depth": 2,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_mount",
+          "Template": "5cde7b43d7f00c000d36b93e",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "62811f461d5df4475f46a332",
+          "Depth": 2,
+          "Parent": 6
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "6a34b1fbbcb0691a5d047e05",
+          "Depth": 3,
+          "Parent": 7
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "5ce69cbad7f00c00b61c5098",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 9,
+      "Cost": 290532,
+      "PerPurchase": 10000,
+      "Attempts": 268,
+      "Floor": 6,
+      "Bound": 6,
+      "BoundSessions": 7,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 703544,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity",
+        "effective distance"
+      ]
+    },
+    "B255E3D47500E075F88990757AD942E0901163D8B56BC03859CCB8DD2815E255": {
+      "Parts": [
+        {
+          "Slot": "mod_reciever",
+          "Template": "5fbcc3e4d6fa9c00c571bb58",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "5fbbfabed5cb881a7363194e",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5fbe7618d6fa9c00c571bb6c",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "5fbc210bf24b94483f726481",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "681236df5cbf0518e00557a0",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_sight_front",
+          "Template": "55d4af3a4bdc2d972f8b456f",
+          "Depth": 3,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5d025cc1d7ad1a53845279ef",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "5aaa5e60e5b5b000140293d6",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "68badb6458dbe419740b1520",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_charge",
+          "Template": "5fbcc640016cce60e8341acc",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 5,
+      "Cost": 125239,
+      "PerPurchase": 10000,
+      "Attempts": 266,
+      "Floor": 7,
+      "Bound": 9,
+      "BoundSessions": 7,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 1228404,
+      "Binding": [
+        "ergonomics"
+      ]
+    },
+    "4F24CD15E68894215825E31436694CD320901F27F0040A72C1B2A498D275B2AB": {
+      "Parts": [
+        {
+          "Slot": "mod_reciever",
+          "Template": "6529119424cbe3c74a05e5bb",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "652910565ae2ae97b80fdf35",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5fbe7618d6fa9c00c571bb6c",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "652910bc24cbe3c74a05e5b9",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "6567e751a715f85433025998",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "5b2388675acfc4771e1be0be",
+          "Depth": 3,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "652910ef50dc782999054b97",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_stock_000",
+          "Template": "58ac1bf086f77420ed183f9f",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "638de3603a1a4031d8260b8c",
+          "Depth": 2,
+          "Parent": 7
+        },
+        {
+          "Slot": "mod_stock_000",
+          "Template": "66f4a8d75a44076e9b2909d2",
+          "Depth": 3,
+          "Parent": 8
+        },
+        {
+          "Slot": "mod_stock_001",
+          "Template": "6984b82c5aab442620032fe8",
+          "Depth": 3,
+          "Parent": 8
+        },
+        {
+          "Slot": "mod_charge",
+          "Template": "6529109524cbe3c74a05e5b7",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "652911675ae2ae97b80fdf3c",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "65293c38fc460e50a509cb25",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 6,
+      "Cost": 169845,
+      "PerPurchase": 10000,
+      "Attempts": 118,
+      "Floor": 10,
+      "Bound": 9,
+      "BoundSessions": 7,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 667838,
+      "Binding": [
+        "weight",
+        "magazine capacity",
+        "effective distance"
+      ]
+    },
+    "F4012679BE476DC651583F82581337827B1FE3E239AB4B20C5EF2B0D8AFDD32C": {
+      "Parts": [
+        {
+          "Slot": "mod_magazine",
+          "Template": "5cf8f3b0d7f00c00217872ef",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "6981ee9cf819a414310292fb",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "627254cc9c563e6e442c398f",
+          "Depth": 2,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "576169e62459773c69055191",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "58272d7f2459774f6311ddfd",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "57616c112459773cce774d66",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_mount_000",
+          "Template": "5947db3f86f77447880cf76f",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5649ade84bdc2d1b2b8b4587",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 5,
+      "Cost": 106198,
+      "PerPurchase": 10000,
+      "Attempts": 249,
+      "Floor": 3,
+      "Bound": 5,
+      "BoundSessions": 7,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 2000000,
+      "Binding": [
+        "ergonomics",
+        "recoil",
+        "weight",
+        "magazine capacity",
+        "effective distance"
+      ]
+    },
+    "5E56252161D457A8BD48EE10B9348A4690E30326688A77565BCF0D02927C7AAC": {
+      "Parts": [
+        {
+          "Slot": "mod_reciever",
+          "Template": "55d355e64bdc2d962f8b4569",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "55d459824bdc2d892f8b4573",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_tactical_2",
+          "Template": "5a7b483fe899ef0016170d15",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "55d3632e4bdc2d972f8b4569",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "5ae30e795acfc408fb139a0b",
+          "Depth": 3,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_sight_rear",
+          "Template": "55d5f46a4bdc2d1b198b4567",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5649be884bdc2d79388b4577",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock_000",
+          "Template": "66f4a8d75a44076e9b2909d2",
+          "Depth": 2,
+          "Parent": 6
+        },
+        {
+          "Slot": "mod_stock_003",
+          "Template": "6984b82c5aab442620032fe8",
+          "Depth": 2,
+          "Parent": 6
+        },
+        {
+          "Slot": "mod_charge",
+          "Template": "55d44fd14bdc2d962f8b456e",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "55d4b9964bdc2d1d4e8b456e",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "55d4887d4bdc2d962f8b4570",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 5,
+      "Cost": 91196,
+      "PerPurchase": 10000,
+      "Attempts": 218,
+      "Floor": 9,
+      "Bound": 10,
+      "BoundSessions": 7,
+      "Falsifications": 0,
+      "FalsifyNodes": 0,
+      "LastFalsifySeed": 0,
+      "Nodes": 1817696,
+      "Binding": [
+        "recoil"
+      ]
+    }
+  }
+}
