@@ -581,59 +581,37 @@ namespace QuestTreeServer
             foreach (var part in mustInclude)
                 if (reach.ContainsKey(part) && !named.Contains(part)) named.Add(part);
 
-            // NO MINIMALITY CLAIM when a named part carries slots of its own. Restored after an attempt to
-            // remove it produced six false proofs on the first boot, and the history is worth keeping.
+            // A named part carrying slots of its own used to withdraw the bound entirely, and two attempts
+            // at removing that withdrawal are the reason the weighted block below is written the way it is.
             //
-            // The unsoundness is real: the threshold terms below subtract the named parts' contributions from
-            // what is wanted and then ask BestBelow how much an assembly of at most r parts ROOTED AT THE
-            // WEAPON can add. Those do not line up when a non-named part hangs off a named mount - the real
-            // build pays for that mount once, as a named part, while a weapon-rooted assembly has to spend
-            // budget reaching it again. The ceiling understates what r parts achieve, Reach asks for more of
-            // them, and the floor comes out ABOVE the true minimum: a false proof, in the direction that
-            // looks like success.
+            // The unsoundness was never really about mounts. It was about SUBTRACTING: the block took the
+            // named parts' stat contributions off what was wanted, and then asked BestBelow what an assembly
+            // of r parts ROOTED AT THE WEAPON could add. Those two do not describe the same gun. BestBelow
+            // charges its budget for every required slot, so the hypothetical r-part assembly had to buy a
+            // barrel the named parts had already bought. The ceiling understated what r parts achieve, Reach
+            // demanded more of them, and the floor came out ABOVE the true minimum - a false proof, in the
+            // direction that looks like success.
             //
-            // Charging the mount once - a knapsack over the weapon and every named host - was tried and is
-            // NOT sufficient. With the withdrawal removed and that knapsack in place, the survey's own alarm
-            // fired on six requirements: The Enemy's Mind Part 4 claimed no build could have fewer than 19
-            // parts against a verified build of 13, Part 13 claimed 12 against 9, Old Friend's Request 7
-            // against 6. Every one of them reasoned through the WEIGHTED block, so the mount was not the only
-            // thing wrong with it.
+            // The Glock 17 is that in one gun: required slots mod_barrel and mod_reciever, the quest names
+            // the barrel, and the satisfying build is five named parts plus a slide. r is 1, but ceiling[1]
+            // is negative infinity because the ceiling insists the free budget buy a barrel AND a slide.
+            // Reach answered 5 + 2 = 7 against a verified build of 6.
             //
-            // What the knapsack fixed was reaching the mount twice. What it did not fix - and this was
-            // first written down as a depth-cap problem, which was wrong - is that BestBelow charges the free
-            // budget for every REQUIRED slot, whether or not a named part is what fills it. So the mount is
-            // still charged twice: once for being reached, and once for occupying.
+            // Charging the mount once, as a knapsack over the weapon and every named host, was tried and made
+            // it WORSE: BestBelow(host)[0] is negative infinity for any host with a required slot, so
+            // combining raises the infeasible prefix. Six requirements produced refuted floors on the first
+            // boot after that.
             //
-            // The Glock 17 is the whole argument in one gun. Its required slots are mod_barrel and
-            // mod_reciever; the quest NAMES the barrel; the satisfying build is five named parts plus a
-            // slide, so r is 1. But ceiling[1] is negative infinity, because the ceiling insists the free
-            // budget buy a barrel AND a slide - and the barrel is already paid for in named.Count. Reach
-            // skips budget 1 and answers 5 + 2 = 7 against a verified build of 6.
+            // The fix is to stop subtracting. BestBelow(weapon)[T] already bounds the value of ANY legal
+            // assembly of T parts below the weapon - and the real build IS one of those, named parts
+            // included, because it is legal and it fills every required slot. So the block below asks
+            // directly for the smallest T whose ceiling reaches the RAW threshold, with no named arithmetic
+            // anywhere in it. Nothing is subtracted, so nothing can be charged twice, and the negative
+            // infinity prefix becomes exactly right: a build really must carry that many parts.
             //
-            // Worse, Combine made this bigger rather than leaving it alone. BestBelow(host)[0] is negative
-            // infinity for any host with a required slot, so combining RAISES the infeasible prefix instead
-            // of lowering it. On The Enemy's Mind Part 20 the weapon-only ceiling gives 18, under a 19-part
-            // build, and would have passed unnoticed; Combine pushed it to 20 and tripped the alarm. The
-            // docstring that function carried claimed the infinity propagation was deliberate and safe. It
-            // was the defect, described as a feature.
-            //
-            // So this stays until the weighted block's own ceiling is sound, and the cost of it is honest:
-            // Gunsmith names handguards and mounts constantly, so provably-minimal-on-part-count reads 0 of
-            // 60 on this install. A claim given up is worth more than one that cannot be trusted - and the
-            // alarm in the survey is what turned that from a belief into a measurement.
-            foreach (var part in named)
-            {
-                if (!Template(part, out var namedItem)) continue;
-                if (namedItem.Properties?.Slots?.Any() != true) continue;
-
-                floor.Unbounded = true;
-                floor.Parts = 0;
-                floor.Reason =
-                    $"the quest names {part}, which carries slots of its own - no lower bound over part " +
-                    "count can be argued while a part may hang off a named host";
-
-                return floor;
-            }
+            // Looser than the subtracting version would have been if that version had worked, because it no
+            // longer exploits knowing the named parts exactly. That is the trade, and this file's history
+            // says which way to take it.
 
             // A category nothing named covers needs a part of its own.
             var uncovered = 0;
@@ -690,11 +668,11 @@ namespace QuestTreeServer
             var selected = 0;
             var claimed = new HashSet<MongoId>();
 
-            // What those parts might contribute to the SUMMED stats while they are busy being a magazine
-            // or a sight. Needed because the threshold bound below counts them as budget spent, and it may
-            // only do that if it also concedes whatever they could have been worth.
-            var selectedErgonomics = 0d;
-            var selectedRecoil = 0d;
+            // What a selected part might have contributed to the summed stats while it was busy being a
+            // magazine or a sight was tracked here, because the threshold bound counted those parts as budget
+            // spent and had to concede what they gave up. The bound no longer counts budget at all - it asks
+            // for a total over the whole assembly, in which a magazine is free to be the best-valued thing in
+            // reach - so the concession is made by the ceiling itself and this had nothing left to read it.
 
             foreach (var (field, compare, value) in thresholds)
             {
@@ -723,23 +701,6 @@ namespace QuestTreeServer
                 if (provider.Any(claimed.Contains)) continue;
 
                 foreach (var template in provider) claimed.Add(template);
-
-                var bestErgonomicsOf = 0d;
-                var bestRecoilOf = 0d;
-
-                foreach (var template in provider)
-                {
-                    if (!Template(template, out var part)) continue;
-
-                    if ((part.Properties!.Ergonomics ?? 0d) > bestErgonomicsOf)
-                        bestErgonomicsOf = part.Properties!.Ergonomics ?? 0d;
-
-                    if (-(part.Properties!.Recoil ?? 0d) > bestRecoilOf)
-                        bestRecoilOf = -(part.Properties!.Recoil ?? 0d);
-                }
-
-                selectedErgonomics += bestErgonomicsOf;
-                selectedRecoil += bestRecoilOf;
 
                 selected++;
             }
@@ -824,6 +785,14 @@ namespace QuestTreeServer
             var needErgonomics = 0d;
             var needRecoil = 0d;
 
+            // The same two requirements with NOTHING subtracted, which is what the weighted block reads. The
+            // net figures above stay because Spread and Percent are structure-blind - they charge each part
+            // at most the best single contribution anywhere, wherever it hangs - so subtracting the named
+            // parts is safe there and buys a tighter answer. It is only the budgeted, slot-tree argument
+            // that cannot survive the subtraction.
+            var wholeErgonomics = 0d;
+            var wholeRecoil = 0d;
+
             // MAX, not assignment, in both cases. A condition stating two thresholds on one stat used to
             // keep whichever came last in the list, which is a weaker requirement than the quest's whenever
             // the last one is not the strongest - and a floor argued from a weakened requirement can come
@@ -846,12 +815,16 @@ namespace QuestTreeServer
                         wantsErgonomics = true;
                         needErgonomics = Math.Max(
                             needErgonomics, value - (props.Ergonomics ?? 0d) - namedErgonomics);
+                        wholeErgonomics = Math.Max(
+                            wholeErgonomics, value - (props.Ergonomics ?? 0d));
                         break;
 
                     case "recoil" when wantsLess && baseRecoil > 0d:
                         wantsRecoil = true;
                         needRecoil = Math.Max(
                             needRecoil, namedRecoil - (value / baseRecoil - 1d) * 100d);
+                        wholeRecoil = Math.Max(
+                            wholeRecoil, -(value / baseRecoil - 1d) * 100d);
                         break;
                 }
             }
@@ -867,21 +840,20 @@ namespace QuestTreeServer
                     if (!wantsErgonomics && ErgonomicsWeight[weighting] > 0d) continue;
                     if (!wantsRecoil && RecoilWeight[weighting] > 0d) continue;
 
-                    var wanted = ErgonomicsWeight[weighting] * needErgonomics
-                                 + RecoilWeight[weighting] * needRecoil;
+                    var wanted = ErgonomicsWeight[weighting] * wholeErgonomics
+                                 + RecoilWeight[weighting] * wholeRecoil;
 
-                    // The parts that have to BE a magazine or a sight are budget the summed stats do not
-                    // get to spend, so they are taken off the count - and in exchange the requirement is
-                    // reduced by the most they could have contributed while doing it. Conceding that is
-                    // what keeps this a bound rather than a guess, and the trade is worth it because a
-                    // magazine is rarely the part that buys ergonomics.
-                    var allowance = ErgonomicsWeight[weighting] * selectedErgonomics
-                                    + RecoilWeight[weighting] * selectedRecoil;
-
+                    // Offset ZERO, and that is the whole correction. It read named.Count + selected, which
+                    // said "this many parts are already accounted for, now tell me how many MORE the budget
+                    // needs" - and the budget was then made to re-buy the required slots those parts fill.
+                    // The ceiling counts the entire assembly, so the answer it gives already includes them
+                    // and nothing may be added to it.
+                    //
+                    // The magazine-and-sight allowance goes with the subtraction: the ceiling lets those
+                    // parts be the best-valued things in reach, which concedes more than the allowance ever
+                    // did, and concedes it in the safe direction.
                     var needs = Reach(
-                        BestBelow(weapon, weighting, 0, new HashSet<MongoId>()),
-                        wanted - allowance,
-                        named.Count + selected);
+                        BestBelow(weapon, weighting, 0, new HashSet<MongoId>()), wanted, 0);
 
                     // Unreachable is not a big number, it is the absence of one, and it cannot be maxed
                     // into a bound. Each weighting is a relaxation every satisfying build must meet, so
