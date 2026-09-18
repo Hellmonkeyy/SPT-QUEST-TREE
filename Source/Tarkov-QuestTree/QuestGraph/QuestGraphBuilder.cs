@@ -156,6 +156,7 @@ namespace QuestTree.QuestGraph
 
             RefreshKappaFlags();
             RefreshCollectorClosure();
+            FindChains();
             UI.PanelOpenTimer.Mark("kappa flags");
 
             RefreshStatusesInternal();
@@ -183,7 +184,63 @@ namespace QuestTree.QuestGraph
 
             Plugin.LogSource?.LogInfo(
                 $"QuestTree: tree built from {Nodes.Count} quest(s) - {failed} failed, {unresolved} with a " +
-                $"prerequisite not in the list, {unobtainable} unobtainable on this profile.");
+                $"prerequisite not in the list, {unobtainable} unobtainable on this profile; {Chains.Count} " +
+                $"single-file chain(s) of 2 or more, {Chains.Sum(c => c.Members.Count)} quest(s) in them, " +
+                $"the longest {(Chains.Count == 0 ? 0 : Chains.Max(c => c.Members.Count))}.");
+        }
+
+        /// <summary>Every chain in the graph, for the tree to collapse. See QuestChain.</summary>
+        public List<QuestChain> Chains { get; private set; } = new();
+
+        /// <summary>Finds the single-file runs. A link is a node with exactly one prerequisite in
+        /// the list whose prerequisite has exactly one unlock (this node) and shares its trader. A
+        /// run starts at a node that is a link's successor but not itself a successor of a link,
+        /// and follows successors until the chain condition breaks. Built once per graph, before
+        /// statuses are known, because it is structure and statuses only change what the box says.
+        ///
+        /// A quest whose prerequisite is not in the list is never a link: it draws as a root and
+        /// wears the missing-prerequisite mark, which a collapsed box would hide.</summary>
+        private void FindChains()
+        {
+            Chains = new List<QuestChain>();
+
+            bool LinkedToPrerequisite(QuestNode node) =>
+                node.PrerequisiteIds.Count == 1 &&
+                node.UnresolvedPrerequisiteIds.Count == 0 &&
+                _byId.TryGetValue(node.PrerequisiteIds[0], out var before) &&
+                before.Unlocks.Count == 1 &&
+                ReferenceEquals(before.Unlocks[0], node) &&
+                before.TraderId == node.TraderId;
+
+            foreach (var node in _byId.Values)
+            {
+                node.Chain = null;
+                node.ChainIndex = 0;
+            }
+
+            foreach (var node in _byId.Values)
+            {
+                // A head: something follows it in single file, but nothing precedes it that way.
+                if (LinkedToPrerequisite(node)) continue;
+                if (node.Unlocks.Count != 1 || !LinkedToPrerequisite(node.Unlocks[0])) continue;
+
+                var chain = new QuestChain();
+                var current = node;
+
+                while (current != null && current.Chain == null)
+                {
+                    current.Chain = chain;
+                    current.ChainIndex = chain.Members.Count;
+                    chain.Members.Add(current);
+
+                    current = current.Unlocks.Count == 1 && LinkedToPrerequisite(current.Unlocks[0])
+                        ? current.Unlocks[0]
+                        : null;
+                }
+
+                if (chain.Members.Count >= 2) Chains.Add(chain);
+                else foreach (var member in chain.Members) { member.Chain = null; member.ChainIndex = 0; }
+            }
         }
 
         /// <summary>

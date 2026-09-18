@@ -38,6 +38,27 @@ namespace QuestTree.QuestGraph
         Failed
     }
 
+    /// <summary>A maximal single-file run of quests from one trader, in order from the quest that
+    /// starts it to the one that ends it. Two members is the shortest run worth naming.</summary>
+    internal sealed class QuestChain
+    {
+        public readonly List<QuestNode> Members = new();
+
+        public QuestNode Head => Members[0];
+        public QuestNode Tail => Members[Members.Count - 1];
+
+        public int Completed
+        {
+            get
+            {
+                var done = 0;
+                foreach (var node in Members)
+                    if (node.Status == ENodeStatus.Completed) done++;
+                return done;
+            }
+        }
+    }
+
     /// <summary>
     /// One quest as a node in the tree. Built once per quest by <see cref="QuestGraphBuilder"/> and
     /// re-used across status refreshes - only <see cref="Status"/> changes on a live update, so the
@@ -101,6 +122,15 @@ namespace QuestTree.QuestGraph
         public int UnlockReach;
 
         public ENodeStatus Status;
+
+        /// <summary>The linear chain this quest sits in, or null. A chain is a maximal run of
+        /// quests where each has exactly one prerequisite and exactly one unlock, both in the run,
+        /// all from one trader - a Weapon Proficiency sequence, say. Found once per build by
+        /// QuestGraphBuilder.FindChains; the tree can draw such a run as one box.</summary>
+        public QuestChain Chain;
+
+        /// <summary>This quest's position in <see cref="Chain"/>, 0 for the head.</summary>
+        public int ChainIndex;
 
         /// <summary>On the canonical Kappa list - Collector's start conditions in SPT's shipped
         /// database, or the player's own kappa-quests.json.</summary>
