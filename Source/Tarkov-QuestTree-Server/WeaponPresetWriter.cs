@@ -158,6 +158,21 @@ namespace QuestTreeServer
             }
         }
 
+        /// <summary>The build as the game's own flat item list, exactly as Save would write it,
+        /// without writing it. Fresh ids every call. For the client's gate check, which assembles a
+        /// Weapon from these the same way the build screen assembles a preset and asks the game's
+        /// hand-in test about it. Null, with the reason, when the tree cannot be flattened.</summary>
+        public List<Item>? ItemsFor(MongoId weapon, IReadOnlyList<WeaponSolver.FittedPart> tree, out string why)
+        {
+            if (tree == null || tree.Count == 0)
+            {
+                why = "there is no build";
+                return null;
+            }
+
+            return Flatten(weapon, tree, out why);
+        }
+
         /// <summary>The id the profile already holds for a preset of this name, or null when there is
         /// none and a new one has to be minted.
         ///

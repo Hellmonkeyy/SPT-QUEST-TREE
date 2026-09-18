@@ -1,3 +1,19 @@
+# Quest Tracker 1.14.0
+
+**The game agrees with the build.** Every verdict this mod gave about a Gunsmith build was the mod
+checking its own arithmetic. Each build your profile can assemble now carries one more line, computed
+by the game's own hand-in test on the exact preset *Save as preset* would write: *The game will
+accept this build*, or *The game would refuse this build: recoil 265.98 where the quest wants <= 250*
+- the first test the trader's code fails, in the trader's numbers - or *checkable once the quest is
+accepted*, because the test needs the quest's own condition, which the game gives the client only for
+quests you hold. The check gun is unloaded and at full durability; the trader weighs the real one
+loaded. Both halves must be 1.14.0.
+
+**Magazine capacity is read from the magazine slot only**, the way the game reads it. No vanilla
+build changes.
+
+---
+
 # Quest Tracker 1.13.3
 
 **The tracker opens in half a second instead of a second and a half.** The first open of a session

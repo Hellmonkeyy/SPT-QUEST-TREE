@@ -418,9 +418,29 @@ namespace QuestTree.UI
             if (saveable != null && (saveable.Status == "ok" || saveable.Status == "repaired"))
                 AddSavePreset(ctx, build.Key, width, ref y);
 
+            AddGateVerdict(ctx, build, saveable, width, ref y);
             AddModelCheck(ctx, build, width, ref y);
 
             y += 8f;
+        }
+
+        /// <summary>What the trader will say, computed by the trader's own code - see GameGate.
+        /// The one line on this panel that is not the mod checking its own arithmetic.</summary>
+        private static void AddGateVerdict(Ctx ctx, WeaponBuildDto build, ProfileBuildDto saveable, float width, ref float y)
+        {
+            if (saveable == null || (saveable.Status != "ok" && saveable.Status != "repaired")) return;
+
+            var verdict = GameGate.Check(ctx.Node?.Id, build, saveable);
+            y += 4f;
+
+            var line = verdict.Kind switch
+            {
+                GameGate.Kind.Accepted => $"<color=#{GameStyle.SuccessHex}>The game will accept this build</color>  <color=#FFFFFF60>({GameStyle.Safe(verdict.Detail)})</color>",
+                GameGate.Kind.Refused => $"<color=#{GameStyle.ErrorHex}>The game would refuse this build: {GameStyle.Safe(verdict.Detail)}</color>",
+                _ => $"<color=#FFFFFF60>Game check: {GameStyle.Safe(verdict.Detail)}</color>"
+            };
+
+            AuxLayout.AddWrapped(ctx.Parent, line, ctx.X, ref y, width, 11);
         }
 
         /// <summary>The build the mod worked out for this quest.

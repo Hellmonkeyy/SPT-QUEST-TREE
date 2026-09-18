@@ -618,8 +618,8 @@ namespace QuestTreeServer
     /// <summary>The weapon builds as one profile can assemble them. See ProfileBuilds.</summary>
     public sealed class ProfileBuildsDto
     {
-        /// <summary>1: first version.</summary>
-        public int SchemaVersion { get; set; } = 1;
+        /// <summary>1: first version. 2 (1.14.0): ItemsJson and Root on each build. An older client ignores them.</summary>
+        public int SchemaVersion { get; set; } = 2;
 
         public string ModVersion { get; set; } = ModInfo.Version;
 
@@ -749,6 +749,16 @@ namespace QuestTreeServer
         /// <summary>Search nodes spent on this profile for this requirement. Zero for a build served as it
         /// was.</summary>
         public int Nodes { get; set; }
+
+        /// <summary>The build as the game's flat item list, serialised by SPT's own JsonUtil - never
+        /// by WireJson, whose options lack the MongoId converters and would ship every id as an
+        /// empty object (the 1.12.2 fault). Empty when there is no build or it could not be
+        /// flattened. The client assembles a Weapon from it and asks Inventory.IsWeaponFitsCondition,
+        /// which on SPT is the entire hand-in gate; since 1.14.0 (schema 2).</summary>
+        public string ItemsJson { get; set; } = "";
+
+        /// <summary>The weapon's item id inside ItemsJson, which WeaponBuild's constructor needs.</summary>
+        public string Root { get; set; } = "";
     }
 
     public sealed class ProfilePartDto

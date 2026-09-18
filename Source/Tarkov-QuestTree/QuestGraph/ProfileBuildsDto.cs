@@ -15,7 +15,7 @@ namespace QuestTree.QuestGraph
     /// </summary>
     internal sealed class ProfileBuildsDto
     {
-        public const int SupportedSchemaVersion = 1;
+        public const int SupportedSchemaVersion = 2;
 
         [JsonProperty("schemaVersion")]
         public int SchemaVersion { get; set; }
@@ -113,6 +113,15 @@ namespace QuestTree.QuestGraph
 
         [JsonProperty("nodes")]
         public int Nodes { get; set; }
+
+        /// <summary>The build as the game's flat item list, serialised server-side with SPT's
+        /// converters. GameGate assembles a Weapon from it. Empty on an older server.</summary>
+        [JsonProperty("itemsJson")]
+        public string ItemsJson { get; set; }
+
+        /// <summary>The weapon's item id inside ItemsJson.</summary>
+        [JsonProperty("root")]
+        public string Root { get; set; }
     }
 
     internal sealed class ProfilePartDto

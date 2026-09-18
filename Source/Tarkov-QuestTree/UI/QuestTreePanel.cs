@@ -227,6 +227,11 @@ namespace QuestTree.UI
             // The tree's chain markers need the same avatars and have no session of their own.
             TraderAvatars.Session = session;
 
+            // The gate check reads the quest's own condition objects from this controller, and a
+            // fresh Show may bring different builds, so its answers start over.
+            GameGate.QuestController = questController;
+            GameGate.Forget();
+
             // A different profile on the same client: the map view's remembered map, quest and
             // view belong to the last character. Read defensively for the same JIT reason as the
             // raid location in MenuTaskBarPatch.

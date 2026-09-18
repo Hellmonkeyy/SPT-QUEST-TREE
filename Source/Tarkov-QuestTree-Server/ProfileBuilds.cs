@@ -13,6 +13,7 @@ using SPTarkov.Server.Core.Models.Common;
 using SPTarkov.Server.Core.Models.Eft.Common;
 using SPTarkov.Server.Core.Servers;
 using SPTarkov.Server.Core.Services.Locales;
+using SPTarkov.Server.Core.Utils;
 
 namespace QuestTreeServer
 {
@@ -60,7 +61,9 @@ namespace QuestTreeServer
         ProfileHelper profileHelper,
         SaveServer saveServer,
         LocaleService localeService,
-        PartPrices partPrices)
+        PartPrices partPrices,
+        WeaponPresetWriter presetWriter,
+        JsonUtil jsonUtil)
     {
         /// <summary>One build requirement as the payload builder states it, with the shared build it
         /// currently serves for it.</summary>
@@ -171,6 +174,33 @@ namespace QuestTreeServer
             payload.Ready = !moved && !broken;
             payload.Stale = moved || broken;
             payload.Builds = answer.Builds;
+
+            // Filled once per build object, on the first request that serves it: the DTOs live in
+            // the answer and are replaced, not mutated, when a compute lands. The writer's own
+            // flattening, so what the gate check sees is what "Save as preset" would write.
+            foreach (var dto in payload.Builds)
+            {
+                if (dto == null || dto.Tree == null || dto.Tree.Count == 0) continue;
+                // Only builds the client will ask the gate about; a blocked build's items would be
+                // a third of the payload for a line nothing draws.
+                if (dto.Status != "ok" && dto.Status != "repaired") continue;
+                if (!dto.WeaponTemplate.TryParseMongoId(out var weapon)) continue;
+
+                // One filler at a time per DTO: two requests for the same session can arrive
+                // together, and each ItemsFor call makes fresh ids, so two unsynchronised fills
+                // could publish one call's items with the other's root. Root is written first,
+                // and readers only trust ItemsJson once it is non-empty.
+                lock (dto)
+                {
+                    if (dto.ItemsJson.Length > 0) continue;
+
+                    var items = presetWriter.ItemsFor(weapon, dto.Tree, out _);
+                    if (items == null || items.Count == 0) continue;
+
+                    dto.Root = items[0].Id.ToString();
+                    dto.ItemsJson = jsonUtil.Serialize(items) ?? "";
+                }
+            }
 
             return payload;
         }

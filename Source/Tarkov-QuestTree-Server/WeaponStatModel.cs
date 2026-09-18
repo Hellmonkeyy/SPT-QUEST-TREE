@@ -112,8 +112,9 @@ namespace QuestTreeServer
 
             // The game's GetMaxMagazineCount is GetCurrentMagazine()?.MaxCount ?? 0: the magazine in
             // the magazine slot, or nothing. So the weapon's own Cartridges do not count, and neither
-            // does any other part that happens to carry a cartridge list - an underbarrel launcher's
-            // chamber inflated this to 1 on builds with no magazine at all.
+            // does any other part that carries a cartridge list. On vanilla data nothing but a
+            // Magazine descendant has one, so this changes no vanilla build; it guards a modded
+            // template that puts Cartridges on something that is not a magazine.
             int? magazine = null;
 
             foreach (var id in fitted ?? Enumerable.Empty<MongoId>())
