@@ -75,100 +75,9 @@ namespace QuestTreeServer
         private int _seed;
         private int _improved;
 
-        /// <summary>The first proven bound seen for each requirement this boot, and how many later answers
-        /// disagreed with it. Concurrent because the training threads all write it.</summary>
-        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, int> _bounds = new();
-
-        private int _boundsDisagreed;
-        private int _boundsChecked;
-
-        /// <summary>Adversarial searches run against builds the prover calls minimal, and how many of them
-        /// found a smaller legal build - which would mean the PROVER is wrong.</summary>
-        private int _falsifyTries;
-        private int _falsified;
-
-        /// <summary>Adversarial searches a single bound needs before the budget moves elsewhere. Evidence
-        /// has diminishing returns: the thousandth failed attack on one build says far less than the first
-        /// attack on a build nobody has tested.</summary>
-        private const int FalsifyEnough = 2_000;
-
-        /// <summary>Whether this launch tries to DISPROVE its own minimality proofs.
-        ///
-        /// A gate that rewards a higher proven count is an incentive to loosen the prover, and loosening it
-        /// is the one direction a prover may never err: a bound that understates the ceiling proves builds
-        /// minimal that are not, with no crash and no log line. Every other check here compares the proof
-        /// against other things this code believes. This one compares it against reality - it takes the
-        /// builds called minimal, ignores the settled flag, spends a long search asking for a strictly
-        /// smaller one, and requires the answer to be no.
-        ///
-        /// Off by default because it is pure cost on a player's machine: nothing it finds makes a build
-        /// smaller, it only says whether a claim is false.</summary>
-        private static bool Falsifying =>
-            Environment.GetEnvironmentVariable("QUESTTREE_FALSIFY") is "1" or "true" or "TRUE" or "yes";
-
         /// <summary>Where training is searching FROM for each build, which is not always what the cache
         /// holds: a wander round moves this without moving the answer.</summary>
         private readonly Dictionary<string, List<WeaponSolver.FittedPart>> _working = new();
-
-        /// <summary>Requirements whose build matches the fewest PARTS any satisfying build could have.
-        ///
-        /// It used to be a skip list - a build at its bound could not get smaller, so it was never searched
-        /// again. It cannot be one any more. The objective is now the number of parts a player has to BUY,
-        /// and a build already as small as possible may still be cheaper to assemble, so every requirement
-        /// stays searchable.
-        ///
-        /// What it still is: a true statement about part count, produced by a bound that cost 566 million
-        /// nodes to establish, and the set the falsifier attacks. What it is NOT is a count of builds proven
-        /// minimal over the objective - that is _provenCost, counted separately against its own bound, and
-        /// neither number may be reported as the other.</summary>
-        private readonly HashSet<string> _proven = new();
-
-        /// <summary>Requirements this boot could prove NO lower bound for, which is the opposite end of
-        /// _proven rather than a weaker version of it.
-        ///
-        /// Kept for two reasons, both learned the hard way. It keeps the Warning to one line per key, since
-        /// Proven is re-entered on every search for a key that never becomes proven. And it is what tells
-        /// the falsifier to attack these: they are the requirements with nothing standing between them and
-        /// a smaller build, so they want the adversarial search MORE than a proved one does, and the first
-        /// attempt at making their unprovability honest accidentally exempted them from it.
-        ///
-        /// A ConcurrentDictionary-backed set would be tidier; this is guarded by the same lock as _proven
-        /// at every touch, which is the convention the rest of this file already follows.</summary>
-        private readonly HashSet<string> _unbounded = new();
-
-        /// <summary>Requirements whose build is proven minimal on COST - the objective - as opposed to
-        /// _proven, which is over part count and answers a different question.
-        ///
-        /// Separate from _proven rather than folded into it, because the two are independent: a build can sit
-        /// at its cost floor while carrying a part more than necessary, and it can be the leanest possible
-        /// build while costing more than the cheapest one. Reporting either number as the other is the
-        /// mistake the line this feeds used to make by reporting zero.
-        ///
-        /// Guarded by _proven's lock at every touch, the convention _unbounded already follows.</summary>
-        private readonly HashSet<string> _provenCost = new();
-
-        /// <summary>Each requirement's cost floor, worked out once.
-        ///
-        /// The floor is a function of the item data, the handbook and PerPurchase, and none of the three
-        /// moves while the server runs - PartPrices memoises PerPurchase on its first read, so the environment
-        /// cannot change it underneath this. So recomputing per attempt would repeat a slot-graph walk for an
-        /// answer that cannot change, which is exactly the waste Proven was carrying before _unbounded was put
-        /// in front of it. Not keyed on PerPurchase for that reason, and this comment is the reason it is
-        /// safe not to be.</summary>
-        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, long> _costFloors = new();
-
-        /// <summary>Requirements whose remembered cost was re-priced by THIS install, which is the only cost a
-        /// floor computed from this install's handbook may be compared against.
-        ///
-        /// The shipped history carries the cost each build had where it was found, and 12 of the 32 shipped
-        /// entries price differently here - one stores 135,454 against 70,856 on this install. Comparing a
-        /// foreign number to a local floor is comparing two different objectives, and it errs in both
-        /// directions, so the proof waits for the local number instead of trusting the stored one.
-        ///
-        /// PerPurchase alone does not settle this: two installs agreeing on PerPurchase can still disagree on
-        /// every part price, and the survey's own cost refresh is what makes the figure local. Recorded at the
-        /// two places that refresh it, both of which describe the build under Handbook first.</summary>
-        private readonly System.Collections.Concurrent.ConcurrentDictionary<string, byte> _repriced = new();
 
         /// <summary>Searches spent this boot. The unit the progress line and both gates count in, since a
         /// round stopped existing when the barrier did.</summary>
@@ -242,47 +151,21 @@ namespace QuestTreeServer
             var widestBuild = 0;
             var duplicates = 0;
             var unscorable = 0;
-            // How many parts are PROVEN necessary, summed. NOT the solver's own floor, which is the size
-            // of one particular mandatory skeleton and is not a bound at all - Gunsmith 18 comes in at
-            // 9 parts against a solver floor of 10, which settles it. Only the verifier's number is a
-            // bound, so only the verifier's number is reported as one.
-            var proven = 0;
+            // Irreducible is the one proof kept: removing any part of the build breaks a requirement. It is
+            // cheap, it runs unconditionally, and it is the only claim here a player can act on. The lower
+            // bounds that used to sit beside it - "provably minimal" on part count and on cost - are gone:
+            // they produced three wrong bounds in one session, proved 8 of 60 at best, and no player could
+            // act on the number either way. The measured contribution of the whole optimality apparatus to
+            // the shipped builds was under 0.05% of their cost.
             var irreducible = 0;
-            var atFloor = 0;
-
-            // Floors a verified build refutes outright. Counted and reported, never folded into atFloor or
-            // unbounded: "the bound is wrong" is a third state, and the two it would otherwise hide in are
-            // "the bound holds" and "there is no bound".
-            var refutedFloors = 0;
-
-            // Requirements no bound could be argued for. Reported rather than inferred from a gap between
-            // two other numbers: this used to be indistinguishable from a bound of int.MaxValue, which is
-            // to say indistinguishable from a proof.
-            //
-            // Counted over every requirement surveyed, where atFloor is counted only over the ones that
-            // solved - so the two are not fractions of the same denominator and the log line says which.
-            var unbounded = 0;
-            var unproven = new List<string>();
             var unverifiable = 0;
             var disagreed = 0;
 
-            // THE OBJECTIVE, summed: parts these builds need that the weapons do not already wear. Reported
-            // beside the part count rather than replacing it, because the bounds and the proofs are over part
-            // count and would read as claims about this number if it stood alone.
+            // THE OBJECTIVE, summed: parts these builds need that the weapons do not already wear.
             var changes = 0;
             var cost = 0L;
             var unpriced = 0;
             var withDefaults = 0;
-
-            // Builds sitting at their COST floor, which is a different claim from atFloor above and counted
-            // separately: that one is over part count, this one is over the objective.
-            var atCostFloor = 0;
-
-            // Requirements the floor could say nothing about, reported rather than folded into the gap between
-            // two other numbers - the same discipline unbounded follows for part count. CostFloorReason is
-            // where a zero becomes legible: "nothing the quest names has to be bought" is a different fact
-            // from a floor that failed to compute.
-            var noCostBound = new List<string>();
             var failed = new List<string>();
 
             // The search has a wall-clock ceiling, so how much of it the worst request actually spends
@@ -327,46 +210,6 @@ namespace QuestTreeServer
                 var verdict = weaponBuildVerifier.Verify(
                     weapon, result.Parts, thresholds, mustInclude, mustIncludeCategories);
 
-                // PROOF, not the solver's opinion: the fewest parts any satisfying build could have,
-                // argued from the item data without looking at the build. A build that matches it is
-                // minimum; one above it is only as small as the passes could make it.
-                var lowest = weaponBuildVerifier.LowestPossible(weapon, thresholds, mustInclude, mustIncludeCategories);
-
-                // Seeded from the SURVEY, which runs before any training thread exists: these sixty are the
-                // single-threaded answers, and every concurrent recomputation for the rest of the boot is
-                // compared against them build by build. Sixty matching sixty, not one total matching another
-                // - two different wrong bounds can sum to the same number.
-                var boundKey = WeaponBuildCache.KeyFor(weapon, thresholds, mustInclude, mustIncludeCategories);
-
-                // A floor the build in hand ALREADY REFUTES is not a weak bound, it is a wrong one, and it
-                // must not be recorded, cross-checked or counted. Without this the alarm below shouted while
-                // the scoreboard ignored it: all six refuted floors still incremented the PROVEN MINIMUM
-                // count and were written to weapon-builds.json as bounds for later boots, so the evidence
-                // line reported sixteen proofs of which six were simultaneously reported as refuted.
-                //
-                // Ordered before Bound deliberately. verdict and result are both in scope here, so there is
-                // no reason for the wrong number to reach the cache first and be corrected afterwards.
-                var refuted = !lowest.Unbounded && verdict.Verified && lowest.Parts > result.Parts.Count;
-
-                if (refuted) refutedFloors++;
-
-                // Same rule as Proven: an unbounded floor is recorded nowhere and cross-checked against
-                // nothing, because it is the absence of a claim rather than a weak one.
-                if (!lowest.Unbounded && !refuted)
-                {
-                    Crosscheck(boundKey, lowest.Parts, weapon);
-
-                    // Recorded HERE as well as in Proven, and the first version of this missed it: the survey
-                    // is the only place a bound is computed on a boot that does no training, so without this
-                    // the evidence line reported zeros on every normal launch - a denominator of nothing,
-                    // which is the exact failure it was added to prevent.
-                    weaponBuildCache.Bound(boundKey, lowest.Parts);
-                }
-                else
-                {
-                    unbounded++;
-                }
-
                 duplicates += verdict.Duplicates;
                 unverifiable += verdict.Unverifiable.Count;
                 if (verdict.Unverifiable.Count > 0) unscorable++;
@@ -388,44 +231,14 @@ namespace QuestTreeServer
                     solved++;
                     parts += result.Parts.Count;
 
-                    // Guarded the way atFloor below is, and for the same reason: an unbounded floor
-                    // carries Parts = 0 deliberately, so adding it unconditionally folded "no bound could
-                    // be proven" into the same total as "zero parts are provably necessary". The evidence
-                    // line would have understated itself with nothing to show it had.
-                    if (!lowest.Unbounded) proven += lowest.Parts;
                     changes += result.Changes;
                     cost += result.Cost;
-                    if (result.CostFloor > 0 && result.Cost <= result.CostFloor) atCostFloor++;
-                    if (result.CostFloor <= 0) noCostBound.Add($"{questName} ({result.CostFloorReason})");
                     unpriced += result.Unpriced;
                     if (weaponPresets.For(weapon) != null) withDefaults++;
 
                     if (verdict.Irreducible) irreducible++;
                     foreach (var spare in verdict.Spare) logger.Warning($"Quest Tracker: '{questName}' carries a spare part - {spare}. The search should not have left it.");
 
-                    // Explicitly, not by relying on Parts being zeroed: this counts the PROVEN MINIMUM
-                    // line, and it read every unbounded floor as a match while the absence of a bound was
-                    // carried as int.MaxValue.
-                    // THE PART FLOOR AGAINST REALITY, and the twin of the cost floor's alarm. A floor is a
-                    // claim that no satisfying build has fewer parts; a satisfying build in hand with fewer
-                    // than that is the claim refuted. The verifier has just passed this build, so the two
-                    // cannot both be right.
-                    //
-                    // Nothing shouted about this before, and it is exactly the failure the named-mount
-                    // withdrawal existed to avoid - so removing that withdrawal without adding this would
-                    // have traded a claim given up for a claim nothing checks.
-                    if (refuted)
-                        logger.Error(
-                            $"Quest Tracker: the part floor for '{questName}' is UNSOUND - it claims no " +
-                            $"satisfying build has fewer than {lowest.Parts} part(s) ({lowest.Reason}), and " +
-                            $"the verifier just passed one with {result.Parts.Count}. Every minimality claim " +
-                            "over part count is suspect until this is explained.");
-
-                    if (!lowest.Unbounded && !refuted && result.Parts.Count <= lowest.Parts) atFloor++;
-                    else unproven.Add(
-                        $"{questName} at {result.Parts.Count} parts, proven necessary {lowest.Parts} " +
-                        $"({lowest.Reason}), solver floor {result.Floor}, binding " +
-                        (result.Binding.Count > 0 ? string.Join("/", result.Binding) : "nothing - it has slack everywhere"));
                     if (result.Parts.Count > widestBuild) widestBuild = result.Parts.Count;
 
                     logger.Debug(
@@ -478,53 +291,22 @@ namespace QuestTreeServer
                 (ceiling > 0 ? $", {ceiling} hit the search budget" : "") +
                 $" - {clock.ElapsedMilliseconds:N0} ms for all of them, {worst:N0} nodes for the worst one, " +
                 $"{(solved > 0 ? (double)parts / solved : 0d):0.##} parts per build ({parts} total), " +
-                $"{widestBuild} at most, {atFloor} of them PROVEN MINIMUM, " +
-                (unbounded > 0 ? $"{unbounded} of all {_questBuilds.Count} with NO PROVABLE BOUND, " : "") +
-                (refutedFloors > 0 ? $"{refutedFloors} FLOOR(S) REFUTED BY A VERIFIED BUILD, " : "") +
-                $"{irreducible} PROVEN IRREDUCIBLE, " +
-                $"{proven} of {parts} parts proven necessary" +
+                $"{widestBuild} at most, {irreducible} PROVEN IRREDUCIBLE" +
                 (duplicates > 0 ? $", {duplicates} duplicated part(s)" : "") +
                 (unverifiable > 0
                     ? $", {unverifiable} constraint(s) across {unscorable} build(s) that nothing here can score"
                     : "") +
                 (disagreed > 0 ? $", SOLVER AND VERIFIER DISAGREED ON {disagreed}" : "") + ".");
 
-            // The objective's own line. It used to end by saying no bound over cost existed and reporting an
-            // unconditional zero; WeaponSolver.CheapestCost is that bound, so the number is now measured.
-            // Still NOT the part-count figure carried over - the two bounds answer different questions and a
-            // build can satisfy either without the other.
+            // The objective's own line: what the shared builds cost at handbook prices. No claim of
+            // minimality follows it any more - the cost floor that used to close this sentence is gone with
+            // the rest of the proof machinery, for the reason given above the counters.
             logger.Info(
                 $"Quest Tracker: the objective - {cost:N0} roubles across {solved} build(s) at handbook prices " +
                 $"plus {partPrices.PerPurchase:N0} per purchase ({(solved > 0 ? cost / Math.Max(1, solved) : 0):N0} per " +
                 $"build), over {changes} change(s) from the default presets ({(solved > 0 ? (double)changes / solved : 0d):0.##} " +
                 $"per build), {unpriced} purchase(s) with no handbook price; {withDefaults} of them have a default preset " +
-                $"to be measured against; {partPrices.Count:N0} templates priced. {atCostFloor} of {solved} are at " +
-                $"their COST FLOOR, so no cheaper build exists for them; {noCostBound.Count} have no cost bound at " +
-                "all. The floor is argued from the parts the quest names, and says nothing about thresholds.");
-
-            if (noCostBound.Count > 0)
-                logger.Debug(
-                    "Quest Tracker: build requirement(s) with no cost bound - " +
-                    string.Join("; ", noCostBound.Take(10)) +
-                    (noCostBound.Count > 10 ? $" and {noCostBound.Count - 10} more" : "") + ".");
-
-            // Per quest, how far the build is above what can be PROVEN necessary. A gap is not waste -
-            // the bound omits the chains that named parts have to be routed through, and bounding
-            // those exactly is a Steiner tree - but it is the honest measure of what is still open.
-            // The denominators. "Zero counterexamples" and "zero comparisons" read identically otherwise,
-            // which is the same defect as a check that cannot fail - and this is the claim the whole feature
-            // rests on, so it is the last place to leave it implicit.
-            var evidence = weaponBuildCache.Evidence();
-
-            logger.Info(
-                $"Quest Tracker: the evidence behind the proofs - the least-tested minimal build has survived " +
-                $"{evidence.Weakest:N0} adversarial search(es), {evidence.Untested} of them have never been " +
-                $"attacked, {evidence.Nodes:N0} node(s) have been spent trying to beat them, and the " +
-                $"shortest-standing bound has held for {evidence.Sessions} session(s). Set QUESTTREE_FALSIFY=1 " +
-                "to spend a launch attacking them.");
-
-            foreach (var line in unproven)
-                logger.Debug($"Quest Tracker: minimality unproven - {line}");
+                $"to be measured against; {partPrices.Count:N0} templates priced.");
 
             if (reasons.Count > 0)
                 logger.Info(
@@ -646,8 +428,8 @@ namespace QuestTreeServer
 
             // Emptied first, because this runs again on every rebuild and these are APPENDED to as the
             // quests are walked. Without the clear they grow by sixty each time: the training run, which
-            // rebuilds the payload every time it finds a smaller build, reported "20 of 180 are provably
-            // minimal" and was searching every requirement three times a round.
+            // rebuilds the payload every time it finds a smaller build, once reported its counts over 180
+            // requirements instead of 60 and was searching every requirement three times a round.
             //
             // Latent since Rebuild was written - a harvest rebuild is rare enough that nobody saw it - and
             // only visible once something started rebuilding often.
@@ -1161,6 +943,89 @@ namespace QuestTreeServer
         /// a derived one - if more builds settle, the same 390 buys more passes over what is left.</summary>
         private const int LaunchAttempts = 390;
 
+        /// <summary>Where a TRAINING run stops on its own, in attempts and in wall-clock time.
+        ///
+        /// Both, because either alone is the wrong unit on some machine. The defaults come from the one
+        /// long run that was measured end to end: 786,308 attempts over 11.6 hours on 16 threads found 13
+        /// cheaper builds, the last of them at attempt 338,297 in hour five, and nothing at all in the
+        /// 448,011 attempts after that. A run that has found nothing for six hours is not about to. The
+        /// defaults sit just past where that run stopped improving; a slower machine reaches the time cap
+        /// first, a faster one the attempt cap, and either is a full run's worth of evidence.
+        ///
+        /// QUESTTREE_TRAIN_ATTEMPTS and QUESTTREE_TRAIN_HOURS move them, and ZERO means no cap of that kind
+        /// - set both to zero and training runs until the server is stopped, which is what it always did
+        /// before the run was measured. Resolved once and reported in the progress line rather than
+        /// described; garbage is ignored with a warning instead of throwing, because a typo in an
+        /// environment variable is not a reason to refuse to start. The same shape as TrainingThreads.</summary>
+        private const int DefaultTrainingAttempts = 340_000;
+
+        private const double DefaultTrainingHours = 5d;
+
+        private int TrainingAttempts
+        {
+            get
+            {
+                if (_trainingAttempts >= 0) return _trainingAttempts;
+
+                var asked = Environment.GetEnvironmentVariable("QUESTTREE_TRAIN_ATTEMPTS");
+
+                if (string.IsNullOrWhiteSpace(asked)) return _trainingAttempts = DefaultTrainingAttempts;
+
+                if (!int.TryParse(asked, out var wanted) || wanted < 0)
+                {
+                    logger.Warning(
+                        $"Quest Tracker: QUESTTREE_TRAIN_ATTEMPTS is '{asked}', which is not a count of " +
+                        $"attempts - training stops at the default {DefaultTrainingAttempts:N0}. Zero means no cap.");
+
+                    return _trainingAttempts = DefaultTrainingAttempts;
+                }
+
+                return _trainingAttempts = wanted;
+            }
+        }
+
+        private int _trainingAttempts = -1;
+
+        private double TrainingHours
+        {
+            get
+            {
+                if (_trainingHours >= 0d) return _trainingHours;
+
+                var asked = Environment.GetEnvironmentVariable("QUESTTREE_TRAIN_HOURS");
+
+                if (string.IsNullOrWhiteSpace(asked)) return _trainingHours = DefaultTrainingHours;
+
+                if (!double.TryParse(asked, System.Globalization.NumberStyles.Float,
+                        System.Globalization.CultureInfo.InvariantCulture, out var wanted)
+                    || double.IsNaN(wanted) || double.IsInfinity(wanted) || wanted < 0d)
+                {
+                    logger.Warning(
+                        $"Quest Tracker: QUESTTREE_TRAIN_HOURS is '{asked}', which is not a number of hours - " +
+                        $"training stops at the default {DefaultTrainingHours:0.#}. Zero means no cap.");
+
+                    return _trainingHours = DefaultTrainingHours;
+                }
+
+                return _trainingHours = wanted;
+            }
+        }
+
+        private double _trainingHours = -1d;
+
+        /// <summary>The caps as one phrase for the progress line, or the honest statement that there are
+        /// none.</summary>
+        private string TrainingCapDescription =>
+            TrainingAttempts <= 0 && TrainingHours <= 0d
+                ? "Runs until the server is stopped."
+                : "Stops on its own at " +
+                  string.Join(" or ", new[]
+                  {
+                      TrainingAttempts > 0 ? $"{TrainingAttempts:N0} attempts" : null,
+                      TrainingHours > 0d ? $"{TrainingHours:0.#} hour(s)" : null
+                  }.Where(part => part != null)) +
+                  "; stop the server to finish sooner.";
+
         /// <summary>Restarts a training round spends on a build that has never resisted, and the most it
         /// will escalate to for one that has.
         ///
@@ -1322,17 +1187,16 @@ namespace QuestTreeServer
                 logger.Info(
                     $"Quest Tracker: looking for smaller weapon builds in the background - {LaunchAttempts} " +
                     $"attempt(s) across {Threads} thread(s) on the lowest thread priority, then it stops for " +
-                    "good. Anything it finds is used from the next start. Set QUESTTREE_TRAIN=1 to search " +
-                    "until the server stops.");
+                    "good. Anything it finds is used from the next start. Set QUESTTREE_TRAIN=1 for a " +
+                    "training session, which searches until it has spent its cap or the server stops.");
             else
                 logger.Warning(
-                    $"Quest Tracker: TRAINING. This launch will keep looking for smaller weapon builds FOR AS " +
-                    $"LONG AS IT RUNS, across {Threads} of this machine's {Environment.ProcessorCount} " +
-                    "thread(s) on the lowest priority, and will not stop on its own. Stop the server when you " +
-                    "have had enough - every improvement is written down as it is found, so nothing is lost by " +
-                    "stopping. Unset QUESTTREE_TRAIN for a normal launch.");
+                    $"Quest Tracker: TRAINING. This launch keeps looking for cheaper weapon builds across " +
+                    $"{Threads} of this machine's {Environment.ProcessorCount} thread(s) on the lowest " +
+                    $"priority. {TrainingCapDescription} Every improvement is written down as it is found, " +
+                    "so nothing is lost by stopping. Unset QUESTTREE_TRAIN for a normal launch.");
 
-            var budget = training ? int.MaxValue : LaunchAttempts;
+            var budget = training ? (TrainingAttempts > 0 ? TrainingAttempts : int.MaxValue) : LaunchAttempts;
             var cursor = -1;
 
             void Worker()
@@ -1342,7 +1206,8 @@ namespace QuestTreeServer
                 try { Thread.CurrentThread.Priority = ThreadPriority.Lowest; }
                 catch (Exception) { /* a platform that will not lower it is no reason to skip the work */ }
 
-                while (!token.IsCancellationRequested && _attempts < budget)
+                while (!token.IsCancellationRequested && _attempts < budget
+                       && !(training && TrainingHours > 0d && clock.Elapsed.TotalHours >= TrainingHours))
                 {
                     // Round-robin rather than a shuffled queue, so no requirement is starved and two workers
                     // never take the same one. The wrap is on an unsigned cast because the cursor is allowed
@@ -1376,15 +1241,8 @@ namespace QuestTreeServer
                 logger.Info(
                     $"Quest Tracker: {what} - {_attempts:N0} attempt(s) in {clock.Elapsed.TotalMinutes:0.0} " +
                     $"minute(s) across {Threads} thread(s) ({_attempts / minutes:N0}/min), {_improved} smaller " +
-                    $"build(s) found. {_proven.Count} of {Requirements} are provably minimal ON PART COUNT, " +
-                    $"{_provenCost.Count} of {Requirements} proven minimal on COST - the objective. " +
-                    $"{_boundsChecked:N0} bound comparison(s) across {_bounds.Count} requirement(s), " +
-                    $"{_boundsDisagreed} disagreement(s)." +
-                    (Falsifying
-                        ? $" {_falsifyTries:N0} falsification attempt(s) against proven-minimal builds, " +
-                          $"{_falsified} counterexample(s)."
-                        : "") +
-                    (weaponBuildCache.Training ? " Stop the server to finish." : ""));
+                    $"build(s) found." +
+                    (weaponBuildCache.Training ? " " + TrainingCapDescription : ""));
             }
 
             try
@@ -1446,117 +1304,6 @@ namespace QuestTreeServer
         /// required strictly smaller and the other did not.</summary>
         private static bool Cheaper(long cost, int parts, long wasCost, int wasParts) =>
             cost < wasCost || (cost == wasCost && parts < wasParts);
-
-        /// <summary>The proven lower bound for one requirement, worked out once and kept. NULL when no
-        /// bound could be argued, which is not a bound of any size - see Floor.Unbounded.</summary>
-        private int? Proven(
-            MongoId weapon,
-            List<(string Field, string Compare, double Value)> thresholds,
-            List<MongoId> mustInclude,
-            List<MongoId> mustIncludeCategories)
-        {
-            var key = WeaponBuildCache.KeyFor(weapon, thresholds, mustInclude, mustIncludeCategories);
-
-            // Asked BEFORE the work, because the work is the expensive part and for most requirements its
-            // answer is already known. Proven is re-entered on every attempt for any key that never becomes
-            // proven, and withholding the bound whenever a quest names a mount left 37 of 60 requirements in
-            // exactly that state - so nearly two thirds of all attempts were running a full LowestPossible,
-            // including its breadth-first walk of the weapon's whole slot graph, and discarding the result.
-            //
-            // Sound on the same premise everything else here rests on: a bound is a property of the item
-            // data, so a requirement that could not be bounded once this boot cannot be bounded later in it.
-            // What it gives up is noticing a key that went unbounded and then bounded again, which would be
-            // a contradiction rather than news - and the first unbounded answer still goes through the full
-            // path below, where Crosscheck compares it against any bound recorded earlier.
-            bool known;
-            lock (_proven) known = _unbounded.Contains(key);
-
-            if (known) return null;
-
-            var floor = weaponBuildVerifier.LowestPossible(weapon, thresholds, mustInclude, mustIncludeCategories);
-
-            // No number is written when there is no claim to write. Nothing stored is withdrawn either:
-            // a bound already on file cannot have outlived its evidence, because Load() zeroes every Bound
-            // when the item fingerprint changes and KeyFor hashes the thresholds into the key - so the two
-            // ways a bound could go stale both invalidate it already. Wiping it here would only throw away
-            // the 16-to-39 sessions of stability the file actually holds.
-            //
-            // But a key that WAS bounded and now is not is a disagreement, and it is exactly the kind
-            // Crosscheck exists for: BestBelow memoises on template alone while its value depends on which
-            // descent hit a cycle cut first, so two threads can legitimately reach different answers for
-            // one key. Routing this case silently around the check would hide the one failure the check
-            // was built to catch.
-            if (floor.Unbounded)
-            {
-                if (_bounds.TryGetValue(key, out var earlier))
-                {
-                    Interlocked.Increment(ref _boundsDisagreed);
-
-                    logger.Warning(
-                        $"Quest Tracker: the proven minimum for '{weapon}' came back as UNPROVABLE after coming back " +
-                        $"as {earlier} earlier in this boot - {floor.Reason}. A bound is a property of the item data " +
-                        "and cannot depend on who asked.");
-                }
-                else if (AddUnbounded(key))
-                {
-                    // Once per key per boot. Proven is re-entered on every Shrink for a key that never
-                    // becomes proven, so logging unconditionally would put hundreds of identical lines in a
-                    // training run's log.
-                    logger.Warning(
-                        $"Quest Tracker: no lower bound could be proven for '{weapon}' - {floor.Reason}. This build " +
-                        "is not called minimal, and the falsifier is turned loose on it below.");
-                }
-
-                return null;
-            }
-
-            Crosscheck(key, floor.Parts, weapon);
-
-            // Written down rather than recomputed from nothing next time, and with its own history: a bound
-            // that has not moved in fifty sessions is a different object from one that improved last
-            // session.
-            weaponBuildCache.Bound(key, floor.Parts);
-
-            return floor.Parts;
-        }
-
-        /// <summary>Records a requirement as unprovable, answering whether this boot had not already.
-        /// Under _proven's lock, because the two sets are read together and a torn answer would either
-        /// duplicate a Warning or drop a falsification.</summary>
-        private bool AddUnbounded(string key)
-        {
-            lock (_proven) return _unbounded.Add(key);
-        }
-
-        /// <summary>Asserts that the proven lower bound for one requirement does not change within a boot.
-        ///
-        /// A bound is a property of the item data, so the same question must give the same answer however
-        /// many threads asked it and in whatever order they filled the shared tables. That is exactly the
-        /// property concurrency breaks, and breaking it does not crash or log: it silently proves a build
-        /// minimal that is not. So it is checked rather than argued, on every call, for the life of the
-        /// process - the cost is one dictionary lookup against a proof the whole feature rests on.
-        ///
-        /// A count of how many were checked is reported beside the count of disagreements, because zero
-        /// disagreements from a check nobody ran looks identical to zero from a check that passed.</summary>
-        private void Crosscheck(string key, int bound, MongoId weapon)
-        {
-            var first = _bounds.GetOrAdd(key, bound);
-
-            // Comparisons, not distinct requirements. "60 cross-checked" could mean each was computed once
-            // and compared against nothing, which is the same blank-reads-as-zero trap the gate was hardened
-            // against; this says how many times an answer was held against an earlier one.
-            Interlocked.Increment(ref _boundsChecked);
-
-            if (first == bound) return;
-
-            Interlocked.Increment(ref _boundsDisagreed);
-
-            logger.Warning(
-                $"Quest Tracker: the proven minimum for '{weapon}' came back as {bound} after coming back as " +
-                $"{first} earlier in this boot. A bound is a property of the item data and cannot depend on who " +
-                "asked - the proof tables are not order-independent, and no build should be called minimal " +
-                "until that is fixed.");
-        }
 
         /// <summary>Counts the builds that name a part the player cannot get.
         ///
@@ -1854,84 +1601,6 @@ namespace QuestTreeServer
 
             if (remembered == null) return false;
 
-            // Provably minimal ON PART COUNT already - which is no longer a reason to stop.
-            var proven = false;
-            lock (_proven) proven = _proven.Contains(key);
-
-            // "is at most the bound" AND "there is a bound". The second half is new and is the whole
-            // point: Proven used to hand back int.MaxValue when it could prove nothing, and every build
-            // compares as at most that - so the requirements nothing could bound were exactly the ones
-            // marked minimal, and the falsifier below was switched off for them.
-            if (!proven &&
-                Proven(weapon, thresholds, mustInclude, mustIncludeCategories) is { } bound)
-            {
-                // REFUTED here too, and this path had no such check while the survey's did. The survey covers
-                // the same sixty keys on a boot, so a floor wrong from the start is caught there - but a
-                // build that gets SMALLER later in the run, which is the entire purpose of training, can dip
-                // below a bound with nothing to notice. Proven writes that bound to the cache, so it would
-                // have been recorded as a proof for the life of the process and in the file.
-                // THREE states, spelled out, because collapsing them to two is how this broke. The first
-                // version of this alarm kept the refutation test and replaced the proof test with "else" -
-                // which is bound <= Parts.Count, the near-NEGATION of the proof it replaced. Every build at
-                // or ABOVE its bound was then marked minimal, and the progress line read 60 of 60 against a
-                // survey reporting 8 of 60 on the same data. A check that cannot fail, again.
-                if (bound > remembered.Parts.Count)
-                    logger.Error(
-                        $"Quest Tracker: the part floor for '{key}' is UNSOUND - it claims no " +
-                        $"satisfying build has fewer than {bound} part(s), and a verified build of " +
-                        $"{remembered.Parts.Count} is in hand. Not counted as a proof.");
-                else if (remembered.Parts.Count <= bound)
-                {
-                    lock (_proven) _proven.Add(key);
-                    proven = true;
-                }
-            }
-
-            // And the same question over the OBJECTIVE, which is the one that was reported as an
-            // unconditional zero because no bound over cost existed. CheapestCost is that bound.
-            //
-            // Gated twice, because a remembered cost is only comparable to a local floor if it IS a local
-            // cost. PerPurchase must match - it is read from the environment, so a history written under a
-            // different one measures a different objective - and the entry must have been re-priced by this
-            // install, see _repriced. The shipped history stores whatever each build cost where it was found,
-            // and on this install 12 of 32 of those figures are wrong for it.
-            bool provenCost;
-            lock (_proven) provenCost = _provenCost.Contains(key);
-
-            if (!provenCost && remembered.PerPurchase == partPrices.PerPurchase && _repriced.ContainsKey(key))
-            {
-                var costFloor = _costFloors.GetOrAdd(
-                    key,
-                    _ => weaponSolver.CheapestCost(
-                        weapon, mustInclude, mustIncludeCategories, Handbook, out _));
-
-                // At most the floor, and a floor of zero proves nothing: it is what a requirement naming
-                // nothing purchasable produces, and every build is at most zero only when it is free.
-                if (costFloor > 0 && remembered.Cost <= costFloor)
-                    lock (_proven) _provenCost.Add(key);
-            }
-
-            // AND THEN IT KEEPS SEARCHING, which is the change the new objective forces. A build at its
-            // part-count bound cannot get smaller; it can still get cheaper to assemble, and cheaper is what
-            // is being minimised. The early return that used to live here would have frozen 21 of the 60 at
-            // whatever they happened to cost.
-            //
-            // Effort follows IGNORANCE where it does spend: a bound already attacked this hard has all the
-            // evidence another search would add, and one never attacked has none.
-            //
-            // "proven OR unprovable", and the second half is the correction to a fix that got this exactly
-            // backwards. Falsify searches adversarially for a SMALLER build, so the requirements with no
-            // bound at all are the ones it is most worth pointing at - there is no proof standing between
-            // them and a smaller answer. Gating on `proven` alone meant that making the absence of a bound
-            // honest also made it unfalsified, which is the opposite of what this comment says the policy
-            // is. It happened to be masked before, because an unprovable bound arrived as int.MaxValue,
-            // compared as satisfied, and so entered this branch by accident.
-            bool unprovable;
-            lock (_proven) unprovable = _unbounded.Contains(key);
-
-            if ((proven || unprovable) && Falsifying && remembered.Falsifications < FalsifyEnough)
-                Falsify(build, weapon, thresholds, mustInclude, mustIncludeCategories, remembered, seed);
-
             // Counted HERE and not in the loop, so an attempt means a search that happened. A settled
             // requirement costs a dictionary lookup and is not an attempt at anything.
             Interlocked.Increment(ref _attempts);
@@ -1984,7 +1653,6 @@ namespace QuestTreeServer
             }
 
             weaponBuildCache.Changed(key, standing.Changes, standing.Cost, Handbook.PerPurchase);
-            _repriced[key] = 1;
 
             // Somewhere new that is no cheaper and no leaner: worth searching from, not worth serving.
             //
@@ -2019,74 +1687,6 @@ namespace QuestTreeServer
             lock (_solved) _solved[key] = result;
 
             return true;
-        }
-
-        /// <summary>Tries to find a build with fewer PARTS than one the part-count bound called minimal, and
-        /// says so loudly if it succeeds.
-        ///
-        /// Still about part count after the objective moved to changes, deliberately: the bound it attacks is
-        /// a bound on part count, the 5,022 failed attacks already recorded are evidence about part count,
-        /// and relabelling either to match the new objective would turn true evidence into a claim nobody
-        /// tested. A falsifier for the changes objective arrives with the changes bound it would attack.
-        ///
-        /// The only check here that tests the proof against reality instead of against another part of this
-        /// code. The bound is argued from the item data; this goes looking for a counterexample with the
-        /// widest search the solver has - every restart it will take, a part ceiling one BELOW the build that
-        /// is supposed to be minimal - and anything it finds has to pass the verifier before it counts, so a
-        /// counterexample cannot be a solver bug dressed up as a proof failure.
-        ///
-        /// A find is not a curiosity. It means a build was called provably minimal when a smaller legal one
-        /// exists, which is the worst failure this code can have: it is wrong in the direction that reads as
-        /// success, and it would have been reported as an achievement. So it is logged as an error naming the
-        /// weapon, both sizes and every part of the smaller build, and the counterexample is written to the
-        /// history - because a smaller build IS the better answer, whatever it says about the proof.</summary>
-        private void Falsify(
-            WeaponBuildDto build,
-            MongoId weapon,
-            List<(string Field, string Compare, double Value)> thresholds,
-            List<MongoId> mustInclude,
-            List<MongoId> mustIncludeCategories,
-            WeaponBuildCache.CachedBuild remembered,
-            int seed)
-        {
-            Interlocked.Increment(ref _falsifyTries);
-
-            var smaller = weaponSolver.Solve(
-                weapon, thresholds, mustInclude, mustIncludeCategories,
-                allowed: null, knownGood: null, seed: seed, restarts: MaxRestarts,
-                ceiling: remembered.Parts.Count - 1,
-                binding: remembered.Binding, pricing: Handbook);
-
-            var key = WeaponBuildCache.KeyFor(weapon, thresholds, mustInclude, mustIncludeCategories);
-
-            if (!smaller.Found || smaller.Parts.Count >= remembered.Parts.Count)
-            {
-                // A FAILED falsification is the expensive half of this and it used to vanish. Recorded, so
-                // the evidence accumulates across sessions instead of being re-bought every run.
-                weaponBuildCache.Falsified(key, smaller.NodesOpened, seed);
-                return;
-            }
-
-            // The verifier decides, exactly as everywhere else. A "counterexample" the verifier rejects is a
-            // search bug and says nothing about the bound.
-            if (!Sound(weapon, smaller.Parts, thresholds, mustInclude, mustIncludeCategories,
-                    "a build smaller than one it called provably minimal"))
-                return;
-
-            Interlocked.Increment(ref _falsified);
-
-            logger.Error(
-                $"Quest Tracker: THE MINIMALITY PROOF IS WRONG for '{build.WeaponName}'. It was called provably " +
-                $"minimal at {remembered.Parts.Count} parts and a verified build exists at " +
-                $"{smaller.Parts.Count}: " +
-                string.Join(" ", smaller.Parts.Select(part => $"{part.SlotName}={part.Template}")) +
-                ". The bound understates what is reachable, so no build should be reported as minimal until " +
-                "that is found and fixed.");
-
-            weaponBuildCache.Put(key, smaller.Parts, smaller.Floor, smaller.Binding, smaller.Changes, smaller.Cost,
-                Handbook.PerPurchase);
-
-            weaponBuildCache.Flush();
         }
 
         /// <summary>The build for one requirement, solved once per boot and remembered across boots.
@@ -2154,7 +1754,6 @@ namespace QuestTreeServer
                     // search is for. And what it costs, so the file says what the objective is for it.
                     weaponBuildCache.Note(key, standing.Binding);
                     weaponBuildCache.Changed(key, standing.Changes, standing.Cost, Handbook.PerPurchase);
-                    _repriced[key] = 1;
 
                     if (!weaponBuildCache.Training)
                     {

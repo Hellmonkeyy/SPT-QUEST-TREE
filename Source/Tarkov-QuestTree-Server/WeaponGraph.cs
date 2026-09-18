@@ -133,10 +133,9 @@ namespace QuestTreeServer
         /// The reachable set therefore depended on the order the candidate lists happened to be in.
         ///
         /// What that cost: a subtree missing from the graph, and the solver reporting a part as "NOT
-        /// REACHABLE from this weapon's slots" when it plainly is. Worse, the verifier's own reachability is
-        /// breadth-first with a shortest-depth map and has never had the flaw - so the two could disagree
-        /// about the same weapon, which is the class of thing Crosscheck exists to shout about and this
-        /// would have made it shout about honestly.
+        /// REACHABLE from this weapon's slots" when it plainly is. Worse, a breadth-first walk of the same
+        /// graph never has the flaw, so two walks of one weapon could disagree - which is how this was
+        /// noticed, back when the verifier kept a walk of its own.
         ///
         /// Breadth-first removes the problem rather than working around it: the first time a template is
         /// dequeued is at its minimum depth, so descending it exactly once is correct and the visited set

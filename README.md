@@ -235,10 +235,12 @@ replaces a build with a **better** one, so the answer never gets worse, and it n
 you mid-session.
 
 To push it harder, set `QUESTTREE_TRAIN=1` in the shell you launch the server from. That turns a
-launch into a training session: it searches for as long as the server runs, using half your cores,
-and writes down every improvement as it finds it. `QUESTTREE_TRAIN_THREADS=N` overrides how many
-cores it uses. Entirely optional - a normal launch is unaffected, and stopping the server loses
-nothing, because every improvement is written as it is found.
+launch into a training session: it searches until it has spent 340,000 attempts or 5 hours - the
+point past which a measured eleven-hour run found nothing further - using half your cores, and writes
+down every improvement as it finds it. `QUESTTREE_TRAIN_THREADS=N` overrides how many cores it uses;
+`QUESTTREE_TRAIN_ATTEMPTS` and `QUESTTREE_TRAIN_HOURS` move the two caps, and `0` removes one.
+Entirely optional - a normal launch is unaffected, and stopping the server early loses nothing,
+because every improvement is written as it is found.
 
 ## The other views
 

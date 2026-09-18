@@ -666,20 +666,6 @@ namespace QuestTreeServer
         public string ClientVersion { get; set; } = "";
     }
 
-    /// <summary>One item of a saved preset, in the shape the GAME's own build type wants, so the
-    /// client can hand it straight to WeaponBuildsStorage without rebuilding the tree itself.</summary>
-    public sealed class PresetItemDto
-    {
-        public string Id { get; set; } = "";
-        public string Tpl { get; set; } = "";
-
-        /// <summary>Empty for the weapon itself, which has no parent.</summary>
-        public string ParentId { get; set; } = "";
-
-        /// <summary>Empty for the weapon itself, which sits in no slot.</summary>
-        public string SlotId { get; set; } = "";
-    }
-
     public sealed class SavePresetResponse
     {
         public bool Saved { get; set; }
