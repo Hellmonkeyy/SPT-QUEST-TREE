@@ -206,7 +206,7 @@ namespace QuestTreeServer
                 {
                     if (template?.Properties == null) continue;
 
-                    var part = Flatten(id, template);
+                    var part = Flatten(id, template, items);
                     _parts[id] = part;
 
                     if (part.Slots.Length > 0) slotted++;
@@ -325,7 +325,7 @@ namespace QuestTreeServer
                     "stops it taking the server down.");
         }
 
-        private static PartInfo Flatten(MongoId id, TemplateItem template)
+        private static PartInfo Flatten(MongoId id, TemplateItem template, IReadOnlyDictionary<MongoId, TemplateItem> items)
         {
             var props = template.Properties!;
             var slots = new List<SlotInfo>();
@@ -356,7 +356,12 @@ namespace QuestTreeServer
                 });
             }
 
-            var cartridge = props.Cartridges?.FirstOrDefault();
+            // Capacity only on a magazine-class part: the game reads GetCurrentMagazine()?.MaxCount
+            // and nothing else, so a launcher's chamber or a weapon's own cartridge list must not
+            // let the search believe a build has a magazine it does not.
+            var cartridge = TemplateClasses.IsA(items, template, TemplateClasses.Magazine)
+                ? props.Cartridges?.FirstOrDefault()
+                : null;
             var capacity = cartridge?.MaxCount;
 
             return new PartInfo

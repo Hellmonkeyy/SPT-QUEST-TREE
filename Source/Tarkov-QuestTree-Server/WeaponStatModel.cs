@@ -54,6 +54,12 @@ namespace QuestTreeServer
         {
             public double Ergonomics { get; set; }
             public double Recoil { get; set; }
+
+            /// <summary>Templates only: the gun and its parts, unloaded. The game's hand-in gate
+            /// compares TotalWeight, which INCLUDES the rounds in the magazine and chamber, against a
+            /// "weight at most" threshold - so a build this model passes by a narrow margin can be
+            /// refused at the trader once loaded. Known, not modelled: the model cannot know what
+            /// ammo the player will load. The client-side gate check is what says so.</summary>
             public double Weight { get; set; }
 
             /// <summary>Null when no fitted part carries a magazine, which is not the same as zero.</summary>
@@ -103,7 +109,12 @@ namespace QuestTreeServer
             var recoilPercent = 0d;
 
             double? sightingRange = props.SightingRange > 0 ? props.SightingRange : null;
-            int? magazine = CapacityOf(baseItem);
+
+            // The game's GetMaxMagazineCount is GetCurrentMagazine()?.MaxCount ?? 0: the magazine in
+            // the magazine slot, or nothing. So the weapon's own Cartridges do not count, and neither
+            // does any other part that happens to carry a cartridge list - an underbarrel launcher's
+            // chamber inflated this to 1 on builds with no magazine at all.
+            int? magazine = null;
 
             foreach (var id in fitted ?? Enumerable.Empty<MongoId>())
             {
@@ -117,9 +128,13 @@ namespace QuestTreeServer
                 var range = mod.Properties.SightingRange;
                 if (range > 0 && (sightingRange == null || range > sightingRange)) sightingRange = range;
 
-                // SELECTED from the fitted magazine, not summed: two magazines is still one gun.
-                var capacity = CapacityOf(mod);
-                if (capacity != null && (magazine == null || capacity > magazine)) magazine = capacity;
+                // SELECTED from the fitted magazine, not summed: two magazines is still one gun -
+                // and only from a part that IS a magazine, the way the game reads it.
+                if (TemplateClasses.IsA(items, mod, TemplateClasses.Magazine))
+                {
+                    var capacity = CapacityOf(mod);
+                    if (capacity != null && (magazine == null || capacity > magazine)) magazine = capacity;
+                }
             }
 
             stats.Recoil = baseRecoil * (1d + recoilPercent / 100d);
