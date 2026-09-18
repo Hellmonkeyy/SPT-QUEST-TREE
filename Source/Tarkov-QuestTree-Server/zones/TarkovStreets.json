@@ -1,0 +1,1215 @@
+{
+  "map": "TarkovStreets",
+  "harvestedAt": "2026-09-07 00:03:02Z",
+  "clientVersion": "1.3.0",
+  "triggers": [
+    {
+      "id": "Bank_points_15",
+      "kind": "ExperienceTrigger",
+      "x": 8.286,
+      "y": -2.76,
+      "z": 5.15,
+      "active": true,
+      "ex": 0.51761794,
+      "ey": 1.0000002,
+      "ez": 0.5176177
+    },
+    {
+      "id": "quest_zone_keeper8_1",
+      "kind": "ExperienceTrigger",
+      "x": 219.391,
+      "y": 10.32,
+      "z": 397.479,
+      "active": true,
+      "ex": 1.7693787,
+      "ey": 1,
+      "ez": 2.1931152
+    },
+    {
+      "id": "Zone_silient_hill_ward",
+      "kind": "PlaceItemTrigger",
+      "x": 182.72272,
+      "y": 2.1748,
+      "z": 111.74513,
+      "active": true,
+      "ex": 0.9212189,
+      "ey": 0.6920757,
+      "ez": 0.6547165
+    },
+    {
+      "id": "event_labyrinth_02_mech_place_04",
+      "kind": "ExperienceTrigger",
+      "x": 215.64001,
+      "y": 8.23,
+      "z": 360.7,
+      "active": true,
+      "ex": 37.800003,
+      "ey": 4.65,
+      "ez": 19.059998
+    },
+    {
+      "id": "Mark_BTR_6",
+      "kind": "PlaceItemTrigger",
+      "x": -136.84,
+      "y": 1.92,
+      "z": 399.3,
+      "active": true,
+      "ex": 4.140915,
+      "ey": 1.1158476,
+      "ez": 3.3547974
+    },
+    {
+      "id": "quest_zone_c11_gmed",
+      "kind": "ExperienceTrigger",
+      "x": 92.96399,
+      "y": 3.587,
+      "z": 320.38403,
+      "active": true,
+      "ex": 2.5,
+      "ey": 1,
+      "ez": 3
+    },
+    {
+      "id": "quest_flyer3",
+      "kind": "PlaceItemTrigger",
+      "x": -169.84,
+      "y": 15.41,
+      "z": 407.59,
+      "active": true,
+      "ex": 4.5386505,
+      "ey": 1.3160596,
+      "ez": 4.026245
+    },
+    {
+      "id": "quest_zone_find_2st_mech",
+      "kind": "ExperienceTrigger",
+      "x": 188.391,
+      "y": 0.7589998,
+      "z": 226.506,
+      "active": true,
+      "ex": 1.5,
+      "ey": 1,
+      "ez": 1.5
+    },
+    {
+      "id": "Pharma_1",
+      "kind": "ExperienceTrigger",
+      "x": 39.054,
+      "y": 3.655,
+      "z": 162.4094,
+      "active": true,
+      "ex": 3.5,
+      "ey": 0.9999999,
+      "ez": 9
+    },
+    {
+      "id": "Bank_points_2",
+      "kind": "ExperienceTrigger",
+      "x": 83.017,
+      "y": 1.222,
+      "z": -30.500004,
+      "active": true,
+      "ex": 1,
+      "ey": 1,
+      "ez": 0.75
+    },
+    {
+      "id": "quest_zone_kill_cinema",
+      "kind": "ExperienceTrigger",
+      "x": -180.39996,
+      "y": 16.5,
+      "z": 400.7,
+      "active": true,
+      "ex": 50.9438,
+      "ey": 15,
+      "ez": 40.750122
+    },
+    {
+      "id": "Bank_points_14",
+      "kind": "ExperienceTrigger",
+      "x": 0.446,
+      "y": -2.7387998,
+      "z": -18.789,
+      "active": true,
+      "ex": 0.5176178,
+      "ey": 1.0000002,
+      "ez": 0.5176182
+    },
+    {
+      "id": "Bank_points_4",
+      "kind": "ExperienceTrigger",
+      "x": -58.149,
+      "y": 3.654,
+      "z": 453.87,
+      "active": true,
+      "ex": 0.5,
+      "ey": 1.0000001,
+      "ez": 1
+    },
+    {
+      "id": "quest_zone_c5_mar",
+      "kind": "ExperienceTrigger",
+      "x": 47.625004,
+      "y": 12.658,
+      "z": 153.123,
+      "active": true,
+      "ex": 3,
+      "ey": 1,
+      "ez": 3.5
+    },
+    {
+      "id": "Bank_points_12",
+      "kind": "ExperienceTrigger",
+      "x": -166.477,
+      "y": 1.625,
+      "z": -3.377,
+      "active": true,
+      "ex": 0.58865356,
+      "ey": 1,
+      "ez": 0.5886607
+    },
+    {
+      "id": "quest_zone_c8_dom2",
+      "kind": "ExperienceTrigger",
+      "x": 107.935,
+      "y": 7.569,
+      "z": 232.193,
+      "active": true,
+      "ex": 2,
+      "ey": 1.0000002,
+      "ez": 3
+    },
+    {
+      "id": "Office_quest",
+      "kind": "ExperienceTrigger",
+      "x": 164.247,
+      "y": 1.722,
+      "z": 167.288,
+      "active": true,
+      "ex": 1.3377991,
+      "ey": 1.0000002,
+      "ez": 1.3377991
+    },
+    {
+      "id": "Bank_points_7",
+      "kind": "ExperienceTrigger",
+      "x": -80.367,
+      "y": 1.583,
+      "z": -64.723,
+      "active": true,
+      "ex": 0.65724945,
+      "ey": 1,
+      "ez": 1.0684662
+    },
+    {
+      "id": "Mark_BTR_4",
+      "kind": "PlaceItemTrigger",
+      "x": -13.105995,
+      "y": 2.36,
+      "z": 217.20792,
+      "active": true,
+      "ex": 4.2620373,
+      "ey": 1.1158475,
+      "ez": 1.8448792
+    },
+    {
+      "id": "quest_produkt3",
+      "kind": "ExperienceTrigger",
+      "x": -77.17,
+      "y": 2.33,
+      "z": 158.91,
+      "active": true,
+      "ex": 7.9798584,
+      "ey": 1.0000002,
+      "ez": 7.9798584
+    },
+    {
+      "id": "quest_zone_kill_stilo",
+      "kind": "ExperienceTrigger",
+      "x": -102.90001,
+      "y": 8.6,
+      "z": -25.59999,
+      "active": true,
+      "ex": 119.19386,
+      "ey": 15.000002,
+      "ez": 69.53608
+    },
+    {
+      "id": "quest_zone_keeper8_2",
+      "kind": "ExperienceTrigger",
+      "x": 36.983,
+      "y": 11.075001,
+      "z": 88.167,
+      "active": true,
+      "ex": 2.0241013,
+      "ey": 1,
+      "ez": 2.0241013
+    },
+    {
+      "id": "quest_zone_place_c22_harley_3",
+      "kind": "PlaceItemTrigger",
+      "x": 99.46399,
+      "y": 3.204,
+      "z": 356.224,
+      "active": true,
+      "ex": 1.1959381,
+      "ey": 0.75,
+      "ez": 1.5449829
+    },
+    {
+      "id": "quest_zone_c7_mel",
+      "kind": "ExperienceTrigger",
+      "x": 42.982,
+      "y": 11.753399,
+      "z": 151.462,
+      "active": true,
+      "ex": 2,
+      "ey": 1,
+      "ez": 2
+    },
+    {
+      "id": "quest_zone_keeper8_1",
+      "kind": "ExperienceTrigger",
+      "x": 224.982,
+      "y": 10.339,
+      "z": 396.674,
+      "active": true,
+      "ex": 1.7693787,
+      "ey": 1,
+      "ez": 2.1931152
+    },
+    {
+      "id": "quest_zone_kill_c17_adm",
+      "kind": "ExperienceTrigger",
+      "x": -69.2,
+      "y": 12.9,
+      "z": 115.8,
+      "active": true,
+      "ex": 82.03647,
+      "ey": 15,
+      "ez": 86.91383
+    },
+    {
+      "id": "quest_zone_place_c24_tigr2",
+      "kind": "PlaceItemTrigger",
+      "x": 172.48,
+      "y": 4.79,
+      "z": 416.94,
+      "active": true,
+      "ex": 4.257187,
+      "ey": 1.5000001,
+      "ez": 3.067047
+    },
+    {
+      "id": "quest_zone_keeper8_1_hide3",
+      "kind": "PlaceItemTrigger",
+      "x": 36.688,
+      "y": 10.583,
+      "z": 85.519,
+      "active": true,
+      "ex": 2.0138626,
+      "ey": 0.5,
+      "ez": 0.55870056
+    },
+    {
+      "id": "quest_zone_keeper00",
+      "kind": "ExperienceTrigger",
+      "x": -34.333004,
+      "y": 4.26,
+      "z": 239.87,
+      "active": true,
+      "ex": 0.5,
+      "ey": 1,
+      "ez": 0.5
+    },
+    {
+      "id": "Hookah_quest",
+      "kind": "ExperienceTrigger",
+      "x": -211.759,
+      "y": 4.199,
+      "z": 297.287,
+      "active": true,
+      "ex": 2.4666748,
+      "ey": 1,
+      "ez": 2.2540894
+    },
+    {
+      "id": "quest_zone_keeper10_place",
+      "kind": "PlaceItemTrigger",
+      "x": 10.4939995,
+      "y": 4.752,
+      "z": 217.564,
+      "active": true,
+      "ex": 1.242526,
+      "ey": 1.056202,
+      "ez": 1.2674866
+    },
+    {
+      "id": "Bank_points_13",
+      "kind": "ExperienceTrigger",
+      "x": -53.575,
+      "y": 1.579,
+      "z": -69.353,
+      "active": true,
+      "ex": 0.5886612,
+      "ey": 1,
+      "ez": 0.5886612
+    },
+    {
+      "id": "Bank_points_10",
+      "kind": "ExperienceTrigger",
+      "x": -35.198,
+      "y": 1.575,
+      "z": -69.976,
+      "active": true,
+      "ex": 0.580513,
+      "ey": 1.0000002,
+      "ez": 0.580513
+    },
+    {
+      "id": "Zone_mutant",
+      "kind": "PlaceItemTrigger",
+      "x": -262.818,
+      "y": -2.334,
+      "z": 206.337,
+      "active": true,
+      "ex": 3.7945862,
+      "ey": 0.6920757,
+      "ez": 3.2251282
+    },
+    {
+      "id": "quest_zone_find_2st_med_invent1",
+      "kind": "ExperienceTrigger",
+      "x": 224.87,
+      "y": 4.818,
+      "z": 172.806,
+      "active": true,
+      "ex": 3.5,
+      "ey": 1,
+      "ez": 3.5
+    },
+    {
+      "id": "quest_zone_c27_sect",
+      "kind": "ExperienceTrigger",
+      "x": -130.801,
+      "y": 9.489,
+      "z": 269.741,
+      "active": true,
+      "ex": 2,
+      "ey": 1.5,
+      "ez": 1.5
+    },
+    {
+      "id": "quest_zone_c21_look",
+      "kind": "ExperienceTrigger",
+      "x": -67.752,
+      "y": 5.947,
+      "z": 65.883,
+      "active": true,
+      "ex": 2.2642899,
+      "ey": 1.0000005,
+      "ez": 2.2642899
+    },
+    {
+      "id": "quest_zone_place_c14_revx_1",
+      "kind": "PlaceItemTrigger",
+      "x": -139.43,
+      "y": 3.5570002,
+      "z": 438.81,
+      "active": true,
+      "ex": 4.71579,
+      "ey": 1.5,
+      "ez": 4.1921997
+    },
+    {
+      "id": "quest_city_trotil2",
+      "kind": "PlaceItemTrigger",
+      "x": 68.257,
+      "y": 3.044,
+      "z": 309.979,
+      "active": true,
+      "ex": 0.5742264,
+      "ey": 0.53836393,
+      "ez": 1.8954773
+    },
+    {
+      "id": "quest_produkt2",
+      "kind": "ExperienceTrigger",
+      "x": 153.686,
+      "y": 4.68,
+      "z": 299.044,
+      "active": true,
+      "ex": 7.5,
+      "ey": 1,
+      "ez": 4
+    },
+    {
+      "id": "quest_zone_hide_2st_mech",
+      "kind": "PlaceItemTrigger",
+      "x": 188.591,
+      "y": 0.3739996,
+      "z": 226.37898,
+      "active": true,
+      "ex": 0.75434875,
+      "ey": 0.5,
+      "ez": 0.75434875
+    },
+    {
+      "id": "quest_zone_find_2st_kpss2",
+      "kind": "ExperienceTrigger",
+      "x": 246.254,
+      "y": -0.32800007,
+      "z": 52.416,
+      "active": true,
+      "ex": 3.5,
+      "ey": 1,
+      "ez": 2
+    },
+    {
+      "id": "Bank_points_8",
+      "kind": "ExperienceTrigger",
+      "x": -160.188,
+      "y": 1.6,
+      "z": -47.807,
+      "active": true,
+      "ex": 1.0726318,
+      "ey": 1.0000001,
+      "ez": 0.66889954
+    },
+    {
+      "id": "quest_zone_keeper8_2",
+      "kind": "ExperienceTrigger",
+      "x": 37.867,
+      "y": 12.664,
+      "z": 155.779,
+      "active": true,
+      "ex": 2.0241013,
+      "ey": 1,
+      "ez": 2.024109
+    },
+    {
+      "id": "quest_zone_find_2st_med_invent2",
+      "kind": "ExperienceTrigger",
+      "x": 182.993,
+      "y": 2.749,
+      "z": 101.998,
+      "active": true,
+      "ex": 1,
+      "ey": 1,
+      "ez": 2
+    },
+    {
+      "id": "quest_weap_race",
+      "kind": "ExperienceTrigger",
+      "x": 62.4,
+      "y": 5.2,
+      "z": 289.9,
+      "active": true,
+      "ex": 150,
+      "ey": 10,
+      "ez": 150
+    },
+    {
+      "id": "Mark_BTR_5",
+      "kind": "PlaceItemTrigger",
+      "x": -232.094,
+      "y": 2.453,
+      "z": 236.69,
+      "active": true,
+      "ex": 3.5410156,
+      "ey": 1.1158476,
+      "ez": 3.1057434
+    },
+    {
+      "id": "quest_zone_hide_barber2",
+      "kind": "PlaceItemTrigger",
+      "x": 214.295,
+      "y": 4.254,
+      "z": 409.255,
+      "active": true,
+      "ex": 1,
+      "ey": 1,
+      "ez": 1
+    },
+    {
+      "id": "quest_zone_keeper8_1_hide1",
+      "kind": "PlaceItemTrigger",
+      "x": 228.187,
+      "y": 9.876,
+      "z": 396.695,
+      "active": true,
+      "ex": 0.8659668,
+      "ey": 0.5,
+      "ez": 0.59698486
+    },
+    {
+      "id": "quest_zone_c8_dom2_dead",
+      "kind": "ExperienceTrigger",
+      "x": 106.772,
+      "y": 4.653,
+      "z": 222.482,
+      "active": true,
+      "ex": 0.5,
+      "ey": 1,
+      "ez": 1
+    },
+    {
+      "id": "Bank_points_9",
+      "kind": "ExperienceTrigger",
+      "x": -148.57,
+      "y": 6.081,
+      "z": -62.751,
+      "active": true,
+      "ex": 0.5805054,
+      "ey": 1,
+      "ez": 0.580513
+    },
+    {
+      "id": "quest_zone_c6_kpss",
+      "kind": "ExperienceTrigger",
+      "x": 131.432,
+      "y": 7.587,
+      "z": 232.371,
+      "active": true,
+      "ex": 2,
+      "ey": 1,
+      "ez": 3
+    },
+    {
+      "id": "quest_zone_hide_barber1",
+      "kind": "PlaceItemTrigger",
+      "x": 206.61302,
+      "y": 4.33,
+      "z": 411.782,
+      "active": true,
+      "ex": 0.5,
+      "ey": 1,
+      "ez": 0.5
+    },
+    {
+      "id": "quest_zone_c16_koll_2",
+      "kind": "ExperienceTrigger",
+      "x": 62.179996,
+      "y": 7.11,
+      "z": 272.84,
+      "active": true,
+      "ex": 17.030643,
+      "ey": 6.0000014,
+      "ez": 12.252319
+    },
+    {
+      "id": "quest_zone_place_c14_revx_3",
+      "kind": "PlaceItemTrigger",
+      "x": 2.1899986,
+      "y": 0.8999996,
+      "z": 34.04,
+      "active": true,
+      "ex": 2.513383,
+      "ey": 1.5000002,
+      "ez": 4.0083504
+    },
+    {
+      "id": "quest_zone_keeper8_1_hide1",
+      "kind": "PlaceItemTrigger",
+      "x": 218.212,
+      "y": 9.899,
+      "z": 396.306,
+      "active": true,
+      "ex": 0.5583801,
+      "ey": 0.5,
+      "ez": 0.5583801
+    },
+    {
+      "id": "Bank_points_6",
+      "kind": "ExperienceTrigger",
+      "x": 279.032,
+      "y": 4.334,
+      "z": 369.676,
+      "active": true,
+      "ex": 0.5,
+      "ey": 1,
+      "ez": 0.75
+    },
+    {
+      "id": "quest_produkt1",
+      "kind": "ExperienceTrigger",
+      "x": -204.31001,
+      "y": 4.3,
+      "z": 181.22,
+      "active": true,
+      "ex": 4,
+      "ey": 1,
+      "ez": 4
+    },
+    {
+      "id": "Bank_points_11",
+      "kind": "ExperienceTrigger",
+      "x": -113.874,
+      "y": 1.609,
+      "z": -12.51,
+      "active": true,
+      "ex": 0.580513,
+      "ey": 1.0000002,
+      "ez": 0.580513
+    },
+    {
+      "id": "quest_zone_c8_dom1",
+      "kind": "ExperienceTrigger",
+      "x": 127.09,
+      "y": 10.636,
+      "z": 232.57,
+      "active": true,
+      "ex": 2,
+      "ey": 1,
+      "ez": 3
+    },
+    {
+      "id": "Bank_points_5",
+      "kind": "ExperienceTrigger",
+      "x": 54.476,
+      "y": 3.799,
+      "z": 234.936,
+      "active": true,
+      "ex": 1,
+      "ey": 0.9999999,
+      "ez": 0.5
+    },
+    {
+      "id": "quest_zone_kill_kardinal",
+      "kind": "ExperienceTrigger",
+      "x": 134,
+      "y": 23,
+      "z": -101.09999,
+      "active": true,
+      "ex": 117.764755,
+      "ey": 30,
+      "ez": 89.37854
+    },
+    {
+      "id": "Bank_points_3",
+      "kind": "ExperienceTrigger",
+      "x": -50.893,
+      "y": 3.654,
+      "z": 453.87,
+      "active": true,
+      "ex": 0.5,
+      "ey": 1.0000001,
+      "ez": 1
+    },
+    {
+      "id": "Mark_BTR_3",
+      "kind": "PlaceItemTrigger",
+      "x": -131.70409,
+      "y": 0.630023,
+      "z": 64.95194,
+      "active": true,
+      "ex": 4.10231,
+      "ey": 1.1158481,
+      "ez": 6.0200157
+    },
+    {
+      "id": "quest_zone_c16_koll_1",
+      "kind": "ExperienceTrigger",
+      "x": 15.649998,
+      "y": 3.3900003,
+      "z": 226.62,
+      "active": true,
+      "ex": 27.56876,
+      "ey": 1.5,
+      "ez": 28.968964
+    },
+    {
+      "id": "Office_enter",
+      "kind": "ExperienceTrigger",
+      "x": 164.36,
+      "y": 1.722,
+      "z": 148.11,
+      "active": true,
+      "ex": 6.3934174,
+      "ey": 1.0000002,
+      "ez": 11.666931
+    },
+    {
+      "id": "quest_city_trotil2",
+      "kind": "PlaceItemTrigger",
+      "x": 68.769,
+      "y": 2.929,
+      "z": 303.724,
+      "active": true,
+      "ex": 0.5382538,
+      "ey": 0.537637,
+      "ez": 0.8010864
+    },
+    {
+      "id": "Pharma_3",
+      "kind": "ExperienceTrigger",
+      "x": 89.26,
+      "y": 5.07,
+      "z": -275.352,
+      "active": true,
+      "ex": 6,
+      "ey": 1,
+      "ez": 5
+    },
+    {
+      "id": "quest_zone_keeper8_1",
+      "kind": "ExperienceTrigger",
+      "x": 214.79,
+      "y": 10.32,
+      "z": 398.14,
+      "active": true,
+      "ex": 1.7693787,
+      "ey": 1,
+      "ez": 2.1931152
+    },
+    {
+      "id": "quest_zone_place_c14_revx_2",
+      "kind": "PlaceItemTrigger",
+      "x": 146.31,
+      "y": 4.7,
+      "z": 408.40503,
+      "active": true,
+      "ex": 4.0655212,
+      "ey": 1.5000001,
+      "ez": 2.6062317
+    },
+    {
+      "id": "quest_zone_c29_debt",
+      "kind": "ExperienceTrigger",
+      "x": -80.26001,
+      "y": 5.98,
+      "z": 50.5,
+      "active": true,
+      "ex": 2.2642899,
+      "ey": 1.0000005,
+      "ez": 2.2642899
+    },
+    {
+      "id": "quest_zone_keeper8_1_hide2",
+      "kind": "PlaceItemTrigger",
+      "x": 37.979,
+      "y": 12.154,
+      "z": 156.245,
+      "active": true,
+      "ex": 1.029026,
+      "ey": 0.5,
+      "ez": 1.0290222
+    },
+    {
+      "id": "quest_flyer3",
+      "kind": "PlaceItemTrigger",
+      "x": -169.75,
+      "y": 15.41,
+      "z": 392.58,
+      "active": true,
+      "ex": 4.484024,
+      "ey": 1.3059826,
+      "ez": 3.9309082
+    },
+    {
+      "id": "quest_zone_keeper8_1_hide1",
+      "kind": "PlaceItemTrigger",
+      "x": 215.752,
+      "y": 9.794,
+      "z": 395.903,
+      "active": true,
+      "ex": 0.6531372,
+      "ey": 0.5,
+      "ez": 0.6531372
+    },
+    {
+      "id": "quest_zone_c25_cinem2",
+      "kind": "ExperienceTrigger",
+      "x": -204.667,
+      "y": 3.264,
+      "z": 242.994,
+      "active": true,
+      "ex": 1,
+      "ey": 1,
+      "ez": 1
+    },
+    {
+      "id": "quest_zone_c25_cinem",
+      "kind": "ExperienceTrigger",
+      "x": 157.362,
+      "y": 5.098,
+      "z": 314.252,
+      "active": true,
+      "ex": 2,
+      "ey": 1.5,
+      "ez": 1.5
+    },
+    {
+      "id": "Zone_death_strending",
+      "kind": "PlaceItemTrigger",
+      "x": 181.2717,
+      "y": 0.8670001,
+      "z": 229.01213,
+      "active": true,
+      "ex": 0.8181915,
+      "ey": 0.6920757,
+      "ez": 0.97935486
+    },
+    {
+      "id": "quest_city_trotil2",
+      "kind": "PlaceItemTrigger",
+      "x": 67.729,
+      "y": 3.03,
+      "z": 306.864,
+      "active": true,
+      "ex": 0.5453186,
+      "ey": 0.53777957,
+      "ez": 1.0159607
+    },
+    {
+      "id": "quest_zone_keeper99",
+      "kind": "ExperienceTrigger",
+      "x": -130.397,
+      "y": 3.2010002,
+      "z": 396.47302,
+      "active": true,
+      "ex": 1.5,
+      "ey": 1,
+      "ez": 2
+    },
+    {
+      "id": "quest_zone_find_sillent",
+      "kind": "ExperienceTrigger",
+      "x": 184.423,
+      "y": 6.759,
+      "z": 55.58,
+      "active": true,
+      "ex": 1,
+      "ey": 1,
+      "ez": 1
+    },
+    {
+      "id": "fond_quest",
+      "kind": "ExperienceTrigger",
+      "x": -58.32,
+      "y": 3.58,
+      "z": 457.86,
+      "active": true,
+      "ex": 8.5,
+      "ey": 1,
+      "ez": 5
+    },
+    {
+      "id": "quest_zone_kill_shool",
+      "kind": "ExperienceTrigger",
+      "x": 208,
+      "y": 10.7,
+      "z": 135.4,
+      "active": true,
+      "ex": 34.457703,
+      "ey": 15.000002,
+      "ez": 50.323563
+    },
+    {
+      "id": "Mark_BTR_2",
+      "kind": "PlaceItemTrigger",
+      "x": 120.758,
+      "y": -2.436,
+      "z": 26.16,
+      "active": true,
+      "ex": 5.676193,
+      "ey": 1.1158476,
+      "ez": 3.7414055
+    },
+    {
+      "id": "Zone_silient_toilet",
+      "kind": "PlaceItemTrigger",
+      "x": 209.6607,
+      "y": 0.81599236,
+      "z": 230.83713,
+      "active": true,
+      "ex": 0.5667114,
+      "ey": 0.52958655,
+      "ez": 0.4674225
+    },
+    {
+      "id": "Pharma_2",
+      "kind": "ExperienceTrigger",
+      "x": -44.62,
+      "y": 4.189,
+      "z": 336.07,
+      "active": true,
+      "ex": 4,
+      "ey": 1,
+      "ez": 5.5
+    },
+    {
+      "id": "quest_zone_hide_sillent2",
+      "kind": "PlaceItemTrigger",
+      "x": 176.304,
+      "y": 6.293,
+      "z": 82.239,
+      "active": true,
+      "ex": 1.0043488,
+      "ey": 0.5,
+      "ez": 0.7558136
+    },
+    {
+      "id": "Bank_points_16",
+      "kind": "ExperienceTrigger",
+      "x": 236.969,
+      "y": -1.127,
+      "z": -93.822,
+      "active": true,
+      "ex": 0.5,
+      "ey": 1.0000002,
+      "ez": 0.5
+    },
+    {
+      "id": "Mark_BTR_1",
+      "kind": "PlaceItemTrigger",
+      "x": 195.52734,
+      "y": 3.2099028,
+      "z": 256.3192,
+      "active": true,
+      "ex": 3.0682983,
+      "ey": 1.1158476,
+      "ez": 1.964386
+    },
+    {
+      "id": "Bank_points_1",
+      "kind": "ExperienceTrigger",
+      "x": 97.422,
+      "y": 1.232,
+      "z": -22.249,
+      "active": true,
+      "ex": 2,
+      "ey": 0.99999994,
+      "ez": 1.25
+    },
+    {
+      "id": "quest_city_trotil1",
+      "kind": "PlaceItemTrigger",
+      "x": -259.891,
+      "y": 2.97,
+      "z": 136.968,
+      "active": true,
+      "ex": 2.1029968,
+      "ey": 1.0511019,
+      "ez": 2.5629425
+    },
+    {
+      "id": "quest_produkt4",
+      "kind": "ExperienceTrigger",
+      "x": 275.64697,
+      "y": 4.303,
+      "z": 380.83405,
+      "active": true,
+      "ex": 4.2325745,
+      "ey": 1,
+      "ez": 8.292175
+    },
+    {
+      "id": "quest_zone_place_c24_tigr1",
+      "kind": "PlaceItemTrigger",
+      "x": -69.39,
+      "y": 3.52,
+      "z": 358.46002,
+      "active": true,
+      "ex": 4.062805,
+      "ey": 1.5,
+      "ez": 1.6765747
+    },
+    {
+      "id": "quest_zone_hide_sillent",
+      "kind": "PlaceItemTrigger",
+      "x": 183.929,
+      "y": 6.093,
+      "z": 53.346,
+      "active": true,
+      "ex": 0.50289917,
+      "ey": 0.5,
+      "ez": 0.502903
+    },
+    {
+      "id": "quest_zone_keeper10_kill",
+      "kind": "ExperienceTrigger",
+      "x": 16.8,
+      "y": 5.2,
+      "z": 236,
+      "active": true,
+      "ex": 85,
+      "ey": 5,
+      "ez": 85
+    },
+    {
+      "id": "halloween_unlock_pc",
+      "kind": "PlaceItemTrigger",
+      "x": 54.729935,
+      "y": 1.104,
+      "z": -79.920006,
+      "active": true,
+      "ex": 2.9335594,
+      "ey": 0.759598,
+      "ez": 2.5122757
+    }
+  ],
+  "questItems": [
+    {
+      "templateId": "63989ced706b793c7d60cfef",
+      "itemId": "6a9dff0c38bce84059009b9a",
+      "x": -127.914,
+      "y": 2.3809996,
+      "z": 397.04297
+    },
+    {
+      "templateId": "638e0057ab150a5f56238960",
+      "itemId": "6a9dff0c38bce84059009b9b",
+      "x": 84.013,
+      "y": 1.4772,
+      "z": 129.821
+    },
+    {
+      "templateId": "64f5b4f71a5f313cb144c06c",
+      "itemId": "6a9dff0c38bce84059009b9c",
+      "x": -41.1733,
+      "y": 7.6146,
+      "z": -110.08528
+    },
+    {
+      "templateId": "63a943cead5cc12f22161ff7",
+      "itemId": "6a9dff0c38bce84059009b9d",
+      "x": -177.12001,
+      "y": 6.1466,
+      "z": 227.1259
+    },
+    {
+      "templateId": "638e9d5536b3b72c944e2fc7",
+      "itemId": "6a9dff0c38bce84059009b9e",
+      "x": -70.079,
+      "y": 5.7520537,
+      "z": 69.437
+    },
+    {
+      "templateId": "6393262086e646067c176aa2",
+      "itemId": "6a9dff0c38bce84059009b9f",
+      "x": -50.001995,
+      "y": 3.2136998,
+      "z": 198.37
+    },
+    {
+      "templateId": "64f07f7726cfa02c506f8ac0",
+      "itemId": "6a9dff0c38bce84059009ba0",
+      "x": 245.89398,
+      "y": -0.6870003,
+      "z": 55.196
+    },
+    {
+      "templateId": "638dfc803083a019d447768e",
+      "itemId": "6a9dff0c38bce84059009ba1",
+      "x": 213.23589,
+      "y": -0.88670063,
+      "z": 410.32123
+    },
+    {
+      "templateId": "64f09c02b63b74469b6c149f",
+      "itemId": "6a9dff0c38bce84059009ba2",
+      "x": -53.875004,
+      "y": 2.1701927,
+      "z": 198.96199
+    },
+    {
+      "templateId": "63927b29c115f907b14700b9",
+      "itemId": "6a9dff0c38bce84059009ba3",
+      "x": 95.209,
+      "y": 2.6704998,
+      "z": 323.80298
+    },
+    {
+      "templateId": "638df4cc7b560b03794a18d2",
+      "itemId": "6a9dff0c38bce84059009ba4",
+      "x": 44.3447,
+      "y": 12.643499,
+      "z": 151.7695
+    },
+    {
+      "templateId": "64f69b4267e11a7c6206e010",
+      "itemId": "6a9dff0c38bce84059009ba5",
+      "x": -29.297,
+      "y": 10.104,
+      "z": -70.153
+    },
+    {
+      "templateId": "638cbc68a63f1b49be6a3010",
+      "itemId": "6a9dff0c38bce84059009ba6",
+      "x": 39.234997,
+      "y": 1.5159998,
+      "z": 117.6931
+    },
+    {
+      "templateId": "638cbb3ba63f1b49be6a300e",
+      "itemId": "6a9dff0c38bce84059009ba7",
+      "x": 66.800995,
+      "y": 7.7271996,
+      "z": 303.143
+    },
+    {
+      "templateId": "66687bc89111279d600b5062",
+      "itemId": "6a9dff0c38bce84059009ba8",
+      "x": 248.9992,
+      "y": -3.6352,
+      "z": 53.766003
+    },
+    {
+      "templateId": "64e74a2fc2b4f829615ec332",
+      "itemId": "6a9dff0c38bce84059009ba9",
+      "x": 212.59741,
+      "y": 5.394934,
+      "z": 116.896126
+    },
+    {
+      "templateId": "657acb2ac900be5902191ac9",
+      "itemId": "6a9dff0c38bce84059009baa",
+      "x": -66.345375,
+      "y": 2.6835337,
+      "z": 462.52396
+    },
+    {
+      "templateId": "64e74a274d49d23b2c39d317",
+      "itemId": "6a9dff0c38bce84059009bab",
+      "x": 228.6012,
+      "y": 9.511701,
+      "z": 406.7285
+    },
+    {
+      "templateId": "64e73909cd54ef0580746af3",
+      "itemId": "6a9dff0c38bce84059009bac",
+      "x": 231.67319,
+      "y": -2.870266,
+      "z": -50.094643
+    },
+    {
+      "templateId": "64e74a35aac4cd0a7264ecdb",
+      "itemId": "6a9dff0c38bce84059009bad",
+      "x": -166.6265,
+      "y": 3.853434,
+      "z": 480.26187
+    },
+    {
+      "templateId": "64e74a1faac4cd0a7264ecd9",
+      "itemId": "6a9dff0c38bce84059009bae",
+      "x": 69.69252,
+      "y": 7.0182343,
+      "z": 304.25037
+    },
+    {
+      "templateId": "64e74a186393886f74114a96",
+      "itemId": "6a9dff0c38bce84059009baf",
+      "x": 68.42471,
+      "y": 12.804899,
+      "z": -118.078186
+    },
+    {
+      "templateId": "683647bb7afb4f25023acf7a",
+      "itemId": "6a9dff0c38bce84059009bb0",
+      "x": 14.6785,
+      "y": 2.9911,
+      "z": 446.7815
+    }
+  ]
+}

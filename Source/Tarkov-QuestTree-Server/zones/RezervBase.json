@@ -1,0 +1,942 @@
+{
+  "map": "RezervBase",
+  "harvestedAt": "2026-09-07 00:22:17Z",
+  "clientVersion": "1.3.0",
+  "triggers": [
+    {
+      "id": "aishi_reserve_folder_1",
+      "kind": "PlaceItemTrigger",
+      "x": -13.70008,
+      "y": 32.92949,
+      "z": 168.7725,
+      "active": true,
+      "ex": 1.5,
+      "ey": 1.125,
+      "ez": 1.5
+    },
+    {
+      "id": "aishi_reserve_antena_2",
+      "kind": "PlaceItemTrigger",
+      "x": -55.9371,
+      "y": 5.394578,
+      "z": 24.71742,
+      "active": true,
+      "ex": 1.125,
+      "ey": 2.125,
+      "ez": 1.375
+    },
+    {
+      "id": "aishi_reserve_antena_1",
+      "kind": "PlaceItemTrigger",
+      "x": -106.7599,
+      "y": 6.304322,
+      "z": 90.69071,
+      "active": true,
+      "ex": 1.375,
+      "ey": 1.7499998,
+      "ez": 1
+    },
+    {
+      "id": "new_year_2024_market_reservee",
+      "kind": "ExperienceTrigger",
+      "x": -103.74011,
+      "y": -5.589226,
+      "z": 16.361908,
+      "active": true,
+      "ex": 13.244431,
+      "ey": 5.075001,
+      "ez": 23.729294
+    },
+    {
+      "id": "tadeush_stryker_area_check_4",
+      "kind": "ExperienceTrigger",
+      "x": -107.222275,
+      "y": -5.6922226,
+      "z": -67.3433,
+      "active": true,
+      "ex": 7.346184,
+      "ey": 2.1975799,
+      "ez": 7.985544
+    },
+    {
+      "id": "quest_ak-50_01_mech_place_01",
+      "kind": "ExperienceTrigger",
+      "x": 45.46988,
+      "y": -2.7892227,
+      "z": -117.468094,
+      "active": true,
+      "ex": 20.823698,
+      "ey": 10.100001,
+      "ez": 20.043655
+    },
+    {
+      "id": "baraholshik_arsenal_area_5",
+      "kind": "ExperienceTrigger",
+      "x": -125.51811,
+      "y": -7.0462265,
+      "z": 95.67992,
+      "active": true,
+      "ex": 1.8709717,
+      "ey": 1.2750001,
+      "ez": 3.6395416
+    },
+    {
+      "id": "fuel4",
+      "kind": "PlaceItemTrigger",
+      "x": -334.93317,
+      "y": -101.455826,
+      "z": -163.46011,
+      "active": true,
+      "ex": 4.3892517,
+      "ey": 1.9218597,
+      "ez": 5.663498
+    },
+    {
+      "id": "baraholshik_arsenal_area_1",
+      "kind": "ExperienceTrigger",
+      "x": -167.37611,
+      "y": -1.2852249,
+      "z": 31.355911,
+      "active": true,
+      "ex": 3.63945,
+      "ey": 1.2750001,
+      "ez": 1.8666239
+    },
+    {
+      "id": "tadeush_tunguska_area_check_9",
+      "kind": "ExperienceTrigger",
+      "x": -264.63712,
+      "y": -8.649223,
+      "z": -71.41809,
+      "active": true,
+      "ex": 11.946068,
+      "ey": 2.504095,
+      "ez": 11.697464
+    },
+    {
+      "id": "mechanik_exit_area_1",
+      "kind": "ExperienceTrigger",
+      "x": -119.75011,
+      "y": -29.311226,
+      "z": 171.7919,
+      "active": true,
+      "ex": 11.083252,
+      "ey": 3.2740383,
+      "ez": 8.853897
+    },
+    {
+      "id": "tadeush_bmp2_area_mark_12",
+      "kind": "PlaceItemTrigger",
+      "x": 101.727905,
+      "y": -5.592224,
+      "z": 64.444916,
+      "active": true,
+      "ex": 3.7894669,
+      "ey": 0.9979553,
+      "ez": 2.6603985
+    },
+    {
+      "id": "tadeush_stryker_area_mark_3",
+      "kind": "PlaceItemTrigger",
+      "x": 42.12439,
+      "y": 0.8737793,
+      "z": -195.23909,
+      "active": true,
+      "ex": 2.4533463,
+      "ey": 1.2594104,
+      "ez": 3.938507
+    },
+    {
+      "id": "prapor_024_area_2",
+      "kind": "ExperienceTrigger",
+      "x": -115.030106,
+      "y": -11.859222,
+      "z": 33.881912,
+      "active": true,
+      "ex": 43.01622,
+      "ey": 3.5,
+      "ez": 35.06127
+    },
+    {
+      "id": "tadeush_bmp2_area_mark_13",
+      "kind": "PlaceItemTrigger",
+      "x": 53.619904,
+      "y": -3.997223,
+      "z": 122.661896,
+      "active": true,
+      "ex": 3.2939796,
+      "ey": 0.9979553,
+      "ez": 1.9731064
+    },
+    {
+      "id": "prapor_025_area_1",
+      "kind": "ExperienceTrigger",
+      "x": -90.30911,
+      "y": -13.41922,
+      "z": -5.1480865,
+      "active": true,
+      "ex": 2.5356827,
+      "ey": 1.25,
+      "ez": 1.9346391
+    },
+    {
+      "id": "baraholshik_arsenal_area_4",
+      "kind": "ExperienceTrigger",
+      "x": -125.5401,
+      "y": -1.2852249,
+      "z": 95.681915,
+      "active": true,
+      "ex": 1.8709717,
+      "ey": 1.2750001,
+      "ez": 3.6395416
+    },
+    {
+      "id": "tar_event_1_1_exp2",
+      "kind": "ExperienceTrigger",
+      "x": -9.470093,
+      "y": 23.570778,
+      "z": 175.52298,
+      "active": true,
+      "ex": 3.7790623,
+      "ey": 1.2329426,
+      "ez": 1.7166138
+    },
+    {
+      "id": "baraholshik_fuel_area_2",
+      "kind": "PlaceItemTrigger",
+      "x": 11.94989,
+      "y": -9.889221,
+      "z": 73.80191,
+      "active": true,
+      "ex": 6.9194293,
+      "ey": 1.8000001,
+      "ez": 9.936617
+    },
+    {
+      "id": "tadeush_bmp2_area_mark_2",
+      "kind": "PlaceItemTrigger",
+      "x": -100.58011,
+      "y": -3.719223,
+      "z": -155.87808,
+      "active": true,
+      "ex": 2.7852936,
+      "ey": 0.88999987,
+      "ez": 3.809372
+    },
+    {
+      "id": "place_flaers2",
+      "kind": "PlaceItemTrigger",
+      "x": 118.98291,
+      "y": -4.386223,
+      "z": -144.5591,
+      "active": true,
+      "ex": 1.224556,
+      "ey": 0.5,
+      "ez": 1.2245636
+    },
+    {
+      "id": "tadeush_tunguska_area_check_5",
+      "kind": "ExperienceTrigger",
+      "x": 210.99603,
+      "y": -4.9422226,
+      "z": -86.309555,
+      "active": true,
+      "ex": 11.177353,
+      "ey": 3.5508509,
+      "ez": 6.7835007
+    },
+    {
+      "id": "tar_event_1_1_exp3",
+      "kind": "ExperienceTrigger",
+      "x": -52.486115,
+      "y": -6.4140015,
+      "z": -29.121979,
+      "active": true,
+      "ex": 2.2617989,
+      "ey": 1.0749803,
+      "ez": 2.41753
+    },
+    {
+      "id": "lijnik_storage_area_1",
+      "kind": "ExperienceTrigger",
+      "x": 65.38989,
+      "y": -24.429222,
+      "z": -104.64809,
+      "active": true,
+      "ex": 51.689575,
+      "ey": 12.500002,
+      "ez": 97.39671
+    },
+    {
+      "id": "baraholshik_dejurniy_area_2",
+      "kind": "ExperienceTrigger",
+      "x": -164.96411,
+      "y": -4.221222,
+      "z": 34.52591,
+      "active": true,
+      "ex": 1.7067566,
+      "ey": 1.2750001,
+      "ez": 1.3521843
+    },
+    {
+      "id": "tadeush_tunguska_area_mark_10",
+      "kind": "PlaceItemTrigger",
+      "x": -249.5701,
+      "y": -3.6492233,
+      "z": -3.3680878,
+      "active": true,
+      "ex": 4.433548,
+      "ey": 1.283072,
+      "ez": 3.300521
+    },
+    {
+      "id": "baraholshik_arsenal_area_3",
+      "kind": "ExperienceTrigger",
+      "x": -167.37611,
+      "y": -7.0462265,
+      "z": 31.355911,
+      "active": true,
+      "ex": 3.63945,
+      "ey": 1.2750001,
+      "ez": 1.8666239
+    },
+    {
+      "id": "q_ny_hide_christmas_tree_rez",
+      "kind": "PlaceItemTrigger",
+      "x": 166.90002,
+      "y": -7.040001,
+      "z": 0.8500061,
+      "active": true,
+      "ex": 2.66362,
+      "ey": 2.5,
+      "ez": 2.6636262
+    },
+    {
+      "id": "prapor_025_area_3",
+      "kind": "ExperienceTrigger",
+      "x": -149.41011,
+      "y": -9.329224,
+      "z": 50.001907,
+      "active": true,
+      "ex": 6.3017426,
+      "ey": 1.25,
+      "ez": 18.499342
+    },
+    {
+      "id": "EXFIL_D2_Basement_Bunker",
+      "kind": "TriggerWithId",
+      "x": -121.479065,
+      "y": -17.001007,
+      "z": 172.24913,
+      "active": true,
+      "ex": 2.4562988,
+      "ey": 1.3206005,
+      "ez": 2.5494385
+    },
+    {
+      "id": "prapor_hq_area_check_1",
+      "kind": "ExperienceTrigger",
+      "x": -109.6501,
+      "y": -12.829224,
+      "z": 37.511917,
+      "active": true,
+      "ex": 43.36705,
+      "ey": 5.5,
+      "ez": 42.058907
+    },
+    {
+      "id": "quest_zone_keeper3_hide",
+      "kind": "ExperienceTrigger",
+      "x": -114.6591,
+      "y": -13.614227,
+      "z": 23.711914,
+      "active": true,
+      "ex": 0.5479202,
+      "ey": 1,
+      "ez": 0.37182617
+    },
+    {
+      "id": "tadeush_tunguska_area_check_8",
+      "kind": "ExperienceTrigger",
+      "x": 144.17188,
+      "y": -8.649223,
+      "z": 34.870926,
+      "active": true,
+      "ex": 10.330841,
+      "ey": 2.504095,
+      "ez": 10.076737
+    },
+    {
+      "id": "tadeush_tunguska_area_mark_6",
+      "kind": "PlaceItemTrigger",
+      "x": 228.90991,
+      "y": -2.929222,
+      "z": -55.48809,
+      "active": true,
+      "ex": 3.9831543,
+      "ey": 1.9481515,
+      "ez": 2.197197
+    },
+    {
+      "id": "Train_tw_event",
+      "kind": "TriggerWithId",
+      "x": 144.986,
+      "y": -3.92,
+      "z": -147.352,
+      "active": true,
+      "ex": 21.888409,
+      "ey": 1,
+      "ez": 7.166626
+    },
+    {
+      "id": "prapor_024_area_1",
+      "kind": "ExperienceTrigger",
+      "x": -116.75311,
+      "y": -13.159225,
+      "z": 31.686905,
+      "active": true,
+      "ex": 8.448204,
+      "ey": 1.3999996,
+      "ez": 8.943176
+    },
+    {
+      "id": "prapor_025_area_5",
+      "kind": "ExperienceTrigger",
+      "x": -73.001114,
+      "y": -9.653221,
+      "z": 29.993912,
+      "active": true,
+      "ex": 1.4835663,
+      "ey": 1.25,
+      "ez": 2.19067
+    },
+    {
+      "id": "prapor_025_area_2",
+      "kind": "ExperienceTrigger",
+      "x": -144.2501,
+      "y": -9.983223,
+      "z": 6.19191,
+      "active": true,
+      "ex": 17.003082,
+      "ey": 1.75,
+      "ez": 6.5732574
+    },
+    {
+      "id": "q_ny_kill_christmas_guys_rez",
+      "kind": "ExperienceTrigger",
+      "x": 166.90002,
+      "y": -5.589226,
+      "z": 0.8500061,
+      "active": true,
+      "ex": 19.826172,
+      "ey": 2.5,
+      "ez": 19.826172
+    },
+    {
+      "id": "tadeush_tunguska_area_check_10",
+      "kind": "ExperienceTrigger",
+      "x": -246.9801,
+      "y": -3.1592255,
+      "z": -2.9780884,
+      "active": true,
+      "ex": 15.881203,
+      "ey": 2.5040956,
+      "ez": 13.605822
+    },
+    {
+      "id": "baraholshik_fuel_area_1",
+      "kind": "PlaceItemTrigger",
+      "x": -9.370117,
+      "y": -9.459221,
+      "z": 83.25191,
+      "active": true,
+      "ex": 8.135763,
+      "ey": 1.8000001,
+      "ez": 7.1099854
+    },
+    {
+      "id": "zone_grass_green",
+      "kind": "PlaceItemTrigger",
+      "x": -82.75,
+      "y": -6.3799973,
+      "z": 62.440002,
+      "active": true,
+      "ex": 2.2653122,
+      "ey": 1.0449386,
+      "ez": 4.3549366
+    },
+    {
+      "id": "Mark_transits_rezerve",
+      "kind": "PlaceItemTrigger",
+      "x": 240.23462,
+      "y": -6.356224,
+      "z": -124.415436,
+      "active": true,
+      "ex": 1.3504944,
+      "ey": 0.7590189,
+      "ez": 2.880085
+    },
+    {
+      "id": "tadeush_tunguska_area_mark_5",
+      "kind": "PlaceItemTrigger",
+      "x": 211.1499,
+      "y": -4.3492203,
+      "z": -86.21809,
+      "active": true,
+      "ex": 4.093033,
+      "ey": 2.282751,
+      "ez": 1.9817429
+    },
+    {
+      "id": "zone_tanchiki",
+      "kind": "PlaceItemTrigger",
+      "x": -77.323,
+      "y": -6.251999,
+      "z": -20.253998,
+      "active": true,
+      "ex": 1.0130081,
+      "ey": 0.8692107,
+      "ez": 0.90530586
+    },
+    {
+      "id": "baraholshik_fuel_area_4",
+      "kind": "PlaceItemTrigger",
+      "x": 178.6799,
+      "y": -3.16922,
+      "z": -123.64809,
+      "active": true,
+      "ex": 22.782837,
+      "ey": 2.6,
+      "ez": 8.057678
+    },
+    {
+      "id": "tadeush_bmp2_area_check_12",
+      "kind": "ExperienceTrigger",
+      "x": 103.3819,
+      "y": -4.6292267,
+      "z": 63.869904,
+      "active": true,
+      "ex": 6.8658295,
+      "ey": 2.1975803,
+      "ez": 7.909189
+    },
+    {
+      "id": "tadeush_bmp2_area_check_11",
+      "kind": "ExperienceTrigger",
+      "x": 79.00989,
+      "y": -4.6292267,
+      "z": -31.548088,
+      "active": true,
+      "ex": 7.382965,
+      "ey": 2.1975794,
+      "ez": 7.9870872
+    },
+    {
+      "id": "Zone_leeter_final",
+      "kind": "PlaceItemTrigger",
+      "x": -127.21611,
+      "y": 0.6957779,
+      "z": -20.359085,
+      "active": true,
+      "ex": 1.7161598,
+      "ey": 0.89896536,
+      "ez": 2.6644573
+    },
+    {
+      "id": "tadeush_bmp2_area_check_2",
+      "kind": "ExperienceTrigger",
+      "x": -100.4001,
+      "y": -4.3192215,
+      "z": -155.6881,
+      "active": true,
+      "ex": 9.026657,
+      "ey": 2.25,
+      "ez": 9.377213
+    },
+    {
+      "id": "tadeush_tunguska_area_mark_8",
+      "kind": "PlaceItemTrigger",
+      "x": 144.14825,
+      "y": -8.6712265,
+      "z": 34.93051,
+      "active": true,
+      "ex": 3.0908508,
+      "ey": 1.9481506,
+      "ez": 4.7411194
+    },
+    {
+      "id": "tadeush_tunguska_area_mark_7",
+      "kind": "PlaceItemTrigger",
+      "x": 183.75009,
+      "y": -2.929222,
+      "z": 22.038666,
+      "active": true,
+      "ex": 4.213318,
+      "ey": 1.9481508,
+      "ez": 4.201912
+    },
+    {
+      "id": "tadeush_tunguska_area_check_7",
+      "kind": "ExperienceTrigger",
+      "x": 184.62988,
+      "y": -3.6622238,
+      "z": 21.221909,
+      "active": true,
+      "ex": 16.814178,
+      "ey": 3.55085,
+      "ez": 16.798187
+    },
+    {
+      "id": "eger_barracks_area_1",
+      "kind": "ExperienceTrigger",
+      "x": -102.8701,
+      "y": -4.139221,
+      "z": 92.47191,
+      "active": true,
+      "ex": 38.48152,
+      "ey": 10.100001,
+      "ez": 26.000793
+    },
+    {
+      "id": "tadeush_bmp2_area_check_13",
+      "kind": "ExperienceTrigger",
+      "x": 53.829895,
+      "y": -4.139221,
+      "z": 122.03192,
+      "active": true,
+      "ex": 6.7647324,
+      "ey": 2.1975803,
+      "ez": 5.2694473
+    },
+    {
+      "id": "huntsman_029",
+      "kind": "ExperienceTrigger",
+      "x": 78.77,
+      "y": -12.286003,
+      "z": -117.1,
+      "active": true,
+      "ex": 16.31115,
+      "ey": 3,
+      "ez": 40.35307
+    },
+    {
+      "id": "tadeush_stryker_area_check_3",
+      "kind": "ExperienceTrigger",
+      "x": 42.029907,
+      "y": 0.28077698,
+      "z": -195.2381,
+      "active": true,
+      "ex": 8.331821,
+      "ey": 2.1975799,
+      "ez": 8.844696
+    },
+    {
+      "id": "baraholshik_fuel_area_3",
+      "kind": "PlaceItemTrigger",
+      "x": 170.0299,
+      "y": -9.309227,
+      "z": -97.85809,
+      "active": true,
+      "ex": 17.411911,
+      "ey": 2.25,
+      "ez": 10.808044
+    },
+    {
+      "id": "tar_event_1_1_exp4",
+      "kind": "ExperienceTrigger",
+      "x": -63.722595,
+      "y": -0.3592224,
+      "z": 6.237625,
+      "active": true,
+      "ex": 7.6046925,
+      "ey": 1.3989043,
+      "ez": 4.792286
+    },
+    {
+      "id": "zone_two_chairs",
+      "kind": "PlaceItemTrigger",
+      "x": 125.10199,
+      "y": -6.481941,
+      "z": -89.345,
+      "active": true,
+      "ex": 0.64121246,
+      "ey": 0.6032419,
+      "ez": 0.89003754
+    },
+    {
+      "id": "event_labyrinth_04_ragman_place_02",
+      "kind": "PlaceItemTrigger",
+      "x": 15.899902,
+      "y": 1.280777,
+      "z": -7.388092,
+      "active": true,
+      "ex": 11.629971,
+      "ey": 2.5000002,
+      "ez": 12.461269
+    },
+    {
+      "id": "q_ny_find_christmas_tree_rez",
+      "kind": "ExperienceTrigger",
+      "x": 166.90002,
+      "y": -7.040001,
+      "z": 0.8500061,
+      "active": true,
+      "ex": 7.9908752,
+      "ey": 2.5,
+      "ez": 7.990879
+    },
+    {
+      "id": "tar_event_1_1_exp1",
+      "kind": "ExperienceTrigger",
+      "x": -104.46568,
+      "y": -13.694443,
+      "z": 28.258179,
+      "active": true,
+      "ex": 5.2829895,
+      "ey": 1.8331776,
+      "ez": 4.9226646
+    },
+    {
+      "id": "tadeush_t90_area_check_1",
+      "kind": "ExperienceTrigger",
+      "x": -160.6201,
+      "y": -4.3192215,
+      "z": -117.58809,
+      "active": true,
+      "ex": 8.448196,
+      "ey": 2.1975803,
+      "ez": 8.943176
+    },
+    {
+      "id": "tadeush_stryker_area_mark_4",
+      "kind": "PlaceItemTrigger",
+      "x": -107.129105,
+      "y": -5.0992203,
+      "z": -67.35909,
+      "active": true,
+      "ex": 1.9269791,
+      "ey": 1.2594104,
+      "ez": 3.7783813
+    },
+    {
+      "id": "tadeush_bmp2_area_mark_11",
+      "kind": "PlaceItemTrigger",
+      "x": 79.02789,
+      "y": -5.4392242,
+      "z": -31.787086,
+      "active": true,
+      "ex": 3.739975,
+      "ey": 0.9979553,
+      "ez": 2.4183416
+    },
+    {
+      "id": "Btr_wheels",
+      "kind": "PlaceItemTrigger",
+      "x": 100.46805,
+      "y": -6.6259995,
+      "z": 28.377014,
+      "active": true,
+      "ex": 1.3840332,
+      "ey": 0.7590189,
+      "ez": 1.8493576
+    },
+    {
+      "id": "prapor_025_area_4",
+      "kind": "ExperienceTrigger",
+      "x": -107.0101,
+      "y": -9.388222,
+      "z": 77.49191,
+      "active": true,
+      "ex": 18.499344,
+      "ey": 1.25,
+      "ez": 6.3017426
+    },
+    {
+      "id": "tadeush_tunguska_area_check_6",
+      "kind": "ExperienceTrigger",
+      "x": 228.9599,
+      "y": -3.6622238,
+      "z": -55.44809,
+      "active": true,
+      "ex": 13.514603,
+      "ey": 3.5508509,
+      "ez": 9.040972
+    },
+    {
+      "id": "Event_terminal_zone",
+      "kind": "PlaceItemTrigger",
+      "x": -14.1311035,
+      "y": 33.881775,
+      "z": 176.7269,
+      "active": true,
+      "ex": 0.91370773,
+      "ey": 1.0798988,
+      "ez": 0.5894165
+    },
+    {
+      "id": "place_flaers2",
+      "kind": "PlaceItemTrigger",
+      "x": 111.079895,
+      "y": -4.542221,
+      "z": -143.2981,
+      "active": true,
+      "ex": 1.224556,
+      "ey": 0.5,
+      "ez": 1.2245636
+    },
+    {
+      "id": "eger_barracks_area_2",
+      "kind": "ExperienceTrigger",
+      "x": -164.0601,
+      "y": -4.139221,
+      "z": 54.131912,
+      "active": true,
+      "ex": 26.000793,
+      "ey": 10.100001,
+      "ez": 38.48152
+    },
+    {
+      "id": "Place_item_tools_rezerve",
+      "kind": "PlaceItemTrigger",
+      "x": 50.98111,
+      "y": -0.62496185,
+      "z": -181.91666,
+      "active": true,
+      "ex": 3.1777,
+      "ey": 0.7224379,
+      "ez": 3.3105774
+    },
+    {
+      "id": "tadeush_tunguska_area_mark_9",
+      "kind": "PlaceItemTrigger",
+      "x": -267.7341,
+      "y": -9.147224,
+      "z": -69.50109,
+      "active": true,
+      "ex": 4.398468,
+      "ey": 1.2830715,
+      "ez": 3.893959
+    }
+  ],
+  "questItems": [
+    {
+      "templateId": "67499b3eeca8acb2d2061636",
+      "itemId": "6a9e039038bce8405902191c",
+      "x": -83.632996,
+      "y": -0.545,
+      "z": -28.823975
+    },
+    {
+      "templateId": "6398a072e301557ae24cec92",
+      "itemId": "6a9e039038bce8405902191d",
+      "x": 102.24298,
+      "y": -6.813,
+      "z": 65.56604
+    },
+    {
+      "templateId": "60915994c49cf53e4772cc38",
+      "itemId": "6a9e039038bce8405902191e",
+      "x": -114.36499,
+      "y": -13.7081,
+      "z": 27.359009
+    },
+    {
+      "templateId": "60a3b6359c427533db36cf84",
+      "itemId": "6a9e039038bce8405902191f",
+      "x": -114.18103,
+      "y": -13.6893,
+      "z": 39.788025
+    },
+    {
+      "templateId": "60a3b65c27adf161da7b6e14",
+      "itemId": "6a9e039038bce84059021920",
+      "x": -121.867004,
+      "y": -14.314,
+      "z": 38.656006
+    },
+    {
+      "templateId": "609267a2bb3f46069c3e6c7d",
+      "itemId": "6a9e039038bce84059021921",
+      "x": -88.065,
+      "y": -19.129,
+      "z": 151.055
+    },
+    {
+      "templateId": "60c080eb991ac167ad1c3ad4",
+      "itemId": "6a9e039038bce84059021922",
+      "x": 99.78601,
+      "y": -6.725,
+      "z": 59.160034
+    },
+    {
+      "templateId": "608c22a003292f4ba43f8a1a",
+      "itemId": "6a9e039038bce84059021923",
+      "x": -59.020996,
+      "y": -3.637,
+      "z": -36.191986
+    },
+    {
+      "templateId": "60a3b5b05f84d429b732e934",
+      "itemId": "6a9e039038bce84059021924",
+      "x": -80.47601,
+      "y": -3.647,
+      "z": -30.765991
+    },
+    {
+      "templateId": "64e74a4baac4cd0a7264ecdd",
+      "itemId": "6a9e039038bce84059021925",
+      "x": -171.2431,
+      "y": -5.9611998,
+      "z": -0.97613525
+    },
+    {
+      "templateId": "67499b9b909d2013670a5029",
+      "itemId": "6a9e039038bce84059021926",
+      "x": -66.87903,
+      "y": -6.510002,
+      "z": 29.537018
+    },
+    {
+      "templateId": "683ed6aed885538c4102d8c8",
+      "itemId": "6a9e039038bce84059021927",
+      "x": 40.606384,
+      "y": -4.2792,
+      "z": -125.85956
+    },
+    {
+      "templateId": "687502c4660d147e2502a94f",
+      "itemId": "6a9e039038bce84059021928",
+      "x": -172.19098,
+      "y": -2.652,
+      "z": -7.2559814
+    },
+    {
+      "templateId": "685618fbcc160182de00bfc4",
+      "itemId": "6a9e039038bce84059021929",
+      "x": 12.9191,
+      "y": 1.31,
+      "z": -27.6702
+    },
+    {
+      "templateId": "68716c83eb31cf77ff9f9fd8",
+      "itemId": "6a9e039038bce8405902192a",
+      "x": -165.31,
+      "y": 2.9295,
+      "z": 30.5324
+    },
+    {
+      "templateId": "694da5f84825e8c609000001",
+      "itemId": "6a9e039038bce8405902192b",
+      "x": 86.4799,
+      "y": -5.82,
+      "z": -29.884
+    },
+    {
+      "templateId": "692d302aa11c340bc5198946",
+      "itemId": "6a9e039038bce8405902192c",
+      "x": -13.70008,
+      "y": 33.67949,
+      "z": 168.7725
+    }
+  ]
+}

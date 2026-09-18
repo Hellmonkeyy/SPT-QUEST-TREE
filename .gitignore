@@ -9,9 +9,10 @@ obj/
 *.user
 *.suo
 
-# Packaged zips are build artifacts. The README they ship is versioned at the repo root
-# instead, so it cannot be lost with a cleared temp folder the way it nearly was.
-Releases/
+# Packaged zips and staging folders are build artifacts. The release notes are not: package.ps1
+# refuses to run without RELEASE-NOTES-<version>.md, so they have to exist in a clone.
+Releases/*
+!Releases/RELEASE-NOTES-*.md
 
 # Internal planning and engineering log, kept locally rather than published. Both are
 # working notes about how the work was done - stop rules, negative results, what was tried
@@ -23,3 +24,9 @@ weapon-solver-ledger.md
 # UI readability backlog - the same kind of working notes as ROADMAP.md, kept local for the
 # same reason.
 quest-tree-readability-spec.md
+
+# Third-party data the server fetches into the install at runtime. Neither carries a licence that
+# allows redistribution, so neither may ever be in a release - package.ps1 refuses a zip that
+# contains either - and neither belongs in the repo.
+objective-gps.json
+tarkovdev-quests.json

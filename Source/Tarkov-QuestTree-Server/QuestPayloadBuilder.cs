@@ -451,9 +451,25 @@ namespace QuestTreeServer
             // Hoisted: built once per payload rather than once per quest, like QuestsByLocation.
             var zoneToMap = zoneStore.ZoneToMap();
 
+            // TEST INJECTION, nothing else. Leaves one quest out of the list so the client's
+            // "prerequisite not in the list" state can be seen on an install that has none - which
+            // is every healthy install, this one included. A quest mod referencing a quest another
+            // mod removed is the real case, and it cannot be staged on demand; this can. Unset for
+            // a normal launch, and logged loudly when set so a forgotten variable cannot pass for a
+            // missing quest.
+            var dropped = Environment.GetEnvironmentVariable("QUESTTREE_DROP_QUEST")?.Trim();
+            if (string.IsNullOrEmpty(dropped)) dropped = null;
+            if (dropped != null)
+            {
+                logger.Warning(
+                    $"Quest Tracker: QUESTTREE_DROP_QUEST is set - quest '{dropped}' is being left out of " +
+                    "the list ON PURPOSE, to test the client's missing-prerequisite state. Unset it for a normal launch.");
+            }
+
             foreach (var quest in quests.Values)
             {
                 if (quest == null) continue;
+                if (dropped != null && string.Equals(quest.Id.ToString(), dropped, StringComparison.Ordinal)) continue;
 
                 try
                 {

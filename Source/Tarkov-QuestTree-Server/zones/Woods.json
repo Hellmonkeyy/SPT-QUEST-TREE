@@ -1,0 +1,1094 @@
+{
+  "map": "Woods",
+  "harvestedAt": "2026-09-07 00:18:23Z",
+  "clientVersion": "1.3.0",
+  "triggers": [
+    {
+      "id": "scorpion_event_woods_radio_kz",
+      "kind": "TriggerWithId",
+      "x": 226.2537,
+      "y": 17.8153,
+      "z": -705.7047,
+      "active": true,
+      "ex": 46.5,
+      "ey": 10.25,
+      "ez": 46.5
+    },
+    {
+      "id": "scorpion_event_woods_radiobunker",
+      "kind": "PlaceItemTrigger",
+      "x": 230.9035,
+      "y": 21.14908,
+      "z": -710.0911,
+      "active": true,
+      "ex": 1,
+      "ey": 1,
+      "ez": 0.75
+    },
+    {
+      "id": "scorpion_event_woods_scav",
+      "kind": "ExperienceTrigger",
+      "x": 130.0811,
+      "y": 25.39942,
+      "z": -743.1104,
+      "active": true,
+      "ex": 4.75,
+      "ey": 1,
+      "ez": 5.5
+    },
+    {
+      "id": "scorpion_event_woods_radio",
+      "kind": "ExperienceTrigger",
+      "x": 226.0909,
+      "y": 25.31895,
+      "z": -707.0381,
+      "active": true,
+      "ex": 4.5,
+      "ey": 1,
+      "ez": 4.5
+    },
+    {
+      "id": "scorpion_event_woods_useccamp2",
+      "kind": "ExperienceTrigger",
+      "x": 278.198,
+      "y": 23.88321,
+      "z": -509.4993,
+      "active": true,
+      "ex": 5.25,
+      "ey": 1,
+      "ez": 5.7499847
+    },
+    {
+      "id": "scorpion_event_woods_useccamp",
+      "kind": "ExperienceTrigger",
+      "x": 289.3267,
+      "y": 23.89419,
+      "z": -440.7957,
+      "active": true,
+      "ex": 7,
+      "ey": 1.25,
+      "ez": 5.75
+    },
+    {
+      "id": "aishi_woods_towers1",
+      "kind": "PlaceItemTrigger",
+      "x": 227.1077,
+      "y": 24.46222,
+      "z": -712.1893,
+      "active": true,
+      "ex": 0.75,
+      "ey": 1.375,
+      "ez": 1
+    },
+    {
+      "id": "uncoordinated_placement",
+      "kind": "PlaceItemTrigger",
+      "x": -89.04757,
+      "y": 27.83061,
+      "z": -374.4907,
+      "active": true,
+      "ex": 1.5987167,
+      "ey": 1,
+      "ez": 1.5419006
+    },
+    {
+      "id": "AEK_PlaceItem_UsecCamp",
+      "kind": "PlaceItemTrigger",
+      "x": 290.0116,
+      "y": 24.00128,
+      "z": -439.7359,
+      "active": true,
+      "ex": 2.6374512,
+      "ey": 0.90415,
+      "ez": 2.0437317
+    },
+    {
+      "id": "deadbody_3",
+      "kind": "PlaceItemTrigger",
+      "x": 81.113,
+      "y": 22.1854,
+      "z": -412.4533,
+      "active": true,
+      "ex": 0.875,
+      "ey": 0.875,
+      "ez": 0.625
+    },
+    {
+      "id": "deadbody_2",
+      "kind": "PlaceItemTrigger",
+      "x": -173.9345,
+      "y": 12.48,
+      "z": -691,
+      "active": true,
+      "ex": 0.9688263,
+      "ey": 0.75,
+      "ez": 1.067749
+    },
+    {
+      "id": "deadbody_1",
+      "kind": "PlaceItemTrigger",
+      "x": 91.6219,
+      "y": 16.7,
+      "z": -845.9562,
+      "active": true,
+      "ex": 0.75,
+      "ey": 1.625,
+      "ez": 0.875
+    },
+    {
+      "id": "place_THX_15",
+      "kind": "ExperienceTrigger",
+      "x": 23.794006,
+      "y": -15.413,
+      "z": 99.84198,
+      "active": true,
+      "ex": 2.5,
+      "ey": 1,
+      "ez": 2.5
+    },
+    {
+      "id": "em_quest4_1",
+      "kind": "PlaceItemTrigger",
+      "x": -533.28503,
+      "y": 18.813,
+      "z": -206.50897,
+      "active": true,
+      "ex": 1.1154175,
+      "ey": 0.64749146,
+      "ez": 0.9045563
+    },
+    {
+      "id": "achiv_plane",
+      "kind": "ExperienceTrigger",
+      "x": -252.79999,
+      "y": 14.1,
+      "z": -30.200012,
+      "active": true,
+      "ex": 24.795898,
+      "ey": 7.500002,
+      "ez": 24.696712
+    },
+    {
+      "id": "place_keeper5_1",
+      "kind": "PlaceItemTrigger",
+      "x": 289.96704,
+      "y": 23.515,
+      "z": -439.01196,
+      "active": true,
+      "ex": 1.1112671,
+      "ey": 0.5,
+      "ez": 0.8152466
+    },
+    {
+      "id": "NosQuests_8_wood_place",
+      "kind": "PlaceItemTrigger",
+      "x": -219.22699,
+      "y": 64.622,
+      "z": -224.43396,
+      "active": true,
+      "ex": 1.2440643,
+      "ey": 1,
+      "ez": 1.2440643
+    },
+    {
+      "id": "meh_45_radio_area_mark_1",
+      "kind": "PlaceItemTrigger",
+      "x": 222.16003,
+      "y": 21.382,
+      "z": -706.6,
+      "active": true,
+      "ex": 4.1000977,
+      "ey": 1.4468651,
+      "ez": 4.163513
+    },
+    {
+      "id": "huntsman_001",
+      "kind": "ExperienceTrigger",
+      "x": -256,
+      "y": 9.58,
+      "z": 9.700012,
+      "active": true,
+      "ex": 5,
+      "ey": 1.5,
+      "ez": 5
+    },
+    {
+      "id": "quest_terminal_ zone_3",
+      "kind": "PlaceItemTrigger",
+      "x": -174.23804,
+      "y": 52.084,
+      "z": -232.50696,
+      "active": true,
+      "ex": 1.0201416,
+      "ey": 0.6669159,
+      "ez": 1.1247711
+    },
+    {
+      "id": "q14_8_5",
+      "kind": "PlaceItemTrigger",
+      "x": -447.077,
+      "y": 2.061,
+      "z": 249,
+      "active": true,
+      "ex": 1.5188293,
+      "ey": 2.0000005,
+      "ez": 1.5188446
+    },
+    {
+      "id": "meh_45_radio_area_mark_2",
+      "kind": "PlaceItemTrigger",
+      "x": -156.091,
+      "y": 52.27,
+      "z": -273.31897,
+      "active": true,
+      "ex": 2.4859924,
+      "ey": 1.6283493,
+      "ez": 1.566803
+    },
+    {
+      "id": "Depo_Zone_2",
+      "kind": "ExperienceTrigger",
+      "x": -615.69,
+      "y": 8.094838,
+      "z": 128.68,
+      "active": true,
+      "ex": 6.843567,
+      "ey": 2.1794586,
+      "ez": 3.4844666
+    },
+    {
+      "id": "new_year_2024_market_woods",
+      "kind": "ExperienceTrigger",
+      "x": 21.22998,
+      "y": -1.22,
+      "z": 16.78003,
+      "active": true,
+      "ex": 13.216507,
+      "ey": 6.500001,
+      "ez": 18.20691
+    },
+    {
+      "id": "Depo_Zone_1",
+      "kind": "ExperienceTrigger",
+      "x": -617.2,
+      "y": 8.094838,
+      "z": 154.15002,
+      "active": true,
+      "ex": 9.646973,
+      "ey": 2.1794586,
+      "ez": 10.012238
+    },
+    {
+      "id": "kill_in_forest_woods",
+      "kind": "ExperienceTrigger",
+      "x": 410,
+      "y": 13.6,
+      "z": -329,
+      "active": true,
+      "ex": 250,
+      "ey": 50,
+      "ez": 800
+    },
+    {
+      "id": "Pack_of_cartridges_2",
+      "kind": "PlaceItemTrigger",
+      "x": -268.92798,
+      "y": 7.687,
+      "z": -412.65295,
+      "active": true,
+      "ex": 0.92910767,
+      "ey": 1.0006828,
+      "ez": 1.5693665
+    },
+    {
+      "id": "kill_in_forest_woods",
+      "kind": "ExperienceTrigger",
+      "x": 49,
+      "y": 13.6,
+      "z": -372.5,
+      "active": true,
+      "ex": 173,
+      "ey": 50,
+      "ez": 210.5
+    },
+    {
+      "id": "bar_fuel3_2",
+      "kind": "PlaceItemTrigger",
+      "x": -325.042,
+      "y": 15.319,
+      "z": 23.984985,
+      "active": true,
+      "ex": 4.150818,
+      "ey": 1.0849037,
+      "ez": 4.1704426
+    },
+    {
+      "id": "Lost_caravan",
+      "kind": "ExperienceTrigger",
+      "x": -39.059998,
+      "y": 19.884,
+      "z": -250.38,
+      "active": true,
+      "ex": 3.5540009,
+      "ey": 3.0538902,
+      "ez": 4.0806885
+    },
+    {
+      "id": "em_quest4_2",
+      "kind": "PlaceItemTrigger",
+      "x": -59.577026,
+      "y": 10.942,
+      "z": -649.36694,
+      "active": true,
+      "ex": 0.8671837,
+      "ey": 0.40499973,
+      "ez": 0.96325684
+    },
+    {
+      "id": "place_peacemaker_007_2_N2_1",
+      "kind": "PlaceItemTrigger",
+      "x": -88.70001,
+      "y": 12.55,
+      "z": -717.61,
+      "active": true,
+      "ex": 2.5,
+      "ey": 1,
+      "ez": 2.5
+    },
+    {
+      "id": "q14_8_3",
+      "kind": "PlaceItemTrigger",
+      "x": -97.25,
+      "y": 13.993,
+      "z": -542.05005,
+      "active": true,
+      "ex": 1.5188446,
+      "ey": 2,
+      "ez": 1.5188599
+    },
+    {
+      "id": "quest_terminal_ zone_1",
+      "kind": "PlaceItemTrigger",
+      "x": -234.83002,
+      "y": 68.563,
+      "z": -228.06897,
+      "active": true,
+      "ex": 1.0536957,
+      "ey": 0.64749146,
+      "ez": 0.92752075
+    },
+    {
+      "id": "place_keeper5_2",
+      "kind": "PlaceItemTrigger",
+      "x": 292.484,
+      "y": 23.353,
+      "z": -507.38306,
+      "active": true,
+      "ex": 0.72232056,
+      "ey": 0.5,
+      "ez": 1.3208618
+    },
+    {
+      "id": "NosQuests_5_Flaer_off",
+      "kind": "ExperienceTrigger",
+      "x": -529.6,
+      "y": 18.2,
+      "z": -185.09998,
+      "active": true,
+      "ex": 23.428177,
+      "ey": 7.5,
+      "ez": 27.052017
+    },
+    {
+      "id": "place_skier_11_1",
+      "kind": "PlaceItemTrigger",
+      "x": 31.086792,
+      "y": -13.612729,
+      "z": 83.011536,
+      "active": true,
+      "ex": 4.7134314,
+      "ey": 2.000001,
+      "ez": 2.5430374
+    },
+    {
+      "id": "meh_45_radio_area_mark_4",
+      "kind": "PlaceItemTrigger",
+      "x": 446.33704,
+      "y": -13.139,
+      "z": 69.18402,
+      "active": true,
+      "ex": 3.2000122,
+      "ey": 1.6099997,
+      "ez": 3.5
+    },
+    {
+      "id": "bar_fuel3_1",
+      "kind": "PlaceItemTrigger",
+      "x": 356.44995,
+      "y": 0.35,
+      "z": -85.880005,
+      "active": true,
+      "ex": 3,
+      "ey": 1,
+      "ez": 3
+    },
+    {
+      "id": "q14_8_1",
+      "kind": "PlaceItemTrigger",
+      "x": 412.20898,
+      "y": 13.708,
+      "z": -608.531,
+      "active": true,
+      "ex": 1.5188293,
+      "ey": 2,
+      "ez": 1.5188599
+    },
+    {
+      "id": "q14_8_2",
+      "kind": "PlaceItemTrigger",
+      "x": -209.22198,
+      "y": 77.521,
+      "z": -279.781,
+      "active": true,
+      "ex": 1.5188446,
+      "ey": 2,
+      "ez": 1.5188293
+    },
+    {
+      "id": "q_ny_kill_christmas_guys_wood",
+      "kind": "ExperienceTrigger",
+      "x": -21.890991,
+      "y": -14.29,
+      "z": 162.97198,
+      "active": true,
+      "ex": 23.631271,
+      "ey": 2.500001,
+      "ez": 23.631271
+    },
+    {
+      "id": "kill_in_forest_woods",
+      "kind": "ExperienceTrigger",
+      "x": -578,
+      "y": 13.6,
+      "z": -9,
+      "active": true,
+      "ex": 100.40001,
+      "ey": 50,
+      "ez": 118.7
+    },
+    {
+      "id": "meh_45_radio_area_mark_3",
+      "kind": "PlaceItemTrigger",
+      "x": -157.60101,
+      "y": 47.173,
+      "z": -233.20203,
+      "active": true,
+      "ex": 1.973938,
+      "ey": 1.5499077,
+      "ez": 2.2560883
+    },
+    {
+      "id": "Bunker_enter",
+      "kind": "ExperienceTrigger",
+      "x": -282.78998,
+      "y": 12.88,
+      "z": -414.77002,
+      "active": true,
+      "ex": 3.4331055,
+      "ey": 2.2020655,
+      "ez": 5.1486816
+    },
+    {
+      "id": "bar_fuel3_3",
+      "kind": "PlaceItemTrigger",
+      "x": -200.40698,
+      "y": 31.302,
+      "z": -210.92401,
+      "active": true,
+      "ex": 4.0235596,
+      "ey": 1.000001,
+      "ez": 4.0235596
+    },
+    {
+      "id": "Zone_for_RPG_3",
+      "kind": "PlaceItemTrigger",
+      "x": -92.52002,
+      "y": 26.96,
+      "z": -380.125,
+      "active": true,
+      "ex": 2.063118,
+      "ey": 1.0006828,
+      "ez": 1.9313354
+    },
+    {
+      "id": "kill_in_forest_woods",
+      "kind": "ExperienceTrigger",
+      "x": -262.90002,
+      "y": 13.6,
+      "z": -485,
+      "active": true,
+      "ex": 173,
+      "ey": 50,
+      "ez": 210.5
+    },
+    {
+      "id": "Pack_of_cartridges_3",
+      "kind": "PlaceItemTrigger",
+      "x": -268.294,
+      "y": 7.687,
+      "z": -416.21204,
+      "active": true,
+      "ex": 0.92910767,
+      "ey": 1.0006828,
+      "ez": 1.5693665
+    },
+    {
+      "id": "place_skier_12_3",
+      "kind": "PlaceItemTrigger",
+      "x": -6.2143555,
+      "y": -0.49247456,
+      "z": -75.55499,
+      "active": true,
+      "ex": 1,
+      "ey": 1,
+      "ez": 0.5
+    },
+    {
+      "id": "place_peacemaker_007_2_N2",
+      "kind": "PlaceItemTrigger",
+      "x": 195.97705,
+      "y": 1.032,
+      "z": -7.2420044,
+      "active": true,
+      "ex": 2.5,
+      "ey": 1,
+      "ez": 2.5
+    },
+    {
+      "id": "Reb_keeper",
+      "kind": "PlaceItemTrigger",
+      "x": -55.005005,
+      "y": 8.82,
+      "z": -498.35303,
+      "active": true,
+      "ex": 5.852833,
+      "ey": 1.0006828,
+      "ez": 6.3391724
+    },
+    {
+      "id": "pr_scout_col",
+      "kind": "ExperienceTrigger",
+      "x": 195.56006,
+      "y": 12.21,
+      "z": -595.81995,
+      "active": true,
+      "ex": 7.5,
+      "ey": 2,
+      "ez": 15
+    },
+    {
+      "id": "huntsman_005_1",
+      "kind": "PlaceItemTrigger",
+      "x": -386.786,
+      "y": 4.224,
+      "z": 22.593018,
+      "active": true,
+      "ex": 1,
+      "ey": 1,
+      "ez": 2
+    },
+    {
+      "id": "pr_scout_base",
+      "kind": "ExperienceTrigger",
+      "x": 283.05005,
+      "y": 24.04,
+      "z": -439.39,
+      "active": true,
+      "ex": 15,
+      "ey": 2,
+      "ez": 10
+    },
+    {
+      "id": "prapor_27_2",
+      "kind": "ExperienceTrigger",
+      "x": -189.09998,
+      "y": 0.3,
+      "z": 232.20001,
+      "active": true,
+      "ex": 51.89273,
+      "ey": 7.500003,
+      "ez": 62.60035
+    },
+    {
+      "id": "em_quest4_1",
+      "kind": "PlaceItemTrigger",
+      "x": -537.853,
+      "y": 15.838,
+      "z": -202.00098,
+      "active": true,
+      "ex": 1.6916504,
+      "ey": 0.64749193,
+      "ez": 1.0804291
+    },
+    {
+      "id": "Zone_for_RPG_1",
+      "kind": "PlaceItemTrigger",
+      "x": -13.52002,
+      "y": -3.12,
+      "z": 49.71997,
+      "active": true,
+      "ex": 1.1740341,
+      "ey": 1.0006831,
+      "ez": 2.212181
+    },
+    {
+      "id": "quest_ak-50_03_skier_place_01",
+      "kind": "ExperienceTrigger",
+      "x": -542.37,
+      "y": 18.38,
+      "z": -203.87,
+      "active": true,
+      "ex": 12.951721,
+      "ey": 7.5000024,
+      "ez": 10.899872
+    },
+    {
+      "id": "ter_015_area_1",
+      "kind": "ExperienceTrigger",
+      "x": -97.150024,
+      "y": -13.19,
+      "z": 219.76001,
+      "active": true,
+      "ex": 7.5,
+      "ey": 2.9999995,
+      "ez": 6
+    },
+    {
+      "id": "Pack_of_cartridges_1",
+      "kind": "PlaceItemTrigger",
+      "x": -272.703,
+      "y": 7.687,
+      "z": -411.79504,
+      "active": true,
+      "ex": 0.90841675,
+      "ey": 1.0006828,
+      "ez": 1.0481262
+    },
+    {
+      "id": "NosQuests_11_wood_place",
+      "kind": "PlaceItemTrigger",
+      "x": -219.74799,
+      "y": 62.621,
+      "z": -219.97498,
+      "active": true,
+      "ex": 1.2440643,
+      "ey": 1,
+      "ez": 1.2440643
+    },
+    {
+      "id": "q_ny_hide_christmas_tree_wood",
+      "kind": "PlaceItemTrigger",
+      "x": -22,
+      "y": -15.74,
+      "z": 163.04999,
+      "active": true,
+      "ex": 1.9594269,
+      "ey": 2.5,
+      "ez": 1.9594269
+    },
+    {
+      "id": "RSHG_event_04_jaeger_r_point",
+      "kind": "ExperienceTrigger",
+      "x": 174.80005,
+      "y": 23.6,
+      "z": -728.1,
+      "active": true,
+      "ex": 108.97766,
+      "ey": 25.000004,
+      "ez": 93.025024
+    },
+    {
+      "id": "Zone_for_RPG_2",
+      "kind": "PlaceItemTrigger",
+      "x": 238.96997,
+      "y": -1.475,
+      "z": -69.380005,
+      "active": true,
+      "ex": 1.55867,
+      "ey": 1.0006831,
+      "ez": 1.2559814
+    },
+    {
+      "id": "Bear_in_car",
+      "kind": "PlaceItemTrigger",
+      "x": -117.32507,
+      "y": 22.035,
+      "z": -463.94995,
+      "active": true,
+      "ex": 2.0752335,
+      "ey": 1.0006828,
+      "ez": 2.0548096
+    },
+    {
+      "id": "kill_in_forest_woods",
+      "kind": "ExperienceTrigger",
+      "x": -115.599976,
+      "y": 13.6,
+      "z": 178.09998,
+      "active": true,
+      "ex": 50,
+      "ey": 50,
+      "ez": 50
+    },
+    {
+      "id": "Depo_Zone_3",
+      "kind": "ExperienceTrigger",
+      "x": -684.24,
+      "y": 8.094838,
+      "z": 105.58002,
+      "active": true,
+      "ex": 12.019592,
+      "ey": 2.1794586,
+      "ez": 6.7883835
+    },
+    {
+      "id": "quest_zone_keeper5",
+      "kind": "ExperienceTrigger",
+      "x": -185,
+      "y": 45.7,
+      "z": -292.69995,
+      "active": true,
+      "ex": 264.7239,
+      "ey": 40.000015,
+      "ez": 264.72388
+    },
+    {
+      "id": "kill_in_forest_woods",
+      "kind": "ExperienceTrigger",
+      "x": -636.1,
+      "y": 13.6,
+      "z": 260.40002,
+      "active": true,
+      "ex": 345.7,
+      "ey": 50,
+      "ez": 51.25
+    },
+    {
+      "id": "q_ny_find_christmas_tree_wood",
+      "kind": "ExperienceTrigger",
+      "x": -21.390015,
+      "y": -15.74,
+      "z": 163.23999,
+      "active": true,
+      "ex": 8.411024,
+      "ey": 2.5,
+      "ez": 9.223831
+    },
+    {
+      "id": "quest_terminal_ zone_2",
+      "kind": "PlaceItemTrigger",
+      "x": -202.26599,
+      "y": 30.326,
+      "z": -210.42102,
+      "active": true,
+      "ex": 0.8685303,
+      "ey": 1.0510073,
+      "ez": 1.1588135
+    },
+    {
+      "id": "q14_8_4",
+      "kind": "PlaceItemTrigger",
+      "x": 247.27002,
+      "y": -9.067,
+      "z": 291.49,
+      "active": true,
+      "ex": 1.5188446,
+      "ey": 2.0000007,
+      "ez": 1.5188293
+    },
+    {
+      "id": "huntsman_005_2",
+      "kind": "PlaceItemTrigger",
+      "x": 447.979,
+      "y": -13.19,
+      "z": 71.301025,
+      "active": true,
+      "ex": 1.5,
+      "ey": 1,
+      "ez": 2
+    },
+    {
+      "id": "kill_in_forest_woods",
+      "kind": "ExperienceTrigger",
+      "x": -267.2,
+      "y": 13.6,
+      "z": -57.700012,
+      "active": true,
+      "ex": 215.5,
+      "ey": 50,
+      "ez": 211.95001
+    },
+    {
+      "id": "kill_in_forest_woods",
+      "kind": "ExperienceTrigger",
+      "x": -388.5,
+      "y": 13.6,
+      "z": 342,
+      "active": true,
+      "ex": 345.7,
+      "ey": 50,
+      "ez": 51.25
+    },
+    {
+      "id": "Woods_mine_quest",
+      "kind": "ExperienceTrigger",
+      "x": 341.59998,
+      "y": 22.907,
+      "z": -492.30005,
+      "active": true,
+      "ex": 25.834747,
+      "ey": 11.705616,
+      "ez": 54.904953
+    },
+    {
+      "id": "place_2A2_unlock_3_woods",
+      "kind": "ExperienceTrigger",
+      "x": 227.69897,
+      "y": 21.056,
+      "z": -706.56006,
+      "active": true,
+      "ex": 1.1426086,
+      "ey": 1,
+      "ez": 1.7133789
+    },
+    {
+      "id": "em_quest4_1",
+      "kind": "PlaceItemTrigger",
+      "x": -545.60803,
+      "y": 18.845,
+      "z": -204.52802,
+      "active": true,
+      "ex": 1.3857422,
+      "ey": 0.64749146,
+      "ez": 1.8178864
+    },
+    {
+      "id": "Case_rpg_keeper",
+      "kind": "PlaceItemTrigger",
+      "x": 412.89,
+      "y": -13.04,
+      "z": 240.04999,
+      "active": true,
+      "ex": 5.031006,
+      "ey": 1.0006828,
+      "ez": 3.8803558
+    },
+    {
+      "id": "Mark_transits_woods",
+      "kind": "PlaceItemTrigger",
+      "x": -132.35999,
+      "y": 0.62,
+      "z": 421.5,
+      "active": true,
+      "ex": 2.5945587,
+      "ey": 1.3787476,
+      "ez": 2.4612122
+    },
+    {
+      "id": "Place_item_tools_woods",
+      "kind": "PlaceItemTrigger",
+      "x": -119.04498,
+      "y": -0.93,
+      "z": 400.652,
+      "active": true,
+      "ex": 1.9430237,
+      "ey": 0.7985116,
+      "ez": 1.6478271
+    },
+    {
+      "id": "nf2024_1",
+      "kind": "ExperienceTrigger",
+      "x": -510.893,
+      "y": 17.147,
+      "z": -178.23499,
+      "active": true,
+      "ex": 1.3407593,
+      "ey": 1.25,
+      "ez": 1.3407593
+    },
+    {
+      "id": "Halloween_zone_for_antivirus(woods)",
+      "kind": "PlaceItemTrigger",
+      "x": -268,
+      "y": 7.2,
+      "z": -664,
+      "active": true,
+      "ex": 347.51447,
+      "ey": 1.3787475,
+      "ez": 253.56018
+    }
+  ],
+  "questItems": [
+    {
+      "templateId": "5a687e7886f7740c4a5133fb",
+      "itemId": "6a9e02a438bce8405901cd12",
+      "x": -94.25195,
+      "y": -15.702,
+      "z": 218.99298
+    },
+    {
+      "templateId": "5af04e0a86f7743a532b79e2",
+      "itemId": "6a9e02a438bce8405901cd13",
+      "x": 56.714966,
+      "y": -1.791,
+      "z": -50.307007
+    },
+    {
+      "templateId": "5d3ec50586f774183a607442",
+      "itemId": "6a9e02a438bce8405901cd14",
+      "x": -257.1476,
+      "y": 8.518,
+      "z": 7.9998
+    },
+    {
+      "templateId": "5af04c0b86f774138708f78e",
+      "itemId": "6a9e02a438bce8405901cd15",
+      "x": 233.84302,
+      "y": -1.235,
+      "z": -71.10199
+    },
+    {
+      "templateId": "5938878586f7741b797c562f",
+      "itemId": "6a9e02a438bce8405901cd16",
+      "x": -3.322,
+      "y": -1.4843,
+      "z": -81.1259
+    },
+    {
+      "templateId": "67499d4deca8acb2d206163b",
+      "itemId": "6a9e02a438bce8405901cd17",
+      "x": -54.61438,
+      "y": 8.867821,
+      "z": -494.30518
+    },
+    {
+      "templateId": "67499d2c69a58fceba104a43",
+      "itemId": "6a9e02a438bce8405901cd18",
+      "x": 409.43433,
+      "y": -13.544999,
+      "z": 240.53363
+    },
+    {
+      "templateId": "67499a9669a58fceba104a41",
+      "itemId": "6a9e02a438bce8405901cd19",
+      "x": -619.19604,
+      "y": 8.457,
+      "z": 127.90881
+    },
+    {
+      "templateId": "664a5775f3d3570fba06be64",
+      "itemId": "6a9e02a438bce8405901cd1a",
+      "x": 296.6609,
+      "y": 23.434,
+      "z": -505.749
+    },
+    {
+      "templateId": "664b69c5a082271bc46c4e11",
+      "itemId": "6a9e02a438bce8405901cd1b",
+      "x": 283.20508,
+      "y": 23.3589,
+      "z": -508.9973
+    },
+    {
+      "templateId": "664b69e8e1238e506d3630af",
+      "itemId": "6a9e02a438bce8405901cd1c",
+      "x": 306.2661,
+      "y": 23.964,
+      "z": -461.195
+    },
+    {
+      "templateId": "683ed6ccd9a096739b0c9228",
+      "itemId": "6a9e02a438bce8405901cd1d",
+      "x": -544.42566,
+      "y": 19.2192,
+      "z": -204.0365
+    },
+    {
+      "templateId": "67f3fd9bdb1fbd5add090f96",
+      "itemId": "6a9e02a438bce8405901cd1e",
+      "x": 132.00867,
+      "y": 25.3763,
+      "z": -732.1907
+    },
+    {
+      "templateId": "6866663e022740fabd074ef2",
+      "itemId": "6a9e02a438bce8405901cd1f",
+      "x": -60.82788,
+      "y": 10.9259,
+      "z": -649.5177
+    },
+    {
+      "templateId": "6879e7fa4c184bd0590dbab6",
+      "itemId": "6a9e02a438bce8405901cd20",
+      "x": -213.1111,
+      "y": -0.7602,
+      "z": 201.5058
+    },
+    {
+      "templateId": "69e5613a079c7bc64a33bb77",
+      "itemId": "6a9e02a438bce8405901cd21",
+      "x": -528.824,
+      "y": -0.34,
+      "z": 283.388
+    },
+    {
+      "templateId": "6a61491533e4372425ec2f56",
+      "itemId": "6a9e02a438bce8405901cd22",
+      "x": -143.299,
+      "y": -1.408,
+      "z": 409.479
+    },
+    {
+      "templateId": "6a66997ad3500a8799dfb257",
+      "itemId": "6a9e02a438bce8405901cd23",
+      "x": -189.26,
+      "y": -0.6,
+      "z": 233.633
+    },
+    {
+      "templateId": "6a66997ad3500a8799dfb257",
+      "itemId": "6a9e02a438bce8405901cd24",
+      "x": -181.112,
+      "y": -1.866,
+      "z": 232.266
+    },
+    {
+      "templateId": "6a66997ad3500a8799dfb257",
+      "itemId": "6a9e02a438bce8405901cd25",
+      "x": -195.357,
+      "y": -1.24,
+      "z": 222.187
+    },
+    {
+      "templateId": "6a6a208a35e0f5860094fa3d",
+      "itemId": "6a9e02a438bce8405901cd26",
+      "x": -270.693,
+      "y": 8.951,
+      "z": -415.655
+    },
+    {
+      "templateId": "6a699b061078d7158cd6fc79",
+      "itemId": "6a9e02a438bce8405901cd27",
+      "x": -271.101,
+      "y": 8.55,
+      "z": -417.72
+    },
+    {
+      "templateId": "6a6980af9994a65e2f0f7a55",
+      "itemId": "6a9e02a438bce8405901cd28",
+      "x": -271.248,
+      "y": 8.654,
+      "z": -414.811
+    }
+  ]
+}

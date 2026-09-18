@@ -1,0 +1,1150 @@
+{
+  "map": "factory4_day",
+  "harvestedAt": "2026-09-07 00:52:50Z",
+  "clientVersion": "1.3.0",
+  "triggers": [
+    {
+      "id": "catwalk01",
+      "kind": "ExperienceTrigger",
+      "x": 5.9728127,
+      "y": 8.088181,
+      "z": 60.9629,
+      "active": true,
+      "ex": 0.3615694,
+      "ey": 0.5,
+      "ez": 0.36441803
+    },
+    {
+      "id": "roof02",
+      "kind": "ExperienceTrigger",
+      "x": 45.152813,
+      "y": 5.801181,
+      "z": 29.320898,
+      "active": true,
+      "ex": 0.6101036,
+      "ey": 0.5,
+      "ez": 0.22632027
+    },
+    {
+      "id": "unitaz",
+      "kind": "ExperienceTrigger",
+      "x": 22.288813,
+      "y": 4.777281,
+      "z": 48.172905,
+      "active": true,
+      "ex": 0.120845795,
+      "ey": 0.20036697,
+      "ez": 0.088581085
+    },
+    {
+      "id": "catwalk03",
+      "kind": "ExperienceTrigger",
+      "x": 6.5598106,
+      "y": 7.756181,
+      "z": -0.7180996,
+      "active": true,
+      "ex": 0.36156988,
+      "ey": 0.5,
+      "ez": 0.26013815
+    },
+    {
+      "id": "locked_office",
+      "kind": "ExperienceTrigger",
+      "x": 30.131813,
+      "y": 8.718182,
+      "z": 38.8869,
+      "active": true,
+      "ex": 1.6280136,
+      "ey": 0.5,
+      "ez": 1.8117065
+    },
+    {
+      "id": "dungeon05",
+      "kind": "ExperienceTrigger",
+      "x": -6.9211884,
+      "y": -2.109819,
+      "z": 23.6659,
+      "active": true,
+      "ex": 0.17683029,
+      "ey": 0.50000006,
+      "ez": 0.5982914
+    },
+    {
+      "id": "roof02",
+      "kind": "ExperienceTrigger",
+      "x": 40.213814,
+      "y": 3.665181,
+      "z": -7.589101,
+      "active": true,
+      "ex": 0.5982933,
+      "ey": 0.5000001,
+      "ez": 0.17682981
+    },
+    {
+      "id": "caseextr",
+      "kind": "ExperienceTrigger",
+      "x": 41.741814,
+      "y": 5.448181,
+      "z": 40.8179,
+      "active": true,
+      "ex": 3.2776833,
+      "ey": 0.9600997,
+      "ez": 1.321373
+    },
+    {
+      "id": "showers",
+      "kind": "ExperienceTrigger",
+      "x": 14.923813,
+      "y": 5.213181,
+      "z": 40.4069,
+      "active": true,
+      "ex": 0.89646053,
+      "ey": 0.5,
+      "ez": 0.22670364
+    },
+    {
+      "id": "exit0zone",
+      "kind": "ExperienceTrigger",
+      "x": -55.976185,
+      "y": 1.806181,
+      "z": 55.983902,
+      "active": true,
+      "ex": 1.7650032,
+      "ey": 0.50000006,
+      "ez": 2.665001
+    },
+    {
+      "id": "office01",
+      "kind": "ExperienceTrigger",
+      "x": 17.193811,
+      "y": 8.718182,
+      "z": 38.6419,
+      "active": true,
+      "ex": 0.8964615,
+      "ey": 0.5,
+      "ez": 0.22670364
+    },
+    {
+      "id": "dungeon03",
+      "kind": "ExperienceTrigger",
+      "x": 65.183815,
+      "y": -2.173819,
+      "z": -34.0851,
+      "active": true,
+      "ex": 0.5982895,
+      "ey": 0.5,
+      "ez": 0.17683029
+    },
+    {
+      "id": "catwalk06",
+      "kind": "ExperienceTrigger",
+      "x": 51.686813,
+      "y": 7.8241806,
+      "z": 40.143898,
+      "active": true,
+      "ex": 0.36156845,
+      "ey": 0.5,
+      "ez": 0.26013947
+    },
+    {
+      "id": "exit1zone",
+      "kind": "ExperienceTrigger",
+      "x": -38.528187,
+      "y": 0.71418095,
+      "z": 7.2929,
+      "active": true,
+      "ex": 1.7650032,
+      "ey": 0.5000001,
+      "ez": 2.6650019
+    },
+    {
+      "id": "roof01",
+      "kind": "ExperienceTrigger",
+      "x": 42.05781,
+      "y": 8.075181,
+      "z": 40.6789,
+      "active": true,
+      "ex": 0.36156845,
+      "ey": 0.5,
+      "ez": 0.26013947
+    },
+    {
+      "id": "dungeon02",
+      "kind": "ExperienceTrigger",
+      "x": 38.935814,
+      "y": -2.173819,
+      "z": -34.1231,
+      "active": true,
+      "ex": 0.5982933,
+      "ey": 0.5,
+      "ez": 0.17683029
+    },
+    {
+      "id": "catwalk04",
+      "kind": "ExperienceTrigger",
+      "x": 37.507812,
+      "y": 7.804181,
+      "z": 0.30789948,
+      "active": true,
+      "ex": 0.36156845,
+      "ey": 0.5,
+      "ez": 0.26013815
+    },
+    {
+      "id": "catwalk05",
+      "kind": "ExperienceTrigger",
+      "x": 51.686813,
+      "y": 7.804181,
+      "z": 0.30789948,
+      "active": true,
+      "ex": 0.36156845,
+      "ey": 0.5,
+      "ez": 0.26013827
+    },
+    {
+      "id": "dungeon07",
+      "kind": "ExperienceTrigger",
+      "x": -31.471188,
+      "y": -2.109819,
+      "z": 27.583899,
+      "active": true,
+      "ex": 0.29568863,
+      "ey": 0.5,
+      "ez": 0.38656044
+    },
+    {
+      "id": "secretpassage",
+      "kind": "ExperienceTrigger",
+      "x": 66.59781,
+      "y": -2.1328192,
+      "z": -28.462101,
+      "active": true,
+      "ex": 0.5982895,
+      "ey": 0.5,
+      "ez": 0.17683029
+    },
+    {
+      "id": "pumproom",
+      "kind": "ExperienceTrigger",
+      "x": 40.40681,
+      "y": 0.63318086,
+      "z": -11.2001,
+      "active": true,
+      "ex": 1.9175491,
+      "ey": 0.3887868,
+      "ez": 3.8081245
+    },
+    {
+      "id": "dungeon06",
+      "kind": "ExperienceTrigger",
+      "x": -17.000187,
+      "y": -2.109819,
+      "z": 39.0409,
+      "active": true,
+      "ex": 1.1522832,
+      "ey": 0.5,
+      "ez": 0.39471054
+    },
+    {
+      "id": "catwalk03",
+      "kind": "ExperienceTrigger",
+      "x": 5.997814,
+      "y": 7.756181,
+      "z": 16.8719,
+      "active": true,
+      "ex": 0.3615694,
+      "ey": 0.5,
+      "ez": 0.26013756
+    },
+    {
+      "id": "dungeon04",
+      "kind": "ExperienceTrigger",
+      "x": 21.001812,
+      "y": -2.109819,
+      "z": -1.1620998,
+      "active": true,
+      "ex": 0.5982914,
+      "ey": 0.5,
+      "ez": 0.17682981
+    },
+    {
+      "id": "exit3zone",
+      "kind": "ExperienceTrigger",
+      "x": 58.866814,
+      "y": 0.71418095,
+      "z": 57.384903,
+      "active": true,
+      "ex": 2.665001,
+      "ey": 0.5,
+      "ez": 1.7649994
+    },
+    {
+      "id": "dungeon01",
+      "kind": "ExperienceTrigger",
+      "x": 17.510813,
+      "y": -2.109819,
+      "z": -21.3031,
+      "active": true,
+      "ex": 0.5982914,
+      "ey": 0.5,
+      "ez": 0.17683029
+    },
+    {
+      "id": "exit2zone",
+      "kind": "ExperienceTrigger",
+      "x": 44.93281,
+      "y": 0.71418095,
+      "z": -45.0941,
+      "active": true,
+      "ex": 2.665001,
+      "ey": 0.5,
+      "ez": 1.7649994
+    },
+    {
+      "id": "catwalk02",
+      "kind": "ExperienceTrigger",
+      "x": -22.420185,
+      "y": 8.088181,
+      "z": 1.6329002,
+      "active": true,
+      "ex": 0.36157036,
+      "ey": 0.5,
+      "ez": 0.36441886
+    },
+    {
+      "id": "case_extraction",
+      "kind": "PlaceItemTrigger",
+      "x": 41.741814,
+      "y": 5.448181,
+      "z": 40.8179,
+      "active": true,
+      "ex": 3.2776833,
+      "ey": 0.9601002,
+      "ez": 1.321373
+    },
+    {
+      "id": "zone_half-life",
+      "kind": "PlaceItemTrigger",
+      "x": 21.400316,
+      "y": -1.8783135,
+      "z": 11.708993,
+      "active": true,
+      "ex": 0.9838486,
+      "ey": 0.6032419,
+      "ez": 0.5828285
+    },
+    {
+      "id": "nf2024_10_3",
+      "kind": "PlaceItemTrigger",
+      "x": -4.36,
+      "y": 4.747,
+      "z": 6.08,
+      "active": true,
+      "ex": 1.5,
+      "ey": 1.25,
+      "ez": 1.5
+    },
+    {
+      "id": "Place_accurate_tools",
+      "kind": "PlaceItemTrigger",
+      "x": 27.89,
+      "y": 1.15,
+      "z": -32.889915,
+      "active": true,
+      "ex": 2.6051598,
+      "ey": 1.25,
+      "ez": 1.7662125
+    },
+    {
+      "id": "nf2024_2_1",
+      "kind": "ExperienceTrigger",
+      "x": 62.68,
+      "y": 1.043,
+      "z": 23.4,
+      "active": true,
+      "ex": 4.028162,
+      "ey": 1.0000002,
+      "ez": 3.3919258
+    },
+    {
+      "id": "nf2024_3_exit",
+      "kind": "ExperienceTrigger",
+      "x": 23.53,
+      "y": 2.259,
+      "z": 63.2,
+      "active": true,
+      "ex": 5.0570526,
+      "ey": 1.5000002,
+      "ez": 5.0570507
+    },
+    {
+      "id": "achiv_office",
+      "kind": "ExperienceTrigger",
+      "x": 16.509,
+      "y": 9.106,
+      "z": 39.299,
+      "active": true,
+      "ex": 5.2649994,
+      "ey": 1,
+      "ez": 2
+    },
+    {
+      "id": "nf2024_6_beacon_1",
+      "kind": "PlaceItemTrigger",
+      "x": -16.994,
+      "y": -1.596,
+      "z": 34.808,
+      "active": true,
+      "ex": 3.3449998,
+      "ey": 1,
+      "ez": 0.75
+    },
+    {
+      "id": "nf2024_4_zone_kill1",
+      "kind": "QuestTrigger",
+      "x": 19.81,
+      "y": -2.56,
+      "z": 46.84,
+      "active": true,
+      "ex": 75,
+      "ey": 2.5,
+      "ez": 24.999998
+    },
+    {
+      "id": "place_pacemaker_SCOUT_02",
+      "kind": "ExperienceTrigger",
+      "x": -53.107,
+      "y": 2.292,
+      "z": 58.188,
+      "active": true,
+      "ex": 1,
+      "ey": 1,
+      "ez": 1
+    },
+    {
+      "id": "huntsman_013",
+      "kind": "QuestTrigger",
+      "x": 22.34,
+      "y": 3.87,
+      "z": 41.73,
+      "active": true,
+      "ex": 15,
+      "ey": 8.5,
+      "ez": 7.5
+    },
+    {
+      "id": "nf2024_7_2",
+      "kind": "PlaceItemTrigger",
+      "x": -5.474,
+      "y": 5.776,
+      "z": -32.477,
+      "active": true,
+      "ex": 0.75495815,
+      "ey": 1.25,
+      "ez": 1.2529678
+    },
+    {
+      "id": "NosQuests_11_factory_place",
+      "kind": "PlaceItemTrigger",
+      "x": 34.789,
+      "y": 8.527,
+      "z": 35.5,
+      "active": true,
+      "ex": 0.75,
+      "ey": 0.5,
+      "ez": 0.75
+    },
+    {
+      "id": "nf2024_2_4",
+      "kind": "ExperienceTrigger",
+      "x": -31.57,
+      "y": 2.33,
+      "z": 57.84,
+      "active": true,
+      "ex": 3.9180222,
+      "ey": 1,
+      "ez": 2.894127
+    },
+    {
+      "id": "zone_sapper",
+      "kind": "PlaceItemTrigger",
+      "x": 30.735636,
+      "y": 4.287,
+      "z": -31.146,
+      "active": true,
+      "ex": 0.49669266,
+      "ey": 0.70214856,
+      "ez": 0.6768608
+    },
+    {
+      "id": "nf2024_2_11",
+      "kind": "ExperienceTrigger",
+      "x": 18.3,
+      "y": 1.49,
+      "z": -15.19,
+      "active": true,
+      "ex": 3.552288,
+      "ey": 1.5,
+      "ez": 4.0278826
+    },
+    {
+      "id": "nf2024_10_1",
+      "kind": "PlaceItemTrigger",
+      "x": 17.81,
+      "y": 4.747,
+      "z": 6.08,
+      "active": true,
+      "ex": 1.5,
+      "ey": 1.25,
+      "ez": 1.5
+    },
+    {
+      "id": "zone_harry_potter",
+      "kind": "PlaceItemTrigger",
+      "x": 52.406708,
+      "y": 1.8644464,
+      "z": -17.486076,
+      "active": true,
+      "ex": 0.7142029,
+      "ey": 0.77848744,
+      "ez": 0.6762848
+    },
+    {
+      "id": "nf2024_6_beacon_2",
+      "kind": "PlaceItemTrigger",
+      "x": 34.428,
+      "y": -1.476,
+      "z": -4.445,
+      "active": true,
+      "ex": 0.75,
+      "ey": 0.99999994,
+      "ez": 3.3449998
+    },
+    {
+      "id": "place_pacemaker_SCOUT_03",
+      "kind": "ExperienceTrigger",
+      "x": 59.698,
+      "y": 1.163,
+      "z": 56.98,
+      "active": true,
+      "ex": 2,
+      "ey": 1,
+      "ez": 2
+    },
+    {
+      "id": "zone_stairway",
+      "kind": "PlaceItemTrigger",
+      "x": 59.563,
+      "y": 0.7,
+      "z": 50.49,
+      "active": true,
+      "ex": 0.7910347,
+      "ey": 0.6785394,
+      "ez": 0.36730957
+    },
+    {
+      "id": "zone_451",
+      "kind": "PlaceItemTrigger",
+      "x": 17.42,
+      "y": 1.832,
+      "z": 43.016,
+      "active": true,
+      "ex": 1.4506474,
+      "ey": 1.0209129,
+      "ez": 1.3226013
+    },
+    {
+      "id": "nf2024_2_9",
+      "kind": "ExperienceTrigger",
+      "x": 13.63,
+      "y": 1.163,
+      "z": -30.07,
+      "active": true,
+      "ex": 2.0557137,
+      "ey": 1.5,
+      "ez": 3.531536
+    },
+    {
+      "id": "NosQuests_8_factory_place",
+      "kind": "PlaceItemTrigger",
+      "x": 36.845,
+      "y": 9.433,
+      "z": 35.5,
+      "active": true,
+      "ex": 0.5,
+      "ey": 1,
+      "ez": 0.5
+    },
+    {
+      "id": "place_pacemaker_SCOUT_01",
+      "kind": "ExperienceTrigger",
+      "x": 66.665,
+      "y": -1.676,
+      "z": -28.878,
+      "active": true,
+      "ex": 1.0439453,
+      "ey": 1,
+      "ez": 0.5950146
+    },
+    {
+      "id": "place_SADOVOD_01_2",
+      "kind": "PlaceItemTrigger",
+      "x": 60.076,
+      "y": 1.093,
+      "z": -48.389,
+      "active": true,
+      "ex": 0.5,
+      "ey": 0.99999994,
+      "ez": 1
+    },
+    {
+      "id": "nf2024_2_3",
+      "kind": "ExperienceTrigger",
+      "x": 64.97,
+      "y": 1.163,
+      "z": -47.28,
+      "active": true,
+      "ex": 2.172636,
+      "ey": 1.0000001,
+      "ez": 3.5956955
+    },
+    {
+      "id": "nf2024_2_2",
+      "kind": "ExperienceTrigger",
+      "x": 71.02,
+      "y": 1.163,
+      "z": -40.93,
+      "active": true,
+      "ex": 2.8821793,
+      "ey": 1.0000001,
+      "ez": 3.9139595
+    },
+    {
+      "id": "nf2024_2_12",
+      "kind": "ExperienceTrigger",
+      "x": 58.323,
+      "y": 1.73,
+      "z": 58.976,
+      "active": true,
+      "ex": 3.0925407,
+      "ey": 1.5,
+      "ez": 3.9771156
+    },
+    {
+      "id": "kill1",
+      "kind": "QuestTrigger",
+      "x": 22.34,
+      "y": 6.1,
+      "z": 41.73,
+      "active": true,
+      "ex": 15,
+      "ey": 1.7000003,
+      "ez": 7.5
+    },
+    {
+      "id": "Mark_transits_factory",
+      "kind": "PlaceItemTrigger",
+      "x": 24.202,
+      "y": 1.91,
+      "z": 66.63533,
+      "active": true,
+      "ex": 3.1782913,
+      "ey": 0.77380306,
+      "ez": 1.5
+    },
+    {
+      "id": "nf2024_4_zone_kill1",
+      "kind": "QuestTrigger",
+      "x": -51.08,
+      "y": -2.99,
+      "z": 13.58,
+      "active": true,
+      "ex": 40,
+      "ey": 2.5,
+      "ez": 40
+    },
+    {
+      "id": "nf2024_2_5",
+      "kind": "ExperienceTrigger",
+      "x": 22.58,
+      "y": 1.163,
+      "z": -23.83,
+      "active": true,
+      "ex": 2.0442333,
+      "ey": 0.9999999,
+      "ez": 3.5250854
+    },
+    {
+      "id": "nf2024_4_zone_kill1",
+      "kind": "QuestTrigger",
+      "x": 19.81,
+      "y": -2.99,
+      "z": -28.64,
+      "active": true,
+      "ex": 75,
+      "ey": 2.5,
+      "ez": 40
+    },
+    {
+      "id": "Check_mine_zone_factory",
+      "kind": "ExperienceTrigger",
+      "x": 25.35,
+      "y": 8.76,
+      "z": 39.25,
+      "active": true,
+      "ex": 1.7655659,
+      "ey": 0.9159279,
+      "ez": 1.9691887
+    },
+    {
+      "id": "nf2024_2_7",
+      "kind": "ExperienceTrigger",
+      "x": 12.37,
+      "y": 1.163,
+      "z": 30.42,
+      "active": true,
+      "ex": 3.950294,
+      "ey": 1.0000004,
+      "ez": 3.8111248
+    },
+    {
+      "id": "nf2024_10_2",
+      "kind": "PlaceItemTrigger",
+      "x": 6.756,
+      "y": 4.747,
+      "z": 6.08,
+      "active": true,
+      "ex": 1.5000002,
+      "ey": 1.25,
+      "ez": 1.5
+    },
+    {
+      "id": "place_pacemaker_SCOUT_04",
+      "kind": "ExperienceTrigger",
+      "x": -18.4,
+      "y": 1.1613333,
+      "z": -49.022,
+      "active": true,
+      "ex": 2,
+      "ey": 1,
+      "ez": 2
+    },
+    {
+      "id": "nf2024_4_zone_kill1",
+      "kind": "QuestTrigger",
+      "x": 64.99,
+      "y": -2.99,
+      "z": 13.58,
+      "active": true,
+      "ex": 40,
+      "ey": 2.5,
+      "ez": 40
+    },
+    {
+      "id": "place_SADOVOD_01_1",
+      "kind": "PlaceItemTrigger",
+      "x": 68.193,
+      "y": 1.059,
+      "z": -7.383,
+      "active": true,
+      "ex": 0.5,
+      "ey": 1,
+      "ez": 0.99999976
+    },
+    {
+      "id": "nf2024_2_8",
+      "kind": "ExperienceTrigger",
+      "x": -15.77,
+      "y": 2.259,
+      "z": 32.58,
+      "active": true,
+      "ex": 2.245615,
+      "ey": 1.5000002,
+      "ez": 3.6342955
+    },
+    {
+      "id": "nf2024_7_3",
+      "kind": "PlaceItemTrigger",
+      "x": -24.441,
+      "y": 6.197,
+      "z": 60.426,
+      "active": true,
+      "ex": 0.7549572,
+      "ey": 1.25,
+      "ez": 1.2529678
+    },
+    {
+      "id": "nf2024_7_1",
+      "kind": "PlaceItemTrigger",
+      "x": 63.612,
+      "y": 6.44,
+      "z": 35.114,
+      "active": true,
+      "ex": 1.2529678,
+      "ey": 1.25,
+      "ez": 0.7549591
+    },
+    {
+      "id": "nf2024_2_6",
+      "kind": "ExperienceTrigger",
+      "x": 21.868,
+      "y": 1.163,
+      "z": -30.777,
+      "active": true,
+      "ex": 2.3610096,
+      "ey": 1,
+      "ez": 3.692913
+    },
+    {
+      "id": "zone_terminator",
+      "kind": "PlaceItemTrigger",
+      "x": -49.607,
+      "y": 2.3474998,
+      "z": 60.411003,
+      "active": true,
+      "ex": 0.31328583,
+      "ey": 0.5297301,
+      "ez": 0.45854187
+    },
+    {
+      "id": "zone_Always_sunny",
+      "kind": "PlaceItemTrigger",
+      "x": 27.369007,
+      "y": 9.233061,
+      "z": 38.424267,
+      "active": true,
+      "ex": 0.36149788,
+      "ey": 0.8358383,
+      "ez": 1.9469299
+    },
+    {
+      "id": "nf2024_2_10",
+      "kind": "ExperienceTrigger",
+      "x": 53.37,
+      "y": 1.48,
+      "z": -22.46,
+      "active": true,
+      "ex": 3.920353,
+      "ey": 1.5000005,
+      "ez": 2.9010468
+    },
+    {
+      "id": "nf2024_6_beacon_3",
+      "kind": "PlaceItemTrigger",
+      "x": 45.615,
+      "y": -1.596,
+      "z": -36.126,
+      "active": true,
+      "ex": 3.75,
+      "ey": 1,
+      "ez": 0.75
+    },
+    {
+      "id": "Halloween_zone_for_antivirus(factory)",
+      "kind": "PlaceItemTrigger",
+      "x": -27.176,
+      "y": -4.632,
+      "z": -24.234352,
+      "active": true,
+      "ex": 2.6051598,
+      "ey": 1.25,
+      "ez": 29.875938
+    },
+    {
+      "id": "scorpion_factory_pumping_place",
+      "kind": "PlaceItemTrigger",
+      "x": 39.53815,
+      "y": 0.8799998,
+      "z": -14.68336,
+      "active": true,
+      "ex": 0.75,
+      "ey": 0.875,
+      "ez": 0.625
+    },
+    {
+      "id": "scorpion_factory_pumping_visit",
+      "kind": "ExperienceTrigger",
+      "x": 39.53815,
+      "y": 0.8799999,
+      "z": -14.68336,
+      "active": true,
+      "ex": 0.75,
+      "ey": 0.875,
+      "ez": 0.625
+    },
+    {
+      "id": "scorpion_factory_exit_3",
+      "kind": "PlaceItemTrigger",
+      "x": 60.27026,
+      "y": 1.183088,
+      "z": 53.60578,
+      "active": true,
+      "ex": 1,
+      "ey": 0.99999994,
+      "ez": 0.875
+    },
+    {
+      "id": "scorpion_factory_exit_2",
+      "kind": "PlaceItemTrigger",
+      "x": -52.31703,
+      "y": 2.035631,
+      "z": 57.47046,
+      "active": true,
+      "ex": 1.125,
+      "ey": 1,
+      "ez": 1.25
+    },
+    {
+      "id": "scorpion_factory_exit_1",
+      "kind": "PlaceItemTrigger",
+      "x": -19.18904,
+      "y": 1.307255,
+      "z": -47.70099,
+      "active": true,
+      "ex": 1.125,
+      "ey": 1.125,
+      "ez": 1.375
+    },
+    {
+      "id": "scorpion_factory_exit_0",
+      "kind": "PlaceItemTrigger",
+      "x": 65.71623,
+      "y": -2.632055,
+      "z": -28.54614,
+      "active": true,
+      "ex": 0.625,
+      "ey": 1.6250001,
+      "ez": 1
+    },
+    {
+      "id": "kill1",
+      "kind": "QuestTrigger",
+      "x": 22.34,
+      "y": 9.58,
+      "z": 39.22,
+      "active": true,
+      "ex": 15,
+      "ey": 1.6999998,
+      "ez": 5
+    },
+    {
+      "id": "ter_017_area_1",
+      "kind": "PlaceItemTrigger",
+      "x": 24.609,
+      "y": 9.17,
+      "z": 39.078,
+      "active": true,
+      "ex": 2,
+      "ey": 1,
+      "ez": 2
+    },
+    {
+      "id": "kill1",
+      "kind": "QuestTrigger",
+      "x": 28.768,
+      "y": 2.7,
+      "z": 44.906,
+      "active": true,
+      "ex": 2.5,
+      "ey": 1.7,
+      "ez": 1.5
+    },
+    {
+      "id": "huntsman_013",
+      "kind": "QuestTrigger",
+      "x": 22.34,
+      "y": 9.58,
+      "z": 39.22,
+      "active": true,
+      "ex": 15,
+      "ey": 1.6999998,
+      "ez": 5
+    },
+    {
+      "id": "huntsman_013",
+      "kind": "QuestTrigger",
+      "x": 28.768,
+      "y": 2.7,
+      "z": 44.906,
+      "active": true,
+      "ex": 2.5,
+      "ey": 1.7,
+      "ez": 1.5
+    },
+    {
+      "id": "kill1",
+      "kind": "QuestTrigger",
+      "x": 22.34,
+      "y": 2.7,
+      "z": 39.32,
+      "active": true,
+      "ex": 15,
+      "ey": 1.7,
+      "ez": 5
+    },
+    {
+      "id": "huntsman_013",
+      "kind": "QuestTrigger",
+      "x": 22.34,
+      "y": 2.7,
+      "z": 39.32,
+      "active": true,
+      "ex": 15,
+      "ey": 1.7,
+      "ez": 5
+    },
+    {
+      "id": "huntsman_013",
+      "kind": "QuestTrigger",
+      "x": 22.34,
+      "y": 6.1,
+      "z": 41.73,
+      "active": true,
+      "ex": 15,
+      "ey": 1.7000003,
+      "ez": 7.5
+    }
+  ],
+  "questItems": [
+    {
+      "templateId": "66a0f0926fee20fa70036da6",
+      "itemId": "6a9e067138bce8405902e481",
+      "x": -19.473001,
+      "y": 0.518,
+      "z": -52.22601
+    },
+    {
+      "templateId": "66a0e523e749756c920d02d0",
+      "itemId": "6a9e067138bce8405902e482",
+      "x": -22.717655,
+      "y": -1.8816979,
+      "z": 48.669617
+    },
+    {
+      "templateId": "669fac549b0ce3feae01a137",
+      "itemId": "6a9e067138bce8405902e483",
+      "x": -5.0550003,
+      "y": -2.657,
+      "z": 18.582003
+    },
+    {
+      "templateId": "66c0b90c8398582e4b0c2e27",
+      "itemId": "6a9e067138bce8405902e484",
+      "x": 26.249004,
+      "y": 7.864,
+      "z": -3.6020005
+    },
+    {
+      "templateId": "66c0b39ca1f68fcc1d0c0cc3",
+      "itemId": "6a9e067138bce8405902e485",
+      "x": 29.309954,
+      "y": 3.7436,
+      "z": -28.936857
+    },
+    {
+      "templateId": "591093bb86f7747caa7bb2ee",
+      "itemId": "6a9e067138bce8405902e486",
+      "x": -19.961002,
+      "y": 0.047,
+      "z": 21.943003
+    },
+    {
+      "templateId": "593a87af86f774122f54a951",
+      "itemId": "6a9e067138bce8405902e487",
+      "x": 23.250032,
+      "y": 8.546161,
+      "z": 39.40377
+    },
+    {
+      "templateId": "690bea5659ebccb1310d6ce2",
+      "itemId": "6a9e067138bce8405902e488",
+      "x": 16.93627,
+      "y": 8.141307,
+      "z": 39.53988
+    },
+    {
+      "templateId": "6a66cd3d30580e2e7433b853",
+      "itemId": "6a9e067138bce8405902e489",
+      "x": 32.574,
+      "y": 9.017,
+      "z": 37.007
+    },
+    {
+      "templateId": "6a66cd3bbb61030ed6701699",
+      "itemId": "6a9e067138bce8405902e48a",
+      "x": 28,
+      "y": 8.276,
+      "z": 39.028
+    },
+    {
+      "templateId": "593a87af86f774122f54a951",
+      "itemId": "6a9e0ac92017e17d53004baf",
+      "x": 26.317059,
+      "y": 8.981565,
+      "z": 36.759205
+    },
+    {
+      "templateId": "66a0f0926fee20fa70036da6",
+      "itemId": "6a9e0ac92017e17d53004bb0",
+      "x": -19.473001,
+      "y": 0.518,
+      "z": -52.22601
+    },
+    {
+      "templateId": "669fac549b0ce3feae01a137",
+      "itemId": "6a9e0ac92017e17d53004bb1",
+      "x": -5.0550003,
+      "y": -2.657,
+      "z": 18.582003
+    },
+    {
+      "templateId": "66c0b39ca1f68fcc1d0c0cc3",
+      "itemId": "6a9e0ac92017e17d53004bb2",
+      "x": 29.309954,
+      "y": 3.7436,
+      "z": -28.936857
+    },
+    {
+      "templateId": "66a0e523e749756c920d02d0",
+      "itemId": "6a9e0ac92017e17d53004bb3",
+      "x": -23.265278,
+      "y": -1.8564624,
+      "z": 44.83158
+    },
+    {
+      "templateId": "66c0b90c8398582e4b0c2e27",
+      "itemId": "6a9e0ac92017e17d53004bb4",
+      "x": 26.249004,
+      "y": 7.864,
+      "z": -3.6020005
+    },
+    {
+      "templateId": "591093bb86f7747caa7bb2ee",
+      "itemId": "6a9e0ac92017e17d53004bb5",
+      "x": -19.961002,
+      "y": 0.047,
+      "z": 21.943003
+    },
+    {
+      "templateId": "690bea5659ebccb1310d6ce2",
+      "itemId": "6a9e0ac92017e17d53004bb6",
+      "x": 16.93627,
+      "y": 8.141307,
+      "z": 39.53988
+    },
+    {
+      "templateId": "6a66c94917ba877b97f279ff",
+      "itemId": "6a9e0ac92017e17d53004bb7",
+      "x": 32.574,
+      "y": 9.017,
+      "z": 37.007
+    },
+    {
+      "templateId": "6a66c953ac7b63a28acbff46",
+      "itemId": "6a9e0ac92017e17d53004bb8",
+      "x": 28,
+      "y": 8.276,
+      "z": 39.028
+    }
+  ]
+}

@@ -1,0 +1,455 @@
+{
+  "map": "Sandbox",
+  "harvestedAt": "2026-09-07 00:07:16Z",
+  "clientVersion": "1.3.0",
+  "triggers": [
+    {
+      "id": "scorpion_gz_ambulance_2_marker",
+      "kind": "PlaceItemTrigger",
+      "x": 158.3343,
+      "y": 24.1111,
+      "z": -88.77029,
+      "active": true,
+      "ex": 3.125,
+      "ey": 1,
+      "ez": 1.625
+    },
+    {
+      "id": "scorpion_gz_ambulance_1_marker",
+      "kind": "PlaceItemTrigger",
+      "x": 63.45448,
+      "y": 24.07728,
+      "z": 89.75129,
+      "active": true,
+      "ex": 1.6250019,
+      "ey": 1,
+      "ez": 3
+    },
+    {
+      "id": "scorpion_gz_ambulance_0_marker",
+      "kind": "PlaceItemTrigger",
+      "x": 80.30547,
+      "y": 24.07533,
+      "z": 226.7141,
+      "active": true,
+      "ex": 1.625,
+      "ey": 1,
+      "ez": 3.625
+    },
+    {
+      "id": "aishi_gz_untarvehicles_1",
+      "kind": "ExperienceTrigger",
+      "x": 100.6829,
+      "y": 22.66475,
+      "z": 64.92615,
+      "active": true,
+      "ex": 8.5,
+      "ey": 2.5,
+      "ez": 4.875
+    },
+    {
+      "id": "aishi_gz_untartransm_1",
+      "kind": "PlaceItemTrigger",
+      "x": -6.985868,
+      "y": 29.71139,
+      "z": 48.87679,
+      "active": true,
+      "ex": 2.753165,
+      "ey": 1.25,
+      "ez": 9.217487
+    },
+    {
+      "id": "aishi_gz_van3",
+      "kind": "PlaceItemTrigger",
+      "x": -14.2492,
+      "y": 29.46511,
+      "z": 58.58861,
+      "active": true,
+      "ex": 1.125,
+      "ey": 2.25,
+      "ez": 0.875
+    },
+    {
+      "id": "aishi_gz_van2",
+      "kind": "PlaceItemTrigger",
+      "x": -27.27835,
+      "y": 24.24923,
+      "z": 54.53775,
+      "active": true,
+      "ex": 1.75,
+      "ey": 0.75,
+      "ez": 2.375
+    },
+    {
+      "id": "aishi_gz_van1s",
+      "kind": "PlaceItemTrigger",
+      "x": -13.95153,
+      "y": 23.81583,
+      "z": -22.01727,
+      "active": true,
+      "ex": 0.5,
+      "ey": 0.5,
+      "ez": 0.5
+    },
+    {
+      "id": "aishi_gz_van1",
+      "kind": "PlaceItemTrigger",
+      "x": -14.10947,
+      "y": 23.87776,
+      "z": -27.13754,
+      "active": true,
+      "ex": 3.25,
+      "ey": 2.25,
+      "ez": 3.125
+    },
+    {
+      "id": "gz_mechanic_tnt03",
+      "kind": "PlaceItemTrigger",
+      "x": -18.82109,
+      "y": 23.92957,
+      "z": 99.80875,
+      "active": true,
+      "ex": 3.5,
+      "ey": 1.875,
+      "ez": 4.75
+    },
+    {
+      "id": "gz_mechanic_tnt02",
+      "kind": "PlaceItemTrigger",
+      "x": -3.243866,
+      "y": 24.37499,
+      "z": 71.36206,
+      "active": true,
+      "ex": 3,
+      "ey": 2.25,
+      "ez": 5.75
+    },
+    {
+      "id": "gz_mechanic_tnt01",
+      "kind": "PlaceItemTrigger",
+      "x": -9.679082,
+      "y": 25.14465,
+      "z": 45.94252,
+      "active": true,
+      "ex": 2.875,
+      "ey": 3.25,
+      "ez": 5.5
+    },
+    {
+      "id": "gz_aishi_cam02",
+      "kind": "PlaceItemTrigger",
+      "x": 14.08673,
+      "y": 25.09454,
+      "z": 72.42995,
+      "active": true,
+      "ex": 2.0000005,
+      "ey": 0.89783096,
+      "ez": 1.7613068
+    },
+    {
+      "id": "gz_aishi_cam01",
+      "kind": "PlaceItemTrigger",
+      "x": 57.20296,
+      "y": 31.17332,
+      "z": 128.3439,
+      "active": true,
+      "ex": 2.125,
+      "ey": 2,
+      "ez": 1
+    },
+    {
+      "id": "Sandbox_2_AGS_exploration",
+      "kind": "ExperienceTrigger",
+      "x": 101.043,
+      "y": 34.16,
+      "z": 276.36,
+      "active": true,
+      "ex": 3.7750015,
+      "ey": 1.5,
+      "ez": 3.2999878
+    },
+    {
+      "id": "Sandbox_2_Kord_exploration",
+      "kind": "ExperienceTrigger",
+      "x": 56.603,
+      "y": 32.336,
+      "z": 130.605,
+      "active": true,
+      "ex": 3.5,
+      "ey": 1.5,
+      "ez": 3.5
+    },
+    {
+      "id": "zone_nakatoimi",
+      "kind": "PlaceItemTrigger",
+      "x": 4.628006,
+      "y": 23.95,
+      "z": 337.2477,
+      "active": true,
+      "ex": 1.8421357,
+      "ey": 0.6592312,
+      "ez": 1.7018433
+    },
+    {
+      "id": "quest_terminal_camera_3",
+      "kind": "PlaceItemTrigger",
+      "x": -16.4086,
+      "y": 30.97,
+      "z": 71.983,
+      "active": true,
+      "ex": 1.1694298,
+      "ey": 0.9015255,
+      "ez": 0.60356903
+    },
+    {
+      "id": "Mark_transits_sandbox",
+      "kind": "PlaceItemTrigger",
+      "x": 222.82912,
+      "y": 15.993,
+      "z": 65.72,
+      "active": true,
+      "ex": 1.5983582,
+      "ey": 0.62449455,
+      "ez": 13.430632
+    },
+    {
+      "id": "zone_computer",
+      "kind": "PlaceItemTrigger",
+      "x": 118.714516,
+      "y": 24.2415,
+      "z": 190.30469,
+      "active": true,
+      "ex": 0.59762573,
+      "ey": 0.60324097,
+      "ez": 0.5108032
+    },
+    {
+      "id": "quest_terminal_camera_1",
+      "kind": "PlaceItemTrigger",
+      "x": -35.01,
+      "y": 26.234,
+      "z": -17.424,
+      "active": true,
+      "ex": 0.3072281,
+      "ey": 0.8201809,
+      "ez": 0.82436943
+    },
+    {
+      "id": "Sandbox_3_Vino_exploration",
+      "kind": "ExperienceTrigger",
+      "x": 117.06,
+      "y": 24.228,
+      "z": 26.86,
+      "active": true,
+      "ex": 11.5,
+      "ey": 1.5,
+      "ez": 6.6500006
+    },
+    {
+      "id": "event_labyrinth_02_mech_place_01",
+      "kind": "ExperienceTrigger",
+      "x": -15.4,
+      "y": 23.79,
+      "z": 68.9,
+      "active": true,
+      "ex": 24.4625,
+      "ey": 5.0300007,
+      "ez": 53.630005
+    },
+    {
+      "id": "Sandbox_mine_quest",
+      "kind": "ExperienceTrigger",
+      "x": 60.354362,
+      "y": 23.741716,
+      "z": 170.88956,
+      "active": true,
+      "ex": 1.128624,
+      "ey": 0.9476204,
+      "ez": 1.8021545
+    },
+    {
+      "id": "Prospect_mira",
+      "kind": "ExperienceTrigger",
+      "x": 172.43,
+      "y": 17.31,
+      "z": 64.7,
+      "active": true,
+      "ex": 27.567673,
+      "ey": 1.5,
+      "ez": 87.47967
+    },
+    {
+      "id": "Sandbox_5_Office_exploration",
+      "kind": "ExperienceTrigger",
+      "x": -13.48,
+      "y": 31.01,
+      "z": 51.33,
+      "active": true,
+      "ex": 6.7999997,
+      "ey": 1.500001,
+      "ez": 6.6500015
+    },
+    {
+      "id": "Sandbox_5_DeadGroup_exploration",
+      "kind": "ExperienceTrigger",
+      "x": -21.01,
+      "y": 24.228,
+      "z": -25.1,
+      "active": true,
+      "ex": 8,
+      "ey": 1.5,
+      "ez": 4
+    },
+    {
+      "id": "Sandbox_5_Laborant_exploration",
+      "kind": "ExperienceTrigger",
+      "x": -60.45,
+      "y": 25.62,
+      "z": 27.42,
+      "active": true,
+      "ex": 2.5,
+      "ey": 1.5,
+      "ez": 3.5
+    },
+    {
+      "id": "Sandbox_1_MedicalArea_exploration",
+      "kind": "ExperienceTrigger",
+      "x": 156.2,
+      "y": 25.52,
+      "z": -83.59,
+      "active": true,
+      "ex": 12.75,
+      "ey": 3,
+      "ez": 7.0999985
+    },
+    {
+      "id": "nt2024_5_throtil_epicentr",
+      "kind": "PlaceItemTrigger",
+      "x": 107.46,
+      "y": 29.09,
+      "z": 148.06,
+      "active": true,
+      "ex": 8.5,
+      "ey": 0.75,
+      "ez": 9.449997
+    },
+    {
+      "id": "event_labyrinth_04_mech_place_01",
+      "kind": "ExperienceTrigger",
+      "x": 79.5,
+      "y": 16.347,
+      "z": 99.308,
+      "active": true,
+      "ex": 1.25,
+      "ey": 1,
+      "ez": 5
+    },
+    {
+      "id": "quest_terminal_camera_4",
+      "kind": "PlaceItemTrigger",
+      "x": -4.807,
+      "y": 30.943,
+      "z": 57.66,
+      "active": true,
+      "ex": 0.5864668,
+      "ey": 0.89840317,
+      "ez": 0.58646774
+    },
+    {
+      "id": "quest_terminal_kill_zone",
+      "kind": "QuestTrigger",
+      "x": -13.48,
+      "y": 31.01,
+      "z": 28.27,
+      "active": true,
+      "ex": 57.02877,
+      "ey": 8.401724,
+      "ez": 84.18082
+    },
+    {
+      "id": "Transits_to_streets",
+      "kind": "ExperienceTrigger",
+      "x": 222.82912,
+      "y": 15.993,
+      "z": 65.72,
+      "active": true,
+      "ex": 6.2200165,
+      "ey": 1,
+      "ez": 17.760511
+    },
+    {
+      "id": "event_labyrinth_01_mech_place_01",
+      "kind": "ExperienceTrigger",
+      "x": 55.26,
+      "y": 23.79,
+      "z": 252.75,
+      "active": true,
+      "ex": 3.6050034,
+      "ey": 3.5,
+      "ez": 3.5
+    },
+    {
+      "id": "event_labyrinth_04_thepar",
+      "kind": "ExperienceTrigger",
+      "x": 45.53,
+      "y": 16.23,
+      "z": 130.67,
+      "active": true,
+      "ex": 1.0299988,
+      "ey": 1.5,
+      "ez": 5.5
+    },
+    {
+      "id": "quest_terminal_camera_2",
+      "kind": "PlaceItemTrigger",
+      "x": -35.426,
+      "y": 28.599,
+      "z": 18.857,
+      "active": true,
+      "ex": 0.28393555,
+      "ey": 0.69696236,
+      "ez": 0.62075615
+    },
+    {
+      "id": "zone_six_chair",
+      "kind": "PlaceItemTrigger",
+      "x": 41.1,
+      "y": 31.411,
+      "z": 140.81,
+      "active": true,
+      "ex": 1.2901688,
+      "ey": 0.60324097,
+      "ez": 2.2783813
+    }
+  ],
+  "questItems": [
+    {
+      "templateId": "6575a6ca8778e96ded05a802",
+      "itemId": "6a9e001538bce8405900e90a",
+      "x": -12.333414,
+      "y": 30.691,
+      "z": 49.01263
+    },
+    {
+      "templateId": "6582bd252b50c61c565828e2",
+      "itemId": "6a9e001538bce8405900e90b",
+      "x": 128.2405,
+      "y": 24.0651,
+      "z": 25.1103
+    },
+    {
+      "templateId": "679b9a1a4e4ed4b3b40ae5c2",
+      "itemId": "6a9e001538bce8405900e90c",
+      "x": 88.976,
+      "y": 23.175,
+      "z": 225.284
+    },
+    {
+      "templateId": "679b98e429acd1f2f60985a3",
+      "itemId": "6a9e001538bce8405900e90d",
+      "x": 78.8748,
+      "y": 15.758503,
+      "z": 96.33389
+    }
+  ]
+}

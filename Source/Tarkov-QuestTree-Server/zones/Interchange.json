@@ -1,0 +1,695 @@
+{
+  "schemaVersion": 1,
+  "map": "Interchange",
+  "harvestedAt": "2026-09-09 01:08:35Z",
+  "clientVersion": "1.8.4",
+  "triggers": [
+    {
+      "id": "scorpion_interchange_kiba_place",
+      "kind": "PlaceItemTrigger",
+      "x": -16.95666,
+      "y": 27.83647,
+      "z": -22.0147,
+      "active": true,
+      "ex": 0.625,
+      "ey": 0.75,
+      "ez": 0.625
+    },
+    {
+      "id": "scorpion_interchange_kiba_visit",
+      "kind": "ExperienceTrigger",
+      "x": -16.95666,
+      "y": 27.83647,
+      "z": -22.0147,
+      "active": true,
+      "ex": 0.625,
+      "ey": 0.75,
+      "ez": 0.625
+    },
+    {
+      "id": "scorpion_interchange_mantis_place",
+      "kind": "PlaceItemTrigger",
+      "x": 7.044386,
+      "y": 27.83648,
+      "z": -66.1673,
+      "active": true,
+      "ex": 0.75,
+      "ey": 0.75,
+      "ez": 0.75
+    },
+    {
+      "id": "scorpion_interchange_mantis_visit",
+      "kind": "ExperienceTrigger",
+      "x": 7.044386,
+      "y": 27.83648,
+      "z": -66.1673,
+      "active": true,
+      "ex": 0.75,
+      "ey": 0.75,
+      "ez": 0.75
+    },
+    {
+      "id": "scorpion_interchange_tower_place",
+      "kind": "PlaceItemTrigger",
+      "x": 208.25,
+      "y": 36.29414,
+      "z": 215.7907,
+      "active": true,
+      "ex": 0.5,
+      "ey": 1.125,
+      "ez": 0.5
+    },
+    {
+      "id": "scorpion_interchange_tower_visit",
+      "kind": "ExperienceTrigger",
+      "x": 209.1192,
+      "y": 24.47279,
+      "z": 215.1356,
+      "active": true,
+      "ex": 8.25,
+      "ey": 3,
+      "ez": 8.25
+    },
+    {
+      "id": "scorpion_interchange_towerbase",
+      "kind": "ExperienceTrigger",
+      "x": 209.1192,
+      "y": 24.47279,
+      "z": 215.1356,
+      "active": true,
+      "ex": 8.25,
+      "ey": 3,
+      "ez": 8.25
+    },
+    {
+      "id": "scorpion_interchange_techlight_visit",
+      "kind": "ExperienceTrigger",
+      "x": 87.13938,
+      "y": 38.56973,
+      "z": 55.52451,
+      "active": true,
+      "ex": 2.25,
+      "ey": 2,
+      "ez": 3
+    },
+    {
+      "id": "scorpion_interchange_medroom_visit",
+      "kind": "ExperienceTrigger",
+      "x": 21.82902,
+      "y": 28.28647,
+      "z": -107.7125,
+      "active": true,
+      "ex": 10,
+      "ey": 1.25,
+      "ez": 3
+    },
+    {
+      "id": "scorpion_interchange_power",
+      "kind": "ExperienceTrigger",
+      "x": -201.5742,
+      "y": 22.3331,
+      "z": -357.6798,
+      "active": true,
+      "ex": 0.875,
+      "ey": 1.125,
+      "ez": 1.125
+    },
+    {
+      "id": "scorpion_interchange_stim_drop",
+      "kind": "PlaceItemTrigger",
+      "x": 65.59298,
+      "y": 37.58001,
+      "z": 39.37956,
+      "active": true,
+      "ex": 0.625,
+      "ey": 1,
+      "ez": 1.375
+    },
+    {
+      "id": "scorpion_interchange_techlight_camera",
+      "kind": "PlaceItemTrigger",
+      "x": 88.22383,
+      "y": 37.06973,
+      "z": 56.86802,
+      "active": true,
+      "ex": 0.75,
+      "ey": 1.25,
+      "ez": 1
+    },
+    {
+      "id": "scorpion_interchange_2fl_hallarea",
+      "kind": "TriggerWithId",
+      "x": 23.84651,
+      "y": 33.81964,
+      "z": -54.47475,
+      "active": true,
+      "ex": 75.25,
+      "ey": 6.75,
+      "ez": 21.499998
+    },
+    {
+      "id": "quest_immortal_stash",
+      "kind": "PlaceItemTrigger",
+      "x": 32.32179,
+      "y": 38.12669,
+      "z": -21.86532,
+      "active": true,
+      "ex": 1,
+      "ey": 1,
+      "ez": 1
+    },
+    {
+      "id": "place_SALE_03_KOSTIN",
+      "kind": "ExperienceTrigger",
+      "x": -24.67,
+      "y": 28.62,
+      "z": -103.52,
+      "active": true,
+      "ex": 13.499999,
+      "ey": 1.5,
+      "ez": 4.5
+    },
+    {
+      "id": "place_WARBLOOD_04_2",
+      "kind": "PlaceItemTrigger",
+      "x": 274.29,
+      "y": 22.85,
+      "z": 14.53,
+      "active": true,
+      "ex": 5.9276123,
+      "ey": 1.5,
+      "ez": 5.320819
+    },
+    {
+      "id": "place_merch_022_5",
+      "kind": "ExperienceTrigger",
+      "x": 109.16,
+      "y": 33.14955,
+      "z": -54.559998,
+      "active": true,
+      "ex": 2.3477936,
+      "ey": 21.599998,
+      "ez": 10.976891
+    },
+    {
+      "id": "event_labyrinth_02_mech_place_03",
+      "kind": "ExperienceTrigger",
+      "x": 42.5,
+      "y": 29.9,
+      "z": -216.4,
+      "active": true,
+      "ex": 7.1503563,
+      "ey": 2.500001,
+      "ez": 8.131226
+    },
+    {
+      "id": "place_merch_022_6",
+      "kind": "ExperienceTrigger",
+      "x": -189.29999,
+      "y": 33.14955,
+      "z": -54.559998,
+      "active": true,
+      "ex": 8.126419,
+      "ey": 21.599998,
+      "ez": 23.908768
+    },
+    {
+      "id": "place_SALE_03_DINO",
+      "kind": "ExperienceTrigger",
+      "x": 94.39,
+      "y": 28.16,
+      "z": -120.64,
+      "active": true,
+      "ex": 4.438324,
+      "ey": 1,
+      "ez": 17.594955
+    },
+    {
+      "id": "place_WARBLOOD_04_1",
+      "kind": "PlaceItemTrigger",
+      "x": -208.36,
+      "y": 22.84,
+      "z": -74.42,
+      "active": true,
+      "ex": 5.725067,
+      "ey": 1.5,
+      "ez": 4.607788
+    },
+    {
+      "id": "new_year_2024_market_interchange",
+      "kind": "ExperienceTrigger",
+      "x": 173.42001,
+      "y": 21.366001,
+      "z": -24.76001,
+      "active": true,
+      "ex": 17.828506,
+      "ey": 2.5,
+      "ez": 17.82851
+    },
+    {
+      "id": "place_merch_022_3",
+      "kind": "ExperienceTrigger",
+      "x": -40.70999,
+      "y": 33.14955,
+      "z": -54.559998,
+      "active": true,
+      "ex": 140.75,
+      "ey": 21.599998,
+      "ez": 124.899994
+    },
+    {
+      "id": "place_skier_11_3",
+      "kind": "PlaceItemTrigger",
+      "x": 8.095032,
+      "y": 27.553,
+      "z": -36.702026,
+      "active": true,
+      "ex": 1.0312006,
+      "ey": 1,
+      "ez": 1.0312004
+    },
+    {
+      "id": "place_merch_022_1",
+      "kind": "ExperienceTrigger",
+      "x": -19.359985,
+      "y": 33.14955,
+      "z": -239.89789,
+      "active": true,
+      "ex": 112.149994,
+      "ey": 21.599998,
+      "ez": 64.450005
+    },
+    {
+      "id": "place_merch_21_1",
+      "kind": "PlaceItemTrigger",
+      "x": 109.86798,
+      "y": 22.33,
+      "z": 288.768,
+      "active": true,
+      "ex": 2.8251343,
+      "ey": 1.5,
+      "ez": 2.2002869
+    },
+    {
+      "id": "q_ny_kill_christmas_guys_int",
+      "kind": "ExperienceTrigger",
+      "x": 255.23001,
+      "y": 21.366001,
+      "z": -58.97,
+      "active": true,
+      "ex": 18.315521,
+      "ey": 2.5,
+      "ez": 18.315529
+    },
+    {
+      "id": "place_merch_022_4",
+      "kind": "ExperienceTrigger",
+      "x": 103.49002,
+      "y": 33.14955,
+      "z": -54.559998,
+      "active": true,
+      "ex": 3.3338928,
+      "ey": 21.599998,
+      "ez": 14.784088
+    },
+    {
+      "id": "place_merch_21_2",
+      "kind": "PlaceItemTrigger",
+      "x": 17.557037,
+      "y": 22.834,
+      "z": -25.496002,
+      "active": true,
+      "ex": 3.153452,
+      "ey": 1.5,
+      "ez": 3.0398865
+    },
+    {
+      "id": "place_SALE_03_TOPBRAND",
+      "kind": "ExperienceTrigger",
+      "x": 94.2,
+      "y": 28.2,
+      "z": 10.22,
+      "active": true,
+      "ex": 4.017067,
+      "ey": 1,
+      "ez": 17.5039
+    },
+    {
+      "id": "place_merch_022_2",
+      "kind": "ExperienceTrigger",
+      "x": -19.359985,
+      "y": 33.14955,
+      "z": 129.34,
+      "active": true,
+      "ex": 112.149994,
+      "ey": 21.599998,
+      "ez": 70
+    },
+    {
+      "id": "event_labyrinth_02_mech_place_02",
+      "kind": "ExperienceTrigger",
+      "x": 159.9,
+      "y": 23.4,
+      "z": -246.7,
+      "active": true,
+      "ex": 30.357971,
+      "ey": 6.050001,
+      "ez": 35.556587
+    },
+    {
+      "id": "place_SALE_03_AVOKADO",
+      "kind": "ExperienceTrigger",
+      "x": -33.16,
+      "y": 28.631,
+      "z": 25.81,
+      "active": true,
+      "ex": 15,
+      "ey": 1.5,
+      "ez": 6
+    },
+    {
+      "id": "q_ny_hide_christmas_tree_int",
+      "kind": "PlaceItemTrigger",
+      "x": 255.85,
+      "y": 21.366001,
+      "z": -59.01001,
+      "active": true,
+      "ex": 2.546936,
+      "ey": 2.5,
+      "ez": 2.5469284
+    },
+    {
+      "id": "quest_zone_keeper6_safe_hide",
+      "kind": "PlaceItemTrigger",
+      "x": -49.320984,
+      "y": 21.80355,
+      "z": 45.028,
+      "active": true,
+      "ex": 1.1320801,
+      "ey": 0.5,
+      "ez": 0.5895996
+    },
+    {
+      "id": "place_merch_020_1",
+      "kind": "PlaceItemTrigger",
+      "x": -50.388,
+      "y": 27.695,
+      "z": 25.076004,
+      "active": true,
+      "ex": 1.0312004,
+      "ey": 1,
+      "ez": 1.5468006
+    },
+    {
+      "id": "place_merch_020_2",
+      "kind": "PlaceItemTrigger",
+      "x": 179.85562,
+      "y": 22.314207,
+      "z": -40.89569,
+      "active": true,
+      "ex": 2.333252,
+      "ey": 1,
+      "ez": 2.2960548
+    },
+    {
+      "id": "quest_zone_keeper6_kiba_kill",
+      "kind": "ExperienceTrigger",
+      "x": -9.443756,
+      "y": 28.241,
+      "z": -33.70941,
+      "active": true,
+      "ex": 50,
+      "ey": 9.999999,
+      "ez": 50
+    },
+    {
+      "id": "place_SALE_03_TREND",
+      "kind": "ExperienceTrigger",
+      "x": 64.17,
+      "y": 28.07,
+      "z": -155.4,
+      "active": true,
+      "ex": 12.5,
+      "ey": 1,
+      "ez": 4
+    },
+    {
+      "id": "place_WARBLOOD_04_3",
+      "kind": "PlaceItemTrigger",
+      "x": -172.62,
+      "y": 22.807,
+      "z": -359.48,
+      "active": true,
+      "ex": 6.168701,
+      "ey": 1.5,
+      "ez": 4.8175354
+    },
+    {
+      "id": "q_ny_find_christmas_tree_int",
+      "kind": "ExperienceTrigger",
+      "x": 255.85,
+      "y": 21.366001,
+      "z": -59.01001,
+      "active": true,
+      "ex": 7.640785,
+      "ey": 2.5,
+      "ez": 7.640791
+    },
+    {
+      "id": "place_skier_12_1",
+      "kind": "PlaceItemTrigger",
+      "x": -27.234375,
+      "y": 28.105,
+      "z": 2.3956604,
+      "active": true,
+      "ex": 1.0312004,
+      "ey": 1,
+      "ez": 0.51560044
+    },
+    {
+      "id": "place_merch_21_3",
+      "kind": "PlaceItemTrigger",
+      "x": -49.76779,
+      "y": 22.854,
+      "z": 59.03575,
+      "active": true,
+      "ex": 3.5799904,
+      "ey": 1.5,
+      "ez": 2.9633408
+    },
+    {
+      "id": "place_merch_022_7",
+      "kind": "ExperienceTrigger",
+      "x": 92.27002,
+      "y": 33.14955,
+      "z": -265.76,
+      "active": true,
+      "ex": 3.3338928,
+      "ey": 21.599998,
+      "ez": 10.985107
+    },
+    {
+      "id": "quest_zone_keeper6_kiba_hide",
+      "kind": "PlaceItemTrigger",
+      "x": -19.50299,
+      "y": 27.57155,
+      "z": -22.401001,
+      "active": true,
+      "ex": 1.1477852,
+      "ey": 0.5,
+      "ez": 1.1477852
+    },
+    {
+      "id": "quest_zone_keeper6_cont_hide",
+      "kind": "PlaceItemTrigger",
+      "x": 138.84702,
+      "y": 25.06355,
+      "z": 274.358,
+      "active": true,
+      "ex": 1.1320801,
+      "ey": 1,
+      "ez": 0.5895996
+    },
+    {
+      "id": "Mark_transits_interchange",
+      "kind": "PlaceItemTrigger",
+      "x": 261.52,
+      "y": 23.288347,
+      "z": 402.45,
+      "active": true,
+      "ex": 4.6156616,
+      "ey": 1.1966457,
+      "ez": 6.2570496
+    }
+  ],
+  "questItems": [
+    {
+      "templateId": "5ae9a4fc86f7746e381e1753",
+      "itemId": "6a9e05a438bce84059029387",
+      "x": -31.44458,
+      "y": 27.566807,
+      "z": -136.19128
+    },
+    {
+      "templateId": "5ae9a3f586f7740aab00e4e6",
+      "itemId": "6a9e05a438bce84059029388",
+      "x": 20.271362,
+      "y": 36.60581,
+      "z": -4.425293
+    },
+    {
+      "templateId": "5ae9a0dd86f7742e5f454a05",
+      "itemId": "6a9e05a438bce84059029389",
+      "x": -76.48059,
+      "y": 27.959812,
+      "z": -157.71924
+    },
+    {
+      "templateId": "5ae9a1b886f77404c8537c62",
+      "itemId": "6a9e05a438bce8405902938a",
+      "x": -1.9990234,
+      "y": 27.960613,
+      "z": -292.8999
+    },
+    {
+      "templateId": "5ae9a18586f7746e381e16a3",
+      "itemId": "6a9e05a438bce8405902938b",
+      "x": 38.008423,
+      "y": 27.952808,
+      "z": 147.14368
+    },
+    {
+      "templateId": "5ae9a25386f7746dd946e6d9",
+      "itemId": "6a9e05a438bce8405902938c",
+      "x": 86.60339,
+      "y": 28.06081,
+      "z": 120.86072
+    },
+    {
+      "templateId": "64e74a5ac2b4f829615ec336",
+      "itemId": "6a9e05a438bce8405902938d",
+      "x": 138.24269,
+      "y": 24.4003,
+      "z": 272.11893
+    },
+    {
+      "templateId": "5b4c81a086f77417d26be63f",
+      "itemId": "6a9e05a438bce8405902938e",
+      "x": 19.3435,
+      "y": 28.1595,
+      "z": -106.6355
+    },
+    {
+      "templateId": "5b4c81bd86f77418a75ae159",
+      "itemId": "6a9e05a438bce8405902938f",
+      "x": 23.514284,
+      "y": 28.033,
+      "z": -80.812
+    },
+    {
+      "templateId": "667a8ef464eea5fdef0db135",
+      "itemId": "6a9e05a438bce84059029390",
+      "x": 14.628261,
+      "y": 38.453,
+      "z": -4.792009
+    },
+    {
+      "templateId": "671a406a6d315b526708f103",
+      "itemId": "6a9e05a438bce84059029391",
+      "x": 137.963,
+      "y": 24.107,
+      "z": 268.126
+    },
+    {
+      "templateId": "687464af51ed3be7e4f6f525",
+      "itemId": "6a9e05a438bce84059029392",
+      "x": 31.7642,
+      "y": 38.7517,
+      "z": -23.244
+    },
+    {
+      "templateId": "5ae9a4fc86f7746e381e1753",
+      "itemId": "6aa0b17308e150afaf004c92",
+      "x": -31.44458,
+      "y": 27.566807,
+      "z": -136.19128
+    },
+    {
+      "templateId": "5ae9a3f586f7740aab00e4e6",
+      "itemId": "6aa0b17308e150afaf004c93",
+      "x": 20.271362,
+      "y": 36.60581,
+      "z": -4.425293
+    },
+    {
+      "templateId": "5ae9a0dd86f7742e5f454a05",
+      "itemId": "6aa0b17308e150afaf004c94",
+      "x": -76.48059,
+      "y": 27.959812,
+      "z": -157.71924
+    },
+    {
+      "templateId": "5ae9a1b886f77404c8537c62",
+      "itemId": "6aa0b17308e150afaf004c95",
+      "x": -1.9990234,
+      "y": 27.960613,
+      "z": -292.8999
+    },
+    {
+      "templateId": "5ae9a18586f7746e381e16a3",
+      "itemId": "6aa0b17308e150afaf004c96",
+      "x": 38.008423,
+      "y": 27.952808,
+      "z": 147.14368
+    },
+    {
+      "templateId": "5ae9a25386f7746dd946e6d9",
+      "itemId": "6aa0b17308e150afaf004c97",
+      "x": 86.60339,
+      "y": 28.06081,
+      "z": 120.86072
+    },
+    {
+      "templateId": "64e74a5ac2b4f829615ec336",
+      "itemId": "6aa0b17308e150afaf004c98",
+      "x": 138.24269,
+      "y": 24.4003,
+      "z": 272.11893
+    },
+    {
+      "templateId": "5b4c81a086f77417d26be63f",
+      "itemId": "6aa0b17308e150afaf004c99",
+      "x": 19.3435,
+      "y": 28.1595,
+      "z": -106.6355
+    },
+    {
+      "templateId": "5b4c81bd86f77418a75ae159",
+      "itemId": "6aa0b17308e150afaf004c9a",
+      "x": 23.514284,
+      "y": 28.033,
+      "z": -80.812
+    },
+    {
+      "templateId": "667a8ef464eea5fdef0db135",
+      "itemId": "6aa0b17308e150afaf004c9b",
+      "x": 14.628261,
+      "y": 38.453,
+      "z": -4.792009
+    },
+    {
+      "templateId": "671a406a6d315b526708f103",
+      "itemId": "6aa0b17308e150afaf004c9c",
+      "x": 137.963,
+      "y": 24.107,
+      "z": 268.126
+    },
+    {
+      "templateId": "687464af51ed3be7e4f6f525",
+      "itemId": "6aa0b17308e150afaf004c9d",
+      "x": 31.7642,
+      "y": 38.7517,
+      "z": -23.244
+    }
+  ]
+}

@@ -1,0 +1,1324 @@
+{
+  "map": "Shoreline",
+  "harvestedAt": "2026-09-07 00:45:27Z",
+  "clientVersion": "1.3.0",
+  "triggers": [
+    {
+      "id": "scorpion_shoreline_pier_place",
+      "kind": "PlaceItemTrigger",
+      "x": -345.5976,
+      "y": -63.82037,
+      "z": 542.6403,
+      "active": true,
+      "ex": 1.625,
+      "ey": 0.7500019,
+      "ez": 1.375
+    },
+    {
+      "id": "scorpion_shoreline_pier_visit",
+      "kind": "ExperienceTrigger",
+      "x": -345.5976,
+      "y": -63.82037,
+      "z": 542.6403,
+      "active": true,
+      "ex": 1.625,
+      "ey": 0.7500019,
+      "ez": 1.375
+    },
+    {
+      "id": "scorpion_shoreline_sanitorium_killzone",
+      "kind": "TriggerWithId",
+      "x": -252.0284,
+      "y": -2.390976,
+      "z": -117.7321,
+      "active": true,
+      "ex": 123.40001,
+      "ey": 14.75,
+      "ez": 61
+    },
+    {
+      "id": "aishi_shoreline_tower1",
+      "kind": "PlaceItemTrigger",
+      "x": -707.3408,
+      "y": -26.67346,
+      "z": 90.60007,
+      "active": true,
+      "ex": 5.375,
+      "ey": 2.125,
+      "ez": 5
+    },
+    {
+      "id": "Aishi_Shoreline_TGCrate_5",
+      "kind": "PlaceItemTrigger",
+      "x": -644.7091,
+      "y": -25.64721,
+      "z": -224.2274,
+      "active": true,
+      "ex": 2.5,
+      "ey": 1.25,
+      "ez": 1.625
+    },
+    {
+      "id": "Aishi_Shoreline_TGCrate_4",
+      "kind": "PlaceItemTrigger",
+      "x": -639.979,
+      "y": -29.21602,
+      "z": -194.8694,
+      "active": true,
+      "ex": 5.875,
+      "ey": 1.625,
+      "ez": 1.875
+    },
+    {
+      "id": "Aishi_Shoreline_TGCrate_3",
+      "kind": "PlaceItemTrigger",
+      "x": -619.6416,
+      "y": -28.84523,
+      "z": -195.8813,
+      "active": true,
+      "ex": 1.75,
+      "ey": 1.125,
+      "ez": 1
+    },
+    {
+      "id": "Aishi_Shoreline_TGCrate_2",
+      "kind": "PlaceItemTrigger",
+      "x": -623.6294,
+      "y": -26.52959,
+      "z": -227.3136,
+      "active": true,
+      "ex": 2.125,
+      "ey": 1.125,
+      "ez": 0.875
+    },
+    {
+      "id": "Aishi_Shoreline_TGCrate_1",
+      "kind": "PlaceItemTrigger",
+      "x": -617.965,
+      "y": -25.6936,
+      "z": -200.779,
+      "active": true,
+      "ex": 4.75,
+      "ey": 1.125,
+      "ez": 3.25
+    },
+    {
+      "id": "ba306shoreline",
+      "kind": "PlaceItemTrigger",
+      "x": -289.2038,
+      "y": 2.592882,
+      "z": -90.92544,
+      "active": true,
+      "ex": 1.25,
+      "ey": 1,
+      "ez": 0.875
+    },
+    {
+      "id": "place_peacemaker_003_N3",
+      "kind": "ExperienceTrigger",
+      "x": -349.68005,
+      "y": -39.864,
+      "z": 185.87,
+      "active": true,
+      "ex": 4.8455505,
+      "ey": 3.5,
+      "ez": 4.3064423
+    },
+    {
+      "id": "place_peacemaker_004_N1",
+      "kind": "ExperienceTrigger",
+      "x": -553.0862,
+      "y": -29.35,
+      "z": -127.67819,
+      "active": true,
+      "ex": 12.700012,
+      "ey": 3.499999,
+      "ez": 12.850002
+    },
+    {
+      "id": "event_labyrinth_03_mech_place_01",
+      "kind": "ExperienceTrigger",
+      "x": -196.5,
+      "y": -6,
+      "z": -81,
+      "active": true,
+      "ex": 1.1413269,
+      "ey": 1.2750001,
+      "ez": 0.76699066
+    },
+    {
+      "id": "event_labyrinth_03_mech_place_02",
+      "kind": "ExperienceTrigger",
+      "x": -196,
+      "y": -6.5,
+      "z": -77,
+      "active": true,
+      "ex": 1.5226746,
+      "ey": 1.2750001,
+      "ez": 1.5326538
+    },
+    {
+      "id": "marafon_kill_village_shoreline",
+      "kind": "ExperienceTrigger",
+      "x": 377.30005,
+      "y": -54.42,
+      "z": 136.29999,
+      "active": true,
+      "ex": 152.21802,
+      "ey": 14.436413,
+      "ez": 87.33778
+    },
+    {
+      "id": "event_labyrinth_02_mech_place_05",
+      "kind": "ExperienceTrigger",
+      "x": -625.81995,
+      "y": -54.72,
+      "z": 482.16998,
+      "active": true,
+      "ex": 104.51892,
+      "ey": 6.375,
+      "ez": 11.114258
+    },
+    {
+      "id": "skier_022_area_2",
+      "kind": "PlaceItemTrigger",
+      "x": 98.10303,
+      "y": -47.19,
+      "z": 96.979034,
+      "active": true,
+      "ex": 0.68842316,
+      "ey": 1.500679,
+      "ez": 0.8195877
+    },
+    {
+      "id": "kill_in_forest_shoreline",
+      "kind": "ExperienceTrigger",
+      "x": 306.19995,
+      "y": -21.5,
+      "z": -285.4,
+      "active": true,
+      "ex": 100.17441,
+      "ey": 40.000004,
+      "ez": 100.17441
+    },
+    {
+      "id": "place_peacemaker_009_3_N1",
+      "kind": "ExperienceTrigger",
+      "x": -149.87402,
+      "y": -6.08,
+      "z": -77.004,
+      "active": true,
+      "ex": 5,
+      "ey": 1,
+      "ez": 1
+    },
+    {
+      "id": "place_peacemaker_010_3",
+      "kind": "ExperienceTrigger",
+      "x": 72.910034,
+      "y": -59.673073,
+      "z": 348.72998,
+      "active": true,
+      "ex": 4,
+      "ey": 1,
+      "ez": 3
+    },
+    {
+      "id": "huntsman_024_2",
+      "kind": "ExperienceTrigger",
+      "x": 382.93994,
+      "y": -51.93,
+      "z": -125.899994,
+      "active": true,
+      "ex": 7.440674,
+      "ey": 2,
+      "ez": 7.4406776
+    },
+    {
+      "id": "kill_in_forest_shoreline",
+      "kind": "ExperienceTrigger",
+      "x": 523.8999,
+      "y": -21.5,
+      "z": -143.7,
+      "active": true,
+      "ex": 121.71655,
+      "ey": 40.000004,
+      "ez": 181.66164
+    },
+    {
+      "id": "huntsman_026",
+      "kind": "ExperienceTrigger",
+      "x": -229.06006,
+      "y": 3.285,
+      "z": -88.856995,
+      "active": true,
+      "ex": 2.5,
+      "ey": 1.2499999,
+      "ez": 2.5
+    },
+    {
+      "id": "NosQuests_11_shoreline_place",
+      "kind": "PlaceItemTrigger",
+      "x": -459.72095,
+      "y": -47.769,
+      "z": 564.833,
+      "active": true,
+      "ex": 0.69784546,
+      "ey": 1,
+      "ez": 0.69781494
+    },
+    {
+      "id": "q_ny_hide_christmas_tree_shorl",
+      "kind": "PlaceItemTrigger",
+      "x": -251.91003,
+      "y": -3.97,
+      "z": -112.46001,
+      "active": true,
+      "ex": 2.0091095,
+      "ey": 2.5000002,
+      "ez": 2.0091095
+    },
+    {
+      "id": "prapor_022_area_2",
+      "kind": "PlaceItemTrigger",
+      "x": 96.72998,
+      "y": -47.19,
+      "z": 97.10004,
+      "active": true,
+      "ex": 1.6262741,
+      "ey": 1.5014038,
+      "ez": 1.6271591
+    },
+    {
+      "id": "q14_10_point_area",
+      "kind": "ExperienceTrigger",
+      "x": -645,
+      "y": -20.3,
+      "z": -200.7,
+      "active": true,
+      "ex": 63.685486,
+      "ey": 25.000011,
+      "ez": 63.685455
+    },
+    {
+      "id": "kill_in_forest_shoreline",
+      "kind": "ExperienceTrigger",
+      "x": 322.6001,
+      "y": -21.5,
+      "z": 28.5,
+      "active": true,
+      "ex": 35.061035,
+      "ey": 40.000004,
+      "ez": 35.061043
+    },
+    {
+      "id": "skier_022_area_1",
+      "kind": "PlaceItemTrigger",
+      "x": -263.594,
+      "y": -3.9580002,
+      "z": -85.71597,
+      "active": true,
+      "ex": 1.0522766,
+      "ey": 1.5000005,
+      "ez": 1.052269
+    },
+    {
+      "id": "q14_11_jeep",
+      "kind": "PlaceItemTrigger",
+      "x": 227.16309,
+      "y": -54.911,
+      "z": -159.882,
+      "active": true,
+      "ex": 3.5277863,
+      "ey": 2.05645,
+      "ez": 2.5992737
+    },
+    {
+      "id": " em_quest4_3",
+      "kind": "PlaceItemTrigger",
+      "x": -512.08704,
+      "y": -13.16,
+      "z": 264.141,
+      "active": true,
+      "ex": 0.5744171,
+      "ey": 0.39000034,
+      "ez": 1.2477112
+    },
+    {
+      "id": "place_meh_sanitar_room",
+      "kind": "ExperienceTrigger",
+      "x": -322.833,
+      "y": -2.7529984,
+      "z": -77.53696,
+      "active": true,
+      "ex": 1.3349915,
+      "ey": 1.0000002,
+      "ez": 1.5700455
+    },
+    {
+      "id": "place_SIGNAL_03_3",
+      "kind": "PlaceItemTrigger",
+      "x": -708.72,
+      "y": -26.21,
+      "z": 90.59,
+      "active": true,
+      "ex": 4,
+      "ey": 1.5,
+      "ez": 4
+    },
+    {
+      "id": "place_peacemaker_003_N1",
+      "kind": "ExperienceTrigger",
+      "x": -153.07996,
+      "y": -17.05,
+      "z": -280.18,
+      "active": true,
+      "ex": 5.3453827,
+      "ey": 3.5,
+      "ez": 5.345398
+    },
+    {
+      "id": "kill_in_forest_shoreline",
+      "kind": "ExperienceTrigger",
+      "x": -327.80005,
+      "y": -21.5,
+      "z": -283.5,
+      "active": true,
+      "ex": 200.13062,
+      "ey": 40.000004,
+      "ez": 75.349
+    },
+    {
+      "id": "place_SIGNAL_03_2",
+      "kind": "PlaceItemTrigger",
+      "x": -230.55005,
+      "y": 8.32,
+      "z": -92.39,
+      "active": true,
+      "ex": 4,
+      "ey": 1.5,
+      "ez": 7
+    },
+    {
+      "id": "prapor_022_area_1",
+      "kind": "PlaceItemTrigger",
+      "x": -263.98303,
+      "y": -3.9580002,
+      "z": -85.25296,
+      "active": true,
+      "ex": 2.8060608,
+      "ey": 1.5000005,
+      "ez": 2.8060455
+    },
+    {
+      "id": "place_peacemaker_008_2_N1",
+      "kind": "ExperienceTrigger",
+      "x": -250.5,
+      "y": -5.1409655,
+      "z": -48.28,
+      "active": true,
+      "ex": 7.5,
+      "ey": 3.5,
+      "ez": 7.5
+    },
+    {
+      "id": "2A2_unlock_4_discover",
+      "kind": "ExperienceTrigger",
+      "x": -200.31006,
+      "y": -6.15,
+      "z": -76.36099,
+      "active": true,
+      "ex": 1.1199951,
+      "ey": 1.5750003,
+      "ez": 2.7799988
+    },
+    {
+      "id": "place_peacemaker_007_1_N1",
+      "kind": "ExperienceTrigger",
+      "x": 287.0691,
+      "y": -49.353,
+      "z": -42.326996,
+      "active": true,
+      "ex": 2.4839172,
+      "ey": 1.2960014,
+      "ez": 2.8000298
+    },
+    {
+      "id": "kill_in_forest_shoreline",
+      "kind": "ExperienceTrigger",
+      "x": -430.19995,
+      "y": -21.5,
+      "z": 84.20001,
+      "active": true,
+      "ex": 211.83058,
+      "ey": 40.000004,
+      "ez": 75.369415
+    },
+    {
+      "id": "RSHG_event_04_jaeger_r_point",
+      "kind": "ExperienceTrigger",
+      "x": -645,
+      "y": -20.3,
+      "z": -200.7,
+      "active": true,
+      "ex": 118.308655,
+      "ey": 25.000011,
+      "ez": 125.16086
+    },
+    {
+      "id": "place_peacemaker_005_N2",
+      "kind": "PlaceItemTrigger",
+      "x": -596.26,
+      "y": -58.53,
+      "z": 475.53003,
+      "active": true,
+      "ex": 5.471985,
+      "ey": 1.5,
+      "ez": 5.4720154
+    },
+    {
+      "id": "prapor_27_3",
+      "kind": "ExperienceTrigger",
+      "x": -253.40002,
+      "y": -5.7,
+      "z": -99.600006,
+      "active": true,
+      "ex": 146.93039,
+      "ey": 25.000006,
+      "ez": 104.02905
+    },
+    {
+      "id": "place_peacemaker_004_N2",
+      "kind": "ExperienceTrigger",
+      "x": 81.433716,
+      "y": -31.8154,
+      "z": -166.845,
+      "active": true,
+      "ex": 10,
+      "ey": 4.5,
+      "ez": 10
+    },
+    {
+      "id": "kill_in_forest_shoreline",
+      "kind": "ExperienceTrigger",
+      "x": -267.40002,
+      "y": -21.5,
+      "z": 293.40002,
+      "active": true,
+      "ex": 50.130836,
+      "ey": 40.000004,
+      "ez": 75.08716
+    },
+    {
+      "id": "huntsman_024_1",
+      "kind": "ExperienceTrigger",
+      "x": 405.93994,
+      "y": -51.93,
+      "z": -44.5,
+      "active": true,
+      "ex": 3.3772278,
+      "ey": 2,
+      "ez": 4.2745056
+    },
+    {
+      "id": "ter_023_area_1_1",
+      "kind": "ExperienceTrigger",
+      "x": -253.17004,
+      "y": -4.0699997,
+      "z": -56.859955,
+      "active": true,
+      "ex": 2.5,
+      "ey": 1.25,
+      "ez": 2.5
+    },
+    {
+      "id": "kill_in_forest_shoreline",
+      "kind": "ExperienceTrigger",
+      "x": -635.9,
+      "y": -21.5,
+      "z": 373.90002,
+      "active": true,
+      "ex": 350.0868,
+      "ey": 40.000004,
+      "ez": 50.61087
+    },
+    {
+      "id": "q_ny_kill_christmas_guys_shorl",
+      "kind": "ExperienceTrigger",
+      "x": -251.87,
+      "y": -3.97,
+      "z": -112.32001,
+      "active": true,
+      "ex": 15.181274,
+      "ey": 2.5,
+      "ez": 15.181274
+    },
+    {
+      "id": "place_SIGNAL_01_2",
+      "kind": "ExperienceTrigger",
+      "x": -483.31006,
+      "y": -25.762,
+      "z": 253.65997,
+      "active": true,
+      "ex": 10,
+      "ey": 1.5,
+      "ez": 10
+    },
+    {
+      "id": "place_peacemaker_003_N2",
+      "kind": "ExperienceTrigger",
+      "x": 378.74,
+      "y": -54.375,
+      "z": 166.85999,
+      "active": true,
+      "ex": 4,
+      "ey": 3.5,
+      "ez": 4
+    },
+    {
+      "id": "BTR_FUEL_2",
+      "kind": "PlaceItemTrigger",
+      "x": -627.011,
+      "y": -25.449,
+      "z": -228.45297,
+      "active": true,
+      "ex": 3.3024292,
+      "ey": 1.5133095,
+      "ez": 2.6876526
+    },
+    {
+      "id": "ter_013_area_4",
+      "kind": "PlaceItemTrigger",
+      "x": 97.660034,
+      "y": -47.25,
+      "z": 70.79999,
+      "active": true,
+      "ex": 2.3640137,
+      "ey": 1.5,
+      "ez": 3.31884
+    },
+    {
+      "id": "place_peacemaker_001",
+      "kind": "ExperienceTrigger",
+      "x": -182.04004,
+      "y": -63.725,
+      "z": 459.84998,
+      "active": true,
+      "ex": 1.0854034,
+      "ey": 1.5,
+      "ez": 1.555542
+    },
+    {
+      "id": "place_peacemaker_001_N2",
+      "kind": "PlaceItemTrigger",
+      "x": -182.04004,
+      "y": -63.725,
+      "z": 459.84998,
+      "active": false,
+      "ex": 0,
+      "ey": 0,
+      "ez": 0
+    },
+    {
+      "id": "kill_in_forest_shoreline",
+      "kind": "ExperienceTrigger",
+      "x": -477.90002,
+      "y": -21.5,
+      "z": -159.2,
+      "active": true,
+      "ex": 50.08722,
+      "ey": 40.000004,
+      "ez": 50.087204
+    },
+    {
+      "id": "ter_013_area_1",
+      "kind": "PlaceItemTrigger",
+      "x": 312.69995,
+      "y": -59.18,
+      "z": 314.5,
+      "active": true,
+      "ex": 3.525879,
+      "ey": 2.0577927,
+      "ez": 3.0366821
+    },
+    {
+      "id": "kill_in_forest_shoreline",
+      "kind": "ExperienceTrigger",
+      "x": -371.5,
+      "y": -21.5,
+      "z": 256,
+      "active": true,
+      "ex": 62.65265,
+      "ey": 40.000004,
+      "ez": 87.60898
+    },
+    {
+      "id": "place_peacemaker_007_2_N3",
+      "kind": "ExperienceTrigger",
+      "x": -336.64404,
+      "y": 3.545,
+      "z": -88.728,
+      "active": true,
+      "ex": 2,
+      "ey": 1,
+      "ez": 2
+    },
+    {
+      "id": "kill_in_forest_shoreline",
+      "kind": "ExperienceTrigger",
+      "x": 212.09998,
+      "y": -21.5,
+      "z": 246.29999,
+      "active": true,
+      "ex": 250.08691,
+      "ey": 40.000004,
+      "ez": 50.43631
+    },
+    {
+      "id": "place_SIGNAL_03_1",
+      "kind": "PlaceItemTrigger",
+      "x": -483.81006,
+      "y": -24.47,
+      "z": 248.83002,
+      "active": true,
+      "ex": 9.1492,
+      "ey": 1.5,
+      "ez": 6.2261963
+    },
+    {
+      "id": "new_year_2024_market_shoreline",
+      "kind": "ExperienceTrigger",
+      "x": -161.57996,
+      "y": -2.9,
+      "z": -64.57001,
+      "active": true,
+      "ex": 22.810654,
+      "ey": 5.1000004,
+      "ez": 6.15979
+    },
+    {
+      "id": "place_peacemaker_005_N1",
+      "kind": "ExperienceTrigger",
+      "x": -234.48999,
+      "y": -3.47,
+      "z": -164.42,
+      "active": true,
+      "ex": 5.1434326,
+      "ey": 1.4999998,
+      "ez": 5.1434326
+    },
+    {
+      "id": "skier_022_area_3",
+      "kind": "PlaceItemTrigger",
+      "x": -305.38403,
+      "y": -60.86,
+      "z": 492.20105,
+      "active": true,
+      "ex": 0.951416,
+      "ey": 1.5028572,
+      "ez": 0.96347046
+    },
+    {
+      "id": "kill_in_forest_shoreline",
+      "kind": "ExperienceTrigger",
+      "x": -88.599976,
+      "y": -21.5,
+      "z": 189.79999,
+      "active": true,
+      "ex": 105.857666,
+      "ey": 40.000004,
+      "ez": 176.534
+    },
+    {
+      "id": "ter_013_area_3",
+      "kind": "PlaceItemTrigger",
+      "x": -258.07495,
+      "y": -3.958,
+      "z": -85.66,
+      "active": true,
+      "ex": 3.3256607,
+      "ey": 1.5000001,
+      "ez": 2.3990479
+    },
+    {
+      "id": "Zone_two_toilets",
+      "kind": "PlaceItemTrigger",
+      "x": -321.5857,
+      "y": -61.078,
+      "z": 488.20343,
+      "active": true,
+      "ex": 1.0395203,
+      "ey": 1.0986214,
+      "ez": 1.0674744
+    },
+    {
+      "id": "Terminal_quest_final",
+      "kind": "PlaceItemTrigger",
+      "x": -312.9746,
+      "y": 6.920006,
+      "z": -82.243805,
+      "active": true,
+      "ex": 31.340332,
+      "ey": 4.102645,
+      "ez": 16.96988
+    },
+    {
+      "id": "event_labyrinth_04_therap_place_01",
+      "kind": "PlaceItemTrigger",
+      "x": 97.5,
+      "y": -47.21,
+      "z": 71,
+      "active": true,
+      "ex": 2.7542648,
+      "ey": 1.5027008,
+      "ez": 3.209259
+    },
+    {
+      "id": "place_SIGNAL_01_1",
+      "kind": "ExperienceTrigger",
+      "x": -230.40002,
+      "y": 8.35,
+      "z": -93.619995,
+      "active": true,
+      "ex": 4,
+      "ey": 1.5,
+      "ez": 8
+    },
+    {
+      "id": "place_peacemaker_008_4_N2",
+      "kind": "ExperienceTrigger",
+      "x": -171.16296,
+      "y": 0.14,
+      "z": -75.51401,
+      "active": true,
+      "ex": 1.5,
+      "ey": 1,
+      "ez": 2.5
+    },
+    {
+      "id": " em_quest4_4",
+      "kind": "PlaceItemTrigger",
+      "x": 407.87598,
+      "y": -52.836,
+      "z": -49.106003,
+      "active": true,
+      "ex": 2.0826416,
+      "ey": 0.625,
+      "ez": 0.68481064
+    },
+    {
+      "id": "prapor_022_area_3",
+      "kind": "PlaceItemTrigger",
+      "x": -306.19995,
+      "y": -60.86,
+      "z": 494.09998,
+      "active": true,
+      "ex": 2.658661,
+      "ey": 1.5,
+      "ez": 2.6444702
+    },
+    {
+      "id": "place_peacemaker_008_2_N2",
+      "kind": "ExperienceTrigger",
+      "x": -280.55005,
+      "y": -4.78,
+      "z": -41.309998,
+      "active": true,
+      "ex": 9,
+      "ey": 1.5,
+      "ez": 9
+    },
+    {
+      "id": "prapor_27_4",
+      "kind": "ExperienceTrigger",
+      "x": -418.30005,
+      "y": -56.87,
+      "z": 546.5,
+      "active": false,
+      "ex": 0,
+      "ey": 0,
+      "ez": 0
+    },
+    {
+      "id": " em_quest4_4",
+      "kind": "PlaceItemTrigger",
+      "x": 407.0569,
+      "y": -52.910187,
+      "z": -39.832993,
+      "active": true,
+      "ex": 2.0826416,
+      "ey": 0.625,
+      "ez": 0.68481064
+    },
+    {
+      "id": "place_peacemaker_009_2",
+      "kind": "ExperienceTrigger",
+      "x": -336.97498,
+      "y": -2.729,
+      "z": -88.08501,
+      "active": true,
+      "ex": 5,
+      "ey": 1,
+      "ez": 2
+    },
+    {
+      "id": "kill_in_forest_shoreline",
+      "kind": "ExperienceTrigger",
+      "x": 62.900024,
+      "y": -21.5,
+      "z": -176.1,
+      "active": true,
+      "ex": 192.73573,
+      "ey": 40.000004,
+      "ez": 192.83554
+    },
+    {
+      "id": "kill_in_forest_shoreline",
+      "kind": "ExperienceTrigger",
+      "x": -569.69995,
+      "y": -21.5,
+      "z": -60.600006,
+      "active": true,
+      "ex": 211.83058,
+      "ey": 40.000004,
+      "ez": 75.369415
+    },
+    {
+      "id": "ter_013_area_2",
+      "kind": "PlaceItemTrigger",
+      "x": 354.91992,
+      "y": -58.63,
+      "z": 306.12,
+      "active": true,
+      "ex": 3.2851257,
+      "ey": 1.5,
+      "ez": 2.222046
+    },
+    {
+      "id": "q14_10_kill",
+      "kind": "ExperienceTrigger",
+      "x": -591.80005,
+      "y": -20.3,
+      "z": -117.7,
+      "active": true,
+      "ex": 156.77086,
+      "ey": 25,
+      "ez": 254.00287
+    },
+    {
+      "id": "q_ny_find_christmas_tree_shorl",
+      "kind": "ExperienceTrigger",
+      "x": -251.91003,
+      "y": -3.97,
+      "z": -112.46001,
+      "active": true,
+      "ex": 5.0227737,
+      "ey": 2.5000002,
+      "ez": 5.0227737
+    },
+    {
+      "id": "place_peacemaker_008_4_N1",
+      "kind": "ExperienceTrigger",
+      "x": -336.54504,
+      "y": 0.145,
+      "z": -76.42799,
+      "active": true,
+      "ex": 1.5,
+      "ey": 1,
+      "ez": 1.5
+    },
+    {
+      "id": "huntsman_024_3",
+      "kind": "ExperienceTrigger",
+      "x": 287.1399,
+      "y": -49.2,
+      "z": -46.320007,
+      "active": true,
+      "ex": 4.2964478,
+      "ey": 1.25,
+      "ez": 4.2964554
+    },
+    {
+      "id": "unkown_mark_2",
+      "kind": "PlaceItemTrigger",
+      "x": 251.98706,
+      "y": -52.69,
+      "z": -105.11865,
+      "active": true,
+      "ex": 0.9767914,
+      "ey": 1.2960014,
+      "ez": 1.5854187
+    },
+    {
+      "id": "ter_023_area_3_1",
+      "kind": "ExperienceTrigger",
+      "x": -311.90002,
+      "y": -60.9,
+      "z": 489.70007,
+      "active": true,
+      "ex": 9.868927,
+      "ey": 1.25,
+      "ez": 9.1927185
+    },
+    {
+      "id": "kill_in_forest_shoreline",
+      "kind": "ExperienceTrigger",
+      "x": 265.8999,
+      "y": -21.5,
+      "z": -27.600006,
+      "active": true,
+      "ex": 35.061035,
+      "ey": 40.000004,
+      "ez": 35.061043
+    },
+    {
+      "id": "BTR_FUEL_1",
+      "kind": "PlaceItemTrigger",
+      "x": -609.32544,
+      "y": -28.66,
+      "z": -176.86499,
+      "active": true,
+      "ex": 4.3966675,
+      "ey": 1.518858,
+      "ez": 2.6002045
+    },
+    {
+      "id": "event_labyrinth_02_mech_place_06",
+      "kind": "ExperienceTrigger",
+      "x": -351.32996,
+      "y": -1.17,
+      "z": -134,
+      "active": true,
+      "ex": 15.217346,
+      "ey": 5.406,
+      "ez": 9.971516
+    },
+    {
+      "id": "Zone_cursed",
+      "kind": "PlaceItemTrigger",
+      "x": 326.22998,
+      "y": -54.202,
+      "z": 131.47339,
+      "active": true,
+      "ex": 1.1507263,
+      "ey": 1.5053596,
+      "ez": 1.2181091
+    },
+    {
+      "id": "ter_023_area_2_1",
+      "kind": "ExperienceTrigger",
+      "x": 94.20996,
+      "y": -47.5,
+      "z": 61.97003,
+      "active": true,
+      "ex": 2,
+      "ey": 1.25,
+      "ez": 2
+    },
+    {
+      "id": "kill_in_forest_shoreline",
+      "kind": "ExperienceTrigger",
+      "x": -807.6,
+      "y": -21.5,
+      "z": 225.70001,
+      "active": true,
+      "ex": 212.04883,
+      "ey": 40.000004,
+      "ez": 200.36923
+    },
+    {
+      "id": "place_peacemaker_010_2",
+      "kind": "ExperienceTrigger",
+      "x": 235.56006,
+      "y": -64.464,
+      "z": 442.02002,
+      "active": true,
+      "ex": 13.5,
+      "ey": 1,
+      "ez": 10
+    },
+    {
+      "id": "NosQuests_8_shoreline_place",
+      "kind": "PlaceItemTrigger",
+      "x": -459.33997,
+      "y": -47.6,
+      "z": 566.965,
+      "active": true,
+      "ex": 0.69784546,
+      "ey": 1,
+      "ez": 0.69781494
+    },
+    {
+      "id": "Halloween_zone_for_antivirus(shoreline)",
+      "kind": "PlaceItemTrigger",
+      "x": -173.71655,
+      "y": -15.86,
+      "z": -335.15195,
+      "active": true,
+      "ex": 7.150543,
+      "ey": 1.6218243,
+      "ez": 14.02179
+    }
+  ],
+  "questItems": [
+    {
+      "templateId": "5939e5a786f77461f11c0098",
+      "itemId": "6a9e08fe226cf6af1700a61e",
+      "x": -340.984,
+      "y": -2.725,
+      "z": -88.627
+    },
+    {
+      "templateId": "5a29357286f77409c705e025",
+      "itemId": "6a9e08fe226cf6af1700a61f",
+      "x": -267.22095,
+      "y": -0.017,
+      "z": -145.576
+    },
+    {
+      "templateId": "5a6860d886f77411cd3a9e47",
+      "itemId": "6a9e08fe226cf6af1700a620",
+      "x": -218.02002,
+      "y": 2.815,
+      "z": -86.09
+    },
+    {
+      "templateId": "5a29284f86f77463ef3db363",
+      "itemId": "6a9e08fe226cf6af1700a621",
+      "x": -285.10303,
+      "y": 2.512,
+      "z": -89.350006
+    },
+    {
+      "templateId": "5a0448bc86f774736f14efa8",
+      "itemId": "6a9e08fe226cf6af1700a622",
+      "x": -152.34998,
+      "y": -14.546,
+      "z": -301.219
+    },
+    {
+      "templateId": "666073159916667083033cb9",
+      "itemId": "6a9e08fe226cf6af1700a623",
+      "x": -203.14978,
+      "y": -6.2083,
+      "z": -76.56938
+    },
+    {
+      "templateId": "5d357d6b86f7745b606e3508",
+      "itemId": "6a9e08fe226cf6af1700a624",
+      "x": -226.552,
+      "y": 2.089,
+      "z": -87.571
+    },
+    {
+      "templateId": "67499adbeca8acb2d2061634",
+      "itemId": "6a9e08fe226cf6af1700a625",
+      "x": -315.52246,
+      "y": -57.378002,
+      "z": 478.8883
+    },
+    {
+      "templateId": "5a29276886f77435ed1b117c",
+      "itemId": "6a9e08fe226cf6af1700a626",
+      "x": -358.95496,
+      "y": 2.549,
+      "z": -76.994
+    },
+    {
+      "templateId": "5efdaf6de6a30218ed211a48",
+      "itemId": "6a9e08fe226cf6af1700a627",
+      "x": 99.45056,
+      "y": -44.3777,
+      "z": 107.002594
+    },
+    {
+      "templateId": "5b4c72fb86f7745cef1cffc5",
+      "itemId": "6a9e08fe226cf6af1700a628",
+      "x": -181.3706,
+      "y": 0.2235,
+      "z": -80.57291
+    },
+    {
+      "templateId": "5b4c72c686f77462ac37e907",
+      "itemId": "6a9e08fe226cf6af1700a629",
+      "x": -289.37805,
+      "y": 2.225,
+      "z": -84.373
+    },
+    {
+      "templateId": "5b4c72b386f7745b453af9c0",
+      "itemId": "6a9e08fe226cf6af1700a62a",
+      "x": -567.78,
+      "y": -44.838,
+      "z": 104.505005
+    },
+    {
+      "templateId": "66760b3deb51b08bd40c2b08",
+      "itemId": "6a9e08fe226cf6af1700a62b",
+      "x": 323.6604,
+      "y": -54.315098,
+      "z": -81.6693
+    },
+    {
+      "templateId": "6707d1f9571b50abc703b651",
+      "itemId": "6a9e08fe226cf6af1700a62c",
+      "x": -321.13196,
+      "y": -2.966,
+      "z": -74.677
+    },
+    {
+      "templateId": "5b43237186f7742f3a4ab252",
+      "itemId": "6a9e08fe226cf6af1700a62d",
+      "x": -186.06189,
+      "y": -2.7302,
+      "z": -86.115204
+    },
+    {
+      "templateId": "64e74a534d49d23b2c39d31b",
+      "itemId": "6a9e08fe226cf6af1700a62e",
+      "x": -222.68823,
+      "y": -34.0668,
+      "z": 188.58603
+    },
+    {
+      "templateId": "5a294d8486f774068638cd93",
+      "itemId": "6a9e08fe226cf6af1700a62f",
+      "x": 81.433716,
+      "y": -31.8154,
+      "z": -166.845
+    },
+    {
+      "templateId": "661421c7c1f2f548c50ee649",
+      "itemId": "6a9e08fe226cf6af1700a630",
+      "x": -628.24304,
+      "y": -29.8,
+      "z": -157.55405
+    },
+    {
+      "templateId": "6614217b6d9d5abcad0ff098",
+      "itemId": "6a9e08fe226cf6af1700a631",
+      "x": -645.5958,
+      "y": -26.140598,
+      "z": -230.26064
+    },
+    {
+      "templateId": "6614238e0d240a5f5d0f679d",
+      "itemId": "6a9e08fe226cf6af1700a632",
+      "x": 410.75635,
+      "y": -53.08418,
+      "z": 159.376
+    },
+    {
+      "templateId": "5efdafc1e70b5e33f86de058",
+      "itemId": "6a9e08fe226cf6af1700a633",
+      "x": -314.59497,
+      "y": -55.7427,
+      "z": 480.1722
+    },
+    {
+      "templateId": "5a294d7c86f7740651337cf9",
+      "itemId": "6a9e08fe226cf6af1700a634",
+      "x": -552.9468,
+      "y": -31.2057,
+      "z": -128.2434
+    },
+    {
+      "templateId": "661423200d240a5f5d0f679b",
+      "itemId": "6a9e08fe226cf6af1700a635",
+      "x": -324.2682,
+      "y": 6.98,
+      "z": -87.591
+    },
+    {
+      "templateId": "68666482abad2f29b00aab57",
+      "itemId": "6a9e08fe226cf6af1700a636",
+      "x": -283.43005,
+      "y": -2.9412,
+      "z": -102.291
+    },
+    {
+      "templateId": "67f3fd9bdb1fbd5add090f96",
+      "itemId": "6a9e08fe226cf6af1700a637",
+      "x": -629.906,
+      "y": -26.0672,
+      "z": -240.437
+    },
+    {
+      "templateId": "687308686fa170bea044d21d",
+      "itemId": "6a9e08fe226cf6af1700a638",
+      "x": -300.3071,
+      "y": 2.8527,
+      "z": -76.5703
+    },
+    {
+      "templateId": "687306abe00a4125a64a80a8",
+      "itemId": "6a9e08fe226cf6af1700a639",
+      "x": -277.1441,
+      "y": 2.7718,
+      "z": -101.2964
+    },
+    {
+      "templateId": "687306abe00a4125a64a80a8",
+      "itemId": "6a9e08fe226cf6af1700a63a",
+      "x": -299.9771,
+      "y": 2.9428,
+      "z": -77.4704
+    },
+    {
+      "templateId": "69895ab4bac10fe7a55b5fba",
+      "itemId": "6a9e08fe226cf6af1700a63b",
+      "x": -320.65,
+      "y": -2.955,
+      "z": -75.661
+    },
+    {
+      "templateId": "69895d2ebf2c588cb5503924",
+      "itemId": "6a9e08fe226cf6af1700a63c",
+      "x": 100.244,
+      "y": -44.303,
+      "z": 107.008
+    },
+    {
+      "templateId": "6963cefaf6234b5806891f49",
+      "itemId": "6a9e08fe226cf6af1700a63d",
+      "x": -779.833,
+      "y": -59.221,
+      "z": 495.031
+    },
+    {
+      "templateId": "6963dede566c81e5c5dc9b4a",
+      "itemId": "6a9e08fe226cf6af1700a63e",
+      "x": -773.012,
+      "y": -58.76,
+      "z": 462.825
+    },
+    {
+      "templateId": "6963e26f0dd99b3578894fa1",
+      "itemId": "6a9e08fe226cf6af1700a63f",
+      "x": -772.014,
+      "y": -58.76,
+      "z": 462.929
+    },
+    {
+      "templateId": "69e58c872c4f50f3899570be",
+      "itemId": "6a9e08fe226cf6af1700a640",
+      "x": -599.058,
+      "y": -58.541,
+      "z": 479.427
+    },
+    {
+      "templateId": "69e58ee426845b37bdc250fd",
+      "itemId": "6a9e08fe226cf6af1700a641",
+      "x": -597.582,
+      "y": -58.599,
+      "z": 478.644
+    },
+    {
+      "templateId": "6a6d234944cd24f0ae3243c6",
+      "itemId": "6a9e08fe226cf6af1700a642",
+      "x": -622.512,
+      "y": -25.679,
+      "z": -203.487
+    }
+  ]
+}

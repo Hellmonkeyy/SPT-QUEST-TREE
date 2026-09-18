@@ -40,7 +40,7 @@
     <LangVersion>latest</LangVersion>
     <!-- MSBuild cannot read the C# constant, so this is the one copy that has to be updated by
          hand: keep it equal to ModInfo.Version in ModInfo.cs, which everything else derives from. -->
-    <AssemblyVersion>1.13.1</AssemblyVersion>
+    <AssemblyVersion>1.13.2</AssemblyVersion>
     <FileVersion>$(AssemblyVersion)</FileVersion>
     <Version>$(AssemblyVersion)</Version>
     <Title>QuestTreeServer</Title>
@@ -125,6 +125,10 @@
   -->
   <ItemGroup>
     <None Include="weapon-builds.json" Link="cache\weapon-builds.json" CopyToOutputDirectory="PreserveNewest" />
+    <!-- The harvested zone files, one per map. Shipped since 1.3.0 and, until 1.13.2, copied
+         into every release by hand from the live install - which also holds the one file that
+         must never ship. Tracked here and built into bin\ so package.ps1 never reads the install. -->
+    <None Include="zones\*.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 
   <Target Name="CopyToServerMods" AfterTargets="PostBuildEvent" Condition="'$(DeployToSpt)' == 'true'">
@@ -150,6 +154,24 @@
        and nothing ships it, so it does not belong beside the DLL. -->
   <Target Name="DropDocXmlFromOutput" AfterTargets="CopyFilesToOutputDirectory">
     <Delete Files="$(OutDir)$(AssemblyName).xml" ContinueOnError="true" />
+  </Target>
+
+  <!-- ModInfo.Version and AssemblyVersion are two hand-kept copies of one number, and they have
+       disagreed once already (1.12.1's notes: both halves stamped 1.11.0 while the mod reported
+       1.12.0). MSBuild cannot read the constant, but it can read the file: the build fails unless
+       ModInfo.cs contains the exact declaration const string Version = "<AssemblyVersion>" - the
+       declaration, so a comment quoting an old number cannot satisfy it. Proven able to fail by
+       mismatching one copy on purpose before this shipped. -->
+  <Target Name="CheckVersionAgreement" BeforeTargets="CoreCompile">
+    <ReadLinesFromFile File="$(MSBuildProjectDirectory)\ModInfo.cs">
+      <Output TaskParameter="Lines" ItemName="_ModInfoLine" />
+    </ReadLinesFromFile>
+    <ItemGroup>
+      <_ModInfoVersionLine Include="@(_ModInfoLine)"
+                           Condition="$([System.String]::Copy('%(Identity)').Contains('const string Version = &quot;$(AssemblyVersion)&quot;'))" />
+    </ItemGroup>
+    <Error Condition="'@(_ModInfoVersionLine)' == ''"
+           Text="ModInfo.cs does not declare const string Version = &quot;$(AssemblyVersion)&quot; - the two copies of the version disagree. Change both, or neither." />
   </Target>
 
 </Project>

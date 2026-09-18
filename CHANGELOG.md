@@ -1,3 +1,40 @@
+# Quest Tracker 1.13.2
+
+The tree tells the truth about three kinds of quest it used to draw as ordinary locked boxes, and
+the release itself is built by a script instead of by hand.
+
+**Failed quests are their own state.** A quest the game has failed or expired drew exactly like one
+you had not reached yet. It has its own colour and glyph now, and the box says whether the trader
+will let you restart it.
+
+**Quests you can never do wear a mark.** Wrong faction, another game edition, a seasonal event: the
+detail panel always said so, the box never did. It wears a `!` now.
+
+**A quest whose prerequisite is not installed wears a mark too.** A quest mod that requires a quest
+from a mod you do not have drew as a quest you could start - it sat at the root of its tree with no
+line into it. It wears a `?` now, and the panel lists the missing quest's id under *Missing
+prerequisites*, which is what identifies the absent mod.
+
+**Boxes are sized for the name they show.** The ten abbreviated series ("W. Prof." for Weapon
+Proficiency, and nine more) were measured on the full name and drawn with the short one, so every
+one of those boxes was wider than its title.
+
+## Under the hood
+
+- The panel logs how long opening it took, and how much of that was waiting on the server. Nothing
+  had ever measured it; the next release is about making it smaller.
+- The one-off check that asked the game's own hand-in test about saved presets (it accepted 6 of 6)
+  is removed from the build. It ran once per profile and wrote its working to the game's log.
+- Builds refuse to compile when the two copies of the version number disagree - which has happened
+  once already, in 1.12.1.
+- The release archive is assembled by `package.ps1` from a fixed list of files, and the script
+  refuses any archive holding a file off that list. Until now every release was zipped by hand from
+  the live install folder, one directory away from a third-party file that must never ship. The
+  README is in the archive for the first time.
+- The weapon-build proof claims in the published 1.13.1 notes are withdrawn; see that entry.
+
+---
+
 # Quest Tracker 1.13.1
 
 The release that was actually published: 1.13.0 was built but never went out, so everything under
