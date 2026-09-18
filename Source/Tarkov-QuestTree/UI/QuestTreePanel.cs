@@ -355,6 +355,19 @@ namespace QuestTree.UI
                 _questController.OnConditionalStatusChanged += HandleStatusChanged;
             }
 
+            // ONE loading screen. The map's picture is tessellated off-thread and arrives on a
+            // later frame; hiding the notice as soon as the list was built showed the list with a
+            // "Rendering the map..." line and then the picture - two loading states where there
+            // used to be one, which is what a player noticed first. So the notice stays until the
+            // picture is in (Update's poll paints it), capped so a stuck worker cannot hold the
+            // panel hostage. The wait is what it was; the game is no longer frozen for it.
+            var held = 0f;
+            while (MapView.IsSpritePending && held < 6f)
+            {
+                held += Time.unscaledDeltaTime;
+                yield return null;
+            }
+
             ShowLoading(false);
 
             // Only after the tree is actually up - showing the controls hint over a loading screen

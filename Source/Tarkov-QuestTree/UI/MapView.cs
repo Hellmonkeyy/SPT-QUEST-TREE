@@ -58,6 +58,11 @@ namespace QuestTree.UI
         /// <summary>Whether the picture the last build went without is ready to be built now.
         /// Asked once a frame by the panel while the map is up; true exactly once per picture, and
         /// the caller repaints, which is where TryGetSprite finishes the job on the main thread.</summary>
+        /// <summary>Whether the last build went without its picture and it has not arrived yet.
+        /// The panel keeps its loading notice up while this is true, so the player sees one
+        /// loading screen and then the finished map, not a list that fills in.</summary>
+        public static bool IsSpritePending => _awaitingLayer != null;
+
         public static bool PollPendingSprite()
         {
             if (_awaitingLayer == null || !_awaitingLayer.IsReadyToBuild) return false;
