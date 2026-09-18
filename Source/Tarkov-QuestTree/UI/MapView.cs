@@ -50,6 +50,21 @@ namespace QuestTree.UI
         /// <summary>The column beside the map: its own scroll view, since the map is fixed and the
         /// list is not. Everything that is not the sidebar is map. Width from Settings.</summary>
         private static float SidebarWidth => ModSettings.Ready ? ModSettings.SidebarWidth.Value : 440f;
+
+        /// <summary>The floor whose picture the last build went without, because its tessellation
+        /// was still running. Null when the last build had its picture or there is none to have.</summary>
+        private static DynamicMapsLibrary.MapLayer _awaitingLayer;
+
+        /// <summary>Whether the picture the last build went without is ready to be built now.
+        /// Asked once a frame by the panel while the map is up; true exactly once per picture, and
+        /// the caller repaints, which is where TryGetSprite finishes the job on the main thread.</summary>
+        public static bool PollPendingSprite()
+        {
+            if (_awaitingLayer == null || !_awaitingLayer.IsReadyToBuild) return false;
+
+            _awaitingLayer = null;
+            return true;
+        }
         private const float SidebarInset = 12f;
 
         /// <summary>The map's own control row - pickers, the accepted-only toggle, coverage -
@@ -726,9 +741,13 @@ namespace QuestTree.UI
             Action onRefresh, Vector2 panelSize)
         {
             var left = AuxLayout.Padding;
-            var sprite = layer?.GetSprite();
-            // The first open of a session pays the SVG tessellation here; later opens hit the
-            // layer's cached sprite. The phase line tells the two apart.
+
+            // Never blocks on the picture. A floor whose sprite is not ready yet paints its list
+            // now and is repainted when the tessellation lands - see PollPendingSprite. Measured
+            // before this: 908 ms of a 1,390 ms open, on the main thread, for one SVG.
+            Sprite sprite = null;
+            var spritePending = layer != null && !layer.TryGetSprite(out sprite);
+            _awaitingLayer = spritePending ? layer : null;
             PanelOpenTimer.Mark("map: sprite");
 
             // The map takes everything the sidebar does not, in both directions. The sidebar
@@ -768,11 +787,12 @@ namespace QuestTree.UI
             {
                 BuildMapViewport(parent, entry, layer, sprite, left, top, mapWidth, height, graph, shownIds, onRepaint);
             }
-            else
+            else if (!spritePending)
             {
                 // The focus request is consumed inside the viewport build, so with no viewport it
                 // would survive to fire on whichever map next renders - flying that map to a quest
-                // nobody asked about.
+                // nobody asked about. A PENDING picture keeps it: the repaint that brings the map
+                // is the one that should fly to the quest.
                 _pendingFocusQuestId = null;
             }
 
@@ -781,7 +801,7 @@ namespace QuestTree.UI
             var sidebarX = sprite != null ? left + mapWidth + AuxLayout.Padding : left;
             var sidebarSpan = sprite != null ? sidebarWidth : Mathf.Max(sidebarWidth, panelSize.x - AuxLayout.Padding * 2f);
 
-            BuildSidebar(parent, sidebarX, top, sidebarSpan, height, quests, visible, entry, layer, graph, onRepaint, onRefresh);
+            BuildSidebar(parent, sidebarX, top, sidebarSpan, height, quests, visible, entry, sprite, spritePending, graph, onRepaint, onRefresh);
             PanelOpenTimer.Mark("map: sidebar rows");
 
             return top + height + AuxLayout.Padding;
@@ -820,11 +840,13 @@ namespace QuestTree.UI
         private static void BuildSidebar(
             RectTransform parent, float x, float top, float width, float height,
             List<QuestNode> quests, List<QuestNode> visible, DynamicMapsLibrary.MapEntry entry,
-            DynamicMapsLibrary.MapLayer layer, QuestGraphBuilder graph, Action onRepaint, Action onRefresh)
+            Sprite sprite, bool spritePending, QuestGraphBuilder graph, Action onRepaint, Action onRefresh)
         {
             var mapName = DisplayNameFor(_selectedLocationKey, quests);
             var set = MarkerSetFor(entry);
-            var sprite = layer?.GetSprite();
+            // The sprite and whether it is still being made come from BuildSelectedMap, which asked
+            // once. Asking again here could FINISH a fast tessellation between the two calls, and
+            // the poll that brings the picture would then never fire.
 
             var sidebarGo = new GameObject(
                 "Sidebar", typeof(RectTransform), typeof(Image), typeof(RectMask2D), typeof(ScrollRect));
@@ -894,7 +916,11 @@ namespace QuestTree.UI
                 _notice = null;
             }
 
-            if (sprite == null && DynamicMapsLibrary.Available)
+            if (spritePending)
+            {
+                AddAt(content, "<color=#FFFFFF60>Rendering the map...</color>", listX, ref y, 18f, 11, inner);
+            }
+            else if (sprite == null && DynamicMapsLibrary.Available)
             {
                 AddAt(content, "<color=#FFFFFF60>No map image for this location.</color>", listX, ref y, 18f, 11, inner);
             }
@@ -968,7 +994,9 @@ namespace QuestTree.UI
 
                 // Rows are laid out on a plain y cursor in the content's own units, so the cursor
                 // IS the scroll offset that brings this row to the top - no rect maths.
-                if (node.Id == _pendingScrollQuestId)
+                // Not on the build that goes without its picture: the repaint that brings the map
+                // is the one the player looks at, and it needs the request still standing.
+                if (!spritePending && node.Id == _pendingScrollQuestId)
                 {
                     _pendingScrollY = Mathf.Max(0f, y - SidebarInset);
                     _pendingScrollQuestId = null;
@@ -988,7 +1016,8 @@ namespace QuestTree.UI
 
             // Whether or not the row turned up - a quest can be filtered out or past the row cap -
             // the request is spent. Leaving it set would scroll on some unrelated later render.
-            _pendingScrollQuestId = null;
+            // Except while the picture is pending, when this build is not the one that counts.
+            if (!spritePending) _pendingScrollQuestId = null;
 
             if (visible.Count > MaxQuestRows)
             {

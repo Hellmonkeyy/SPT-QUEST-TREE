@@ -409,6 +409,10 @@ namespace QuestTree.UI
         /// the panel is actually open - no extra "is it visible" guard needed.</summary>
         public void Update()
         {
+            // The map's picture arrives from a worker thread; the repaint that shows it is this.
+            if (_selectedTraderId == MapsTabId && MapView.PollPendingSprite())
+                RenderSelectedTab(frame: false);
+
             if (Input.GetKeyDown(KeyCode.Escape))
             {
                 // While typing, Escape leaves the search box - it used to fall through to the

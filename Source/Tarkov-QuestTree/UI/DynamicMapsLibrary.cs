@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading.Tasks;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using Unity.VectorGraphics;
@@ -97,10 +98,22 @@ namespace QuestTree.UI
             private Sprite _sprite;
             private bool _spriteFailed;
 
+            /// <summary>The tessellation in flight on a worker thread, or null. See TryGetSprite.</summary>
+            private Task<PreparedArtwork> _preparing;
+
+            /// <summary>Whether a tessellation has finished and the sprite only awaits the main
+            /// thread. Polled once a frame by the panel while the map is up.</summary>
+            public bool IsReadyToBuild => _preparing != null && _preparing.IsCompleted;
+
             /// <summary>Rasterised on first use and kept - tessellating a 340KB SVG is not something
             /// to repeat every time a floor is switched back to. Kept for the most recently used
             /// few, not forever: each is a mesh of up to 65,500 vertices, and a session that
-            /// browsed every floor of every map held all of them for the life of the process.</summary>
+            /// browsed every floor of every map held all of them for the life of the process.
+            ///
+            /// SYNCHRONOUS, and the map view no longer calls it: measured at 908 ms on the panel's
+            /// open path, two thirds of the whole wait. TryGetSprite below is what the view uses.
+            /// Kept as the fallback for a tessellation that fails off-thread, and for any caller
+            /// that would rather block than repaint.</summary>
             public Sprite GetSprite()
             {
                 if (_sprite != null)
@@ -111,13 +124,95 @@ namespace QuestTree.UI
 
                 if (_spriteFailed) return null;
 
+                _preparing = null;
                 _sprite = LoadSvgSprite(ImagePath, this);
                 _spriteFailed = _sprite == null;
                 if (_sprite != null) NoteSpriteUse(this);
                 return _sprite;
             }
 
-            /// <summary>Frees the rasterised floor; the next GetSprite tessellates again.</summary>
+            /// <summary>The sprite if it exists or can be finished now, otherwise starts making it
+            /// and returns false so the caller can paint without it and come back.
+            ///
+            /// The expensive part - reading the SVG, parsing it, tessellating it through the
+            /// presets until it fits the index budget - is pure C# over structs and runs on a
+            /// worker thread. Only BuildSprite, which makes a Mesh, a Sprite and possibly a
+            /// Texture2D, has to be on Unity's thread, and it is the cheap part. The view paints
+            /// its list at once, the panel polls <see cref="IsReadyToBuild"/> each frame, and the
+            /// map arrives on the repaint that follows - which the player sees as the list first
+            /// and the picture a moment later, instead of nothing for a second.
+            ///
+            /// A worker-thread failure falls back to the synchronous path once, so the answer is
+            /// never "no image" because of a threading assumption in a library this mod does not
+            /// own. True with a null sprite means there really is no usable image.</summary>
+            public bool TryGetSprite(out Sprite sprite)
+            {
+                if (_sprite != null)
+                {
+                    NoteSpriteUse(this);
+                    sprite = _sprite;
+                    return true;
+                }
+
+                if (_spriteFailed)
+                {
+                    sprite = null;
+                    return true;
+                }
+
+                if (_preparing == null)
+                {
+                    var path = ImagePath;
+                    _preparing = Task.Run(() => PrepareArtwork(path));
+                    sprite = null;
+                    return false;
+                }
+
+                if (!_preparing.IsCompleted)
+                {
+                    sprite = null;
+                    return false;
+                }
+
+                var task = _preparing;
+                _preparing = null;
+
+                if (task.IsFaulted)
+                {
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: '{Path.GetFileName(ImagePath)}' could not be tessellated off-thread " +
+                        $"({task.Exception?.GetBaseException().Message}) - trying on the main thread.");
+                    sprite = GetSprite();
+                    return true;
+                }
+
+                if (task.Result == null)
+                {
+                    // No viewBox, nothing parsed, or too dense at every preset - already logged by
+                    // PrepareArtwork, and the same file would give the same answer on any thread.
+                    _spriteFailed = true;
+                    sprite = null;
+                    return true;
+                }
+
+                var prepared = task.Result;
+                var clock = System.Diagnostics.Stopwatch.StartNew();
+
+                Viewport = prepared.Viewport;
+                _sprite = BuildFromPrepared(prepared, this);
+                _spriteFailed = _sprite == null;
+
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: map image '{Path.GetFileName(ImagePath)}' tessellated off-thread in " +
+                    $"{prepared.Millis} ms (preset {prepared.Preset + 1} of {TessellationPresets.Length}), " +
+                    $"sprite built in {clock.ElapsedMilliseconds} ms.");
+
+                if (_sprite != null) NoteSpriteUse(this);
+                sprite = _sprite;
+                return true;
+            }
+
+            /// <summary>Frees the rasterised floor; the next TryGetSprite tessellates again.</summary>
             internal void ReleaseSprite()
             {
                 if (_sprite != null)
@@ -611,45 +706,11 @@ namespace QuestTree.UI
         {
             try
             {
-                var text = File.ReadAllText(path);
+                var prepared = PrepareArtwork(path);
+                if (prepared == null) return null;
 
-                // Read from the text, not from SceneInfo.SceneViewport: the parser the game ships
-                // leaves that zero-sized for every one of these files. DynamicMaps parses the
-                // attribute itself for the same reason, and rejects the layer when it is missing.
-                layer.Viewport = ReadViewBox(text);
-                if (layer.Viewport.width <= 0f || layer.Viewport.height <= 0f)
-                {
-                    Plugin.LogSource?.LogWarning(
-                        $"QuestTree: '{Path.GetFileName(path)}' has no viewBox, so it cannot be placed.");
-                    return null;
-                }
-
-                using var reader = new StringReader(text);
-                var scene = SVGParser.ImportSVG(
-                    reader, ViewportOptions.OnlyApplyRootViewBox, 0f, 1f, 0, 0);
-
-                if (scene.Scene?.Root == null) return null;
-
-                foreach (var preset in TessellationPresets)
-                {
-                    var geometry = VectorUtils.TessellateScene(scene.Scene, preset, scene.NodeOpacity);
-                    if (geometry == null || geometry.Count == 0) return null;
-
-                    if (OverBudget(geometry)) continue;
-
-                    var sprite = VectorUtils.BuildSprite(
-                        geometry, layer.Viewport, 1f, VectorUtils.Alignment.Center,
-                        Vector2.zero, 32, true);
-
-                    LogArtworkGeometry(layer, sprite);
-                    return sprite;
-                }
-
-                Plugin.LogSource?.LogWarning(
-                    $"QuestTree: '{Path.GetFileName(path)}' is too dense to tessellate within " +
-                    $"{VertexBudget} vertices at any preset.");
-
-                return null;
+                layer.Viewport = prepared.Viewport;
+                return BuildFromPrepared(prepared, layer);
             }
             catch (Exception ex)
             {
@@ -657,6 +718,93 @@ namespace QuestTree.UI
                     $"QuestTree: could not render map image '{Path.GetFileName(path)}' ({ex.Message}).");
                 return null;
             }
+        }
+
+        /// <summary>Everything about a floor's picture that does not need Unity's thread: the
+        /// viewBox and the tessellated geometry, plus how it was made.</summary>
+        internal sealed class PreparedArtwork
+        {
+            public Rect Viewport;
+            public List<VectorUtils.Geometry> Geometry;
+            public int Preset;
+            public long Millis;
+        }
+
+        /// <summary>The thread-free half of the loader: file, viewBox, parse, tessellate. Null
+        /// when the file has no viewBox, parses to nothing, or is too dense at every preset; a
+        /// parse exception propagates to the caller, which decides whether to log or fall back.
+        /// Warnings go through the logger, which is safe from a worker thread.</summary>
+        /// <summary>One tessellation at a time, on any thread. Unity.VectorGraphics is not
+        /// re-entrant: TessellateScene clears and walks a process-wide static clip stack, and
+        /// LibTessDotNet pools its vertices on unsynchronised static free-lists. Two floors
+        /// tessellating together - a floor switch while one is in flight - would throw or, worse,
+        /// share pooled vertices and build a silently wrong mesh. The synchronous fallback goes
+        /// through here too, so it cannot race a worker either.</summary>
+        private static readonly object TessellateLock = new();
+
+        private static PreparedArtwork PrepareArtwork(string path)
+        {
+            lock (TessellateLock)
+            {
+                return PrepareArtworkLocked(path);
+            }
+        }
+
+        private static PreparedArtwork PrepareArtworkLocked(string path)
+        {
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            var text = File.ReadAllText(path);
+
+            // Read from the text, not from SceneInfo.SceneViewport: the parser the game ships
+            // leaves that zero-sized for every one of these files. DynamicMaps parses the
+            // attribute itself for the same reason, and rejects the layer when it is missing.
+            var viewport = ReadViewBox(text);
+            if (viewport.width <= 0f || viewport.height <= 0f)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: '{Path.GetFileName(path)}' has no viewBox, so it cannot be placed.");
+                return null;
+            }
+
+            using var reader = new StringReader(text);
+            var scene = SVGParser.ImportSVG(
+                reader, ViewportOptions.OnlyApplyRootViewBox, 0f, 1f, 0, 0);
+
+            if (scene.Scene?.Root == null) return null;
+
+            for (var i = 0; i < TessellationPresets.Length; i++)
+            {
+                var geometry = VectorUtils.TessellateScene(scene.Scene, TessellationPresets[i], scene.NodeOpacity);
+                if (geometry == null || geometry.Count == 0) return null;
+
+                if (OverBudget(geometry)) continue;
+
+                return new PreparedArtwork
+                {
+                    Viewport = viewport,
+                    Geometry = geometry,
+                    Preset = i,
+                    Millis = clock.ElapsedMilliseconds
+                };
+            }
+
+            Plugin.LogSource?.LogWarning(
+                $"QuestTree: '{Path.GetFileName(path)}' is too dense to tessellate within " +
+                $"{VertexBudget} vertices at any preset.");
+
+            return null;
+        }
+
+        /// <summary>The Unity half: the Sprite (and its Mesh, and a Texture2D when the map has
+        /// gradient fills) from geometry already tessellated. Main thread only.</summary>
+        private static Sprite BuildFromPrepared(PreparedArtwork prepared, MapLayer layer)
+        {
+            var sprite = VectorUtils.BuildSprite(
+                prepared.Geometry, prepared.Viewport, 1f, VectorUtils.Alignment.Center,
+                Vector2.zero, 32, true);
+
+            LogArtworkGeometry(layer, sprite);
+            return sprite;
         }
 
         private static bool OverBudget(List<VectorUtils.Geometry> geometry)
