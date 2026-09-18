@@ -394,6 +394,7 @@ namespace QuestTree.UI
             ColourRow(column, ref y, width, "Completed", ModSettings.ColorCompleted, QuestNodeView.ColorFor(ENodeStatus.Completed));
             ColourRow(column, ref y, width, "Level gated", ModSettings.ColorGated, QuestNodeView.ColorFor(ENodeStatus.Gated));
             ColourRow(column, ref y, width, "Locked", ModSettings.ColorLocked, QuestNodeView.ColorFor(ENodeStatus.Locked));
+            ColourRow(column, ref y, width, "Failed", ModSettings.ColorFailed, QuestNodeView.ColorFor(ENodeStatus.Failed));
             ColourRow(column, ref y, width, "Accent", ModSettings.ColorAccent, GameStyle.AccentColor);
 
             // The palette rotated in 1.10 so that in-progress and completed stopped sharing a hue.
@@ -407,7 +408,7 @@ namespace QuestTree.UI
 
             ResetLink(column, ref y, width,
                 ModSettings.ColorActive, ModSettings.ColorAvailable, ModSettings.ColorCompleted,
-                ModSettings.ColorLocked, ModSettings.ColorGated, ModSettings.ColorAccent);
+                ModSettings.ColorLocked, ModSettings.ColorGated, ModSettings.ColorFailed, ModSettings.ColorAccent);
         }
 
         /// <summary>A colour row per trader, built from the traders the graph actually has.

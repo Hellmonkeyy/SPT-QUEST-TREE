@@ -121,6 +121,7 @@ namespace QuestTree
         public static ConfigEntry<string> ColorCompleted { get; private set; }
         public static ConfigEntry<string> ColorLocked { get; private set; }
         public static ConfigEntry<string> ColorGated { get; private set; }
+        public static ConfigEntry<string> ColorFailed { get; private set; }
         public static ConfigEntry<string> ColorAccent { get; private set; }
 
         /// <summary>Which generation of the status palette this config holds.
@@ -261,9 +262,12 @@ namespace QuestTree
             moved += AdoptNewDefault(ColorLocked, LegacyColours.Locked);
 
             // Scheme 2 moved the two detail thresholds to "never". They have since been deleted
-            // outright - a box has one appearance now - so there is nothing left to migrate, and
-            // BepInEx drops an orphaned key from the file on its own. The version still advances so
-            // this never runs twice.
+            // outright - a box has one appearance now - so there is nothing left to migrate. Their
+            // keys STAY in an old config file: BepInEx preserves entries nothing binds, so a config
+            // from before 1.10 carries four dead lines under [Tree] and [Tree look]. Harmless, and
+            // not worth reflecting into BepInEx's orphan list to remove. (This comment used to say
+            // BepInEx drops them; the live file says otherwise.) The version still advances so this
+            // never runs twice.
             ColourScheme.Value = CurrentColourScheme;
 
             if (moved > 0)
@@ -482,6 +486,7 @@ namespace QuestTree
             ColorCompleted = config.Bind("Colours", "Completed", "#4FBF7F", "Hex colour for quests handed in.");
             ColorLocked = config.Bind("Colours", "Locked", "#6B6B6B", "Hex colour for quests behind another quest.");
             ColorGated = config.Bind("Colours", "Level gated", "#D9534F", "Hex colour for quests whose prerequisites are done but whose level, loyalty or standing requirement is not.");
+            ColorFailed = config.Bind("Colours", "Failed", "#9E5C9E", "Hex colour for quests the game has failed or expired.");
             ColorAccent = config.Bind("Colours", "Accent", "#C7A659", "Hex colour for selection, headers and highlights.");
 
             ColourScheme = config.Bind(
@@ -519,7 +524,7 @@ namespace QuestTree
                 SidebarWidth, DoNextRows, ShowItemsSection,
                 ShowTakeWithYou, CountUnacceptedQuests, ShowTraderColours,
                 TraderColours, ShowCredits,
-                PinLabels, ColorActive, ColorAvailable, ColorCompleted, ColorLocked, ColorGated, ColorAccent, Tooltips,
+                PinLabels, ColorActive, ColorAvailable, ColorCompleted, ColorLocked, ColorGated, ColorFailed, ColorAccent, Tooltips,
                 HoverSounds, RememberLastView, OpenTracker
             });
 
@@ -564,6 +569,7 @@ namespace QuestTree
             ColorCompleted.SettingChanged += Raise;
             ColorLocked.SettingChanged += Raise;
             ColorGated.SettingChanged += Raise;
+            ColorFailed.SettingChanged += Raise;
             ColorAccent.SettingChanged += Raise;
             Tooltips.SettingChanged += Raise;
             HoverSounds.SettingChanged += Raise;

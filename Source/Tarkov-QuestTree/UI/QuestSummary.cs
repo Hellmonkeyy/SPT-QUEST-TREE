@@ -56,6 +56,9 @@ namespace QuestTree.UI
                 // Faction- and edition-locked quests are shown rather than hidden, so this is what
                 // stops one reading as a bug in the tree.
                 node.UnobtainableReason != null ? $"<color=#{GameStyle.ErrorHex}>{node.UnobtainableReason}</color>" : null,
+                // How the game failed it, and whether the trader will take it back - the one
+                // detail the Failed box does not have room for.
+                node.FailureDetail != null ? $"<color=#{QuestNodeView.HexFor(ENodeStatus.Failed)}>{node.FailureDetail}</color>" : null,
                 // The single gate actually stopping you, computed server-side against your level,
                 // loyalty and standing. Until this existed a locked quest was a grey box with no
                 // explanation of what to go and do about it.
@@ -76,7 +79,7 @@ namespace QuestTree.UI
                     var suffix = note == null ? "" : $"  <color=#FFFFFF60>{note}</color>";
                     lines.Add(graph != null && graph.NodesById.TryGetValue(prereqId, out var prereq)
                         ? $"{GameStyle.Safe(prereq.Name)} ({GameStyle.Safe(prereq.TraderName)}){suffix}"
-                        : prereqId + suffix);
+                        : $"{prereqId}  <color=#{GameStyle.ErrorHex}>not in this install's quest list</color>{suffix}");
                 }
                 lines.Add("");
             }

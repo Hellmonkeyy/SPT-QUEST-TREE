@@ -163,12 +163,32 @@ namespace QuestTree.UI
             //
             // Only skipped when Route actually renders, though. A completed quest has no route at
             // all, and for those this section is the only place its prerequisites appear.
-            if (node.PrerequisiteIds.Count > 0 && !routeShown)
+            // Prerequisites the list does not contain get their own section, always. They are
+            // why this quest will never unlock, so they are the most important thing on the panel
+            // for it - and they are raw ids on purpose: the name is by definition unavailable, and
+            // the id is what identifies the absent mod.
+            if (node.UnresolvedPrerequisiteIds.Count > 0)
+            {
+                AuxLayout.AddSectionHeader(ctx.Parent, ref y, "Missing prerequisites", ctx.X, width);
+                AuxLayout.AddLabelAt(ctx.Parent,
+                    $"<color=#{GameStyle.ErrorHex}>Not in this install's quest list - this quest cannot unlock " +
+                    "until whatever adds them is installed.</color>", ctx.X, ref y, AuxLayout.RowHeight, 11, width);
+
+                foreach (var prereqId in node.UnresolvedPrerequisiteIds)
+                    AuxLayout.AddLabelAt(ctx.Parent, prereqId, ctx.X, ref y, AuxLayout.RowHeight, 12, width);
+
+                y += 8f;
+            }
+
+            if (node.PrerequisiteIds.Count > node.UnresolvedPrerequisiteIds.Count && !routeShown)
             {
                 AuxLayout.AddSectionHeader(ctx.Parent, ref y, "Requires", ctx.X, width);
 
                 foreach (var prereqId in node.PrerequisiteIds)
                 {
+                    // Listed above; a second, nameless row here said nothing.
+                    if (node.UnresolvedPrerequisiteIds.Contains(prereqId)) continue;
+
                     if (ctx.Graph != null && ctx.Graph.NodesById.TryGetValue(prereqId, out var prereq))
                         AddQuestLink(ctx, prereq, width, ref y, QuestSummary.PrerequisiteNote(node, prereqId));
                     else

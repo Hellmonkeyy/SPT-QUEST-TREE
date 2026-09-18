@@ -337,6 +337,12 @@ namespace QuestTree.UI
             if (entry.Bucket == Bucket.InProgress)
                 return $"  ·  {QuestSummary.ObjectiveProgress(entry.Node, profile)}";
 
+            // Only a restartable failure reaches this list (RankUncached drops the rest), and its
+            // next action is the restart - not the level it wanted the first time round, which is
+            // where the fallthrough below would have landed.
+            if (entry.Node.Status == ENodeStatus.Failed)
+                return $"  ·  {entry.Node.FailureDetail ?? "failed"}";
+
             // Why this row is where it is, in the quest's own terms rather than as a number. A
             // score nobody can check is a score nobody should trust, and "0.62" checks nothing.
             var why = Why(entry, profile, graph);
@@ -509,6 +515,12 @@ namespace QuestTree.UI
             foreach (var node in graph.Nodes)
             {
                 if (node.Status == ENodeStatus.Completed) continue;
+
+                // A quest the game has failed for good is not something to do next. Before Failed
+                // was its own state these scored as a quest with no gate in the way - 0.6 on
+                // nearness, the same as one you could pick up tomorrow. A restartable one stays: the
+                // thing to do is go and restart it.
+                if (node.Status == ENodeStatus.Failed && !node.CanRestart) continue;
 
                 ranked.Add(new Ranked
                 {

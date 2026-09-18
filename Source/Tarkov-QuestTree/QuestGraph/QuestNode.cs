@@ -28,7 +28,14 @@ namespace QuestTree.QuestGraph
         /// not. Never set for a gate that can never change (faction, edition, event) - those stay
         /// Locked, because "come back when you are level 30" is advice and "wrong edition" is
         /// not.</summary>
-        Gated
+        Gated,
+
+        /// <summary>The game has failed or expired the quest: Fail, FailRestartable, MarkedAsFailed
+        /// or Expired. These used to fold into Locked, so a quest that can never be handed in drew
+        /// exactly like one not yet reached - the tree stating something untrue. Whether it can be
+        /// restarted is a detail for the panel (<see cref="QuestNode.FailureDetail"/>), not a
+        /// sixth box.</summary>
+        Failed
     }
 
     /// <summary>
@@ -72,6 +79,13 @@ namespace QuestTree.QuestGraph
         /// <summary>Populated after the graph is built: every node that lists this one as a
         /// prerequisite. This is what the tree actually draws lines out to.</summary>
         public readonly List<QuestNode> Unlocks = new();
+
+        /// <summary>Prerequisite ids the quest list does not contain, filled by the builder. Such a
+        /// quest can never unlock - a quest mod referencing a quest another mod removed, or a
+        /// half-updated install - and it draws as a root, because the depth walk skips what it
+        /// cannot find. Empty on a healthy install; the ids are raw because the name is, by
+        /// definition, unavailable, and the id is what identifies the absent mod.</summary>
+        public readonly List<string> UnresolvedPrerequisiteIds = new();
 
         /// <summary>Topological layer - 0 for a quest with no prerequisites, otherwise
         /// 1 + max(depth of prerequisites). Drives the node's horizontal column.</summary>
@@ -274,6 +288,29 @@ namespace QuestTree.QuestGraph
         /// that state none.</summary>
         public IEnumerable<RewardDto> Rewards =>
             Dto.Rewards == null ? Enumerable.Empty<RewardDto>() : Dto.Rewards.Where(r => r != null);
+
+        /// <summary>A failed quest the trader will hand back: the one kind of failure that is still
+        /// something to do, which is why Do next keeps it and drops the rest.</summary>
+        public bool CanRestart => LiveQuest != null && LiveQuest.QuestStatus == EQuestStatus.FailRestartable;
+
+        /// <summary>How the game failed this quest, in the words the panel shows, or null when it
+        /// has not. Read from the live instance, which is the only place the distinction between a
+        /// restartable failure and a final one exists.</summary>
+        public string FailureDetail
+        {
+            get
+            {
+                if (LiveQuest == null) return null;
+
+                return LiveQuest.QuestStatus switch
+                {
+                    EQuestStatus.FailRestartable => "Failed - can be restarted at the trader",
+                    EQuestStatus.Expired => "Expired",
+                    EQuestStatus.Fail or EQuestStatus.MarkedAsFailed => "Failed",
+                    _ => null
+                };
+            }
+        }
 
         /// <summary>Why this quest can never be completed on this profile, or null when it can be.
         /// Faction- and edition-locked quests are deliberately shown rather than hidden, so this is

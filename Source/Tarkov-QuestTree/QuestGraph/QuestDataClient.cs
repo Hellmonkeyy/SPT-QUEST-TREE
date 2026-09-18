@@ -99,10 +99,24 @@ namespace QuestTree.QuestGraph
             }
         }
 
+        /// <summary>Time the main thread has spent inside GetJson since the last
+        /// <see cref="ResetFetchClock"/>, and how many requests that was. Read by the panel's
+        /// open-time line; main-thread only, like everything else in here.</summary>
+        public static long FetchMillis { get; private set; }
+
+        public static int FetchCount { get; private set; }
+
+        public static void ResetFetchClock()
+        {
+            FetchMillis = 0;
+            FetchCount = 0;
+        }
+
         /// <summary>RequestHandler.GetJson with a deadline. Same mechanism SPT uses (the async call
         /// on a pool thread, waited on here), plus the wait having a limit.</summary>
         private static string GetJson(string route)
         {
+            var clock = System.Diagnostics.Stopwatch.StartNew();
             var task = Task.Run(() => RequestHandler.GetJsonAsync(route));
 
             try
@@ -114,6 +128,12 @@ namespace QuestTree.QuestGraph
             {
                 // The real failure, not "One or more errors occurred" - it goes into a log line.
                 ExceptionDispatchInfo.Capture(ex.InnerException).Throw();
+            }
+            finally
+            {
+                // Counted on failure too: a timeout is fifteen seconds the player waited.
+                FetchMillis += clock.ElapsedMilliseconds;
+                FetchCount++;
             }
 
             return task.Result;

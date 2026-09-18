@@ -227,9 +227,6 @@ namespace QuestTree.UI
             // The tree's chain markers need the same avatars and have no session of their own.
             TraderAvatars.Session = session;
 
-            // SPIKE - see GameGateSpike. Once per profile, cannot throw, logs only.
-            GameGateSpike.Run(questController, session);
-
             // A different profile on the same client: the map view's remembered map, quest and
             // view belong to the last character. Read defensively for the same JIT reason as the
             // raid location in MenuTaskBarPatch.
@@ -372,7 +369,19 @@ namespace QuestTree.UI
         {
             try
             {
+                // Measured, because it is the one wait a player feels and nothing had ever put a
+                // number on it: every fetch in here blocks the main thread behind the loading
+                // notice. The server share is what a later release can move off-thread; the rest
+                // is parse and layout.
+                QuestDataClient.ResetFetchClock();
+                var clock = System.Diagnostics.Stopwatch.StartNew();
+
                 RebuildGraph(questController, session);
+
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: panel open - {clock.ElapsedMilliseconds} ms to fetch, build and paint the tree, " +
+                    $"{QuestDataClient.FetchMillis} ms of it waiting on the server across " +
+                    $"{QuestDataClient.FetchCount} request(s).");
                 return true;
             }
             catch (Exception ex)

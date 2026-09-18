@@ -6,7 +6,8 @@ progression - every quest in the game, including the ones you have not unlocked 
 tree coloured by your progress. Plus the things a wiki cannot tell you: what your quests will ask
 you not to sell, why a quest is locked, what to do next, and how far you are from Kappa.
 
-**Built for SPT 4.1.5.**
+**Built for SPT 4.1.5.** Not to be confused with DrakiaXYZ's *QuestTracker*, a different mod that
+lists your active quests in raid; the two coexist, and this one's folder is `QuestTree`.
 
 ---
 
@@ -22,6 +23,9 @@ containing `EscapeFromTarkov.exe`) and let them merge. You should end up with:
 [SPT folder]\SPT_Runtime\user\mods\QuestTree\zones\*.json
 [SPT folder]\SPT_Runtime\user\mods\QuestTree\cache\weapon-builds.json
 ```
+
+The archive also carries this README and the release notes beside those two folders; they are for
+reading, not for installing.
 
 The `zones` and `cache` files are data the mod ships so a fresh install starts with map zones already
 known and weapon builds already solved. Nothing breaks without them, but they come back slowly: a map's
@@ -86,10 +90,16 @@ without being clicked: a status mark and the name, then the trader, the level it
 of its objectives are done - with a bar along the bottom for the one you are on. Marks on the right
 say what it pays out: experience, an item, reputation, a trader unlock.
 
-**Five states, and each has a glyph as well as a colour**, so the tree still reads if you are
+**Six states, and each has a glyph as well as a colour**, so the tree still reads if you are
 colour-blind or the box is small: in progress, available to start, completed (dimmed and struck
 through, so finished work recedes), **level gated** - every prerequisite quest done but you are
-short a level, loyalty or standing - and locked behind another quest.
+short a level, loyalty or standing - locked behind another quest, and **failed** - the game has
+failed or expired it, and the box says whether the trader will let you restart it.
+
+Two marks in the top-right corner cover what a status cannot: **!** on a quest this profile can
+never complete (wrong faction, another edition, a seasonal event), and **?** on a quest whose
+prerequisite is not in your quest list at all - a quest mod referencing a quest another mod removed
+- with the missing id named in the detail panel. Both used to draw as ordinary locked boxes.
 
 Level-gated is its own state because it is the one that changes what you do: "another quest first"
 means write it off for now, "you need two more levels" means keep it in mind.
@@ -314,7 +324,7 @@ The Settings view, in four sections, and the same values in BepInEx's F12 menu. 
 - **Map** - accepted quests only, which sidebar sections show, how many "do next" rows, which pins
   carry their name at rest (hover only / in progress and available / all), sidebar width, and the
   artwork rotation and mirror overrides.
-- **Colours** - the five status colours and the accent, with presets in-game and any hex colour in
+- **Colours** - the six status colours and the accent, with presets in-game and any hex colour in
   F12, plus **Restore the pre-1.10 colours** for anyone who preferred the old palette.
 
 ## Notes
@@ -325,7 +335,8 @@ The Settings view, in four sections, and the same values in BepInEx's F12 menu. 
 - **Kappa list** comes from the Collector quest's own requirements in the quest database, and is
   what badges quests "Kappa" in the tree and the detail. If a mod has changed Collector on your
   install, the Kappa tab says so and still shows the real list. To track your own list instead, put
-  quest names in `kappa-quests.json` and hit Reload in Settings.
+  quest names in `kappa-quests.json` and hit Reload in Settings. The file ships empty on purpose -
+  `[]` - because the database's own list is the default.
 - **Collector badge** answers a different question from the Kappa list: not "is this on the
   community's Kappa list" but "does Collector, as it exists on this install, depend on this". It is
   read from the loaded quest graph, so it follows your quest mods, and it is the same set the Kappa

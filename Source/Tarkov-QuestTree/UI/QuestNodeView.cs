@@ -25,13 +25,9 @@ namespace QuestTree.UI
     /// </summary>
     internal sealed class QuestNodeView : MonoBehaviour, IPointerClickHandler, IPointerEnterHandler, IPointerExitHandler
     {
-        /// <summary>How far a node fades when it is not part of the hovered quest's chain. Low
-        /// enough to recede, high enough that the shape of the rest of the tree is still readable.</summary>
-        private const float DimmedAlpha = 0.25f;
-
-        /// <summary>Node size follows the layout-density setting - see UI/LayoutMetrics.cs. Kept
-        /// under these names so every existing call site (framing, visibility, edge maths) reads
-        /// unchanged.</summary>
+        /// <summary>The size a fresh, unbound view is created at. Everything that lays out or
+        /// frames a BOUND box reads QuestGraphView.SizeOf, since boxes stopped being uniform in
+        /// 1.9.0; these two only size the pooled GameObject before its first Bind.</summary>
         public static float Width => LayoutMetrics.NodeWidth;
 
         /// <summary>How wide the trader slab is. Lives in LayoutMetrics because the text inset
@@ -41,10 +37,8 @@ namespace QuestTree.UI
         private Image _traderStripe;
         public static float Height => LayoutMetrics.NodeHeight;
 
-        /// <summary>The size this bound node was given, for anything that has to line up with it.
-        /// Boxes stopped being uniform in 1.9.0.</summary>
-        public Vector2 Size => _size;
-
+        /// <summary>The size this bound node was given, read back by the detail-level layout so
+        /// the text rects follow the box. (A public Size over it had no readers and is gone.)</summary>
         private Vector2 _size = new Vector2(LayoutMetrics.NodeWidth, LayoutMetrics.NodeHeight);
 
         /// <summary>The graph the boxes are currently drawn from, so a blocked box can turn a
@@ -78,6 +72,11 @@ namespace QuestTree.UI
         /// Red because it is the only status that is about YOU rather than about the quest.</summary>
         private static readonly Color GatedColor = new(0.85f, 0.33f, 0.31f, 1f);
 
+        /// <summary>Failed or expired. A muted purple: the one hue the palette had left that reads
+        /// apart from gated red at a glance and, desaturated, apart from locked grey by brightness.
+        /// The glyph carries it for anyone the hue does not reach.</summary>
+        private static readonly Color FailedColor = new(0.62f, 0.36f, 0.62f, 1f);
+
         // Completed keeps green - "done" is green by convention - and now it is the ONLY green, so
         // it no longer has to be a darker shade of in-progress to be told apart from it. Brightened
         // accordingly: the old value was dimmed to create that separation, and with hue doing the
@@ -103,6 +102,7 @@ namespace QuestTree.UI
             ENodeStatus.Active => FromSettings(ModSettings.ColorActive, ActiveColor),
             ENodeStatus.Available => FromSettings(ModSettings.ColorAvailable, AvailableColor),
             ENodeStatus.Gated => FromSettings(ModSettings.ColorGated, GatedColor),
+            ENodeStatus.Failed => FromSettings(ModSettings.ColorFailed, FailedColor),
             _ => FromSettings(ModSettings.ColorLocked, LockedColor)
         };
 
@@ -111,7 +111,7 @@ namespace QuestTree.UI
 
         /// <summary>A glyph per status, so state is not carried by colour alone.
         ///
-        /// This is what the greyscale test rests on: desaturate every accent and the five states
+        /// This is what the greyscale test rests on: desaturate every accent and the six states
         /// must still be tellable apart. Colour is the fast channel, the glyph is the one that
         /// still works for a colour-blind player and at the zoom where a 6px bar is a smudge.</summary>
         public static string GlyphFor(ENodeStatus status) => status switch
@@ -120,6 +120,7 @@ namespace QuestTree.UI
             ENodeStatus.Active => Glyphs.Active,
             ENodeStatus.Available => Glyphs.Available,
             ENodeStatus.Gated => Glyphs.Gated,
+            ENodeStatus.Failed => Glyphs.Failed,
             _ => Glyphs.Locked
         };
 
@@ -136,12 +137,13 @@ namespace QuestTree.UI
         private static class Glyphs
         {
             private static bool _resolved;
-            private static string _completed, _active, _available, _gated, _locked, _needs;
+            private static string _completed, _active, _available, _gated, _failed, _locked, _needs;
 
             public static string Completed { get { Resolve(); return _completed; } }
             public static string Active { get { Resolve(); return _active; } }
             public static string Available { get { Resolve(); return _available; } }
             public static string Gated { get { Resolve(); return _gated; } }
+            public static string Failed { get { Resolve(); return _failed; } }
             public static string Locked { get { Resolve(); return _locked; } }
 
             /// <summary>The arrow on a blocked box's reason line. Allowed to come back empty -
@@ -160,6 +162,9 @@ namespace QuestTree.UI
                 _active = GameStyle.PickGlyph("▶", "▸", ">");
                 _available = GameStyle.PickGlyph("◇", "○", "o");
                 _gated = GameStyle.PickGlyph("▲", "▴", "^");
+                // Not a cross: Locked already wears one, and the two must not read alike. Nor "!",
+                // which is the unobtainable badge's letter on the same box.
+                _failed = GameStyle.PickGlyph("⊘", "#");
                 _locked = GameStyle.LockGlyph(GameStyle.PickGlyph("✕", "x"));
                 _needs = GameStyle.PickGlyph("↑", "▲", "");
             }
@@ -171,6 +176,7 @@ namespace QuestTree.UI
             ENodeStatus.Active => "In progress",
             ENodeStatus.Available => "Available",
             ENodeStatus.Gated => "Level gated",
+            ENodeStatus.Failed => "Failed",
             _ => "Locked"
         };
 
@@ -200,6 +206,13 @@ namespace QuestTree.UI
         private Image _progressFillImage;
         private GameObject _kappaBadge;
         private GameObject _collectorBadge;
+
+        /// <summary>The two marks for a quest the tree used to draw as merely locked: "!" for one
+        /// this profile can never complete (faction, edition, event), "?" for one whose
+        /// prerequisite is not in the quest list. Neither is a status - both are a small population
+        /// and the panel explains them - so they ride the badge corner the K and C already use.</summary>
+        private GameObject _unobtainableBadge;
+        private GameObject _missingBadge;
 
         /// <summary>Why this node survived the current search, or null when it matched on
         /// its own name and needs no explaining. Set by the renderer, which already knows
@@ -241,7 +254,8 @@ namespace QuestTree.UI
             tall = false;
             if (node == null) return new Vector2(LayoutMetrics.NodeWidth, LayoutMetrics.NodeHeight);
 
-            var badges = (node.IsKappaRequired ? 1 : 0) + (node.IsCollectorPrerequisite ? 1 : 0);
+            var badges = (node.IsKappaRequired ? 1 : 0) + (node.IsCollectorPrerequisite ? 1 : 0) +
+                         (node.UnobtainableReason != null ? 1 : 0) + (node.UnresolvedPrerequisiteIds.Count > 0 ? 1 : 0);
             var badgeInset = Mathf.Max(0, badges - 1) * (LayoutMetrics.KappaBadgeSize + BadgeGap);
             var chrome = LayoutMetrics.TitleInsetX + 44f + badgeInset;
 
@@ -255,7 +269,10 @@ namespace QuestTree.UI
             if (oneLine <= max)
                 return new Vector2(Mathf.Max(min, oneLine), LayoutMetrics.NodeHeight);
 
-            var (head, tail) = TitleParts(node.Name);
+            // From the SAME name Bind draws - DisplayName, not node.Name. Measured on the raw name,
+            // the ten abbreviated series were sized for "Weapon Proficiency" and drawn as "W. Prof.",
+            // which is the two-callers-two-names mistake DisplayName's own doc warns about.
+            var (head, tail) = TitleParts(name);
 
             // No part to break on, or tall boxes turned off: as wide as allowed, and the text
             // ellipsises. Honest rather than pretending a name fits.
@@ -436,7 +453,7 @@ namespace QuestTree.UI
 
             // Views are pooled, so a recycled one arrives carrying whatever dim the highlight left
             // on it. Reset here for the same reason RefreshStatus resets the colours.
-            SetDimmed(false);
+            SetDimAlpha(1f);
             _selected = false;
 
             RefreshBadges();
@@ -605,8 +622,13 @@ namespace QuestTree.UI
             // reach today.
             var unstarted = status == ENodeStatus.Locked || status == ENodeStatus.Gated;
 
+            // Failed recedes the same way: there is nothing to do on it either. It keeps its glyph
+            // at full strength, like Gated, because the mark is the whole of what distinguishes it
+            // from the grey majority around it.
+            var receded = unstarted || status == ENodeStatus.Failed;
+
             if (_statusBar != null) _statusBar.color = color;
-            if (_fill != null) _fill.color = unstarted ? LockedFillColor : FillColor;
+            if (_fill != null) _fill.color = receded ? LockedFillColor : FillColor;
 
             if (_outline != null)
             {
@@ -635,7 +657,7 @@ namespace QuestTree.UI
             // completed box would have brightened permanently the first time you hovered near it.
             // Fading the ink leaves that channel to the one writer that owns it.
             var completed = status == ENodeStatus.Completed;
-            var ink = unstarted ? GameStyle.DimTextColor
+            var ink = receded ? GameStyle.DimTextColor
                 : completed ? Fade(GameStyle.TextColor, 0.72f)
                 : GameStyle.TextColor;
 
@@ -651,8 +673,8 @@ namespace QuestTree.UI
             }
 
             if (_subtitle != null)
-                _subtitle.color = Fade(GameStyle.TextColor, unstarted ? 0.4f : completed ? 0.42f : 0.6f);
-            if (_rewards != null) _rewards.color = Fade(GameStyle.TextColor, unstarted ? 0.35f : 0.5f);
+                _subtitle.color = Fade(GameStyle.TextColor, receded ? 0.4f : completed ? 0.42f : 0.6f);
+            if (_rewards != null) _rewards.color = Fade(GameStyle.TextColor, receded ? 0.35f : 0.5f);
 
             if (_statusGlyph != null)
             {
@@ -747,6 +769,14 @@ namespace QuestTree.UI
                         ? null
                         : $"<color=#{hex}>{GameStyle.Safe(reason.Detail)}</color>";
             }
+        }
+
+        /// <summary>How the game failed this quest, for the meta row, in the status colour. Null
+        /// when the live instance is gone, and the row falls back to trader and level.</summary>
+        private string FailedLine()
+        {
+            var detail = Node.FailureDetail;
+            return detail == null ? null : $"<color=#{HexFor(ENodeStatus.Failed)}>{detail}</color>";
         }
 
         /// <summary>"Needs Carbines III", plus a count when more than one quest is in the way.
@@ -890,7 +920,10 @@ namespace QuestTree.UI
             _progressFillImage.raycastTarget = false;
         }
 
-        private void RefreshDetails()
+        /// <summary>The meta row and the progress bar, from the current status and the cached
+        /// profile. Public since 1.13.2 so a status change can rewrite the row, not only recolour
+        /// the box.</summary>
+        public void RefreshDetails()
         {
             var profile = QuestGraph.QuestDataClient.GetProfile();
             var status = Node.Status;
@@ -909,7 +942,9 @@ namespace QuestTree.UI
             // say and until now it cost a click to find out - the tree drew "Scorpion · Lv 25" on a
             // quest you cannot touch, which is the one case where the trader and the level are not
             // what you wanted to know.
-            var reason = blocked ? BlockedReason(profile) : null;
+            var reason = blocked ? BlockedReason(profile)
+                : status == ENodeStatus.Failed ? FailedLine()
+                : null;
 
             _subtitle.text = reason ?? string.Join("  ·  ", parts);
 
@@ -1072,16 +1107,34 @@ namespace QuestTree.UI
         {
             var kappa = Node != null && Node.IsKappaRequired && ModSettings.ShowKappaBadge;
             var collector = Node != null && Node.IsCollectorPrerequisite && ModSettings.ShowCollectorBadge;
-            _badgeSlots = (kappa ? 1 : 0) + (collector ? 1 : 0);
+            // Not behind a setting: a box that will never be completable, or can never unlock, is
+            // a fact about the tree rather than a preference about its decoration.
+            var unobtainable = Node != null && Node.UnobtainableReason != null;
+            var missing = Node != null && Node.UnresolvedPrerequisiteIds.Count > 0;
+            _badgeSlots = (kappa ? 1 : 0) + (collector ? 1 : 0) + (unobtainable ? 1 : 0) + (missing ? 1 : 0);
 
             var slot = 0;
 
             if (kappa) PlaceBadge(EnsureBadge(ref _kappaBadge, "K", GameStyle.KappaGold), slot++, true);
             else if (_kappaBadge != null) _kappaBadge.SetActive(false);
 
-            if (collector) PlaceBadge(EnsureBadge(ref _collectorBadge, "C", GameStyle.CollectorBlue), slot, true);
+            if (collector) PlaceBadge(EnsureBadge(ref _collectorBadge, "C", GameStyle.CollectorBlue), slot++, true);
             else if (_collectorBadge != null) _collectorBadge.SetActive(false);
+
+            if (unobtainable) PlaceBadge(EnsureBadge(ref _unobtainableBadge, "!", UnobtainableBadgeColor), slot++, true);
+            else if (_unobtainableBadge != null) _unobtainableBadge.SetActive(false);
+
+            if (missing) PlaceBadge(EnsureBadge(ref _missingBadge, "?", MissingBadgeColor), slot, true);
+            else if (_missingBadge != null) _missingBadge.SetActive(false);
         }
+
+        /// <summary>The "!" mark's fill: the panel's error red, so the badge and the line that
+        /// explains it agree.</summary>
+        private static readonly Color UnobtainableBadgeColor = new(0.78f, 0.39f, 0.39f);
+
+        /// <summary>The "?" mark's fill: a neutral light grey, because the tree does not know what
+        /// the missing quest is, only that it is missing.</summary>
+        private static readonly Color MissingBadgeColor = new(0.72f, 0.72f, 0.7f);
 
         /// <summary>Builds a mark the first time this box needs one. Most quests wear neither, and
         /// a view is pooled and rebound many times - two GameObjects apiece, eagerly, on up to two
@@ -1099,11 +1152,9 @@ namespace QuestTree.UI
                 new Vector2(-24f - slot * (LayoutMetrics.KappaBadgeSize + BadgeGap), -4f);
         }
 
-        /// <summary>Dim state for the chain highlight. Alpha only - the node keeps its layout,
-        /// its position and its ability to be clicked.</summary>
-        public void SetDimmed(bool dimmed) => SetDimAlpha(dimmed ? DimmedAlpha : 1f);
-
-        /// <summary>A specific alpha, for the distance-based dimming around a hovered quest.</summary>
+        /// <summary>The chain highlight's dim, as an alpha. Alpha only - the node keeps its
+        /// layout, its position and its ability to be clicked. 1 is undimmed, which is what Bind
+        /// resets a pooled view to.</summary>
         public void SetDimAlpha(float alpha)
         {
             if (_canvasGroup == null) return;

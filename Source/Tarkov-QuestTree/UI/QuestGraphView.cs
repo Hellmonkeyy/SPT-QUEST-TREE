@@ -320,12 +320,18 @@ namespace QuestTree.UI
                 view.SetSelected(true);
         }
 
-        /// <summary>Recolours every built node after the game reports a status change. Only the
-        /// built ones exist to recolour; the rest read their status when they are next built.</summary>
+        /// <summary>Recolours every built node after the game reports a status change, and
+        /// rewrites its meta row - the row is where "Needs X", "Lv 30" and "Failed - can be
+        /// restarted" live, and until 1.13.2 only the colours followed a change, so a box that had
+        /// just unlocked kept saying what it needed. Only the built ones exist to refresh; the rest
+        /// read their status when they are next built. GetProfile is cached, so the row is cheap.</summary>
         public void RefreshNodeStatuses()
         {
             foreach (var view in _views.Values)
+            {
                 view.RefreshStatus();
+                view.RefreshDetails();
+            }
         }
 
         /// <summary>
@@ -381,11 +387,10 @@ namespace QuestTree.UI
         /// maths, whereas building their views is not, and that split is what lets the whole tree be
         /// browsable rather than truncated. <see cref="RefreshVisibleNodes"/> builds what is on
         /// screen.
+        ///
+        /// With <paramref name="frame"/> off the camera stays where it is, for a re-layout the
+        /// player did not ask for (a status change under a filter).
         /// </summary>
-        public void Render(IReadOnlyList<QuestNode> candidates) => Render(candidates, frame: true);
-
-        /// <summary>As above; with <paramref name="frame"/> off the camera stays where it is,
-        /// for a re-layout the player did not ask for (a status change under a filter).</summary>
         public void Render(IReadOnlyList<QuestNode> candidates, bool frame)
         {
             ClearGraphViews();

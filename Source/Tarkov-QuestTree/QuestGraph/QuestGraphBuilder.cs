@@ -136,15 +136,17 @@ namespace QuestTree.QuestGraph
             ComputeUnlockReach(_byId);
 
             // A prerequisite the list does not contain is skipped by the depth walk, so such a
-            // quest draws as a root. Said once per build: it is the symptom of a half-updated
-            // install or a quest mod referencing a quest another mod removed.
-            var dangling = 0;
-            foreach (var node in _byId.Values)
-                foreach (var prereqId in node.PrerequisiteIds)
-                    if (!_byId.ContainsKey(prereqId)) dangling++;
-
-            if (dangling > 0)
-                Plugin.LogSource?.LogInfo($"QuestTree: {dangling} prerequisite reference(s) point at quests not in the list; those quests draw as roots.");
+            // quest draws as a root. Kept on the node, so the box can wear a mark and the panel can
+            // name the id: it is the symptom of a half-updated install or a quest mod referencing a
+            // quest another mod removed, and until 1.13.2 the only trace of it was a log line.
+            //
+            // Only when the list is the whole quest database. Without the server half the list is
+            // the quests this client has unlocked, and every prerequisite outside it is merely
+            // unseen - marking those "not installed" would be wrong on every box.
+            if (HasFullQuestList)
+                foreach (var node in _byId.Values)
+                    foreach (var prereqId in node.PrerequisiteIds)
+                        if (!_byId.ContainsKey(prereqId)) node.UnresolvedPrerequisiteIds.Add(prereqId);
 
             RefreshKappaFlags();
             RefreshCollectorClosure();
@@ -154,6 +156,24 @@ namespace QuestTree.QuestGraph
 
             Nodes = _byId.Values.ToArray();
             Version++;
+
+            // The three states the tree used to draw as ordinary locked boxes, counted once per
+            // build so an in-game check has a number to compare against - "0 failed" on a profile
+            // with a failed quest is the kind of zero that means the check did not run.
+            var failed = 0;
+            var unresolved = 0;
+            var unobtainable = 0;
+
+            foreach (var node in Nodes)
+            {
+                if (node.Status == ENodeStatus.Failed) failed++;
+                if (node.UnresolvedPrerequisiteIds.Count > 0) unresolved++;
+                if (node.UnobtainableReason != null) unobtainable++;
+            }
+
+            Plugin.LogSource?.LogInfo(
+                $"QuestTree: tree built from {Nodes.Count} quest(s) - {failed} failed, {unresolved} with a " +
+                $"prerequisite not in the list, {unobtainable} unobtainable on this profile.");
         }
 
         /// <summary>
@@ -532,7 +552,11 @@ namespace QuestTree.QuestGraph
             EQuestStatus.Started => ENodeStatus.Active,
             EQuestStatus.AvailableForFinish => ENodeStatus.Active,
             EQuestStatus.AvailableForStart => ENodeStatus.Available,
-            _ => ENodeStatus.Locked // Locked, AvailableAfter, Fail, FailRestartable, MarkedAsFailed, Expired
+            EQuestStatus.Fail => ENodeStatus.Failed,
+            EQuestStatus.FailRestartable => ENodeStatus.Failed,
+            EQuestStatus.MarkedAsFailed => ENodeStatus.Failed,
+            EQuestStatus.Expired => ENodeStatus.Failed,
+            _ => ENodeStatus.Locked // Locked, AvailableAfter
         };
     }
 }

@@ -155,9 +155,11 @@ namespace QuestTree.UI
                 // that walks the whole profile inventory server-side. Only the graph cares.
                 if (isAuxTabSelected()) return;
 
-                // A full re-render, not a visibility pass: the search decides which nodes get
-                // built at all (see QuestGraphView.Render), which is what keeps a
-                // multi-thousand-quest tab affordable.
+                // A visibility pass over the boxes already built, not a re-render: the search
+                // lights matches in place and dims the rest (QuestGraphView.RefreshSearch), so the
+                // layout - and the edges you were tracing - stays put while you type. It used to
+                // re-render and drop non-matches out of the layout entirely; this comment outlived
+                // that by a release.
                 onSearchChanged();
             });
 
@@ -286,7 +288,7 @@ namespace QuestTree.UI
                 : GameStyle.PanelColor;
         }
 
-        /// <summary>The four statuses as they look on a node - a bar in the status colour and the
+        /// <summary>The statuses as they look on a node - a bar in the status colour and the
         /// name - laid out inline. Returns the width consumed.</summary>
         private float BuildLegendChips(RectTransform toolbar, float x, float itemY, float itemHeight)
         {
@@ -297,7 +299,7 @@ namespace QuestTree.UI
             var statuses = new[]
             {
                 ENodeStatus.Active, ENodeStatus.Available, ENodeStatus.Completed,
-                ENodeStatus.Gated, ENodeStatus.Locked
+                ENodeStatus.Gated, ENodeStatus.Locked, ENodeStatus.Failed
             };
 
             var cursor = x;
