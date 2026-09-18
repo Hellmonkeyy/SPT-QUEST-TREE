@@ -19,3 +19,7 @@ Releases/
 # mod. The ledger in particular is only useful next to the scratchpad it cites.
 ROADMAP.md
 weapon-solver-ledger.md
+
+# UI readability backlog - the same kind of working notes as ROADMAP.md, kept local for the
+# same reason.
+quest-tree-readability-spec.md
