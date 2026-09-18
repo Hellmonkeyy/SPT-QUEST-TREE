@@ -227,6 +227,9 @@ namespace QuestTree.UI
             // The tree's chain markers need the same avatars and have no session of their own.
             TraderAvatars.Session = session;
 
+            // SPIKE - see GameGateSpike. Once per profile, cannot throw, logs only.
+            GameGateSpike.Run(questController, session);
+
             // A different profile on the same client: the map view's remembered map, quest and
             // view belong to the last character. Read defensively for the same JIT reason as the
             // raid location in MenuTaskBarPatch.
