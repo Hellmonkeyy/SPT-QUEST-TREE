@@ -369,19 +369,16 @@ namespace QuestTree.UI
         {
             try
             {
-                // Measured, because it is the one wait a player feels and nothing had ever put a
-                // number on it: every fetch in here blocks the main thread behind the loading
-                // notice. The server share is what a later release can move off-thread; the rest
-                // is parse and layout.
+                // Measured by phase, because it is the one wait a player feels: the first
+                // measurement (1.13.2) put the whole open at 1.2 to 1.4 s with the server under a
+                // tenth of it, and could not say where the rest went. Every fetch in here still
+                // blocks the main thread behind the loading notice; the "server" entries are that.
                 QuestDataClient.ResetFetchClock();
-                var clock = System.Diagnostics.Stopwatch.StartNew();
+                PanelOpenTimer.Start();
 
                 RebuildGraph(questController, session);
 
-                Plugin.LogSource?.LogInfo(
-                    $"QuestTree: panel open - {clock.ElapsedMilliseconds} ms to fetch, build and paint the tree, " +
-                    $"{QuestDataClient.FetchMillis} ms of it waiting on the server across " +
-                    $"{QuestDataClient.FetchCount} request(s).");
+                Plugin.LogSource?.LogInfo(PanelOpenTimer.Report());
                 return true;
             }
             catch (Exception ex)
@@ -902,8 +899,11 @@ namespace QuestTree.UI
             if (_settingsDirtyLayout) _graphView.DiscardViewPools();
             _settingsDirty = false;
             _settingsDirtyLayout = false;
+            PanelOpenTimer.Mark("reset");
 
+            var waited = QuestDataClient.FetchMillis;
             ApplyServerKappaList();
+            PanelOpenTimer.MarkSplit("kappa: server", QuestDataClient.FetchMillis - waited, "kappa: apply");
 
             // The tab below is chosen by setting; this only decides which map that tab shows.
             if (_pendingRaidLocation != null)
@@ -925,7 +925,19 @@ namespace QuestTree.UI
             }
 
             BuildTabs();
+            PanelOpenTimer.Mark("tabs");
+
+            waited = QuestDataClient.FetchMillis;
             RenderSelectedTab();
+
+            // An aux view marks its own phases as it builds (MapView does); what is left here is
+            // whatever came after its last mark. The tree has no inner marks, so its split is the
+            // whole render.
+            if (IsAuxTab(_selectedTraderId))
+                PanelOpenTimer.Mark($"{_selectedTraderId.Trim('_')}: rest");
+            else
+                PanelOpenTimer.MarkSplit("tree: server", QuestDataClient.FetchMillis - waited, "tree: layout+paint");
+
             UpdateTabHighlight();
         }
 

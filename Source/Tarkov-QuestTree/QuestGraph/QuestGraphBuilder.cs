@@ -52,8 +52,10 @@ namespace QuestTree.QuestGraph
             _questController = questController;
             _byId = new Dictionary<string, QuestNode>();
 
+            var waited = QuestDataClient.FetchMillis;
             var quests = QuestDataClient.TryFetchAll();
             HasFullQuestList = quests != null;
+            UI.PanelOpenTimer.MarkSplit("quests: server", QuestDataClient.FetchMillis - waited, "quests: parse");
 
             if (quests == null) quests = BuildFallbackDtos(questController);
 
@@ -129,11 +131,15 @@ namespace QuestTree.QuestGraph
             foreach (var node in _byId.Values)
                 node.BuildSearchText(TraderNames.TryGetValue(node.TraderId, out var trader) ? trader : null);
 
+            UI.PanelOpenTimer.Mark("graph");
+
             var depths = ComputeDepths(_byId);
             foreach (var node in _byId.Values)
                 node.Depth = depths[node.Id];
 
             ComputeUnlockReach(_byId);
+
+            UI.PanelOpenTimer.Mark("depths");
 
             // A prerequisite the list does not contain is skipped by the depth walk, so such a
             // quest draws as a root. Kept on the node, so the box can wear a mark and the panel can
@@ -150,9 +156,13 @@ namespace QuestTree.QuestGraph
 
             RefreshKappaFlags();
             RefreshCollectorClosure();
+            UI.PanelOpenTimer.Mark("kappa flags");
 
             RefreshStatusesInternal();
+
+            waited = QuestDataClient.FetchMillis;
             ApplyLockGates();
+            UI.PanelOpenTimer.MarkSplit("profile: server", QuestDataClient.FetchMillis - waited, "statuses");
 
             Nodes = _byId.Values.ToArray();
             Version++;

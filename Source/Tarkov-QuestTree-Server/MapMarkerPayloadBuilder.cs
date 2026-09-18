@@ -54,6 +54,8 @@ namespace QuestTreeServer
         /// </summary>
         public async Task OnLoadAsync(CancellationToken cancellationToken)
         {
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+
             try
             {
                 // Awaited here so the network calls happen during startup rather than inside the
@@ -92,7 +94,33 @@ namespace QuestTreeServer
                 logger.Error($"Quest Tracker: could not fetch objective locations: {ex}");
             }
 
-            GetPayloadJson();
+            // The build itself runs BEHIND the boot, not on it. Measured at 5.0 and 5.7 s on two
+            // boots - 70% of everything this mod cost the server's start - almost all of it the
+            // loose-loot tables being deserialised off disk (42 MB for Customs alone; see
+            // CollectMarkers for why that is per read, not per process). Nothing at boot needs the
+            // answer: a client request arriving before it is done waits on _buildLock inside
+            // GetPayloadJson for the build already in progress, which is the same wait it would
+            // have paid before, and one that in practice never happens - a player is not at the
+            // map tab within seconds of the server's port opening.
+            //
+            // It overlaps whatever loads after this - this mod's own QuestPayloadBuilder, and any
+            // other mod's IOnLoad at default priority. Everything Build reads is assigned whole or
+            // locked (QuestFacts' lookups, ZoneStore, SPT's LazyLoad), so the one exposure is a
+            // later mod ADDING to the quest or location tables while Build enumerates them: that
+            // throws, GetPayloadJson catches it, the route answers no pins for 60 s, and the gate
+            // rebuilds. Self-healing, and mods mutate the database at PostLoad or earlier, which
+            // has finished by now. Do not move this back onto the boot path to "fix" that.
+            var boot = clock.ElapsedMilliseconds;
+            _ = Task.Run(() =>
+            {
+                var build = System.Diagnostics.Stopwatch.StartNew();
+                GetPayloadJson();
+
+                if (_cachedJson != null)
+                    logger.Info($"Quest Tracker: map markers built in the background in {build.ElapsedMilliseconds:N0} ms; the boot paid {boot:N0} ms for the objective sources.");
+                else
+                    logger.Warning($"Quest Tracker: the background map marker build did not produce markers after {build.ElapsedMilliseconds:N0} ms - see the error above; it retries in a minute.");
+            });
         }
 
         private IReadOnlyList<TarkovDevClient.ObjectiveLocation> _objectiveLocations =
@@ -270,7 +298,7 @@ namespace QuestTreeServer
                     {
                         try
                         {
-                            markers.AddRange(CollectMarkers(location!, remainingWanted));
+                            markers.AddRange(CollectMarkers(internalName!, location!, remainingWanted));
                         }
                         catch (Exception ex)
                         {
@@ -736,40 +764,73 @@ namespace QuestTreeServer
                 : questName;
         }
 
+        /// <summary>Each map's forced spawn points - position and the item templates placed there -
+        /// read out of the loot table ONCE per process.
+        ///
+        /// SPT's LazyLoad does not cache: LooseLoot carries no [CacheLazyLoad], so every read of
+        /// LooseLoot.Value deserialises the whole file again - 42 MB for Customs - and this builder
+        /// reads every map's on every Build, which is every harvest rebuild as well as the boot.
+        /// The forced spawns are the only part it wants, they are a few hundred entries, and the
+        /// table does not change while the server runs, so they are kept. Written only under
+        /// _buildLock, which every Build holds.</summary>
+        private readonly Dictionary<string, List<(Vector3 Position, List<string> Items)>> _forcedSpawns =
+            new(StringComparer.OrdinalIgnoreCase);
+
+        private List<(Vector3 Position, List<string> Items)> ForcedSpawnsFor(string internalName, Location location)
+        {
+            if (_forcedSpawns.TryGetValue(internalName, out var known)) return known;
+
+            var spawns = new List<(Vector3, List<string>)>();
+
+            // This is where the loot table is actually read off disk. Only the forced spawns are
+            // kept: a random-chance spawn point is not somewhere to send someone.
+            var loot = location.LooseLoot?.Value;
+
+            if (loot?.SpawnpointsForced != null)
+            {
+                foreach (var spawn in loot.SpawnpointsForced)
+                {
+                    var template = spawn?.Template;
+                    var position = template?.Position;
+
+                    if (template?.Items == null || position == null) continue;
+
+                    var items = new List<string>();
+
+                    foreach (var item in template.Items)
+                    {
+                        var tpl = item?.Template.ToString();
+                        if (!string.IsNullOrWhiteSpace(tpl)) items.Add(tpl!);
+                    }
+
+                    if (items.Count > 0) spawns.Add((position.Value, items));
+                }
+            }
+
+            _forcedSpawns[internalName] = spawns;
+            return spawns;
+        }
+
         private List<MapMarkerDto> CollectMarkers(
-            Location location, Dictionary<string, WantedBy> wanted)
+            string internalName, Location location, Dictionary<string, WantedBy> wanted)
         {
             var markers = new List<MapMarkerDto>();
             var spawnsByItem = new Dictionary<string, List<Vector3>>(StringComparer.OrdinalIgnoreCase);
             var locale = localeService.GetLocaleDb();
 
-            // LazyLoad, so this is where the map's loot table is actually read off disk. Only the
-            // forced spawns are walked: the full spawn list is 42MB on Customs alone, and a
-            // random-chance spawn point is not somewhere to send someone.
-            var loot = location.LooseLoot?.Value;
-            if (loot?.SpawnpointsForced == null) return markers;
-
-            foreach (var spawn in loot.SpawnpointsForced)
+            foreach (var (position, items) in ForcedSpawnsFor(internalName, location))
             {
-                var template = spawn?.Template;
-                var position = template?.Position;
-
-                if (template?.Items == null || position == null) continue;
-
-                foreach (var item in template.Items)
+                foreach (var tpl in items)
                 {
-                    var tpl = item?.Template.ToString();
+                    if (!wanted.ContainsKey(tpl)) continue;
 
-                    if (string.IsNullOrWhiteSpace(tpl)) continue;
-                    if (!wanted.TryGetValue(tpl!, out var wanting)) continue;
-
-                    if (!spawnsByItem.TryGetValue(tpl!, out var spots))
+                    if (!spawnsByItem.TryGetValue(tpl, out var spots))
                     {
                         spots = new List<Vector3>();
-                        spawnsByItem[tpl!] = spots;
+                        spawnsByItem[tpl] = spots;
                     }
 
-                    spots.Add(position.Value);
+                    spots.Add(position);
                 }
             }
 

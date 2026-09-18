@@ -38,8 +38,18 @@ namespace QuestTreeServer
         public string GetPayloadJson(MongoId sessionId) =>
             JsonSerializer.Serialize(Build(sessionId), WireJson.Options);
 
+        /// <summary>Whether the timing line has been written this process. The first request and
+        /// any slow one go to the log at Info; the rest stay at Debug, where a default install never
+        /// sees them - which is fine for the hundredth line and was wrong for the first.</summary>
+        private bool _timed;
+
+        /// <summary>A per-profile route slower than this is logged at Info every time. The client
+        /// waits on these on its main thread, and 200 ms is where a wait starts to be felt.</summary>
+        public const int SlowRequestMs = 200;
+
         private ProfilePayloadDto Build(MongoId sessionId)
         {
+            var clock = System.Diagnostics.Stopwatch.StartNew();
             var payload = new ProfilePayloadDto();
 
             var profile = TryGetProfile(sessionId);
@@ -103,11 +113,17 @@ namespace QuestTreeServer
 
             WalkQuests(profile, payload);
 
-            // Debug: this runs on every panel open, and at Info it was the loudest thing in the
-            // server console during a session.
-            logger.Debug(
+            // Once at Info, then Debug: this runs on every panel open, and at Info every time it was
+            // the loudest thing in the server console - but at Debug every time it was invisible on a
+            // default install (sptLogger.json ships Information), so the cost of the biggest
+            // per-request walk on the server had never once been seen. A slow one is always news.
+            var line =
                 $"Quest Tracker: profile payload - level {payload.Level}, {payload.Traders.Count} traders, " +
-                $"{payload.ConditionProgress.Count} counters, {payload.LockReasons.Count} locked quests explained.");
+                $"{payload.ConditionProgress.Count} counters, {payload.LockReasons.Count} locked quests explained, " +
+                $"in {clock.ElapsedMilliseconds} ms.";
+
+            if (!_timed || clock.ElapsedMilliseconds > SlowRequestMs) { _timed = true; logger.Info(line); }
+            else logger.Debug(line);
 
             return payload;
         }

@@ -334,6 +334,7 @@ namespace QuestTree.UI
             RectTransform parent, QuestGraphBuilder graph, Action onRepaint, Action onRefresh, Vector2 panelSize)
         {
             var byMap = GroupByMap(graph);
+            PanelOpenTimer.Mark("map: group");
 
             if (byMap.Count == 0)
             {
@@ -726,6 +727,9 @@ namespace QuestTree.UI
         {
             var left = AuxLayout.Padding;
             var sprite = layer?.GetSprite();
+            // The first open of a session pays the SVG tessellation here; later opens hit the
+            // layer's cached sprite. The phase line tells the two apart.
+            PanelOpenTimer.Mark("map: sprite");
 
             // The map takes everything the sidebar does not, in both directions. The sidebar
             // yields first: on a narrow panel the setting's width is cut back so the map keeps
@@ -772,10 +776,13 @@ namespace QuestTree.UI
                 _pendingFocusQuestId = null;
             }
 
+            PanelOpenTimer.Mark("map: viewport+pins");
+
             var sidebarX = sprite != null ? left + mapWidth + AuxLayout.Padding : left;
             var sidebarSpan = sprite != null ? sidebarWidth : Mathf.Max(sidebarWidth, panelSize.x - AuxLayout.Padding * 2f);
 
             BuildSidebar(parent, sidebarX, top, sidebarSpan, height, quests, visible, entry, layer, graph, onRepaint, onRefresh);
+            PanelOpenTimer.Mark("map: sidebar rows");
 
             return top + height + AuxLayout.Padding;
         }
@@ -920,6 +927,7 @@ namespace QuestTree.UI
                 .Where(r => !StartedOnly || r.Node.Status == ENodeStatus.Active)
                 .Take(MaxDoNextRows)
                 .ToList();
+            PanelOpenTimer.Mark("map: sidebar head+rank");
 
             if (ranked.Count > 0)
             {

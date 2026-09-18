@@ -64,8 +64,12 @@ namespace QuestTreeServer
         public string GetPayloadJson(MongoId sessionId) =>
             JsonSerializer.Serialize(Build(sessionId), WireJson.Options);
 
+        /// <summary>See ProfilePayloadBuilder._timed: first request and slow ones at Info.</summary>
+        private bool _timed;
+
         private KappaPayloadDto Build(MongoId sessionId)
         {
+            var clock = System.Diagnostics.Stopwatch.StartNew();
             var payload = new KappaPayloadDto();
 
             var collector = FindCollectorQuest();
@@ -152,9 +156,12 @@ namespace QuestTreeServer
                 }
             }
 
-            logger.Debug(
+            var line =
                 $"Quest Tracker: Kappa checklist built - {payload.Items.Count} items, " +
-                $"{payload.Items.Count(i => i.HandedIn)} already handed in.");
+                $"{payload.Items.Count(i => i.HandedIn)} already handed in, in {clock.ElapsedMilliseconds} ms.";
+
+            if (!_timed || clock.ElapsedMilliseconds > ProfilePayloadBuilder.SlowRequestMs) { _timed = true; logger.Info(line); }
+            else logger.Debug(line);
 
             return payload;
         }

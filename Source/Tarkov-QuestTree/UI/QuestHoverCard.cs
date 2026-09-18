@@ -37,6 +37,11 @@ namespace QuestTree.UI
         private RectTransform _body;
         private Image _background;
 
+        /// <summary>The canvas above the root, found once. Place runs every frame the card is up,
+        /// and the parent walk ran on each of them - the same mistake PanZoomHandler had already
+        /// fixed for drag deltas.</summary>
+        private Canvas _canvas;
+
         public QuestHoverCard(RectTransform root) => _root = root;
 
         public bool Visible { get; private set; }
@@ -95,9 +100,9 @@ namespace QuestTree.UI
         {
             if (_card == null || _root == null) return;
 
-            var canvas = _root.GetComponentInParent<Canvas>();
-            var camera = canvas != null && canvas.renderMode != RenderMode.ScreenSpaceOverlay
-                ? canvas.worldCamera
+            if (_canvas == null) _canvas = _root.GetComponentInParent<Canvas>();
+            var camera = _canvas != null && _canvas.renderMode != RenderMode.ScreenSpaceOverlay
+                ? _canvas.worldCamera
                 : null;
 
             if (!RectTransformUtility.ScreenPointToLocalPointInRectangle(

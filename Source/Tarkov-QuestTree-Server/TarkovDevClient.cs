@@ -38,6 +38,19 @@ namespace QuestTreeServer
         private const string Endpoint = "https://api.tarkov.dev/graphql";
         private const string CacheFileName = "tarkovdev-quests.json";
 
+        /// <summary>Written beside the cache when a fetch fails, read before the next one. Every
+        /// boot used to pay the two attempts and the pause between them - 1.7 s, measured, on an
+        /// outage that lasted the whole day - because nothing remembered the last answer was no.
+        /// After a failure the fetch is skipped for a day; delete the file to try sooner.</summary>
+        private const string FailureStampName = "tarkovdev-last-failure.txt";
+
+        private static readonly TimeSpan SkipAfterFailure = TimeSpan.FromDays(1);
+
+        /// <summary>How old the cache may be before it is refreshed. The data moves when the game
+        /// moves, which is rarely; until 1.13.3 a cache was served forever and the only refresh was a
+        /// human deleting the file. An expired cache is still served if the refresh fails.</summary>
+        private static readonly TimeSpan CacheLifetime = TimeSpan.FromDays(7);
+
         /// <summary>
         /// This runs during server startup, and SPT waits for it - so the budget is what a player
         /// with no internet pays on every boot, not just what a slow connection needs. Two tries of
@@ -130,15 +143,114 @@ namespace QuestTreeServer
         {
             if (_locations != null) return _locations;
 
-            _locations = ReadCache() ?? await FetchAsync(cancellationToken) ?? new List<ObjectiveLocation>();
-            return _locations;
+            var cached = ReadCache(out var age);
+
+            if (cached != null && age < CacheLifetime)
+            {
+                logger.Info(
+                    $"Quest Tracker: using the {Describe(age)}-old tarkov.dev cache. Delete {CacheFileName} to refresh " +
+                    $"it now; it refreshes on its own after {CacheLifetime.TotalDays:0} days.");
+                return _locations = cached;
+            }
+
+            if (cached != null)
+                logger.Info($"Quest Tracker: the tarkov.dev cache is {Describe(age)} old - refreshing it.");
+
+            if (RecentFailure(out var since))
+            {
+                logger.Info(
+                    $"Quest Tracker: tarkov.dev could not be reached {Describe(since)} ago - not asking again for a day. " +
+                    $"Delete {FailureStampName} to try sooner." +
+                    (cached != null ? $" Using the {Describe(age)}-old cache." : ""));
+
+                return _locations = cached ?? new List<ObjectiveLocation>();
+            }
+
+            var fetched = await FetchAsync(cancellationToken);
+
+            if (fetched != null)
+            {
+                ClearFailureStamp();
+                return _locations = fetched;
+            }
+
+            WriteFailureStamp();
+
+            if (cached != null)
+                logger.Info($"Quest Tracker: keeping the {Describe(age)}-old tarkov.dev cache, since the refresh failed.");
+
+            return _locations = cached ?? new List<ObjectiveLocation>();
         }
+
+        private static string StampPath =>
+            System.IO.Path.Combine(AppContext.BaseDirectory, "user", "mods", "QuestTree", FailureStampName);
+
+        /// <summary>Whether the last attempt failed recently enough to skip this one. A stamp that
+        /// cannot be read is no stamp: the cost of being wrong is one fetch.</summary>
+        private static bool RecentFailure(out TimeSpan since)
+        {
+            since = TimeSpan.Zero;
+
+            try
+            {
+                if (!System.IO.File.Exists(StampPath)) return false;
+
+                var text = System.IO.File.ReadAllText(StampPath).Trim();
+                if (!DateTime.TryParse(text, System.Globalization.CultureInfo.InvariantCulture,
+                        System.Globalization.DateTimeStyles.RoundtripKind, out var when))
+                {
+                    return false;
+                }
+
+                since = DateTime.UtcNow - when.ToUniversalTime();
+                return since >= TimeSpan.Zero && since < SkipAfterFailure;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private void WriteFailureStamp()
+        {
+            try
+            {
+                var folder = System.IO.Path.GetDirectoryName(StampPath);
+                if (!string.IsNullOrEmpty(folder)) System.IO.Directory.CreateDirectory(folder);
+                System.IO.File.WriteAllText(StampPath, DateTime.UtcNow.ToString("o", System.Globalization.CultureInfo.InvariantCulture));
+            }
+            catch (Exception ex)
+            {
+                logger.Warning($"Quest Tracker: could not write {FailureStampName} ({ex.Message}) - the next boot will try tarkov.dev again.");
+            }
+        }
+
+        private static void ClearFailureStamp()
+        {
+            try
+            {
+                if (System.IO.File.Exists(StampPath)) System.IO.File.Delete(StampPath);
+            }
+            catch
+            {
+                // A stale stamp after a success only skips fetches the cache makes unnecessary anyway.
+            }
+        }
+
+        private static string Describe(TimeSpan span) =>
+            span.TotalDays >= 1 ? $"{span.TotalDays:0}-day"
+            : span.TotalHours >= 1 ? $"{span.TotalHours:0}-hour"
+            : $"{Math.Max(1, span.TotalMinutes):0}-minute";
 
         private static string CachePath =>
             System.IO.Path.Combine(AppContext.BaseDirectory, "user", "mods", "QuestTree", CacheFileName);
 
-        private List<ObjectiveLocation>? ReadCache()
+        /// <summary>The cache and its age, or null. The age is what decides whether it is served
+        /// as is or refreshed first - see GetLocationsAsync.</summary>
+        private List<ObjectiveLocation>? ReadCache(out TimeSpan age)
         {
+            age = TimeSpan.Zero;
+
             try
             {
                 var path = CachePath;
@@ -149,9 +261,10 @@ namespace QuestTreeServer
 
                 if (cached == null || cached.Count == 0) return null;
 
-                logger.Info(
-                    $"Quest Tracker: {cached.Count} quest objective locations from the cached " +
-                    $"tarkov.dev data. Delete {CacheFileName} to refresh it.");
+                age = DateTime.UtcNow - System.IO.File.GetLastWriteTimeUtc(path);
+                if (age < TimeSpan.Zero) age = TimeSpan.Zero;
+
+                logger.Info($"Quest Tracker: {cached.Count} quest objective locations in {CacheFileName}.");
 
                 return cached;
             }
@@ -192,7 +305,7 @@ namespace QuestTreeServer
                 await Task.Delay(RetryDelay, cancellationToken);
             }
 
-            logger.Info("Quest Tracker: no tarkov.dev data - the map will show item spawns only. It will try again next start.");
+            logger.Info("Quest Tracker: no tarkov.dev data - the map will show item spawns only. It will try again in a day.");
             return null;
         }
 

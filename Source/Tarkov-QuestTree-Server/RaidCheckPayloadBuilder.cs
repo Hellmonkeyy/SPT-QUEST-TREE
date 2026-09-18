@@ -34,8 +34,12 @@ namespace QuestTreeServer
         public string GetPayloadJson(MongoId sessionId) =>
             JsonSerializer.Serialize(Build(sessionId), WireJson.Options);
 
+        /// <summary>See ProfilePayloadBuilder._timed: first request and slow ones at Info.</summary>
+        private bool _timed;
+
         private RaidCheckDto Build(MongoId sessionId)
         {
+            var clock = System.Diagnostics.Stopwatch.StartNew();
             var payload = new RaidCheckDto();
 
             var profile = TryGetProfile(sessionId);
@@ -99,12 +103,15 @@ namespace QuestTreeServer
             // The task-item tally is here rather than in a test because it is only ever interesting
             // against a real profile: it is what tells you whether a green row went green for the right
             // reason, on an install whose quest mods put items in those containers.
-            logger.Debug(
+            var line =
                 $"Quest Tracker: raid check - {payload.Maps.Sum(m => m.Requirements.Count)} carry conditions " +
                 $"across {payload.Maps.Count(m => m.Requirements.Count > 0)} maps, " +
                 $"{payload.ConditionsWithNoMap} placeable nowhere, " +
                 $"{payload.Held.Values.Count(h => h.InTaskItems > 0)} of {payload.Held.Count} items in the " +
-                "task-item containers.");
+                $"task-item containers, in {clock.ElapsedMilliseconds} ms.";
+
+            if (!_timed || clock.ElapsedMilliseconds > ProfilePayloadBuilder.SlowRequestMs) { _timed = true; logger.Info(line); }
+            else logger.Debug(line);
 
             return payload;
         }
