@@ -163,8 +163,10 @@ namespace QuestTree.UI
                 _available = GameStyle.PickGlyph("◇", "○", "o");
                 _gated = GameStyle.PickGlyph("▲", "▴", "^");
                 // Not a cross: Locked already wears one, and the two must not read alike. Nor "!",
-                // which is the unobtainable badge's letter on the same box.
-                _failed = GameStyle.PickGlyph("⊘", "#");
+                // which is the unobtainable badge's letter on the same box. The game's font has no
+                // U+2298, so the Ø is what actually draws; "#" was seen on screen first and read as
+                // a code rather than a state.
+                _failed = GameStyle.PickGlyph("⊘", "Ø", "#");
                 _locked = GameStyle.LockGlyph(GameStyle.PickGlyph("✕", "x"));
                 _needs = GameStyle.PickGlyph("↑", "▲", "");
             }

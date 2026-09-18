@@ -425,6 +425,11 @@ namespace QuestTreeServer
                     {
                         _file = found;
                         _file.Items = fingerprint;
+                        // The solver version too, or the carry-over never ends: the file kept the
+                        // old number, was written back with it, and every boot after the 9 -> 10 bump
+                        // re-opened all sixty builds and reported "carried over" - a check that
+                        // could not stop failing, found by reading the log of the second boot.
+                        _file.SolverVersion = CurrentSolver;
                         _dirty = true;
 
                         Authoritative = false;
