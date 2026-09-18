@@ -1,3 +1,40 @@
+# Quest Tracker 1.13.1
+
+The release that was actually published: 1.13.0 was built but never went out, so everything under
+1.13.0 below shipped here. What 1.13.1 adds on top:
+
+**Dollars count as money you hold.** The item watchlist's dollar template id had one wrong character
+and had never matched anything. Roubles and euros were fine.
+
+**A build you asked for during a re-solve no longer goes stale for a generation.** A request arriving
+while the server was already computing your builds was refused and then forgotten, so the panel kept
+the old answer until something else happened to ask.
+
+**Opening a three-weapon quest asked the server three times per repaint.** *Old Friend's Request*
+made three blocking calls for an answer that could not have changed between them; a not-ready answer
+now stands for two seconds.
+
+**Quests with no map stopped claiming items on the hideout.** An unlocated quest's items were fanned
+across all nineteen location entries, six of which nobody can raid.
+
+**A quest stating two thresholds on one stat is held to the stronger one**, and a modded "recoil at
+least X" is read the right way round.
+
+**The builds are re-seeded.** 56 of the 60 shipped builds come from a fresh training run and 4 are
+kept from the previous seed; in total they cost within a percent of what they did.
+
+## Withdrawn
+
+The published notes for this release also claimed that 9 of 60 builds were *provably* the cheapest
+possible, that a provably minimal build stops being searched, and that an `UNSOUND` line in the server
+log would mean the mod had caught a wrong bound. Those claims are withdrawn: the machinery behind them
+was removed from the code the same day, having contributed under 0.05% of the builds' cost and been
+wrong three times in one session. The 1.13.1 build still prints the lines; they mean nothing. 1.13.2
+is the first release without them. Irreducibility - every part proven necessary by taking it off and
+re-checking - is kept.
+
+---
+
 # Quest Tracker 1.13.0
 
 A whole-project code review, and what it found. Five features did not work at all, four of them
@@ -47,6 +84,9 @@ loop. That is the player the feature is most for.
 - 16 seasonal quests were not flagged as seasonal, and 9 more were called permanently unavailable
   during the very weeks the game shows them. The mod asks the game now instead of reimplementing it.
 - Weapon presets appear without restarting the game (also fixed in 1.12.2).
+- One preset per gun: a quest that wants more than one weapon - *Gunsmith - Part 21*, *Old Friend's
+  Request* - saved every build under the same name, and the game de-duplicates by name, so you kept
+  one gun and lost the rest. Presets are named `QT: <quest> - <weapon>` now.
 - Opening the Maps tab, or its floor dropdown, no longer rebuilds the whole item watchlist.
 - The builds panel no longer regenerates every trader's stock on every request.
 - A dropdown re-picking its current value no longer stays painted over the page.
