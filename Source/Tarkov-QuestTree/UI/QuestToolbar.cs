@@ -8,9 +8,9 @@ using UnityEngine.UI;
 namespace QuestTree.UI
 {
     /// <summary>
-    /// The bar across the top of the Quest Tree: the search box, the "showing N of M" notice, the
-    /// My quests / Fit / Settings / Close buttons, and the legend that sits over the graph's
-    /// bottom-left corner.
+    /// The bar across the top of the Quest Tree: the search box, the My quests / Fit / Focus /
+    /// Chains / ? buttons, the status legend, the "showing N of M" notice, and at the right the
+    /// view buttons (Tree, Maps, Do next, Items, Kappa, Settings) and Close.
     ///
     /// A plain class, not a MonoBehaviour: it builds GameObjects and holds references to the few
     /// controls that are read back later, but it has nothing of its own to hook into Unity's
@@ -34,6 +34,7 @@ namespace QuestTree.UI
         private TMP_InputField _searchField;
         private TMP_Text _renderNotice;
         private Image _focusBackground;
+        private Image _chainsBackground;
 
         /// <summary>Everything that only means something over the quest graph - search, framing,
         /// Focus, the legend - hidden while a whole-screen view (map, lists, settings) is up.</summary>
@@ -189,6 +190,13 @@ namespace QuestTree.UI
                 out _focusBackground, treeOnly: true);
             RefreshFocusState();
 
+            // Chains is the same shape: a persisted setting, lit while on.
+            navX += BuildToolbarAction(toolbar, "Chains", navX, itemY, itemHeight, 70f, ToggleChains,
+                "Draw each single-file run of one trader's quests as one box - click a box to open it, " +
+                "the - mark on its first quest closes it. Off and on again closes every open run",
+                out _chainsBackground, treeOnly: true);
+            RefreshChainsState();
+
             // The controls hint is shown once and then never again on its own, which would make it
             // useless to anyone who dismissed it before they knew what it was for. This is how you
             // get it back.
@@ -284,6 +292,25 @@ namespace QuestTree.UI
 
             var on = ModSettings.Ready && ModSettings.FocusFrontier.Value;
             _focusBackground.color = on
+                ? new Color(GameStyle.AccentColor.r, GameStyle.AccentColor.g, GameStyle.AccentColor.b, 0.35f)
+                : GameStyle.PanelColor;
+        }
+
+        /// <summary>The Chains toggle, wired like Focus: the setting is the state, and the change
+        /// event re-renders.</summary>
+        public void ToggleChains()
+        {
+            if (!ModSettings.Ready) return;
+            ModSettings.CollapseChains.Value = !ModSettings.CollapseChains.Value;
+            RefreshChainsState();
+        }
+
+        private void RefreshChainsState()
+        {
+            if (_chainsBackground == null) return;
+
+            var on = ModSettings.Ready && ModSettings.CollapseChains.Value;
+            _chainsBackground.color = on
                 ? new Color(GameStyle.AccentColor.r, GameStyle.AccentColor.g, GameStyle.AccentColor.b, 0.35f)
                 : GameStyle.PanelColor;
         }
@@ -446,8 +473,8 @@ namespace QuestTree.UI
         ///
         /// This ran over all ~830 nodes on every notice update, and the notice updates from the render path
         /// - so it was a full scan per repaint for a number that can only change when the graph does.
-        /// Version is bumped by QuestGraphBuilder.Build and by nothing else, which is exactly the event that
-        /// can move it.</summary>
+        /// Version moves on QuestGraphBuilder.Build and on every RefreshStatuses, which are exactly the
+        /// events that can move it.</summary>
         private int CompletedCount()
         {
             if (_graph == null) return 0;
@@ -474,6 +501,7 @@ namespace QuestTree.UI
         public void UpdateRenderNotice(int matchingCount, int tabTotal, bool focused = false, int searchMatches = -1)
         {
             RefreshFocusState();
+            RefreshChainsState();
 
             if (_renderNotice == null) return;
 

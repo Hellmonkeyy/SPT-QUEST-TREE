@@ -137,6 +137,9 @@ namespace QuestTree.UI
             Toggle(column, ref y, "Two-line titles",
                 "Let a box grow a line so \"Gunsmith - Part 3\" shows both parts instead of an ellipsis.",
                 ModSettings.TallTitles);
+            Toggle(column, ref y, "Collapse chains",
+                "A single-file run of one trader's quests draws as one box until you click it open. Shortcut: C on the tree.",
+                ModSettings.CollapseChains);
             Toggle(column, ref y, "Show trader colours",
                 "A coloured stripe per trader down the left edge of each quest. Status colours are unaffected.",
                 ModSettings.ShowTraderColours);
@@ -175,7 +178,7 @@ namespace QuestTree.UI
                 index => ModSettings.QuestBadges.Value = (ModSettings.BadgeMode)index);
 
             ResetLink(column, ref y, width,
-                ModSettings.CompactLayout, ModSettings.TallTitles,
+                ModSettings.CompactLayout, ModSettings.TallTitles, ModSettings.CollapseChains,
                 ModSettings.DrawEdges, ModSettings.FocusFrontier, ModSettings.HideUnobtainable,
                 ModSettings.HideCompleted, ModSettings.HideTraderless, ModSettings.EdgeOpacity,
                 ModSettings.HoverDimStrength, ModSettings.OverviewBelowZoom, ModSettings.FocusRadius,

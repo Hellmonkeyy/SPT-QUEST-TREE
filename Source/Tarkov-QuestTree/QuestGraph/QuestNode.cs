@@ -57,6 +57,20 @@ namespace QuestTree.QuestGraph
                 return done;
             }
         }
+
+        /// <summary>The status of the quest the player would do next - the first member not yet
+        /// completed - or Completed when they all are. What a collapsed chain is coloured by: the
+        /// least-advanced member would always be Locked on any chain still in progress, which
+        /// says nothing.</summary>
+        public ENodeStatus NextStatus
+        {
+            get
+            {
+                foreach (var node in Members)
+                    if (node.Status != ENodeStatus.Completed) return node.Status;
+                return ENodeStatus.Completed;
+            }
+        }
     }
 
     /// <summary>

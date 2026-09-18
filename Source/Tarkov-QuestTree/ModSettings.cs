@@ -55,6 +55,10 @@ namespace QuestTree
         public static ConfigEntry<int> EdgeOpacity { get; private set; }
         public static ConfigEntry<int> HoverDimStrength { get; private set; }
         public static ConfigEntry<bool> TallTitles { get; private set; }
+
+        /// <summary>Draw each single-file run of one trader's quests as one box until it is
+        /// clicked open. See QuestGraphView.Render.</summary>
+        public static ConfigEntry<bool> CollapseChains { get; private set; }
         public static ConfigEntry<int> OverviewBelowZoom { get; private set; }
         public static ConfigEntry<int> FocusRadius { get; private set; }
         public static ConfigEntry<BadgeMode> QuestBadges { get; private set; }
@@ -423,6 +427,13 @@ namespace QuestTree
                 "Tree", "Two-line titles", true,
                 "Let a quest box grow a line so a series/episode title (\"Gunsmith - Part 3\") shows both parts instead of an ellipsis.");
 
+            CollapseChains = config.Bind(
+                "Tree", "Collapse chains", true,
+                "Draw a single-file run of quests from one trader (\"Gunsmith - Part 1\" through " +
+                "\"Part 25\") as one box showing how many are done. Click the box to open the run " +
+                "up; the - mark on its first quest closes it again. Toggle with C in the tree, or " +
+                "the Chains button - off and on again closes every open chain.");
+
             OverviewBelowZoom = config.Bind(
                 "Tree", "Trader overview below zoom", 0,
                 new ConfigDescription(
@@ -519,7 +530,7 @@ namespace QuestTree
             {
                 HideUnobtainable, HideCompleted, HideTraderless, MarkStartedOnly, MapArtworkRotation,
                 MirrorMapArtwork, ShowMapGuides, DrawEdges, FocusFrontier, CompactLayout, MaxVisibleNodes,
-                OpenOnMap, HarvestZones, EdgeOpacity, HoverDimStrength, TallTitles,
+                OpenOnMap, HarvestZones, EdgeOpacity, HoverDimStrength, TallTitles, CollapseChains,
                 OverviewBelowZoom, FocusRadius, QuestBadges, DoNextGoal, DoNextMaxRows,
                 SidebarWidth, DoNextRows, ShowItemsSection,
                 ShowTakeWithYou, CountUnacceptedQuests, ShowTraderColours,
@@ -552,6 +563,7 @@ namespace QuestTree
             EdgeOpacity.SettingChanged += Raise;
             HoverDimStrength.SettingChanged += Raise;
             TallTitles.SettingChanged += Raise;
+            CollapseChains.SettingChanged += Raise;
             OverviewBelowZoom.SettingChanged += Raise;
             FocusRadius.SettingChanged += Raise;
             QuestBadges.SettingChanged += Raise;

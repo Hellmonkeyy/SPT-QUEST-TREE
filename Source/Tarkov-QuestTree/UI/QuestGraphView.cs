@@ -158,6 +158,49 @@ namespace QuestTree.UI
         /// origins, the visibility test and the node rect itself.</summary>
         private readonly Dictionary<QuestNode, Vector2> _sizes = new Dictionary<QuestNode, Vector2>();
 
+        // --- chains ---
+        //
+        // A single-file run of one trader's quests (QuestChain) draws as ONE box - its head - until
+        // it is opened. The render model in FoldChains decides, per Render, which runs fold; BoxFor
+        // then maps any quest to the box that stands for it, and every place that joins two quests
+        // (layout parent, edge endpoint, selection, framing) goes through it.
+
+        /// <summary>Runs the player has opened, by clicking or by being sent to a member. Kept for
+        /// the session, across tabs and across status refreshes; cleared when the graph's
+        /// STRUCTURE is rebuilt (see <see cref="_chainsOf"/>) and when the Chains toggle goes
+        /// off, so off-and-on closes everything.</summary>
+        private readonly HashSet<QuestChain> _expandedChains = new();
+
+        /// <summary>The chain list the expanded set was opened against. Build assigns a new list
+        /// (with new chain objects) each time; a status refresh does not. Graph.Version cannot be
+        /// used for this - it also moves on every hand-in, and keying the set on it snapped every
+        /// opened run shut the moment a quest was turned in.</summary>
+        private List<QuestChain> _chainsOf;
+
+        /// <summary>Runs folded in the current layout.</summary>
+        private readonly HashSet<QuestChain> _collapsedChains = new();
+
+        /// <summary>Runs every member of which is in the current layout - the ones that CAN fold.
+        /// A run with a member filtered out draws member by member: a quest already hidden by a
+        /// filter must not vanish a second time into a count that includes it.</summary>
+        private readonly List<QuestChain> _collapsibleChains = new();
+
+        /// <summary>What each foldable run's head box is bound with, folded or open.</summary>
+        private readonly Dictionary<QuestChain, ChainSummary> _chainSummaries = new();
+
+        /// <summary>Every quest the last Render showed, folded or not - what the counts, the
+        /// search and "My quests" run over. <see cref="_layoutOrder"/> is the boxes, which is
+        /// fewer whenever a run is folded.</summary>
+        private QuestNode[] _shown = Array.Empty<QuestNode>();
+
+        /// <summary>What the last Render was given, so a fold or unfold can lay the same tab out
+        /// again without the panel's involvement.</summary>
+        private IReadOnlyList<QuestNode> _lastCandidates;
+
+        /// <summary>Click handlers for a run's head box, bound in Build like <see cref="_onNodeClicked"/>.</summary>
+        private Action<QuestNode> _expandChainOf;
+        private Action<QuestNode> _toggleChainOf;
+
         /// <summary>Portrait size, in content units at full zoom. Named because the spacing rule
         /// that keeps two markers apart is derived from it.</summary>
         private const float TraderMarkerSize = 76f;
@@ -260,6 +303,16 @@ namespace QuestTree.UI
                 onNodeClicked(node);
             };
 
+            // A folded run's box opens on click rather than selecting its first quest; the mark
+            // in its corner goes the other way once it is open.
+            _expandChainOf = node => ExpandChain(node?.Chain);
+            _toggleChainOf = node =>
+            {
+                if (node?.Chain == null) return;
+                if (_collapsedChains.Contains(node.Chain)) ExpandChain(node.Chain);
+                else CollapseChain(node.Chain);
+            };
+
             var viewportGo = new GameObject("Viewport", typeof(RectTransform), typeof(Image), typeof(RectMask2D));
             _viewport = (RectTransform)viewportGo.transform;
             var viewport = _viewport;
@@ -311,12 +364,13 @@ namespace QuestTree.UI
         {
             if (ReferenceEquals(_selectedNode, node)) return;
 
-            if (_selectedNode != null && _views.TryGetValue(_selectedNode, out var previous))
+            // Through BoxFor: a quest folded into its run is marked on the run's box.
+            if (_selectedNode != null && _views.TryGetValue(BoxFor(_selectedNode), out var previous))
                 previous.SetSelected(false);
 
             _selectedNode = node;
 
-            if (node != null && _views.TryGetValue(node, out var view))
+            if (node != null && _views.TryGetValue(BoxFor(node), out var view))
                 view.SetSelected(true);
         }
 
@@ -412,8 +466,10 @@ namespace QuestTree.UI
             var matching = candidates
                 .Where(node => PassesFilters(node) && (frontier == null || frontier.Contains(node)))
                 .ToList();
+            _lastCandidates = candidates;
             _lastCandidateCount = candidates.Count;
             _lastFocused = frontier != null;
+            _shown = matching.ToArray();
             _toolbar.UpdateRenderNotice(matching.Count, candidates.Count, frontier != null, CountMatches(matching));
 
             if (matching.Count == 0)
@@ -423,22 +479,27 @@ namespace QuestTree.UI
                 return;
             }
 
+            // The boxes: every shown quest, less the members of each folded run, which its head
+            // stands for. Everything from here down lays out BOXES.
+            var boxes = FoldChains(matching);
+
             // Measure first: both axes need the sizes before anything can be placed.
             _sizes.Clear();
-            foreach (var node in matching)
-                _sizes[node] = QuestNodeView.MeasureSize(node, out _);
+            foreach (var node in boxes)
+                _sizes[node] = QuestNodeView.MeasureSize(node, SummaryOf(node), out _);
 
-            var y = ComputeTreeLayout(matching);
+            var y = ComputeTreeLayout(boxes);
 
             // Columns as wide as their widest member, laid end to end.
             //
             // Depth still decides WHICH column a quest is in - that is global and comes from the
             // graph builder - but no longer where that column sits, because a column holding a
-            // double-width box can no longer be a fixed step from its neighbour.
+            // double-width box can no longer be a fixed step from its neighbour. A folded run
+            // occupies only its head's column; the columns its members would fill are free.
             var columnX = new Dictionary<int, float>();
             var widest = new Dictionary<int, float>();
 
-            foreach (var node in matching)
+            foreach (var node in boxes)
             {
                 var width = SizeOf(node).x;
                 if (!widest.TryGetValue(node.Depth, out var current) || width > current)
@@ -456,20 +517,20 @@ namespace QuestTree.UI
             }
 
             _layout.Clear();
-            foreach (var node in matching)
+            foreach (var node in boxes)
                 _layout[node] = new Vector2(
                     columnX.TryGetValue(node.Depth, out var left) ? left : 0f,
                     -y[node]);
 
-            _layoutOrder = matching.ToArray();
+            _layoutOrder = boxes.ToArray();
 
             // A blocked box names the quest in its way, and it only has the ID. One reference for
             // the whole render rather than the same one threaded onto hundreds of Bind calls.
             QuestNodeView.SetGraphContext(_graph);
 
-            BuildEdgeLayout(matching);
-            BuildTraderMarkers(matching);
-            BuildBands(matching);
+            BuildEdgeLayout(boxes);
+            BuildTraderMarkers(boxes);
+            BuildBands(boxes, matching);
 
             // Put the camera on the content that was just laid out. Without this the view keeps
             // whatever position it had, so searching while panned to a far corner of a 5,000-quest
@@ -481,6 +542,149 @@ namespace QuestTree.UI
             _lastContentScale = _content.localScale.x;
             _initialSweepFrames = InitialSweepFrames;
             RefreshVisibleNodes();
+        }
+
+        /// <summary>Decides which runs fold, and returns the boxes: <paramref name="shown"/> less
+        /// the members of every folded run, whose head stays in and stands for them.
+        ///
+        /// A run is foldable only when ALL of its members are shown (see _collapsibleChains), and
+        /// then folds unless the player has opened it or it must stay open (<see cref="MustStayOpen"/>).
+        /// A run that must stay open gets no summary at all - no mark offers to close what cannot
+        /// be closed - and its head draws as an ordinary quest.
+        ///
+        /// Under "Hide completed quests" that means a partly-done run never folds: its done
+        /// members are not shown. Left that way on purpose. The done members are always the
+        /// FIRST ones, so the head - the box - is among the hidden, and folding would need a
+        /// per-run stand-in box threaded through BoxFor, the edges, the layout parent and the
+        /// depth column; and the filter asked for done quests to be gone, which a "3/7 done" box
+        /// would half undo. What that filter leaves of such a run is exactly its undone members,
+        /// drawn one by one, which is what the filter says.</summary>
+        private List<QuestNode> FoldChains(List<QuestNode> shown)
+        {
+            _collapsibleChains.Clear();
+            _collapsedChains.Clear();
+            _chainSummaries.Clear();
+
+            // A rebuilt graph has new chain objects, so the old ones in the set could never match
+            // again and would only pin the old graph. By list identity, not Graph.Version - see
+            // _chainsOf.
+            if (!ReferenceEquals(_graph.Chains, _chainsOf))
+            {
+                _chainsOf = _graph.Chains;
+                _expandedChains.Clear();
+            }
+
+            if (ModSettings.Ready && !ModSettings.CollapseChains.Value)
+            {
+                _expandedChains.Clear();
+                return shown;
+            }
+
+            var shownSet = new HashSet<QuestNode>(shown);
+
+            foreach (var chain in _graph.Chains)
+            {
+                var whole = true;
+                foreach (var member in chain.Members)
+                {
+                    if (shownSet.Contains(member)) continue;
+                    whole = false;
+                    break;
+                }
+
+                if (!whole) continue;
+
+                _collapsibleChains.Add(chain);
+                if (MustStayOpen(chain)) continue;
+
+                var collapsed = !_expandedChains.Contains(chain);
+                if (collapsed) _collapsedChains.Add(chain);
+
+                _chainSummaries[chain] = new ChainSummary(chain, QuestNodeView.ChainTitle(chain), collapsed);
+            }
+
+            if (_collapsedChains.Count == 0) return shown;
+
+            var boxes = new List<QuestNode>(shown.Count);
+            foreach (var node in shown)
+                if (node.Chain == null || node.ChainIndex == 0 || !_collapsedChains.Contains(node.Chain)) boxes.Add(node);
+
+            return boxes;
+        }
+
+        /// <summary>A run that a count would misrepresent. A failed member or one whose
+        /// prerequisite is not in the list wears a mark that is the whole reason to look at the
+        /// box, and a search match folded away is a match nobody can see.
+        ///
+        /// The search clause is narrower than the search itself: member NAMES only, and only once
+        /// the needle is <see cref="SearchFoldMinChars"/> long. Matched on all fifteen fields from
+        /// the first letter, nearly every run had a member matching "e" somewhere in a reward or a
+        /// map, so the whole tree re-laid out per keystroke and the runs flapped open and shut as
+        /// the needle grew. The full match still lights the box and counts in the notice.</summary>
+        private bool MustStayOpen(QuestChain chain)
+        {
+            var needle = _toolbar?.SearchNeedle ?? "";
+            var searching = needle.Length >= SearchFoldMinChars;
+
+            foreach (var member in chain.Members)
+            {
+                if (member.Status == ENodeStatus.Failed || member.UnresolvedPrerequisiteIds.Count > 0) return true;
+                if (searching && member.Name.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>How long a search needle has to be before it opens folded runs.</summary>
+        private const int SearchFoldMinChars = 3;
+
+        private bool ShouldCollapse(QuestChain chain) =>
+            !_expandedChains.Contains(chain) && !MustStayOpen(chain);
+
+        /// <summary>Whether the folds the last Render made still hold, given the search box and
+        /// the statuses now. A keystroke and a hand-in both ask, and re-lay out only when the
+        /// answer is no - the layout is otherwise identical before and after either.</summary>
+        public bool ChainsWouldChange()
+        {
+            foreach (var chain in _collapsibleChains)
+                if (ShouldCollapse(chain) != _collapsedChains.Contains(chain)) return true;
+
+            return false;
+        }
+
+        /// <summary>The box that stands for a quest: its run's head while the run is folded,
+        /// otherwise itself.</summary>
+        private QuestNode BoxFor(QuestNode node) =>
+            node?.Chain != null && _collapsedChains.Contains(node.Chain) ? node.Chain.Head : node;
+
+        /// <summary>The run a box heads, folded or open, or null for an ordinary box.</summary>
+        private ChainSummary SummaryOf(QuestNode node) =>
+            node?.Chain != null && node.ChainIndex == 0 && _chainSummaries.TryGetValue(node.Chain, out var summary)
+                ? summary
+                : null;
+
+        private bool IsCollapsedHead(QuestNode node) =>
+            node?.Chain != null && node.ChainIndex == 0 && _collapsedChains.Contains(node.Chain);
+
+        private void ExpandChain(QuestChain chain)
+        {
+            if (chain == null || !_expandedChains.Add(chain)) return;
+            Rerender();
+        }
+
+        private void CollapseChain(QuestChain chain)
+        {
+            if (chain == null || !_expandedChains.Remove(chain)) return;
+            Rerender();
+        }
+
+        /// <summary>Lays the same tab out again with the camera where it is. The rows barely move
+        /// - a single-file run has one leaf however it is drawn - but the head's box changes
+        /// width with its title, and every column to its right shifts as the run's columns fill
+        /// or empty, so the box you clicked can land a little away from the pointer.</summary>
+        private void Rerender()
+        {
+            if (_lastCandidates != null) Render(_lastCandidates, frame: false);
         }
 
         /// <summary>A trader portrait and name at the left of each trader's first chain.
@@ -573,8 +777,11 @@ namespace QuestTree.UI
         /// It used to claim the same of the counts, "which forces a rebuild anyway". It does not: after a
         /// hand-in, RefreshAfterStatusChange only re-renders behind a status-dependent filter, so on default
         /// settings neither the bands nor the cards were rebuilt and both showed pre-hand-in numbers.
-        /// TreeOverview.Draw now compares the counts it last drew instead of trusting that.</summary>
-        private void BuildBands(IReadOnlyList<QuestNode> nodes)
+        /// TreeOverview.Draw now compares the counts it last drew instead of trusting that.
+        ///
+        /// Bounds come from the boxes, counts from every quest shown - a folded run is one box
+        /// but its members still count.</summary>
+        private void BuildBands(IReadOnlyList<QuestNode> nodes, IReadOnlyList<QuestNode> counted)
         {
             _bands.Clear();
             _overview?.Clear();
@@ -590,9 +797,9 @@ namespace QuestTree.UI
 
                 var size = SizeOf(node);
 
-                if (!byTrader.TryGetValue(node.TraderId, out var band))
+                if (!byTrader.ContainsKey(node.TraderId))
                 {
-                    byTrader[node.TraderId] = band = new TreeOverview.Band
+                    byTrader[node.TraderId] = new TreeOverview.Band
                     {
                         TraderId = node.TraderId,
                         TraderName = _graph != null && _graph.TraderNames.TryGetValue(node.TraderId, out var name) && !string.IsNullOrEmpty(name)
@@ -610,6 +817,12 @@ namespace QuestTree.UI
                     Mathf.Max(box.y, position.x + size.x),
                     Mathf.Min(box.z, position.y - size.y * 0.5f),
                     Mathf.Max(box.w, position.y + size.y * 0.5f));
+            }
+
+            foreach (var node in counted)
+            {
+                if (node == null || string.IsNullOrEmpty(node.TraderId)) continue;
+                if (!byTrader.TryGetValue(node.TraderId, out var band)) continue;
 
                 if (node.Status == ENodeStatus.Active) band.Active++;
                 else if (node.Status == ENodeStatus.Available) band.Available++;
@@ -796,7 +1009,11 @@ namespace QuestTree.UI
 
         /// <summary>Precomputes every edge's two endpoints once per tab. Nodes are created with
         /// pivot (0, 0.5) (QuestNodeView.Create), so a node's layout position is already its left
-        /// edge at vertical centre - the line leaves from the right edge and arrives at the left.</summary>
+        /// edge at vertical centre - the line leaves from the right edge and arrives at the left.
+        ///
+        /// A folded run's box carries its TAIL's outgoing edges, and any edge into a member lands
+        /// on it (only the head can have one, by construction). The run's internal edges are not
+        /// drawn: their ends are not boxes.</summary>
         private void BuildEdgeLayout(List<QuestNode> nodes)
         {
             if (!ModSettings.Ready || !ModSettings.DrawEdges.Value)
@@ -814,11 +1031,14 @@ namespace QuestTree.UI
                 // that would break when boxes stopped being uniform.
                 var fromPoint = _layout[node] + new Vector2(SizeOf(node).x, 0f);
 
-                foreach (var unlocked in node.Unlocks)
+                var source = IsCollapsedHead(node) ? node.Chain.Tail : node;
+
+                foreach (var unlocked in source.Unlocks)
                 {
                     // An edge whose other end was filtered out of this tab has nothing to join to.
-                    if (!_layout.TryGetValue(unlocked, out var toPoint)) continue;
-                    edges.Add((node, unlocked, fromPoint, toPoint));
+                    var to = BoxFor(unlocked);
+                    if (!_layout.TryGetValue(to, out var toPoint)) continue;
+                    edges.Add((node, to, fromPoint, toPoint));
                 }
             }
 
@@ -852,6 +1072,10 @@ namespace QuestTree.UI
         {
             if (_hoverCandidate == null) return;
             if (ModSettings.Ready && !ModSettings.Tooltips.Value) return;
+
+            // A folded run's box is titled for the run; its first quest's card under it would be
+            // explaining a different box.
+            if (IsCollapsedHead(_hoverCandidate)) return;
 
             if (Input.GetMouseButton(0) || Input.GetMouseButton(1))
             {
@@ -1025,9 +1249,15 @@ namespace QuestTree.UI
                 // path, and this is not part of it.
                 view.SearchReason = node.MatchReason(_toolbar.SearchNeedle);
 
-                view.Bind(node, _onNodeClicked, HighlightChain, _ => ClearHighlight());
+                // A folded run's box opens on click; its head, once open, is clicked like any
+                // quest and closed from the mark in its corner.
+                var summary = SummaryOf(node);
+                var folded = summary != null && summary.Collapsed;
+
+                view.Bind(node, folded ? _expandChainOf : _onNodeClicked, HighlightChain, _ => ClearHighlight(),
+                    summary, summary != null ? _toggleChainOf : null);
                 view.SetOutlineUnit(outlineUnit);
-                view.SetSelected(ReferenceEquals(node, _selectedNode));
+                view.SetSelected(ReferenceEquals(node, BoxFor(_selectedNode)));
                 _views[node] = view;
             }
 
@@ -1371,11 +1601,13 @@ namespace QuestTree.UI
         /// <summary>Re-issues the toolbar's "N shown · C of T completed" line from the last
         /// render - the completed total is what a hand-in changes.</summary>
         public void RefreshNotice() =>
-            _toolbar?.UpdateRenderNotice(_layoutOrder.Length, _lastCandidateCount, _lastFocused);
+            _toolbar?.UpdateRenderNotice(_shown.Length, _lastCandidateCount, _lastFocused);
 
         /// <summary>A keystroke in the search box.
         ///
-        /// Repaints; does not re-render. This used to be wired straight to a full RenderSelectedTab,
+        /// Repaints, and re-renders only when the keystroke opens or closes a folded run (a
+        /// three-letter needle matching a member's name - see MustStayOpen); with the camera kept.
+        /// This used to be wired straight to a full RenderSelectedTab,
         /// which cleared every view, re-measured all eight hundred boxes, recomputed the tidy-tree,
         /// rebuilt the edge list, destroyed and recreated every trader portrait and reframed the
         /// camera - per character typed. It had to, because search decided which quests existed.
@@ -1387,13 +1619,22 @@ namespace QuestTree.UI
         {
             if (_layoutOrder.Length == 0 || _toolbar == null) return;
 
+            // The one exception: a match inside a folded run has to open it, and a run whose
+            // matches were just deleted closes again. That is a layout change, and Render does
+            // the repaint on its way out.
+            if (ChainsWouldChange())
+            {
+                Rerender();
+                return;
+            }
+
             // Why a box matched, for the hover card. Only the built ones - anything scrolled in
             // later is given its reason by the build loop.
             foreach (var (node, view) in _views)
                 view.SearchReason = node.MatchReason(_toolbar.SearchNeedle);
 
             _toolbar.UpdateRenderNotice(
-                _layoutOrder.Length, _lastCandidateCount, _lastFocused, CountMatches(_layoutOrder));
+                _shown.Length, _lastCandidateCount, _lastFocused, CountMatches(_shown));
 
             RepaintEmphasis();
         }
@@ -1429,6 +1670,10 @@ namespace QuestTree.UI
         public void FocusNode(QuestNode node)
         {
             if (node == null || _graph == null) return;
+
+            // A quest folded into its run has no box of its own to frame or mark: open the run
+            // first. It stays open, like one the player clicked.
+            if (node.Chain != null && _collapsedChains.Contains(node.Chain)) ExpandChain(node.Chain);
 
             _pendingFocus = null;
             _focusRetryFrames = 0;
@@ -1765,8 +2010,10 @@ namespace QuestTree.UI
             }
         }
 
-        /// <summary>Returns every built node and edge to its pool. Used when the tab or search
-        /// changes - the pooled objects are reused immediately by the next layout.</summary>
+        /// <summary>Returns every built node and edge to its pool. Called at the top of every
+        /// Render - a tab switch, a fold, a settings change, a re-layout under a status change -
+        /// and when a non-graph view takes the surface; the pooled objects are reused immediately
+        /// by the next layout.</summary>
         public void ClearGraphViews()
         {
             foreach (var view in _views.Values) ReleaseNodeView(view);
@@ -1778,7 +2025,14 @@ namespace QuestTree.UI
             _layout.Clear();
             _sizes.Clear();
             _layoutOrder = Array.Empty<QuestNode>();
+            _shown = Array.Empty<QuestNode>();
             _edgeLayout = Array.Empty<(QuestNode, QuestNode, Vector2, Vector2)>();
+
+            // The folds belong to the layout being torn down; the expanded set is the player's
+            // and outlives it.
+            _collapsedChains.Clear();
+            _collapsibleChains.Clear();
+            _chainSummaries.Clear();
 
             // The hovered set refers to nodes from the tab being torn down; keeping it would leave
             // ClearHighlight sweeping views that no longer relate to it.
@@ -1876,6 +2130,9 @@ namespace QuestTree.UI
                 foreach (var prereqId in node.PrerequisiteIds)
                 {
                     if (!_graph.NodesById.TryGetValue(prereqId, out var candidate)) continue;
+
+                    // A prerequisite folded into its run is represented by the run's box.
+                    candidate = BoxFor(candidate);
                     if (!nodeSet.Contains(candidate)) continue; // outside the currently rendered tab
 
                     if (parent == null)
@@ -1971,9 +2228,11 @@ namespace QuestTree.UI
         /// reference and being usable.</summary>
         public void FrameMyQuests()
         {
-            var mine = _layoutOrder.Where(n => n.Status == ENodeStatus.Active).ToList();
+            // Over every quest shown, not the boxes: an in-progress quest folded into its run is
+            // framed as the run's box.
+            var mine = _shown.Where(n => n.Status == ENodeStatus.Active).Select(BoxFor).Distinct().ToList();
             if (mine.Count == 0)
-                mine = _layoutOrder.Where(n => n.Status == ENodeStatus.Available).ToList();
+                mine = _shown.Where(n => n.Status == ENodeStatus.Available).Select(BoxFor).Distinct().ToList();
 
             GameStyle.PlaySound(EUISoundType.ButtonClick);
 

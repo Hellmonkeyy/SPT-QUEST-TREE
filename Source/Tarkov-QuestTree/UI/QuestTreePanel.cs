@@ -471,6 +471,7 @@ namespace QuestTree.UI
                     if (Input.GetKeyDown(KeyCode.F)) _graphView.FrameContent();
                     if (Input.GetKeyDown(KeyCode.M)) _graphView.FrameMyQuests();
                     if (Input.GetKeyDown(KeyCode.X)) _toolbar.ToggleFocus();
+                    if (Input.GetKeyDown(KeyCode.C)) _toolbar.ToggleChains();
                     if (Input.GetKeyDown(KeyCode.Slash)) _toolbar.FocusSearch();
                 }
             }
@@ -586,9 +587,11 @@ namespace QuestTree.UI
                     return;
                 }
 
+                // A fold can also move: a run whose member just failed has to open to show the
+                // mark, and a repaint cannot do that.
                 var statusDecidesTheSet = ModSettings.Ready &&
                                           (ModSettings.HideCompleted.Value || ModSettings.FocusFrontier.Value);
-                if (statusDecidesTheSet) RenderSelectedTab(frame: false);
+                if (statusDecidesTheSet || _graphView.ChainsWouldChange()) RenderSelectedTab(frame: false);
                 else _graphView.RefreshNotice();
 
                 RefreshTabLabels();
@@ -659,7 +662,7 @@ namespace QuestTree.UI
             _introPanel.SetParent(root, worldPositionStays: false);
             _introPanel.anchorMin = _introPanel.anchorMax = new Vector2(0.5f, 0.5f);
             _introPanel.pivot = new Vector2(0.5f, 0.5f);
-            _introPanel.sizeDelta = new Vector2(470f, 410f);
+            _introPanel.sizeDelta = new Vector2(470f, 430f);
             _introPanel.anchoredPosition = Vector2.zero;
 
             var background = panelGo.GetComponent<Image>();
@@ -675,6 +678,7 @@ namespace QuestTree.UI
             AuxLayout.AddText(_introPanel, ref y, "<b>F</b>  fit the whole tab on screen (on the map: fit the floor)", 20f, 12);
             AuxLayout.AddText(_introPanel, ref y, "<b>M</b>  jump to the quests you can work on", 20f, 12);
             AuxLayout.AddText(_introPanel, ref y, "<b>X</b>  focus: hide everything you cannot work on yet", 20f, 12);
+            AuxLayout.AddText(_introPanel, ref y, "<b>C</b>  chains: a run of quests as one box - click it to open, its - mark to close", 20f, 12);
             AuxLayout.AddText(_introPanel, ref y, "<b>/</b>  search - Enter opens the first match, Esc leaves the box", 20f, 12);
             AuxLayout.AddText(_introPanel, ref y, "<b>[ ]</b>  on the map: the floor below or above", 20f, 12);
             AuxLayout.AddText(_introPanel, ref y, "<b>Esc</b>  close the quest detail, then the tree", 20f, 12);
@@ -1021,8 +1025,8 @@ namespace QuestTree.UI
 
         /// <summary>Done/total per trader id, in one pass, cached until the graph is rebuilt.
         ///
-        /// Keyed on QuestGraphBuilder.Version, which Build bumps and nothing else does - so a hand-in that
-        /// re-runs the graph invalidates this, and a repaint that does not cannot see a stale number.</summary>
+        /// Keyed on QuestGraphBuilder.Version, which Build and RefreshStatuses bump - so a hand-in
+        /// invalidates this, and a repaint that moved no status cannot see a stale number.</summary>
         private Dictionary<string, (int Done, int Total)> TraderTallies()
         {
             if (_traderTallies != null && _traderTallyVersion == _graph.Version) return _traderTallies;

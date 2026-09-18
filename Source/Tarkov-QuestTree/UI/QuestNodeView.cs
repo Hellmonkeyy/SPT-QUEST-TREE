@@ -10,6 +10,46 @@ using UnityEngine.UI;
 
 namespace QuestTree.UI
 {
+    /// <summary>What a chain's head box needs to know to stand for the whole run, built once per
+    /// render by QuestGraphView for every run that can fold - all members shown, none failed or
+    /// missing a prerequisite, no search match inside. <see cref="Collapsed"/> says whether the
+    /// head is standing in for its members or merely wearing the mark that closes them again.
+    ///
+    /// The title is decided here, once, so the box is measured on the exact string it draws -
+    /// the same one-name rule DisplayName keeps for ordinary quests.</summary>
+    internal sealed class ChainSummary
+    {
+        public readonly QuestChain Chain;
+        public readonly string Title;
+        public readonly bool Collapsed;
+
+        /// <summary>The marks the run wears as a whole: a chain with a Kappa quest in it is on the
+        /// Kappa path, whichever member it is.</summary>
+        public readonly bool AnyKappa;
+        public readonly bool AnyCollector;
+        public readonly bool AnyUnobtainable;
+
+        public ChainSummary(QuestChain chain, string title, bool collapsed)
+        {
+            Chain = chain;
+            Title = title;
+            Collapsed = collapsed;
+
+            foreach (var member in chain.Members)
+            {
+                AnyKappa |= member.IsKappaRequired;
+                AnyCollector |= member.IsCollectorPrerequisite;
+                AnyUnobtainable |= member.UnobtainableReason != null;
+            }
+        }
+
+        public int Total => Chain.Members.Count;
+        public int Completed => Chain.Completed;
+
+        /// <summary>Read live, so a hand-in moves the box through RefreshStatus like any other.</summary>
+        public ENodeStatus Status => Chain.NextStatus;
+    }
+
     /// <summary>
     /// Compact visual for one QuestNode: a dark box with a status-coloured bar down its left edge,
     /// title, a trader/level/map subtitle, a one-line objective preview, and a Kappa badge. Built
@@ -216,6 +256,15 @@ namespace QuestTree.UI
         private GameObject _unobtainableBadge;
         private GameObject _missingBadge;
 
+        /// <summary>The mark a chain's head wears: "+" while the run is folded into this box, "-"
+        /// once it is open. The only badge that takes clicks - it is how an open chain closes.</summary>
+        private GameObject _chainBadge;
+        private TMP_Text _chainBadgeText;
+
+        /// <summary>The run this box heads, or null for the ordinary case. Set per Bind, like
+        /// everything else a pooled view must not carry over.</summary>
+        private ChainSummary _chain;
+
         /// <summary>Why this node survived the current search, or null when it matched on
         /// its own name and needs no explaining. Set by the renderer, which already knows
         /// the needle - computed only for nodes that already matched, which is a handful,
@@ -235,6 +284,9 @@ namespace QuestTree.UI
         public Action<QuestNode> OnHoverEnter;
         public Action<QuestNode> OnHoverExit;
 
+        /// <summary>The chain mark was clicked: open the run, or close it. Bound with the chain.</summary>
+        public Action<QuestNode> OnChainToggle;
+
         /// <summary>The box this quest wants, and whether its title needs two lines.
         ///
         /// The layout asks this once per graph build; Bind asks it again per node so the box and the
@@ -250,26 +302,33 @@ namespace QuestTree.UI
         ///
         /// Prefers a WIDER box to a taller one, up to the clamp. "Weapon Mastery FN P90 5.7x28mm" on
         /// one readable line beats the same name cut to "Weapon Mastery FN P90 5.7x28mm Pa..." over
-        /// two.</summary>
-        public static Vector2 MeasureSize(QuestNode node, out bool tall)
+        /// two.
+        ///
+        /// <paramref name="chain"/> is non-null for a box that heads a chain: a collapsed head is
+        /// sized on the chain's title, one line, and both states reserve room for the chain mark.</summary>
+        public static Vector2 MeasureSize(QuestNode node, ChainSummary chain, out bool tall)
         {
             tall = false;
             if (node == null) return new Vector2(LayoutMetrics.NodeWidth, LayoutMetrics.NodeHeight);
 
-            var badges = (node.IsKappaRequired ? 1 : 0) + (node.IsCollectorPrerequisite ? 1 : 0) +
-                         (node.UnobtainableReason != null ? 1 : 0) + (node.UnresolvedPrerequisiteIds.Count > 0 ? 1 : 0);
+            var badges = CountBadges(node, chain);
             var badgeInset = Mathf.Max(0, badges - 1) * (LayoutMetrics.KappaBadgeSize + BadgeGap);
             var chrome = LayoutMetrics.TitleInsetX + 44f + badgeInset;
 
             var min = LayoutMetrics.NodeWidth;
             var max = LayoutMetrics.MaxNodeWidth;
 
-            var name = DisplayName(node);
+            var name = chain != null && chain.Collapsed ? chain.Title : DisplayName(node);
 
             // One line if the whole name fits inside the clamp.
             var oneLine = EstimateWidth(name, LayoutMetrics.TitleFontSize) + chrome;
             if (oneLine <= max)
                 return new Vector2(Mathf.Max(min, oneLine), LayoutMetrics.NodeHeight);
+
+            // A collapsed head's title is a series name with no episode to break on: as wide as
+            // allowed, and the text ellipsises.
+            if (chain != null && chain.Collapsed)
+                return new Vector2(max, LayoutMetrics.NodeHeight);
 
             // From the SAME name Bind draws - DisplayName, not node.Name. Measured on the raw name,
             // the ten abbreviated series were sized for "Weapon Proficiency" and drawn as "W. Prof.",
@@ -445,13 +504,22 @@ namespace QuestTree.UI
             return text;
         }
 
+        /// <summary>Binds a quest to this box. <paramref name="chain"/> is non-null only for the
+        /// head of a chain: collapsed, the box draws the run's title and count in place of the
+        /// quest; open, it draws the quest and wears the mark that closes the run again.</summary>
         public void Bind(QuestNode node, Action<QuestNode> onClicked,
-            Action<QuestNode> onHoverEnter = null, Action<QuestNode> onHoverExit = null)
+            Action<QuestNode> onHoverEnter = null, Action<QuestNode> onHoverExit = null,
+            ChainSummary chain = null, Action<QuestNode> onChainToggle = null)
         {
             Node = node;
             OnClicked = onClicked;
             OnHoverEnter = onHoverEnter;
             OnHoverExit = onHoverExit;
+
+            // Before RefreshBadges, which reads them - and reset for every bind, chain or not, or
+            // a pooled view would keep standing for a run it no longer heads.
+            _chain = chain;
+            OnChainToggle = onChainToggle;
 
             // Views are pooled, so a recycled one arrives carrying whatever dim the highlight left
             // on it. Reset here for the same reason RefreshStatus resets the colours.
@@ -472,7 +540,7 @@ namespace QuestTree.UI
             // The box the layout reserved for this quest, from the same call the layout made - so
             // the text is fitted to the space that was actually allocated, rather than to a global
             // constant the box no longer has.
-            var size = MeasureSize(node, out _tall);
+            var size = MeasureSize(node, chain, out _tall);
             _size = size;
 
             // Glyph and badges live top-right; RefreshBadges above has just counted them.
@@ -481,9 +549,11 @@ namespace QuestTree.UI
 
             // The head line only has to name the series, so it may lose its tail; the single-line
             // and episode forms keep theirs, because that is what tells one box from the next.
-            _title.text = GameStyle.Safe(_tall && tail != null
-                ? FitToWidth(head, titleWidth, protectTail: false) + "\n" + FitToWidth(tail, titleWidth)
-                : FitToWidth(DisplayName(node), titleWidth));
+            _title.text = GameStyle.Safe(
+                chain != null && chain.Collapsed ? FitToWidth(chain.Title, titleWidth)
+                : _tall && tail != null
+                    ? FitToWidth(head, titleWidth, protectTail: false) + "\n" + FitToWidth(tail, titleWidth)
+                    : FitToWidth(DisplayName(node), titleWidth));
 
             ((RectTransform)transform).sizeDelta = size;
 
@@ -590,6 +660,32 @@ namespace QuestTree.UI
             return string.IsNullOrEmpty(tail) ? shortHead : shortHead + " \u2013 " + tail;
         }
 
+        /// <summary>What a collapsed chain's box is titled: the series name its members share
+        /// ("Gunsmith" for Part 1 through Part 25), unabbreviated because it is the whole title
+        /// and has the room. A run whose members share no series - a chain of unrelated names -
+        /// is "first quest +N": the head's name alone over "3/5 done" read as the head's own
+        /// progress, and the +N says the count is for a run.</summary>
+        public static string ChainTitle(QuestChain chain)
+        {
+            if (chain == null || chain.Members.Count == 0) return "";
+
+            string shared = null;
+
+            foreach (var member in chain.Members)
+            {
+                var (head, tail) = TitleParts(member.Name);
+                if (tail == null) return HeadPlusRest(chain);
+
+                if (shared == null) shared = head;
+                else if (!string.Equals(shared, head, StringComparison.OrdinalIgnoreCase)) return HeadPlusRest(chain);
+            }
+
+            return shared ?? HeadPlusRest(chain);
+        }
+
+        private static string HeadPlusRest(QuestChain chain) =>
+            $"{DisplayName(chain.Head)} +{chain.Members.Count - 1}";
+
         /// <summary>The separators quest names use between a series and its episode: "Gunsmith -
         /// Part 3", "The Survivalist Path - Thrifty", "Textile - Part 1 - USEC".</summary>
         private static readonly string[] Separators = { " \u2013 ", " - ", ": " };
@@ -614,7 +710,9 @@ namespace QuestTree.UI
         /// QuestController.OnConditionalStatusChanged fires.</summary>
         public void RefreshStatus()
         {
-            var status = Node.Status;
+            // A collapsed head is coloured by the quest the player would do next in the run, not by
+            // its own (usually long-completed) first quest.
+            var status = _chain != null && _chain.Collapsed ? _chain.Status : Node.Status;
             var color = ColorFor(status);
 
             // "Cannot be started", which is now two statuses rather than one. Every recede-into-the-
@@ -868,7 +966,7 @@ namespace QuestTree.UI
 
         /// <summary>Shows, hides and fills the in-progress bar. Built the first time a box needs
         /// one; most boxes never do.</summary>
-        private void ShowProgress(bool wanted, float fraction)
+        private void ShowProgress(bool wanted, float fraction, ENodeStatus tint = ENodeStatus.Active)
         {
             _progressWanted = wanted;
 
@@ -881,7 +979,7 @@ namespace QuestTree.UI
             EnsureProgressBar();
 
             _progressTrack.SetActive(true);
-            if (_progressFillImage != null) _progressFillImage.color = ColorFor(ENodeStatus.Active);
+            if (_progressFillImage != null) _progressFillImage.color = ColorFor(tint);
 
             // The fill is an ANCHOR, not a width: the bar stretches with the box, and boxes stopped
             // being a fixed width in 1.9.0, so a width computed here would be wrong for every node
@@ -927,6 +1025,22 @@ namespace QuestTree.UI
         /// the box.</summary>
         public void RefreshDetails()
         {
+            // A collapsed head's row is the run's count, and its bar is quests done rather than
+            // objectives - in the completed colour, since that is what the fill means here.
+            if (_chain != null && _chain.Collapsed)
+            {
+                var chainTotal = _chain.Total;
+                var chainDone = _chain.Completed;
+                var chainParts = new[] { Node.TraderName, $"{chainDone}/{chainTotal} done" }
+                    .Where(p => !string.IsNullOrEmpty(p));
+
+                _subtitle.text = string.Join("  ·  ", chainParts);
+                if (_rewards != null) _rewards.text = "";
+
+                ShowProgress(chainTotal > 0, chainTotal > 0 ? (float)chainDone / chainTotal : 0f, ENodeStatus.Completed);
+                return;
+            }
+
             var profile = QuestGraph.QuestDataClient.GetProfile();
             var status = Node.Status;
             var blocked = status == ENodeStatus.Locked || status == ENodeStatus.Gated;
@@ -1102,20 +1216,40 @@ namespace QuestTree.UI
         /// be switched off in Settings, and both go with the title once the box is only a code,
         /// where a 14px square is a smudge.
         ///
-        /// The first visible mark takes the inner slot, so a box wearing only C puts it exactly
-        /// where a box wearing only K puts that - the corner reads the same either way.
+        /// The chain mark, when there is one, always takes the corner slot - it is a control, and
+        /// a control should be where it was last time. After it the first visible mark takes the
+        /// next slot in, so a box wearing only C puts it exactly where a box wearing only K puts
+        /// that.
         /// </summary>
         private void RefreshBadges()
         {
-            var kappa = Node != null && Node.IsKappaRequired && ModSettings.ShowKappaBadge;
-            var collector = Node != null && Node.IsCollectorPrerequisite && ModSettings.ShowCollectorBadge;
-            // Not behind a setting: a box that will never be completable, or can never unlock, is
-            // a fact about the tree rather than a preference about its decoration.
-            var unobtainable = Node != null && Node.UnobtainableReason != null;
-            var missing = Node != null && Node.UnresolvedPrerequisiteIds.Count > 0;
-            _badgeSlots = (kappa ? 1 : 0) + (collector ? 1 : 0) + (unobtainable ? 1 : 0) + (missing ? 1 : 0);
+            BadgeFlags(Node, _chain, out var kappa, out var collector, out var unobtainable, out var missing, out var chainMark);
+            _badgeSlots = (kappa ? 1 : 0) + (collector ? 1 : 0) + (unobtainable ? 1 : 0) + (missing ? 1 : 0) + (chainMark ? 1 : 0);
 
             var slot = 0;
+
+            // The chain mark takes the corner slot so it sits in the same place on every head,
+            // whatever else the box wears - it is the one badge that is also a control.
+            if (chainMark)
+            {
+                var badge = EnsureBadge(ref _chainBadge, "+", ChainBadgeColor);
+                _chainBadgeText ??= badge.GetComponentInChildren<TMP_Text>();
+
+                // Its own click rather than the box's: closing a run must not also select its
+                // first quest, and Unity hands a click to the topmost handler only. Guarded on the
+                // component itself, so a second handler can never be added.
+                if (badge.GetComponent<ChainBadgeClick>() == null)
+                {
+                    badge.GetComponent<Image>().raycastTarget = true;
+                    badge.AddComponent<ChainBadgeClick>().View = this;
+                }
+
+                // The en dash the titles already draw ("Gunsmith – Part 3"), so it is known to be
+                // in the font; a true minus sign is not.
+                if (_chainBadgeText != null) _chainBadgeText.text = _chain.Collapsed ? "+" : "–";
+                PlaceBadge(badge, slot++, true);
+            }
+            else if (_chainBadge != null) _chainBadge.SetActive(false);
 
             if (kappa) PlaceBadge(EnsureBadge(ref _kappaBadge, "K", GameStyle.KappaGold), slot++, true);
             else if (_kappaBadge != null) _kappaBadge.SetActive(false);
@@ -1128,6 +1262,55 @@ namespace QuestTree.UI
 
             if (missing) PlaceBadge(EnsureBadge(ref _missingBadge, "?", MissingBadgeColor), slot, true);
             else if (_missingBadge != null) _missingBadge.SetActive(false);
+        }
+
+        /// <summary>Which marks a box wears. ONE answer for MeasureSize and RefreshBadges: the box
+        /// is sized for the marks it will draw, and two counts that could disagree is how a title
+        /// ends up cut at a width nothing laid it out for.
+        ///
+        /// K and C follow their settings; "!" and "?" do not - a box that will never be completable,
+        /// or can never unlock, is a fact about the tree rather than a preference about its
+        /// decoration. A collapsed head wears its members' K, C and "!" - a run with a Kappa quest
+        /// in it is on the Kappa path whichever member that is. "?" is only ever the head's own:
+        /// a chain with a missing prerequisite anywhere is never collapsed.</summary>
+        private static void BadgeFlags(QuestNode node, ChainSummary chain,
+            out bool kappa, out bool collector, out bool unobtainable, out bool missing, out bool chainMark)
+        {
+            kappa = collector = unobtainable = missing = chainMark = false;
+            if (node == null) return;
+
+            var collapsed = chain != null && chain.Collapsed;
+
+            kappa = (collapsed ? chain.AnyKappa : node.IsKappaRequired) && ModSettings.ShowKappaBadge;
+            collector = (collapsed ? chain.AnyCollector : node.IsCollectorPrerequisite) && ModSettings.ShowCollectorBadge;
+            unobtainable = collapsed ? chain.AnyUnobtainable : node.UnobtainableReason != null;
+            missing = node.UnresolvedPrerequisiteIds.Count > 0;
+            chainMark = chain != null;
+        }
+
+        private static int CountBadges(QuestNode node, ChainSummary chain)
+        {
+            BadgeFlags(node, chain, out var kappa, out var collector, out var unobtainable, out var missing, out var chainMark);
+            return (kappa ? 1 : 0) + (collector ? 1 : 0) + (unobtainable ? 1 : 0) + (missing ? 1 : 0) + (chainMark ? 1 : 0);
+        }
+
+        /// <summary>The chain mark's fill: the accent, because it is a control rather than a
+        /// state, and the accent is what the rest of the panel's controls wear.</summary>
+        private static Color ChainBadgeColor => GameStyle.AccentColor;
+
+        /// <summary>Routes a click on the chain mark to the box's toggle. A component because the
+        /// mark is a child GameObject and Unity delivers the click to it, not to the box.</summary>
+        private sealed class ChainBadgeClick : MonoBehaviour, IPointerClickHandler
+        {
+            public QuestNodeView View;
+
+            public void OnPointerClick(PointerEventData eventData)
+            {
+                if (View == null || View.OnChainToggle == null) return;
+
+                GameStyle.PlaySound(EUISoundType.ButtonClick);
+                View.OnChainToggle.Invoke(View.Node);
+            }
         }
 
         /// <summary>The "!" mark's fill: the panel's error red, so the badge and the line that
