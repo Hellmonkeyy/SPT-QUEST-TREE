@@ -1,3 +1,26 @@
+# Quest Tracker 1.13.3
+
+**The tracker opens in half a second instead of a second and a half.** The first open of a session
+spent most of its time turning the map's SVG into a mesh on the game's main thread. That runs on a
+worker thread now: the map tab appears at once with its list and *Rendering the map...*, and the
+picture arrives about a second later. Measured: 1,390 ms down to 499 ms.
+
+**The server starts seven seconds sooner.** The map-marker build read every map's loot table off
+disk on the boot path. It runs in the background now, and each table is read once per server run
+instead of on every rebuild.
+
+**A tarkov.dev outage no longer costs every boot.** A failure is remembered for a day (delete
+`tarkovdev-last-failure.txt` to retry sooner); a successful download refreshes itself after a week
+instead of being kept forever.
+
+## Under the hood
+
+- One log line per panel open with the time in each phase; the three per-profile server routes log
+  their time on the first request and whenever they exceed 200 ms. At Debug they were never seen.
+- The hover card finds its canvas once instead of every frame.
+
+---
+
 # Quest Tracker 1.13.2
 
 The tree tells the truth about three kinds of quest it used to draw as ordinary locked boxes, and
