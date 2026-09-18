@@ -1,3 +1,15 @@
+# Quest Tracker 1.15.0
+
+**Seven boxes become one.** A run of quests in single file - each unlocking exactly the next, one
+trader - draws as one box with the series name, a done count and a progress bar, coloured by the
+first quest still to do. Click to unfold; the `-` on the first quest folds it again; the tree
+remembers what you opened for the session. A run stays open when something inside needs seeing: a
+failed quest, a missing prerequisite, a search hit on a member's name, or a quest opened from the
+panel. The **Chains** toolbar button (`C`) turns folding off; the setting persists. On the reference
+profile: 148 runs holding 498 of 827 quests, the longest 21.
+
+---
+
 # Quest Tracker 1.14.0
 
 **The game agrees with the build.** Every verdict this mod gave about a Gunsmith build was the mod
