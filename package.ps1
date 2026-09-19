@@ -9,8 +9,14 @@
 # objective-gps / tarkovdev / .bak is a non-zero exit. It also refuses when the four version strings
 # (two ModInfo.cs, two csproj) disagree, or when the built DLLs do not carry that version.
 #
-# Proven able to fail before it shipped: a planted objective-gps.json in the staging folder, and a
-# mismatched version constant, each made it exit non-zero.
+# It also runs check-dtos.py, which compares the server's wire DTOs against the client's
+# hand-mirrored copies of them. The two halves cannot share a source file, the mirrors are copied by
+# hand, and a dropped field reads as a default rather than as an error - the 1.12.2 ids fault and
+# several silently-missing fields all came from that gap. Its own header says what it does not catch.
+#
+# Proven able to fail before it shipped: a planted objective-gps.json in the staging folder, a
+# mismatched version constant, and (for the DTO check) a bogus property added to the client's
+# RewardDto, each made it exit non-zero.
 #
 # Usage:  .\package.ps1                 build, stage, zip, verify
 #         .\package.ps1 -RefreshZones   first copy zones\*.json from the install into the repo
@@ -56,6 +62,23 @@ if (@($distinct).Count -ne 1) {
 }
 $version = $distinct
 Write-Host "Version $version in all four places." -ForegroundColor Green
+
+# ---------------------------------------------------------------- the two halves' DTOs must agree
+# Before the build, not after: a mirror that has drifted is not something a successful compile says
+# anything about, and there is no point spending two builds to find out. Before the release-notes
+# check too, so that the one failure here that is about the CODE is reported ahead of the one that is
+# about the paperwork - and so this gate is reachable on a version whose notes are not written yet.
+$dtoCheck = Join-Path $repo "check-dtos.py"
+if (-not (Test-Path $dtoCheck)) { Fail "missing $dtoCheck - the DTO drift check is not optional" }
+if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
+    Fail "python is not on PATH, so check-dtos.py cannot run - install Python 3 rather than packaging unchecked"
+}
+
+& python $dtoCheck
+if ($LASTEXITCODE -ne 0) {
+    Fail "the server DTOs and the client mirrors disagree (see above) - fix the mirror, in the same commit as the change that moved it"
+}
+Write-Host "Server DTOs and client mirrors agree." -ForegroundColor Green
 
 $notes = Join-Path $repo "Releases\RELEASE-NOTES-$version.md"
 if (-not (Test-Path $notes)) { Fail "write Releases\RELEASE-NOTES-$version.md first - a release without notes is not a release" }
