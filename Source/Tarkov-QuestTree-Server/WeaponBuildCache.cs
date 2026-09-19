@@ -45,7 +45,15 @@ namespace QuestTreeServer
         // 10: the proof machinery is gone. The squeeze loop no longer stops at a cost lower bound and no
         // longer falls through into shrinking part count, so a history solved under 9 can differ from what
         // 10 would find; the carry-over branch keeps the builds and re-measures them.
-        private const int CurrentSolver = 10;
+        //
+        // 11: THE OBJECTIVE ITSELF CHANGED. A part is now priced at the cheapest trader cash price rather
+        // than at the handbook, and a part no trader sells costs handbook times a multiple - so a build that
+        // was cheapest under 10 can be beaten under 11 by one that swaps a flea-only part for a trader-sold
+        // equivalent. Nothing about the search changed; the number it is minimising did, which breaks the
+        // same promise in the same way. The carry-over branch keeps the builds and re-measures them, so an
+        // existing install loses no work: every build is still legal, still verified before use, and the
+        // search starts from it rather than from nothing.
+        private const int CurrentSolver = 11;
 
         /// <summary>Shape of the file itself, for the day a field is added.</summary>
         private const int CurrentSchema = 1;
@@ -487,7 +495,23 @@ namespace QuestTreeServer
         /// Adding them moves the hash, so every existing install pays the carry-over branch once. That keeps
         /// Parts - the builds themselves survive - and zeroes what was measured around them: Nodes, Cost,
         /// Changes, PerPurchase and Binding. Worth the invalidation, and worth stating rather than calling it
-        /// a re-solve.</summary>
+        /// a re-solve.
+        ///
+        /// WHAT IS DELIBERATELY NOT IN HERE: the trader tables, even though the shared objective now reads
+        /// prices out of them. Two reasons, and the second is the important one.
+        ///
+        /// A cached build is a claim about LEGALITY and a claim about being cheapest, and only the first is
+        /// what this hash protects. Changing what a scope costs cannot make a build unassemblable; it can
+        /// only mean a cheaper one now exists, which is a reason to keep searching - exactly what the
+        /// per-profile Fingerprint over in PartAvailability says about trader stock, and handled the same
+        /// way: the answer is stale in quality, never wrong.
+        ///
+        /// And hashing them would end the shipped history. Every trader mod, every price tweak, every
+        /// assort edit anybody installs would move the hash, so no modded install would ever load the seed
+        /// on its fast path again - it would take the carry-over branch on every single boot, permanently
+        /// non-authoritative, re-measuring sixty builds forever to discover the same answer. The shipped
+        /// seed is the most valuable thing in this file and it is worth more than reacting to a price
+        /// change the search will notice by itself on its next pass.</summary>
         private string Fingerprint()
         {
             if (_fingerprint != null) return _fingerprint;

@@ -37,7 +37,7 @@ namespace QuestTreeServer
     /// GetAssort(sessionId, trader, showLockedAssorts: false) is what makes this honest - the server has
     /// already stripped what loyalty and quest progress lock, so there is no filtering here to get wrong.
     /// Trader ids come from the profile rather than a fixed list, so a modded trader counts as much as
-    /// Prapor does.
+    /// Prapor does - with ONE exclusion, Fence, for the reason given at the loop that skips him.
     ///
     /// The flea tier is switched by the profile's level against the game's own RagFair.MinUserLevel, read
     /// from the globals rather than assumed to be fifteen, and by the template's CanSellOnRagfair flag. A
@@ -46,8 +46,8 @@ namespace QuestTreeServer
     ///
     /// MULTI-PROFILE, because this is used with FIKA: a host serves a group, and this install already has
     /// two profiles. Everything here is per session and allocated per call - the only shared state is the
-    /// read-only currency set and the read-only flea price map - so several sessions asking at once cannot
-    /// interfere with each other.
+    /// read-only currency set and the flea read, which is replaced wholesale on a timer and never written
+    /// into - so several sessions asking at once cannot interfere with each other.
     ///
     /// THAT CHANGED, and the difference is the one to know before writing to a Sources: For memoises the
     /// whole object for a few seconds, so one instance is now shared between request threads and the
@@ -273,6 +273,16 @@ namespace QuestTreeServer
             foreach (var (trader, info) in (profile.TradersInfo ?? new Dictionary<MongoId, TraderInfo>())
                          .OrderBy(pair => pair.Key.ToString(), StringComparer.Ordinal))
             {
+                // FENCE IS NOT A SOURCE. His stock is randomly generated, rotates on a timer, and is priced
+                // at his own mark-up, so "Fence has one" is not a fact the player can act on ten minutes
+                // later and not a price anybody else will be quoted. Counting him made a part look buyable
+                // that will not be there, which is the one thing this class exists to stop.
+                //
+                // It also costs two FenceService generations per profile per read - GetAssort is called
+                // twice, once for the Gated diagnostic - which is the most expensive trader here by far and
+                // was being paid for an answer that should not have been used.
+                if (trader == SPTarkov.Server.Core.Models.Enums.Traders.FENCE) continue;
+
                 try
                 {
                     Read(sessionId, trader, sources, stamp, info);
@@ -290,10 +300,12 @@ namespace QuestTreeServer
             var minimum = globals.Configuration?.RagFair?.MinUserLevel;
             var level = profile.Info?.Level ?? 0;
 
+            var flea = FleaPrices();
+
             sources.FleaLevel = minimum ?? int.MaxValue;
             sources.FleaAccess = minimum is { } needed && level >= needed;
-            sources.Flea = FleaPrices();
-            sources.FleaBanned = _banned ?? new HashSet<MongoId>();
+            sources.Flea = flea.Prices;
+            sources.FleaBanned = flea.Banned;
             // Empty means the file could not be READ, not that no vanilla items exist - so the empty
             // case answers true rather than asking the set, which would answer false for every template.
             // Asking it directly made every part read as mod-injected on an install where nothing was: the
@@ -519,73 +531,66 @@ namespace QuestTreeServer
         /// <summary>The cheapest cash price among a trader's alternative schemes for one offer, or null when
         /// every alternative wants goods.
         ///
-        /// The outer list is ALTERNATIVES - any one of them buys the item - and each inner list is that
-        /// alternative's requirements. A single requirement naming a currency is a cash price; anything else
-        /// is a barter, and has no rouble amount to report.</summary>
-        /// <summary>Roubles per unit of a currency, from the handbook - which is how SPT's own
-        /// HandbookHelper.InRUB converts a trader's dollar or euro price. Roubles are 1; a currency
-        /// the handbook does not price (a modded one) is null, and a price in it is not a price.
-        ///
-        /// Until 1.16.0 a Peacekeeper price of 335 dollars was carried as 335 "roubles", on the
-        /// panel's cost labels, in the Cash totals, and in the bill measurement whose widest
-        /// disagreement - handbook 45,787 against paid 335 - is what gave it away.</summary>
-        private double? RoublesPer(MongoId currency)
-        {
-            if (currency.ToString().Equals(Currencies.Roubles, StringComparison.OrdinalIgnoreCase)) return 1d;
-
-            var rate = partPrices.Of(currency);
-            return rate is > 0 ? rate : null;
-        }
-
-        private long? CashPrice(TraderAssort assort, MongoId offer)
-        {
-            if (assort.BarterScheme == null || !assort.BarterScheme.TryGetValue(offer, out var alternatives))
-                return null;
-
-            long? cheapest = null;
-
-            foreach (var scheme in alternatives ?? new List<List<BarterScheme>>())
-            {
-                if (scheme == null || scheme.Count != 1) continue;
-
-                var requirement = scheme[0];
-
-                if (requirement?.Template == null) continue;
-                if (!Currencies.All.Contains(requirement.Template.ToString())) continue;
-
-                var rate = RoublesPer(requirement.Template);
-                if (rate == null) continue;
-
-                var price = (long)Math.Round((requirement.Count ?? 0d) * rate.Value);
-
-                if (price <= 0) continue;
-                if (cheapest == null || price < cheapest) cheapest = price;
-            }
-
-            return cheapest;
-        }
+        /// DELEGATED, not implemented here. What counts as a cash price - a single requirement naming one of
+        /// the game's currencies, converted at the handbook's rate - and what a dollar is worth in roubles
+        /// both live in PartPrices now, because the shared boot read needs the identical rule and two
+        /// implementations of it is how the 1.16.0 currency bug survived as long as it did: a Peacekeeper
+        /// price of 335 dollars was carried as 335 "roubles" on every cost label the panel drew.</summary>
+        private long? CashPrice(TraderAssort assort, MongoId offer) => partPrices.CashPrice(assort, offer);
 
         private readonly object _fleaLock = new();
-        private Dictionary<MongoId, long>? _flea;
-        private HashSet<MongoId>? _banned;
         private HashSet<MongoId>? _vanilla;
 
+        /// <summary>One read of the flea: the prices and the bans together, with when they were taken.
+        ///
+        /// ONE reference for both, rather than two fields, because they are two halves of one answer and a
+        /// caller that got the new prices with the old bans would be reporting a part as flea-banned and
+        /// flea-priced at the same time.</summary>
+        private sealed class FleaRead
+        {
+            public Dictionary<MongoId, long> Prices { get; init; } = new();
+            public HashSet<MongoId> Banned { get; init; } = new();
+            public DateTime At { get; init; }
+        }
+
+        private FleaRead? _fleaRead;
+
+        /// <summary>How long a flea read is trusted.
+        ///
+        /// NOT FOREVER, which is what it used to be. LiveFleaPrices rewrites the server's price table about
+        /// once an hour, and this was memoised for the life of the process - so a server left running
+        /// overnight reported yesterday's flea prices on every panel and in every "cost of restriction"
+        /// figure, with nothing anywhere saying the number was stale.
+        ///
+        /// A minute rather than the five seconds For uses: the walk is 6,500 templates with two service
+        /// calls each, which is far too much to pay every five seconds, and a minute is already sixty times
+        /// finer than the hourly rewrite it exists to follow. Nothing here is a correctness question - a
+        /// flea price is an estimate and is labelled one - so the only thing being bought is that the
+        /// estimate moves when the thing it estimates does.</summary>
+        private static readonly TimeSpan FleaPricesFor = TimeSpan.FromMinutes(1);
+
         /// <summary>Every template the game lets a player list on the flea, with the server's price for it.
-        /// Built once: it is a property of the item data and the price table, not of any profile.
+        /// A property of the item data and the price table, not of any profile - so it is shared across
+        /// profiles and rebuilt on a timer rather than per call.
         ///
         /// Listable is the SERVER'S rule - RagfairServerHelper.IsItemValidRagfairItem, which applies the
         /// ragfair blacklist as well as CanSellOnRagfair - rather than the flag alone, so a part the config
         /// bans is banned here too. A template with no price is left out: GetFleaPriceForItem hands back 1
         /// rouble when it has no price at all, and 1 rouble is not a price, it is the absence of one dressed
         /// as a number. An unpriced part must never look cheap.</summary>
-        private Dictionary<MongoId, long> FleaPrices()
+        private FleaRead FleaPrices()
         {
-            if (_flea != null) return _flea;
+            var known = _fleaRead;
+
+            if (known != null && DateTime.UtcNow - known.At < FleaPricesFor) return known;
 
             lock (_fleaLock)
             {
-                if (_flea != null) return _flea;
+                known = _fleaRead;
 
+                if (known != null && DateTime.UtcNow - known.At < FleaPricesFor) return known;
+
+                var first = known == null;
                 var prices = new Dictionary<MongoId, long>();
                 var banned = new HashSet<MongoId>();
                 var unpriced = 0;
@@ -638,13 +643,16 @@ namespace QuestTreeServer
                     prices[id] = (long)Math.Round(price);
                 }
 
-                logger.Info(
+                var line =
                     $"Quest Tracker: {prices.Count:N0} template(s) are flea-listable with a price, {unpriced:N0} " +
-                    $"listable but unpriced (not counted), {banned.Count:N0} refused by the game's flea rules.");
+                    $"listable but unpriced (not counted), {banned.Count:N0} refused by the game's flea rules.";
 
-                _banned = banned;
+                // Info once, Debug on every refresh after that. The counts are worth seeing at boot and
+                // would be a line a minute for the rest of the server's life otherwise.
+                if (first) logger.Info(line);
+                else logger.Debug(line + " (re-read; the server's flea prices move on their own clock)");
 
-                return _flea = prices;
+                return _fleaRead = new FleaRead { Prices = prices, Banned = banned, At = DateTime.UtcNow };
             }
         }
 

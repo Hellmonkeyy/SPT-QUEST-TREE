@@ -93,6 +93,8 @@ namespace QuestTreeServer
             // first boot happened to find.
             _seed = weaponBuildCache.Advance();
 
+            ReportPricing();
+
             GetPayloadJson();
 
             // After the payload, because the set of weapons to walk is filled while it is built.
@@ -118,14 +120,56 @@ namespace QuestTreeServer
             return Task.CompletedTask;
         }
 
-        /// <summary>The shared baseline's pricing: the handbook, static and the same for everyone, so the
-        /// history it produces ships. Built once; PartPrices reads the environment for PerPurchase.</summary>
-        private WeaponSolver.Pricing Handbook =>
-            _handbook ??= new WeaponSolver.Pricing
+        /// <summary>What the shared search will be pricing parts with, before it prices anything - and the
+        /// two numbers that say whether the pricing works at all.
+        ///
+        /// FIRST, and unconditionally, because every other line about money in this file is downstream of it
+        /// and a silent failure here looks like nothing at all. The three coverage counts partition the item
+        /// database, so a trader read that returned nothing shows up as everything landing in the handbook
+        /// column rather than as prices that merely look a bit high.
+        ///
+        /// THE CHECK THAT CAN FAIL is the last number. The shipped database prices 618 root offers in
+        /// dollars and 44 in euros, all of them Peacekeeper, Skier, Therapist, Mechanic and Ragman stock. If
+        /// PartPrices.RoublesPer stops converting them, every one of those offers is skipped in silence, the
+        /// parts behind them quietly fall back to handbook times the multiple, and the only way anybody finds
+        /// out is a Peacekeeper scope priced as though nobody sold it. Zero non-rouble offers on a stock
+        /// install means exactly that has happened.</summary>
+        private void ReportPricing()
+        {
+            var coverage = partPrices.SharedCoverage;
+
+            logger.Info(
+                $"Quest Tracker: the shared builds are priced at the cheapest trader cash price across " +
+                $"{coverage.Traders} trader(s) at any loyalty (Fence excluded) - {coverage.FromTraders:N0} " +
+                $"template(s) priced that way, {coverage.FleaOnly:N0} sold by no trader and priced at handbook " +
+                $"x{partPrices.FleaOnlyMultiple}, {coverage.Unpriced:N0} with no price at all. " +
+                $"{coverage.NonRoubleOffers:N0} offer(s) were priced in dollars or euros and converted" +
+                (coverage.NonRoubleOffers == 0
+                    ? " - ZERO, WHICH MEANS THE CURRENCY CONVERSION IS BROKEN on any install with a Peacekeeper"
+                    : "") +
+                (coverage.UnknownCurrencyOffers > 0
+                    ? $", and {coverage.UnknownCurrencyOffers:N0} in a currency the handbook does not price were skipped"
+                    : "") +
+                ".");
+        }
+
+        /// <summary>The shared baseline's pricing: what a trader would charge, falling back to the handbook
+        /// times a multiple for the parts no trader sells.
+        ///
+        /// Still static and still the same for everyone - it is read once from the database's own trader
+        /// tables, with no profile in it - so the history it produces still ships. PartPrices.Shared carries
+        /// the whole rule and the measurements behind it; what matters here is that this is the ONLY pricing
+        /// the shared search ever sees, so a build in the cache is a build that was cheapest under it.
+        ///
+        /// Built once; PartPrices reads the environment for PerPurchase and the flea multiple.</summary>
+        private WeaponSolver.Pricing Shared =>
+            _shared ??= new WeaponSolver.Pricing
             {
-                Price = partPrices.Of,
+                Price = partPrices.Shared,
                 PerPurchase = partPrices.PerPurchase
             };
+
+        private WeaponSolver.Pricing? _shared;
 
         /// <summary>Runs the solver over every build requirement on this install, once, and says
         /// how many it could satisfy.
@@ -136,8 +180,6 @@ namespace QuestTreeServer
         /// the answer, and conflating the two would make a solver bug look like a poor trader level.
         ///
         /// Debug, because it is a developer's question. The one-line summary is Info.</summary>
-        private WeaponSolver.Pricing? _handbook;
-
         private void SurveySolver()
         {
             if (_questBuilds.Count == 0) return;
@@ -298,15 +340,17 @@ namespace QuestTreeServer
                     : "") +
                 (disagreed > 0 ? $", SOLVER AND VERIFIER DISAGREED ON {disagreed}" : "") + ".");
 
-            // The objective's own line: what the shared builds cost at handbook prices. No claim of
-            // minimality follows it any more - the cost floor that used to close this sentence is gone with
-            // the rest of the proof machinery, for the reason given above the counters.
+            // The objective's own line: what the shared builds cost under the pricing they were solved
+            // under. No claim of minimality follows it any more - the cost floor that used to close this
+            // sentence is gone with the rest of the proof machinery, for the reason given above the counters.
             logger.Info(
-                $"Quest Tracker: the objective - {cost:N0} roubles across {solved} build(s) at handbook prices " +
-                $"plus {partPrices.PerPurchase:N0} per purchase ({(solved > 0 ? cost / Math.Max(1, solved) : 0):N0} per " +
+                $"Quest Tracker: the objective - {cost:N0} roubles across {solved} build(s) at the cheapest trader " +
+                $"cash price, or handbook x{partPrices.FleaOnlyMultiple} where no trader sells the part, plus " +
+                $"{partPrices.PerPurchase:N0} per purchase ({(solved > 0 ? cost / Math.Max(1, solved) : 0):N0} per " +
                 $"build), over {changes} change(s) from the default presets ({(solved > 0 ? (double)changes / solved : 0d):0.##} " +
-                $"per build), {unpriced} purchase(s) with no handbook price; {withDefaults} of them have a default preset " +
-                $"to be measured against; {partPrices.Count:N0} templates priced.");
+                $"per build), {unpriced} purchase(s) no trader sells and the handbook does not list either; " +
+                $"{withDefaults} of them have a default preset to be measured against; {partPrices.Count:N0} " +
+                $"templates in the handbook.");
 
             if (reasons.Count > 0)
                 logger.Info(
@@ -1640,11 +1684,11 @@ namespace QuestTreeServer
                 ? weaponSolver.Solve(
                     weapon, thresholds, mustInclude, mustIncludeCategories,
                     allowed: null, knownGood: null, seed: seed, restarts: restarts, ceiling: working.Count,
-                    binding: binding, pricing: Handbook)
+                    binding: binding, pricing: Shared)
                 : weaponSolver.Solve(
                     weapon, thresholds, mustInclude, mustIncludeCategories,
                     allowed: null, knownGood: working, seed: seed, restarts: restarts,
-                    binding: binding, pricing: Handbook);
+                    binding: binding, pricing: Shared);
 
             weaponBuildCache.Cost(key, result.NodesOpened);
 
@@ -1660,7 +1704,7 @@ namespace QuestTreeServer
             var incumbent = Restore(remembered);
             var standing = incumbent == null
                 ? null
-                : weaponSolver.Describe(weapon, thresholds, mustInclude, mustIncludeCategories, incumbent, Handbook);
+                : weaponSolver.Describe(weapon, thresholds, mustInclude, mustIncludeCategories, incumbent, Shared);
 
             if (standing == null)
             {
@@ -1668,7 +1712,7 @@ namespace QuestTreeServer
                 return false;
             }
 
-            weaponBuildCache.Changed(key, standing.Changes, standing.Cost, Handbook.PerPurchase);
+            weaponBuildCache.Changed(key, standing.Changes, standing.Cost, Shared.PerPurchase);
 
             // Somewhere new that is no cheaper and no leaner: worth searching from, not worth serving.
             //
@@ -1695,7 +1739,7 @@ namespace QuestTreeServer
             }
 
             weaponBuildCache.Put(key, result.Parts, result.Floor, result.Binding, result.Changes, result.Cost,
-                Handbook.PerPurchase);
+                Shared.PerPurchase);
 
             lock (_working) _working[key] = result.Parts;
 
@@ -1754,7 +1798,7 @@ namespace QuestTreeServer
             if (incumbent != null)
             {
                 standing = weaponSolver.Describe(
-                    weapon, thresholds, mustInclude, mustIncludeCategories, incumbent, Handbook);
+                    weapon, thresholds, mustInclude, mustIncludeCategories, incumbent, Shared);
 
                 // BOTH have to agree before a remembered build is served, and they still do: the verifier has
                 // just passed these parts above - seated legally, nothing claimed twice, every threshold met -
@@ -1769,7 +1813,7 @@ namespace QuestTreeServer
                     // the builds that never change - which is most of them, and precisely the ones a directed
                     // search is for. And what it costs, so the file says what the objective is for it.
                     weaponBuildCache.Note(key, standing.Binding);
-                    weaponBuildCache.Changed(key, standing.Changes, standing.Cost, Handbook.PerPurchase);
+                    weaponBuildCache.Changed(key, standing.Changes, standing.Cost, Shared.PerPurchase);
 
                     if (!weaponBuildCache.Training)
                     {
@@ -1793,7 +1837,7 @@ namespace QuestTreeServer
             var result = weaponSolver.Solve(
                 weapon, thresholds, mustInclude, mustIncludeCategories,
                 allowed: null, knownGood: incumbent, seed: _seed,
-                binding: remembered?.Binding, pricing: Handbook);
+                binding: remembered?.Binding, pricing: Shared);
 
             // A remembered entry that FAILED verification counts as absent, and that word "rejected" is
             // load-bearing. Without it an invalid entry that happens to be small blocks its own replacement
@@ -1806,7 +1850,7 @@ namespace QuestTreeServer
                 && Sound(weapon, result.Parts, thresholds, mustInclude, mustIncludeCategories, "a freshly solved build"))
             {
                 weaponBuildCache.Put(key, result.Parts, result.Floor, result.Binding, result.Changes, result.Cost,
-                    Handbook.PerPurchase);
+                    Shared.PerPurchase);
 
                 // Interlocked, like the other writer of this counter. Rebuild() reaches Solve() from the
                 // zone-harvest POST thread while the training workers are running, so a plain ++ could lose

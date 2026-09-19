@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using SPTarkov.Common.Models.Logging;
 using SPTarkov.DI.Annotations;
 using SPTarkov.Server.Core.Models.Common;
+using SPTarkov.Server.Core.Models.Eft.Common.Tables;
 using SPTarkov.Server.Core.Models.Spt.Tables;
 
 namespace QuestTreeServer
@@ -16,19 +17,40 @@ namespace QuestTreeServer
     /// price was invisible, so headroom broke the tie and picked the one costing 3.8 times more. That is
     /// about 11,600 roubles wasted on one part of one build, and the same blindness applied to all sixty.
     ///
-    /// THE HANDBOOK AND NOT TRADER ASSORTS, deliberately. Handbook prices are static and the same for
-    /// everybody, so the answer stays cacheable, shippable and identical for every player. A trader's real
-    /// price depends on loyalty level and quest progress, which would make every build profile-specific,
-    /// destroy the shipped history and move the whole thing onto a per-request route. If real prices are
-    /// wanted they belong in what is DISPLAYED, not in what is optimised.
+    /// TWO PRICES, AND THE DIFFERENCE BETWEEN THEM IS THE POINT.
     ///
-    /// AN UNPRICED PART IS NOT A FREE PART. The handbook covers 4,288 items and a modded part may be in
-    /// none of them. Returning zero there would make the search prefer exactly the parts it knows least
-    /// about, so an item with no entry reports null, still counts as a purchase, and is reported as
-    /// unpriced rather than quietly costed at nothing.
+    ///   Of      - the handbook's valuation. Static, listed for 4,288 items, the game's own number. Used
+    ///             wherever something is being VALUED rather than bought: quest rewards, and the control
+    ///             column of the bill measurement.
+    ///   Shared  - what the shared weapon builds are optimised against, and the only thing the search sees.
+    ///
+    /// WHAT Shared IS, and why it is not the handbook any more. The cheapest CASH price any trader asks at
+    /// any loyalty level, read once from the trader tables in the database; and when no trader sells the
+    /// template for money at all, the handbook price times FleaOnlyMultiple, because that part has to come
+    /// off the flea market and the flea does not charge handbook. Measured on the shipped builds: trader
+    /// prices run a flat ~9% over handbook, which cannot reorder anything, while the 8% of part instances
+    /// that no trader sells accounted for 61% of the whole gap between what the handbook said and what the
+    /// player paid, at three to four and a half times handbook. The multiple is what makes the search
+    /// prefer a trader-sold part when one satisfies the same constraint - which is the decision the
+    /// handbook was getting wrong, not the arithmetic.
+    ///
+    /// STILL STATIC, WHICH IS WHAT KEEPS THE ANSWER SHIPPABLE. Read from TradersTable - the database's own
+    /// assort, every offer at every loyalty level, not what one profile has unlocked - so it is the same
+    /// number for every player on the same install and the solved history can ship. A trader's real price
+    /// for a real profile belongs in what is DISPLAYED, and that is what PartAvailability is for.
+    ///
+    /// AND NEVER THE FLEA MARKET. templateTable.Prices and RagfairPriceService are rewritten hourly by
+    /// LiveFleaPrices and differ between installs, so a build optimised against them would be
+    /// irreproducible, would move under a cache that cannot see it move, and could not be shipped. The
+    /// flea's influence enters as one constant multiple and nothing else.
+    ///
+    /// AN UNPRICED PART IS NOT A FREE PART. A modded part may be in no trader's list and in no handbook.
+    /// Returning zero there would make the search prefer exactly the parts it knows least about, so an item
+    /// with no price at all reports null, still counts as a purchase, and is reported as unpriced rather
+    /// than quietly costed at nothing.
     /// </summary>
     [Injectable(InjectionType.Singleton)]
-    public class PartPrices(ISptLogger<PartPrices> logger, TemplateTable templateTable)
+    public class PartPrices(ISptLogger<PartPrices> logger, TemplateTable templateTable, TradersTable tradersTable)
     {
         /// <summary>What one purchase is worth avoiding, in roubles, beyond what it costs.
         ///
@@ -65,6 +87,44 @@ namespace QuestTreeServer
 
         private long _perPurchase = -1;
 
+        /// <summary>What a part no trader sells costs, as a multiple of its handbook price.
+        ///
+        /// Three, measured. Across the shipped builds the parts nothing sells for cash went for three to
+        /// four and a half times what the handbook says, and they are where practically all of the
+        /// handbook's error lives. The exact figure matters far less than its existence: any multiple above
+        /// one makes the search break a tie towards the part a trader stocks, and that is the whole job.
+        ///
+        /// QUESTTREE_FLEA_MULTIPLE moves it. Below one is REFUSED rather than clamped - a multiple under
+        /// one would make an unbuyable part look cheaper than a buyable one, which is the exact inversion
+        /// this exists to prevent - and like PerPurchase it changes which build is best, so a history
+        /// solved under a different value is a history solved under a different question.</summary>
+        public long FleaOnlyMultiple
+        {
+            get
+            {
+                if (_fleaOnlyMultiple >= 0) return _fleaOnlyMultiple;
+
+                var asked = Environment.GetEnvironmentVariable("QUESTTREE_FLEA_MULTIPLE");
+
+                if (string.IsNullOrWhiteSpace(asked)) return _fleaOnlyMultiple = DefaultFleaOnlyMultiple;
+
+                if (!long.TryParse(asked, out var wanted) || wanted < 1)
+                {
+                    logger.Warning(
+                        $"Quest Tracker: QUESTTREE_FLEA_MULTIPLE is '{asked}', which is not a multiple of one or " +
+                        $"more - using the default {DefaultFleaOnlyMultiple}.");
+
+                    return _fleaOnlyMultiple = DefaultFleaOnlyMultiple;
+                }
+
+                return _fleaOnlyMultiple = wanted;
+            }
+        }
+
+        public const long DefaultFleaOnlyMultiple = 3;
+
+        private long _fleaOnlyMultiple = -1;
+
         private readonly object _lock = new();
         private Dictionary<MongoId, long>? _prices;
 
@@ -76,9 +136,67 @@ namespace QuestTreeServer
             return prices.TryGetValue(template, out var price) ? price : null;
         }
 
+        /// <summary>What the shared weapon builds are optimised against: the cheapest cash price any trader
+        /// asks at any loyalty, else the handbook times FleaOnlyMultiple, else null.
+        ///
+        /// Null means no trader sells it and the handbook does not list it. That is genuinely unpriced and
+        /// is carried as null so the search counts it as a purchase without costing it at nothing.</summary>
+        public long? Shared(MongoId template)
+        {
+            if (TraderPrices().TryGetValue(template, out var trader)) return trader;
+
+            return Of(template) is { } handbook ? handbook * FleaOnlyMultiple : null;
+        }
+
         /// <summary>How many templates carry a price. Reported at boot, because "nothing is priced" and
         /// "the handbook could not be read" produce identical silence otherwise.</summary>
         public int Count => Prices().Count;
+
+        /// <summary>How the item database splits under Shared, and the two numbers that say whether the
+        /// currency conversion behind it works at all.
+        ///
+        /// FromTraders, FleaOnly and Unpriced partition templateTable.Items: every template falls in
+        /// exactly one, so the three add up to the database and a broken trader read shows as the partition
+        /// collapsing onto FleaOnly rather than as a plausible-looking price.
+        ///
+        /// NonRoubleOffers is the check that can actually fail. The shipped database prices 618 offers in
+        /// dollars and 44 in euros; if RoublesPer stops converting them they are skipped in silence, every
+        /// Peacekeeper part quietly becomes handbook times the multiple, and nothing else in the log moves.
+        /// Zero here means exactly that.</summary>
+        public readonly record struct Coverage(
+            int Traders,
+            int FromTraders,
+            int FleaOnly,
+            int Unpriced,
+            int NonRoubleOffers,
+            int UnknownCurrencyOffers);
+
+        public Coverage SharedCoverage
+        {
+            get
+            {
+                // Forces the trader read, which is also what fills the offer counters beside it.
+                var traders = TraderPrices();
+                var handbook = Prices();
+
+                var fromTraders = 0;
+                var fleaOnly = 0;
+                var unpriced = 0;
+                var items = templateTable.Items;
+
+                if (items != null)
+                    foreach (var id in items.Keys)
+                    {
+                        if (traders.ContainsKey(id)) fromTraders++;
+                        else if (handbook.ContainsKey(id)) fleaOnly++;
+                        else unpriced++;
+                    }
+
+                var read = _traderRead!;
+
+                return new Coverage(read.Traders, fromTraders, fleaOnly, unpriced, read.NonRouble, read.UnknownCurrency);
+            }
+        }
 
         private Dictionary<MongoId, long> Prices()
         {
@@ -110,6 +228,163 @@ namespace QuestTreeServer
 
                 return _prices = prices;
             }
+        }
+
+        private readonly object _traderLock = new();
+
+        /// <summary>The trader read and the counters taken during it, published as ONE reference so a
+        /// caller can never see the prices without the numbers that describe them. Three separate int
+        /// fields beside the dictionary would be three writes another thread could read half of.</summary>
+        private sealed class TraderRead
+        {
+            public Dictionary<MongoId, long> Prices { get; init; } = new();
+            public int Traders { get; init; }
+            public int NonRouble { get; init; }
+            public int UnknownCurrency { get; init; }
+        }
+
+        private TraderRead? _traderRead;
+
+        /// <summary>The cheapest cash price each template is sold at by any trader, at any loyalty level.
+        ///
+        /// Built once, from the DATABASE'S assort rather than a generated one: TradersTable holds what the
+        /// install ships, every offer at every level, with no profile in it. That is what makes the answer
+        /// the same for every player and so shippable - and it is also why this cannot be compared against
+        /// what PartAvailability reports, which is one profile's unlocked subset at one moment.
+        ///
+        /// ROOT OFFERS ONLY. A scope fitted to a rifle on Prapor's list is not separately purchasable, and
+        /// counting its price as that template's price is how a build gets costed at money nobody could
+        /// spend. The root of an offer is slotId "hideout"; 420 of Prapor's 951 assort rows are roots.
+        ///
+        /// FENCE IS EXCLUDED, for the reason PartAvailability excludes him: his stock is random, rotates,
+        /// and carries his mark-up, so it is not a price the next player will see. His database assort is an
+        /// empty stub anyway - the real one is generated per boot by FenceService - so nothing is lost here,
+        /// but a mod that fills it in must not be allowed to make the shared builds install-specific.</summary>
+        private Dictionary<MongoId, long> TraderPrices()
+        {
+            if (_traderRead != null) return _traderRead.Prices;
+
+            lock (_traderLock)
+            {
+                if (_traderRead != null) return _traderRead.Prices;
+
+                var cheapest = new Dictionary<MongoId, long>();
+                var tally = new Tally();
+                var traders = 0;
+
+                foreach (var (id, trader) in tradersTable)
+                {
+                    if (id == SPTarkov.Server.Core.Models.Enums.Traders.FENCE) continue;
+
+                    var assort = trader?.Assort;
+                    var items = assort?.Items;
+
+                    if (items == null || items.Count == 0) continue;
+
+                    traders++;
+
+                    foreach (var offer in items)
+                    {
+                        if (offer == null) continue;
+                        if (!string.Equals(offer.SlotId, "hideout", StringComparison.Ordinal)) continue;
+
+                        if (CashPrice(assort!, offer.Id, tally) is not { } cash) continue;
+
+                        if (!cheapest.TryGetValue(offer.Template, out var best) || cash < best)
+                            cheapest[offer.Template] = cash;
+                    }
+                }
+
+                _traderRead = new TraderRead
+                {
+                    Prices = cheapest,
+                    Traders = traders,
+                    NonRouble = tally.NonRouble,
+                    UnknownCurrency = tally.UnknownCurrency
+                };
+
+                return _traderRead.Prices;
+            }
+        }
+
+        /// <summary>Roubles per unit of a currency, from the handbook - which is how SPT's own
+        /// HandbookHelper.InRUB converts a trader's dollar or euro price. Roubles are 1; a currency
+        /// the handbook does not price (a modded one) is null, and a price in it is not a price.
+        ///
+        /// HERE, AND NOWHERE ELSE. Until 1.16.0 a Peacekeeper price of 335 dollars was carried as 335
+        /// "roubles", on the panel's cost labels, in the Cash totals, and in the bill measurement whose
+        /// widest disagreement - handbook 45,787 against paid 335 - is what gave it away. It now has one
+        /// implementation, used by both the profile-specific read in PartAvailability and the shared read
+        /// above, because two of them is how one of them stays wrong.</summary>
+        public double? RoublesPer(MongoId currency)
+        {
+            if (currency.ToString().Equals(Currencies.Roubles, StringComparison.OrdinalIgnoreCase)) return 1d;
+
+            var rate = Of(currency);
+            return rate is > 0 ? rate : null;
+        }
+
+        /// <summary>The cheapest cash price among a trader's alternative schemes for one offer, or null when
+        /// every alternative wants goods.
+        ///
+        /// The outer list is ALTERNATIVES - any one of them buys the item - and each inner list is that
+        /// alternative's requirements. A single requirement naming a currency is a cash price; anything else
+        /// is a barter, and has no rouble amount to report.
+        ///
+        /// One implementation for both readers: the shared boot read here and PartAvailability's per-profile
+        /// read, which delegates to this. The rule about what counts as a cash price is the sort of thing
+        /// that drifts when it is written twice.</summary>
+        public long? CashPrice(TraderAssort assort, MongoId offer) => CashPrice(assort, offer, null);
+
+        /// <summary>Counters for the boot report, threaded through the scheme walk. Null when nobody is
+        /// counting, which is every per-profile read.</summary>
+        private sealed class Tally
+        {
+            public int NonRouble;
+            public int UnknownCurrency;
+        }
+
+        private long? CashPrice(TraderAssort assort, MongoId offer, Tally? tally)
+        {
+            if (assort.BarterScheme == null || !assort.BarterScheme.TryGetValue(offer, out var alternatives))
+                return null;
+
+            long? cheapest = null;
+
+            foreach (var scheme in alternatives ?? new List<List<BarterScheme>>())
+            {
+                if (scheme == null || scheme.Count != 1) continue;
+
+                var requirement = scheme[0];
+
+                if (requirement?.Template == null) continue;
+
+                var currency = requirement.Template.ToString();
+
+                if (!Currencies.All.Contains(currency)) continue;
+
+                var rate = RoublesPer(requirement.Template);
+
+                if (rate == null)
+                {
+                    if (tally != null) tally.UnknownCurrency++;
+                    continue;
+                }
+
+                var price = (long)Math.Round((requirement.Count ?? 0d) * rate.Value);
+
+                if (price <= 0) continue;
+
+                // The CURRENCY, not the rate: a modded currency the handbook happens to price at one rouble
+                // would read as roubles otherwise, and this counter's whole job is to notice a conversion
+                // that stopped happening.
+                if (tally != null && !currency.Equals(Currencies.Roubles, StringComparison.OrdinalIgnoreCase))
+                    tally.NonRouble++;
+
+                if (cheapest == null || price < cheapest) cheapest = price;
+            }
+
+            return cheapest;
         }
     }
 }
