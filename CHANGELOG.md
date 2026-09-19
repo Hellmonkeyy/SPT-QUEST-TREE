@@ -1,3 +1,33 @@
+# Quest Tracker 1.18.3
+
+**Opening the tracker stops freezing the game on four more fetches.** The profile, Kappa, pre-raid
+check and map-marker payloads were each a blocking request on the thread that draws frames, at their
+own point in the build. They are fetched, parsed and cleaned on one more worker during the wait the
+quest list already had, so each call site finds its payload cached; whichever is already cached is not
+asked for again, and one that does not arrive is not cached at all, so its getter asks for itself
+exactly as before.
+
+**The open line says where that time went.** Each payload's two halves print as `profile: prefetch`
+and `profile: prefetch parse`; the `profile: server` and `kappa: server` entries later in the line are
+the main-thread twins, and them reading 0 is what says the prefetch covered them.
+
+**A stale answer cannot land on top of a newer one.** Each payload carries a counter that moves when
+something announces it has changed, compared before the answer is published - a request already in
+flight cannot be cancelled. A batch that finished while the panel was shut is discarded rather than
+published: nothing bumps a counter when you pack a magazine, and the pre-raid check's promise is that
+if it says you have enough on you, you have enough.
+
+**A prefetch that runs out of time says so.** The batch may keep starting requests for twenty
+seconds, under the forty the open waits; giving up on the payloads is charged to `payloads: gave up`
+rather than to `quests: main`, which is meant to be the small remainder the game still spends its own
+thread on.
+
+## Also
+
+- The four helper scripts moved into `tools/`, which is where packaging looks for the DTO check.
+
+---
+
 # Quest Tracker 1.18.2
 
 **The pre-raid button tells you what you are carrying now.** It was painted once from a

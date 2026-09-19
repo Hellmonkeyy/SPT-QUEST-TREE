@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.Runtime.ExceptionServices;
+using System.Threading;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
 using SPT.Common.Http;
@@ -645,6 +646,429 @@ namespace QuestTree.QuestGraph
         }
 
 
+
+        // ------------------------------------------------------------ the open's other four fetches
+
+        /// <summary>The payloads an open needs besides the quest list, in the order one worker asks
+        /// for them. Also the index into <see cref="_generations"/>, so the values must stay stable
+        /// within a run - nothing outside this class sees them.</summary>
+        private enum EPayload
+        {
+            Profile,
+            Kappa,
+            RaidCheck,
+            Markers
+        }
+
+        /// <summary>How many times each payload has been invalidated. Snapshotted when a prefetch is
+        /// STARTED and compared before its result is published, so an answer asked for before an
+        /// Invalidate* cannot land on top of what that invalidation was announcing: the request is
+        /// already in flight and RequestHandler.GetJsonAsync takes no cancellation token, so
+        /// comparing on publish is the only workable answer - the same shape the pre-raid button uses
+        /// for its own re-entrancy (MatchMakerAcceptScreenPatch._generation).
+        ///
+        /// Interlocked because InvalidateMapMarkers is called from the harvester's pool thread - see
+        /// _markersStale, which is that same situation - while every read is on the main thread.
+        ///
+        /// Sized from the enum rather than by a literal, because ResetSession walks every index: a
+        /// fifth payload with a hand-written 4 still here would be an IndexOutOfRangeException in the
+        /// one method whose job is to forget everything.</summary>
+        private static readonly int[] _generations = new int[Enum.GetValues(typeof(EPayload)).Length];
+
+        private static void Invalidated(EPayload payload) => Interlocked.Increment(ref _generations[(int)payload]);
+
+        private static int GenerationOf(EPayload payload) => Volatile.Read(ref _generations[(int)payload]);
+
+        /// <summary>One payload's prefetch: what came back, what each half of it cost on the worker,
+        /// and the generation its cache stood at when it was asked for. The value is untyped because
+        /// one worker carries all four; the publish for each payload is the only place that knows
+        /// which type it is.</summary>
+        private sealed class PrefetchSlot
+        {
+            public EPayload Payload;
+            public int Generation;
+
+            /// <summary>The parsed payload, or null when there is none - see <see cref="Failure"/>.</summary>
+            public object Value;
+
+            public long ServerMillis;
+            public long ParseMillis;
+
+            /// <summary>Why there is no value, for the line the main thread writes. Nothing is logged
+            /// on the worker, exactly as in FetchQuestsOffThread, so the panel's log order holds.</summary>
+            public string Failure;
+        }
+
+        /// <summary>What one prefetched payload cost, for the open-time line. <see cref="Name"/> is
+        /// the phase prefix; the caller spells the two halves ": prefetch" and ": prefetch parse", so
+        /// they cannot collide with the ": server" phase the same payload's main-thread call site
+        /// marks later in the same open - two entries reading "profile: server" in one line, one of
+        /// them 0, is a line nobody can act on.</summary>
+        public readonly struct PrefetchPhase
+        {
+            public PrefetchPhase(string name, long serverMillis, long parseMillis)
+            {
+                Name = name;
+                ServerMillis = serverMillis;
+                ParseMillis = parseMillis;
+            }
+
+            public string Name { get; }
+
+            public long ServerMillis { get; }
+
+            public long ParseMillis { get; }
+        }
+
+        /// <summary>How long the batch may keep STARTING requests. The four run in sequence, so
+        /// without this a server that accepts connections and then hangs would hold the worker for
+        /// four times <see cref="RequestTimeout"/> - past the forty seconds the panel waits, which
+        /// would abandon the batch and send every getter back to blocking the main thread for fifteen
+        /// seconds each, the exact freeze this is here to remove. Twenty seconds leaves room for one
+        /// full timeout after the last request starts and still comes in under that cap.</summary>
+        private static readonly TimeSpan PrefetchBudget = TimeSpan.FromSeconds(20);
+
+        /// <summary>The batch <see cref="BeginAll"/> started, until <see cref="TryTakeAll"/>
+        /// publishes it. Main-thread only, like _fetch: the worker only ever fills and RETURNS the
+        /// slots it was handed.</summary>
+        private static Task<List<PrefetchSlot>> _prefetch;
+
+        /// <summary>Whether the batch is still running. False the moment it has finished - finished
+        /// and unpublished is not pending, it is ready.</summary>
+        public static bool IsPrefetchPending => _prefetch != null && !_prefetch.IsCompleted;
+
+        /// <summary>Starts everything an open fetches, off the main thread: the quest list exactly as
+        /// <see cref="BeginFetchAll"/> does, plus whichever of the profile, Kappa, raid check and map
+        /// marker payloads is not already cached.
+        ///
+        /// Written because the quest list was never the only round trip an open made. Each of those
+        /// four is a synchronous GetJson at its call site - GetProfile from the gate pass and the tab
+        /// strip, GetKappa from the badge pass, GetRaidCheck and GetMapMarkers from the map - under a
+        /// fifteen-second cap, on the thread drawing frames. Prefetched here they are in their caches
+        /// by the time those call sites run, so each one answers without a request; a payload that
+        /// did not arrive is not cached at all, so its getter behaves exactly as it always did, which
+        /// is the whole fallback.
+        ///
+        /// ONE worker, in sequence, rather than four: four concurrent requests through SPT's
+        /// RequestHandler for payloads the server derives from one profile buy nothing, and a single
+        /// task is one thing to wait on and one thing to abandon. Idempotent - called again while a
+        /// batch is in flight it starts nothing.</summary>
+        public static void BeginAll()
+        {
+            BeginFetchAll();
+
+            // A batch that finished while the panel was SHUT is discarded, not published. It was
+            // fetched for a stash the player has had every opportunity to change since - a closed
+            // panel is exactly when items get moved - and the raid check's whole promise is "if it
+            // says you have enough on you, you have enough". The generation guard cannot save it:
+            // nothing bumps a generation when a magazine is packed, so a minutes-old answer would
+            // pass the guard and latch as this open's. Dropped here, which leaves every gate below
+            // reading "uncached" and asking again; nothing is published, and nothing is charged to
+            // this open's clock.
+            if (_prefetch != null && _prefetch.IsCompleted) _prefetch = null;
+
+            if (_prefetch != null) return;
+
+            // Consumed here as well as in GetMapMarkers, and for the same reason it is consumed
+            // there: this is the main thread, and a harvest has to beat both the cache and any answer
+            // asked for before it.
+            if (_markersStale)
+            {
+                _markersStale = false;
+                _markers = null;
+                _markersAttempted = false;
+            }
+
+            // Each test is its own getter's cache gate, so "already cached" here means exactly what
+            // "answers without a request" means there - a remembered failure included, and the map
+            // markers' empty-answer hold-off too.
+            var wanted = new List<PrefetchSlot>();
+
+            if (!_profileAttempted) wanted.Add(NewSlot(EPayload.Profile));
+            if (_kappaResult == null) wanted.Add(NewSlot(EPayload.Kappa));
+            if (!_raidCheckAttempted) wanted.Add(NewSlot(EPayload.RaidCheck));
+            if (!_markersAttempted && DateTime.UtcNow >= _markersRetryAt) wanted.Add(NewSlot(EPayload.Markers));
+
+            if (wanted.Count == 0) return;
+
+            try
+            {
+                _prefetch = Task.Run(() => FetchPayloadsOffThread(wanted));
+            }
+            catch (Exception ex)
+            {
+                // A pool that cannot take work at all. Left null, so TryTakeAll answers true with
+                // nothing to publish and every getter fetches at its own call site, as before.
+                Plugin.LogSource?.LogWarning($"QuestTree: could not start the payload prefetch ({ex.Message}).");
+            }
+        }
+
+        private static PrefetchSlot NewSlot(EPayload payload) =>
+            new PrefetchSlot { Payload = payload, Generation = GenerationOf(payload) };
+
+        /// <summary>Stops waiting on the batch in flight and leaves nothing behind, so the next
+        /// <see cref="BeginAll"/> starts a fresh one. <see cref="AbandonFetch"/>'s reasoning exactly:
+        /// a worker that never comes back would otherwise be waited out on every later open. The
+        /// orphan is dropped, not cancelled - it can only ever fill slots nobody reads.</summary>
+        public static void AbandonAll() => _prefetch = null;
+
+        /// <summary>Every wanted payload on one pool thread: request, deserialise, Sanitise, then the
+        /// next one. No Unity API, no logging and no static state written in here - only the slots it
+        /// was handed, which is what makes it safe off the main thread, and the reason it cannot use
+        /// GetJson: that writes the fetch counters.</summary>
+        private static List<PrefetchSlot> FetchPayloadsOffThread(List<PrefetchSlot> slots)
+        {
+            var budget = System.Diagnostics.Stopwatch.StartNew();
+
+            foreach (var slot in slots)
+            {
+                if (budget.Elapsed > PrefetchBudget)
+                {
+                    // Left absent rather than asked for late - see PrefetchBudget. Absent is the case
+                    // every one of these getters already handles.
+                    slot.Failure = "the prefetch was out of time before this payload was asked for";
+                    continue;
+                }
+
+                switch (slot.Payload)
+                {
+                    case EPayload.Profile:
+                        Fetch<ProfilePayloadDto>(slot, ProfileRoute, Sanitise);
+                        break;
+
+                    case EPayload.Kappa:
+                        Fetch<KappaPayloadDto>(slot, KappaRoute, Sanitise);
+                        break;
+
+                    case EPayload.RaidCheck:
+                        Fetch<RaidCheckDto>(slot, RaidCheckRoute, Sanitise);
+                        break;
+
+                    case EPayload.Markers:
+                        Fetch<MapMarkerPayloadDto>(slot, MapMarkerRoute, Sanitise);
+                        break;
+                }
+            }
+
+            return slots;
+        }
+
+        /// <summary>One payload's request and parse on the worker, measured in halves and charged to
+        /// the half that failed - FetchQuestsOffThread's shape, for the reasons written there.</summary>
+        private static void Fetch<T>(PrefetchSlot slot, string route, Action<T> sanitise) where T : class
+        {
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            var answered = false;
+            var parsed = false;
+
+            try
+            {
+                var request = RequestHandler.GetJsonAsync(route);
+
+                // The same cap GetJson applies, on a pool thread that has nothing else to do.
+                if (!request.Wait(RequestTimeout))
+                    throw new TimeoutException($"no answer within {RequestTimeout.TotalSeconds:0}s");
+
+                var json = request.Result;
+                slot.ServerMillis = clock.ElapsedMilliseconds;
+                answered = true;
+
+                // How a route no mod registered presents itself - see FetchKappa. Each getter has its
+                // own sentence for that, and says it when it goes and asks for itself.
+                if (string.IsNullOrEmpty(json))
+                {
+                    slot.Failure = "the server returned an empty response";
+                    return;
+                }
+
+                var payload = JsonConvert.DeserializeObject<T>(json);
+                sanitise(payload);
+                slot.ParseMillis = clock.ElapsedMilliseconds - slot.ServerMillis;
+                parsed = true;
+
+                if (payload == null) slot.Failure = "the server sent nothing usable";
+                else slot.Value = payload;
+
+                return;
+            }
+            catch (AggregateException ex) when (ex.InnerException != null)
+            {
+                // The real failure, not "One or more errors occurred" - it goes into a log line.
+                slot.Failure = ex.InnerException.Message;
+            }
+            catch (Exception ex)
+            {
+                slot.Failure = ex.Message;
+            }
+
+            // A half that failed is still charged to itself, or it would surface as main-thread time.
+            if (!answered) slot.ServerMillis = clock.ElapsedMilliseconds;
+            else if (!parsed) slot.ParseMillis = clock.ElapsedMilliseconds - slot.ServerMillis;
+        }
+
+        /// <summary>Publishes a FINISHED batch into the very caches the synchronous getters read, on
+        /// the main thread, and hands back what each payload cost the worker.
+        ///
+        /// False only while the batch is still running, which is the caller's signal to keep
+        /// yielding. True with an empty list when there was nothing to fetch, nothing left to
+        /// publish, or no thread to fetch on - in every one of those the getters answer exactly as
+        /// they always have.
+        ///
+        /// Idempotent: the batch is let go of before anything is published, so a second call finds
+        /// nothing and publishes nothing.</summary>
+        public static bool TryTakeAll(out List<PrefetchPhase> phases)
+        {
+            phases = new List<PrefetchPhase>();
+
+            var prefetch = _prefetch;
+
+            if (prefetch == null) return true;
+            if (!prefetch.IsCompleted) return false;
+
+            // Cleared before anything below can throw, so one batch is applied exactly once.
+            _prefetch = null;
+
+            List<PrefetchSlot> slots;
+
+            try
+            {
+                // Completed, so this cannot block; it can still throw if the pool lost the work
+                // itself, which Fetch's own catches would never see.
+                slots = prefetch.Result;
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning($"QuestTree: the payload prefetch did not come back ({ex.Message}).");
+                return true;
+            }
+
+            foreach (var slot in slots)
+            {
+                if (slot == null) continue;
+
+                var name = NameOf(slot.Payload);
+
+                // Charged even when the payload failed: a request that timed out is time the player
+                // waited, and none of it is the main thread's to answer for. Into the same counters
+                // the synchronous fetches feed - see FetchMillis - so the open's remaining
+                // main-thread ": server" splits still measure only what the main thread did.
+                phases.Add(new PrefetchPhase(name, slot.ServerMillis, slot.ParseMillis));
+                FetchMillis += slot.ServerMillis;
+                FetchCount++;
+
+                // An Invalidate* while this was in flight means the answer predates the change the
+                // caller was announcing. Dropped, and nothing is cached, so the getter asks again at
+                // its own call site - which is the behaviour without any of this.
+                if (slot.Generation != GenerationOf(slot.Payload))
+                {
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: the prefetched {name} payload was invalidated while it was in flight - dropped.");
+                    continue;
+                }
+
+                // Deliberately NOT cached as a failure: each getter's own failure handling - its
+                // sentence in the log, its Kappa status, its retry hold-off - is the one that has to
+                // apply, and it applies by the getter finding nothing cached and asking itself.
+                if (slot.Value == null)
+                {
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: the {name} payload could not be prefetched ({slot.Failure ?? "no reason given"}) - " +
+                        "it will be fetched where it is used.");
+                    continue;
+                }
+
+                // Switched on the value's TYPE rather than on the slot's payload, because the type
+                // is what decides which cache this belongs in: a cast that went wrong would hand a
+                // publish a null and latch "there is no profile" over a payload that arrived.
+                switch (slot.Value)
+                {
+                    case ProfilePayloadDto profile:
+                        PublishProfile(profile);
+                        break;
+
+                    case KappaPayloadDto kappa:
+                        PublishKappa(kappa);
+                        break;
+
+                    case RaidCheckDto raidCheck:
+                        PublishRaidCheck(raidCheck);
+                        break;
+
+                    case MapMarkerPayloadDto markers:
+                        PublishMarkers(markers);
+                        break;
+                }
+            }
+
+            return true;
+        }
+
+        /// <summary>The phase prefix the open-time line prints for each payload, and the word the
+        /// prefetch's own lines use for it.</summary>
+        private static string NameOf(EPayload payload) => payload switch
+        {
+            EPayload.Profile => "profile",
+            EPayload.Kappa => "kappa",
+            EPayload.RaidCheck => "raid",
+            _ => "markers"
+        };
+
+        /// <summary>GetProfile's tail without the request, so a prefetched profile is
+        /// indistinguishable from a fetched one.
+        ///
+        /// Every publish below begins by standing down if something already answered: a getter that
+        /// ran on the main thread while the worker was out fetched LATER than this did, so its answer
+        /// is the fresher one even when it failed - and a latched failure is asked about again by
+        /// RetryFailedFetches, which is the path that already exists for it.</summary>
+        private static void PublishProfile(ProfilePayloadDto payload)
+        {
+            if (_profileAttempted) return;
+
+            WarnProfileSchema(payload);
+            _profile = payload;
+            _profileAttempted = true;
+        }
+
+        private static void PublishRaidCheck(RaidCheckDto payload)
+        {
+            if (_raidCheckAttempted) return;
+
+            WarnRaidCheckSchema(payload);
+            _raidCheck = payload;
+            _raidCheckAttempted = true;
+        }
+
+        /// <summary>The Kappa payload is judged here rather than on the worker, by the same method
+        /// FetchKappa judges its own with: a version mismatch is a sentence in the log and a status
+        /// the Kappa tab explains, and both belong on the main thread.</summary>
+        private static void PublishKappa(KappaPayloadDto payload)
+        {
+            if (_kappaResult != null) return;
+
+            _kappaResult = JudgeKappa(payload);
+        }
+
+        /// <summary>GetMapMarkers' tail without the request: the empty-answer hold-off, the schema
+        /// note and the count line, so the log reads the same whichever path fetched it.</summary>
+        private static void PublishMarkers(MapMarkerPayloadDto payload)
+        {
+            if (_markersAttempted) return;
+
+            _markers = payload;
+
+            // Empty is not a failure and must not latch - the server answers empty, uncached, for a
+            // minute after a failed marker build. The getter's own hold-off, applied here too.
+            if (payload?.Maps == null || payload.Maps.Count == 0)
+            {
+                _markersRetryAt = DateTime.UtcNow.AddSeconds(60);
+                Plugin.LogSource?.LogInfo("QuestTree: the server sent no map markers - asking again in a minute.");
+                return;
+            }
+
+            _markersAttempted = true;
+            NoteMarkers(payload);
+        }
+
         private static RaidCheckDto _raidCheck;
         private static bool _raidCheckAttempted;
 
@@ -658,6 +1082,10 @@ namespace QuestTree.QuestGraph
         {
             _raidCheckAttempted = false;
             _raidCheck = null;
+
+            // Any prefetch of it in flight is now answering a question that has changed - see
+            // _generations. Every Invalidate* below says the same thing the same way.
+            Invalidated(EPayload.RaidCheck);
         }
 
         /// <summary>What you must be carrying, per map - or null when the server half is missing,
@@ -684,13 +1112,7 @@ namespace QuestTree.QuestGraph
 
                 var payload = JsonConvert.DeserializeObject<RaidCheckDto>(json);
                 Sanitise(payload);
-
-                if (payload != null && payload.SchemaVersion != RaidCheckDto.SupportedSchemaVersion)
-                {
-                    Plugin.LogSource?.LogWarning(
-                        $"QuestTree: raid check payload schema v{payload.SchemaVersion} but this client expects " +
-                        $"v{RaidCheckDto.SupportedSchemaVersion} (server mod {payload.ModVersion}).");
-                }
+                WarnRaidCheckSchema(payload);
 
                 _raidCheck = payload;
                 return _raidCheck;
@@ -700,6 +1122,17 @@ namespace QuestTree.QuestGraph
                 LogUnavailable(ex.Message);
                 return null;
             }
+        }
+
+        /// <summary>The raid check's schema note - as WarnProfileSchema, and for the same
+        /// two-paths reason.</summary>
+        private static void WarnRaidCheckSchema(RaidCheckDto payload)
+        {
+            if (payload == null || payload.SchemaVersion == RaidCheckDto.SupportedSchemaVersion) return;
+
+            Plugin.LogSource?.LogWarning(
+                $"QuestTree: raid check payload schema v{payload.SchemaVersion} but this client expects " +
+                $"v{RaidCheckDto.SupportedSchemaVersion} (server mod {payload.ModVersion}).");
         }
 
         /// <summary>Every name in the raid check comes from the locale table and is rendered inside
@@ -763,13 +1196,7 @@ namespace QuestTree.QuestGraph
 
                 var payload = JsonConvert.DeserializeObject<ProfilePayloadDto>(json);
                 Sanitise(payload);
-
-                if (payload != null && payload.SchemaVersion != ProfilePayloadDto.SupportedSchemaVersion)
-                {
-                    Plugin.LogSource?.LogWarning(
-                        $"QuestTree: profile payload schema v{payload.SchemaVersion} ({SchemaNote(payload.SchemaVersion, ProfilePayloadDto.SupportedSchemaVersion)}) but this client expects " +
-                        $"v{ProfilePayloadDto.SupportedSchemaVersion} (server mod {payload.ModVersion}).");
-                }
+                WarnProfileSchema(payload);
 
                 _profile = payload;
                 return _profile;
@@ -779,6 +1206,18 @@ namespace QuestTree.QuestGraph
                 Plugin.LogSource?.LogWarning($"QuestTree: could not reach {ProfileRoute} ({ex.Message}).");
                 return null;
             }
+        }
+
+        /// <summary>The profile payload's schema note. Its own method because the open now has two
+        /// ways to obtain this payload - GetProfile's own request and the prefetch's - and both must
+        /// say the same thing about a server half that does not match.</summary>
+        private static void WarnProfileSchema(ProfilePayloadDto payload)
+        {
+            if (payload == null || payload.SchemaVersion == ProfilePayloadDto.SupportedSchemaVersion) return;
+
+            Plugin.LogSource?.LogWarning(
+                $"QuestTree: profile payload schema v{payload.SchemaVersion} ({SchemaNote(payload.SchemaVersion, ProfilePayloadDto.SupportedSchemaVersion)}) but this client expects " +
+                $"v{ProfilePayloadDto.SupportedSchemaVersion} (server mod {payload.ModVersion}).");
         }
 
         private static MapMarkerPayloadDto _markers;
@@ -806,7 +1245,13 @@ namespace QuestTree.QuestGraph
         /// <summary>Drops the cached markers so the next Maps tab build re-fetches. Called by the
         /// zone harvester once the server has accepted a raid's zones and rebuilt its markers -
         /// the one event that changes them while the server is up. Safe from any thread.</summary>
-        public static void InvalidateMapMarkers() => _markersStale = true;
+        public static void InvalidateMapMarkers()
+        {
+            _markersStale = true;
+
+            // Interlocked, because this is the one Invalidate* called off the main thread.
+            Invalidated(EPayload.Markers);
+        }
 
         /// <summary>
         /// Quest-item spawn markers, keyed by map.
@@ -852,22 +1297,7 @@ namespace QuestTree.QuestGraph
                     return _markers;
                 }
 
-                if (_markers.SchemaVersion != MapMarkerPayloadDto.SupportedSchemaVersion)
-                {
-                    // Not fatal: the maps are the one feature this payload carries, and a version
-                    // that only differs in a field this client does not read still pins fine. Named
-                    // in the log so a mis-drawn map has a first place to look.
-                    Plugin.LogSource?.LogWarning(
-                        $"QuestTree: map marker payload schema v{_markers.SchemaVersion} ({SchemaNote(_markers.SchemaVersion, MapMarkerPayloadDto.SupportedSchemaVersion)}) but this client expects " +
-                        $"v{MapMarkerPayloadDto.SupportedSchemaVersion} (server mod {_markers.Version}). " +
-                        "Update both halves of the mod together.");
-                }
-
-                var count = 0;
-                foreach (var map in _markers.Maps)
-                    count += map?.Markers?.Count ?? 0;
-
-                Plugin.LogSource?.LogInfo($"QuestTree: loaded {count} quest-item map markers.");
+                NoteMarkers(_markers);
                 return _markers;
             }
             catch (Exception ex)
@@ -877,12 +1307,38 @@ namespace QuestTree.QuestGraph
             }
         }
 
+        /// <summary>What a usable marker payload is worth saying about: the schema it speaks and how
+        /// many pins came with it. Shared by GetMapMarkers and the prefetch's publish, so one line is
+        /// written per payload whichever of them fetched it.</summary>
+        private static void NoteMarkers(MapMarkerPayloadDto payload)
+        {
+            if (payload == null) return;
+
+            if (payload.SchemaVersion != MapMarkerPayloadDto.SupportedSchemaVersion)
+            {
+                // Not fatal: the maps are the one feature this payload carries, and a version
+                // that only differs in a field this client does not read still pins fine. Named
+                // in the log so a mis-drawn map has a first place to look.
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: map marker payload schema v{payload.SchemaVersion} ({SchemaNote(payload.SchemaVersion, MapMarkerPayloadDto.SupportedSchemaVersion)}) but this client expects " +
+                    $"v{MapMarkerPayloadDto.SupportedSchemaVersion} (server mod {payload.Version}). " +
+                    "Update both halves of the mod together.");
+            }
+
+            var count = 0;
+            foreach (var map in payload.Maps)
+                count += map?.Markers?.Count ?? 0;
+
+            Plugin.LogSource?.LogInfo($"QuestTree: loaded {count} quest-item map markers.");
+        }
+
         /// <summary>Drops the cached profile so the next GetProfile re-fetches. Paired with
         /// InvalidateKappa - the same events move both.</summary>
         public static void InvalidateProfile()
         {
             _profile = null;
             _profileAttempted = false;
+            Invalidated(EPayload.Profile);
         }
 
         private static KappaFetchResult _kappaResult;
@@ -910,7 +1366,11 @@ namespace QuestTree.QuestGraph
         }
 
         /// <summary>Drops the cached Kappa result so the next <see cref="GetKappa"/> re-fetches.</summary>
-        public static void InvalidateKappa() => _kappaResult = null;
+        public static void InvalidateKappa()
+        {
+            _kappaResult = null;
+            Invalidated(EPayload.Kappa);
+        }
 
         /// <summary>
         /// Forgets everything fetched for the previous profile/server, so the next request starts
@@ -948,6 +1408,12 @@ namespace QuestTree.QuestGraph
             // call is saying to forget. Dropped rather than cancelled, like the stale path above -
             // the orphan finishes into a value nobody can read.
             _fetch = null;
+
+            // And the other four payloads' batch, for the same reason. The generations move with it,
+            // so even a batch handed to a take by some later path cannot publish what was fetched for
+            // the profile or server this call is forgetting.
+            _prefetch = null;
+            for (var i = 0; i < _generations.Length; i++) Invalidated((EPayload)i);
         }
 
         // Every name the views will put inside rich text, made literal once here - see RichText.
@@ -1047,33 +1513,8 @@ namespace QuestTree.QuestGraph
 
                 var payload = JsonConvert.DeserializeObject<KappaPayloadDto>(json);
                 Sanitise(payload);
-                if (payload == null)
-                    return KappaFetchResult.Failed(EKappaFetchStatus.ServerHalfMissing);
 
-                // Two halves from different downloads is the case the Kappa tab explains in words,
-                // and the server's own version number is the fact that says so. A server too old
-                // to send one is judged by its schema, as before. With the versions equal, a schema
-                // difference cannot occur; the warning below is for a build stamp lying.
-                var differentDownload = string.IsNullOrEmpty(payload.ModVersion)
-                    ? payload.SchemaVersion != KappaPayloadDto.SupportedSchemaVersion
-                    : payload.ModVersion != ModInfo.Version;
-
-                if (differentDownload)
-                {
-                    Plugin.LogSource?.LogWarning(
-                        $"QuestTree: the server half is {(string.IsNullOrEmpty(payload.ModVersion) ? "older than 1.8.1" : payload.ModVersion)} " +
-                        $"and this client is {ModInfo.Version} - reinstall both halves from the same download.");
-                    return KappaFetchResult.Failed(EKappaFetchStatus.VersionMismatch, payload.ModVersion);
-                }
-
-                if (payload.SchemaVersion != KappaPayloadDto.SupportedSchemaVersion)
-                {
-                    Plugin.LogSource?.LogWarning(
-                        $"QuestTree: Kappa payload schema v{payload.SchemaVersion} ({SchemaNote(payload.SchemaVersion, KappaPayloadDto.SupportedSchemaVersion)}) " +
-                        $"but this client expects v{KappaPayloadDto.SupportedSchemaVersion}. Continuing anyway - some fields may be missing.");
-                }
-
-                return KappaFetchResult.Ok(payload);
+                return JudgeKappa(payload);
             }
             catch (Exception ex)
             {
@@ -1081,6 +1522,41 @@ namespace QuestTree.QuestGraph
                     $"QuestTree: could not reach {KappaRoute} ({ex.Message}).");
                 return KappaFetchResult.Failed(EKappaFetchStatus.Unreachable);
             }
+        }
+
+        /// <summary>What a parsed Kappa payload amounts to: the checklist, or the status the Kappa
+        /// tab explains in words. Separate from the request because the prefetch parses this payload
+        /// on a worker and the judgement - two log lines and a version compare - belongs on the main
+        /// thread, said once, by whichever path got there first.</summary>
+        private static KappaFetchResult JudgeKappa(KappaPayloadDto payload)
+        {
+            if (payload == null)
+                return KappaFetchResult.Failed(EKappaFetchStatus.ServerHalfMissing);
+
+            // Two halves from different downloads is the case the Kappa tab explains in words,
+            // and the server's own version number is the fact that says so. A server too old
+            // to send one is judged by its schema, as before. With the versions equal, a schema
+            // difference cannot occur; the warning below is for a build stamp lying.
+            var differentDownload = string.IsNullOrEmpty(payload.ModVersion)
+                ? payload.SchemaVersion != KappaPayloadDto.SupportedSchemaVersion
+                : payload.ModVersion != ModInfo.Version;
+
+            if (differentDownload)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: the server half is {(string.IsNullOrEmpty(payload.ModVersion) ? "older than 1.8.1" : payload.ModVersion)} " +
+                    $"and this client is {ModInfo.Version} - reinstall both halves from the same download.");
+                return KappaFetchResult.Failed(EKappaFetchStatus.VersionMismatch, payload.ModVersion);
+            }
+
+            if (payload.SchemaVersion != KappaPayloadDto.SupportedSchemaVersion)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: Kappa payload schema v{payload.SchemaVersion} ({SchemaNote(payload.SchemaVersion, KappaPayloadDto.SupportedSchemaVersion)}) " +
+                    $"but this client expects v{KappaPayloadDto.SupportedSchemaVersion}. Continuing anyway - some fields may be missing.");
+            }
+
+            return KappaFetchResult.Ok(payload);
         }
 
         private static void LogUnavailable(string reason)

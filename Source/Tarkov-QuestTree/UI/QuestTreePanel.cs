@@ -365,15 +365,24 @@ namespace QuestTree.UI
             // The quest list off the main thread, with the loading notice already up. Of a measured
             // 453 ms open, 233 ms was the parse and 29 ms the server, all of it with Unity's thread
             // blocked; this is the same begin/poll/take shape the map's tessellation uses.
-            QuestDataClient.BeginFetchAll();
+            //
+            // BeginAll rather than BeginFetchAll, because the quest list was never the only round
+            // trip an open makes: the profile, Kappa, raid check and map marker payloads are four
+            // more, each a blocking request at its own call site below this line. They are fetched on
+            // one more worker during the same wait, so those call sites find them cached.
+            QuestDataClient.BeginAll();
 
             var deadline = Time.realtimeSinceStartup + FetchWaitSeconds;
-            while (QuestDataClient.IsFetchPending && Time.realtimeSinceStartup < deadline)
+            while ((QuestDataClient.IsFetchPending || QuestDataClient.IsPrefetchPending) &&
+                   Time.realtimeSinceStartup < deadline)
                 yield return null;
 
             List<QuestDto> quests = null;
+            var questServerMillis = 0L;
+            var questParseMillis = 0L;
+            var gaveUpOnQuests = QuestDataClient.IsFetchPending;
 
-            if (QuestDataClient.IsFetchPending)
+            if (gaveUpOnQuests)
             {
                 // Given up on, and the fetch let go with it: left in flight it would never complete,
                 // so every later open would wait this out again and the panel would never show a
@@ -387,27 +396,65 @@ namespace QuestTree.UI
                 Plugin.LogSource?.LogWarning(
                     $"QuestTree: the quest list did not arrive in time ({FetchWaitSeconds:0}s) - building from the " +
                     "quests this client has already unlocked.");
-
-                // Its own phase, not charged to the two below: nothing was measured, and forty
-                // seconds landing in "quests: main" would read as the main thread having spent it.
-                PanelOpenTimer.Mark("quests: gave up");
             }
             else
             {
                 // On the main thread, which is where the cache is set and the fetch's own log lines
-                // are written. The worker measured the two numbers; they are charged against the
-                // frames just spent waiting, and "quests: main" is whatever is left of that wait -
-                // the poll's frame slack, the pool's own start-up, and this take. Small, and the
-                // number to watch: it is the only part of the quest fetch the game still spends its
-                // own thread on.
-                if (!QuestDataClient.TryTakeFetched(out quests, out var serverMillis, out var parseMillis))
+                // are written. The worker measured the two numbers; they are charged below.
+                if (!QuestDataClient.TryTakeFetched(out quests, out questServerMillis, out questParseMillis))
                     Plugin.LogSource?.LogWarning(
                         "QuestTree: the quest fetch produced nothing to take - building from the quests this client knows about.");
-
-                PanelOpenTimer.Add("quests: server", serverMillis);
-                PanelOpenTimer.Add("quests: parse", parseMillis);
-                PanelOpenTimer.Mark("quests: main");
             }
+
+            // The other four, published into the very caches GetProfile, GetKappa, GetRaidCheck and
+            // GetMapMarkers read, so each of those call sites answers without a request. False means
+            // the batch is still out: let go of it, for AbandonFetch's reason, and let those getters
+            // fetch for themselves further down - a blocking request behind the loading notice, which
+            // is what every one of them did before this existed.
+            //
+            // Kept, because the phase name at the end of the wait depends on it: the cap can fire on
+            // THIS batch with the quest list already in, and then nothing below measures anything and
+            // the whole forty seconds would print as "quests: main" - the one phase that is supposed
+            // to mean work the main thread did, and the number the next release would go and chase.
+            var gaveUpOnPayloads = !QuestDataClient.TryTakeAll(out var payloads);
+
+            if (gaveUpOnPayloads)
+            {
+                QuestDataClient.AbandonAll();
+
+                Plugin.LogSource?.LogWarning(
+                    "QuestTree: the profile, Kappa, raid check and marker payloads did not arrive in time " +
+                    $"({FetchWaitSeconds:0}s) - whichever of them this open needs will be fetched on the main thread.");
+            }
+
+            // Every worker-measured half before the remainder is closed, because Add charges a phase
+            // against the interval since the last mark and clamps it to what is left of it: the two
+            // workers ran at the same time, so their measurements can add up to more than the frames
+            // actually spent waiting. The quest list goes first, as the longest and the one this wait
+            // was built for; a payload printing 0 was covered by that wait, not free.
+            if (!gaveUpOnQuests)
+            {
+                PanelOpenTimer.Add("quests: server", questServerMillis);
+                PanelOpenTimer.Add("quests: parse", questParseMillis);
+            }
+
+            foreach (var payload in payloads)
+            {
+                // Named ": prefetch", not ": server": each of these four has a ": server" phase of its
+                // own later in the open, marked by the call site that reads it, and the point of that
+                // one is that it now reads 0. Two entries under one name in one line, only one of them
+                // meaning anything, is worse than no entry at all.
+                PanelOpenTimer.Add($"{payload.Name}: prefetch", payload.ServerMillis);
+                PanelOpenTimer.Add($"{payload.Name}: prefetch parse", payload.ParseMillis);
+            }
+
+            // What is left of the wait: the poll's frame slack, the pool's own start-up and the two
+            // takes. Small, and the number to watch - it is the only part of the fetching the game
+            // still spends its own thread on. When the cap fired instead, the phase is named for
+            // WHICHEVER half was given up on and takes the whole remainder: nothing was measured, and
+            // forty seconds landing in "quests: main" would read as the main thread having spent it.
+            PanelOpenTimer.Mark(
+                gaveUpOnQuests ? "quests: gave up" : gaveUpOnPayloads ? "payloads: gave up" : "quests: main");
 
             // A failed build leaves the loading surface up: it is where the error message was just
             // written, and hiding it showed an empty tree with no explanation.

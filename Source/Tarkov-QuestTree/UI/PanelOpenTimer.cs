@@ -6,9 +6,13 @@ namespace QuestTree.UI
 {
     /// <summary>
     /// Where the time goes between the taskbar click and the tree being on screen, as one log line
-    /// per open. Called on the main thread only, which is also where all but two of the phases are
-    /// spent: the quest fetch's request and parse are measured on the worker that does them and
-    /// handed to <see cref="Add"/> here - see QuestDataClient.BeginFetchAll.
+    /// per open. Called on the main thread only, which is no longer where most of the phases are
+    /// spent: the quest list and the four payloads beside it are fetched and parsed on workers that
+    /// measure their own two halves and hand them to <see cref="Add"/> here - see
+    /// QuestDataClient.BeginAll. The four payloads print those halves as ": prefetch" and
+    /// ": prefetch parse"; the ": server" phase each of them still has later in the open is the
+    /// main-thread twin (<see cref="MarkSplit"/>), and it reading 0 is what says the prefetch
+    /// covered that request.
     ///
     /// Written because the first measurement of that wait (1.13.2) came out at 1.2 to 1.4 seconds
     /// with the server accounting for under a tenth of it - and nothing could say where the rest
