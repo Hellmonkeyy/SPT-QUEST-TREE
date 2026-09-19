@@ -1,3 +1,20 @@
+# Quest Tracker 1.17.0
+
+**The quest list loads off the main thread.** Opening the tracker froze the game for the quarter
+second the quest list took to fetch and parse; that runs on a worker now while the loading notice
+is up. If the list does not arrive in time, the tracker builds the unlocked-only tree it has always
+shown without the server half and asks again next open.
+
+## Under the hood
+
+- The README describes everything since 1.13.2: folded chains, the game's verdict on a build, the
+  collapsing legend, the new settings and log lines. Two claims in it were wrong and are fixed: `?`
+  is a button, not a key, and Enter goes to the first search match, not each in turn.
+- Packaging refuses a release when the client and server disagree about a wire field, and when the
+  shipped build history is stamped by an older solver. Both gates proven able to fail.
+
+---
+
 # Quest Tracker 1.16.0
 
 **The toolbar fits at 1600 px.** When the bar's own arithmetic says the six status chips, the

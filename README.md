@@ -107,6 +107,20 @@ means write it off for now, "you need two more levels" means keep it in mind.
 **A box you cannot start says why**, in place of its trader line - `Needs Carbines III`, or `Lv 30`.
 That is the single most useful thing a blocked quest can tell you and it used to cost a click.
 
+**A run of quests in single file draws as one box.** Where each quest unlocks exactly the next and
+they all come from one trader - a Gunsmith or Weapon Proficiency sequence - the tree folds the run
+into its first box: the series name, the trader, how many of the run are done, and a bar for that
+count, coloured by the first quest in it still to do. A `+` in the corner says there is more inside.
+Click the box to unfold the run; the `–` on its first quest folds it again, and the tree remembers
+what you opened for the session.
+
+**A run opens itself when something inside needs seeing**: a failed quest, a quest whose
+prerequisite is not installed, a search of three letters or more matching a member's name, or a
+member you opened from the detail panel. With *Hide completed quests* on, a part-done run is drawn
+quest by quest rather than as a box claiming to hold the finished ones. The **Chains** button and
+`C` turn folding off and on - off and on again closes every run you had opened - and the setting
+persists.
+
 - **The box is the same box at every zoom.** It does not swap to a title, or to a code, or to a
   coloured bar - it scales, and nothing appears or disappears while you move.
 - **Rest on any box** and a card appears with the full name, the level and loyalty it wants, how
@@ -115,7 +129,7 @@ That is the single most useful thing a blocked quest can tell you and it used to
 - **Hovering lights the whole chain** - every quest this one waits on, all the way back, and
   everything that unlocks from it, all the way forward, with the rest of the tree fading away.
 - **Search highlights in place.** Matches light up, everything else dims, and nothing moves. The
-  count reads `12 matches - 830 quests shown`. `Enter` jumps to each in turn.
+  count reads `12 matches · 830 quests shown`. `Enter` opens the first match.
 - **Focus (`X`)** cuts the tree to what you can work on now and everything within four quests of
   it. The reach is a setting, 1 to 10.
 - **A coloured slab down each box** says whose chain it is, with that trader's portrait beside the
@@ -123,6 +137,9 @@ That is the single most useful thing a blocked quest can tell you and it used to
   colours - so a trader can never be mistaken for a state.
 - **Tabs** along the top: All, then one per trader, ordered by how many of their quests you can act
   on. The row scrolls.
+- **The legend is in the toolbar**, a bar-and-name chip per state. On a panel too narrow to fit all
+  six beside the view buttons they fold into one **Legend** chip carrying the six glyphs in their
+  colours, with the full names on hover.
 - **Badges** in a box's corner: a gold **K** for a quest on the Kappa list, a blue **C** for one
   you must finish before Collector can be accepted on *your* install - including the quests behind
   those. On a stock install that is a wide net: 252 of 558 quests, and it contains all 136 Kappa
@@ -173,6 +190,22 @@ A quest can ask for more than one weapon, and each gets its own block.
   something the mod cannot score. Eyeball that one on the gun before you hand it in.
 - **Closest build found** - no complete build was found. It says which threshold it missed and by
   how much, which separates "this quest is hard" from "your parts are limited".
+
+**And then the game is asked.** Every heading above is the mod checking its own arithmetic. A build
+your profile can actually assemble carries one more line, computed by the game's own hand-in test on
+the exact preset *Save as a weapon preset* would write:
+
+- **The game will accept this build**, with the ergonomics, recoil and weight the game measured, or
+- **The game would refuse this build: recoil 265.98 where the quest wants ≤ 250** - the first test
+  the trader's code fails, in the trader's own numbers, or
+- **Game check: checkable once the quest is accepted** - the test needs the quest's own condition,
+  and the game gives the client that only for quests you hold.
+
+Two things the check cannot know, and says on the line: the gun it tests is **unloaded** and at
+**full durability**, while the trader weighs the real one loaded and tests its real durability - so
+a build that passes a weight limit by a few grams can still be refused with a magazine in. Both
+halves of the mod have to be 1.14.0 or newer for this line; an older server sends no items to
+assemble it from, and the line says so instead of guessing.
 
 Two things worth knowing about how the builds are worked out:
 
@@ -303,29 +336,34 @@ around it.
 | `F` | Fit the current tab on screen; on the map, fit the floor |
 | `M` | Jump to the quests you can work on |
 | `X` | Focus: only what you can work on, and everything within reach of it |
+| `C` | Chains: fold each single-file run of quests into one box, or unfold them all |
 | `/` | Focus the search box; `Enter` opens the first match, `Esc` leaves the box |
 | `[` `]` | On the map, the floor below or above |
 | `Esc` | Close the hint, then the quest detail, then the tracker |
-| `?` | Show the controls hint again |
+| `?` button | Show the controls hint again |
 | `Ctrl+Q` | Open or close the tracker from anywhere in the menu (rebindable in F12) |
 
 ## Settings
 
-The Settings view, in four sections, and the same values in BepInEx's F12 menu. Every section has a
-"Reset this section to defaults" row.
+The Settings view, in six sections, and the same values in BepInEx's F12 menu. Each section resets
+to its own defaults from the last row in it.
 
-- **Tree** - compact layout, two-line titles, prerequisite lines and their opacity, hover dimming
-  strength, how far **Focus** reaches, the visible-quest ceiling, which quest badges the boxes wear
-  (Kappa, Collector, or both), the trader-card overview threshold, and the hide filters
-  (unobtainable / completed / traderless).
+- **Tree** - compact layout, two-line titles, **collapse chains**, whether the trader stripe shows,
+  prerequisite lines and their opacity, hover dimming strength, how far **Focus** reaches, the
+  visible-quest ceiling, which quest badges the boxes wear (Kappa, Collector, or both), the
+  trader-card overview threshold, and the hide filters (unobtainable / completed / traderless).
 - **Do next** - which goal the ranking optimises for, and how many rows the tab lists.
-- **Behaviour** - open on the map or remember the last view, the open-tracker shortcut, tooltips,
-  hover sounds, in-raid zone harvesting, the controls hint, and reloading `kappa-quests.json`.
+- **Behaviour** - open on the map or remember the last view, tooltips, hover sounds, in-raid zone
+  harvesting, the controls hint, and reloading `kappa-quests.json`. The open-tracker shortcut is
+  rebound in F12.
 - **Map** - accepted quests only, which sidebar sections show, how many "do next" rows, which pins
   carry their name at rest (hover only / in progress and available / all), sidebar width, and the
   artwork rotation and mirror overrides.
-- **Colours** - the six status colours and the accent, with presets in-game and any hex colour in
-  F12, plus **Restore the pre-1.10 colours** for anyone who preferred the old palette.
+- **Colours** - the six status colours (in progress, available, completed, level gated, locked,
+  **failed**) and the accent, with presets in-game and any hex colour in F12, plus **Restore the
+  pre-1.10 colours** for anyone who preferred the old palette.
+- **Trader colours** - the stripe colour per trader, one row each, generated from the traders your
+  install actually has, so modded ones are in the list too.
 
 ## Notes
 
@@ -350,7 +388,12 @@ The Settings view, in four sections, and the same values in BepInEx's F12 menu. 
 ## Troubleshooting
 
 - **No taskbar button** - check `BepInEx\LogOutput.log` for lines starting `QuestTree`. The load
-  line carries the build stamp (`QuestTree 1.8.5+abc1234: loaded.`), which is what to quote.
+  line carries the build stamp (`QuestTree 1.17.0+abc1234: loaded.`), which is what to quote.
+- **The tracker is slow to open** - `LogOutput.log` carries one line per open with the time in each
+  phase: `QuestTree: panel open - 499 ms: quests: server 29, quests: parse 233, graph 61, ...`. The
+  quest fetch and its parse run on a worker thread, so the game is drawing frames through those two.
+  The server half logs each per-profile request's time on the first one and again whenever it passes
+  200 ms. Quote both lines rather than a feeling.
 - **Tree only shows unlocked quests, no pins** - the server half is missing, or you are on someone
   else's server that does not have it. See "Both halves are required" above.
 - **`Http response status code: NotFound` on `/questtree/...`** - same cause: the server you are on
@@ -361,6 +404,10 @@ The Settings view, in four sections, and the same values in BepInEx's F12 menu. 
   it fixes that for everyone on the server.
 - **A map has no image** - that map has no DynamicMaps image, which is expected for a few of them.
   The quest list still works.
+- **`tarkovdev-last-failure.txt` in `SPT_Runtime\user\mods\QuestTree`** - tarkov.dev could not be
+  reached, so the server stops asking for a day rather than paying the attempt on every boot. Delete
+  the file to retry sooner. A successful download lands beside it as `tarkovdev-quests.json` and
+  refreshes itself after seven days; delete that one to refresh it now.
 
 ## Uninstalling
 
@@ -373,5 +420,6 @@ two folders:
   your profile, named `QT: <quest> - <weapon>`. Delete them in the game's own build list.
 - **`BepInEx\config\com.takov.questtree.cfg`**, your settings. Harmless, and deleting it is optional.
 
-Everything else - the harvested map zones, the solved weapon builds - lives in the two folders above
-and goes with them.
+Everything else - the harvested map zones, the solved weapon builds, the downloaded objective
+locations (`tarkovdev-quests.json`, `objective-gps.json`) and the `tarkovdev-last-failure.txt` stamp
+beside them - lives in the two folders above and goes with them.
