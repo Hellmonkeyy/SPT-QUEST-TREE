@@ -63,7 +63,8 @@ namespace QuestTreeServer
         GlobalTable globals,
         RagfairPriceService fleaPrices,
         SPTarkov.Server.Core.Helpers.Ragfair.RagfairServerHelper ragfairRules,
-        SPTarkov.Server.Core.Helpers.Items.ItemHelper itemHelper)
+        SPTarkov.Server.Core.Helpers.Items.ItemHelper itemHelper,
+        PartPrices partPrices)
     {
         /// <summary>The equipment slots a weapon in use sits in. A part under one of these is on a gun
         /// the player is carrying into raids.</summary>
@@ -521,7 +522,22 @@ namespace QuestTreeServer
         /// The outer list is ALTERNATIVES - any one of them buys the item - and each inner list is that
         /// alternative's requirements. A single requirement naming a currency is a cash price; anything else
         /// is a barter, and has no rouble amount to report.</summary>
-        private static long? CashPrice(TraderAssort assort, MongoId offer)
+        /// <summary>Roubles per unit of a currency, from the handbook - which is how SPT's own
+        /// HandbookHelper.InRUB converts a trader's dollar or euro price. Roubles are 1; a currency
+        /// the handbook does not price (a modded one) is null, and a price in it is not a price.
+        ///
+        /// Until 1.16.0 a Peacekeeper price of 335 dollars was carried as 335 "roubles", on the
+        /// panel's cost labels, in the Cash totals, and in the bill measurement whose widest
+        /// disagreement - handbook 45,787 against paid 335 - is what gave it away.</summary>
+        private double? RoublesPer(MongoId currency)
+        {
+            if (currency.ToString().Equals(Currencies.Roubles, StringComparison.OrdinalIgnoreCase)) return 1d;
+
+            var rate = partPrices.Of(currency);
+            return rate is > 0 ? rate : null;
+        }
+
+        private long? CashPrice(TraderAssort assort, MongoId offer)
         {
             if (assort.BarterScheme == null || !assort.BarterScheme.TryGetValue(offer, out var alternatives))
                 return null;
@@ -537,7 +553,10 @@ namespace QuestTreeServer
                 if (requirement?.Template == null) continue;
                 if (!Currencies.All.Contains(requirement.Template.ToString())) continue;
 
-                var price = (long)Math.Round(requirement.Count ?? 0d);
+                var rate = RoublesPer(requirement.Template);
+                if (rate == null) continue;
+
+                var price = (long)Math.Round((requirement.Count ?? 0d) * rate.Value);
 
                 if (price <= 0) continue;
                 if (cheapest == null || price < cheapest) cheapest = price;
