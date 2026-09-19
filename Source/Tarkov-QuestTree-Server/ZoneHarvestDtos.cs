@@ -15,8 +15,23 @@ namespace QuestTreeServer
     /// </summary>
     public sealed class ZoneHarvestRequest : IRequestData
     {
+        /// <summary>The newest harvest shape this server understands. The client mirror
+        /// (QuestGraph/ZoneHarvestDto.cs) declares the same number as its own CurrentSchemaVersion:
+        /// change either and change the other in the same commit. Named like the client's other
+        /// supported-version constants because it does their job here - this is the one payload the
+        /// SERVER receives, so the version check the client runs on every other payload has to live
+        /// on this side.</summary>
+        public const int SupportedSchemaVersion = 1;
+
         /// <summary>The shape the client believes it is sending. 0 from a client older than
-        /// 1.8.1, which sent no version at all - the one payload in the system that did not.</summary>
+        /// 1.8.1, which sent no version at all - the one payload in the system that did not.
+        ///
+        /// READ by QuestTreeRouter.AcceptHarvest, which refuses a harvest claiming a shape newer
+        /// than SupportedSchemaVersion and accepts older or equal. Older is safe because every
+        /// version so far has been the same shape and an absent field arrives as 0; newer is not,
+        /// because this is the one route that mutates shipped, shared data, and fields this build
+        /// cannot see would be dropped by the deserializer and then written into zones\ as though
+        /// the harvest had been understood in full.</summary>
         [JsonPropertyName("schemaVersion")]
         public int SchemaVersion { get; set; }
 
@@ -78,11 +93,19 @@ namespace QuestTreeServer
     /// version it was taken, so a stale file can be recognised after a game update.</summary>
     public sealed class ZoneFile
     {
-        /// <summary>The shape of this file. Missing (0) in files written before 1.8.2, which
-        /// are the same shape as version 1; a reader meeting a higher number knows the file is
-        /// from a newer server rather than corrupt.</summary>
+        /// <summary>The newest zone-file shape this server can read, and the one it writes.</summary>
+        public const int CurrentSchemaVersion = 1;
+
+        /// <summary>The shape of this file. ABSENT from files written before 1.8.2, the shipped seeds
+        /// among them; those are the same shape as version 1 and deserialise to this initializer, not
+        /// to 0, which is why the reader below needs no special case for them.
+        ///
+        /// READ by ZoneStore.Read, which SKIPS a file stamped higher than CurrentSchemaVersion with
+        /// one warning naming it - so a file left behind by a newer server is recognised as being
+        /// from the future rather than parsed as though its unknown fields did not matter, and is not
+        /// reported as corrupt either. Equal or lower is read exactly as before.</summary>
         [JsonPropertyName("schemaVersion")]
-        public int SchemaVersion { get; set; } = 1;
+        public int SchemaVersion { get; set; } = CurrentSchemaVersion;
 
         [JsonPropertyName("map")]
         public string Map { get; set; } = "";

@@ -125,7 +125,11 @@ namespace QuestTreeServer
         /// fresh collections for precisely this reason.</summary>
         public sealed class Sources
         {
-            /// <summary>Templates with at least one LOOSE copy - the free ones.</summary>
+            /// <summary>Templates with at least one LOOSE copy - the free ones.
+            ///
+            /// A SET, so it answers "any" and not "how many", and it was read as "how many" for several
+            /// releases: pricing a build from it made every copy of a held template free. How many is in
+            /// Holdings[template].Loose, and FreeCopies is the question to ask.</summary>
             public HashSet<MongoId> Owned { get; } = new();
 
             /// <summary>Every template the profile holds anywhere, with where. Loose, fitted to a stored
@@ -185,26 +189,123 @@ namespace QuestTreeServer
             public bool HasFromTraders(MongoId template) =>
                 Owned.Contains(template) || Buyable.ContainsKey(template) || Barter.Contains(template);
 
-            /// <summary>The tier a part falls in for this profile and what it costs there. A price is only
-            /// returned for Buyable and Flea; Fitted and Owned cost nothing, Barter and Absent have no rouble
-            /// figure and are never given one.</summary>
-            public (Tier Tier, long? Price) Classify(MongoId template, WeaponPresets.Defaults? defaults) =>
-                Classify(template, defaults, null);
-
-            /// <summary>As above, and with the quest's weapon named: a part already fitted to a copy of that
-            /// weapon the profile owns is in place rather than owned.</summary>
-            public (Tier Tier, long? Price) Classify(MongoId template, WeaponPresets.Defaults? defaults, MongoId? questWeapon)
+            /// <summary>The tier the INSTANCE'th copy of a part falls in for this profile and what that copy
+            /// costs there - zero for the first copy in a build, one for the second, and so on. A price is
+            /// only returned for Buyable and Flea; Fitted, InPlace and Owned cost nothing, Barter and Absent
+            /// have no rouble figure and are never given one.
+            ///
+            /// WHY AN INDEX, AND WHY IT IS THE ONLY WAY TO ASK. Ownership is a COUNT and every tier was
+            /// written as if it were a flag: a build that fits three of a part the profile has one loose copy
+            /// of was told all three were owned and priced all three at zero, in the rows, in the bill and in
+            /// the repair search's own objective. The free copies are handed out in the order FreeCopies lists
+            /// them and every copy past them is priced as a purchase, which is what Purchase answers.
+            ///
+            /// The instance-free overloads that used to sit here are gone rather than kept for convenience.
+            /// Passing zero is what every one of their callers did, and it was wrong in each of them: what
+            /// reads a build reads it part by part and knows which copy it is holding. A caller with genuinely
+            /// one copy in hand passes zero and says so at the call site.</summary>
+            public (Tier Tier, long? Price) Classify(
+                MongoId template, WeaponPresets.Defaults? defaults, MongoId? questWeapon, int instance)
             {
-                // Slot-blind, and OccupiesAnySlot's own comment says what that costs.
-                if (defaults != null && defaults.OccupiesAnySlot(template)) return (Tier.Fitted, 0);
-                if (questWeapon is { } owned && OwnedWeapons.TryGetValue(owned, out var onIt) && onIt.Contains(template))
-                    return (Tier.InPlace, 0);
-                if (Owned.Contains(template)) return (Tier.Owned, 0);
+                // Slot-blind still, and CopiesOf's comment says what that costs: this is handed a template
+                // and no slot, so it knows HOW MANY of it the preset carries but not which slots they are.
+                // The count is the half that used to be missing - a set of templates said "fitted" to a
+                // second copy the gun does not have.
+                var fitted = defaults?.CopiesOf(template) ?? 0;
+
+                if (instance < fitted) return (Tier.Fitted, 0);
+
+                var beyond = instance - fitted;
+
+                // Only when the preset does not carry it: when it does, the copy on the profile's own gun IS
+                // the preset's copy, and counting both would hand the same physical part out twice.
+                if (fitted == 0 && questWeapon is { } owned
+                                && OwnedWeapons.TryGetValue(owned, out var onIt) && onIt.Contains(template))
+                {
+                    if (beyond == 0) return (Tier.InPlace, 0);
+
+                    beyond--;
+                }
+
+                // Loose only, exactly as Owned means loose only. Holding.Loose and the Owned set are written
+                // together in Hold, so "Loose > 0" and "Owned.Contains" are the same question; this one has
+                // the count behind it.
+                if (beyond < (Holdings.TryGetValue(template, out var holding) ? holding.Loose : 0))
+                    return (Tier.Owned, 0);
+
+                return Purchase(template);
+            }
+
+            /// <summary>What a copy the profile does NOT already have costs it, and from where. The tail of
+            /// Classify, on its own because the search asks it directly: Priced only ever asks for the price
+            /// of an instance it has decided to charge, so "what would another one cost" is the only question
+            /// it has - and answering it with Classify's first-instance answer is what priced a second rail
+            /// at the handbook value of a rail the player already owns.</summary>
+            public (Tier Tier, long? Price) Purchase(MongoId template)
+            {
                 if (Buyable.TryGetValue(template, out var cash)) return (Tier.Buyable, cash);
                 if (Barter.Contains(template)) return (Tier.Barter, null);
                 if (FleaAccess && Flea.TryGetValue(template, out var flea)) return (Tier.Flea, flea);
 
                 return (Tier.Absent, null);
+            }
+
+            /// <summary>How many copies of one template cost this profile nothing to fit on this weapon, in
+            /// the order Classify hands them out:
+            ///
+            ///   ONE PER SLOT the weapon's default preset fills with it - the gun arrives wearing them;
+            ///   ONE already fitted to a copy of the quest's weapon this profile owns, and only when the
+            ///     preset does not carry the template, for the reason Classify gives;
+            ///   EVERY LOOSE COPY in the stash.
+            ///
+            /// Fitted to some other weapon is not counted at all: stripping a gun the player uses is their
+            /// call, never the mod's assumption. See Holding.
+            ///
+            /// The order decides which row says "fitted" and which says "owned"; it cannot change how many
+            /// copies are free, and so cannot change what a build costs.</summary>
+            public int FreeCopies(MongoId template, WeaponPresets.Defaults? defaults, MongoId? questWeapon)
+            {
+                var fitted = defaults?.CopiesOf(template) ?? 0;
+
+                var inPlace = fitted == 0 && questWeapon is { } owned
+                                          && OwnedWeapons.TryGetValue(owned, out var onIt) && onIt.Contains(template)
+                    ? 1
+                    : 0;
+
+                var loose = Holdings.TryGetValue(template, out var holding) ? holding.Loose : 0;
+
+                return fitted + inPlace + loose;
+            }
+
+            /// <summary>FreeCopies for every template it is not zero on, as a fresh dictionary the caller
+            /// owns - the budget WeaponSolver.Pricing.FreeCopies wants, and the reason this class's
+            /// immutability rule is not in danger: nothing here is written to.
+            ///
+            /// The preset's own copies are IN it, deliberately. A caller that declares a budget gets the
+            /// preset's parts from the budget rather than per slot (see Pricing.FreeCopies), so leaving them
+            /// out would charge for parts the gun already wears.</summary>
+            public Dictionary<MongoId, int> FreeCopyBudget(WeaponPresets.Defaults? defaults, MongoId? questWeapon)
+            {
+                var budget = new Dictionary<MongoId, int>();
+
+                void Add(MongoId template)
+                {
+                    if (budget.ContainsKey(template)) return;
+
+                    var copies = FreeCopies(template, defaults, questWeapon);
+
+                    if (copies > 0) budget[template] = copies;
+                }
+
+                foreach (var template in Owned) Add(template);
+
+                if (defaults != null)
+                    foreach (var template in defaults.AnySlot) Add(template);
+
+                if (questWeapon is { } owned && OwnedWeapons.TryGetValue(owned, out var onIt))
+                    foreach (var template in onIt) Add(template);
+
+                return budget;
             }
         }
 

@@ -1493,13 +1493,28 @@ namespace QuestTreeServer
                     var earlyBlockedHere = false;
                     var defaults = weaponPresets.For(weapon);
 
+                    // WHICH COPY OF EACH TEMPLATE this row is, because ownership is a count: a build fitting
+                    // two of a part the profile holds one of has one it owns and one it must buy, and this
+                    // ledger's "already in the stash" figure counted both as owned for as long as Classify was
+                    // asked without an instance. One counter per BUILD - the free copies are the profile's and
+                    // every build gets them again, since no two of these are assembled at once.
+                    var instances = new Dictionary<MongoId, int>();
+
                     foreach (var part in remembered.Parts)
                     {
                         if (!part.Template.TryParseMongoId(out var template)) continue;
 
+                        instances.TryGetValue(template, out var instance);
+                        instances[template] = instance + 1;
+
                         // The trader-only view, kept as the headline so the figure stays comparable with the
                         // ones taken before the flea market was a tier. The flea view is counted beside it.
-                        var (tier, price) = sources.Classify(template, defaults, weapon);
+                        //
+                        // A copy beyond the free ones falls to whatever a purchase of it costs, which for a
+                        // part nobody but Fence sells is absent - so a build can now be counted unbuildable
+                        // for needing a SECOND copy of something unobtainable, and that is the honest reading:
+                        // one is in the stash, the other cannot be got at all.
+                        var (tier, price) = sources.Classify(template, defaults, weapon, instance);
 
                         // Held but not loose: counted apart, because the ledger's "179 already in the stash"
                         // could not tell a spare from a part bolted to the gun they raid with.

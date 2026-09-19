@@ -372,6 +372,10 @@ namespace QuestTreeServer
             var repairedCash = 0L;
             var sharedUnpriced = 0;
 
+            // REPEATED PARTS, over whichever rows each build is actually served with. The check on the copy
+            // budget: see the line that reports it, below.
+            var copies = new Copies();
+
             // THE OBJECTIVE AGAINST THE BILL, in three columns over one set of rows.
             //
             //   handbook  - what the shared search USED to minimise. Kept as the control, because it is the
@@ -404,7 +408,7 @@ namespace QuestTreeServer
             foreach (var requirement in requirements)
             {
                 var judged = Judge(requirement, sources, locale, fresh ? "fresh" : profileId.ToString(),
-                    ref verifiedHere, ref rejectedHere);
+                    copies, ref verifiedHere, ref rejectedHere);
 
                 answer.Builds.Add(judged);
                 nodes += judged.Nodes;
@@ -459,9 +463,15 @@ namespace QuestTreeServer
 
                             sharedParts += requirement.Baseline.Count;
 
+                            // Per INSTANCE here as well: the shared build's own cost is what the repaired one
+                            // is being compared against, and counting a template it fits twice as one owned
+                            // part understated exactly the side of the comparison this line is about.
+                            var sharedCopies = new Copies();
+
                             foreach (var part in requirement.Baseline)
                             {
-                                var (tier, price) = sources.Classify(part.Template, sharedDefaults);
+                                var (tier, price) = sources.Classify(
+                                    part.Template, sharedDefaults, null, sharedCopies.Next(part.Template));
 
                                 if (tier is PartAvailability.Tier.Buyable or PartAvailability.Tier.Flea) sharedCash += price ?? 0;
                                 else if (tier is PartAvailability.Tier.Absent or PartAvailability.Tier.Barter) sharedUnpriced++;
@@ -499,6 +509,44 @@ namespace QuestTreeServer
                     $"build (priced parts only; {sharedUnpriced} absent or barter part(s) carry no price) against " +
                     $"{(double)repairedParts / repaired:0.##} parts and {(double)repairedCash / repaired:N0} roubles " +
                     $"(trader prices plus flea estimates) per repaired build.");
+
+            // WHETHER COUNTING COPIES CHANGES ANYTHING, and it is a check rather than a boast. A part
+            // instance counts as charged here only when it was priced although this profile has a free copy
+            // of that template - the gun's own default part, one already fitted to a copy of the quest's
+            // weapon it owns, or a loose copy in the stash - which is the case a set of owned templates priced
+            // at zero, and this is the number that used to be missing from the bill. The unsourced ones are
+            // the same situation with nobody to buy another from: Row keeps those at the tier of the copy the
+            // profile has and says the shortfall in the row, so nothing is charged for them.
+            //
+            // THE COMPARISON IS THE CHECK, not the counters. Owed() recounts the same quantity from the
+            // finished rows without reading any of them, so charged + unsourced == owed is a claim that can
+            // come out false: a budget spent twice, an instance index that restarts mid-build, a row list
+            // replaced after it was counted, or Row and Owed disagreeing about what a free copy is would each
+            // break it. What was here before - "charged cannot exceed repeated" - could not fail at all: the
+            // two counters are incremented by adjacent statements in one if-block, so it only ever asked
+            // whether both of them had run.
+            //
+            // REPEATED IS REPORTED BESIDE THEM as the scale to read them against: only a build fitting the
+            // SAME template twice can charge for a copy of something the profile has. The shipped seed carries
+            // exactly one repeated instance across its sixty builds - the same one the verifier's Duplicates
+            // total counts - so a profile served all sixty as shared reads "of 1" repeated, charged 1 only
+            // when it holds exactly one copy of that part, and 0 when it holds none or both. "0 of 0" means no
+            // build served here fits anything twice and this line proves nothing this boot.
+            logger.Info(
+                $"Quest Tracker: repeated parts for {who} - {copies.Charged} charged and {copies.Unsourced} " +
+                $"with nobody to buy another from, of {copies.Repeated} part instance(s) past the first of " +
+                $"their template. Recounted from the served rows: {copies.Owed} owed beyond the copies this " +
+                $"profile has. Each copy past what it has is a purchase; a set of owned templates made them " +
+                "free.");
+
+            if (copies.Charged + copies.Unsourced != copies.Owed)
+                logger.Warning(
+                    $"Quest Tracker: the copy budget and the served rows DISAGREE for {who} - the rows were " +
+                    $"charged for {copies.Charged} instance(s) beyond the free copies and {copies.Unsourced} " +
+                    $"more had no seller, {copies.Charged + copies.Unsourced} together, but counting the same " +
+                    $"rows template by template against PartAvailability.FreeCopies says {copies.Owed}. One of " +
+                    "the two is wrong and the bill is the one that matters. Row's instance count, the budget " +
+                    "it classifies against, or Owed's own arithmetic.");
 
             if (shared + nothingToBuy > 0)
             {
@@ -574,10 +622,11 @@ namespace QuestTreeServer
             PartAvailability.Sources sources,
             Dictionary<string, string> locale,
             string who,
+            Copies copies,
             ref int verified,
             ref int rejected)
         {
-            var dto = JudgeQuietly(requirement, sources, locale, ref verified, ref rejected);
+            var dto = JudgeQuietly(requirement, sources, locale, copies, ref verified, ref rejected);
 
             // Every build that is not simply the shared one, named, so the wording can be read against
             // what a player would do with it. The ok ones are the majority and say nothing new.
@@ -589,13 +638,30 @@ namespace QuestTreeServer
             foreach (var id in requirement.Build.RequiredItemIds)
                 if (id.TryParseMongoId(out var parsed)) namedParts.Add(parsed);
 
-            var avoided = requirement.Baseline == null
-                ? new List<string>()
-                : requirement.Baseline
-                    .Where(part => !namedParts.Contains(part.Template)
-                                   && sources.Classify(part.Template, defaults, weapon).Tier == PartAvailability.Tier.Absent)
-                    .Select(part => QuestPayloadBuilder.ResolveItemName(part.Template.ToString(), locale))
-                    .Distinct().ToList();
+            // PER INSTANCE, like every other reading of the shared build: a part is on this list because the
+            // profile cannot get THIS copy of it, which for a build fitting two of something they hold one of
+            // is true of the second and false of the first. A foreach rather than the LINQ it replaces because
+            // the instance index has to advance on every part, the quest's own named ones included, or the
+            // second copy of a named part would be read as the first copy of something else.
+            var avoided = new List<string>();
+
+            if (requirement.Baseline != null)
+            {
+                var seen = new Copies();
+
+                foreach (var part in requirement.Baseline)
+                {
+                    var instance = seen.Next(part.Template);
+
+                    if (namedParts.Contains(part.Template)) continue;
+                    if (sources.Classify(part.Template, defaults, weapon, instance).Tier != PartAvailability.Tier.Absent)
+                        continue;
+
+                    var name = QuestPayloadBuilder.ResolveItemName(part.Template.ToString(), locale);
+
+                    if (!avoided.Contains(name)) avoided.Add(name);
+                }
+            }
 
             logger.Info(
                 $"Quest Tracker: {who} - '{dto.QuestName}' ({dto.WeaponName}): {dto.Status}" +
@@ -617,6 +683,7 @@ namespace QuestTreeServer
             Requirement requirement,
             PartAvailability.Sources sources,
             Dictionary<string, string> locale,
+            Copies copies,
             ref int verified,
             ref int rejected)
         {
@@ -654,11 +721,16 @@ namespace QuestTreeServer
             // reason to search: no build can avoid it, so its row says what it is and the build stands.
             var blocked = false;
 
+            // One Copies per LIST OF ROWS, and three lists are built below: this one, and the repaired and
+            // blocked ones that replace it. Only the list that is actually served is counted into the
+            // profile's total, because the others are cleared and never seen.
+            var sharedRows = new Copies();
+
             foreach (var part in requirement.Baseline)
             {
                 dto.Tree ??= requirement.Baseline;
 
-                var row = Row(part, sources, defaults, locale, weapon, named);
+                var row = Row(part, sources, defaults, locale, weapon, named, sharedRows);
 
                 if (row.Tier == "absent" && !row.Named) blocked = true;
 
@@ -669,6 +741,7 @@ namespace QuestTreeServer
             {
                 dto.Status = "ok";
                 Total(dto);
+                copies.Add(sharedRows, Owed(dto.Parts, sources, defaults, weapon));
                 return dto;
             }
 
@@ -682,17 +755,24 @@ namespace QuestTreeServer
             // THIS PROFILE'S PRICES. A trader's cash price is a fact; a flea price is an estimate; a barter
             // and anything else is valued at the handbook for the objective only - the search needs a
             // comparable number and the handbook is the game's own valuation, but no row ever shows it as
-            // a price. Loose in the stash or already on the quest weapon is free.
-            var free = new HashSet<MongoId>(sources.Owned);
-            if (inPlace != null) free.UnionWith(inPlace);
-
+            // a price.
+            //
+            // HOW MANY COPIES ARE FREE, not which templates are. A budget per template - the gun's own
+            // default parts, one already fitted to a copy of it the profile owns, and every loose copy in the
+            // stash - because this was a SET of templates and a build that fits two of something the player
+            // has one of was solved as if the second were free. The budget counts the preset's own parts in,
+            // which is what Pricing.FreeCopies asks of a caller that declares one.
+            //
+            // And the price asked for is always the price of ANOTHER one: Priced only asks about instances it
+            // has decided to charge, so Purchase is the right question and Classify's first-copy answer was
+            // the wrong one - it would value a second rail at the handbook price of a rail already owned.
             var pricing = new WeaponSolver.Pricing
             {
                 PerPurchase = partPrices.PerPurchase,
-                Free = free,
+                FreeCopies = sources.FreeCopyBudget(defaults, weapon),
                 Price = template =>
                 {
-                    var (tier, price) = sources.Classify(template, defaults, weapon);
+                    var (tier, price) = sources.Purchase(template);
 
                     return tier switch
                     {
@@ -725,7 +805,12 @@ namespace QuestTreeServer
                     dto.Parts.Clear();
                     dto.Tree = result.Parts;
 
-                    foreach (var part in result.Parts) dto.Parts.Add(Row(part, sources, defaults, locale, weapon, named));
+                    var repairedRows = new Copies();
+
+                    foreach (var part in result.Parts)
+                        dto.Parts.Add(Row(part, sources, defaults, locale, weapon, named, repairedRows));
+
+                    copies.Add(repairedRows, Owed(dto.Parts, sources, defaults, weapon));
 
                     // A repaired build made only of obtainable parts, by construction, the quest's own named
                     // parts aside; said out loud if that ever stops being true, rather than trusted.
@@ -763,7 +848,12 @@ namespace QuestTreeServer
             dto.Parts.Clear();
             dto.Tree = result.Parts;
 
-            foreach (var part in result.Parts) dto.Parts.Add(Row(part, sources, defaults, locale, weapon, named));
+            var blockedRows = new Copies();
+
+            foreach (var part in result.Parts)
+                dto.Parts.Add(Row(part, sources, defaults, locale, weapon, named, blockedRows));
+
+            copies.Add(blockedRows, Owed(dto.Parts, sources, defaults, weapon));
 
             Total(dto);
 
@@ -816,15 +906,138 @@ namespace QuestTreeServer
             return dto;
         }
 
+        /// <summary>How many copies of each template one build's rows have claimed so far, and what that cost
+        /// the player beyond what they have.
+        ///
+        /// ONE PER LIST OF ROWS, never per profile: the free copies are the profile's and are spent again by
+        /// every build. Two builds that each fit the one rail in the stash each get it - they are not
+        /// assembled at the same time, and telling a player the second build needs a rail because the first
+        /// one used it would be inventing a constraint the game does not have.
+        ///
+        /// WHAT THE COUNTERS ARE FOR. Repeated is every row past the first of its template - the same quantity
+        /// the verifier reports as Duplicates, over the same builds. Charged is those of them priced although
+        /// the profile has a free copy of that template, which is exactly the case a set of owned templates
+        /// got wrong, and Unsourced is the rest of them: beyond the free copies with nobody to buy another
+        /// from, kept at the free tier by Row and therefore charged nothing.
+        ///
+        /// Owed is the same thing counted a SECOND WAY, by Owed() off the finished rows, and it is the only
+        /// one of the four that can contradict the others.</summary>
+        private sealed class Copies
+        {
+            private readonly Dictionary<MongoId, int> _seen = new();
+
+            public int Repeated;
+            public int Charged;
+            public int Unsourced;
+
+            /// <summary>What Owed() says these rows should have had to obtain beyond the copies the profile
+            /// has. Counted from the rows and from none of the counters above, so Charged + Unsourced == Owed
+            /// is a claim that can be false.</summary>
+            public int Owed;
+
+            /// <summary>How many copies of this template these rows have already claimed, and one more from
+            /// now on. Zero the first time a template is asked about.</summary>
+            public int Next(MongoId template)
+            {
+                _seen.TryGetValue(template, out var seen);
+                _seen[template] = seen + 1;
+
+                return seen;
+            }
+
+            /// <summary>The counters only: a total over several builds keeps no _seen of its own.</summary>
+            public void Add(Copies rows, int owed)
+            {
+                Repeated += rows.Repeated;
+                Charged += rows.Charged;
+                Unsourced += rows.Unsourced;
+                Owed += owed;
+            }
+        }
+
+        /// <summary>How many part instances these rows should have had to obtain beyond the copies the profile
+        /// already has: every template counted across the rows, its free copies subtracted, the remainder
+        /// owed.
+        ///
+        /// A SECOND OPINION, and that is its whole purpose. It reads the finished rows - their template ids,
+        /// re-parsed - and shares nothing with the running instance counter Row keeps, so the two can
+        /// disagree, and the boot line that compares them is the only reason to believe either. The check the
+        /// comparison replaced tested that two adjacent statements in Row had both run, which no defect could
+        /// have made false.
+        ///
+        /// TEMPLATES THE PROFILE HAS NO FREE COPY OF ARE OUT, deliberately: every instance of those was
+        /// charged before this change and is charged now, so they are not what is being checked and counting
+        /// them would make the two sides different quantities. What remains is exactly the instances the old
+        /// set-of-templates priced at zero.</summary>
+        private static int Owed(
+            List<ProfilePartDto> rows,
+            PartAvailability.Sources sources,
+            WeaponPresets.Defaults? defaults,
+            MongoId questWeapon)
+        {
+            var instances = new Dictionary<MongoId, int>();
+
+            foreach (var row in rows)
+                if (row.Template.TryParseMongoId(out var template))
+                    instances[template] = instances.TryGetValue(template, out var seen) ? seen + 1 : 1;
+
+            var owed = 0;
+
+            foreach (var (template, count) in instances)
+            {
+                var free = sources.FreeCopies(template, defaults, questWeapon);
+
+                if (free > 0) owed += Math.Max(0, count - free);
+            }
+
+            return owed;
+        }
+
         private static ProfilePartDto Row(
             WeaponSolver.FittedPart part,
             PartAvailability.Sources sources,
             WeaponPresets.Defaults? defaults,
             Dictionary<string, string> locale,
             MongoId questWeapon,
-            HashSet<MongoId> named)
+            HashSet<MongoId> named,
+            Copies copies)
         {
-            var (tier, price) = sources.Classify(part.Template, defaults, questWeapon);
+            // WHICH COPY THIS ROW IS. A build that fits a template twice needs two of them, and the second is
+            // only free if the profile has a second - see Sources.FreeCopies.
+            var instance = copies.Next(part.Template);
+            var (tier, price) = sources.Classify(part.Template, defaults, questWeapon, instance);
+
+            // Held: how many copies cost nothing. Beyond: this row is past them and is being charged although
+            // the profile has one - the case a set of owned templates priced at zero, and the one the boot
+            // line counts.
+            var held = instance > 0 ? sources.FreeCopies(part.Template, defaults, questWeapon) : 0;
+            var beyond = held > 0
+                         && tier is not (PartAvailability.Tier.Fitted or PartAvailability.Tier.InPlace
+                             or PartAvailability.Tier.Owned);
+
+            // THE TIER BEFORE THE SOFTENING BELOW, and every question about where a part comes from is asked
+            // of THIS one rather than of the tier the row ends up showing. Softening first and asking after
+            // is what made a second copy sold by Prapor one loyalty up lose its Gate and be told nobody but
+            // Fence sells another.
+            var charged = tier;
+
+            // A COPY BEYOND THE FREE ONES THAT NOBODY SELLS. Absent is the honest tier and deliberately not
+            // the one used: an unnamed absent row is what StillObtainable reads as a change in circumstances,
+            // so labelling the second copy absent would put a build that has been served happily for months
+            // into the permanent stale-and-requeue loop that comment describes - and for a row Total cannot
+            // charge for anyway, since absent carries no price. So the row keeps the tier the copy they DO
+            // have earned, and Where says a further copy is needed and where it is not.
+            var unsourced = beyond && tier == PartAvailability.Tier.Absent;
+
+            if (unsourced) (tier, price) = sources.Classify(part.Template, defaults, questWeapon, 0);
+
+            if (instance > 0)
+            {
+                copies.Repeated++;
+
+                if (unsourced) copies.Unsourced++;
+                else if (beyond) copies.Charged++;
+            }
 
             var row = new ProfilePartDto
             {
@@ -836,20 +1049,54 @@ namespace QuestTreeServer
                 Named = named.Contains(part.Template)
             };
 
-            if (tier == PartAvailability.Tier.Absent && sources.Gated.TryGetValue(part.Template, out var gate))
+            // The trader and level that WOULD sell it, asked of the charged tier: a copy beyond the free ones
+            // is gated exactly as a first copy would be, and the row showing "owned" does not change who
+            // stocks another one.
+            if (charged == PartAvailability.Tier.Absent && sources.Gated.TryGetValue(part.Template, out var gate))
                 row.Gate = $"{TraderName(gate.Trader, locale)} at loyalty {gate.Level}";
 
             // A copy they hold that is not loose: said, with the weapon, beside whatever the part costs to
-            // buy - so "strip it or buy another" is a decision they can make from the row.
-            if (tier is not (PartAvailability.Tier.Fitted or PartAvailability.Tier.InPlace or PartAvailability.Tier.Owned)
-                && sources.Holdings.TryGetValue(part.Template, out var holding) && holding.FittedAnywhere)
+            // buy - so "strip it or buy another" is a decision they can make from the row. Off the charged
+            // tier too, or the hint disappears on precisely the rows that most need it.
+            var fittedElsewhere = "";
+
+            if (sources.Holdings.TryGetValue(part.Template, out var holding) && holding.FittedAnywhere)
             {
                 var equipped = holding.FittedToEquipped.FirstOrDefault();
                 var stored = holding.FittedToStored.FirstOrDefault();
 
-                row.Where = holding.FittedToEquipped.Count > 0
+                fittedElsewhere = holding.FittedToEquipped.Count > 0
                     ? $"fitted to your equipped {QuestPayloadBuilder.ResolveItemName(equipped.ToString(), locale)}"
                     : $"fitted to your {QuestPayloadBuilder.ResolveItemName(stored.ToString(), locale)}";
+            }
+
+            if (fittedElsewhere.Length > 0
+                && charged is not (PartAvailability.Tier.Fitted or PartAvailability.Tier.InPlace
+                    or PartAvailability.Tier.Owned))
+                row.Where = fittedElsewhere;
+
+            // The copy whose tier is a kindness: this build fits more of the part than the profile has. What
+            // it HAS is said in the terms the player can check - the gun brings some, the stash holds others -
+            // rather than as one number that counted the gun's own parts as things they own. Where another
+            // comes from is whatever is true: a trader further up their loyalty, a copy on another gun, and
+            // only when neither applies is it Fence's problem.
+            if (unsourced)
+            {
+                var fromPreset = defaults?.CopiesOf(part.Template) ?? 0;
+                var loose = holding?.Loose ?? 0;
+
+                var have = new List<string>();
+                if (fromPreset > 0) have.Add($"the gun comes with {fromPreset}");
+                if (held > fromPreset + loose) have.Add("one is already on the copy you own");
+                if (loose > 0) have.Add($"you have {loose} loose");
+
+                var another = row.Gate.Length > 0
+                    ? $"another comes from {row.Gate}"
+                    : fittedElsewhere.Length > 0
+                        ? $"another is {fittedElsewhere}"
+                        : "no trader but Fence sells another";
+
+                row.Where = $"this build fits {instance + 1} of these; {string.Join(", ", have)} - {another}";
             }
 
             return row;

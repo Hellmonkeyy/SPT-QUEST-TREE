@@ -39,24 +39,37 @@ namespace QuestTreeServer
 
             public int Count => Occupants.Count;
 
-            /// <summary>Whether this template is the default in ANY slot, ignoring which.
+            /// <summary>Which templates the preset carries at all, ignoring where. The slot-blind question,
+            /// and the only thing still asked of it is "does this weapon's preset mention this part" - as a
+            /// set of candidates to price, in PartAvailability.FreeCopyBudget.
             ///
-            /// The slot-blind question, named so its looseness is visible at the call site. Classify has to
-            /// ask it - it is handed a template and no slot - and the answer is wrong in one direction: a
-            /// build carrying TWO copies of a part that is the default in one slot shows both rows as fitted
-            /// and free, while WeaponSolver.Priced keys on (host, slot) and charges for the second. So the
-            /// display can under-report what the search itself optimised against.
+            /// AN `OccupiesAnySlot(template)` PREDICATE OVER THIS SET IS GONE, with the answer it gave: a
+            /// build carrying TWO copies of a part the preset carries once showed BOTH rows as fitted and
+            /// free, while WeaponSolver.Priced keyed on (host, slot) and charged for the second, so the
+            /// display under-reported what the search itself optimised against. CopiesOf answers with the
+            /// number instead, which is what every caller actually needed; the yes-or-no question has no
+            /// callers left and is not kept for one.
             ///
             /// A set rather than the Values.Contains scan it replaces, which was O(n) per part per
             /// classify. Built with the object rather than lazily: one Defaults is cached per weapon and
             /// read by every training thread at once - however many that is, which is half the processor
             /// count and not the fifteen this comment first claimed - so a `??=` here would let one of them
             /// publish a half-built HashSet to the others.</summary>
-            public bool OccupiesAnySlot(MongoId template) => AnySlot.Contains(template);
-
-            /// <summary>Occupants' values as a set. Assigned beside Occupants, never derived from it after
-            /// the fact, for the reason above.</summary>
             public IReadOnlySet<MongoId> AnySlot { get; init; } = new HashSet<MongoId>();
+
+            /// <summary>HOW MANY of the preset's slots this template fills - the number a set of templates
+            /// cannot hold. A preset that carries one rail gives the gun one rail: a build that fits two is
+            /// one rail short and somebody has to buy it. Counted here so the answer costs a lookup rather
+            /// than a scan of Occupants' values per part per classify - the same reason AnySlot is a set -
+            /// and assigned with the object for the same reason it is.
+            ///
+            /// Zero for a template the preset does not carry, which is the honest answer and not a claim
+            /// that the weapon has no preset: Defaults is null when there is none.</summary>
+            public int CopiesOf(MongoId template) => Copies.TryGetValue(template, out var copies) ? copies : 0;
+
+            /// <summary>Occupants' values counted per template, which CopiesOf reads. Not to be confused
+            /// with Count, which is how many slots the preset fills in total.</summary>
+            public IReadOnlyDictionary<MongoId, int> Copies { get; init; } = new Dictionary<MongoId, int>();
         }
 
         /// <summary>Cached per weapon, and the miss is cached too - a weapon with no preset must not be
@@ -107,13 +120,19 @@ namespace QuestTreeServer
                     occupants.TryAdd((host, item.SlotId!), item.Template);
                 }
 
-                return occupants.Count == 0
-                    ? null
-                    : new Defaults
-                    {
-                        Occupants = occupants,
-                        AnySlot = new HashSet<MongoId>(occupants.Values)
-                    };
+                if (occupants.Count == 0) return null;
+
+                var copies = new Dictionary<MongoId, int>(occupants.Count);
+
+                foreach (var template in occupants.Values)
+                    copies[template] = copies.TryGetValue(template, out var seen) ? seen + 1 : 1;
+
+                return new Defaults
+                {
+                    Occupants = occupants,
+                    AnySlot = new HashSet<MongoId>(occupants.Values),
+                    Copies = copies
+                };
             }
             catch (System.Exception ex)
             {

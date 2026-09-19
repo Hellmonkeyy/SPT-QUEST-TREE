@@ -560,6 +560,26 @@ namespace QuestTreeServer
                 var file = JsonSerializer.Deserialize<ZoneFile>(System.IO.File.ReadAllText(path), FileOptions);
                 if (file == null) return null;
 
+                // Written by a newer server than this one. The fields this build recognises are NOT
+                // taken for the whole file: a v2 file could mean a trigger's position is relative to
+                // something v1 never recorded, and drawing those pins would put quest markers in the
+                // wrong place while every log line said the map was fine.
+                //
+                // Skipped exactly as an unreadable file is skipped, with the same consequence: this
+                // map has no harvested pins this boot, and the next raid there writes a fresh
+                // current-schema file over it. That trade is deliberate - a downgrade costs one raid
+                // per map, and there is nothing an older reader could do with a newer file that would
+                // not be a guess. Read's result, null included, is cached by both callers, so this is
+                // said once per boot per map rather than on every payload rebuild.
+                if (file.SchemaVersion > ZoneFile.CurrentSchemaVersion)
+                {
+                    logger.Warning(
+                        $"Quest Tracker: zones/{key}.json is schema v{file.SchemaVersion}, newer than the " +
+                        $"v{ZoneFile.CurrentSchemaVersion} this server reads - skipped, so '{key}' has no " +
+                        "harvested zones this boot. Update the server half, or delete that file and raid the map again.");
+                    return null;
+                }
+
                 // Filled in rather than dereferenced. Files this server wrote always carry both arrays, but
                 // a hand-edited or third-party seed with "triggers": null threw into the catch below and was
                 // reported as unreadable - discarding the questItems it did have, and telling the player to

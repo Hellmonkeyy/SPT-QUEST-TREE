@@ -312,6 +312,29 @@ namespace QuestTreeServer
 
             if (request == null) return Reject("no body", mapIsValid: false);
 
+            // BEFORE every other check, because this is the one route that mutates shared, shipped
+            // data and the checks below all assume they are reading a shape this build knows. A
+            // harvest from a newer client carries fields System.Text.Json drops silently; storing
+            // the rest would put a half-understood harvest into zones\ stamped with a schemaVersion
+            // saying it is complete, and the harvest is fire-and-forget, so nothing downstream would
+            // ever notice. Older or equal is accepted unchanged - every version so far has been the
+            // same shape, and a client older than 1.8.1 sends no version at all, which deserialises
+            // to 0.
+            //
+            // mapIsValid: false, although the map is usually fine: the map name is a field of a body
+            // this build cannot read in full, so it is not trusted far enough to key a log line on
+            // before IsValidMapName has looked at it.
+            //
+            // The claimed version goes IN the reason, which is what makes Reject's own dedup - keyed
+            // on map and reason - say this once per boot per version rather than once per raid. The
+            // wording is the client's to print: ZoneHarvester logs response.Message verbatim on
+            // !Ok, so this is the line the player actually sees.
+            if (request.SchemaVersion > ZoneHarvestRequest.SupportedSchemaVersion)
+                return Reject(
+                    $"harvest schema v{request.SchemaVersion} is newer than the v{ZoneHarvestRequest.SupportedSchemaVersion} " +
+                    "this server reads - this server is older than the client, update the server half",
+                    mapIsValid: false);
+
             // Two checks, AND-ed, because they guard different things. IsValidMapName guards the
             // FILE - the regex and the reserved-name set stop a harvest escaping the zones folder
             // or naming a Windows device such as NUL - and cannot be replaced by the table check,

@@ -174,12 +174,6 @@ namespace QuestTreeServer
         public bool Training =>
             Environment.GetEnvironmentVariable("QUESTTREE_TRAIN") is "1" or "true" or "TRUE" or "yes";
 
-        /// <summary>False when the cache was written against a different set of items than this install
-        /// has. The entries are still used - a build that VERIFIES is a good answer whoever wrote it - but
-        /// they may no longer be the smallest possible, because parts this install has were not there when
-        /// they were found.</summary>
-        public bool Authoritative { get; private set; } = true;
-
         /// <summary>Search seeds one boot gets through, and therefore the stride between boots. Wide
         /// enough that no two boots ever try the same starting point.</summary>
         private const int SeedStride = 1_000;
@@ -441,8 +435,6 @@ namespace QuestTreeServer
                         _file.SolverVersion = CurrentSolver;
                         _dirty = true;
 
-                        Authoritative = false;
-
                         // EVERYTHING MEASURED IS RE-OPENED. A build carried over from another install is still
                         // a build and the verifier will say whether it is a legal one - but its cost, its
                         // change count and what a search of it spent were all facts about a different set of
@@ -460,6 +452,13 @@ namespace QuestTreeServer
                             build.Binding.Clear();
                         }
 
+                        // THE LOG LINE IS THE WHOLE RECORD OF THIS BRANCH. An `Authoritative` property was
+                        // set false here for a reader that was never written: the two Info lines - "remembered
+                        // from a previous boot" above and this one - already say which of the two happened, and
+                        // nothing decides anything differently on the strength of it, because the verifier
+                        // checks every build before use whoever wrote it and the search looks for a smaller one
+                        // either way. A flag nothing reads reads as a promise the code does not keep, so it is
+                        // gone; if a consumer ever needs it, it is this branch that grows one.
                         logger.Info(
                             $"Quest Tracker: {found.Builds.Count} weapon build(s) carried over from a different " +
                             "solver or a different set of items. They are checked before use, and the search will " +

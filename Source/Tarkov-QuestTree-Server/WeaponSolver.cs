@@ -223,8 +223,9 @@ namespace QuestTreeServer
             public int Changes { get; set; }
 
             /// <summary>THE OBJECTIVE, in roubles: the price of every part the player has to obtain plus
-            /// Pricing.PerPurchase for each one, with parts on the default preset and parts the caller lists
-            /// as free costing nothing. Changes stays beside it as the count the price is over.</summary>
+            /// Pricing.PerPurchase for each one, with parts on the default preset and as many copies of a
+            /// part as the caller says the player already has costing nothing - see Pricing.FreeCopies.
+            /// Changes stays beside it as the count the price is over.</summary>
             public long Cost { get; set; }
 
             /// <summary>Purchases charged with no price behind them - a part the price table does not know.
@@ -264,17 +265,33 @@ namespace QuestTreeServer
         /// a multiple where no trader sells the part; static, profile-blind, the same for everyone, so its
         /// history ships. A profile's own pass is priced from its traders, its flea and its stash.
         ///
-        /// A part on the weapon's default preset costs nothing; so does one in Free, which is how a caller
-        /// says "loose in the stash". A part with no price is charged PerPurchase alone and COUNTED as
+        /// A part on the weapon's default preset costs nothing; so does one the caller has already got, which
+        /// FreeCopies is how a caller says. A part with no price is charged PerPurchase alone and COUNTED as
         /// unpriced: returning zero for it would make the search prefer exactly the parts it knows least
         /// about, and the count is what stops that reading as cheap.</summary>
         public sealed class Pricing
         {
+            /// <summary>What ONE MORE copy of this template costs the player - a purchase, never a copy they
+            /// already have. Priced only asks about instances it has decided to charge for.</summary>
             public Func<MongoId, long?> Price { get; init; } = _ => null;
 
             public long PerPurchase { get; init; }
 
-            public IReadOnlyCollection<MongoId>? Free { get; init; }
+            /// <summary>How many copies of a template this search's player can fit for nothing.
+            ///
+            /// A COUNT PER TEMPLATE, and it was a SET of templates until a build that fits two identical
+            /// rails was found to be pricing both at zero for a player who owns one. The (k+1)th copy of a
+            /// template they hold k of is a purchase like any other.
+            ///
+            /// A budget declared here covers EVERY free copy, the weapon's own default parts included,
+            /// because Priced then hands the preset's parts out from the budget rather than recognising them
+            /// per slot. That is what makes two identical rails on a gun whose preset ships one cost a rail,
+            /// and it is why PartAvailability.FreeCopyBudget counts the preset in.
+            ///
+            /// NULL is no budget at all - the shared baseline's pricing, which knows no player - and then the
+            /// preset's occupants are free where they sit, per (host, slot), exactly as they always were. The
+            /// shipped build history was solved that way and still is.</summary>
+            public IReadOnlyDictionary<MongoId, int>? FreeCopies { get; init; }
         }
 
         /// <summary>One threshold, reduced to what the search needs: which stat, which direction is
@@ -2071,17 +2088,32 @@ namespace QuestTreeServer
             }
         }
 
-        /// <summary>What the build costs under the search's pricing: for every part not already on the
-        /// default preset and not listed as free, its price plus PerPurchase - and the count of those charged
-        /// with no price at all.
+        /// <summary>What the build costs under the search's pricing: for every part the player does not
+        /// already have a free copy of, its price plus PerPurchase - and the count of those charged with no
+        /// price at all.
         ///
         /// A part of the default that the build does not carry costs nothing, exactly as in Changed: taking a
-        /// part off is a trip to nowhere.</summary>
+        /// part off is a trip to nowhere.
+        ///
+        /// FREE COPIES ARE COUNTED OFF, not matched. With a budget (see Pricing.FreeCopies) the walk spends
+        /// one copy per instance and charges every instance past the budget, which is what makes a build that
+        /// fits two of something the player owns one of cost one of them. Without a budget - the shared
+        /// baseline - the preset's own occupants are free per (host, slot), as before.
+        ///
+        /// ORDER-FREE, and it has to be: the answer this returns is the objective, so a build's cost may not
+        /// depend on the order the walk happens to reach its parts in. It does not, because every instance of
+        /// one template is priced the same, so a template with n instances and a budget of k costs
+        /// max(0, n - k) purchases whichever n - k of them the walk happens to charge. Which ROWS a panel
+        /// labels free can differ; what the build costs cannot.</summary>
         private static (long Cost, int Unpriced) Priced(Node root, SearchState state)
         {
             var pricing = state.Pricing;
+            var budget = pricing.FreeCopies;
+            var spent = state.Spent;
             var cost = 0L;
             var unpriced = 0;
+
+            if (budget != null) spent.Clear();
 
             Walk(root);
 
@@ -2091,11 +2123,7 @@ namespace QuestTreeServer
             {
                 foreach (var child in node.Children)
                 {
-                    var stock = state.Defaults != null
-                                && state.Defaults.Occupants.TryGetValue((node.Template, child.SlotName), out var fitted)
-                                && fitted == child.Template;
-
-                    if (!stock && (pricing.Free == null || !pricing.Free.Contains(child.Template)))
+                    if (!Free(node.Template, child))
                     {
                         var price = pricing.Price(child.Template);
 
@@ -2107,6 +2135,24 @@ namespace QuestTreeServer
 
                     Walk(child);
                 }
+            }
+
+            bool Free(MongoId host, Node child)
+            {
+                if (budget == null)
+                    return state.Defaults != null
+                           && state.Defaults.Occupants.TryGetValue((host, child.SlotName), out var fitted)
+                           && fitted == child.Template;
+
+                if (!budget.TryGetValue(child.Template, out var copies)) return false;
+
+                spent.TryGetValue(child.Template, out var used);
+
+                if (used >= copies) return false;
+
+                spent[child.Template] = used + 1;
+
+                return true;
             }
         }
 
@@ -2545,6 +2591,15 @@ namespace QuestTreeServer
 
             /// <summary>What parts cost the player this search is for. Never null once Solve has set it.</summary>
             public Pricing Pricing = new() { PerPurchase = 1 };
+
+            /// <summary>Scratch for Priced: how many of each template's free copies the walk in progress has
+            /// already spent. Cleared at the top of each walk and read by nothing else.
+            ///
+            /// Reused rather than allocated because Priced runs on every measurement, which is the hot path;
+            /// safe to share for the same reason Counts and Shortlist are, which is that one search owns one
+            /// SearchState and nothing inside a search runs in parallel. Training runs several searches at
+            /// once, each with its own state.</summary>
+            public Dictionary<MongoId, int> Spent { get; } = new();
 
             /// <summary>What the weapon ships with, or null when the game has no preset for it. Read once
             /// per search rather than once per measurement.</summary>

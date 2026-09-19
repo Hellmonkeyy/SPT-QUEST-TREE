@@ -30,6 +30,41 @@ namespace QuestTree.UI
         /// <summary>Shared by the Close button and by the Settings button that sits beside it.</summary>
         private const float CloseButtonWidth = 90f;
 
+        /// <summary>The bar's outer padding and the three gaps the left block is built from: after
+        /// the search box, after each action button (BuildToolbarAction adds it), and before the
+        /// legend. Named because the fit arithmetic has to walk the same cursor the layout does.</summary>
+        private const float Padding = 8f;
+        private const float SearchGap = 10f;
+        private const float ActionGap = 6f;
+        private const float LegendGap = 6f;
+
+        /// <summary>The left block's fixed widths and labels, in two tiers.
+        ///
+        /// The tight tier exists because the collapsed legend is not always enough: on a 1366-wide
+        /// panel the notice is left ~37px, well under MinNoticeWidth, so the one line saying how
+        /// much of the tab you are seeing ellipsises to nothing. These widths buy ~118px back from
+        /// the only place on the bar that has it - the search box and the long labels - and the
+        /// shortcut letter stays in every shortened label because that is what the label is for.
+        /// Tier one is exactly what shipped, so the wide and collapsed layouts do not move.</summary>
+        private const float WideSearchWidth = 220f;
+        private const float TightSearchWidth = 160f;
+        private const float WideMyQuestsWidth = 110f;
+        private const float TightMyQuestsWidth = 72f;
+        private const float FitButtonWidth = 70f;
+        private const float WideFocusWidth = 90f;
+        private const float TightFocusWidth = 78f;
+        private const float WideChainsWidth = 70f;
+        private const float TightChainsWidth = 62f;
+        private const float HelpButtonWidth = 30f;
+
+        private const string WideMyQuestsLabel = "My quests (M)";
+        private const string TightMyQuestsLabel = "Mine (M)";
+
+        /// <summary>The placeholder is shortened with the box: the full sentence does not fit 160px
+        /// of field, and TMP wraps rather than clips it, so it would read as two broken lines.</summary>
+        private const string WideSearchPlaceholder = "Search quests or traders  ( / )";
+        private const string TightSearchPlaceholder = "Search  ( / )";
+
         /// <summary>The band a view button's width is clamped into. The minimum is also what every
         /// view button drops to when the bar does not fit.</summary>
         private const float MinViewButtonWidth = 70f;
@@ -115,9 +150,22 @@ namespace QuestTree.UI
             toolbarGo.GetComponent<Image>().color = new Color(0f, 0f, 0f, 0.4f);
             GameStyle.ApplyPanel(toolbarGo.GetComponent<Image>());
 
-            const float padding = 8f;
             const float itemHeight = 28f;
             var itemY = -(Height - itemHeight) / 2f; // vertically centered within the bar
+
+            // The whole layout is decided here, before anything is built: the children are placed
+            // from a left cursor and from the right edge, and on many common window widths the two
+            // meet. Six named legend chips plus naturally-sized view buttons need more than a
+            // 1600-wide panel has, so the legend collapses to one chip and the view buttons drop to
+            // their minimum (compact); and on a 1366-wide panel even that leaves the notice under
+            // MinNoticeWidth, so the left block shortens too (tight). Decided once: the shell is
+            // built on the first Show and never rebuilt, so this is the only look at the width.
+            // Both tiers are pure arithmetic over the constants above, which is why this can run
+            // before the search box exists - the estimate is the width the layout stays near (see
+            // FitsWide).
+            var available = AvailableWidth(toolbar, root);
+            var compact = !FitsWide(LegendX(tight: false), viewButtons, available);
+            var tight = compact && CollapsedNoticeWidth(tight: false, viewButtons, available) < MinNoticeWidth;
 
             var searchGo = new GameObject("Search", typeof(RectTransform), typeof(Image), typeof(TMP_InputField));
             _treeOnly.Add(searchGo);
@@ -125,8 +173,8 @@ namespace QuestTree.UI
             searchRect.SetParent(toolbar, worldPositionStays: false);
             searchRect.anchorMin = searchRect.anchorMax = new Vector2(0f, 1f);
             searchRect.pivot = new Vector2(0f, 1f);
-            searchRect.anchoredPosition = new Vector2(padding, itemY);
-            const float searchWidth = 220f;
+            searchRect.anchoredPosition = new Vector2(Padding, itemY);
+            var searchWidth = tight ? TightSearchWidth : WideSearchWidth;
             searchRect.sizeDelta = new Vector2(searchWidth, itemHeight);
             var searchBackground = searchGo.GetComponent<Image>();
             searchBackground.color = new Color(1f, 1f, 1f, 0.08f);
@@ -166,7 +214,7 @@ namespace QuestTree.UI
             placeholderRect.offsetMax = Vector2.zero;
 
             var placeholder = placeholderGo.AddComponent<TextMeshProUGUI>();
-            placeholder.text = "Search quests or traders  ( / )";
+            placeholder.text = tight ? TightSearchPlaceholder : WideSearchPlaceholder;
             placeholder.fontSize = 12;
             placeholder.color = GameStyle.DimTextColor;
             GameStyle.Apply(placeholder);
@@ -208,22 +256,27 @@ namespace QuestTree.UI
             // from one meant for the panel - see QuestTreePanel.Update.
             _searchField.onEndEdit.AddListener(_ => _searchBlurFrame = Time.frameCount);
 
-            // Placed between the search box and the notice, on the same manual x-cursor.
-            var navX = padding + searchWidth + 10f;
-            navX += BuildToolbarAction(toolbar, "My quests (M)", navX, itemY, itemHeight, 110f, frameMyQuests,
+            // Placed between the search box and the notice, on the same manual x-cursor. Every width
+            // and label here is the tier's, so this cursor lands exactly on LegendX(tight).
+            var navX = Padding + searchWidth + SearchGap;
+            navX += BuildToolbarAction(
+                toolbar, tight ? TightMyQuestsLabel : WideMyQuestsLabel, navX, itemY, itemHeight,
+                tight ? TightMyQuestsWidth : WideMyQuestsWidth, frameMyQuests,
                 "Jump to the quests you can work on now", treeOnly: true);
-            navX += BuildToolbarAction(toolbar, "Fit (F)", navX, itemY, itemHeight, 70f, frameContent,
+            navX += BuildToolbarAction(toolbar, "Fit (F)", navX, itemY, itemHeight, FitButtonWidth, frameContent,
                 "Fit the whole tab on screen", treeOnly: true);
 
             // Focus is a toggle, so its background says whether it is on - the tree itself looking
             // sparse is not enough of a clue.
-            navX += BuildToolbarAction(toolbar, "Focus (X)", navX, itemY, itemHeight, 90f, ToggleFocus,
+            navX += BuildToolbarAction(toolbar, "Focus (X)", navX, itemY, itemHeight,
+                tight ? TightFocusWidth : WideFocusWidth, ToggleFocus,
                 "Show only what you can work on and the quests within reach of it - Settings sets the reach",
                 out _focusBackground, treeOnly: true);
             RefreshFocusState();
 
             // Chains is the same shape: a persisted setting, lit while on.
-            navX += BuildToolbarAction(toolbar, "Chains", navX, itemY, itemHeight, 70f, ToggleChains,
+            navX += BuildToolbarAction(toolbar, "Chains", navX, itemY, itemHeight,
+                tight ? TightChainsWidth : WideChainsWidth, ToggleChains,
                 "Draw each single-file run of one trader's quests as one box - click a box to open it, " +
                 "the - mark on its first quest closes it. Off and on again closes every open run",
                 out _chainsBackground, treeOnly: true);
@@ -232,25 +285,47 @@ namespace QuestTree.UI
             // The controls hint is shown once and then never again on its own, which would make it
             // useless to anyone who dismissed it before they knew what it was for. This is how you
             // get it back.
-            navX += BuildToolbarAction(toolbar, "?", navX, itemY, itemHeight, 30f, showIntro, "Controls");
+            navX += BuildToolbarAction(
+                toolbar, "?", navX, itemY, itemHeight, HelpButtonWidth, showIntro, "Controls");
 
-            // Everything from here on is placed from the left cursor or from the right edge, and
-            // the two meet in the middle: six named legend chips plus the view cluster need more
-            // than many common window widths have, and where the width runs out they overlap. So
-            // the bar is asked whether its fixed content fits and, if not, the legend collapses to
-            // one chip and the view buttons drop to their minimum. Decided once, here: the shell
-            // is built on the first Show and never rebuilt, so this is the only look at the width.
-            const float legendGap = 6f;
-            var rightOffset = padding + CloseButtonWidth + 6f;
-            var compact = !FitsWide(navX + legendGap, rightOffset, viewButtons, AvailableWidth(toolbar, root));
+            // The cursor above and LegendX are two sums of the same widths, and only the cursor
+            // draws. A width changed in one and not the other would pick the tier for a bar that is
+            // not the bar being built, silently - so the two are compared here, where both exist,
+            // and disagreement is said out loud with both numbers in it. Once per session by
+            // construction: the shell is built on the first Show and never rebuilt.
+            var predictedLegendX = LegendX(tight);
+            if (!Mathf.Approximately(navX + LegendGap, predictedLegendX))
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: the toolbar's left block ends at {navX + LegendGap:0.#}px but the fit " +
+                    $"arithmetic predicted {predictedLegendX:0.#}px (tight={tight}) - LegendX and the " +
+                    "layout cursor have drifted apart, so the width tier was chosen on the wrong sums.");
+            }
+
+            // Below about 1345px even the shortened labels cannot give the notice MinNoticeWidth.
+            // Stated rather than left to ellipsise: a count that has silently vanished reads as a
+            // missing feature, and this is the only place that knows it was a width.
+            if (tight)
+            {
+                var tightNotice = CollapsedNoticeWidth(tight: true, viewButtons, available);
+                if (tightNotice < MinNoticeWidth)
+                {
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: the toolbar has {available:0.#}px, which leaves the render notice " +
+                        $"{tightNotice:0.#}px of the {MinNoticeWidth:0.#}px it needs even with the " +
+                        "shortened labels - the quest count will be ellipsised on this panel width.");
+                }
+            }
+
+            var rightOffset = Padding + CloseButtonWidth + 6f;
 
             // The legend lives here, in the bar, as the same bar-and-name the nodes wear - it used
             // to be a box in the corner of the graph, over whatever was drawn there.
             navX += compact
-                ? BuildCollapsedLegend(toolbar, navX + legendGap, itemY, itemHeight)
-                : BuildLegendChips(toolbar, navX + legendGap, itemY, itemHeight);
+                ? BuildCollapsedLegend(toolbar, navX + LegendGap, itemY, itemHeight)
+                : BuildLegendChips(toolbar, navX + LegendGap, itemY, itemHeight);
 
-            BuildCloseButton(toolbar, itemY, itemHeight, padding, closeTree);
+            BuildCloseButton(toolbar, itemY, itemHeight, Padding, closeTree);
 
             // Maps / Items / Kappa / Settings live together at the right, next to Close: they are
             // whole views rather than a slice of the quest graph, so grouping them apart from the
@@ -287,18 +362,68 @@ namespace QuestTree.UI
         /// layout is guaranteed to stay near. The notice stretches to whatever is left, so it is
         /// counted at the least it can say something with (MinNoticeWidth), not at full width.</summary>
         private static bool FitsWide(
-            float legendX, float rightOffset, IReadOnlyList<(string TabId, string Label)> viewButtons, float available)
+            float legendX, IReadOnlyList<(string TabId, string Label)> viewButtons, float available)
         {
             var leftNeed = legendX;
             foreach (var status in LegendStatuses)
                 leftNeed += LegendChipWidth(GameStyle.EstimateWidth(QuestNodeView.NameFor(status), LegendFontSize));
 
-            var rightNeed = rightOffset;
-            foreach (var (_, label) in viewButtons)
-                rightNeed += ViewButtonWidth(GameStyle.EstimateWidth(label, 12f), compact: false) + 1f;
-
-            return leftNeed + NoticeGap + MinNoticeWidth + NoticeGap + rightNeed <= available;
+            return leftNeed + NoticeGap + MinNoticeWidth + NoticeGap
+                + RightNeed(viewButtons, compact: false) <= available;
         }
+
+        /// <summary>Where the legend starts for a tier: the padding, the search box, the five action
+        /// buttons and every gap between them. One formula for the fit arithmetic and the layout -
+        /// Build's x-cursor sums exactly these values - so a tier cannot be measured at one width and
+        /// drawn at another.</summary>
+        private static float LegendX(bool tight) =>
+            Padding
+            + (tight ? TightSearchWidth : WideSearchWidth) + SearchGap
+            + (tight ? TightMyQuestsWidth : WideMyQuestsWidth) + ActionGap
+            + FitButtonWidth + ActionGap
+            + (tight ? TightFocusWidth : WideFocusWidth) + ActionGap
+            + (tight ? TightChainsWidth : WideChainsWidth) + ActionGap
+            + HelpButtonWidth + ActionGap
+            + LegendGap;
+
+        /// <summary>What the right-hand cluster takes: Close, its gap, and each view button at the
+        /// width this tier gives it. Read through the same ViewButtonWidth the layout uses, so this
+        /// only reads those widths rather than deciding them.</summary>
+        private static float RightNeed(IReadOnlyList<(string TabId, string Label)> viewButtons, bool compact)
+        {
+            var need = Padding + CloseButtonWidth + 6f;
+            foreach (var (_, label) in viewButtons)
+                need += ViewButtonWidth(GameStyle.EstimateWidth(label, 12f), compact) + 1f;
+
+            return need;
+        }
+
+        /// <summary>The collapsed chip's width by the same estimate: the word, then a space and a
+        /// glyph per status. The glyphs come from the table the chip itself draws from, so a
+        /// two-character one (a lock outside the BMP is a surrogate pair) is counted as drawn; the
+        /// colour tags around them are not, because EstimateWidth strips markup.</summary>
+        private static float CollapsedLegendWidth()
+        {
+            var label = CollapsedLegendLabel;
+            foreach (var status in LegendStatuses)
+                label += " " + QuestNodeView.GlyphFor(status);
+
+            return LegendChipWidth(GameStyle.EstimateWidth(label, LegendFontSize));
+        }
+
+        /// <summary>What the notice is left with in the collapsed layout, once that one chip and the
+        /// minimum-width view cluster have taken theirs. This is what picks the tight tier: under
+        /// MinNoticeWidth the notice ellipsises away entirely, and a bar whose buttons fit while the
+        /// line saying how much of the tab you are seeing has vanished has not fit.
+        ///
+        /// Counted the way FitsWide counts, so the two agree: the gap before the legend is inside
+        /// LegendX, which makes this a few pixels pessimistic against the drawn layout (Build's
+        /// cursor does not re-add that gap after the legend). Pessimistic is the safe direction.</summary>
+        private static float CollapsedNoticeWidth(
+            bool tight, IReadOnlyList<(string TabId, string Label)> viewButtons, float available) =>
+            available
+            - (LegendX(tight) + CollapsedLegendWidth() + NoticeGap)
+            - (RightNeed(viewButtons, compact: true) + NoticeGap);
 
         /// <summary>A legend chip's footprint for a label of the given width: the bar, its gap,
         /// the padded label, and the gap to the next chip. One formula for the layout and the fit
