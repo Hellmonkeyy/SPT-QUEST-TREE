@@ -70,4 +70,4 @@ from the log line the open writes. What to look for on the first open with this 
 - No `UnobservedTaskException` in `Player.log`. One would mean an abandoned request faulted after its
   cap fired.
 
-Archive sha256: c5d1e643132cacf4c351ebcb4d161eaa4fb8cc1f191c83d2afa56f09cbcfa78e
+Archive sha256: bfb531f8ed3908801a87a3750d80fed4ce97470b7e209c0568551623ced5d660
