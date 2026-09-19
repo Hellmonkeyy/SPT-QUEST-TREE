@@ -9,7 +9,7 @@
 # objective-gps / tarkovdev / .bak is a non-zero exit. It also refuses when the four version strings
 # (two ModInfo.cs, two csproj) disagree, or when the built DLLs do not carry that version.
 #
-# It also runs check-dtos.py, which compares the server's wire DTOs against the client's
+# It also runs tools/check-dtos.py, which compares the server's wire DTOs against the client's
 # hand-mirrored copies of them. The two halves cannot share a source file, the mirrors are copied by
 # hand, and a dropped field reads as a default rather than as an error - the 1.12.2 ids fault and
 # several silently-missing fields all came from that gap. Its own header says what it does not catch.
@@ -77,7 +77,7 @@ Write-Host "Version $version in all four places." -ForegroundColor Green
 # anything about, and there is no point spending two builds to find out. Before the release-notes
 # check too, so that the one failure here that is about the CODE is reported ahead of the one that is
 # about the paperwork - and so this gate is reachable on a version whose notes are not written yet.
-$dtoCheck = Join-Path $repo "check-dtos.py"
+$dtoCheck = Join-Path $repo "tools/check-dtos.py"
 if (-not (Test-Path $dtoCheck)) { Fail "missing $dtoCheck - the DTO drift check is not optional" }
 if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
     Fail "python is not on PATH, so check-dtos.py cannot run - install Python 3 rather than packaging unchecked"

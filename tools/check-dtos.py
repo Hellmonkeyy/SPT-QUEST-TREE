@@ -26,14 +26,14 @@ What it does NOT catch, by design:
 Proven able to fail before it shipped: a bogus property added to the client's RewardDto made it exit
 1 naming the class and the property; see the report in the commit that added it.
 
-Usage:  python check-dtos.py          compare, print the table, exit 1 on drift
+Usage:  python tools/check-dtos.py          compare, print the table, exit 1 on drift
 """
 
 import re
 import sys
 from pathlib import Path
 
-REPO = Path(__file__).resolve().parent
+REPO = Path(__file__).resolve().parent.parent  # tools/ sits one level below the repo root
 SERVER = REPO / "Source" / "Tarkov-QuestTree-Server"
 CLIENT = REPO / "Source" / "Tarkov-QuestTree" / "QuestGraph"
 
