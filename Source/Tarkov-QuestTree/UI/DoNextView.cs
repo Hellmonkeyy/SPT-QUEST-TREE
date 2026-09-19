@@ -509,6 +509,19 @@ namespace QuestTree.UI
 
         private static List<Ranked> RankUncached(QuestGraphBuilder graph, ProfilePayloadDto profile)
         {
+            // Timed on every recompute, because one panel open measured this at 891 ms where two
+            // others had 48 and 121, and a number that swings that much needs more than three
+            // samples before anything is done about it. One line per recompute, which is per
+            // panel open (the profile is invalidated on Show) or per ranking-goal change.
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            var ranked = RankUncachedInner(graph, profile);
+            Plugin.LogSource?.LogInfo(
+                $"QuestTree: do-next ranking - {ranked.Count} quest(s) scored in {clock.ElapsedMilliseconds} ms (goal {Goal()}).");
+            return ranked;
+        }
+
+        private static List<Ranked> RankUncachedInner(QuestGraphBuilder graph, ProfilePayloadDto profile)
+        {
             var goal = Goal();
             var ranked = new List<Ranked>();
 
