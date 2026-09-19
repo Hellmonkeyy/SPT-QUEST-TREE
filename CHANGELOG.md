@@ -1,3 +1,18 @@
+# Quest Tracker 1.18.1
+
+**Copies you do not hold are charged.** A build fitting two of the same part priced both at zero
+if you owned one loose copy. Each copy past the ones you hold (preset parts, the copy on a gun you
+own, loose copies) is a purchase now, in the search and on the panel; a second copy nobody sells
+says so, or names the trader and loyalty that does. The shared builds are unchanged.
+
+## Also
+
+- A third toolbar layout below ~1460 px so the "N shown" count is readable at 1366 wide.
+- The zone harvest route refuses a client newer than the server; a zone file stamped newer is
+  skipped with a reason. A flag nothing read is gone.
+
+---
+
 # Quest Tracker 1.18.0
 
 **The weapon builder now minimises what you pay, not the handbook.** Shared builds are priced at
