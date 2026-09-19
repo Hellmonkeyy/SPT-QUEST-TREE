@@ -372,6 +372,26 @@ namespace QuestTreeServer
             var repairedCash = 0L;
             var sharedUnpriced = 0;
 
+            // THE OBJECTIVE AGAINST THE BILL. The shared search minimises handbook price plus PerPurchase per
+            // part bought, while the player pays trader prices or the flea, and nothing has ever measured
+            // whether the two agree - if handbook and paid drift far apart, the search has been optimising a
+            // number nobody is charged. Only builds served AS SHARED are measured: a repaired build was
+            // searched under this profile's own trader and flea prices, so its objective already was the
+            // bill and it would only dilute the comparison. Measured like for like: both figures cover the
+            // same rows, the buyable and flea parts of each shared build, the handbook on one side and Cash
+            // + FleaEstimate on the other - a part the handbook does not list is taken off BOTH sides and
+            // counted. Owned, in-place and fitted parts are zero on both sides, and barter and absent parts
+            // are on neither (barters are counted). The PerPurchase surcharge is left out of the handbook
+            // side deliberately: this compares prices with prices.
+            var shared = 0;
+            var nothingToBuy = 0;
+            var handbookTotal = 0L;
+            var paidTotal = 0L;
+            var sharedBarters = 0;
+            var handbookUnpriced = 0;
+            var disagree = 0;
+            var spread = new List<(string Quest, long Handbook, long Paid, double Ratio)>();
+
             foreach (var requirement in requirements)
             {
                 var judged = Judge(requirement, sources, locale, fresh ? "fresh" : profileId.ToString(),
@@ -381,6 +401,34 @@ namespace QuestTreeServer
                 nodes += judged.Nodes;
                 cash += judged.Cash;
                 barters += judged.Barters;
+
+                if (judged.Status == "ok")
+                {
+                    var (handbook, unpriced, unpricedPaid) = Handbook(judged);
+                    // The rows the handbook does not list come off this side too, so both sides cover the
+                    // same parts; otherwise a build whose only purchases are unlisted reads as a disagreement.
+                    var paid = judged.Cash + judged.FleaEstimate - unpricedPaid;
+
+                    handbookUnpriced += unpriced;
+
+                    if (handbook == 0 && paid == 0)
+                    {
+                        nothingToBuy++;
+                    }
+                    else
+                    {
+                        var ratio = handbook == paid
+                            ? 1d
+                            : Math.Max(handbook, paid) / (double)Math.Max(1L, Math.Min(handbook, paid));
+
+                        shared++;
+                        handbookTotal += handbook;
+                        paidTotal += paid;
+                        sharedBarters += judged.Barters;
+                        if (ratio > 1.25d) disagree++;
+                        spread.Add((judged.QuestName, handbook, paid, ratio));
+                    }
+                }
 
                 switch (judged.Status)
                 {
@@ -437,6 +485,50 @@ namespace QuestTreeServer
                     $"build (priced parts only; {sharedUnpriced} absent or barter part(s) carry no price) against " +
                     $"{(double)repairedParts / repaired:0.##} parts and {(double)repairedCash / repaired:N0} roubles " +
                     $"(trader prices plus flea estimates) per repaired build.");
+
+            if (shared + nothingToBuy > 0)
+            {
+                var widest = spread
+                    .OrderByDescending(entry => entry.Ratio)
+                    .Take(3)
+                    .Select(entry => $"'{entry.Quest}': handbook {entry.Handbook:N0} vs paid {entry.Paid:N0}");
+
+                logger.Info(
+                    $"Quest Tracker: the objective against the bill for {who} - over the {shared} build(s) served as " +
+                    $"shared with something to buy ({nothingToBuy} with nothing to buy, repaired builds excluded), the " +
+                    $"handbook values the parts to buy at {handbookTotal:N0} roubles and it would pay {paidTotal:N0} " +
+                    $"(trader prices plus flea estimates), with {sharedBarters} barter(s) on neither side and " +
+                    $"{handbookUnpriced} part(s) the handbook does not list taken off both. {disagree} of {shared} " +
+                    $"build(s) disagree by more than 25% either way" +
+                    (spread.Count > 0 ? $". Widest: {string.Join("; ", widest)}." : "."));
+            }
+        }
+
+        /// <summary>The handbook's valuation of the same rows Total prices - buyable and flea - with how many of
+        /// them the handbook does not list and what Total charged for those, so the caller can take them off
+        /// the paid side too. Keep the tiers in step with Total, or the two sides of the
+        /// objective-against-the-bill line stop covering the same parts.</summary>
+        private (long Handbook, int Unpriced, long UnpricedPaid) Handbook(ProfileBuildDto dto)
+        {
+            var handbook = 0L;
+            var unpriced = 0;
+            var unpricedPaid = 0L;
+
+            foreach (var part in dto.Parts)
+            {
+                if (part.Tier is not ("buyable" or "flea")) continue;
+
+                if (part.Template.TryParseMongoId(out var template) && partPrices.Of(template) is { } price)
+                {
+                    handbook += price;
+                    continue;
+                }
+
+                unpriced++;
+                unpricedPaid += part.Price ?? 0;
+            }
+
+            return (handbook, unpriced, unpricedPaid);
         }
 
         /// <summary>One requirement for one profile: the shared build if every part is obtainable, else a

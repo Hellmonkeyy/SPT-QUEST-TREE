@@ -30,6 +30,38 @@ namespace QuestTree.UI
         /// <summary>Shared by the Close button and by the Settings button that sits beside it.</summary>
         private const float CloseButtonWidth = 90f;
 
+        /// <summary>The band a view button's width is clamped into. The minimum is also what every
+        /// view button drops to when the bar does not fit.</summary>
+        private const float MinViewButtonWidth = 70f;
+        private const float MaxViewButtonWidth = 110f;
+
+        /// <summary>Between the last view button and the notice, and between the legend and the
+        /// notice: the same gap either side, so the notice reads as sitting between the two.</summary>
+        private const float NoticeGap = 8f;
+
+        /// <summary>The legend's font is a point smaller than the buttons' so it reads as a key,
+        /// not a row of more buttons. Named because the fit arithmetic must use the same size.</summary>
+        private const float LegendFontSize = 11f;
+
+        /// <summary>The word the six chips collapse into when the bar does not fit; the glyphs
+        /// follow it at build time.</summary>
+        private const string CollapsedLegendLabel = "Legend";
+
+        /// <summary>The shortest count the notice shows in full. The wide layout only counts as
+        /// fitting when the notice keeps this much: a bar that fits its buttons but ellipsises
+        /// the one line that says how many quests you are looking at has not fit.</summary>
+        private static readonly float MinNoticeWidth = GameStyle.EstimateWidth("0,000 of 0,000 shown", 12f);
+
+        /// <summary>Every status the legend names. Ordered the way the tree is read - what you are
+        /// doing, what you could take, what is done, what is behind a wall, what is behind a quest.
+        /// Hardcoded and therefore easy to forget: a status left out here simply never appears in
+        /// the legend or its tooltip, with nothing to catch it.</summary>
+        private static readonly ENodeStatus[] LegendStatuses =
+        {
+            ENodeStatus.Active, ENodeStatus.Available, ENodeStatus.Completed,
+            ENodeStatus.Gated, ENodeStatus.Locked, ENodeStatus.Failed
+        };
+
         private QuestGraphBuilder _graph;
         private TMP_InputField _searchField;
         private TMP_Text _renderNotice;
@@ -202,9 +234,21 @@ namespace QuestTree.UI
             // get it back.
             navX += BuildToolbarAction(toolbar, "?", navX, itemY, itemHeight, 30f, showIntro, "Controls");
 
+            // Everything from here on is placed from the left cursor or from the right edge, and
+            // the two meet in the middle: six named legend chips plus the view cluster need more
+            // than many common window widths have, and where the width runs out they overlap. So
+            // the bar is asked whether its fixed content fits and, if not, the legend collapses to
+            // one chip and the view buttons drop to their minimum. Decided once, here: the shell
+            // is built on the first Show and never rebuilt, so this is the only look at the width.
+            const float legendGap = 6f;
+            var rightOffset = padding + CloseButtonWidth + 6f;
+            var compact = !FitsWide(navX + legendGap, rightOffset, viewButtons, AvailableWidth(toolbar, root));
+
             // The legend lives here, in the bar, as the same bar-and-name the nodes wear - it used
             // to be a box in the corner of the graph, over whatever was drawn there.
-            navX += BuildLegendChips(toolbar, navX + 6f, itemY, itemHeight);
+            navX += compact
+                ? BuildCollapsedLegend(toolbar, navX + legendGap, itemY, itemHeight)
+                : BuildLegendChips(toolbar, navX + legendGap, itemY, itemHeight);
 
             BuildCloseButton(toolbar, itemY, itemHeight, padding, closeTree);
 
@@ -212,24 +256,68 @@ namespace QuestTree.UI
             // whole views rather than a slice of the quest graph, so grouping them apart from the
             // trader tabs says which is which. Laid out right-to-left from Close so the cluster
             // stays put whatever the window width.
-            var rightOffset = padding + CloseButtonWidth + 6f;
             foreach (var (tabId, label) in viewButtons)
             {
-                rightOffset += BuildViewButton(toolbar, tabId, label, rightOffset, itemY, itemHeight);
+                rightOffset += BuildViewButton(toolbar, tabId, label, rightOffset, itemY, itemHeight, compact);
             }
 
             // Stretched between the nav buttons and that cluster rather than given a fixed width,
             // so it cannot collide with them on a narrow window.
-            BuildRenderNotice(toolbar, itemY, itemHeight, navX + 8f, rightOffset + 8f);
+            BuildRenderNotice(toolbar, itemY, itemHeight, navX + NoticeGap, rightOffset + NoticeGap);
         }
+
+        /// <summary>The width the bar has to lay out in. Its own rect, which stretches with the
+        /// panel; the panel's rect when its own has not been computed; the screen when neither
+        /// has. The same fallback chain the panel uses for the aux views, and for the same reason -
+        /// on the very first open the hierarchy may not have been laid out yet.</summary>
+        private static float AvailableWidth(RectTransform toolbar, RectTransform root)
+        {
+            var width = toolbar.rect.width;
+            if (width > 100f) return width;
+
+            width = root.rect.width;
+            return width > 100f ? width : Screen.width;
+        }
+
+        /// <summary>Whether the six named chips and the naturally-sized view buttons both fit.
+        ///
+        /// The same sums the layout makes, only with the character estimate in place of the TMP
+        /// measurement: nothing has been created to measure yet, and the measurement is banded
+        /// around this estimate anyway (see GameStyle.MeasureWidth), so this is the width the
+        /// layout is guaranteed to stay near. The notice stretches to whatever is left, so it is
+        /// counted at the least it can say something with (MinNoticeWidth), not at full width.</summary>
+        private static bool FitsWide(
+            float legendX, float rightOffset, IReadOnlyList<(string TabId, string Label)> viewButtons, float available)
+        {
+            var leftNeed = legendX;
+            foreach (var status in LegendStatuses)
+                leftNeed += LegendChipWidth(GameStyle.EstimateWidth(QuestNodeView.NameFor(status), LegendFontSize));
+
+            var rightNeed = rightOffset;
+            foreach (var (_, label) in viewButtons)
+                rightNeed += ViewButtonWidth(GameStyle.EstimateWidth(label, 12f), compact: false) + 1f;
+
+            return leftNeed + NoticeGap + MinNoticeWidth + NoticeGap + rightNeed <= available;
+        }
+
+        /// <summary>A legend chip's footprint for a label of the given width: the bar, its gap,
+        /// the padded label, and the gap to the next chip. One formula for the layout and the fit
+        /// arithmetic, so they cannot disagree.</summary>
+        private static float LegendChipWidth(float labelWidth) =>
+            LayoutMetrics.StatusBarWidth + 4f + (labelWidth + 8f) + 10f;
+
+        /// <summary>A view button's width for a label of the given width: sized to the label
+        /// inside the clamp band when the bar fits, the band's minimum when it does not.</summary>
+        private static float ViewButtonWidth(float labelWidth, bool compact) =>
+            compact ? MinViewButtonWidth : Mathf.Clamp(labelWidth + 24f, MinViewButtonWidth, MaxViewButtonWidth);
 
         /// <summary>One of the non-graph views. Returns the width consumed so the caller can keep
         /// walking leftwards from Close.</summary>
         private float BuildViewButton(
-            RectTransform toolbar, string tabId, string label, float rightOffset, float itemY, float itemHeight)
+            RectTransform toolbar, string tabId, string label, float rightOffset, float itemY, float itemHeight, bool compact)
         {
             var buttonRect = GameStyle.CreateButton(toolbar, label, () => _onViewSelected(tabId));
-            var width = Mathf.Clamp(GameStyle.MeasureWidth(buttonRect.GetComponentInChildren<TMP_Text>(), label) + 24f, 70f, 110f);
+            var width = ViewButtonWidth(GameStyle.MeasureWidth(buttonRect.GetComponentInChildren<TMP_Text>(), label), compact);
             buttonRect.anchorMin = buttonRect.anchorMax = new Vector2(1f, 1f);
             buttonRect.pivot = new Vector2(1f, 1f);
             buttonRect.anchoredPosition = new Vector2(-rightOffset, itemY);
@@ -319,56 +407,100 @@ namespace QuestTree.UI
         /// name - laid out inline. Returns the width consumed.</summary>
         private float BuildLegendChips(RectTransform toolbar, float x, float itemY, float itemHeight)
         {
-            // Hardcoded and therefore easy to forget: a status left out of this array simply never
-            // appears in the legend, with nothing to catch it. Ordered the way the tree is read -
-            // what you are doing, what you could take, what is done, what is behind a wall, what is
-            // behind a quest.
-            var statuses = new[]
-            {
-                ENodeStatus.Active, ENodeStatus.Available, ENodeStatus.Completed,
-                ENodeStatus.Gated, ENodeStatus.Locked, ENodeStatus.Failed
-            };
-
             var cursor = x;
-
-            foreach (var status in statuses)
+            foreach (var status in LegendStatuses)
             {
-                var barGo = new GameObject($"Legend_{status}", typeof(RectTransform), typeof(Image));
-                var barRect = (RectTransform)barGo.transform;
-                barRect.SetParent(toolbar, worldPositionStays: false);
-                barRect.anchorMin = barRect.anchorMax = new Vector2(0f, 1f);
-                barRect.pivot = new Vector2(0f, 1f);
-                barRect.anchoredPosition = new Vector2(cursor, itemY - (itemHeight - 14f) / 2f);
-                barRect.sizeDelta = new Vector2(LayoutMetrics.StatusBarWidth, 14f);
-                var bar = barGo.GetComponent<Image>();
-                bar.color = QuestNodeView.ColorFor(status);
-                bar.raycastTarget = false;
-                _treeOnly.Add(barGo);
-
-                var name = QuestNodeView.NameFor(status);
-
-                var textGo = new GameObject("Label", typeof(RectTransform));
-                var textRect = (RectTransform)textGo.transform;
-                textRect.SetParent(toolbar, worldPositionStays: false);
-                textRect.anchorMin = textRect.anchorMax = new Vector2(0f, 1f);
-                textRect.pivot = new Vector2(0f, 1f);
-                textRect.anchoredPosition = new Vector2(cursor + LayoutMetrics.StatusBarWidth + 4f, itemY);
-                var text = textGo.AddComponent<TextMeshProUGUI>();
-                text.text = name;
-                text.fontSize = 11;
-                text.alignment = TextAlignmentOptions.Left;
-                text.color = GameStyle.DimTextColor;
-                text.raycastTarget = false;
-                GameStyle.Apply(text);
-                _treeOnly.Add(textGo);
-
-                var width = GameStyle.MeasureWidth(text, name) + 8f;
-                textRect.sizeDelta = new Vector2(width, itemHeight);
-
-                cursor += LayoutMetrics.StatusBarWidth + 4f + width + 10f;
+                cursor += BuildLegendChip(
+                    toolbar, $"Legend_{status}", cursor, itemY, itemHeight,
+                    QuestNodeView.ColorFor(status), QuestNodeView.NameFor(status), _treeOnly);
             }
 
             return cursor - x;
+        }
+
+        /// <summary>The whole legend as one chip for a bar too narrow to name the six states in a
+        /// row: an accent bar, the word "Legend", then each state's glyph in its own colour. The
+        /// glyph-and-colour pairing is the legend - it is what the boxes wear - so the chip reads
+        /// on its own; the names are in a tooltip when tooltips exist, which they need not (the
+        /// setting can be off, or the game's tooltip context absent). Glyphs, colours and names
+        /// all come from the QuestNodeView tables the boxes draw from, so they cannot drift.
+        /// Returns the width consumed.</summary>
+        private float BuildCollapsedLegend(RectTransform toolbar, float x, float itemY, float itemHeight)
+        {
+            // The bar and label are children of one hover area rather than siblings in the bar:
+            // the tooltip attaches to a single object, and it has to cover both. The host's Image
+            // is invisible; whether it catches the pointer is decided below, once it is known
+            // whether there is a tooltip to show.
+            var hostGo = new GameObject("Legend", typeof(RectTransform), typeof(Image));
+            var hostRect = (RectTransform)hostGo.transform;
+            hostRect.SetParent(toolbar, worldPositionStays: false);
+            hostRect.anchorMin = hostRect.anchorMax = new Vector2(0f, 1f);
+            hostRect.pivot = new Vector2(0f, 1f);
+            hostRect.anchoredPosition = new Vector2(x, itemY);
+            var host = hostGo.GetComponent<Image>();
+            host.color = Color.clear;
+            _treeOnly.Add(hostGo);
+
+            var label = CollapsedLegendLabel;
+            var lines = new List<string>(LegendStatuses.Length);
+            foreach (var status in LegendStatuses)
+            {
+                var glyph = $"<color=#{QuestNodeView.HexFor(status)}>{QuestNodeView.GlyphFor(status)}</color>";
+                label += " " + glyph;
+                lines.Add(glyph + "  " + QuestNodeView.NameFor(status));
+            }
+
+            var width = BuildLegendChip(
+                hostRect, "Chip", 0f, 0f, itemHeight, GameStyle.AccentColor, label, treeOnly: null);
+            hostRect.sizeDelta = new Vector2(width, itemHeight);
+
+            // A raycast target only when there is a tooltip for it to raise: AddTooltip attaches
+            // nothing with tooltips off or the game's tooltip context absent, and an invisible
+            // pointer-catcher with nothing behind it would only swallow hovers.
+            host.raycastTarget = GameStyle.AddTooltip(hostGo, string.Join("\n", lines)) != null;
+            return width;
+        }
+
+        /// <summary>One bar-and-name chip at <paramref name="x"/> under <paramref name="parent"/>.
+        /// Returns the width consumed, which is LegendChipWidth of the measured label - the one
+        /// formula the fit arithmetic also uses. The pieces go into <paramref name="treeOnly"/>
+        /// when the caller wants them hidden on the aux tabs individually; null when the parent
+        /// is hidden as a whole.</summary>
+        private static float BuildLegendChip(
+            RectTransform parent, string name, float x, float itemY, float itemHeight,
+            Color barColor, string label, List<GameObject> treeOnly)
+        {
+            var barGo = new GameObject(name, typeof(RectTransform), typeof(Image));
+            var barRect = (RectTransform)barGo.transform;
+            barRect.SetParent(parent, worldPositionStays: false);
+            barRect.anchorMin = barRect.anchorMax = new Vector2(0f, 1f);
+            barRect.pivot = new Vector2(0f, 1f);
+            barRect.anchoredPosition = new Vector2(x, itemY - (itemHeight - 14f) / 2f);
+            barRect.sizeDelta = new Vector2(LayoutMetrics.StatusBarWidth, 14f);
+            var bar = barGo.GetComponent<Image>();
+            bar.color = barColor;
+            bar.raycastTarget = false;
+            treeOnly?.Add(barGo);
+
+            var textGo = new GameObject("Label", typeof(RectTransform));
+            var textRect = (RectTransform)textGo.transform;
+            textRect.SetParent(parent, worldPositionStays: false);
+            textRect.anchorMin = textRect.anchorMax = new Vector2(0f, 1f);
+            textRect.pivot = new Vector2(0f, 1f);
+            textRect.anchoredPosition = new Vector2(x + LayoutMetrics.StatusBarWidth + 4f, itemY);
+            var text = textGo.AddComponent<TextMeshProUGUI>();
+            text.text = label;
+            text.fontSize = LegendFontSize;
+            text.alignment = TextAlignmentOptions.Left;
+            text.color = GameStyle.DimTextColor;
+            text.raycastTarget = false;
+            GameStyle.Apply(text);
+            treeOnly?.Add(textGo);
+
+            var labelWidth = GameStyle.MeasureWidth(text, label);
+            textRect.sizeDelta = new Vector2(labelWidth + 8f, itemHeight);
+
+            return LegendChipWidth(labelWidth);
         }
 
         /// <summary>The "showing N of M" line, sitting immediately right of the search box on the
@@ -420,16 +552,6 @@ namespace QuestTree.UI
             closeRect.sizeDelta = new Vector2(width, itemHeight);
         }
 
-        /// <summary>
-        /// Names what the node colours mean. Overlaid on the graph's bottom-left corner rather than
-        /// placed in the toolbar: the toolbar is already full and laid out with a manual x-cursor,
-        /// so anything added there risks colliding with the right-anchored buttons on a narrow
-        /// window. Here it cannot collide with anything.
-        ///
-        /// Colours and glyphs come from QuestNodeView so the legend can never drift from the nodes.
-        /// </summary>
-        /// <summary>Tints the Settings button for the selected state. The panel supplies the colour
-        /// because it owns the same pair the tab row is highlighted with.</summary>
         /// <summary>Lights whichever view button is selected. These are not part of the tab row's
         /// backgrounds - that collection is cleared and rebuilt with the tab row, whereas these are
         /// built once with the toolbar and outlive it.</summary>

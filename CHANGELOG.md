@@ -1,3 +1,18 @@
+# Quest Tracker 1.16.0
+
+**The toolbar fits at 1600 px.** When the bar's own arithmetic says the six status chips, the
+"N shown" notice and the view buttons cannot all fit, the chips fold into one *Legend* item showing
+the six glyphs in their colours (full names on hover), and the view buttons take their minimum
+width. At 1920 nothing changes; at 1600 the notice gets its room back; at 1366 nothing overlaps but
+the notice is still short.
+
+**The weapon builder's objective is measured against the bill.** The optimiser minimises handbook
+prices; the player pays trader or flea prices. The server now logs, per profile, the two totals over
+the shared builds with something to buy, how many builds the two price the same parts more than 25%
+apart, and the three widest. A measurement only - it decides whether the objective is ever changed.
+
+---
+
 # Quest Tracker 1.15.0
 
 **Seven boxes become one.** A run of quests in single file - each unlocking exactly the next, one
