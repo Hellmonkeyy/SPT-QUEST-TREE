@@ -47,15 +47,31 @@ namespace QuestTree.QuestGraph
         public IReadOnlyDictionary<string, string> TraderNames { get; private set; } =
             new Dictionary<string, string>();
 
-        public void Build(QuestController questController, IEftSession session)
+        /// <summary>Builds with the quest list fetched here and now, on this thread. For the callers
+        /// that are not the panel's open path and so cannot wait on a worker - see
+        /// <see cref="QuestDataClient.TryFetchAll"/>.
+        ///
+        /// Marks no phases, unlike the open path: this is not an open. Its one caller never starts
+        /// the panel-open clock and never reports it, so a mark here would be measured against
+        /// whatever the last open left on that clock - a meaningless number, recorded into a list
+        /// nothing prints and the next open clears.</summary>
+        public void Build(QuestController questController, IEftSession session) =>
+            Build(questController, session, QuestDataClient.TryFetchAll());
+
+        /// <summary>Builds from a quest list somebody else already has.
+        ///
+        /// <paramref name="quests"/> NULL is meaningful and is not "fetch it yourself": it means
+        /// there is no full list - the companion server mod is missing, or did not answer - and the
+        /// tree is synthesized from the quests this client has itself unlocked. The panel's open path
+        /// passes what QuestDataClient.TryTakeFetched handed it, having fetched and parsed it on a
+        /// worker while the loading notice was up; its two phase entries are added there, which is
+        /// why this overload marks none of its own.</summary>
+        public void Build(QuestController questController, IEftSession session, List<QuestDto> quests)
         {
             _questController = questController;
             _byId = new Dictionary<string, QuestNode>();
 
-            var waited = QuestDataClient.FetchMillis;
-            var quests = QuestDataClient.TryFetchAll();
             HasFullQuestList = quests != null;
-            UI.PanelOpenTimer.MarkSplit("quests: server", QuestDataClient.FetchMillis - waited, "quests: parse");
 
             if (quests == null) quests = BuildFallbackDtos(questController);
 
@@ -161,7 +177,7 @@ namespace QuestTree.QuestGraph
 
             RefreshStatusesInternal();
 
-            waited = QuestDataClient.FetchMillis;
+            var waited = QuestDataClient.FetchMillis;
             ApplyLockGates();
             UI.PanelOpenTimer.MarkSplit("profile: server", QuestDataClient.FetchMillis - waited, "statuses");
 

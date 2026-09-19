@@ -338,18 +338,80 @@ namespace QuestTree.UI
             else if (ModSettings.Ready && ModSettings.OpenOnMap.Value) SelectTab(MapsTabId);
         }
 
-        /// <summary>Waits for the loading notice to render, then does the expensive build. Unity
-        /// paints between frames, so a single yield is enough for the notice to be on screen before
-        /// the thread is tied up.</summary>
+        /// <summary>How long the open waits for the off-thread quest fetch before building without
+        /// it. Clear of everything the fetch can legitimately spend, which is more than the worker's
+        /// own fifteen-second cap: that covers the REQUEST only, and the deserialise, the sanitise
+        /// pass and however long the pool took to start the thread all come after it. This cap is the
+        /// backstop for a worker that never comes back, so it must not be the first to fire on a
+        /// server that was going to answer.</summary>
+        private const float FetchWaitSeconds = 40f;
+
+        /// <summary>Lets the loading notice render, fetches the quest list off the main thread, then
+        /// does the build. Two yields because Unity paints between frames and the notice has to be on
+        /// screen before any of this - and the fetch no longer ties the thread up at all: the frames
+        /// keep coming while the worker has it.</summary>
         private System.Collections.IEnumerator RebuildGraphDeferred(
             QuestController questController, IEftSession session)
         {
             yield return null;
             yield return null;
 
+            // Started here rather than inside TryRebuildGraph, because the quest fetch below is part
+            // of the open the player is waiting through: the clock has to be running before it, or
+            // the line would print a total that excludes the longest phase in it.
+            QuestDataClient.ResetFetchClock();
+            PanelOpenTimer.Start();
+
+            // The quest list off the main thread, with the loading notice already up. Of a measured
+            // 453 ms open, 233 ms was the parse and 29 ms the server, all of it with Unity's thread
+            // blocked; this is the same begin/poll/take shape the map's tessellation uses.
+            QuestDataClient.BeginFetchAll();
+
+            var deadline = Time.realtimeSinceStartup + FetchWaitSeconds;
+            while (QuestDataClient.IsFetchPending && Time.realtimeSinceStartup < deadline)
+                yield return null;
+
+            List<QuestDto> quests = null;
+
+            if (QuestDataClient.IsFetchPending)
+            {
+                // Given up on, and the fetch let go with it: left in flight it would never complete,
+                // so every later open would wait this out again and the panel would never show a
+                // tree again - not even the unlocked-only one. Dropping it also means the next open
+                // simply asks again.
+                //
+                // Then on to the build with no list, which is the documented fallback the
+                // synchronous version reached the same way: a smaller tree beats a loading screen.
+                QuestDataClient.AbandonFetch();
+
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: the quest list did not arrive in time ({FetchWaitSeconds:0}s) - building from the " +
+                    "quests this client has already unlocked.");
+
+                // Its own phase, not charged to the two below: nothing was measured, and forty
+                // seconds landing in "quests: main" would read as the main thread having spent it.
+                PanelOpenTimer.Mark("quests: gave up");
+            }
+            else
+            {
+                // On the main thread, which is where the cache is set and the fetch's own log lines
+                // are written. The worker measured the two numbers; they are charged against the
+                // frames just spent waiting, and "quests: main" is whatever is left of that wait -
+                // the poll's frame slack, the pool's own start-up, and this take. Small, and the
+                // number to watch: it is the only part of the quest fetch the game still spends its
+                // own thread on.
+                if (!QuestDataClient.TryTakeFetched(out quests, out var serverMillis, out var parseMillis))
+                    Plugin.LogSource?.LogWarning(
+                        "QuestTree: the quest fetch produced nothing to take - building from the quests this client knows about.");
+
+                PanelOpenTimer.Add("quests: server", serverMillis);
+                PanelOpenTimer.Add("quests: parse", parseMillis);
+                PanelOpenTimer.Mark("quests: main");
+            }
+
             // A failed build leaves the loading surface up: it is where the error message was just
             // written, and hiding it showed an empty tree with no explanation.
-            if (!TryRebuildGraph(questController, session)) yield break;
+            if (!TryRebuildGraph(questController, session, quests)) yield break;
 
             // Adopted only now - see Show for why. Unsubscribed first: a rebuild for a controller
             // already adopted (the fallback-tree path in Show) must not add a second handler.
@@ -364,13 +426,19 @@ namespace QuestTree.UI
             // later frame; hiding the notice as soon as the list was built showed the list with a
             // "Rendering the map..." line and then the picture - two loading states where there
             // used to be one, which is what a player noticed first. So the notice stays until the
-            // picture is in (Update's poll paints it), capped so a stuck worker cannot hold the
-            // panel hostage. The wait is what it was; the game is no longer frozen for it.
+            // picture is in, capped so a stuck worker cannot hold the panel hostage. The wait is
+            // what it was; the game is no longer frozen for it.
+            //
+            // Polled here rather than left to Update, which now stays out of the way while the
+            // notice is up: the picture arriving is the one thing this loop waits for, and the
+            // repaint that shows it has to happen for the loop to end at all.
             var held = 0f;
             while (MapView.IsSpritePending && held < 6f)
             {
                 held += Time.unscaledDeltaTime;
                 yield return null;
+
+                if (_selectedTraderId == MapsTabId && MapView.PollPendingSprite()) RenderSelectedTab(frame: false);
             }
 
             ShowLoading(false);
@@ -383,18 +451,18 @@ namespace QuestTree.UI
         /// <summary>Separate from the coroutine because C# forbids yielding inside a try/catch that
         /// has a catch clause - and this call must not be allowed to throw into the taskbar button
         /// handler that started it.</summary>
-        private bool TryRebuildGraph(QuestController questController, IEftSession session)
+        private bool TryRebuildGraph(
+            QuestController questController, IEftSession session, List<QuestDto> quests)
         {
             try
             {
                 // Measured by phase, because it is the one wait a player feels: the first
                 // measurement (1.13.2) put the whole open at 1.2 to 1.4 s with the server under a
-                // tenth of it, and could not say where the rest went. Every fetch in here still
-                // blocks the main thread behind the loading notice; the "server" entries are that.
-                QuestDataClient.ResetFetchClock();
-                PanelOpenTimer.Start();
-
-                RebuildGraph(questController, session);
+                // tenth of it, and could not say where the rest went. Every fetch reached from here
+                // still blocks the main thread behind the loading notice - the "server" entries are
+                // that - except the quest list, which the caller already has. The clock was started
+                // there, before that fetch.
+                RebuildGraph(questController, session, quests);
 
                 Plugin.LogSource?.LogInfo(PanelOpenTimer.Report());
                 return true;
@@ -427,10 +495,6 @@ namespace QuestTree.UI
         /// the panel is actually open - no extra "is it visible" guard needed.</summary>
         public void Update()
         {
-            // The map's picture arrives from a worker thread; the repaint that shows it is this.
-            if (_selectedTraderId == MapsTabId && MapView.PollPendingSprite())
-                RenderSelectedTab(frame: false);
-
             if (Input.GetKeyDown(KeyCode.Escape))
             {
                 // While typing, Escape leaves the search box - it used to fall through to the
@@ -449,6 +513,22 @@ namespace QuestTree.UI
                 else HideGameObject();
                 return;
             }
+
+            // Nothing else while the loading notice is up, and everything below this line used to
+            // run through it: shortcuts and the virtualization tick against the graph that is about
+            // to be REPLACED, and - the one that did visible harm - the map's sprite poll, whose
+            // repaint marks its own phases on the panel-open timer. Those marks moved the timer's
+            // cursor to now, so the worker's fetch and parse numbers were charged against an interval
+            // they had already spent and clamped to nothing. The load's own coroutine polls the
+            // sprite while it waits; see RebuildGraphDeferred.
+            //
+            // Escape stays ABOVE this: a load that is taking its cap has to be escapable, and
+            // hiding the panel is how the player gets out of it.
+            if (_loadingPanel != null && _loadingPanel.gameObject.activeSelf) return;
+
+            // The map's picture arrives from a worker thread; the repaint that shows it is this.
+            if (_selectedTraderId == MapsTabId && MapView.PollPendingSprite())
+                RenderSelectedTab(frame: false);
 
             // Shortcuts. Deliberately only while the panel has focus and the search box does not -
             // typing "f" into search must not re-frame the view. Split by view: on the map, F fits
@@ -911,9 +991,12 @@ namespace QuestTree.UI
         /// <summary>Rebuilds the graph DATA (called only when the QuestController instance
         /// changes) and the tab strip that depends on it, then renders whichever tab is
         /// selected - defaulting back to "All" for a fresh QuestController.</summary>
-        private void RebuildGraph(QuestController questController, IEftSession session)
+        private void RebuildGraph(
+            QuestController questController, IEftSession session, List<QuestDto> quests)
         {
-            _graph.Build(questController, session);
+            // Already fetched and parsed off the main thread by the coroutine that got us here; null
+            // means there is no full list, which is the fallback tree - see QuestGraphBuilder.Build.
+            _graph.Build(questController, session, quests);
 
             DoNextView.Forget();
             QuestBody.Forget();

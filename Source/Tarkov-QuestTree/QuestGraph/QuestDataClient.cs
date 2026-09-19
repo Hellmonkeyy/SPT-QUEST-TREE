@@ -29,10 +29,12 @@ namespace QuestTree.QuestGraph
         private const string BuildsRoute = "/questtree/builds";
 
         /// <summary>
-        /// How long a request may hold the game. Every fetch here is synchronous on Unity's main
-        /// thread - by design, see TryFetchAll - and SPT's own GetJson has no limit of its own, so
-        /// a server that accepted the connection and then hung froze the game with no frames and
-        /// no way out. This is a cap, not a cure: the thread is still blocked until it fires.
+        /// How long a request may hold the thread that made it. Every fetch here but the quest list
+        /// is synchronous on Unity's main thread - see TryFetchAll - and SPT's own GetJson has no
+        /// limit of its own, so a server that accepted the connection and then hung froze the game
+        /// with no frames and no way out. This is a cap, not a cure: the thread is still blocked
+        /// until it fires. The quest list is fetched on a worker since 1.17.0 (BeginFetchAll) and
+        /// keeps the same cap there, where it blocks a pool thread instead of the game.
         /// </summary>
         private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(15);
 
@@ -99,9 +101,12 @@ namespace QuestTree.QuestGraph
             }
         }
 
-        /// <summary>Time the main thread has spent inside GetJson since the last
-        /// <see cref="ResetFetchClock"/>, and how many requests that was. Read by the panel's
-        /// open-time line; main-thread only, like everything else in here.</summary>
+        /// <summary>Time spent waiting on the server since the last <see cref="ResetFetchClock"/>,
+        /// and how many requests that was: every synchronous GetJson, plus the quest fetch's own
+        /// server wait, which <see cref="TryTakeFetched"/> adds on the main thread once the worker
+        /// has measured it. Read by the panel's open-time line. Not synchronised: the pre-raid
+        /// screen already fetches its raid check on a pool thread, so this has never been more than
+        /// an accounting number - never a fact anything decides on.</summary>
         public static long FetchMillis { get; private set; }
 
         public static int FetchCount { get; private set; }
@@ -152,6 +157,12 @@ namespace QuestTree.QuestGraph
             if (_markersAttempted && _markers == null) _markersAttempted = false;
             if (_profileAttempted && _profile == null) _profileAttempted = false;
             if (_buildsAttempted && _builds == null) _buildsAttempted = false;
+
+            // A finished-but-untaken quest fetch that came back with no list goes too, or it would
+            // eat the retry the line above just granted: the panel hidden mid-fetch leaves the result
+            // sitting there, and the next open would take THAT failure and latch it for the session
+            // instead of asking again. A finished fetch that HAS a list is kept - it is the answer.
+            if (_fetch != null && _fetch.IsCompleted && !Succeeded(_fetch)) _fetch = null;
         }
 
         private static ProfileBuildsDto _builds;
@@ -266,7 +277,9 @@ namespace QuestTree.QuestGraph
         private static bool _attempted;
 
         /// <summary>Set off the main thread by InvalidateQuests, read and cleared on the main thread by
-        /// TryFetchAll. The same shape as _markersStale, for the same reason and one release late.
+        /// whichever fetch runs first - BeginFetchAll on the panel's open path, TryFetchAll for the
+        /// callers that cannot yield. The same shape as _markersStale, for the same reason and one
+        /// release late.
         ///
         /// InvalidateQuests is called from the harvester's pool thread, one line after
         /// InvalidateMapMarkers, and used to write the two fields above directly. Neither is volatile, so
@@ -287,10 +300,272 @@ namespace QuestTree.QuestGraph
         /// quest would gain its pins and never gain its map.</summary>
         public static void InvalidateQuests() => _questsStale = true;
 
+        /// <summary>One off-thread quest fetch: what it got, how long each half took, and what the
+        /// main thread must say about it. Nothing is logged on the worker - the lines are carried
+        /// here and written by <see cref="Complete"/> - so they keep the panel's log order.</summary>
+        private sealed class FetchedQuests
+        {
+            /// <summary>The list, or null when there is none - see <see cref="Unavailable"/>.</summary>
+            public List<QuestDto> Quests;
+
+            public long ServerMillis;
+            public long ParseMillis;
+
+            /// <summary>The schema-mismatch warning, already worded, or null.</summary>
+            public string Warning;
+
+            /// <summary>Why there is no list, for LogUnavailable. Null when there is one.</summary>
+            public string Unavailable;
+        }
+
+        /// <summary>The fetch <see cref="BeginFetchAll"/> started, until <see cref="TryTakeFetched"/>
+        /// consumes it. Main-thread only, like the cache pair above: the worker only ever RETURNS a
+        /// value, so nothing off the main thread touches any field in this class along this path.</summary>
+        private static Task<FetchedQuests> _fetch;
+
+        /// <summary>Whether a quest fetch is still running. False the moment one has finished -
+        /// finished and untaken is not pending, it is ready.</summary>
+        public static bool IsFetchPending => _fetch != null && !_fetch.IsCompleted;
+
+        /// <summary>Starts the quest fetch on a pool thread, or does nothing because the answer is
+        /// already here or already coming.
+        ///
+        /// Off the main thread because the parse is the expensive half: of a measured 453 ms panel
+        /// open, 233 ms was DeserializeObject plus Sanitise and 29 ms was the server. Both halves
+        /// are plain string and object work with no Unity API in them, and the caller yields frames
+        /// until <see cref="IsFetchPending"/> goes false with the loading notice already up, so that
+        /// quarter-second is now frames the game draws instead of a frozen client.
+        ///
+        /// The cache semantics are <see cref="TryFetchAll"/>'s exactly, stale flag included: a
+        /// remembered failure counts as an answer, and RetryFailedFetches is what clears it.
+        /// Idempotent - called again while a fetch is in flight, or on one finished and not yet
+        /// taken, it starts nothing.</summary>
+        public static void BeginFetchAll()
+        {
+            // The same consume-on-the-main-thread as TryFetchAll, and it has to come first: a
+            // harvest has to beat both the cache and an answer asked for before it.
+            if (_questsStale)
+            {
+                _questsStale = false;
+                _attempted = false;
+                _cached = null;
+
+                // Whatever is in flight was asked before the harvest, so its answer is the one the
+                // stale flag exists to reject. Dropped, not cancelled: the orphan finishes into a
+                // value nobody reads, and it can never write the cache itself.
+                _fetch = null;
+            }
+
+            if (_fetch != null) return;
+            if (_attempted) return;
+
+            try
+            {
+                _fetch = Task.Run(FetchQuestsOffThread);
+            }
+            catch (Exception ex)
+            {
+                // A pool that cannot take work at all. Left null, so TryTakeFetched answers from the
+                // cache - empty here - and the tree is built from the client's own quest list.
+                Plugin.LogSource?.LogWarning($"QuestTree: could not start the quest fetch ({ex.Message}).");
+            }
+        }
+
+        /// <summary>Stops waiting on the fetch in flight and leaves nothing behind, so the next
+        /// <see cref="BeginFetchAll"/> starts a fresh one.
+        ///
+        /// For the caller that gave up: without it a worker that never came back would be waited out
+        /// again on every subsequent open - the task stays un-completed forever, so IsFetchPending
+        /// stays true - and the player would never get a tree again, not even the unlocked-only one.
+        /// The orphan is dropped, not cancelled: it can only ever return a value nobody reads.</summary>
+        public static void AbandonFetch() => _fetch = null;
+
+        /// <summary>Applies a FINISHED fetch to the cache and writes its log lines, on the main
+        /// thread. Shared because either path can be the one that finds it done: the open's
+        /// <see cref="TryTakeFetched"/> normally, or <see cref="TryFetchAll"/> when a status change
+        /// rebuilds mid-wait.</summary>
+        private static void Complete(Task<FetchedQuests> fetch, out long serverMillis, out long parseMillis)
+        {
+            serverMillis = 0;
+            parseMillis = 0;
+
+            // Cleared before anything below can throw, so one fetch is applied exactly once.
+            _fetch = null;
+            _attempted = true;
+
+            FetchedQuests result;
+
+            try
+            {
+                // Completed, so this cannot block; it can still throw if the pool lost the work
+                // itself, which FetchQuestsOffThread's own catches would never see.
+                result = fetch.Result;
+            }
+            catch (Exception ex)
+            {
+                LogUnavailable(ex.Message);
+                return;
+            }
+
+            serverMillis = result.ServerMillis;
+            parseMillis = result.ParseMillis;
+
+            // Into the same counters the synchronous fetches feed, so "what this open spent waiting
+            // on the server" still means that - see FetchMillis.
+            FetchMillis += result.ServerMillis;
+            FetchCount++;
+
+            if (!string.IsNullOrEmpty(result.Warning)) Plugin.LogSource?.LogWarning(result.Warning);
+
+            if (result.Quests == null)
+            {
+                LogUnavailable(result.Unavailable ?? "the server sent no quest list");
+                return;
+            }
+
+            Plugin.LogSource?.LogInfo($"QuestTree: loaded {result.Quests.Count} quests from the QuestTreeServer mod.");
+            _cached = result.Quests;
+        }
+
+        /// <summary>Whether a finished fetch came back with a list. Read without consuming it, for
+        /// RetryFailedFetches; a fetch the pool lost counts as a failure like any other.</summary>
+        private static bool Succeeded(Task<FetchedQuests> fetch)
+        {
+            try
+            {
+                return fetch.Result?.Quests != null;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>The whole fetch on a pool thread: the request, the deserialise, the Sanitise
+        /// pass. No Unity API, no logging and no static state written in here - only the DTOs it
+        /// builds and returns, which is what makes it safe off the main thread.</summary>
+        private static FetchedQuests FetchQuestsOffThread()
+        {
+            var result = new FetchedQuests();
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+
+            // Whether each half finished, so a failure below is charged to the right phase: a
+            // request that timed out is server time, a parse that threw is parse time, and neither
+            // may end up in the main thread's remainder. Flags rather than zero tests, because a
+            // server on the same machine really can answer inside a millisecond.
+            var answered = false;
+            var parsed = false;
+
+            try
+            {
+                var request = RequestHandler.GetJsonAsync(Route);
+
+                // The same cap GetJson applies, for the same reason - a server that accepts the
+                // connection and then hangs - except the thread it blocks is this pool thread,
+                // which has nothing else to do, rather than the one drawing frames.
+                if (!request.Wait(RequestTimeout))
+                    throw new TimeoutException($"no answer within {RequestTimeout.TotalSeconds:0}s");
+
+                var json = request.Result;
+                result.ServerMillis = clock.ElapsedMilliseconds;
+                answered = true;
+
+                if (string.IsNullOrEmpty(json))
+                {
+                    result.Unavailable = "the server returned an empty response";
+                    return result;
+                }
+
+                var payload = JsonConvert.DeserializeObject<QuestPayloadDto>(json);
+                Sanitise(payload);
+                result.ParseMillis = clock.ElapsedMilliseconds - result.ServerMillis;
+                parsed = true;
+
+                if (payload?.Quests == null || payload.Quests.Count == 0)
+                {
+                    result.Unavailable = "the server returned no quests";
+                    return result;
+                }
+
+                if (payload.SchemaVersion != QuestPayloadDto.SupportedSchemaVersion)
+                {
+                    var server = string.IsNullOrEmpty(payload.ModVersion) ? "older than 1.8.1" : payload.ModVersion;
+                    result.Warning =
+                        $"QuestTree: the QuestTreeServer mod ({server}, {SchemaNote(payload.SchemaVersion, QuestPayloadDto.SupportedSchemaVersion)}) speaks payload schema v{payload.SchemaVersion} but this " +
+                        $"client ({ModInfo.Version}) expects v{QuestPayloadDto.SupportedSchemaVersion}. Update both halves of " +
+                        "the mod to the same version. Continuing anyway - some fields may be missing.";
+                }
+
+                result.Quests = payload.Quests;
+                return result;
+            }
+            catch (AggregateException ex) when (ex.InnerException != null)
+            {
+                // The real failure, not "One or more errors occurred" - it goes into a log line.
+                result.Unavailable = ex.InnerException.Message;
+            }
+            catch (Exception ex)
+            {
+                result.Unavailable = ex.Message;
+            }
+
+            // A half that failed is still charged to itself: a timeout is fifteen seconds the player
+            // waited, and a parse that threw on malformed JSON spent real time doing it. Left
+            // unaccounted they would both surface as "quests: main", which is the one number that is
+            // supposed to mean work the main thread did.
+            if (!answered) result.ServerMillis = clock.ElapsedMilliseconds;
+            else if (!parsed) result.ParseMillis = clock.ElapsedMilliseconds - result.ServerMillis;
+
+            return result;
+        }
+
+        /// <summary>Completes the fetch <see cref="BeginFetchAll"/> started, on the main thread: the
+        /// cache is set here, the fetch's log lines are written here so they land in the panel's own
+        /// order, and the worker's two measurements come back for the open-time line.
+        ///
+        /// False only when there is nothing to complete AND nothing cached - a fetch still running,
+        /// or a BeginFetchAll that never got a thread. <paramref name="quests"/> null means the
+        /// fetch failed, which is the caller's signal to build from the client's own quest list.
+        ///
+        /// Idempotent: a second call finds no task and answers from the cache with zero timings, so
+        /// a coroutine that dies between the take and the build refetches nothing.</summary>
+        public static bool TryTakeFetched(out List<QuestDto> quests, out long serverMillis, out long parseMillis)
+        {
+            quests = null;
+            serverMillis = 0;
+            parseMillis = 0;
+
+            var fetch = _fetch;
+
+            if (fetch == null)
+            {
+                // Either BeginFetchAll answered from the cache - a list, or a remembered failure -
+                // or a take has already happened.
+                quests = _cached;
+                return _attempted;
+            }
+
+            if (!fetch.IsCompleted) return false;
+
+            Complete(fetch, out serverMillis, out parseMillis);
+            quests = _cached;
+            return true;
+        }
+
         /// <summary>The full quest list, or null when the companion server mod is not installed or
         /// did not answer. Fetched once per game session and after a harvest - see
         /// <see cref="InvalidateQuests"/> - or on connecting somewhere else, which is what
-        /// <see cref="ResetSession"/> is for.</summary>
+        /// <see cref="ResetSession"/> is for.
+        ///
+        /// Synchronous, and the panel's open path no longer uses it: that goes through
+        /// <see cref="BeginFetchAll"/> and <see cref="TryTakeFetched"/>, which do the same work on a
+        /// worker. This remains for the callers that are not an open and cannot yield - the
+        /// status-change rebuild of a tree built without the server half, and any later one.
+        ///
+        /// It CAN be reached while a worker's fetch is in flight: that rebuild runs off
+        /// QuestController's event, which stays subscribed through the twenty-odd frames the open
+        /// spends waiting. So it never starts a rival request for the same list - see the top of the
+        /// body for what it does instead.</summary>
         public static List<QuestDto> TryFetchAll()
         {
             // Cleared here rather than by the caller that asked for it: this is the main thread, which is
@@ -300,6 +575,29 @@ namespace QuestTree.QuestGraph
                 _questsStale = false;
                 _attempted = false;
                 _cached = null;
+
+                // And any answer asked for before the harvest, exactly as BeginFetchAll does.
+                _fetch = null;
+            }
+
+            var fetch = _fetch;
+
+            if (fetch != null)
+            {
+                // Done: apply it rather than fetch the same thing again, and the open's own take
+                // afterwards is then the idempotent second one.
+                if (fetch.IsCompleted)
+                {
+                    Complete(fetch, out _, out _);
+                    return _cached;
+                }
+
+                // Still running. This caller gets what is known now - nothing, which is the same "no
+                // full list" a missing server half gives, and the tree it builds is the unlocked-only
+                // one it would have built anyway. Deliberately WITHOUT latching _attempted: the
+                // worker's result is still to be taken, and latching here would make the open take
+                // it for a second one and throw it away.
+                return _cached;
             }
 
             if (_attempted) return _cached;
@@ -307,8 +605,8 @@ namespace QuestTree.QuestGraph
 
             try
             {
-                // Synchronous by design: this is called from the panel's own open path, once, and
-                // the tree cannot be drawn before the data arrives anyway.
+                // Synchronous because this caller cannot yield: it is inside a rebuild, not a
+                // coroutine. The open path, which can, no longer comes through here.
                 var json = GetJson(Route);
 
                 if (string.IsNullOrEmpty(json))
@@ -645,6 +943,11 @@ namespace QuestTree.QuestGraph
             _questsStale = false;
             _markersStale = false;
             _buildsRetryAt = DateTime.MinValue;
+
+            // An in-flight or finished-but-untaken quest fetch too: it was asked of the server this
+            // call is saying to forget. Dropped rather than cancelled, like the stale path above -
+            // the orphan finishes into a value nobody can read.
+            _fetch = null;
         }
 
         // Every name the views will put inside rich text, made literal once here - see RichText.
