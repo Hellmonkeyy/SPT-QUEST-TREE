@@ -607,6 +607,11 @@ namespace QuestTree.UI
                 QuestDataClient.InvalidateProfile();
                 QuestDataClient.InvalidateBuilds();
 
+                // Accepting a quest is what turns "checkable once the quest is accepted" into a
+                // real verdict, and that line was cached against the quest. Only Show cleared it,
+                // so with the panel open the stale line would outlive the acceptance.
+                GameGate.Forget();
+
                 if (_graph.HasFullQuestList)
                 {
                     _graph.RefreshStatuses();

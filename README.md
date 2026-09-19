@@ -139,7 +139,11 @@ persists.
   on. The row scrolls.
 - **The legend is in the toolbar**, a bar-and-name chip per state. On a panel too narrow to fit all
   six beside the view buttons they fold into one **Legend** chip carrying the six glyphs in their
-  colours, with the full names on hover.
+  colours, with the full names on hover. Narrower still - under about 1,460 px, where even the
+  collapsed chip leaves no room for the line saying how much of the tab you are seeing - the
+  left-hand block shortens too: a 160px search box reading `Search  ( / )`, and **Mine (M)** in
+  place of **My quests (M)**. The shortcut letter stays in every shortened label, because that is
+  what the label is for.
 - **Badges** in a box's corner: a gold **K** for a quest on the Kappa list, a blue **C** for one
   you must finish before Collector can be accepted on *your* install - including the quests behind
   those. On a stock install that is a wide net: 252 of 558 quests, and it contains all 136 Kappa
@@ -207,8 +211,17 @@ a build that passes a weight limit by a few grams can still be refused with a ma
 halves of the mod have to be 1.14.0 or newer for this line; an older server sends no items to
 assemble it from, and the line says so instead of guessing.
 
-Two things worth knowing about how the builds are worked out:
+Three things worth knowing about how the builds are worked out:
 
+- **The cheapest build wins, and "cheapest" is a number.** Every part is costed at the lowest cash
+  price any trader asks for it at any loyalty level, converted to roubles - so Peacekeeper's dollars
+  and Ref's GP coins are counted as the money a trader treats them as, rather than as barter goods.
+  A part no trader sells for money at all is costed at **three times its handbook price**, because
+  it has to come off the flea and the flea does not charge handbook. Then every separate part you
+  have to buy adds a flat **10,000** on top, so a build of thirty cheap parts does not beat one of
+  two dear ones on price alone - a trader trip costs you something too. The prices come from the
+  database's own trader tables, the same for every player on the same install, which is what makes a
+  solved build shippable; `QUESTTREE_PER_PURCHASE` and `QUESTTREE_FLEA_MULTIPLE` move the other two.
 - **Nothing in a build is spare.** Every part is checked by taking it off and re-deriving the
   quest's requirements on what is left; if the smaller gun still passes, the part goes. So a build
   is not merely correct, it is stripped - which matters when you are the one buying the parts.
@@ -220,24 +233,44 @@ Two things worth knowing about how the builds are worked out:
 ### It only suggests parts you can actually get
 
 A build made of parts you cannot buy is not advice, it is a taunt. So the build is worked out
-against **what you specifically can obtain right now**:
+against **what you specifically can obtain right now**, and each row says which of seven things the
+part is *to you*:
 
-- **Parts already in your stash** are free, and the row says so. If the part is fitted to another
-  weapon it says which one - *"fitted to your equipped MDR"* - and still shows you the price,
-  because stripping the gun you raid with is your decision to make, not the mod's.
-- **Parts a trader will sell you at your current loyalty**, with the price. Locked assortments and
-  quest-locked offers are already excluded; nothing is suggested that the trader would refuse you.
-- **Parts on the flea**, if you have flea access, with the price marked as an estimate - a trader
-  price is a fact, a flea price is a guess.
-- **Anything else is left out of the build entirely** rather than quietly recommended.
+- **already on the gun** - it is on the weapon's own default preset, so there is nothing to get.
+- **already on yours** - fitted to a copy of the quest's weapon you own. Not "owned elsewhere":
+  already done.
+- **in your stash** - loose, which is the only ownership that is genuinely free. A copy fitted to
+  some *other* weapon is not free and is not counted as owned; the row names the gun instead -
+  *"fitted to your equipped MDR"* - and still shows you the price, because stripping the gun you
+  raid with is your decision to make, not the mod's.
+- **a price in roubles** - a trader will sell it to you at your current loyalty. Locked assortments
+  and quest-locked offers are already excluded; nothing is suggested that the trader would refuse
+  you.
+- **barter** - a trader has it, but for goods rather than money, so there is no rouble figure to
+  print. It is counted as a barter in the total rather than quietly costed at nothing.
+- **about N ₽ on the flea** - if you have flea access, with the price marked as an estimate,
+  because a trader price is a fact and a flea price is a guess.
+- **not sold**, or **needs \<trader> at loyalty N** - and a part in either state is left out of the
+  build entirely rather than quietly recommended.
+
+**Fence is not a source.** His stock is randomly generated, rotates on a timer and carries his
+mark-up, so it is not a price the next player will see - neither the shared builds nor your own ever
+read him. That is why a part with nowhere left to come from says *"no trader but Fence sells
+another"* rather than naming him as an option.
+
+**The copies you do not hold are charged.** Where a build fits two or three of the same part, only
+the ones you actually have are free, and the row says what you have in terms you can check rather
+than as one number that counted the gun's own parts as things you own: *"this build fits 2 of these;
+the gun comes with 1, you have 1 loose - another comes from Skier at loyalty 3"*.
 
 **When no build can be made from what you can get, it says why**, and the three cases it
-distinguishes are the three that change what you do:
+distinguishes are the three that change what you do. The panel says it in a sentence; the server
+writes the same verdict as one line in its own log (wrapped here):
 
 ```
-'Gunsmith - Part 8' (AKS-74N): blocked - trader level -
-   AK Zenit PT Lock from Skier at loyalty 2
-   closest attempt missed: recoil 280.67, needs <= 275 (short by 5.67)
+Quest Tracker: profile 6a1f0d... (level 24, flea open) - 'Gunsmith - Part 8' (AKS-74N): blocked -
+trader level - AK Zenit PT Lock from Skier at loyalty 2; closest attempt missed: recoil 280.67,
+needs <= 275 (short by 5.67); the shared build needed AK Zenit PT Lock
 ```
 
 That is a goal, not a dead end. "You need Skier at loyalty 2" is worth knowing; "no build found" is
@@ -343,22 +376,31 @@ around it.
 | `?` button | Show the controls hint again |
 | `Ctrl+Q` | Open or close the tracker from anywhere in the menu (rebindable in F12) |
 
+**The keys are split by view.** `F`, `M`, `X`, `C` and `/` are the tree's, and only fire there: on
+**Maps** the only keys are `F` and `[` `]`, and on **Do next**, **Items**, **Kappa** and **Settings**
+none of them fire at all. They used to fire everywhere, where `F` and `M` did nothing visible and
+`X` silently flipped a tree-only setting from a view that does not show the tree. Nothing fires
+while the cursor is in the search box, so typing `f` into it searches rather than re-framing.
+
 ## Settings
 
 The Settings view, in six sections, and the same values in BepInEx's F12 menu. Each section resets
 to its own defaults from the last row in it.
 
 - **Tree** - compact layout, two-line titles, **collapse chains**, whether the trader stripe shows,
-  prerequisite lines and their opacity, hover dimming strength, how far **Focus** reaches, the
-  visible-quest ceiling, which quest badges the boxes wear (Kappa, Collector, or both), the
-  trader-card overview threshold, and the hide filters (unobtainable / completed / traderless).
+  prerequisite lines and their opacity, hover dimming strength, **Focus on what you can work on**
+  and how far it reaches, the visible-quest ceiling, which quest badges the boxes wear (Kappa,
+  Collector, or both), the trader-card overview threshold, and the hide filters (unobtainable /
+  completed / traderless).
 - **Do next** - which goal the ranking optimises for, and how many rows the tab lists.
 - **Behaviour** - open on the map or remember the last view, tooltips, hover sounds, in-raid zone
   harvesting, the controls hint, and reloading `kappa-quests.json`. The open-tracker shortcut is
   rebound in F12.
-- **Map** - accepted quests only, which sidebar sections show, how many "do next" rows, which pins
-  carry their name at rest (hover only / in progress and available / all), sidebar width, and the
-  artwork rotation and mirror overrides.
+- **Map** - accepted quests only, which sidebar sections show, whether quests you have **not**
+  accepted are counted when working out what to take into a raid, how many "do next" rows, which
+  pins carry their name at rest (hover only / in progress and available / all), sidebar width, the
+  artwork rotation and mirror overrides, and the alignment guides that outline the area a map's
+  coordinates cover and mark its origin.
 - **Colours** - the six status colours (in progress, available, completed, level gated, locked,
   **failed**) and the accent, with presets in-game and any hex colour in F12, plus **Restore the
   pre-1.10 colours** for anyone who preferred the old palette.
@@ -387,19 +429,33 @@ to its own defaults from the last row in it.
 
 ## Troubleshooting
 
+**Which log, and what to grep for.** The client half writes to `BepInEx\LogOutput.log` and prefixes
+every line `QuestTree`; the server half writes to the server console and its own log, and prefixes
+every line `Quest Tracker:`. A symptom that could be either is worth grepping for both.
+
 - **No taskbar button** - check `BepInEx\LogOutput.log` for lines starting `QuestTree`. The load
-  line carries the build stamp (`QuestTree 1.17.0+abc1234: loaded.`), which is what to quote.
+  line carries the build stamp (`QuestTree 1.18.1+abc1234: loaded.`), which is what to quote.
 - **The tracker is slow to open** - `LogOutput.log` carries one line per open with the time in each
   phase: `QuestTree: panel open - 499 ms: quests: server 29, quests: parse 233, graph 61, ...`. The
   quest fetch and its parse run on a worker thread, so the game is drawing frames through those two.
   The server half logs each per-profile request's time on the first one and again whenever it passes
   200 ms. Quote both lines rather than a feeling.
 - **Tree only shows unlocked quests, no pins** - the server half is missing, or you are on someone
-  else's server that does not have it. See "Both halves are required" above.
+  else's server that does not have it. See "Both halves are required" above. The server half says so
+  in its own log every time it answers - `Quest Tracker <stamp>: serving 558 quests to the client
+  mod.` - so the absence of that line is the confirmation, and a small count in it is the other
+  half of the answer.
 - **`Http response status code: NotFound` on `/questtree/...`** - same cause: the server you are on
   has no Quest Tracker server half, or one older than this client.
 - **Server refuses to load the mod** - the server half must match your SPT version. This build
   targets SPT 4.1.5.
+- **On Fika, a map stops learning zones once someone joins with a newer build** - the host's server
+  half is older than the joiner's client, so it refuses a harvest whose schema it cannot read in full
+  rather than storing half of one, and it skips any zone file already stamped newer than it reads.
+  Both refusals name the reason in the **host's** server log - `Quest Tracker: refused a zone harvest
+  for 'bigmap' - harvest schema v2 is newer than the v1 this server reads ...`, and `Quest Tracker:
+  zones/bigmap.json is schema v2, newer than the v1 this server reads - skipped ...`. Update the
+  host's half; the joiner's version is not the one that decides.
 - **A map says "not harvested yet"** - it is a map the release did not ship zones for. One raid on
   it fixes that for everyone on the server.
 - **A map has no image** - that map has no DynamicMaps image, which is expected for a few of them.

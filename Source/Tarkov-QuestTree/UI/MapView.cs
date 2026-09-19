@@ -44,9 +44,6 @@ namespace QuestTree.UI
         private const float PickerWidth = 300f;
         private const float FloorPickerWidth = 190f;
 
-        /// <summary>The quest list's column on the right. Everything left of it is map - the map is
-        /// the thing you are here to read, and the list is the caption.</summary>
-
         /// <summary>The column beside the map: its own scroll view, since the map is fixed and the
         /// list is not. Everything that is not the sidebar is map. Width from Settings.</summary>
         private static float SidebarWidth => ModSettings.Ready ? ModSettings.SidebarWidth.Value : 440f;
@@ -55,14 +52,14 @@ namespace QuestTree.UI
         /// was still running. Null when the last build had its picture or there is none to have.</summary>
         private static DynamicMapsLibrary.MapLayer _awaitingLayer;
 
-        /// <summary>Whether the picture the last build went without is ready to be built now.
-        /// Asked once a frame by the panel while the map is up; true exactly once per picture, and
-        /// the caller repaints, which is where TryGetSprite finishes the job on the main thread.</summary>
         /// <summary>Whether the last build went without its picture and it has not arrived yet.
         /// The panel keeps its loading notice up while this is true, so the player sees one
         /// loading screen and then the finished map, not a list that fills in.</summary>
         public static bool IsSpritePending => _awaitingLayer != null;
 
+        /// <summary>Whether the picture the last build went without is ready to be built now.
+        /// Asked once a frame by the panel while the map is up; true exactly once per picture, and
+        /// the caller repaints, which is where TryGetSprite finishes the job on the main thread.</summary>
         public static bool PollPendingSprite()
         {
             if (_awaitingLayer == null || !_awaitingLayer.IsReadyToBuild) return false;
@@ -70,6 +67,7 @@ namespace QuestTree.UI
             _awaitingLayer = null;
             return true;
         }
+
         private const float SidebarInset = 12f;
 
         /// <summary>The map's own control row - pickers, the accepted-only toggle, coverage -
@@ -83,6 +81,17 @@ namespace QuestTree.UI
 
 
         private const int MaxQuestRows = 40;
+
+        /// <summary>How many not-started markers a map will draw. Markers for quests you have
+        /// started are never trimmed - those are the pins that carry the map - so this bounds only
+        /// the background. Every drawn pin is a GameObject with a component on it and the whole set
+        /// is rebuilt on every dropdown click, so a map whose harvest states thousands of spawns
+        /// would otherwise cost thousands of objects per click.</summary>
+        private const int MaxInactiveMarkers = 200;
+
+        /// <summary>Maps that have already reported a trimmed marker set, by display name. Said
+        /// once: the alternative is the same line on every rebuild, which is every click.</summary>
+        private static readonly HashSet<string> MarkerTrimLogged = new(StringComparer.Ordinal);
 
         private const float MinZoom = 0.5f;
         private const float MaxZoom = 8f;
@@ -1635,7 +1644,38 @@ namespace QuestTree.UI
                 .OrderBy(m => m.Active ? 0 : 1)
                 .ThenBy(m => m.Objective ? 0 : 1)
                 .ThenBy(m => m.Owner == null || m.Owner == layer ? 0 : 1)
+                // Status last, and it is the cap below that needs it: without this key every
+                // not-started marker ranks the same, so the trim kept whatever order the payload
+                // happened to arrive in and would draw a COMPLETED quest's pin while dropping the
+                // pin of one you can accept and walk to now. StatusRank is the list's own order -
+                // available, then gated or locked, then completed.
+                .ThenBy(m => m.Status.HasValue ? StatusRank(m.Status.Value) : 2)
                 .ToList();
+
+            // The cap. Active markers are all kept, however many; the rest keeps the first
+            // MaxInactiveMarkers in the order just established, so what is dropped is the least
+            // interesting end - not started, not an objective, on another floor, and least
+            // actionable of what is left.
+            var started = ordered.Where(m => m.Active).ToList();
+            var background = ordered.Where(m => !m.Active).ToList();
+
+            if (background.Count > MaxInactiveMarkers)
+            {
+                var undrawn = background.Count - MaxInactiveMarkers;
+
+                started.AddRange(background.Take(MaxInactiveMarkers));
+                ordered = started;
+
+                // Said once per map rather than per rebuild, and at Info because it is the mod
+                // choosing not to draw data the player's map file does contain.
+                var mapKey = entry.DisplayName ?? "";
+                if (MarkerTrimLogged.Add(mapKey))
+                {
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree map '{mapKey}': {undrawn} not-started marker(s) left undrawn " +
+                        $"(showing every started one plus {MaxInactiveMarkers} others).");
+                }
+            }
 
             // Lifted above the other pins once they all exist - doing it as it is built would only
             // put it above the markers created so far.

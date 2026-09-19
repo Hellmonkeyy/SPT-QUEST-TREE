@@ -21,7 +21,18 @@
       file the compiler never raises CS1570-CS1574 or CS1734 at all.
 
       What it does NOT catch, and the reason a manual pass is still owed: a doc block carrying two
-      <summary> elements raises nothing. Twenty-eight of those remain.
+      <summary> elements raises nothing - the second documents nothing, and it is usually a member that
+      was deleted out from under its comment. FOUR of those remain, all four in the CLIENT half
+      (DynamicMapsLibrary, MapView, QuestGraphView, QuestNodeView); this half has none.
+
+      It said "twenty-eight" for several releases, which was a number nobody could reproduce because the
+      sentence never said how to take it. THE COUNT IS: one run of consecutive /// lines - a blank line
+      ends the run - holding two or more <summary> tags, over Source/Tarkov-QuestTree-Server and
+      Source/Tarkov-QuestTree. 1.18.2 removed the three this half had (QuestPayloadBuilder once,
+      WeaponSolver twice) and, beside them, two doc blocks that a blank line had cut off from the member
+      below (QuestPayloadBuilder again, and RaidCheckDto's summary sitting eleven classes above its own
+      class in QuestTreeDtos) - the same defect wearing different clothes, since the compiler attaches
+      those to nothing at all.
 
       DocumentationFile is deliberately NOT set. The SDK's own default for GenerateDocumentationFile
       already writes it under obj\; naming it here put it in the project ROOT instead - untracked, in
@@ -40,7 +51,7 @@
     <LangVersion>latest</LangVersion>
     <!-- MSBuild cannot read the C# constant, so this is the one copy that has to be updated by
          hand: keep it equal to ModInfo.Version in ModInfo.cs, which everything else derives from. -->
-    <AssemblyVersion>1.18.1</AssemblyVersion>
+    <AssemblyVersion>1.18.2</AssemblyVersion>
     <FileVersion>$(AssemblyVersion)</FileVersion>
     <Version>$(AssemblyVersion)</Version>
     <Title>QuestTreeServer</Title>

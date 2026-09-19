@@ -412,18 +412,6 @@ namespace QuestTreeServer
     }
 
 
-    /// <summary>What you must be CARRYING to finish the quests on each map.
-    ///
-    /// Deliberately narrow: only the carry-in conditions count. A hand-in is done at a trader and a
-    /// find-in-raid is found there, so neither is something to bring, and including them would turn
-    /// a useful verdict into a shopping list nobody can satisfy.
-    ///
-    /// No verdict is reached here. The server reports facts - what each condition wants, where it
-    /// happens, what the profile holds, what state the quest is in - and the client folds them,
-    /// because only the client knows the "count unaccepted quests" setting and only the client has
-    /// ENodeStatus where it has a graph at all.
-    /// </summary>
-
     /// <summary>The requirement a weapon-build quest states, in the terms the game compares against.
     ///
     /// Present only for WeaponAssembly conditions. 56 quests on the reference install carry one - 32
@@ -793,6 +781,17 @@ namespace QuestTreeServer
         public string Gate { get; set; } = "";
     }
 
+    /// <summary>What you must be CARRYING to finish the quests on each map.
+    ///
+    /// Deliberately narrow: only the carry-in conditions count. A hand-in is done at a trader and a
+    /// find-in-raid is found there, so neither is something to bring, and including them would turn
+    /// a useful verdict into a shopping list nobody can satisfy.
+    ///
+    /// No verdict is reached here. The server reports facts - what each condition wants, where it
+    /// happens, what the profile holds, what state the quest is in - and the client folds them,
+    /// because only the client knows the "count unaccepted quests" setting and only the client has
+    /// ENodeStatus where it has a graph at all.
+    /// </summary>
     public sealed class RaidCheckDto
     {
         /// <summary>1 (1.9.0): first version. The client mirror carries SupportedSchemaVersion = 1

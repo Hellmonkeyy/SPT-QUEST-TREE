@@ -52,6 +52,7 @@ namespace QuestTreeServer
         PartAvailability partAvailability,
         ProfileBuilds profileBuilds,
         PartPrices partPrices,
+        RaidCheckPayloadBuilder raidCheck,
         SPTarkov.Server.Core.Helpers.Profile.ProfileHelper profileHelper,
         SPTarkov.Server.Core.Servers.SaveServer saveServer) : IOnLoad
     {
@@ -100,7 +101,14 @@ namespace QuestTreeServer
             // After the payload, because the set of weapons to walk is filled while it is built.
             // Deliberately at boot: a cyclic slot graph is uncatchable at runtime, so the walk that
             // would meet one has to happen where a log line is read rather than inside a request.
-            weaponGraph.Survey(_questWeapons);
+            //
+            // COPIED UNDER THE LOCK THAT GUARDS IT, like every other read of the two collections this class
+            // owns: a zone-harvest POST reaches Rebuild, which clears and refills both, and enumerating a
+            // HashSet somebody else is writing to throws.
+            HashSet<MongoId> weapons;
+            lock (_questBuilds) weapons = new HashSet<MongoId>(_questWeapons);
+
+            weaponGraph.Survey(weapons);
             SurveySolver();
             AuditAvailability();
 
@@ -211,7 +219,13 @@ namespace QuestTreeServer
         /// Debug, because it is a developer's question. The one-line summary is Info.</summary>
         private void SurveySolver()
         {
-            if (_questBuilds.Count == 0) return;
+            // Snapshotted under the lock, once, for the guard and the walk and the count in the summary line
+            // alike - the pattern Work and Diagnose use, and for the same reason: Rebuild replaces this list
+            // from the zone-harvest POST thread.
+            List<(string Quest, WeaponBuildDto Build)> requirements;
+            lock (_questBuilds) requirements = _questBuilds.ToList();
+
+            if (requirements.Count == 0) return;
 
             var solved = 0;
             var ceiling = 0;
@@ -251,7 +265,7 @@ namespace QuestTreeServer
             // model that cannot see the stat at all.
             var reasons = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
-            foreach (var (questName, build) in _questBuilds)
+            foreach (var (questName, build) in requirements)
             {
                 if (!build.WeaponTemplate.TryParseMongoId(out var weapon)) continue;
 
@@ -357,7 +371,7 @@ namespace QuestTreeServer
             }
 
             logger.Info(
-                $"Quest Tracker: weapon solver dry run - {solved} of {_questBuilds.Count} build requirement(s) " +
+                $"Quest Tracker: weapon solver dry run - {solved} of {requirements.Count} build requirement(s) " +
                 $"satisfied from the full parts list" +
                 (ceiling > 0 ? $", {ceiling} hit the search budget" : "") +
                 $" - {clock.ElapsedMilliseconds:N0} ms for all of them, {worst:N0} nodes for the worst one, " +
@@ -1132,9 +1146,12 @@ namespace QuestTreeServer
         /// question from the same place. A same-size build somewhere else in the space is a new basin to
         /// try shrinking from, and it costs a round to get one.
         ///
-        /// A wander never reaches the cache. It changes where training LOOKS, not what the mod serves - the
-        /// history is still only ever replaced by something strictly smaller, so no player is told to fit
-        /// one thing today and another tomorrow.</summary>
+        /// A WANDER IS WRITTEN DOWN LIKE ANY OTHER RESULT WHEN IT WINS. It reaches the history through the
+        /// same Put in Shrink - there is one write path and no mode of this skips it - and what protects the
+        /// player is the write rule rather than the round's intent: only a build that is cheaper, or the same
+        /// price and leaner, and that the verifier has passed, ever replaces the incumbent. So a wander
+        /// USUALLY only moves where training looks next, because a same-size build somewhere else rarely beats
+        /// the incumbent on cost; when it does beat it, serving it is exactly right.</summary>
         private const int WanderEveryNthAttempt = 4;
 
         /// <summary>Threads training spreads across. Half the logical processors by default, and
@@ -1196,9 +1213,6 @@ namespace QuestTreeServer
         /// down with it - which is exactly when a progress line is least readable.</summary>
         private static readonly TimeSpan TrainingReportEvery = TimeSpan.FromSeconds(20);
 
-        /// <summary>How long the search may run. Seconds on a normal start, minutes while training. This is
-        /// CPU on the machine hosting the game, and a solver improving a build by one part does not get to
-        /// cost somebody a raid.</summary>
         /// <summary>Threads a normal launch uses. Two, because a normal launch is brief and the machine
         /// belongs to whoever is playing. Training takes half the cores, which is a session the user chose
         /// to spend.
@@ -1233,11 +1247,21 @@ namespace QuestTreeServer
         /// passes the verifier. So the risk is not correctness, it is CPU on a machine somebody is playing
         /// on, which is what the budget, the pause between rounds, and the cancellation token are for.
         ///
-        /// Every improvement rebuilds the payload, so a client asking after one lands gets the better build
-        /// rather than the one this start began with.</summary>
+        /// NOTHING REACHES THE CLIENT MID-SESSION, which this said the opposite of for several releases. An
+        /// improvement is written to the history file and served from the NEXT start; nothing here rebuilds the
+        /// cached payload when one lands, and the line the worker logs says so ("It will be used from the next
+        /// start"). That is deliberate rather than missing: a panel that changed its advice under the player
+        /// between two looks at the same quest is worse than one that is a start behind.
+        ///
+        /// The one door that is not this loop's: a zone-harvest POST calls Rebuild for its own reasons, and
+        /// that rebuild reads whatever has been found by then. Rare, player-initiated, and the same size of
+        /// change as a restart.</summary>
         private void Improve(CancellationToken cancellationToken)
         {
-            if (_questBuilds.Count == 0) return;
+            int requirements;
+            lock (_questBuilds) requirements = _questBuilds.Count;
+
+            if (requirements == 0) return;
 
             _ = Task.Run(() => Work(cancellationToken), cancellationToken);
         }
@@ -1380,11 +1404,6 @@ namespace QuestTreeServer
             }
         }
 
-        private int Requirements
-        {
-            get { lock (_questBuilds) return _questBuilds.Count; }
-        }
-
         /// <summary>Whether one build beats another on the objective: fewer purchases, or the same number
         /// of purchases and fewer parts.
         ///
@@ -1402,9 +1421,13 @@ namespace QuestTreeServer
         /// is to find out how often it happens rather than to start pricing things.
         ///
         /// Every profile on the install, because this is used with FIKA: a host serves a group, and the
-        /// answer differs sharply between a fresh profile and a finished one. Read-only, allocated per
-        /// profile, and it runs once at boot after the survey - it touches no shared state and nothing waits
-        /// on it.
+        /// answer differs sharply between a fresh profile and a finished one. Read-only and allocated per
+        /// profile, so it touches no shared state and nothing waits on it.
+        ///
+        /// AND NOTHING WAITS ON IT LITERALLY, since 1.18.2: the diagnostic spent 436 ms of every boot on the
+        /// blocking path, for numbers no request reads. Only the handoff below - the requirements and their
+        /// baselines, which is what every profile panel is served from - has to finish before the server is
+        /// up, so that runs first and the walk that reports on it runs on a background thread afterwards.
         ///
         /// The loyalty view is the interesting half. A part this profile cannot buy might be gated behind
         /// trader progress or not sold at all, and those are different problems: one is "your traders are too
@@ -1418,6 +1441,86 @@ namespace QuestTreeServer
 
             if (requirements.Count == 0) return;
 
+            // THE HANDOFF FIRST, because it is the only part of this a boot has any reason to wait for: it is
+            // what every profile's panel is served from, and Refresh queues its own work off the boot path.
+            // The answer for each profile is prepared there: the shared build where every part is obtainable,
+            // a build searched within reach where it is not.
+            var handoff = new List<ProfileBuilds.Requirement>(requirements.Count);
+
+            foreach (var (questName, build) in requirements)
+            {
+                if (!build.WeaponTemplate.TryParseMongoId(out var weapon) || string.IsNullOrEmpty(build.Key)) continue;
+
+                IReadOnlyList<WeaponSolver.FittedPart>? baseline = null;
+
+                // What THIS boot serves, which in training mode can differ from the file.
+                lock (_solved)
+                    if (_solved.TryGetValue(build.Key, out var served) && served.Found) baseline = served.Parts;
+
+                if (baseline == null)
+                {
+                    var remembered = weaponBuildCache.Get(build.Key);
+                    if (remembered != null) baseline = Restore(remembered);
+                }
+
+                handoff.Add(new ProfileBuilds.Requirement
+                {
+                    Quest = questName,
+                    Key = build.Key,
+                    Build = build,
+                    Baseline = baseline
+                });
+            }
+
+            profileBuilds.Refresh(handoff);
+
+            // AND THE DIAGNOSTIC AFTER IT, off the boot path entirely. 436 ms of per-profile reporting was
+            // being paid by a boot that reads none of it: every profile's inventory, trader tables and flea
+            // read, walked against all sixty remembered builds, to produce three log lines per profile.
+            //
+            // EVERYTHING is caught. This is a report, it runs where nothing is waiting to observe a failure,
+            // and an unobserved exception on a task the server has stopped holding is the one way a
+            // diagnostic could take the process down.
+            _ = Task.Run(() =>
+            {
+                try
+                {
+                    Diagnose(requirements);
+                }
+                catch (Exception ex)
+                {
+                    logger.Warning(
+                        $"Quest Tracker: the part-availability report did not finish ({ex.Message}). The builds " +
+                        "themselves are unaffected - this walk only reports on them.");
+                }
+
+                // And the pre-raid answer built once here, on the same thread and after the report, for the
+                // reason RaidCheckPayloadBuilder.Warm gives: the first request for it cost 745 ms of one-time
+                // work on Unity's main thread. It catches its own failures.
+                raidCheck.Warm(Sessions());
+            });
+        }
+
+        /// <summary>Profile ids on this install, or none of them when they cannot be read. Never throws: every
+        /// caller is a diagnostic or a warm-up running where a failure has nobody to report it to.</summary>
+        private IEnumerable<MongoId> Sessions()
+        {
+            try
+            {
+                return saveServer.GetProfiles().Keys.ToList();
+            }
+            catch (Exception ex)
+            {
+                logger.Info($"Quest Tracker: the profile list could not be read ({ex.Message}).");
+
+                return Array.Empty<MongoId>();
+            }
+        }
+
+        /// <summary>The per-profile availability report itself: what AuditAvailability's summary describes,
+        /// on a background thread with the handoff already done.</summary>
+        private void Diagnose(List<(string Quest, WeaponBuildDto Build)> requirements)
+        {
             Dictionary<MongoId, SPTarkov.Server.Core.Models.Eft.Profile.SptProfile> profiles;
 
             try
@@ -1609,37 +1712,6 @@ namespace QuestTreeServer
                         (missing.Count > 12 ? $" and {missing.Count - 12} more" : "") +
                         ". Affected: " + string.Join("; ", affected.Take(8)) + ".");
             }
-
-            // And then the answer for each profile is prepared, off the boot path: the shared build where
-            // every part is obtainable, a build searched within reach where it is not.
-            var handoff = new List<ProfileBuilds.Requirement>(requirements.Count);
-
-            foreach (var (questName, build) in requirements)
-            {
-                if (!build.WeaponTemplate.TryParseMongoId(out var weapon) || string.IsNullOrEmpty(build.Key)) continue;
-
-                IReadOnlyList<WeaponSolver.FittedPart>? baseline = null;
-
-                // What THIS boot serves, which in training mode can differ from the file.
-                lock (_solved)
-                    if (_solved.TryGetValue(build.Key, out var served) && served.Found) baseline = served.Parts;
-
-                if (baseline == null)
-                {
-                    var remembered = weaponBuildCache.Get(build.Key);
-                    if (remembered != null) baseline = Restore(remembered);
-                }
-
-                handoff.Add(new ProfileBuilds.Requirement
-                {
-                    Quest = questName,
-                    Key = build.Key,
-                    Build = build,
-                    Baseline = baseline
-                });
-            }
-
-            profileBuilds.Refresh(handoff);
         }
 
         /// <summary>Whether the VERIFIER agrees this build satisfies the requirement. Nothing reaches the
@@ -1674,14 +1746,6 @@ namespace QuestTreeServer
 
             return false;
         }
-
-        /// <summary>One sweep over every requirement from a fresh set of starting points, and how many
-        /// builds it managed to shrink.
-        ///
-        /// Spread across half the machine's cores. The sixty requirements are independent problems and this
-        /// was solving them one at a time - 330 rounds in 34 minutes on sixteen cores, using one of them.
-        /// Half rather than all, because the rest belongs to whoever is playing.</summary>
-
 
         /// <summary>Looks for a smaller build for one requirement, and returns whether it found one.
         ///
@@ -1749,17 +1813,38 @@ namespace QuestTreeServer
             // blocked every improvement for a whole training run (ledger, defect 7); describing the remembered
             // build is a handful of dictionary lookups and cannot be stale.
             var incumbent = Restore(remembered);
-            var standing = incumbent == null
+
+            // AND IT IS AUDITED HERE TOO, which is what makes Solve's claim that every path audits the
+            // remembered build true of this one. This is the training path: it described whatever it was
+            // trying to beat and never asked whether that was legal.
+            var rejected = incumbent == null
+                           || !Sound(weapon, incumbent, thresholds, mustInclude, mustIncludeCategories,
+                               "a remembered build");
+
+            var standing = rejected || incumbent == null
                 ? null
                 : weaponSolver.Describe(weapon, thresholds, mustInclude, mustIncludeCategories, incumbent, Shared);
 
-            if (standing == null)
+            // DESCRIBE DOES NOT RETURN NULL FOR A BUILD IT CANNOT RE-SEAT. It returns a Result it never filled
+            // in - Found false, Cost 0 - when the weapon's slot graph is unreachable or Rebuild cannot seat the
+            // remembered parts (WeaponSolver ~688/702). Zero is unbeatable under Cheaper, so an entry in that
+            // state blocked every candidate for the life of the install while Held escalated the restarts
+            // spent on it: defect 7 in a second costume, and the reason Solve carries a `rejected` flag at
+            // all. Counted as ABSENT here for the same reason - the candidate replaces it rather than losing
+            // to it forever.
+            if (standing is { Found: false })
             {
-                weaponBuildCache.Held(key);
-                return false;
+                logger.Info(
+                    $"Quest Tracker: the remembered weapon build for '{weapon}' cannot be re-seated on this " +
+                    "install, so a verified smaller one replaces it rather than being measured against it - " +
+                    string.Join("; ", standing.Unmet.Distinct().Take(3)) + ".");
+
+                rejected = true;
+                standing = null;
             }
 
-            weaponBuildCache.Changed(key, standing.Changes, standing.Cost, Shared.PerPurchase);
+            if (standing != null)
+                weaponBuildCache.Changed(key, standing.Changes, standing.Cost, Shared.PerPurchase);
 
             // Somewhere new that is no cheaper and no leaner: worth searching from, not worth serving.
             //
@@ -1768,9 +1853,23 @@ namespace QuestTreeServer
             // a build never gets more expensive and never grows - holds exactly as before. What it admits is
             // the build that costs less and happens to carry one part more, which under the old rule could
             // never be written down at all.
-            if (!Cheaper(result.Cost, result.Parts.Count, standing.Cost, remembered.Parts.Count))
+            //
+            // A REJECTED INCUMBENT SKIPS THIS GATE ENTIRELY - standing is null - so a candidate that verifies
+            // is written down in its place. That is the whole point of the flag: there is nothing legal to
+            // compare against.
+            if (standing != null
+                && !Cheaper(result.Cost, result.Parts.Count, standing.Cost, remembered.Parts.Count))
             {
-                if (result.Parts.Count <= working.Count)
+                // THE SAME PREDICATE THAT DECIDES WHAT IS SERVED, with ties admitted, rather than part count
+                // alone. Part count alone moved the search onto a build one part smaller and thousands of
+                // roubles dearer and then searched from there - a different question from the one being asked.
+                // The tie is what a wander needs: a same-size build somewhere else is the new basin.
+                //
+                // The working point is priced at the INCUMBENT'S cost, and that is exact rather than an
+                // approximation: this branch is only reached when the candidate did not beat the incumbent, so
+                // admitting one requires equal cost, which means every build this line has ever written here
+                // cost what the incumbent cost.
+                if (!Cheaper(standing.Cost, working.Count, result.Cost, result.Parts.Count))
                     lock (_working) _working[key] = result.Parts;
 
                 weaponBuildCache.Held(key);
@@ -1826,10 +1925,11 @@ namespace QuestTreeServer
             //
             // Training is the exception and the reason the search still exists here: that mode is trying to
             // beat the build, so it has to run.
-            // The audit of a remembered build happens on EVERY path, training included. Training used to skip
-            // it and search from whatever it found, which is how an invalid entry survived two hundred rounds
-            // that were all looking at it: nothing in that mode ever asked whether the build it was trying to
-            // beat was legal in the first place.
+            // The audit of a remembered build happens on EVERY path, training included: Shrink - the training
+            // path - audits the incumbent it is trying to beat with this same Sound call, and treats one that
+            // fails as absent. Training used to skip it and search from whatever it found, which is how an
+            // invalid entry survived two hundred rounds that were all looking at it: nothing in that mode ever
+            // asked whether the build it was trying to beat was legal in the first place.
             if (incumbent != null
                 && !Sound(weapon, incumbent, thresholds, mustInclude, mustIncludeCategories, "a remembered build"))
             {

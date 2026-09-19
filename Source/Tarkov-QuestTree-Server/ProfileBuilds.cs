@@ -79,9 +79,6 @@ namespace QuestTreeServer
         {
             public string Fingerprint = "";
             public List<ProfileBuildDto> Builds = new();
-            public int Level;
-            public bool FleaAccess;
-            public DateTime At;
         }
 
         private readonly object _lock = new();
@@ -91,11 +88,6 @@ namespace QuestTreeServer
         private readonly Queue<(MongoId Profile, bool Fresh)> _queue = new();
         private readonly HashSet<(MongoId, bool)> _queued = new();
         private bool _working;
-
-        /// <summary>How many repairs the verifier has passed and rejected, over the life of the process.
-        /// Reported together, because "0 rejected" from a check that never ran reads as a pass.</summary>
-        private int _verified;
-        private int _rejected;
 
         /// <summary>The requirements and their shared builds, as of this boot. Every known profile is queued
         /// for a pass, off the boot path.</summary>
@@ -341,13 +333,7 @@ namespace QuestTreeServer
 
             var clock = System.Diagnostics.Stopwatch.StartNew();
             var locale = localeService.GetLocaleDb();
-            var answer = new Answer
-            {
-                Fingerprint = sources.Fingerprint,
-                Level = pmc.Info?.Level ?? 0,
-                FleaAccess = sources.FleaAccess,
-                At = DateTime.UtcNow
-            };
+            var answer = new Answer { Fingerprint = sources.Fingerprint };
 
             var ok = 0;
             var repaired = 0;
@@ -405,6 +391,17 @@ namespace QuestTreeServer
             var disagreeObjective = 0;
             var spread = new List<(string Quest, long Handbook, long Objective, long Paid, double Ratio)>();
 
+            // AND THE SAME TWO SIDES FOR THE REPAIRED BUILDS, which the three columns above deliberately
+            // leave out. There is no handbook control to draw for them - their objective is this profile's own
+            // prices - so it is objective against paid, exactly as for the shared ones, and the gap between
+            // the two is a quantity with a name: the parts the objective has to put a number on and nobody is
+            // charged for. See Repaired().
+            var repairedObjectiveTotal = 0L;
+            var repairedPaidTotal = 0L;
+            var repairedValuedUnpaid = 0;
+            var repairedUnpricedRows = 0;
+            var disagreeRepaired = 0;
+
             foreach (var requirement in requirements)
             {
                 var judged = Judge(requirement, sources, locale, fresh ? "fresh" : profileId.ToString(),
@@ -456,6 +453,17 @@ namespace QuestTreeServer
                         repairedParts += judged.Parts.Count;
                         repairedCash += judged.Cash + judged.FleaEstimate;
 
+                        // What the restricted search valued this build's purchases at, beside what the bill
+                        // charges for the same build.
+                        var repairedSides = Repaired(judged, sources);
+
+                        repairedObjectiveTotal += repairedSides.Objective;
+                        repairedPaidTotal += repairedSides.Paid;
+                        repairedValuedUnpaid += repairedSides.ValuedUnpaid;
+                        repairedUnpricedRows += repairedSides.Unpriced;
+
+                        if (Disagreement(repairedSides.Objective, repairedSides.Paid) > 1.25d) disagreeRepaired++;
+
                         if (requirement.Baseline != null
                             && requirement.Build.WeaponTemplate.TryParseMongoId(out var repairedWeapon))
                         {
@@ -489,9 +497,6 @@ namespace QuestTreeServer
             }
 
             if (!fresh) _answers[profileId] = answer;
-
-            Interlocked.Add(ref _verified, verifiedHere);
-            Interlocked.Add(ref _rejected, rejectedHere);
 
             logger.Info(
                 $"Quest Tracker: builds for {who} - {ok} of {requirements.Count} shared build(s) usable as " +
@@ -567,6 +572,92 @@ namespace QuestTreeServer
                     $"objective-to-paid" +
                     (spread.Count > 0 ? $". Widest by handbook: {string.Join("; ", widest)}." : "."));
             }
+
+            // THE REPAIRED BUILDS' OBJECTIVE AGAINST THEIR OWN BILL, so that both searches' objectives are
+            // shown against what a player pays and not only the shared one's. The shared builds got that line
+            // when their objective changed; the repaired ones never had it, and their objective just changed
+            // too - the barter and absent fallback went from the handbook to handbook x the flea multiple,
+            // which is a threefold move on exactly the rows this line separates out.
+            //
+            // WHAT THE GAP IS, because it is not noise: every row the bill charges for is valued here from the
+            // same Sources.Purchase the bill reads, so those two figures cannot drift. The difference is the
+            // barter and absent rows - the search must put a number on a part to compare builds at all, and
+            // the bill charges nothing for a part with no cash price. So objective minus paid is precisely the
+            // valuation nobody is charged, and the count beside it says how many builds that valuation
+            // dominates.
+            if (repaired > 0)
+                logger.Info(
+                    $"Quest Tracker: the objective against the bill for the repaired builds for {who} - over the " +
+                    $"{repaired} repaired build(s), the objective the restricted search used values their parts " +
+                    $"at {repairedObjectiveTotal:N0} roubles and the bill charges {repairedPaidTotal:N0}. The " +
+                    $"{repairedObjectiveTotal - repairedPaidTotal:N0} rouble difference is {repairedValuedUnpaid} " +
+                    $"barter or absent part(s) the objective values at PartPrices.Shared - the same fallback the " +
+                    $"shared search uses, at handbook x{partPrices.FleaOnlyMultiple} - and the bill charges " +
+                    $"nothing for; {repairedUnpricedRows} row(s) have no valuation on either side. " +
+                    $"{disagreeRepaired} of {repaired} build(s) disagree objective-to-paid by more than 25%, " +
+                    "which for these is a build the search chose mostly out of parts nobody sells for money.");
+        }
+
+        /// <summary>What the repair search's own pricing values one build's parts at, what the bill charges
+        /// for the same build, how many rows carry the first figure and not the second, and how many carry
+        /// neither.
+        ///
+        /// THE TWO SIDES ARE NOT THE SAME QUESTION, and the difference between them is the point. Valued is
+        /// every row the search pays for - the Pricing built in Judge, Sources.Purchase with PartPrices.Shared
+        /// behind it - which includes the barter and absent rows, because a search cannot compare two builds
+        /// without a number for every part in them. Paid is what Total charges, which is cash and flea
+        /// estimates only.
+        ///
+        /// SO NO PART OF THIS IS A RESTATEMENT OF THE OTHER, and none of it is a claim the two agree either:
+        /// on the buyable and flea rows they read the same function and cannot differ; on the rest, one has a
+        /// figure and the other deliberately does not. Objective minus paid is therefore exactly the valuation
+        /// nobody is charged - the quantity that just tripled when the fallback stopped being the handbook at
+        /// face value - which is what the line reporting it says.
+        ///
+        /// PerPurchase is out of both, as it is out of the three shared columns: this compares prices with
+        /// prices. A row at a free tier is out of both as well - the search spent a free copy on it from the
+        /// same budget Classify gave the row, and neither side charges for one.</summary>
+        private (long Objective, long Paid, int ValuedUnpaid, int Unpriced) Repaired(
+            ProfileBuildDto dto, PartAvailability.Sources sources)
+        {
+            var objective = 0L;
+            var paid = 0L;
+            var valuedUnpaid = 0;
+            var unpriced = 0;
+
+            foreach (var part in dto.Parts)
+            {
+                // The free tiers, which cost the search nothing and the player nothing. "fitted", "inplace"
+                // and "owned" are Row's spellings of them; anything else is a copy somebody has to obtain.
+                if (part.Tier is "fitted" or "inplace" or "owned") continue;
+
+                if (!part.Template.TryParseMongoId(out var template))
+                {
+                    unpriced++;
+                    continue;
+                }
+
+                var (tier, price) = sources.Purchase(template);
+
+                // The repair search's own fallback, kept in step with the Pricing built in Judge: a part with
+                // no cash price is valued the way the shared objective values it.
+                var valued = tier is PartAvailability.Tier.Buyable or PartAvailability.Tier.Flea
+                    ? price
+                    : partPrices.Shared(template);
+
+                if (valued is not { } value)
+                {
+                    unpriced++;
+                    continue;
+                }
+
+                objective += value;
+
+                if (part.Tier is "buyable" or "flea") paid += part.Price ?? 0;
+                else valuedUnpaid++;
+            }
+
+            return (objective, paid, valuedUnpaid, unpriced);
         }
 
         /// <summary>Two valuations of the same rows Total prices - buyable and flea - with how many of them
@@ -753,9 +844,15 @@ namespace QuestTreeServer
             if (sources.OwnedWeapons.TryGetValue(weapon, out var inPlace)) allowed.UnionWith(inPlace);
 
             // THIS PROFILE'S PRICES. A trader's cash price is a fact; a flea price is an estimate; a barter
-            // and anything else is valued at the handbook for the objective only - the search needs a
-            // comparable number and the handbook is the game's own valuation, but no row ever shows it as
-            // a price.
+            // and anything else is valued for the objective only - the search needs a comparable number - and
+            // no row ever shows that valuation as a price.
+            //
+            // THE FALLBACK IS PartPrices.Shared, WHICH IS THE SHARED SEARCH'S OWN. It was partPrices.Of, the
+            // handbook at face value, and the shared objective prices a part no trader sells at handbook x
+            // FleaOnlyMultiple (3) - so the repair search was valuing every barter and otherwise-absent part at
+            // a third of what the search it is replacing values it at. That is not a small bias: it made the
+            // restricted search PREFER barter parts threefold, and the cost-of-restriction line beside it
+            // compared the two objectives as though they were the same question.
             //
             // HOW MANY COPIES ARE FREE, not which templates are. A budget per template - the gun's own
             // default parts, one already fitted to a copy of it the profile owns, and every loose copy in the
@@ -778,7 +875,7 @@ namespace QuestTreeServer
                     {
                         PartAvailability.Tier.Buyable => price,
                         PartAvailability.Tier.Flea => price,
-                        _ => partPrices.Of(template)
+                        _ => partPrices.Shared(template)
                     };
                 }
             };

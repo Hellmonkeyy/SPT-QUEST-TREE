@@ -139,7 +139,10 @@ namespace QuestTreeServer
         private long _fleaOnlyMultiple = -1;
 
         private readonly object _lock = new();
-        private Dictionary<MongoId, long>? _prices;
+
+        /// <summary>Volatile because it is read without the lock - Of() checks it first and the double-checked
+        /// build below publishes it from whichever thread got there first.</summary>
+        private volatile Dictionary<MongoId, long>? _prices;
 
         /// <summary>The handbook price of one template, or null when the handbook does not list it.</summary>
         public long? Of(MongoId template)

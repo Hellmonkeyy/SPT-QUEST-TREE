@@ -184,11 +184,6 @@ namespace QuestTreeServer
                 Owned.Contains(template) || Buyable.ContainsKey(template) || Barter.Contains(template)
                 || (FleaAccess && Flea.ContainsKey(template));
 
-            /// <summary>Obtainable without the flea market. Kept separately because the flea is a generated
-            /// source whose prices move, and the ledger's earlier figures were taken without it.</summary>
-            public bool HasFromTraders(MongoId template) =>
-                Owned.Contains(template) || Buyable.ContainsKey(template) || Barter.Contains(template);
-
             /// <summary>The tier the INSTANCE'th copy of a part falls in for this profile and what that copy
             /// costs there - zero for the first copy in a build, one for the second, and so on. A price is
             /// only returned for Buyable and Flea; Fitted, InPlace and Owned cost nothing, Barter and Absent
@@ -640,7 +635,10 @@ namespace QuestTreeServer
         private long? CashPrice(TraderAssort assort, MongoId offer) => partPrices.CashPrice(assort, offer);
 
         private readonly object _fleaLock = new();
-        private HashSet<MongoId>? _vanilla;
+
+        /// <summary>Volatile for the same reason _fleaRead is: Vanilla() reads it before taking the lock, and
+        /// the thread that builds it publishes it from inside one.</summary>
+        private volatile HashSet<MongoId>? _vanilla;
 
         /// <summary>One read of the flea: the prices and the bans together, with when they were taken.
         ///

@@ -38,9 +38,12 @@ namespace QuestTree.UI
             public string Detail = "";
         }
 
-        /// <summary>One answer per build, re-asked only when the server sends different items.
-        /// Assembling a Weapon is not free and the panel repaints often.</summary>
-        private static readonly Dictionary<string, (string ItemsJson, Verdict Verdict)> Cache = new();
+        /// <summary>One answer per quest-and-build, re-asked only when the server sends different
+        /// items. Assembling a Weapon is not free and the panel repaints often. The quest is half
+        /// the key because Compute is quest-scoped: it resolves the condition object from questId
+        /// and three of its Unknown verdicts speak about the quest, not the build, so two held
+        /// quests stating the same requirement must not share one entry.</summary>
+        private static readonly Dictionary<(string QuestId, string BuildKey), (string ItemsJson, Verdict Verdict)> Cache = new();
 
         public static void Forget() => Cache.Clear();
 
@@ -48,7 +51,7 @@ namespace QuestTree.UI
         {
             if (requirement == null || build == null) return Unknown("there is no build to check");
 
-            var key = build.Key ?? "";
+            var key = (questId ?? "", build.Key ?? "");
             var itemsJson = build.ItemsJson ?? "";
 
             if (Cache.TryGetValue(key, out var cached) && cached.ItemsJson == itemsJson) return cached.Verdict;

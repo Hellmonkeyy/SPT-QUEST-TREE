@@ -31,19 +31,124 @@ namespace QuestTreeServer
         ZoneStore zoneStore,
         QuestFacts facts)
     {
-        public string GetPayloadJson(MongoId sessionId) =>
-            JsonSerializer.Serialize(Build(sessionId), WireJson.Options);
+        public string GetPayloadJson(MongoId sessionId)
+        {
+            var json = Serialise(sessionId, out var phases);
+
+            // ONCE at Info, and the PHASES rather than the total. The first answer after a boot cost 745 ms
+            // against 10 and 6 ms for the two after it, on a route the client now refetches on every
+            // matchmaker show - synchronously, on Unity's main thread, where 745 ms is a freeze rather than a
+            // slow request. A total says only that it was slow; the split says which phase to warm, and it
+            // stays here at Debug so a regression says so too.
+            if (!_phased)
+            {
+                _phased = true;
+                logger.Info($"Quest Tracker: raid check phases, first request - {phases}.");
+            }
+            else logger.Debug($"Quest Tracker: raid check phases - {phases}.");
+
+            return json;
+        }
+
+        /// <summary>One answer, built and serialised, with the split of where its time went.
+        ///
+        /// The serialise is timed HERE rather than inside Build because on the first call it is not free: the
+        /// serialiser builds its reflection metadata for the whole DTO graph on first use, which is one-time
+        /// cost that reads as a slow request.</summary>
+        private string Serialise(MongoId sessionId, out string phases)
+        {
+            var payload = Build(sessionId, warming: false, out var built);
+
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+            var json = JsonSerializer.Serialize(payload, WireJson.Options);
+
+            phases = $"{built}, serialise {clock.Elapsed.TotalMilliseconds:0.0} ms";
+
+            return json;
+        }
+
+        /// <summary>Builds one full answer at boot, off the boot path, so the first request from the game pays
+        /// for none of the one-time work behind it.
+        ///
+        /// WHAT IS ONE-TIME, measured: the first request cost 745 ms and the next two 10 and 6, so about
+        /// 730 ms of it was work that happens once per process - the locale table, the zone index, the
+        /// location lookups, this path's JIT, the serialiser's metadata for the DTO graph - and none of it is
+        /// per-request. That is why warming is the whole fix rather than a partial one: the phases the first
+        /// request would otherwise pay for are the same ones the steady-state 6 ms is made of.
+        ///
+        /// Every id is tried until one has a profile behind it, because an id with none builds an empty
+        /// payload and warms nothing at all. It never throws: this is an optimisation nobody is waiting on,
+        /// running on a thread where an exception would be lost in silence.</summary>
+        public void Warm(IEnumerable<MongoId> sessions)
+        {
+            try
+            {
+                foreach (var session in sessions)
+                {
+                    var payload = Build(session, warming: true, out var built);
+
+                    // No profile behind this id: nothing was walked, so nothing was warmed. Try the next one.
+                    if (!payload.HasProfile) continue;
+
+                    var clock = System.Diagnostics.Stopwatch.StartNew();
+                    var json = JsonSerializer.Serialize(payload, WireJson.Options);
+
+                    logger.Info(
+                        $"Quest Tracker: raid check warmed off the boot path - {built}, serialise " +
+                        $"{clock.Elapsed.TotalMilliseconds:0.0} ms, {json.Length:N0} bytes. The first request " +
+                        "from the game pays for none of it.");
+
+                    return;
+                }
+
+                logger.Info(
+                    "Quest Tracker: no profile to warm the raid check with - the first request will pay for it.");
+            }
+            catch (Exception ex)
+            {
+                logger.Warning(
+                    $"Quest Tracker: could not warm the raid check ({ex.Message}) - the first request will pay " +
+                    "for it. The answer itself is unaffected.");
+            }
+        }
 
         /// <summary>See ProfilePayloadBuilder._timed: first request and slow ones at Info.</summary>
         private bool _timed;
 
-        private RaidCheckDto Build(MongoId sessionId)
+        /// <summary>Whether the per-phase split has been reported at Info yet. Separate from _timed so a
+        /// warm-up pass cannot spend the one line the first real request is meant to print.</summary>
+        private bool _phased;
+
+        /// <summary>One answer. <paramref name="warming"/> when it is the boot-path warm-up rather than a
+        /// request, which is what keeps the tally line below at Debug for it: _timed spends its single Info
+        /// line on the first caller, and the caller that line is FOR is the first real request. Warm's own
+        /// Info line reports the warm-up.</summary>
+        private RaidCheckDto Build(MongoId sessionId, bool warming, out string phases)
         {
             var clock = System.Diagnostics.Stopwatch.StartNew();
+            var at = 0d;
+
+            // Measured on EVERY request and not only the first. A split taken once cannot show a regression,
+            // which is the other half of what this line is for; after the first it is Debug.
+            double Split()
+            {
+                var now = clock.Elapsed.TotalMilliseconds;
+                var span = now - at;
+                at = now;
+
+                return span;
+            }
+
             var payload = new RaidCheckDto();
 
             var profile = TryGetProfile(sessionId);
-            if (profile == null) return payload;   // HasProfile false -> the cue stays neutral
+            var profileMs = Split();
+
+            if (profile == null)
+            {
+                phases = $"profile {profileMs:0.0} ms, no profile";
+                return payload;   // HasProfile false -> the cue stays neutral
+            }
 
             payload.HasProfile = true;
 
@@ -53,15 +158,18 @@ namespace QuestTreeServer
             // looking entirely correct.
             var owned = ProfileInventory.CountFresh(profile, out var locationsKnown);
             payload.InventoryLocationsKnown = locationsKnown;
+            var inventoryMs = Split();
 
             var locale = localeService.GetLocaleDb();
             var zoneToMap = zoneStore.ZoneToMap();
             var harvested = zoneStore.HarvestedMaps();
+            var lookupsMs = Split();
 
             // One pass over the quest list of the profile rather than a scan per quest: the builders
             // this replaces used FirstOrDefault, which is 835 x 439 comparisons a request on the
             // reference profile - on a route fired from the ready-up screen.
             var progress = facts.IndexProgress(profile);
+            var progressMs = Split();
 
             // Every real location gets a row up front, whether or not anything is wanted there.
             //
@@ -84,6 +192,8 @@ namespace QuestTreeServer
                 };
             }
 
+            var mapsMs = Split();
+
             foreach (var quest in facts.Quests())
             {
                 try
@@ -98,7 +208,14 @@ namespace QuestTreeServer
                 }
             }
 
+            var questsMs = Split();
+
             payload.Maps = maps.Values.OrderBy(m => m.Name, StringComparer.OrdinalIgnoreCase).ToList();
+
+            phases =
+                $"profile {profileMs:0.0} ms, inventory walk {inventoryMs:0.0} ms, locale and zone index " +
+                $"{lookupsMs:0.0} ms, quest progress {progressMs:0.0} ms, map rows {mapsMs:0.0} ms, quest walk " +
+                $"{questsMs:0.0} ms";
 
             // The task-item tally is here rather than in a test because it is only ever interesting
             // against a real profile: it is what tells you whether a green row went green for the right
@@ -110,7 +227,11 @@ namespace QuestTreeServer
                 $"{payload.Held.Values.Count(h => h.InTaskItems > 0)} of {payload.Held.Count} items in the " +
                 $"task-item containers, in {clock.ElapsedMilliseconds} ms.";
 
-            if (!_timed || clock.ElapsedMilliseconds > ProfilePayloadBuilder.SlowRequestMs) { _timed = true; logger.Info(line); }
+            if (!warming && (!_timed || clock.ElapsedMilliseconds > ProfilePayloadBuilder.SlowRequestMs))
+            {
+                _timed = true;
+                logger.Info(line);
+            }
             else logger.Debug(line);
 
             return payload;

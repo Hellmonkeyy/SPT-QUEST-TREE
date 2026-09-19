@@ -1,3 +1,43 @@
+# Quest Tracker 1.18.2
+
+**The pre-raid button tells you what you are carrying now.** It was painted once from a
+session-long cache only the tracker's Refresh link refetched, so packing the item left the button
+saying "1 TO PACK" over a sidebar saying it was on you. It refetches on every matchmaker show and
+repaints when the tracker refreshes.
+
+**Pressing ready no longer pauses the game.** The first pre-raid check after a start cost 745 ms
+against 10 and 6 for the next two - one-time work the game paid for on its own thread. The server
+builds one full answer at boot, off the blocking path, and logs both passes phase by phase.
+
+**Two quests asking for the same gun get two answers.** The game's own verdict was cached per build
+but is computed per quest, so two held quests stating one requirement shared a verdict. Keyed by
+quest and build now; and accepting a quest with the tracker open clears the "checkable once the
+quest is accepted" line instead of leaving it behind.
+
+**The repair search values barter parts the way the shared search does.** It valued a barter or
+absent part at handbook face value where the shared search values it at handbook x3 - a threefold
+bias towards barter parts, and a cost comparison between two different questions. A new boot line
+reports the repaired builds' objective against their bill and what the difference is made of.
+
+**A build that cannot be re-seated is replaced, not defended.** A remembered build whose parts
+cannot be seated on this install described itself as costing zero, which is unbeatable, so it
+blocked every smaller build found for it. Treated as absent now, with the weapon and reason logged;
+the training path also audits the incumbent before measuring anything against it.
+
+## Also
+
+- The Kappa tab's lists draw at most 150 rows each with a "+N more" tail. A map draws every started
+  quest's markers plus 200 others, ordered as the quest list is, and logs once per map when it trims.
+- The 436 ms per-profile parts report moved off the boot's blocking path, taking the mod's share of
+  a boot from 677 ms to 280; two caches read outside their lock are volatile; the boot survey and the
+  solver dry run copy what a zone harvest rebuilds.
+- A hover card that cannot read the profile says so once a session. Dead fields and doc comments
+  attached to nothing are gone.
+- The README describes 1.18.0 and 1.18.1. Packaging refuses a release with no changelog entry or
+  stub notes, and records the built archive's sha256 in the notes.
+
+---
+
 # Quest Tracker 1.18.1
 
 **Copies you do not hold are charged.** A build fitting two of the same part priced both at zero

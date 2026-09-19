@@ -1589,7 +1589,6 @@ namespace QuestTreeServer
             promising.RemoveAt(worst);
         }
 
-        /// <summary>What the assembled gun costs, in units of the thresholds themselves.</summary>
         /// <summary>Takes off every part the quest does not actually need.
         ///
         /// The climb can only ever ADD. It starts from a greedily dressed gun and its moves swap one
@@ -2053,13 +2052,6 @@ namespace QuestTreeServer
             }
         }
 
-        /// <summary>The grid the assembled gun takes up. The receiver is 1x1 and every part extends it,
-        /// so each direction takes the LARGEST extension any one part asks for, except parts marked
-        /// ExtraSizeForceAdd which stack on top.
-        ///
-        /// Folding and collapsing are NOT applied, matching the verifier's reading for the same reason: the
-        /// item data does not say whether a hand-in measures a weapon extended or reduced, and a build that
-        /// fits extended fits whatever the player does with the stock.</summary>
         /// <summary>Parts of this build the weapon does not already wear.
         ///
         /// A swap and an addition each count one, because each is something the player has to go and get. A

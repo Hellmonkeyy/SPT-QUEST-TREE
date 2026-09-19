@@ -93,8 +93,6 @@ namespace QuestTree.UI
             /// ImageBounds describes, and so the one that has to land on it.</summary>
             public Rect Viewport;
 
-            public bool HasArtworkBounds => Viewport.width > 0f && Viewport.height > 0f;
-
             private Sprite _sprite;
             private bool _spriteFailed;
 

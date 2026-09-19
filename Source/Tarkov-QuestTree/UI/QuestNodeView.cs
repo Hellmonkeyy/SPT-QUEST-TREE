@@ -960,16 +960,10 @@ namespace QuestTree.UI
             return string.IsNullOrEmpty(mark) ? null : mark;
         }
 
-        /// <summary>Whether the bar is wanted, kept so the detail-level sweep can hide it without
-        /// losing the fact that this quest is in progress.</summary>
-        private bool _progressWanted;
-
         /// <summary>Shows, hides and fills the in-progress bar. Built the first time a box needs
         /// one; most boxes never do.</summary>
         private void ShowProgress(bool wanted, float fraction, ENodeStatus tint = ENodeStatus.Active)
         {
-            _progressWanted = wanted;
-
             if (!wanted)
             {
                 if (_progressTrack != null) _progressTrack.SetActive(false);

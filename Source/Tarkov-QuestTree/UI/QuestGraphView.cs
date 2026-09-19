@@ -233,6 +233,11 @@ namespace QuestTree.UI
         private QuestNode _hoverCandidate;
         private float _hoverSince;
 
+        /// <summary>Whether the hover card's profile fetch has already been reported. Static, so it
+        /// is once per session rather than once per view: the view is rebuilt whenever the tree is,
+        /// and a per-instance latch would say the same line again on every rebuild.</summary>
+        private static bool _hoverProfileWarned;
+
         /// <summary>The middle of everything laid out, so the overview's cards sit over the tree and
         /// pan with it rather than being pinned to a corner of a canvas half a million pixels
         /// tall.</summary>
@@ -1103,10 +1108,19 @@ namespace QuestTree.UI
             {
                 profile = QuestDataClient.GetProfile();
             }
-            catch
+            catch (Exception ex)
             {
-                // The card degrades to name, trader and objectives without counters rather than
-                // not appearing at all.
+                // The card still degrades to name, trader and objectives without counters rather
+                // than not appearing at all - but said once, because this ran on a hover and a
+                // silent catch here meant a profile fetch that is broken for every card in the
+                // tree left no trace anywhere.
+                if (!_hoverProfileWarned)
+                {
+                    _hoverProfileWarned = true;
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: the hover card could not read the profile, so its counters are " +
+                        $"absent ({ex.GetType().Name}: {ex.Message}). Said once per session.");
+                }
             }
 
             var reason = _views.TryGetValue(_hoverCandidate, out var view) ? view.SearchReason : null;

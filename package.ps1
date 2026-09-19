@@ -14,9 +14,18 @@
 # hand, and a dropped field reads as a default rather than as an error - the 1.12.2 ids fault and
 # several silently-missing fields all came from that gap. Its own header says what it does not catch.
 #
+# And it checks the PAPERWORK once the archive is real: the changelog's first line must name the
+# version being packaged, and the release notes must be more than a stub that mentions it. 1.15.0 was
+# built, versioned and zipped and then never published, and nothing here noticed, because every other
+# gate is about the code or the archive. It then records the built archive's sha256 as the last line
+# of that version's release notes, because re-running this script re-zips and a fresh zip is not
+# byte-identical to the one already published as the release asset.
+#
 # Proven able to fail before it shipped: a planted objective-gps.json in the staging folder, a
 # mismatched version constant, and (for the DTO check) a bogus property added to the client's
-# RewardDto, each made it exit non-zero.
+# RewardDto, each made it exit non-zero. The two paperwork gates were proven the same way: a
+# CHANGELOG.md whose first line named 1.18.0 while the constants said 1.18.1, and a release-notes
+# file cut to 120 bytes, each made it exit non-zero and name what it wanted.
 #
 # Usage:  .\package.ps1                 build, stage, zip, verify
 #         .\package.ps1 -RefreshZones   first copy zones\*.json from the install into the repo
@@ -161,6 +170,21 @@ foreach ($entry in $allow) {
     Copy-Item $entry.Source $target -Force
 }
 
+# THE STAGED NOTES MUST NOT CARRY A HASH LINE. The repo copy gains one at the end of every run (see
+# the bottom of this file), so from the SECOND run onwards the copy being zipped would assert a
+# sha256 that is the PREVIOUS archive's - a number that cannot match the archive holding it, which
+# is worse than no number at all. Stripped from the staged copy only; the repo copy is where the
+# line lives and where a published hash is checked from.
+$stagedNotes = Join-Path $staging ("RELEASE-NOTES-$version.md")
+#
+# Cast to [string] first: Get-Content -Raw hands back $null for an empty file, and -replace over
+# $null yields an empty ARRAY, which has no TrimEnd - so a zero-byte notes file would die here with
+# a method-not-found instead of reaching the stub gate below that has the sentence for it.
+$stagedBody = ([string](Get-Content -Raw $stagedNotes)) -replace "(?m)^Archive sha256: [0-9a-fA-F]+[ \t]*\r?\n?", ""
+[System.IO.File]::WriteAllText(
+    $stagedNotes, (($stagedBody.TrimEnd(([char[]]"`r`n `t")) -replace "`r`n", "`n") + "`n"),
+    (New-Object System.Text.UTF8Encoding($false)))
+
 # The staging folder is NOT wiped first, on purpose: anything already in it that is not on the
 # list - a file left by an earlier hand-assembly, or one planted to test this check - fails the
 # run rather than being silently discarded.
@@ -195,6 +219,58 @@ try {
 }
 
 VerifySet "the zip" $entries
+
+# ---------------------------------------------------------------- the paperwork, now the zip is real
+# 1.15.0 fell out of the process here. It was built, the four constants agreed, the zip verified - and
+# it was never published, because nothing in this script has an opinion about whether the release was
+# WRITTEN UP. The changelog's first line is the cheapest possible check that it was: it names the
+# newest release, so if it still names the previous one, the version being packaged has no entry.
+$changelog = Join-Path $repo "CHANGELOG.md"
+if (-not (Test-Path $changelog)) { Fail "missing CHANGELOG.md - the changelog is not optional" }
+
+$changelogHead = @(Get-Content $changelog -TotalCount 1)[0]
+$wantHead = "# Quest Tracker $version"
+if ($changelogHead -ne $wantHead) {
+    Fail "CHANGELOG.md's first line is '$changelogHead', not '$wantHead' - write this version's entry at the top before packaging it"
+}
+Write-Host "CHANGELOG.md's first line is '$wantHead'." -ForegroundColor Green
+
+# And the notes have to say something about THIS version. The Test-Path above only proves a file of
+# that name exists, which is exactly what a rushed release produces; both halves of this check the
+# ways it goes wrong. Size, because a one-line stub ships as readily as real notes. The version
+# string, because last release's notes copied to a new filename pass every size check and then sit
+# in the archive describing the wrong build.
+$notesBytes = (Get-Item $notes).Length
+if ($notesBytes -le 300) {
+    Fail "Releases\RELEASE-NOTES-$version.md is $notesBytes byte(s) - write the notes rather than shipping a stub"
+}
+if ((Get-Content -Raw $notes) -notmatch [regex]::Escape($version)) {
+    Fail "Releases\RELEASE-NOTES-$version.md never mentions $version - it looks like an earlier release's notes under a new name"
+}
+Write-Host "Release notes: $notesBytes bytes, and they name $version." -ForegroundColor Green
+
+# ---------------------------------------------------------------- the shipped archive's hash, on record
+# Compress-Archive writes each entry's timestamp, so two runs over identical inputs produce different
+# bytes. Whichever zip was uploaded as the release asset is therefore the only one whose hash means
+# anything, and a later run silently replaces the file on disk with one that hashes differently. This
+# writes the hash of the archive JUST BUILT as the last line of the notes that ship beside it, so the
+# published bytes are on record and a re-run's divergence is visible in git rather than invisible.
+#
+# Replaced, not appended, on a re-run: two "Archive sha256:" lines are two answers to one question.
+# Written with LF and no BOM, as every other file in the repo is.
+#
+# WHAT THIS LINE IS NOT: the copy of the notes INSIDE the archive cannot carry it, because the notes
+# are staged and zipped before the zip exists to hash - which is why the staged copy has any such
+# line STRIPPED above rather than being left with the previous run's. The line lives in the repo,
+# which is where a published hash is checked from, and it is one commit behind the archive by
+# construction.
+$hashLine = "Archive sha256: " + (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+$body = ((Get-Content -Raw $notes) -replace "(?m)^Archive sha256: [0-9a-fA-F]+[ \t]*\r?\n?", "")
+$body = $body.TrimEnd(([char[]]"`r`n `t"))
+[System.IO.File]::WriteAllText(
+    $notes, ($body -replace "`r`n", "`n") + "`n`n" + $hashLine + "`n",
+    (New-Object System.Text.UTF8Encoding($false)))
+Write-Host "Recorded in RELEASE-NOTES-$version.md: $hashLine" -ForegroundColor Green
 
 Write-Host ""
 Write-Host "$zip" -ForegroundColor Green

@@ -47,6 +47,13 @@ namespace QuestTree.UI
         private const string SectionKappa = "kappa";
         private const string SectionCollector = "collector";
 
+        /// <summary>The most rows any one section here will draw, with a "+N more" tail when there
+        /// were more. Every list on this tab is unbounded in principle - Collector's item list, the
+        /// prerequisite closure and the outstanding Kappa quests all grow with what mods add - and
+        /// each row is a GameObject with a TextMeshPro on it. The same number ItemWatchlistView
+        /// uses; MapView's quest list and DoNextView are capped for the same reason.</summary>
+        private const int MaxRows = 150;
+
         /// <summary>Builds the whole tab into <paramref name="parent"/> and returns its height.
         /// Reads the cached fetch result rather than requesting - see QuestDataClient.GetKappa for
         /// why this must not hit the server on every render.</summary>
@@ -221,8 +228,10 @@ namespace QuestTree.UI
                     "items below are what is sitting in your stash.</color>", 20f, 11);
             }
 
-            foreach (var item in items)
+            foreach (var item in items.Take(MaxRows))
                 ItemRow(parent, ref y, item.Template, FormatItem(item));
+
+            MoreRow(parent, ref y, items.Count);
         }
 
         /// <summary>A checklist line that opens the game's own inspect window on the item. The rows
@@ -294,9 +303,12 @@ namespace QuestTree.UI
                 "<color=#FFFFFF80>What Collector actually requires on this install right now, after " +
                 "mods. Shown because it differs from the canonical Kappa list above.</color>", 32f, 11);
 
-            foreach (var node in required
-                         .OrderBy(n => n.TraderName, StringComparer.OrdinalIgnoreCase)
-                         .ThenBy(n => n.Name, StringComparer.OrdinalIgnoreCase))
+            var ordered = required
+                .OrderBy(n => n.TraderName, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(n => n.Name, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            foreach (var node in ordered.Take(MaxRows))
             {
                 // Taken from the shared status palette rather than a hardcoded green: this is a
                 // quest's completion state, so it has to say "completed" in the same colour the
@@ -310,6 +322,8 @@ namespace QuestTree.UI
 
                 QuestRow(parent, ref y, node, $"{mark}  {GameStyle.Safe(node.Name)}  <color=#FFFFFF60>{GameStyle.Safe(node.TraderName)}</color>");
             }
+
+            MoreRow(parent, ref y, ordered.Count);
         }
 
         // ------------------------------------------------------------------ curated list
@@ -399,7 +413,7 @@ namespace QuestTree.UI
                     26f, 11);
             }
 
-            foreach (var node in outstanding)
+            foreach (var node in outstanding.Take(MaxRows))
             {
                 // The status glyph replaces a uniform empty checkbox, which said only "not done" -
                 // true of every row and so worth nothing. This distinguishes what is in progress
@@ -410,6 +424,8 @@ namespace QuestTree.UI
                     $"<color=#{hex}>{QuestNodeView.GlyphFor(node.Status)}</color>  {GameStyle.Safe(node.Name)}" +
                     $"  <color=#FFFFFF60>{GameStyle.Safe(node.TraderName)}</color>");
             }
+
+            MoreRow(parent, ref y, outstanding.Count);
         }
 
         /// <summary>The manual kappa-quests.json path, used only when that file has been filled in.</summary>
@@ -445,6 +461,17 @@ namespace QuestTree.UI
             var onSelected = _onQuestSelected;
             AuxLayout.AddClickableRow(parent, text, _x, ref y, _width, false,
                 () => onSelected?.Invoke(captured));
+        }
+
+        /// <summary>The tail under a capped list, drawn only when the list was longer than the cap.
+        /// Takes the full count rather than the remainder so the caller cannot get the subtraction
+        /// wrong, and reads the same as the tree map's tail.</summary>
+        private static void MoreRow(RectTransform parent, ref float y, int total)
+        {
+            if (total <= MaxRows) return;
+
+            AuxLayout.AddText(parent, ref y,
+                $"<color=#FFFFFF60>+{total - MaxRows} more</color>", AuxLayout.RowHeight, 11, indent: 6f);
         }
     }
 }

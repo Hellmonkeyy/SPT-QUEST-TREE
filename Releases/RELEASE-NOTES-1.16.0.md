@@ -1,6 +1,7 @@
 # Quest Tracker 1.16.0
 
-Install over 1.15.0 - replace both DLLs, keep your config.
+Install over 1.14.0 (1.15.0 was built but never published; everything in it is here) - replace both
+DLLs, keep your config.
 
 ## The toolbar fits at 1600 px
 
