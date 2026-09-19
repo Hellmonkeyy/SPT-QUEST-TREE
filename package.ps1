@@ -80,6 +80,23 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "Server DTOs and client mirrors agree." -ForegroundColor Green
 
+# ---------------------------------------------------------------- the shipped build history must be from the current solver
+# The cache's SolverVersion is what decides whether a boot trusts the shipped builds or re-opens
+# every one of them ("carried over from a different solver"). 1.13.2 shipped a seed still stamped 9
+# after the bump to 10, and every install paid the carry-over on every boot until it was noticed in
+# a log. The seed is a plain JSON file and the constants are plain source: compare them here.
+$cacheSource = Get-Content -Raw (Join-Path $server "WeaponBuildCache.cs")
+$seedText = Get-Content -Raw (Join-Path $server "weapon-builds.json")
+$solverConst = [regex]::Match($cacheSource, 'private const int CurrentSolver = ([0-9]+);').Groups[1].Value
+$schemaConst = [regex]::Match($cacheSource, 'private const int CurrentSchema = ([0-9]+);').Groups[1].Value
+$solverSeed = [regex]::Match($seedText, '"SolverVersion":\s*([0-9]+)').Groups[1].Value
+$schemaSeed = [regex]::Match($seedText, '"SchemaVersion":\s*([0-9]+)').Groups[1].Value
+if ($solverConst -eq "" -or $solverSeed -eq "") { Fail "could not read CurrentSolver from WeaponBuildCache.cs or SolverVersion from weapon-builds.json" }
+if ($solverConst -ne $solverSeed -or $schemaConst -ne $schemaSeed) {
+    Fail "the shipped weapon-builds.json is stamped solver $solverSeed / schema $schemaSeed but the code is $solverConst / $schemaConst - every install would re-open all its builds on every boot. Boot a server on the new code once and copy its cache over the seed."
+}
+Write-Host "Shipped build history is stamped solver $solverSeed / schema $schemaSeed, matching the code." -ForegroundColor Green
+
 $notes = Join-Path $repo "Releases\RELEASE-NOTES-$version.md"
 if (-not (Test-Path $notes)) { Fail "write Releases\RELEASE-NOTES-$version.md first - a release without notes is not a release" }
 
