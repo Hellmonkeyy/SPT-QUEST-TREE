@@ -29,4 +29,12 @@ Write-Host "Training on. The server searches for cheaper builds until 340,000 at
 Write-Host "Progress appears in the server log every 20 seconds." -ForegroundColor Yellow
 Write-Host ""
 
-& $exe
+# From the server's own folder: SPT.Server.exe reads ./sptLogger.json relative to the working
+# directory and dies with "Unable to find SPTLogger file" when launched from anywhere else - which
+# is exactly what running this script from the repo did, the first time anyone ran it that way.
+Push-Location $SptPath
+try {
+    & $exe
+} finally {
+    Pop-Location
+}
