@@ -37,7 +37,7 @@ namespace QuestTreeServer
     /// not a wrong answer. That is the whole reason this is safe to add.
     /// </summary>
     [Injectable(InjectionType.Singleton)]
-    public class WeaponBuildCache(ISptLogger<WeaponBuildCache> logger, TemplateTable templateTable)
+    public class WeaponBuildCache(ISptLogger<WeaponBuildCache> logger, TemplateTable templateTable, PartPrices partPrices)
     {
         /// <summary>Bumped by hand whenever the search changes what it would return. A cached answer is
         /// a claim that solving again would produce the same build, and a better search makes that claim
@@ -93,7 +93,8 @@ namespace QuestTreeServer
             /// has to know what the remembered build cost as well as how big it was.</summary>
             public int Changes { get; set; }
 
-            /// <summary>What this build costs under the handbook pricing it was last measured with - THE
+            /// <summary>What this build costs under the shared pricing it was last measured with - trader
+            /// cash where a trader sells the part, handbook times the flea multiple where none does - THE
             /// OBJECTIVE - and the PerPurchase it was measured at. Informational: the write rule compares
             /// against the incumbent's cost measured LIVE, never against this number, because a stored zero
             /// once read as a perfect score and blocked every improvement (ledger, defect 7).</summary>
@@ -511,7 +512,17 @@ namespace QuestTreeServer
         /// on its fast path again - it would take the carry-over branch on every single boot, permanently
         /// non-authoritative, re-measuring sixty builds forever to discover the same answer. The shipped
         /// seed is the most valuable thing in this file and it is worth more than reacting to a price
-        /// change the search will notice by itself on its next pass.</summary>
+        /// change the search will notice by itself on its next pass.
+        ///
+        /// WHAT IS IN HERE, though, is FleaOnlyMultiple, and the difference from the trader tables is worth
+        /// stating because it looks inconsistent. The multiple is not a fact about the install that the
+        /// search will rediscover; it is a TERM OF THE QUESTION, like PerPurchase. A seed solved at x3 and
+        /// loaded at x10 is a set of answers to a question nobody asked, and there was nothing anywhere to
+        /// notice: the solver version covers a change to the code and the item hash covers a change to the
+        /// parts, and an environment variable is neither. PerPurchase does not need to be here only because
+        /// every entry already records the value it was measured under; the multiple has no such field, so
+        /// the fingerprint is where it goes. Changing it invalidates on the carry-over branch, which keeps
+        /// the builds and re-measures them - the honest outcome, since they are still legal builds.</summary>
         private string Fingerprint()
         {
             if (_fingerprint != null) return _fingerprint;
@@ -573,6 +584,10 @@ namespace QuestTreeServer
 
                 text.Append('\n');
             }
+
+            // The objective's own terms, after the items and separated from them, so a change to the
+            // multiple moves the hash exactly the way a change to the parts does. See the doc above.
+            text.Append("flea-multiple:").Append(partPrices.FleaOnlyMultiple).Append('\n');
 
             return _fingerprint = Hash(text.ToString());
         }

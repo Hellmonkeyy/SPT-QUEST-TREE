@@ -128,13 +128,41 @@ namespace QuestTreeServer
         /// database, so a trader read that returned nothing shows up as everything landing in the handbook
         /// column rather than as prices that merely look a bit high.
         ///
-        /// THE CHECK THAT CAN FAIL is the last number. The shipped database prices 618 root offers in
-        /// dollars and 44 in euros, all of them Peacekeeper, Skier, Therapist, Mechanic and Ragman stock. If
+        /// THE CHECK THAT CAN FAIL is the last number, and it has already caught one thing. The shipped
+        /// database settles root offers in dollars (Peacekeeper and Skier), euros (Mechanic, Skier, Therapist,
+        /// Ragman) and GP coins (Ref, all 156 of his cash offers and not one in roubles). If
         /// PartPrices.RoublesPer stops converting them, every one of those offers is skipped in silence, the
         /// parts behind them quietly fall back to handbook times the multiple, and the only way anybody finds
         /// out is a Peacekeeper scope priced as though nobody sold it. Zero non-rouble offers on a stock
-        /// install means exactly that has happened.</summary>
+        /// install means exactly that has happened; a number near 700 rather than near 840 means one currency
+        /// of the four has dropped out, which is how the GP coin's absence was found.</summary>
         private void ReportPricing()
+        {
+            // CAUGHT, because an exception out of OnLoadAsync aborts SPT's boot - the hazard
+            // MapMarkerPayloadBuilder documents at its own catch. This is a DIAGNOSTIC: it walks every
+            // trader's assort and every template to report numbers, and a modded trader with a malformed
+            // assort is not a reason for the server not to start. Error and not Warning, because if this
+            // failed the trader read failed, which means every part is about to be priced at handbook times
+            // the multiple - the builds will still be produced and will still be legal, they will just be
+            // solved against the wrong question, and that is worth the loudest line available.
+            //
+            // The read is not lost with the report: TraderPrices() only publishes its result on success, so
+            // the first Shared() call a moment later retries the whole walk. If it fails again it fails the
+            // same way, silently, which is exactly why this line is here to fail loudly first.
+            try
+            {
+                ReportPricingOrThrow();
+            }
+            catch (Exception ex)
+            {
+                logger.Error(
+                    $"Quest Tracker: could not read the trader tables to price the shared builds ({ex.Message}) - " +
+                    "the builds will be solved against the handbook times the flea multiple instead of trader " +
+                    "prices. They remain legal builds; they are not the cheapest ones.");
+            }
+        }
+
+        private void ReportPricingOrThrow()
         {
             var coverage = partPrices.SharedCoverage;
 
@@ -143,7 +171,8 @@ namespace QuestTreeServer
                 $"{coverage.Traders} trader(s) at any loyalty (Fence excluded) - {coverage.FromTraders:N0} " +
                 $"template(s) priced that way, {coverage.FleaOnly:N0} sold by no trader and priced at handbook " +
                 $"x{partPrices.FleaOnlyMultiple}, {coverage.Unpriced:N0} with no price at all. " +
-                $"{coverage.NonRoubleOffers:N0} offer(s) were priced in dollars or euros and converted" +
+                $"{coverage.NonRoubleOffers:N0} offer(s) settled cheapest in dollars, euros or GP coins and " +
+                $"were converted" +
                 (coverage.NonRoubleOffers == 0
                     ? " - ZERO, WHICH MEANS THE CURRENCY CONVERSION IS BROKEN on any install with a Peacekeeper"
                     : "") +
@@ -1505,9 +1534,12 @@ namespace QuestTreeServer
 
                         }
 
-                        // Not obtainable from a trader. Whether the flea would supply it is counted as a
-                        // HYPOTHETICAL for every profile, access or not: the question being answered is
-                        // whether the advice has any acquisition route at all.
+                        // Not obtainable from any trader BUT FENCE, who is deliberately not read as a source -
+                        // his stock is randomly generated and rotates, so a part he happens to have today is
+                        // not a route anybody can be told to take. See the exclusion in PartAvailability.Build.
+                        // Whether the flea would supply it is counted as a HYPOTHETICAL for every profile,
+                        // access or not: the question being answered is whether the advice has any
+                        // acquisition route at all.
                         blocked = true;
                         missing.Add(template);
                         earlyBlockedHere = true;

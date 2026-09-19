@@ -260,8 +260,9 @@ namespace QuestTreeServer
         /// THE OBJECTIVE IS price + PerPurchase x purchases. Two quantities in one currency, so money and
         /// errands can be compared at all: at PerPurchase zero a build of thirty cheap parts beats one of two
         /// dear ones; at fifty thousand the count dominates and price barely matters. The shared baseline is
-        /// priced from the handbook - static, profile-blind, the same for everyone, so its history ships;
-        /// a profile's own pass is priced from its traders, its flea and its stash.
+        /// priced by PartPrices.Shared - the cheapest trader cash price in the database, or the handbook times
+        /// a multiple where no trader sells the part; static, profile-blind, the same for everyone, so its
+        /// history ships. A profile's own pass is priced from its traders, its flea and its stash.
         ///
         /// A part on the weapon's default preset costs nothing; so does one in Free, which is how a caller
         /// says "loose in the stash". A part with no price is charged PerPurchase alone and COUNTED as
@@ -594,7 +595,7 @@ namespace QuestTreeServer
                 }
 
                 // Nothing left to want: everything satisfied, nothing to buy, and at a size nothing could
-                // undercut. All but unreachable under handbook pricing, where every purchase costs
+                // undercut. All but unreachable under the shared pricing, where every purchase costs
                 // PerPurchase, and known to be: the restarts run and the budget is what stops them. A lower
                 // bound over cost briefly made this reachable; it went with the rest of the proof machinery.
                 if (bestWhole == 0 && bestShortfall <= 0d && bestCost == 0 && bestCount <= floor) break;

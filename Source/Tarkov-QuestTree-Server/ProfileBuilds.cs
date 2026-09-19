@@ -420,7 +420,12 @@ namespace QuestTreeServer
 
                     handbookUnpriced += unpriced;
 
-                    if (handbook == 0 && paid == 0)
+                    // ALL THREE at zero, not just the two that used to be here. A build whose only purchases
+                    // are rows the handbook prices at zero but a trader sells for money has handbook 0 and
+                    // paid 0, and used to be filed as "nothing to buy" while the objective column had a real
+                    // number in it - which silently dropped that number out of objectiveTotal and made the
+                    // three columns cover different builds, the one thing this line promises they do not.
+                    if (handbook == 0 && objective == 0 && paid == 0)
                     {
                         nothingToBuy++;
                     }
@@ -481,8 +486,8 @@ namespace QuestTreeServer
             logger.Info(
                 $"Quest Tracker: builds for {who} - {ok} of {requirements.Count} shared build(s) usable as " +
                 $"they are, {repaired} repaired within what this profile can get, {traderLevel} blocked by trader " +
-                $"level, {needsFlea} blocked until the flea market, {unsold} blocked because no trader sells what " +
-                $"they need, {unsolved} with no shared build to start from. {verifiedHere} repaired build(s) " +
+                $"level, {needsFlea} blocked until the flea market, {unsold} blocked because no trader but Fence " +
+                $"sells what they need, {unsolved} with no shared build to start from. {verifiedHere} repaired build(s) " +
                 $"passed the verifier and {rejectedHere} were rejected by it. {nodes:N0} node(s) in " +
                 $"{clock.Elapsed.TotalSeconds:0.0} s on one thread. Buying everything not owned or fitted would " +
                 $"cost {cash:N0} roubles plus {barters} barter(s).");
@@ -806,7 +811,7 @@ namespace QuestTreeServer
                 }
             }
 
-            dto.Why = "not sold - no trader at any level sells what this build needs";
+            dto.Why = "not sold - no trader but Fence sells what this build needs, at any level";
 
             return dto;
         }

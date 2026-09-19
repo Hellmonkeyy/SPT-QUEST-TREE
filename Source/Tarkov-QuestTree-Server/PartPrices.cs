@@ -27,12 +27,17 @@ namespace QuestTreeServer
     /// WHAT Shared IS, and why it is not the handbook any more. The cheapest CASH price any trader asks at
     /// any loyalty level, read once from the trader tables in the database; and when no trader sells the
     /// template for money at all, the handbook price times FleaOnlyMultiple, because that part has to come
-    /// off the flea market and the flea does not charge handbook. Measured on the shipped builds: trader
-    /// prices run a flat ~9% over handbook, which cannot reorder anything, while the 8% of part instances
-    /// that no trader sells accounted for 61% of the whole gap between what the handbook said and what the
-    /// player paid, at three to four and a half times handbook. The multiple is what makes the search
-    /// prefer a trader-sold part when one satisfies the same constraint - which is the decision the
-    /// handbook was getting wrong, not the arithmetic.
+    /// off the flea market and the flea does not charge handbook.
+    ///
+    /// BOTH HALVES CARRY INFORMATION, and an earlier version of this comment claimed the first one did not.
+    /// It said trader prices were "a flat ~9% over handbook, which cannot reorder anything". The median is
+    /// indeed 1.08, but a median is not a distribution: over the 519 trader-sold part instances in the
+    /// shipped seed the ratio runs from 0.70x to 4.67x, mean 1.12, p90 1.25, with 6.9% of instances above
+    /// 1.3x and 7.1% BELOW handbook - a trader undercutting the game's own valuation. Any of those can break
+    /// a tie between two parts that satisfy the same constraint, which is the only thing price is ever asked
+    /// to do here. The flea-only half is the bigger effect, not the only one: 8% of instances, 61% of the
+    /// whole gap between what the handbook said and what the player paid, at three to four and a half times
+    /// handbook. The multiple is what makes the search prefer a trader-sold part when one will do.
     ///
     /// STILL STATIC, WHICH IS WHAT KEEPS THE ANSWER SHIPPABLE. Read from TradersTable - the database's own
     /// assort, every offer at every loyalty level, not what one profile has unlocked - so it is the same
@@ -94,10 +99,16 @@ namespace QuestTreeServer
         /// handbook's error lives. The exact figure matters far less than its existence: any multiple above
         /// one makes the search break a tie towards the part a trader stocks, and that is the whole job.
         ///
-        /// QUESTTREE_FLEA_MULTIPLE moves it. Below one is REFUSED rather than clamped - a multiple under
-        /// one would make an unbuyable part look cheaper than a buyable one, which is the exact inversion
-        /// this exists to prevent - and like PerPurchase it changes which build is best, so a history
-        /// solved under a different value is a history solved under a different question.</summary>
+        /// QUESTTREE_FLEA_MULTIPLE moves it, WITHIN ONE AND A HUNDRED. Both ends are refused rather than
+        /// clamped. Below one would make an unbuyable part look cheaper than a buyable one, the exact
+        /// inversion this exists to prevent. Above a hundred is not a price at all but a ban: the handbook's
+        /// dearest part is over four million roubles, so even 100 puts a flea-only part past any plausible
+        /// PerPurchase and turns "prefer a trader" into "never consider the flea", which is a different
+        /// decision that should be asked for in different words. It is also where the arithmetic starts to
+        /// matter - handbook x a large multiple x sixty parts is where a long would eventually stop holding.
+        ///
+        /// Like PerPurchase it changes which build is best, so a history solved under a different value is a
+        /// history solved under a different question - which is why it is in the cache fingerprint.</summary>
         public long FleaOnlyMultiple
         {
             get
@@ -108,11 +119,11 @@ namespace QuestTreeServer
 
                 if (string.IsNullOrWhiteSpace(asked)) return _fleaOnlyMultiple = DefaultFleaOnlyMultiple;
 
-                if (!long.TryParse(asked, out var wanted) || wanted < 1)
+                if (!long.TryParse(asked, out var wanted) || wanted < 1 || wanted > MaxFleaOnlyMultiple)
                 {
                     logger.Warning(
-                        $"Quest Tracker: QUESTTREE_FLEA_MULTIPLE is '{asked}', which is not a multiple of one or " +
-                        $"more - using the default {DefaultFleaOnlyMultiple}.");
+                        $"Quest Tracker: QUESTTREE_FLEA_MULTIPLE is '{asked}', which is not a multiple between 1 " +
+                        $"and {MaxFleaOnlyMultiple} - using the default {DefaultFleaOnlyMultiple}.");
 
                     return _fleaOnlyMultiple = DefaultFleaOnlyMultiple;
                 }
@@ -122,6 +133,8 @@ namespace QuestTreeServer
         }
 
         public const long DefaultFleaOnlyMultiple = 3;
+
+        public const long MaxFleaOnlyMultiple = 100;
 
         private long _fleaOnlyMultiple = -1;
 
@@ -159,10 +172,15 @@ namespace QuestTreeServer
         /// exactly one, so the three add up to the database and a broken trader read shows as the partition
         /// collapsing onto FleaOnly rather than as a plausible-looking price.
         ///
-        /// NonRoubleOffers is the check that can actually fail. The shipped database prices 618 offers in
-        /// dollars and 44 in euros; if RoublesPer stops converting them they are skipped in silence, every
-        /// Peacekeeper part quietly becomes handbook times the multiple, and nothing else in the log moves.
-        /// Zero here means exactly that.</summary>
+        /// NonRoubleOffers is the check that can actually fail. The shipped database settles 618 offers in
+        /// dollars, 44 in euros and 156 in GP coins; if RoublesPer stops converting them they are skipped in
+        /// silence, every Peacekeeper and every Ref part quietly becomes handbook times the multiple, and
+        /// nothing else in the log moves. Zero here means exactly that.
+        ///
+        /// COUNTED PER OFFER, on the alternative that actually WON. An offer Prapor will take either 50,000
+        /// roubles or 400 dollars for is a rouble price, because that is the cheaper of the two and the
+        /// cheaper of the two is what gets used; counting both alternatives made the number bigger than the
+        /// thing it was supposed to be counting and the name a lie.</summary>
         public readonly record struct Coverage(
             int Traders,
             int FromTraders,
@@ -177,7 +195,6 @@ namespace QuestTreeServer
             {
                 // Forces the trader read, which is also what fills the offer counters beside it.
                 var traders = TraderPrices();
-                var handbook = Prices();
 
                 var fromTraders = 0;
                 var fleaOnly = 0;
@@ -187,8 +204,14 @@ namespace QuestTreeServer
                 if (items != null)
                     foreach (var id in items.Keys)
                     {
+                        // CLASSIFIED ON Shared, not on whether the handbook merely HAS a row, because those
+                        // are different questions for 168 templates: the handbook prices them at zero, and a
+                        // zero is not a price - WeaponSolver.Priced counts `known > 0` as priced and
+                        // everything else as an unpriced purchase. Asking the dictionary for membership
+                        // instead put all 168 in the flea-only column and told the operator they were priced
+                        // at handbook x3, which is zero.
                         if (traders.ContainsKey(id)) fromTraders++;
-                        else if (handbook.ContainsKey(id)) fleaOnly++;
+                        else if (Shared(id) is > 0) fleaOnly++;
                         else unpriced++;
                     }
 
@@ -243,7 +266,28 @@ namespace QuestTreeServer
             public int UnknownCurrency { get; init; }
         }
 
-        private TraderRead? _traderRead;
+        /// <summary>Volatile because the double-checked read below publishes it without taking the lock.
+        /// Without it the JIT is free to hoist the field read, and on a weak memory model a thread can see
+        /// the reference before the TraderRead's own fields - which is the bug the single-object publish was
+        /// supposed to have closed, still open one level up.</summary>
+        private volatile TraderRead? _traderRead;
+
+        /// <summary>Whether an assort row is an OFFER rather than something bolted to one.
+        ///
+        /// A scope fitted to a rifle on Prapor's list is not separately purchasable, and counting its price
+        /// as that template's price is how a build gets costed at money nobody could spend. 420 of Prapor's
+        /// 951 assort rows are offers.
+        ///
+        /// ParentId, which is the field SPT's own trader-assort filter tests - TraderAssortExtensions and
+        /// RagfairOfferGenerator both read ParentId, while every generator that builds a root sets ParentId
+        /// and SlotId together. Measured on the shipped database before settling on one: across all 5,790
+        /// assort rows there is not a single row where the two fields disagree about being a root, so this is
+        /// the same answer the shared read got from SlotId, from the field SPT would ask.
+        ///
+        /// ONE implementation because it was written twice, once per field, in the two places that ask -
+        /// which is not a bug today and is exactly how one becomes one.</summary>
+        public static bool IsRootOffer(Item? offer) =>
+            offer != null && string.Equals(offer.ParentId, "hideout", StringComparison.Ordinal);
 
         /// <summary>The cheapest cash price each template is sold at by any trader, at any loyalty level.
         ///
@@ -252,9 +296,7 @@ namespace QuestTreeServer
         /// the same for every player and so shippable - and it is also why this cannot be compared against
         /// what PartAvailability reports, which is one profile's unlocked subset at one moment.
         ///
-        /// ROOT OFFERS ONLY. A scope fitted to a rifle on Prapor's list is not separately purchasable, and
-        /// counting its price as that template's price is how a build gets costed at money nobody could
-        /// spend. The root of an offer is slotId "hideout"; 420 of Prapor's 951 assort rows are roots.
+        /// ROOT OFFERS ONLY - see IsRootOffer.
         ///
         /// FENCE IS EXCLUDED, for the reason PartAvailability excludes him: his stock is random, rotates,
         /// and carries his mark-up, so it is not a price the next player will see. His database assort is an
@@ -285,10 +327,9 @@ namespace QuestTreeServer
 
                     foreach (var offer in items)
                     {
-                        if (offer == null) continue;
-                        if (!string.Equals(offer.SlotId, "hideout", StringComparison.Ordinal)) continue;
+                        if (!IsRootOffer(offer)) continue;
 
-                        if (CashPrice(assort!, offer.Id, tally) is not { } cash) continue;
+                        if (CashPrice(assort!, offer!.Id, tally) is not { } cash) continue;
 
                         if (!cheapest.TryGetValue(offer.Template, out var best) || cash < best)
                             cheapest[offer.Template] = cash;
@@ -311,6 +352,10 @@ namespace QuestTreeServer
         /// HandbookHelper.InRUB converts a trader's dollar or euro price. Roubles are 1; a currency
         /// the handbook does not price (a modded one) is null, and a price in it is not a price.
         ///
+        /// The handbook is what makes this work for the GP coin without a special case: it prices one at
+        /// 7,500, so Ref's "12 GP" becomes 90,000 roubles by the same arithmetic that turns Peacekeeper's
+        /// dollars into roubles.
+        ///
         /// HERE, AND NOWHERE ELSE. Until 1.16.0 a Peacekeeper price of 335 dollars was carried as 335
         /// "roubles", on the panel's cost labels, in the Cash totals, and in the bill measurement whose
         /// widest disagreement - handbook 45,787 against paid 335 - is what gave it away. It now has one
@@ -331,6 +376,13 @@ namespace QuestTreeServer
         /// alternative's requirements. A single requirement naming a currency is a cash price; anything else
         /// is a barter, and has no rouble amount to report.
         ///
+        /// CURRENCY MEANS Currencies.Charged, the four SPT's own Money.GetMoneyTpls() lists, and the GP coin
+        /// is the one that was missing. Reading the three-currency display set here made Ref - all 156 of
+        /// whose cash offers are priced in GP and none in roubles - look like a trader who sells nothing for
+        /// money: every Ref-only part was a barter to PartAvailability whatever the player's loyalty, and
+        /// unsold to the shared objective, which tripled it through the flea multiple. The Lega Medal is not
+        /// in that set and Ref's other 11 offers want it, so those stay the barters they are.
+        ///
         /// One implementation for both readers: the shared boot read here and PartAvailability's per-profile
         /// read, which delegates to this. The rule about what counts as a cash price is the sort of thing
         /// that drifts when it is written twice.</summary>
@@ -350,6 +402,8 @@ namespace QuestTreeServer
                 return null;
 
             long? cheapest = null;
+            var cheapestIsRoubles = false;
+            var sawUnknownCurrency = false;
 
             foreach (var scheme in alternatives ?? new List<List<BarterScheme>>())
             {
@@ -361,27 +415,35 @@ namespace QuestTreeServer
 
                 var currency = requirement.Template.ToString();
 
-                if (!Currencies.All.Contains(currency)) continue;
+                if (!Currencies.Charged.Contains(currency)) continue;
 
                 var rate = RoublesPer(requirement.Template);
 
                 if (rate == null)
                 {
-                    if (tally != null) tally.UnknownCurrency++;
+                    sawUnknownCurrency = true;
                     continue;
                 }
 
                 var price = (long)Math.Round((requirement.Count ?? 0d) * rate.Value);
 
                 if (price <= 0) continue;
+                if (cheapest != null && price >= cheapest) continue;
+
+                cheapest = price;
 
                 // The CURRENCY, not the rate: a modded currency the handbook happens to price at one rouble
                 // would read as roubles otherwise, and this counter's whole job is to notice a conversion
                 // that stopped happening.
-                if (tally != null && !currency.Equals(Currencies.Roubles, StringComparison.OrdinalIgnoreCase))
-                    tally.NonRouble++;
+                cheapestIsRoubles = currency.Equals(Currencies.Roubles, StringComparison.OrdinalIgnoreCase);
+            }
 
-                if (cheapest == null || price < cheapest) cheapest = price;
+            // ONE BUMP PER OFFER, on the alternative that won, so the counter counts what its name says.
+            // Both are only reported by the boot line, so both are only counted for the shared read.
+            if (tally != null)
+            {
+                if (cheapest != null && !cheapestIsRoubles) tally.NonRouble++;
+                if (sawUnknownCurrency) tally.UnknownCurrency++;
             }
 
             return cheapest;

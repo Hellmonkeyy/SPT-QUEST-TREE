@@ -487,10 +487,10 @@ namespace QuestTreeServer
             {
                 // Only the OFFERS, not what hangs off them: a scope fitted to a rifle on Prapor's list is not
                 // separately purchasable, and counting it as available is exactly how a build gets called
-                // buildable when it is not.
-                if (offer == null || offer.ParentId != "hideout") continue;
+                // buildable when it is not. PartPrices owns the rule, because the shared read asks it too.
+                if (!PartPrices.IsRootOffer(offer)) continue;
 
-                var price = CashPrice(assort!, offer.Id);
+                var price = CashPrice(assort!, offer!.Id);
 
                 if (price is { } cash)
                 {
@@ -511,10 +511,10 @@ namespace QuestTreeServer
 
             foreach (var offer in everything.Items)
             {
-                if (offer == null || offer.ParentId != "hideout") continue;
+                if (!PartPrices.IsRootOffer(offer)) continue;
 
                 var level = everything.LoyalLevelItems != null
-                            && everything.LoyalLevelItems.TryGetValue(offer.Id, out var required)
+                            && everything.LoyalLevelItems.TryGetValue(offer!.Id, out var required)
                     ? required
                     : 1;
 
@@ -553,7 +553,13 @@ namespace QuestTreeServer
             public DateTime At { get; init; }
         }
 
-        private FleaRead? _fleaRead;
+        /// <summary>Volatile for the same reason TraderRead is: it is read without the lock, and the
+        /// refresher below replaces it from a background thread while request threads are reading it.</summary>
+        private volatile FleaRead? _fleaRead;
+
+        /// <summary>Whether a background refresh is already running, so a minute's worth of requests start
+        /// one walk between them rather than one each.</summary>
+        private int _fleaRefreshing;
 
         /// <summary>How long a flea read is trusted.
         ///
@@ -563,15 +569,23 @@ namespace QuestTreeServer
         /// figure, with nothing anywhere saying the number was stale.
         ///
         /// A minute rather than the five seconds For uses: the walk is 6,500 templates with two service
-        /// calls each, which is far too much to pay every five seconds, and a minute is already sixty times
-        /// finer than the hourly rewrite it exists to follow. Nothing here is a correctness question - a
-        /// flea price is an estimate and is labelled one - so the only thing being bought is that the
-        /// estimate moves when the thing it estimates does.</summary>
+        /// calls each - about 98 ms measured - and a minute is already sixty times finer than the hourly
+        /// rewrite it exists to follow. Nothing here is a correctness question - a flea price is an estimate
+        /// and is labelled one - so the only thing being bought is that the estimate moves when the thing it
+        /// estimates does.</summary>
         private static readonly TimeSpan FleaPricesFor = TimeSpan.FromMinutes(1);
 
         /// <summary>Every template the game lets a player list on the flea, with the server's price for it.
         /// A property of the item data and the price table, not of any profile - so it is shared across
         /// profiles and rebuilt on a timer rather than per call.
+        ///
+        /// A STALE READ IS SERVED WHILE THE NEW ONE IS BUILT, and this is the only interesting thing here.
+        /// Expiring the read on a timer made every sixtieth request pay the whole 98 ms walk on the thread
+        /// that asked, which is precisely the rule WeaponGraph states and this class was already quoting: a
+        /// request handler must not pay for work like this. So an expired read is RETURNED, and the refresh
+        /// happens on a pool thread; the request gets an estimate up to a minute out of date instead of a
+        /// stall, which for a number the panel already labels an estimate is not a trade worth thinking
+        /// about. The only caller that blocks is the first one, because there is nothing to serve it.
         ///
         /// Listable is the SERVER'S rule - RagfairServerHelper.IsItemValidRagfairItem, which applies the
         /// ragfair blacklist as well as CanSellOnRagfair - rather than the flag alone, so a part the config
@@ -582,78 +596,123 @@ namespace QuestTreeServer
         {
             var known = _fleaRead;
 
-            if (known != null && DateTime.UtcNow - known.At < FleaPricesFor) return known;
+            if (known != null)
+            {
+                if (DateTime.UtcNow - known.At >= FleaPricesFor) RefreshFleaPrices();
+
+                // Stale or fresh, the caller gets it now. Stale by up to a minute beats blocking, and the
+                // refresh just started will be there for whoever asks next.
+                return known;
+            }
 
             lock (_fleaLock)
             {
+                // Nothing to serve, so this one caller waits. Re-checked under the lock: a concurrent first
+                // caller may have finished the walk while this one queued.
                 known = _fleaRead;
 
-                if (known != null && DateTime.UtcNow - known.At < FleaPricesFor) return known;
+                if (known != null) return known;
 
-                var first = known == null;
-                var prices = new Dictionary<MongoId, long>();
-                var banned = new HashSet<MongoId>();
-                var unpriced = 0;
+                return ReadFleaPrices(true);
+            }
+        }
 
-                foreach (var pair in templateTable.Items ?? new Dictionary<MongoId, TemplateItem>())
+        /// <summary>Kicks off one background walk, if one is not already running.
+        ///
+        /// Interlocked rather than the lock, because the point is NOT to wait: a request thread that finds
+        /// the flag already set has nothing to do and returns immediately. The flag is cleared in a finally,
+        /// so a walk that throws does not wedge the refresh off for the life of the process - the next
+        /// expired read starts another.</summary>
+        private void RefreshFleaPrices()
+        {
+            if (System.Threading.Interlocked.CompareExchange(ref _fleaRefreshing, 1, 0) != 0) return;
+
+            System.Threading.Tasks.Task.Run(() =>
+            {
+                try
                 {
-                    var (id, item) = pair;
+                    lock (_fleaLock) ReadFleaPrices(false);
+                }
+                catch (Exception ex)
+                {
+                    // The stale read stays in place, which is the right answer: an estimate a few minutes
+                    // old is still an estimate, and there is nothing better to put there.
+                    logger.Warning(
+                        $"Quest Tracker: could not refresh the flea prices ({ex.Message}) - the previous read " +
+                        "is still being served.");
+                }
+                finally
+                {
+                    System.Threading.Interlocked.Exchange(ref _fleaRefreshing, 0);
+                }
+            });
+        }
 
-                    if (item?.Properties == null) continue;
+        /// <summary>The walk itself. Called with _fleaLock held, by the first caller or by the refresher.</summary>
+        private FleaRead ReadFleaPrices(bool first)
+        {
+            var prices = new Dictionary<MongoId, long>();
+            var banned = new HashSet<MongoId>();
+            var unpriced = 0;
 
-                    // Only things a player could fit to a gun are worth classifying; the rule is asked of
-                    // everything anyway because it is cheap and the counts are reported.
-                    bool valid;
+            foreach (var pair in templateTable.Items ?? new Dictionary<MongoId, TemplateItem>())
+            {
+                var (id, item) = pair;
 
-                    try
-                    {
-                        // The helper takes the (found, item) pair ItemHelper.GetItem returns, not the table's own.
-                        valid = item.Properties.CanSellOnRagfair == true
-                                && ragfairRules.IsItemValidRagfairItem(new KeyValuePair<bool, TemplateItem?>(true, item));
-                    }
-                    catch (Exception)
-                    {
-                        valid = false;
-                    }
+                if (item?.Properties == null) continue;
 
-                    if (!valid)
-                    {
-                        banned.Add(id);
-                        continue;
-                    }
+                // Only things a player could fit to a gun are worth classifying; the rule is asked of
+                // everything anyway because it is cheap and the counts are reported.
+                bool valid;
 
-                    double price;
-
-                    try
-                    {
-                        price = fleaPrices.GetFleaPriceForItem(id);
-                    }
-                    catch (Exception)
-                    {
-                        unpriced++;
-                        continue;
-                    }
-
-                    if (price <= 1d || double.IsNaN(price) || double.IsInfinity(price))
-                    {
-                        unpriced++;
-                        continue;
-                    }
-
-                    prices[id] = (long)Math.Round(price);
+                try
+                {
+                    // The helper takes the (found, item) pair ItemHelper.GetItem returns, not the table's own.
+                    valid = item.Properties.CanSellOnRagfair == true
+                            && ragfairRules.IsItemValidRagfairItem(new KeyValuePair<bool, TemplateItem?>(true, item));
+                }
+                catch (Exception)
+                {
+                    valid = false;
                 }
 
-                var line =
-                    $"Quest Tracker: {prices.Count:N0} template(s) are flea-listable with a price, {unpriced:N0} " +
-                    $"listable but unpriced (not counted), {banned.Count:N0} refused by the game's flea rules.";
+                if (!valid)
+                {
+                    banned.Add(id);
+                    continue;
+                }
 
-                // Info once, Debug on every refresh after that. The counts are worth seeing at boot and
-                // would be a line a minute for the rest of the server's life otherwise.
-                if (first) logger.Info(line);
-                else logger.Debug(line + " (re-read; the server's flea prices move on their own clock)");
+                double price;
 
-                return _fleaRead = new FleaRead { Prices = prices, Banned = banned, At = DateTime.UtcNow };
+                try
+                {
+                    price = fleaPrices.GetFleaPriceForItem(id);
+                }
+                catch (Exception)
+                {
+                    unpriced++;
+                    continue;
+                }
+
+                if (price <= 1d || double.IsNaN(price) || double.IsInfinity(price))
+                {
+                    unpriced++;
+                    continue;
+                }
+
+                prices[id] = (long)Math.Round(price);
             }
+
+            var line =
+                $"Quest Tracker: {prices.Count:N0} template(s) are flea-listable with a price, {unpriced:N0} " +
+                $"listable but unpriced (not counted), {banned.Count:N0} refused by the game's flea rules.";
+
+            // Info once, Debug on every refresh after that. The counts are worth seeing at boot and
+            // would be a line a minute for the rest of the server's life otherwise.
+            if (first) logger.Info(line);
+            else logger.Debug(line + " (re-read; the server's flea prices move on their own clock)");
+
+            return _fleaRead = new FleaRead { Prices = prices, Banned = banned, At = DateTime.UtcNow };
         }
 
         /// <summary>The ids in the vanilla items file. NOT the item database - the live one is merged from
