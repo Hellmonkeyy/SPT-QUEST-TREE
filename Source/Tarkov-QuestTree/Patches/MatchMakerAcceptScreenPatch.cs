@@ -123,8 +123,36 @@ namespace QuestTree.Patches
             if (screen.isActiveAndEnabled)
             {
                 screen.StartCoroutine(PlaceNextFrame(root, screen, container));
+
+                // Refetched on every show, never served from the session cache. The player packs
+                // in the inventory screen and comes back here; a label painted from a raid check
+                // fetched before the packing said "1 TO PACK" over a sidebar that, refreshed in the
+                // tracker, said everything was on them. The check is cheap - single-digit
+                // milliseconds server-side, and the server bypasses its own memo for exactly this
+                // screen - so asking again is the honest default.
+                QuestDataClient.InvalidateRaidCheck();
+
+                _lastScreen = screen;
+                _lastContainer = container;
                 screen.StartCoroutine(ApplyVerdict(screen, container, ++_generation));
             }
+        }
+
+        private static MatchMakerAcceptScreen _lastScreen;
+        private static RectTransform _lastContainer;
+
+        /// <summary>Paints the button again from a fresh raid check, if the matchmaker screen is
+        /// still up. The tracker opens over that screen, and its map sidebar's Refresh link
+        /// refetches the raid check; without this the sidebar and the button behind it could say
+        /// different things about the same stash.</summary>
+        public static void Repaint()
+        {
+            var screen = _lastScreen;
+            var container = _lastContainer;
+
+            if (screen == null || container == null || !screen.isActiveAndEnabled) return;
+
+            screen.StartCoroutine(ApplyVerdict(screen, container, ++_generation));
         }
 
         /// <summary>Bumped on every Show. The fetch runs off the main thread and the screen is

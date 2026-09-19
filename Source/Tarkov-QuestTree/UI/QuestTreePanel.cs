@@ -1541,6 +1541,10 @@ namespace QuestTree.UI
                     // four-thousand-item inventory on every map click.
                     QuestDataClient.InvalidateRaidCheck();
                     RenderSelectedTab();
+
+                    // The pre-raid button behind this panel reads the same check; repaint it so
+                    // the two never disagree about one stash.
+                    QuestTree.Patches.MatchMakerAcceptScreenPatch.Repaint();
                 }, size)
                 : _selectedTraderId == ItemsTabId
                 ? ItemWatchlistView.Build(_auxContent, _graph, size, FocusNode, () =>
