@@ -1,3 +1,28 @@
+# Quest Tracker 1.18.0
+
+**The weapon builder now minimises what you pay, not the handbook.** Shared builds are priced at
+the cheapest trader cash price at any loyalty, in roubles, with parts no trader sells for cash
+priced at three times handbook so the search prefers a trader-sold part when one will do. Measured
+on the reference profile: the old objective sat 22% under the real bill; the new one is within 0.1%
+of it, and the builds priced more than 25% off the bill fell from 20 to 10. An hour's training
+under the new prices found 9 cheaper builds across 6 quests and moved 16 part instances from
+unpriced or flea-only onto trader stock. The shipped build history is re-seeded from that run.
+
+**GP coins are money.** Ref prices everything in them, and the mod read all of Ref as barter, so
+a Ref-only part could never be "buyable". It is now, at the game's own exchange rate.
+
+## Also
+
+- Fence is no longer read as a trader source: its stock is random and rotates, so a part it
+  happened to hold read as buyable at a price that vanished on restock.
+- Flea estimates on the panel refresh every minute instead of being frozen at whatever the first
+  request saw (LiveFleaPrices rewrites them hourly).
+- `train.ps1` runs the server from its own folder (it died on the logger config otherwise), and
+  `train-all-threads.cmd` trains on every thread in a visible console.
+- The bill line in the server log gains an "objective" column beside handbook and paid.
+
+---
+
 # Quest Tracker 1.17.0
 
 **The quest list loads off the main thread.** Opening the tracker froze the game for the quarter
