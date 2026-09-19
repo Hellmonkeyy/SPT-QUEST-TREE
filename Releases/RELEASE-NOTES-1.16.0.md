@@ -10,6 +10,12 @@ colours, with the full names on hover, and the view buttons take their minimum w
 nothing changes. At 1600 the notice gets its room back. At 1366 nothing overlaps any more, but the
 notice is still short.
 
+## Prices in dollars and euros are roubles now
+
+A part sold by Peacekeeper or Ref showed its price in dollars or euros with a rouble label, on the
+build panel's cost lines and in the totals, since the builder first shipped. They convert through the
+game's own exchange rate now. The measurement below is what exposed it.
+
 ## Under the hood
 
 - The server logs, per profile, how the weapon builder's objective (handbook prices) compares with

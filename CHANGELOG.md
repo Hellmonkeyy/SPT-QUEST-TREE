@@ -6,6 +6,10 @@ the six glyphs in their colours (full names on hover), and the view buttons take
 width. At 1920 nothing changes; at 1600 the notice gets its room back; at 1366 nothing overlaps but
 the notice is still short.
 
+**Dollar and euro trader prices are converted to roubles.** A Peacekeeper or Ref price was carried in
+its own currency and labelled roubles, on the panel's cost labels and in the Cash totals, since the
+builder shipped. The new measurement below is what exposed it.
+
 **The weapon builder's objective is measured against the bill.** The optimiser minimises handbook
 prices; the player pays trader or flea prices. The server now logs, per profile, the two totals over
 the shared builds with something to buy, how many builds the two price the same parts more than 25%
