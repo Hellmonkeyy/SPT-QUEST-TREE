@@ -238,6 +238,10 @@ namespace QuestTree.UI
             _keptFrom = null;
             _drawnMarkers = 0;
 
+            // The labels go with the viewport they belong to. Kept any longer, the zoom callback of
+            // the NEXT map would be switching destroyed objects on and off.
+            _labelCull = null;
+
             // Unity's null: true as well for a viewport already destroyed with the panel around it,
             // which is how a torn-down menu leaves this static.
             if (_keptViewport == null)
@@ -1549,6 +1553,11 @@ namespace QuestTree.UI
             {
                 _savedScale = scale;
                 _savedPan = pan;
+
+                // Zooming changes which of our own names fit and whether the zone names are worth
+                // drawing at all, and neither can be settled at build time - see LabelCull, which
+                // ignores a pan and a zoom too small to matter.
+                _labelCull?.OnViewChanged(scale);
             };
 
             _savedScale = space.localScale.x;
@@ -1710,17 +1719,7 @@ namespace QuestTree.UI
             // by it - see LabelModeFor.
             var mode = LabelModeFor(entry);
 
-            // Map units per screen pixel, for the collision test below. A label's rect is in screen
-            // pixels - PanZoomHandler.KeepConstantScale counter-scales it against the container - so
-            // its footprint on the map is its size divided by the container's scale. Taken once,
-            // at the zoom this build opens at: a later zoom moves the names apart or together and
-            // this is not recomputed, which is the accepted cost of deciding at build time.
-            var scale = space.localScale.x;
-            if (scale <= 0f) scale = 1f;
-
-            // What has already been drawn, in map units. Only our own names are tested: a
-            // DynamicMaps config's names are hand-placed to sit where they fit.
-            var taken = new List<Rect>();
+            var cull = new LabelCull();
 
             // Extracts before zones, so a zone name is the one that yields when two collide. Stable
             // within a kind, so a DynamicMaps map - every name of which is a Place - keeps the order
@@ -1728,7 +1727,8 @@ namespace QuestTree.UI
             foreach (var label in entry.Labels.OrderBy(
                 l => l.Kind == DynamicMapsLibrary.MapLabelKind.Exfil ? 0 : 1))
             {
-                // Ours, collected in bulk, and drawn small on a plate; a hand-placed name is not.
+                // Ours, collected in bulk, and drawn as a plated tag with a dot on the spot; a
+                // hand-placed name is a word lying on the map, as it always was.
                 var compact = label.Kind != DynamicMapsLibrary.MapLabelKind.Place;
 
                 if (compact)
@@ -1737,67 +1737,25 @@ namespace QuestTree.UI
 
                     if (mode == ModSettings.LabelMode.ExtractsOnly &&
                         label.Kind != DynamicMapsLibrary.MapLabelKind.Exfil) continue;
+
+                    BuildCompactLabel(space, panZoom, label, cull);
+                    continue;
                 }
 
                 // Which floor the place is on, by the same height-band test the markers use. A name
                 // whose height matches no band is treated as being on the floor you are looking at,
                 // rather than dropped - the bands do not tile the world, and a real place name is
                 // worth more than a tidy rule.
-                //
-                // A captured map's names skip the test outright (FloorAgnostic): the capture records
-                // a ground position and no height, and asking the bands about height 0 would file
-                // every exfil on whichever storey happens to contain y=0 and fade it on the rest.
-                var owner = label.FloorAgnostic
-                    ? null
-                    : entry.LayerFor(label.Position.x, label.Position.y, label.Height);
+                var owner = entry.LayerFor(label.Position.x, label.Position.y, label.Height);
                 var onThisFloor = owner == null || owner == layer;
 
-                // The box the name needs, in screen pixels. Estimated from the character count
-                // rather than measured: TMP only knows a string's width after a layout pass, which
-                // would mean building every label, forcing a rebuild, and then destroying the ones
-                // that did not fit. An estimate that is a few pixels generous costs a name at the
-                // margin; measuring costs the frame.
-                var size = compact
-                    ? new Vector2(label.Text.Length * CompactLabelFontSize * 0.62f + 12f,
-                        CompactLabelFontSize + 6f)
-                    : new Vector2(160f, 18f);
-
-                if (compact)
-                {
-                    // Does it land on a name already drawn? In map units, with a pixel of gutter so
-                    // two plates cannot touch. Skipped rather than nudged: moving a name off the
-                    // place it names is worse than not drawing it, because the reader cannot tell.
-                    var footprint = new Rect(
-                        label.Position.x - (size.x * 0.5f + 1f) / scale,
-                        label.Position.y - (size.y * 0.5f + 1f) / scale,
-                        (size.x + 2f) / scale,
-                        (size.y + 2f) / scale);
-
-                    if (taken.Any(r => r.Overlaps(footprint))) continue;
-                    taken.Add(footprint);
-                }
-
-                // A plate behind our own names, and none behind a hand-placed one. At 9 points over
-                // a photographic map the shared outline alone is not enough to read a name against
-                // pale concrete, and the plate is also what makes a skipped neighbour obvious
-                // rather than looking like a rendering fault.
-                var go = compact
-                    ? new GameObject("PlaceLabel", typeof(RectTransform), typeof(Image))
-                    : new GameObject("PlaceLabel", typeof(RectTransform));
-
+                var go = new GameObject("PlaceLabel", typeof(RectTransform));
                 var rect = (RectTransform)go.transform;
                 rect.SetParent(space, worldPositionStays: false);
                 rect.anchorMin = rect.anchorMax = new Vector2(0.5f, 0.5f);
                 rect.pivot = new Vector2(0.5f, 0.5f);
                 rect.anchoredPosition = label.Position;
-                rect.sizeDelta = size;
-
-                if (compact)
-                {
-                    var plate = go.GetComponent<Image>();
-                    plate.color = new Color(0f, 0f, 0f, onThisFloor ? 0.55f : 0.3f);
-                    plate.raycastTarget = false;
-                }
+                rect.sizeDelta = new Vector2(160f, 18f);
 
                 // Negated because these angles are clockwise-positive, as screen and SVG angles are,
                 // while Unity's Z rotation is counter-clockwise - the same negation DynamicMaps
@@ -1809,25 +1767,9 @@ namespace QuestTree.UI
 
                 panZoom.KeepConstantScale(rect);
 
-                // Its own object when there is a plate: Unity allows one Graphic per GameObject, so
-                // the Image and the text cannot share one. Stretched to the plate, so the plate's
-                // size is the only place a label's geometry is decided.
-                var textGo = go;
-
-                if (compact)
-                {
-                    textGo = new GameObject("Text", typeof(RectTransform));
-                    var textRect = (RectTransform)textGo.transform;
-                    textRect.SetParent(rect, worldPositionStays: false);
-                    textRect.anchorMin = Vector2.zero;
-                    textRect.anchorMax = Vector2.one;
-                    textRect.offsetMin = Vector2.zero;
-                    textRect.offsetMax = Vector2.zero;
-                }
-
-                var text = textGo.AddComponent<TextMeshProUGUI>();
+                var text = go.AddComponent<TextMeshProUGUI>();
                 text.text = label.Text;
-                text.fontSize = compact ? CompactLabelFontSize : 15;
+                text.fontSize = 15;
 
                 // Full strength and bold, against a background that is teal, tan and grey by turns.
                 // At 75% white it washed out over the pale buildings; the black outline the shared
@@ -1837,24 +1779,306 @@ namespace QuestTree.UI
                 // Names on another floor recede rather than disappear. Hiding them would strip 63
                 // of Interchange's 77 off its ground floor and take the sense of place with them.
                 text.color = onThisFloor ? Color.white : new Color(1f, 1f, 1f, 0.45f);
-
-                // Bold at 15 points reads as a place name; bold at 9 on a plate reads as a smudge.
-                text.fontStyle = onThisFloor && !compact ? FontStyles.Bold : FontStyles.Normal;
+                text.fontStyle = onThisFloor ? FontStyles.Bold : FontStyles.Normal;
 
                 text.alignment = TextAlignmentOptions.Center;
                 text.enableWordWrapping = false;
                 text.raycastTarget = false;
-
-                // The outline stays on the plated names too: the plate is translucent, so the map
-                // still shows through behind the glyphs.
                 GameStyle.ApplyOutlined(text);
+            }
+
+            // Which of the plated names actually fit, decided once here and again whenever the zoom
+            // changes enough to matter - see LabelCull.
+            _labelCull = cull.Any ? cull : null;
+            cull.Apply(space.localScale.x, force: true);
+        }
+
+        /// <summary>
+        /// One of our own names: a dot on the spot, and a plated tag above it.
+        ///
+        /// The shape is what the first screen of a captured Customs asked for. Grey 9-point text on
+        /// a half-transparent plate could not be read at all over a photographic map, and a plate
+        /// centred on the position covered the very thing it named. So: a dot marks the place, the
+        /// tag sits clear above it, the plate is nearly opaque, and the text is full white (a zone)
+        /// or the accent (an extract) so the two kinds can be told apart without reading them.
+        ///
+        /// Every size here is in SCREEN pixels, because the container is registered with
+        /// PanZoomHandler.KeepConstantScale: that counter-scales it by 1/zoom on every scroll and on
+        /// every fly-to, so a name is the same size at any zoom and the plate never swallows the
+        /// map. The offsets inside the container are therefore constant on screen too.
+        /// </summary>
+        private static void BuildCompactLabel(
+            RectTransform space, PanZoomHandler panZoom, DynamicMapsLibrary.MapLabel label,
+            LabelCull cull)
+        {
+            var extract = label.Kind == DynamicMapsLibrary.MapLabelKind.Exfil;
+
+            // An extract wears the accent the quest pins wear - it is somewhere you are going to go -
+            // and a zone name is plain white. Both at full strength: a capture's names carry no
+            // height, so there is no off-floor state for them to recede into.
+            var ink = extract ? GameStyle.AccentColor : Color.white;
+
+            // The box the name needs, in screen pixels. Estimated from the character count rather
+            // than measured: TMP only knows a string's width after a layout pass, which would mean
+            // building every label, forcing a rebuild, and then destroying the ones that did not fit.
+            // A few pixels generous costs a name at the margin; measuring costs the frame.
+            var size = new Vector2(
+                label.Text.Length * CompactLabelFontSize * 0.62f + 12f,
+                CompactLabelFontSize + 6f);
+
+            // The container sits exactly on the place. It carries no graphic of its own, so it is
+            // also what the cull switches off, and what is counter-scaled against the zoom.
+            var go = new GameObject("PlaceLabel", typeof(RectTransform));
+            var rect = (RectTransform)go.transform;
+            rect.SetParent(space, worldPositionStays: false);
+            rect.anchorMin = rect.anchorMax = new Vector2(0.5f, 0.5f);
+            rect.pivot = new Vector2(0.5f, 0.5f);
+            rect.anchoredPosition = label.Position;
+            rect.sizeDelta = Vector2.zero;
+
+            panZoom.KeepConstantScale(rect);
+
+            // The dot IS the position. Without it the tag above would be the only mark and the eye
+            // would read the place as being wherever the words are.
+            var dotGo = new GameObject("Dot", typeof(RectTransform), typeof(Image));
+            var dot = (RectTransform)dotGo.transform;
+            dot.SetParent(rect, worldPositionStays: false);
+            dot.anchorMin = dot.anchorMax = new Vector2(0.5f, 0.5f);
+            dot.pivot = new Vector2(0.5f, 0.5f);
+            dot.anchoredPosition = Vector2.zero;
+            dot.sizeDelta = new Vector2(CompactLabelDotSize, CompactLabelDotSize);
+
+            var dotImage = dotGo.GetComponent<Image>();
+            dotImage.color = ink;
+            dotImage.raycastTarget = false;
+
+            // The plate, clear of the dot: its BOTTOM edge sits the gap above the position, so the
+            // spot itself is never under it.
+            var plateGo = new GameObject("Plate", typeof(RectTransform), typeof(Image));
+            var plate = (RectTransform)plateGo.transform;
+            plate.SetParent(rect, worldPositionStays: false);
+            plate.anchorMin = plate.anchorMax = new Vector2(0.5f, 0.5f);
+            plate.pivot = new Vector2(0.5f, 0.5f);
+            plate.anchoredPosition = new Vector2(0f, CompactLabelPlateGap + size.y * 0.5f);
+            plate.sizeDelta = size;
+
+            var plateImage = plateGo.GetComponent<Image>();
+            plateImage.color = new Color(0f, 0f, 0f, CompactLabelPlateAlpha);
+            plateImage.raycastTarget = false;
+
+            // Its own object: Unity allows one Graphic per GameObject, so the plate and the text
+            // cannot share one. Stretched to the plate, so the plate's size is the only place a
+            // label's geometry is decided.
+            var textGo = new GameObject("Text", typeof(RectTransform));
+            var textRect = (RectTransform)textGo.transform;
+            textRect.SetParent(plate, worldPositionStays: false);
+            textRect.anchorMin = Vector2.zero;
+            textRect.anchorMax = Vector2.one;
+            textRect.offsetMin = Vector2.zero;
+            textRect.offsetMax = Vector2.zero;
+
+            var text = textGo.AddComponent<TextMeshProUGUI>();
+            text.text = label.Text;
+            text.fontSize = CompactLabelFontSize;
+            text.color = ink;
+            text.fontStyle = FontStyles.Normal;
+            text.alignment = TextAlignmentOptions.Center;
+            text.enableWordWrapping = false;
+            text.raycastTarget = false;
+
+            // The outline stays: it is what keeps the glyphs' edges off the plate's edge and holds
+            // the text legible where a plate happens to sit over something pale.
+            GameStyle.ApplyOutlined(text);
+
+            cull.Note(rect, label.Position, size, isZone: !extract);
+        }
+
+        /// <summary>Point size for a captured map's own names, in screen pixels - see
+        /// <see cref="BuildCompactLabel"/> for why they are pixels and not map units. Nine was too
+        /// small to read over a photograph; this is the size the user could read.</summary>
+        private const float CompactLabelFontSize = 12.5f;
+
+        /// <summary>How opaque the plate behind one of our names is. Nearly solid, because the map
+        /// behind it is a photograph: at 55 % the text was sitting on concrete and roofs and could
+        /// not be read.</summary>
+        private const float CompactLabelPlateAlpha = 0.85f;
+
+        /// <summary>The dot on the place itself, in screen pixels.</summary>
+        private const float CompactLabelDotSize = 4f;
+
+        /// <summary>Clear space between the dot and the bottom of its plate, in screen pixels. The
+        /// reason the plate is above the position rather than on it.</summary>
+        private const float CompactLabelPlateGap = 8f;
+
+        /// <summary>
+        /// The zoom a zone name needs before it is worth drawing, in screen pixels per metre.
+        ///
+        /// 250 px per 200 m: below that a map's forty-odd zone names are a wall of tags over
+        /// everything, and the extracts - which are always drawn - are what the map is for at that
+        /// distance. Above it there is room between the places for their names, and the overlap cull
+        /// deals with what is left.
+        /// </summary>
+        private const float ZoneLabelMinPxPerMetre = 250f / 200f;
+
+        /// <summary>How far the zoom has to move before the cull is worth running again: a quarter
+        /// either way. Every drag raises OnViewChanged as well, and re-culling fifty labels on each
+        /// mouse-move delta would be work for nothing, since panning cannot change which names
+        /// overlap.</summary>
+        private const float LabelReCullRatio = 1.25f;
+
+        /// <summary>The cull belonging to the viewport on screen, or null when it has no plated
+        /// names. Static because the zoom callback and the next build both have to reach it; dropped
+        /// with the viewport in <see cref="DiscardViewport"/>.</summary>
+        private static LabelCull _labelCull;
+
+        /// <summary>
+        /// Which of our own names are drawn at the zoom the map is at.
+        ///
+        /// Two rules, both of which depend on the zoom and so cannot be settled once at build time:
+        /// a zone name appears only above <see cref="ZoneLabelMinPxPerMetre"/>, and no name is drawn
+        /// over one already drawn. The labels are built once and switched on and off from here,
+        /// rather than rebuilt: a rebuild is the whole viewport, and this runs on a wheel notch.
+        ///
+        /// The test is in SCREEN pixels, which is the space the question is really asked in - the
+        /// tags are a constant size on screen while the distance between their places grows with the
+        /// zoom, so the same pair collides at one zoom and not at the next.
+        /// </summary>
+        /// <summary>One plated name as the cull sees it: where it is in the world, how big its plate
+        /// is on screen, and whether it is a zone (which a low zoom drops outright). No scene object,
+        /// deliberately - see <see cref="LabelCull.Decide"/>.</summary>
+        internal readonly struct LabelBox
+        {
+            public readonly Vector2 Position;
+            public readonly Vector2 Size;
+            public readonly bool IsZone;
+
+            /// <param name="position">The place, in map coordinates.</param>
+            /// <param name="size">The plate, in screen pixels.</param>
+            /// <param name="isZone">True for a bot-zone name, false for an extract.</param>
+            public LabelBox(Vector2 position, Vector2 size, bool isZone)
+            {
+                Position = position;
+                Size = size;
+                IsZone = isZone;
             }
         }
 
-        /// <summary>Point size for a captured map's own names. About 60 % of the place-name size:
-        /// these are collected in bulk and there are dozens of them, so they have to sit beside the
-        /// map rather than on top of it.</summary>
-        private const float CompactLabelFontSize = 9f;
+        private sealed class LabelCull
+        {
+            /// <summary>Extracts first, because the caller adds them first: the first name to claim
+            /// a piece of screen keeps it, so this order is what makes a zone yield to an extract.</summary>
+            private readonly List<LabelBox> _boxes = new();
+
+            /// <summary>The scene objects, in step with <see cref="_boxes"/>.</summary>
+            private readonly List<RectTransform> _rects = new();
+
+            /// <summary>The zoom the current visibility was decided at, or 0 before the first pass.</summary>
+            private float _culledAt;
+
+            internal bool Any => _boxes.Count > 0;
+
+            internal void Note(RectTransform rect, Vector2 position, Vector2 size, bool isZone)
+            {
+                _rects.Add(rect);
+                _boxes.Add(new LabelBox(position, size, isZone));
+            }
+
+            /// <summary>Called on every view change. Cheap on a pan, which cannot change the
+            /// answer, and on a zoom too small to change it.</summary>
+            /// <param name="scale">The map container's new scale.</param>
+            internal void OnViewChanged(float scale)
+            {
+                if (scale <= 0f) return;
+
+                if (_culledAt > 0f &&
+                    scale < _culledAt * LabelReCullRatio &&
+                    scale > _culledAt / LabelReCullRatio)
+                {
+                    return;
+                }
+
+                Apply(scale, force: false);
+            }
+
+            /// <summary>Switches every tag on or off for this zoom.</summary>
+            /// <param name="scale">The map container's scale, which is screen pixels per metre.</param>
+            /// <param name="force">Run even when the zoom has not moved - the first pass of a
+            /// build, where nothing has been decided yet.</param>
+            internal void Apply(float scale, bool force)
+            {
+                if (scale <= 0f) return;
+                if (!force && Mathf.Approximately(scale, _culledAt)) return;
+
+                _culledAt = scale;
+
+                var visible = Decide(_boxes, scale);
+
+                for (var i = 0; i < _rects.Count; i++)
+                {
+                    var rect = _rects[i];
+
+                    // Unity's null: the viewport may have been destroyed under a callback that was
+                    // already queued.
+                    if (rect == null) continue;
+
+                    if (rect.gameObject.activeSelf != visible[i]) rect.gameObject.SetActive(visible[i]);
+                }
+            }
+
+            /// <summary>
+            /// Which names are drawn at this zoom - the whole decision, as a function of geometry and
+            /// nothing else.
+            ///
+            /// Split from <see cref="Apply"/> so it can be exercised without a running game: every
+            /// other way of checking "does a zone yield to an extract at 2 px/m and stop yielding at
+            /// 20" needs a Unity scene, and an eye on a screenshot cannot measure a two-pixel
+            /// overlap. Vector2 and Rect are plain managed structs, so this runs anywhere.
+            ///
+            /// In screen pixels, which is the space the question is really asked in: the tags are a
+            /// constant size on screen while the distance between their places grows with the zoom,
+            /// so the same pair collides at one zoom and not at the next.
+            /// </summary>
+            /// <param name="boxes">The tags, extracts first.</param>
+            /// <param name="scale">Screen pixels per metre - the map container's scale.</param>
+            /// <returns>One flag per box, in the same order.</returns>
+            internal static bool[] Decide(IList<LabelBox> boxes, float scale)
+            {
+                var visible = new bool[boxes.Count];
+                var taken = new List<Rect>();
+
+                for (var i = 0; i < boxes.Count; i++)
+                {
+                    var box = boxes[i];
+
+                    // A zone name below the threshold is not drawn and does not claim any space
+                    // either - it must not be able to hide an extract it would not have been
+                    // visible next to.
+                    if (box.IsZone && scale < ZoneLabelMinPxPerMetre) continue;
+
+                    // The plate's own rectangle on screen: the place, scaled, plus the constant
+                    // offset the plate sits at inside its container. Two pixels of gutter, so two
+                    // plates cannot end up edge to edge.
+                    var centre = new Vector2(
+                        box.Position.x * scale,
+                        box.Position.y * scale + CompactLabelPlateGap + box.Size.y * 0.5f);
+
+                    var footprint = new Rect(
+                        centre.x - box.Size.x * 0.5f - 1f,
+                        centre.y - box.Size.y * 0.5f - 1f,
+                        box.Size.x + 2f,
+                        box.Size.y + 2f);
+
+                    // Skipped rather than nudged: moving a name off the place it names is worse than
+                    // not drawing it, because the reader cannot tell it has been moved.
+                    if (taken.Any(r => r.Overlaps(footprint))) continue;
+
+                    taken.Add(footprint);
+                    visible[i] = true;
+                }
+
+                return visible;
+            }
+        }
 
         /// <summary>
         /// Which of this map's own names to draw - ModSettings.MapLabels.

@@ -183,6 +183,67 @@ namespace QuestTree.QuestGraph
         /// frame budget is built in.</summary>
         private const int InpaintChunkPixels = 20000;
 
+        /// <summary>How many samples a side each output pixel is rendered from: 2, so every pixel is
+        /// the average of four. The tile target stays 2048 and covers half the metres it did, which
+        /// quadruples the tile count - Customs goes from 3x2 to 6x4 tiles - and leaves the float buffer,
+        /// the drawn mask, the distances and everything downstream at the output resolution.
+        ///
+        /// It is here because of what a single sample per pixel looks like on a photographed map at a
+        /// quarter of a metre to the pixel: every railing, wire, roof edge and tree trunk is a hard
+        /// staircase, and no amount of smoothing afterwards can recover the coverage information that
+        /// one sample never had. Supersampling is the only antialiasing that works on everything -
+        /// geometry edges, alpha-tested foliage and texture detail alike - and unlike MSAA it does not
+        /// depend on the rendering path.
+        ///
+        /// A pixel counts as drawn when ANY of its four samples was drawn, and its value is the mean of
+        /// the DRAWN samples only, so a pixel half covered by a roof edge is the roof's colour rather
+        /// than the roof mixed with the clear colour.</summary>
+        private const int SupersampleFactor = 2;
+
+        /// <summary>Samples of multisampling asked of the tile target, best first. Hardware MSAA is
+        /// free-ish antialiasing on top of the supersampling above, and the two work on different
+        /// things: MSAA resolves the coverage of a polygon edge inside one sample, supersampling
+        /// resolves everything at four times the sample count.
+        ///
+        /// Asked for rather than assumed: a graphics device may refuse 8 on a half-float target, and
+        /// the fallbacks are what keeps the capture working rather than failing. The value actually
+        /// achieved goes in the capture header and into <see cref="RenderTag"/>, because two machines
+        /// that resolved differently did not produce the same picture and must not merge into one
+        /// another.
+        ///
+        /// Honest caveat, written here because the log cannot say it: MSAA applies to FORWARD rendering,
+        /// and this camera copies the game's own path, which is DeferredShading. Unity ignores
+        /// multisampling on a deferred camera, so on this path the number in the header is what the
+        /// target was allocated with and not necessarily what antialiased the picture. The
+        /// supersampling above is what does the work; this costs nothing to ask for and helps if the
+        /// path is ever forward.</summary>
+        private static readonly int[] MsaaLevels = { 8, 4, 2, 1 };
+
+        /// <summary>Whether the despeckle pass runs. Static readonly, not const, for the same reason as
+        /// the two switches below it.</summary>
+        private static readonly bool DespeckleEnabled = true;
+
+        /// <summary>How far a pixel's stretched luminance must sit from the median of its eight drawn
+        /// neighbours before it is treated as a speckle: a quarter of the picture's whole tonal range,
+        /// which nothing that is part of a surface ever does.
+        ///
+        /// It exists because a bilateral filter cannot remove an isolated outlier - it reads one as an
+        /// EDGE and preserves it, which is the whole reason a separate pass is needed after it. What is
+        /// left after the smoothing is single bright or black pixels: specular glints on wet metal, a
+        /// lamp seen end-on, one sample of sky through a gap in a roof.</summary>
+        private const float DespeckleThreshold = 0.25f;
+
+        /// <summary>How much the eight neighbours may disagree among themselves and still count as a
+        /// surface the odd pixel out does not belong to. 0.12: at a real edge the neighbours straddle
+        /// it and spread far wider than this, so the pass leaves edges, corners and thin lines alone
+        /// and only touches a pixel its whole surroundings agree about.</summary>
+        private const float DespeckleNeighbourSpread = 0.12f;
+
+        /// <summary>How many of the eight neighbours must have been drawn before the test is allowed to
+        /// judge. Five: at the edge of a hole or of the picture there is not enough around a pixel to
+        /// call it an outlier, and guessing there would eat the real content at every border.</summary>
+        private const int DespeckleMinNeighbours = 5;
+
         /// <summary>Whether the edge-preserving smoothing runs. Part of <see cref="RenderTag"/>, so
         /// turning it off replaces older captures rather than merging into them. Static readonly, not
         /// const, so both paths stay compiled - see FillWaterCyan.</summary>
@@ -343,12 +404,15 @@ namespace QuestTree.QuestGraph
         /// to the building-less ones taken before the LOD bias. A capture written before this field
         /// existed records nothing and is replaced for the same reason. See
         /// <see cref="LoadPrevious"/>.</summary>
-        private static string RenderTag =>
+        private string RenderTag =>
             "own-" + CaptureLightIntensity.ToString("0.###", CultureInfo.InvariantCulture) +
             ";lod" + CaptureLodBias.ToString("0.###", CultureInfo.InvariantCulture) +
             ";basemap" + CaptureBasemapDistance.ToString("0.###", CultureInfo.InvariantCulture) +
             ";water" + (FillWaterCyan ? "1" : "0") +
-            ";smooth" + (SmoothingEnabled ? (SmoothingRadius * 2 + 1).ToString(CultureInfo.InvariantCulture) : "0");
+            ";smooth" + (SmoothingEnabled ? (SmoothingRadius * 2 + 1).ToString(CultureInfo.InvariantCulture) : "0") +
+            ";despeckle" + (DespeckleEnabled ? "1" : "0") +
+            ";ss" + SupersampleFactor.ToString(CultureInfo.InvariantCulture) +
+            ";msaa" + _msaa.ToString(CultureInfo.InvariantCulture);
 
         /// <summary>Added to the far plane so the band's own floor is comfortably inside it rather
         /// than exactly on it.</summary>
@@ -461,8 +525,13 @@ namespace QuestTree.QuestGraph
         /// pools by Dorms are, because the water shader has nothing to reflect from a camera that is
         /// not the player's. The ground under it draws instead, which reads as a map should.
         ///
-        /// What is deliberately KEPT: Default, Terrain, Foliage, Grass, Interactive, Loot,
-        /// LevelBorder, TransparentFX. These are the map.
+        /// TransparentFX went the same way and for the same reason: the campaign capture of Customs has
+        /// blue streaks lying across the crane and the railway where glass and transparent effects are
+        /// drawn by a shader that expects the player's camera behind it. What is under them - the crane,
+        /// the rails - is what a map should show.
+        ///
+        /// What is deliberately KEPT: Default, Terrain, Foliage, Grass, Interactive, Loot and
+        /// LevelBorder. These are the map.
         ///
         /// The list is longer than the plan's four names because Phase 0 logged all 32 layer names of
         /// this game version (D1) and they could then be named exactly. Names this version does not
@@ -472,7 +541,7 @@ namespace QuestTree.QuestGraph
         {
             "Player", "PlayerRenderers", "PlayerCollisionTest", "PlayerSpiritAura",
             "Weapons", "Weapon Preview", "Shells", "Deadbody",
-            "UI", "Menu Environment", "RainDrops", "Sky", "Water",
+            "UI", "Menu Environment", "RainDrops", "Sky", "Water", "TransparentFX",
             "Triggers", "CullingMask", "DisablerCullingObject",
             "DoorLowPolyCollider", "HighPolyCollider", "LowPolyCollider", "HitCollider",
             "TransparentCollider"
@@ -530,6 +599,10 @@ namespace QuestTree.QuestGraph
         /// tile of every floor. Half-float when the hardware will render one, so the deferred
         /// pipeline's values arrive intact instead of clipped into eight bits.</summary>
         private Texture2D _stage;
+
+        /// <summary>Samples of multisampling the tile target was actually allocated with, 1 when the
+        /// device refused all of them. Part of <see cref="RenderTag"/> and of the capture header.</summary>
+        private int _msaa = 1;
 
         /// <summary>Whether the render target and staging texture are half-float. False means the
         /// hardware refused the format and the whole capture is running on eight-bit data - which
@@ -813,8 +886,11 @@ namespace QuestTree.QuestGraph
                     return false;
                 }
 
-                plan.TilesX = (plan.WidthPx + TileSize - 1) / TileSize;
-                plan.TilesY = (plan.HeightPx + TileSize - 1) / TileSize;
+                // Counted in SAMPLES, not output pixels: a tile is 2048 samples, which at
+                // SupersampleFactor 2 is 1024 output pixels, so a Customs-sized floor takes 6x4 tiles
+                // where one sample a pixel took 3x2.
+                plan.TilesX = (plan.SampleWidth + TileSize - 1) / TileSize;
+                plan.TilesY = (plan.SampleHeight + TileSize - 1) / TileSize;
 
                 foreach (var floor in extent.Floors)
                 {
@@ -858,7 +934,7 @@ namespace QuestTree.QuestGraph
 
                 // After the camera, because whether the previous capture can be merged into this one
                 // depends on the encoding the camera decided (see LoadPrevious).
-                plan.Previous = LoadPrevious(plan, _needsGamma);
+                plan.Previous = LoadPrevious(plan, _needsGamma, RenderTag);
                 plan.Captures = plan.Previous == null ? 1 : Math.Max(1, plan.Previous.Captures) + 1;
                 plan.FirstCapturedAt = plan.Previous == null
                     ? null
@@ -957,7 +1033,7 @@ namespace QuestTree.QuestGraph
 
                 _camera.nearClipPlane = NearClip;
                 _camera.farClipPlane = far;
-                _camera.orthographicSize = TileSize / (2f * plan.Ppm);
+                _camera.orthographicSize = TileSize / (2f * plan.SamplePpm);
                 _camera.aspect = 1f;
 
                 Plugin.LogSource?.LogDebug(
@@ -1019,8 +1095,11 @@ namespace QuestTree.QuestGraph
                 var px0 = tileX * TileSize;
                 var py0 = tileY * TileSize;
 
-                var tw = Math.Min(TileSize, plan.WidthPx - px0);
-                var th = Math.Min(TileSize, plan.HeightPx - py0);
+                // In SAMPLES. Both the tile size and the sample dimensions are multiples of
+                // SupersampleFactor, so every tile holds whole sample blocks and no output pixel is
+                // ever split across two tiles.
+                var tw = Math.Min(TileSize, plan.SampleWidth - px0);
+                var th = Math.Min(TileSize, plan.SampleHeight - py0);
                 if (tw <= 0 || th <= 0) return;
 
                 PositionCamera(plan, floor, px0, py0);
@@ -1038,38 +1117,81 @@ namespace QuestTree.QuestGraph
                 _stage.ReadPixels(new Rect(0f, TileSize - th, tw, th), 0, 0);
 
                 // The floor buffer is kept in TEXTURE order - row 0 at the bottom, world -z - because
-                // that is the order SetPixels32 and EncodeToPNG want, and it makes the destination row
-                // of a tile the same expression the one-step version used: HeightPx - py0 - th.
-                var baseRow = plan.HeightPx - py0 - th;
+                // that is the order SetPixels32 and EncodeToPNG want. sampleBase is this tile's first
+                // SAMPLE row in that order; it is a multiple of SupersampleFactor because the sample
+                // height, the tile size and py0 all are, which is what lets two sample rows be folded
+                // into one output row without any carry between tiles or bands.
+                var sampleBase = plan.SampleHeight - py0 - th;
+                var outCol0 = px0 / SupersampleFactor;
+                var outCols = tw / SupersampleFactor;
 
                 for (var bandBottom = 0; bandBottom < th; bandBottom += PixelBandRows)
                 {
                     var rows = Math.Min(PixelBandRows, th - bandBottom);
                     var band = _stage.GetPixels(0, bandBottom, tw, rows);
 
-                    for (var row = 0; row < rows; row++)
+                    // Two sample rows at a time: one output row, and each output pixel's four samples
+                    // are all in hand at once, so nothing has to be accumulated across frames.
+                    for (var row = 0; row + SupersampleFactor <= rows; row += SupersampleFactor)
                     {
-                        var pixelRow = (baseRow + bandBottom + row) * plan.WidthPx + px0;
-                        var target = pixelRow * 3;
-                        var source = row * tw;
+                        var outRow = (sampleBase + bandBottom + row) / SupersampleFactor;
+                        var pixelRow = outRow * plan.WidthPx + outCol0;
 
-                        for (var col = 0; col < tw; col++)
+                        for (var outCol = 0; outCol < outCols; outCol++)
                         {
-                            var pixel = band[source + col];
-                            var at = target + col * 3;
+                            var r = 0f;
+                            var g = 0f;
+                            var b = 0f;
+                            var drawn = 0;
 
-                            floor.Pixels[at] = pixel.r;
-                            floor.Pixels[at + 1] = pixel.g;
-                            floor.Pixels[at + 2] = pixel.b;
+                            for (var dy = 0; dy < SupersampleFactor; dy++)
+                            {
+                                var source = (row + dy) * tw + outCol * SupersampleFactor;
 
-                            // The camera clears to (0,0,0,0) and draws nothing over a chunk the game
-                            // has streamed out, so a pixel with anything at all in any channel -
-                            // alpha included, which opaque geometry writes as 1 - was drawn, and one
-                            // that is four exact zeroes was not. Both signals together rather than
-                            // either alone: a rendered pixel in true black shadow has alpha, and a
-                            // shader that writes no alpha still has colour.
-                            floor.Drawn[pixelRow + col] =
-                                pixel.r > 0f || pixel.g > 0f || pixel.b > 0f || pixel.a > 0f;
+                                for (var dx = 0; dx < SupersampleFactor; dx++)
+                                {
+                                    var sample = band[source + dx];
+
+                                    // The camera clears to (0,0,0,0) and draws nothing over a chunk the
+                                    // game has streamed out, so a sample with anything at all in any
+                                    // channel - alpha included, which opaque geometry writes as 1 - was
+                                    // drawn, and one that is four exact zeroes was not. Both signals
+                                    // together rather than either alone: a rendered sample in true black
+                                    // shadow has alpha, and a shader that writes no alpha still has
+                                    // colour.
+                                    if (sample.r <= 0f && sample.g <= 0f && sample.b <= 0f && sample.a <= 0f)
+                                    {
+                                        continue;
+                                    }
+
+                                    r += sample.r;
+                                    g += sample.g;
+                                    b += sample.b;
+                                    drawn++;
+                                }
+                            }
+
+                            var index = pixelRow + outCol;
+                            var at = index * 3;
+
+                            // The mean of the DRAWN samples, not of all four: a pixel half covered by a
+                            // roof edge is the roof's colour rather than the roof mixed with the clear
+                            // colour, which would draw a dark fringe around everything.
+                            if (drawn > 0)
+                            {
+                                var inverse = 1f / drawn;
+                                floor.Pixels[at] = r * inverse;
+                                floor.Pixels[at + 1] = g * inverse;
+                                floor.Pixels[at + 2] = b * inverse;
+                                floor.Drawn[index] = true;
+                            }
+                            else
+                            {
+                                floor.Pixels[at] = 0f;
+                                floor.Pixels[at + 1] = 0f;
+                                floor.Pixels[at + 2] = 0f;
+                                floor.Drawn[index] = false;
+                            }
                         }
                     }
                 }
@@ -1156,6 +1278,8 @@ namespace QuestTree.QuestGraph
                     line += $", {floor.CyanFilled} cyan water pixels filled";
                     if (floor.CyanDropped > 0) line += $" and {floor.CyanDropped} left as holes";
                 }
+
+                if (floor.Despeckled > 0) line += $", {floor.Despeckled} speckles medianed";
 
                 if (floor.Merged)
                 {
@@ -1407,7 +1531,10 @@ namespace QuestTree.QuestGraph
         /// <param name="plan">The capture's plan, already holding the extent, scale and floors.</param>
         /// <param name="needsGamma">Whether this capture will gamma-encode its pixels, which has to
         /// match what the stored exposure was written with.</param>
-        private static CaptureMeta LoadPrevious(Plan plan, bool needsGamma)
+        /// <param name="renderTag">This capture's render recipe, which the stored one has to equal. Passed
+        /// in rather than read from the property, because it depends on the multisampling this capture's
+        /// device actually granted and this method is static.</param>
+        private static CaptureMeta LoadPrevious(Plan plan, bool needsGamma, string renderTag)
         {
             var path = Path.Combine(plan.Dir, $"{plan.Key}.map.json");
 
@@ -1450,7 +1577,7 @@ namespace QuestTree.QuestGraph
                     return null;
                 }
 
-                if (!string.Equals(meta.Render, RenderTag, StringComparison.Ordinal))
+                if (!string.Equals(meta.Render, renderTag, StringComparison.Ordinal))
                 {
                     // The render recipe is part of what a pixel IS. A capture taken before the recipe was
                     // recorded is one of the black rain-era or building-less pictures this replaces; one
@@ -1458,8 +1585,8 @@ namespace QuestTree.QuestGraph
                     // the LOD bias would win the distance test over ground that actually has buildings in
                     // it. Any difference at all, and this capture starts fresh.
                     Fresh(plan, string.IsNullOrEmpty(meta.Render)
-                        ? $"it was taken before the render recipe was recorded, and this one is rendered {RenderTag}"
-                        : $"it was rendered {meta.Render} and this one is rendered {RenderTag}");
+                        ? $"it was taken before the render recipe was recorded, and this one is rendered {renderTag}"
+                        : $"it was rendered {meta.Render} and this one is rendered {renderTag}");
                     return null;
                 }
 
@@ -2272,6 +2399,105 @@ namespace QuestTree.QuestGraph
             return from;
         }
 
+        /// <summary>
+        /// Replaces a lone outlier pixel with the median of its eight neighbours, after the bilateral
+        /// filter has run.
+        ///
+        /// It is a separate pass because a bilateral filter CANNOT do this: the range weight is what
+        /// makes it preserve an edge, and a single pixel unlike everything around it looks exactly like
+        /// an edge to it, so every speckle survives the smoothing untouched. What is left after that
+        /// pass is single bright or black pixels - a specular glint on wet metal, a lamp seen end-on,
+        /// one sample of sky through a gap in a roof - and at a quarter of a metre to the pixel there
+        /// are thousands of them on a map.
+        ///
+        /// Three conditions, all of which have to hold, so that the pass cannot eat real content:
+        ///   - at least <see cref="DespeckleMinNeighbours"/> of the eight neighbours were drawn, or
+        ///     there is not enough around this pixel to judge it by (the edge of a hole, the edge of
+        ///     the picture);
+        ///   - those neighbours agree among themselves within <see cref="DespeckleNeighbourSpread"/>,
+        ///     which at a real edge, corner or thin line they never do;
+        ///   - and this pixel differs from their median by more than <see cref="DespeckleThreshold"/>.
+        /// The replacement is a real neighbour's colour - the one holding the median luminance - rather
+        /// than an average, so nothing is invented and a coloured surface keeps its hue.
+        ///
+        /// Luminance is read from the band's buffer, which holds the pixels as they were BEFORE the
+        /// smoothing. That is deliberate: the smoothing leaves an outlier alone, so the unsmoothed
+        /// value is the right thing to test, and it costs nothing extra to read.
+        /// </summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="floor">The floor being developed, for its pixels, drawn mask, luminance band and
+        /// the two reused neighbour buffers.</param>
+        /// <param name="lumFrom">The first picture row the band's luminance buffer covers.</param>
+        /// <param name="row">The pixel's row, counting from the bottom.</param>
+        /// <param name="col">The pixel's column.</param>
+        /// <param name="r">The pixel's red, replaced when it is a speckle.</param>
+        /// <param name="g">The pixel's green, replaced when it is a speckle.</param>
+        /// <param name="b">The pixel's blue, replaced when it is a speckle.</param>
+        private static void Despeckle(
+            Plan plan, FloorPlan floor, int lumFrom, int row, int col,
+            ref float r, ref float g, ref float b)
+        {
+            var width = plan.WidthPx;
+            var lum = floor.LumBand;
+            var drawn = floor.Drawn;
+            var values = floor.NeighbourLum;
+            var indices = floor.NeighbourIndex;
+
+            var centre = lum[(row - lumFrom) * width + col];
+            var count = 0;
+
+            for (var dy = -1; dy <= 1; dy++)
+            {
+                var y = row + dy;
+                if (y < 0 || y >= plan.HeightPx) continue;
+
+                var pixelRow = y * width;
+                var lumRow = (y - lumFrom) * width;
+
+                for (var dx = -1; dx <= 1; dx++)
+                {
+                    if (dx == 0 && dy == 0) continue;
+
+                    var x = col + dx;
+                    if (x < 0 || x >= width) continue;
+
+                    var other = pixelRow + x;
+                    if (!drawn[other]) continue;
+
+                    // Insertion sort as they are collected: eight items at most, so this is cheaper
+                    // than sorting afterwards and it keeps each value beside the pixel it came from.
+                    var value = lum[lumRow + x];
+                    var at = count;
+
+                    while (at > 0 && values[at - 1] > value)
+                    {
+                        values[at] = values[at - 1];
+                        indices[at] = indices[at - 1];
+                        at--;
+                    }
+
+                    values[at] = value;
+                    indices[at] = other;
+                    count++;
+                }
+            }
+
+            if (count < DespeckleMinNeighbours) return;
+            if (values[count - 1] - values[0] > DespeckleNeighbourSpread) return;
+
+            // The lower middle of an even count, which is a real pixel rather than an average of two.
+            var middle = count / 2;
+            var difference = centre - values[middle];
+            if (difference < 0f) difference = -difference;
+            if (difference <= DespeckleThreshold) return;
+
+            var source = indices[middle] * 3;
+            r = floor.Pixels[source];
+            g = floor.Pixels[source + 1];
+            b = floor.Pixels[source + 2];
+            floor.Despeckled++;
+        }
+
         /// <summary>The development's first step: the checks, the floor's eight-bit texture, and the
         /// two buffers every band works from. False, having failed the floor and said why, when there
         /// is nothing to develop.</summary>
@@ -2295,9 +2521,13 @@ namespace QuestTree.QuestGraph
 
                 // One band's stretched luminance plus the filter's halo - 640 KB at 0.25 m/px, against
                 // the 116 MB a second full float buffer would have cost. See Smooth.
-                if (SmoothingEnabled)
+                // Wanted by the smoothing AND by the despeckle, which measures its neighbours on the
+                // same stretched luminance.
+                if (SmoothingEnabled || DespeckleEnabled)
                 {
                     floor.LumBand = new float[plan.WidthPx * (DevelopBandRows + SmoothingRadius * 2)];
+                    floor.NeighbourLum = new float[8];
+                    floor.NeighbourIndex = new int[8];
                 }
 
                 // The squared X distance of every column from the player, once for the whole floor
@@ -2346,7 +2576,7 @@ namespace QuestTree.QuestGraph
                 var rows = Math.Min(DevelopBandRows, plan.HeightPx - y0);
 
                 var clock = Stopwatch.StartNew();
-                var lumFrom = SmoothingEnabled ? FillLuminance(plan, floor, y0, rows, low, scale) : 0;
+                var lumFrom = floor.LumBand != null ? FillLuminance(plan, floor, y0, rows, low, scale) : 0;
 
                 for (var row = 0; row < rows; row++)
                 {
@@ -2402,16 +2632,27 @@ namespace QuestTree.QuestGraph
                             // Smoothed for every pixel this capture supplies, and only for those: a
                             // pixel the merge keeps from disk was smoothed when IT was captured, and
                             // filtering it again here would soften it once per capture.
+                            float pr, pg, pb;
+
                             if (SmoothingEnabled)
                             {
-                                Smooth(plan, floor, lumFrom, textureRow, col, out var sr, out var sg, out var sb);
-                                block[target + col] = Grade(sr, sg, sb, low, scale, gamma);
+                                Smooth(plan, floor, lumFrom, textureRow, col, out pr, out pg, out pb);
                             }
                             else
                             {
-                                block[target + col] = Grade(
-                                    pixels[at], pixels[at + 1], pixels[at + 2], low, scale, gamma);
+                                pr = pixels[at];
+                                pg = pixels[at + 1];
+                                pb = pixels[at + 2];
                             }
+
+                            // After the smoothing, which by design leaves a lone outlier exactly as it
+                            // was - see Despeckle.
+                            if (DespeckleEnabled && floor.LumBand != null)
+                            {
+                                Despeckle(plan, floor, lumFrom, textureRow, col, ref pr, ref pg, ref pb);
+                            }
+
+                            block[target + col] = Grade(pr, pg, pb, low, scale, gamma);
 
                             floor.Filled++;
                         }
@@ -2477,6 +2718,8 @@ namespace QuestTree.QuestGraph
                 floor.Block = null;
                 floor.DxSquared = null;
                 floor.LumBand = null;
+                floor.NeighbourLum = null;
+                floor.NeighbourIndex = null;
             }
         }
 
@@ -2663,7 +2906,7 @@ namespace QuestTree.QuestGraph
 
             _camera.enabled = false;
             _camera.orthographic = true;
-            _camera.orthographicSize = TileSize / (2f * plan.Ppm);
+            _camera.orthographicSize = TileSize / (2f * plan.SamplePpm);
             _camera.aspect = 1f;
             _camera.nearClipPlane = NearClip;
             _camera.farClipPlane = 1000f;
@@ -2696,6 +2939,8 @@ namespace QuestTree.QuestGraph
             {
                 note = $"{note}, own light {CaptureLightIntensity.ToString("0.###", CultureInfo.InvariantCulture)}";
             }
+
+            note = $"{note}, {SupersampleFactor}x supersampled, msaa {_msaa}";
 
             // Named in the header because they are the two settings that decide whether the picture has
             // buildings in it and whether its ground is smooth - see RenderOnce - and a capture that came
@@ -2765,9 +3010,42 @@ namespace QuestTree.QuestGraph
             // nothing at all, so in both of those the data is already display-ready.
             _needsGamma = _hdr && QualitySettings.activeColorSpace == ColorSpace.Linear;
 
-            _rt = new RenderTexture(
-                TileSize, TileSize, 24,
-                _hdr ? RenderTextureFormat.ARGBHalf : RenderTextureFormat.ARGB32);
+            var format = _hdr ? RenderTextureFormat.ARGBHalf : RenderTextureFormat.ARGB32;
+
+            // Multisampling, best first, and ALLOCATED here rather than left to the first render: a
+            // device that will not give 8 samples of a half-float target says so by failing Create,
+            // and asking now means the fallback happens before a single tile has been rendered rather
+            // than silently per frame. ReadPixels resolves a multisampled target on its own.
+            foreach (var samples in MsaaLevels)
+            {
+                var candidate = new RenderTexture(TileSize, TileSize, 24, format) { antiAliasing = samples };
+
+                try
+                {
+                    if (candidate.Create())
+                    {
+                        _rt = candidate;
+                        _msaa = candidate.antiAliasing;
+                        break;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Plugin.LogSource?.LogDebug(
+                        $"QuestTree: a {TileSize} {format} target with {samples}x multisampling was refused " +
+                        $"({ex.GetType().Name}: {ex.Message}).");
+                }
+
+                Destroy(candidate);
+            }
+
+            if (_rt == null)
+            {
+                // Every multisampled allocation refused, including one sample. The plain constructor
+                // creates on first use, which is the behaviour every capture before this had.
+                _rt = new RenderTexture(TileSize, TileSize, 24, format);
+                _msaa = 1;
+            }
 
             _stage = new Texture2D(
                 TileSize, TileSize,
@@ -2775,7 +3053,8 @@ namespace QuestTree.QuestGraph
                 mipChain: false);
 
             Plugin.LogSource?.LogDebug(
-                $"QuestTree: capture target {_rt.format}, staging {_stage.format}, colour space " +
+                $"QuestTree: capture target {_rt.format} with {_msaa}x multisampling, staging {_stage.format}, " +
+                $"{SupersampleFactor}x{SupersampleFactor} samples a pixel, colour space " +
                 $"{QualitySettings.activeColorSpace}, gamma encoding " +
                 $"{(_needsGamma ? "applied by us" : "already in the data")}.");
         }
@@ -2789,8 +3068,10 @@ namespace QuestTree.QuestGraph
         /// <param name="py0">The tile's top edge, in image pixels from the top.</param>
         private void PositionCamera(Plan plan, FloorPlan floor, int px0, int py0)
         {
-            var centreX = plan.Extent.MinX + (px0 + TileSize * 0.5d) / plan.Ppm;
-            var centreZ = plan.Extent.MaxZ - (py0 + TileSize * 0.5d) / plan.Ppm;
+            // px0 and py0 are SAMPLE offsets, and the divisor is samples per metre - see
+            // Plan.SamplePpm. Everything else about the framing is unchanged by supersampling.
+            var centreX = plan.Extent.MinX + (px0 + TileSize * 0.5d) / plan.SamplePpm;
+            var centreZ = plan.Extent.MaxZ - (py0 + TileSize * 0.5d) / plan.SamplePpm;
 
             _camera.transform.position = new Vector3((float)centreX, floor.CameraY, (float)centreZ);
         }
@@ -3053,6 +3334,8 @@ namespace QuestTree.QuestGraph
             floor.Block = null;
             floor.DxSquared = null;
             floor.LumBand = null;
+            floor.NeighbourLum = null;
+            floor.NeighbourIndex = null;
             floor.Cyan = null;
 
             if (floor.Texture != null)
@@ -3084,14 +3367,18 @@ namespace QuestTree.QuestGraph
         /// <param name="why">What disagreed, for the warning, or null when everything agreed.</param>
         private bool SelfCheck(Plan plan, FloorPlan floor, out string why)
         {
-            var centreTileX = Mathf.Clamp(plan.WidthPx / 2 / TileSize, 0, plan.TilesX - 1);
-            var centreTileY = Mathf.Clamp(plan.HeightPx / 2 / TileSize, 0, plan.TilesY - 1);
+            // Sample space throughout, because that is what the camera renders in: a tile is TileSize
+            // SAMPLES across and the projection maps world metres to samples. The output picture's
+            // geometry follows from it by an exact integer factor, which is what the box average in
+            // RenderTile relies on.
+            var centreTileX = Mathf.Clamp(plan.SampleWidth / 2 / TileSize, 0, plan.TilesX - 1);
+            var centreTileY = Mathf.Clamp(plan.SampleHeight / 2 / TileSize, 0, plan.TilesY - 1);
             var px0 = centreTileX * TileSize;
             var py0 = centreTileY * TileSize;
 
             PositionCamera(plan, floor, px0, py0);
 
-            var ppm = plan.Ppm;
+            var ppm = plan.SamplePpm;
             var span = TileSize / (double)ppm;
             var tileMinX = plan.Extent.MinX + px0 / (double)ppm;
             var tileMaxX = tileMinX + span;
@@ -3725,6 +4012,18 @@ namespace QuestTree.QuestGraph
 
             public int TileCount => TilesX * TilesY;
 
+            /// <summary>The picture's size in SAMPLES rather than output pixels - the resolution the
+            /// camera actually renders at, <see cref="SupersampleFactor"/> times the output in each
+            /// direction. The tiling, the camera's framing and the self-check all work in this space;
+            /// everything from the float buffer onwards works in output pixels.</summary>
+            public int SampleWidth => WidthPx * SupersampleFactor;
+
+            public int SampleHeight => HeightPx * SupersampleFactor;
+
+            /// <summary>Samples per metre: what the camera is framed to, and what the self-check holds
+            /// the projection against.</summary>
+            public float SamplePpm => Ppm * SupersampleFactor;
+
             /// <summary>Where the player was standing when the key was pressed, in world XZ. Every
             /// pixel's distance from here goes into the sidecar, and that is what decides whether this
             /// capture's view of a spot beats the one already on disk.</summary>
@@ -3801,6 +4100,17 @@ namespace QuestTree.QuestGraph
             /// below it - what the range weight is measured on. Refilled per band by FillLuminance and
             /// dropped by DevelopFinish.</summary>
             public float[] LumBand;
+
+            /// <summary>The eight neighbours' luminances and the pixels they came from, sorted as they
+            /// are collected. Two arrays of eight, allocated once a floor and reused for every pixel,
+            /// because a per-pixel allocation here would be ten million of them.</summary>
+            public float[] NeighbourLum;
+
+            public int[] NeighbourIndex;
+
+            /// <summary>How many lone outliers were replaced by their neighbours' median, for the
+            /// floor's log line.</summary>
+            public int Despeckled;
 
             /// <summary>Wall time spent developing this floor's bands, the smoothing included, for the
             /// debug line. Accumulated across the band frames, so it is work rather than elapsed

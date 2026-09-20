@@ -405,13 +405,6 @@ namespace QuestTree.UI
             /// the mall's upper storeys.</summary>
             public float Height;
 
-            /// <summary>Whether this name belongs to no particular floor, so every floor shows it
-            /// at full strength. True for a captured map's labels: the capture meta carries a name
-            /// and a ground position and no height at all, and <see cref="Height"/> 0 would put an
-            /// exfil on whichever band happens to contain y=0 and dim it on every other storey.
-            /// See MapView.BuildPlaceLabels.</summary>
-            public bool FloorAgnostic;
-
             /// <summary>The angle the name is meant to be written at, for places that run along
             /// something rather than sitting on a point. All 22 of Reserve's names are set to 14.5
             /// to follow the base's grid; eight of Streets' run from -90 to 10.</summary>

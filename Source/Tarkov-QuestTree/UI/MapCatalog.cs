@@ -859,10 +859,10 @@ namespace QuestTree.UI
                     // Map space: the label's x and z, in the same coordinates every marker uses.
                     Position = new Vector2(label.X, label.Z),
 
-                    // The capture records no height, so the name belongs to no one floor - see
-                    // MapLabel.FloorAgnostic. Height 0 with the flag off would put an exfil on
-                    // whichever band contains y=0 and dim it everywhere else.
-                    FloorAgnostic = true,
+                    // No height in the meta, and none inferred: a captured name belongs to no one
+                    // floor, which is what MapView reads its Kind for - the plated path does no
+                    // floor test at all, where a Height of 0 would have filed every extract on
+                    // whichever band happens to contain y=0 and faded it on every other storey.
                     Height = 0f,
                     Rotation = 0f
                 });
