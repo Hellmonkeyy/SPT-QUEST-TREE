@@ -14,6 +14,12 @@ namespace QuestTree.UI
     /// main-thread twin (<see cref="MarkSplit"/>), and it reading 0 is what says the prefetch
     /// covered that request.
     ///
+    /// A payload with NO ": prefetch" pair in the line was never asked for: the batch ran out of
+    /// budget before reaching it, the panel gave up and cancelled it, or it is inside the hold-off a
+    /// timed-out prefetch leaves behind (QuestDataClient.PrefetchTimeoutHoldOff). Its ": server" phase
+    /// reading 0 then means "nobody fetched it", not "it was already here" - which is why a slot with
+    /// no request behind it prints nothing rather than a pair of zeroes.
+    ///
     /// Written because the first measurement of that wait (1.13.2) came out at 1.2 to 1.4 seconds
     /// with the server accounting for under a tenth of it - and nothing could say where the rest
     /// went. Every phase is one <see cref="Mark"/>, <see cref="MarkSplit"/> or <see cref="Add"/> on

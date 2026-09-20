@@ -1,3 +1,44 @@
+# Quest Tracker 1.18.4
+
+**The map stops flickering and resetting when you click a dropdown.** Opening the map picker, closing
+it and re-picking the map already shown changed nothing about the map, yet each threw away the
+picture, the mask, the pan handler, every place name and up to two hundred-odd pins to draw the same
+thing - a visible flash, and pan and zoom back to a fresh fit. The viewport is kept across a rebuild
+that would draw the identical map (map, floor, statuses, marker payload, picture, settings, selected
+quest, panel size) and thrown away for one that would not; the sidebar and pickers are still rebuilt
+every time, F still refits, and panning and zooming are untouched.
+
+**The pin count says how many pins are on the map.** It printed the marker payload's total, so "340
+pins" sat over a map showing twelve of them with accepted-only on, or past the 200-pin cap. It reads
+"12 of 340 pins" when fewer are drawn than the payload holds, and plain "340 pins" when they all are.
+
+**A server that has stopped answering costs one wait, not four.** A prefetch that times out left each
+payload uncached, so the game's own thread went and proved the same silence again, fifteen seconds per
+payload. Those payloads are answered as unavailable for thirty seconds instead - no request, nothing
+cached, nothing latched, expiring on its own; a payload the budget never reached inherits the hold-off
+of the one that hung. A refused connection or a missing route is unchanged. A batch the panel gave up
+on is cancelled as well as dropped, so its worker stops duplicating round trips the call sites are
+already re-issuing.
+
+**Refresh always asks.** Every Refresh link on the four aux tabs clears those hold-offs and the
+markers' empty-answer window before refetching - pressing it is the player saying "ask now", and on
+the Kappa tab the button under "the server cannot be reached" did nothing for half a minute. A hand-in
+does not clear them: it says the answer changed, not that the server started answering. A change of
+profile or server clears both.
+
+## Also
+
+- One combined warning line per batch names the payloads that did not answer, instead of one line
+  each about the same hanging server. The open line counts only requests actually issued, so a slot
+  the budget skipped or cancellation stopped no longer prints a `: prefetch 0` pair or inflates the
+  round-trip count.
+- A settings generation counter, bumped by every setting change and section reset, feeds the map's
+  keep-or-rebuild test. One number rather than named entries, because the pin colours reach the map
+  without it reading a setting - named entries left every pin in the old palette after an F12 colour
+  change.
+
+---
+
 # Quest Tracker 1.18.3
 
 **Opening the tracker stops freezing the game on four more fetches.** The profile, Kappa, pre-raid

@@ -164,6 +164,34 @@ namespace QuestTree.QuestGraph
             // sitting there, and the next open would take THAT failure and latch it for the session
             // instead of asking again. A finished fetch that HAS a list is kept - it is the answer.
             if (_fetch != null && _fetch.IsCompleted && !Succeeded(_fetch)) _fetch = null;
+
+            // And the post-timeout hold-offs, for the same reason the flags above go: this call IS the
+            // retry, and a window that outlived it would answer the retry with the failure it was
+            // granted to get past.
+            ClearHoldOffs();
+        }
+
+        /// <summary>Forgets every post-timeout hold-off, so the next call to each getter asks the server
+        /// again rather than being answered from <see cref="PrefetchTimeoutHoldOff"/>.
+        ///
+        /// For an explicit retry and nothing else. An Invalidate* deliberately does NOT come through
+        /// here - it says the ANSWER changed, not that the server started answering, and a hand-in
+        /// invalidating the profile four times a minute would spend the window it exists to keep. A
+        /// player pressing Refresh is the other thing entirely: they are looking at a map with no pins
+        /// or a cue saying nothing, and "try again now" is the whole content of the press. Whether the
+        /// server has in fact come back is then measured the way it always was - on the main thread,
+        /// behind the notice, once.
+        ///
+        /// The markers' empty-answer window goes with them, because to the player pressing Refresh on a
+        /// map with no pins the two are one symptom - a server that answered "no markers" and a server
+        /// that did not answer at all both leave the same bare map under the same button.
+        ///
+        /// Main thread only, like every write to those fields.</summary>
+        public static void ClearHoldOffs()
+        {
+            for (var i = 0; i < _prefetchTimedOutUntil.Length; i++) _prefetchTimedOutUntil[i] = DateTime.MinValue;
+
+            _markersRetryAt = DateTime.MinValue;
         }
 
         private static ProfileBuildsDto _builds;
@@ -697,6 +725,28 @@ namespace QuestTree.QuestGraph
             /// <summary>Why there is no value, for the line the main thread writes. Nothing is logged
             /// on the worker, exactly as in FetchQuestsOffThread, so the panel's log order holds.</summary>
             public string Failure;
+
+            /// <summary>Whether a request for this payload was actually put to the server. False for a
+            /// slot the budget skipped or cancellation stopped, which is what the fetch counters have
+            /// to tell apart: FetchCount is "how many round trips this open made", and a slot nobody
+            /// asked for made none.</summary>
+            public bool Requested;
+
+            /// <summary>Whether the request was still unanswered when the cap fired - the
+            /// accept-then-hang server, not a refused connection or an unregistered route, both of
+            /// which come back in milliseconds. The main thread turns this into that payload's
+            /// hold-off, so it is a flag and not a message: a sentence in <see cref="Failure"/> is for
+            /// a log line, never a fact to decide on.</summary>
+            public bool TimedOut;
+
+            /// <summary>Whether the BUDGET is why this payload was never asked for, as against
+            /// cancellation, which is the other way a slot comes back unrequested. The two have to be
+            /// told apart on the main thread and a <see cref="Failure"/> sentence is not a fact to
+            /// decide on: a budget-skipped slot in a batch that also timed out inherits that
+            /// timeout's hold-off (see <see cref="ApplyTimeoutHoldOffs"/>), where a cancelled one
+            /// inherits nothing - the panel gave up on it, the server never got the chance to be
+            /// slow about it, and its getter is about to ask for itself.</summary>
+            public bool Skipped;
         }
 
         /// <summary>What one prefetched payload cost, for the open-time line. <see cref="Name"/> is
@@ -728,14 +778,113 @@ namespace QuestTree.QuestGraph
         /// full timeout after the last request starts and still comes in under that cap.</summary>
         private static readonly TimeSpan PrefetchBudget = TimeSpan.FromSeconds(20);
 
+        /// <summary>How long a payload whose PREFETCH timed out is answered as unavailable without a
+        /// request of its own.
+        ///
+        /// For the server that accepts the connection and then hangs, which is the worst case this
+        /// whole path has: without it the batch spends its budget proving the server does not answer,
+        /// the panel gives up on it, and then each getter goes and blocks Unity's thread for another
+        /// fifteen seconds proving the same thing - four times over, once per payload. The prefetch
+        /// already knows, so for half a minute the getters are told instead of finding out again.
+        ///
+        /// All four of them, which takes the inheritance in <see cref="ApplyTimeoutHoldOffs"/> and not
+        /// this window alone: <see cref="PrefetchBudget"/> is twenty seconds and
+        /// <see cref="RequestTimeout"/> fifteen, and the budget is tested BEFORE each request, so a
+        /// batch against a hanging server issues exactly two requests - at 0 s and at 15 s - and skips
+        /// the rest at 30 s. A skipped slot never went to the server and so has no timeout of its own to
+        /// report; it inherits the hold-off of the slot that ate the budget hanging. Without that, the
+        /// two payloads at the back of the batch kept no hold-off and their getters blocked the frame
+        /// thread for fifteen seconds each, inside the very open this exists to keep free of it.
+        ///
+        /// So the bound this states is: against an accept-then-hang server, the first batch costs at
+        /// most two <see cref="RequestTimeout"/>s and pays all of it on the WORKER, and every getter for
+        /// the next thirty seconds - all four of them, on the Maps tab, which is the open that reads the
+        /// lot - answers from this array without touching the main thread. Zero seconds of freeze after
+        /// the first batch, where it used to be four fifteens.
+        ///
+        /// Thirty seconds is two full <see cref="RequestTimeout"/>s: as long as the batch that measured
+        /// it could possibly have taken, and short enough that a server which has come back is asked
+        /// again within the same menu session. Not longer, deliberately - during the window the map
+        /// draws no pins and the pre-raid cue says nothing, which is the wrong answer to give for long
+        /// about a server that only hiccupped once.
+        ///
+        /// NOT a latch, and the difference is the point:
+        ///   - nothing is written into any payload's cache or its "attempted" flag, so no failure is
+        ///     remembered as an answer - the getter returns its documented unavailable value (null for
+        ///     the profile, raid check and markers; Unreachable for Kappa) and forgets it;
+        ///   - it expires by itself, so the next open past the window fetches exactly as it always did,
+        ///     and <see cref="ClearHoldOffs"/> lets the player say "now" rather than wait it out;
+        ///   - only a TIMEOUT sets it - either the payload's own or, for a payload the budget never
+        ///     reached, the one that ate the budget in the same batch (<see cref="ApplyTimeoutHoldOffs"/>,
+        ///     which is also where the two cases that inherit NOTHING are written down). A refused
+        ///     connection and SPT's empty body for an unregistered route come back in milliseconds and
+        ///     cost the main thread nothing worth avoiding, so those keep their existing behaviour - the
+        ///     getter asks, fails fast and latches as before, which is what RetryFailedFetches undoes.
+        ///
+        /// Written on the main thread only (TryTakeAll). Read there too (the four getters and
+        /// BeginAll's gates) with ONE exception, which is not new to this field: the pre-raid button
+        /// calls GetRaidCheck on a pool thread - MatchMakerAcceptScreenPatch.ApplyVerdict - so the
+        /// RaidCheck entry can be read off the main thread, unsynchronised, exactly as
+        /// _raidCheckAttempted and _raidCheck already are on that same path. Left that way on purpose:
+        /// a DateTime is one 64-bit field, so on the x64 client the read cannot tear, and the worst a
+        /// stale read can do either way is let one request through or hold one payload back for a
+        /// moment - never a wrong answer, because nothing here is cached. The prefetch worker itself
+        /// never touches this array at all. Indexed by <see cref="EPayload"/> and sized from it, for
+        /// _generations' reason.</summary>
+        private static readonly TimeSpan PrefetchTimeoutHoldOff = TimeSpan.FromSeconds(30);
+
+        /// <summary>When each payload may be asked for again, DateTime.MinValue meaning "now". That is
+        /// what a fresh DateTime[] holds, which is the same "no hold-off" value
+        /// <see cref="_markersRetryAt"/> and _buildsRetryAt use - relied on here, not a coincidence.</summary>
+        private static readonly DateTime[] _prefetchTimedOutUntil = new DateTime[Enum.GetValues(typeof(EPayload)).Length];
+
+        /// <summary>Whether this payload's prefetch timed out recently enough that neither its getter
+        /// nor the next batch should go and wait on the same server again - see
+        /// <see cref="PrefetchTimeoutHoldOff"/>.</summary>
+        private static bool TimedOutRecently(EPayload payload) =>
+            DateTime.UtcNow < _prefetchTimedOutUntil[(int)payload];
+
         /// <summary>The batch <see cref="BeginAll"/> started, until <see cref="TryTakeAll"/>
         /// publishes it. Main-thread only, like _fetch: the worker only ever fills and RETURNS the
         /// slots it was handed.</summary>
         private static Task<List<PrefetchSlot>> _prefetch;
 
+        /// <summary>Cancels the batch above, one per batch, so a batch nobody is waiting for any more
+        /// stops asking the server for things the getters are already asking for themselves.
+        ///
+        /// Without it, giving up on a batch (see <see cref="DropPrefetch"/>) left an orphan worker
+        /// that went on issuing all four requests while the main thread's getters re-issued the same
+        /// four - up to four duplicate round trips, one of them the raid check's whole-inventory walk,
+        /// against a server already slow enough to have missed the panel's deadline.
+        ///
+        /// It can only stop requests not yet ISSUED: RequestHandler.GetJsonAsync in the installed
+        /// spt-common takes a path and nothing else (verified against the assembly - no token
+        /// overload), so the one already in flight runs to completion on the pool thread and its
+        /// answer is dropped, exactly as an abandoned batch's answers always were.
+        ///
+        /// Never disposed, deliberately: nothing registers a callback or asks for its WaitHandle, so
+        /// the source holds nothing that needs releasing, and disposing it would only put an
+        /// ObjectDisposedException in the way of the worker's token reads. Main-thread only, like
+        /// _prefetch itself.</summary>
+        private static CancellationTokenSource _prefetchCancel;
+
         /// <summary>Whether the batch is still running. False the moment it has finished - finished
         /// and unpublished is not pending, it is ready.</summary>
         public static bool IsPrefetchPending => _prefetch != null && !_prefetch.IsCompleted;
+
+        /// <summary>Lets go of the batch and tells its worker to stop at the next request boundary.
+        /// Every path that stops caring about a batch goes through here, so none of them can leave a
+        /// worker running requests nobody will read - see <see cref="_prefetchCancel"/>.</summary>
+        private static void DropPrefetch()
+        {
+            _prefetch = null;
+
+            var cancel = _prefetchCancel;
+            _prefetchCancel = null;
+
+            // A no-op on a batch that has already finished, which two of the callers have.
+            cancel?.Cancel();
+        }
 
         /// <summary>Starts everything an open fetches, off the main thread: the quest list exactly as
         /// <see cref="BeginFetchAll"/> does, plus whichever of the profile, Kappa, raid check and map
@@ -765,7 +914,7 @@ namespace QuestTree.QuestGraph
             // pass the guard and latch as this open's. Dropped here, which leaves every gate below
             // reading "uncached" and asking again; nothing is published, and nothing is charged to
             // this open's clock.
-            if (_prefetch != null && _prefetch.IsCompleted) _prefetch = null;
+            if (_prefetch != null && _prefetch.IsCompleted) DropPrefetch();
 
             if (_prefetch != null) return;
 
@@ -780,25 +929,39 @@ namespace QuestTree.QuestGraph
             }
 
             // Each test is its own getter's cache gate, so "already cached" here means exactly what
-            // "answers without a request" means there - a remembered failure included, and the map
-            // markers' empty-answer hold-off too.
+            // "answers without a request" means there - a remembered failure included, the map
+            // markers' empty-answer hold-off, and the post-timeout hold-off every one of the four now
+            // has (see TimedOutRecently). That last one is the whole point of it: a payload the getter
+            // is about to answer as unavailable without a request must not be asked for here either,
+            // or the next open would spend another fifteen seconds of worker on the hang it just
+            // measured.
             var wanted = new List<PrefetchSlot>();
 
-            if (!_profileAttempted) wanted.Add(NewSlot(EPayload.Profile));
-            if (_kappaResult == null) wanted.Add(NewSlot(EPayload.Kappa));
-            if (!_raidCheckAttempted) wanted.Add(NewSlot(EPayload.RaidCheck));
-            if (!_markersAttempted && DateTime.UtcNow >= _markersRetryAt) wanted.Add(NewSlot(EPayload.Markers));
+            if (!_profileAttempted && !TimedOutRecently(EPayload.Profile)) wanted.Add(NewSlot(EPayload.Profile));
+            if (_kappaResult == null && !TimedOutRecently(EPayload.Kappa)) wanted.Add(NewSlot(EPayload.Kappa));
+            if (!_raidCheckAttempted && !TimedOutRecently(EPayload.RaidCheck)) wanted.Add(NewSlot(EPayload.RaidCheck));
+            if (!_markersAttempted && DateTime.UtcNow >= _markersRetryAt && !TimedOutRecently(EPayload.Markers))
+                wanted.Add(NewSlot(EPayload.Markers));
 
             if (wanted.Count == 0) return;
 
             try
             {
-                _prefetch = Task.Run(() => FetchPayloadsOffThread(wanted));
+                // The token is taken here, on the main thread, and closed over as a VALUE: the worker
+                // must never read _prefetchCancel itself, which the next batch overwrites.
+                var cancel = new CancellationTokenSource();
+                var token = cancel.Token;
+
+                _prefetchCancel = cancel;
+                _prefetch = Task.Run(() => FetchPayloadsOffThread(wanted, token));
             }
             catch (Exception ex)
             {
                 // A pool that cannot take work at all. Left null, so TryTakeAll answers true with
-                // nothing to publish and every getter fetches at its own call site, as before.
+                // nothing to publish and every getter fetches at its own call site, as before. The
+                // source goes with it - there is no worker to stop.
+                _prefetchCancel = null;
+
                 Plugin.LogSource?.LogWarning($"QuestTree: could not start the payload prefetch ({ex.Message}).");
             }
         }
@@ -808,24 +971,41 @@ namespace QuestTree.QuestGraph
 
         /// <summary>Stops waiting on the batch in flight and leaves nothing behind, so the next
         /// <see cref="BeginAll"/> starts a fresh one. <see cref="AbandonFetch"/>'s reasoning exactly:
-        /// a worker that never comes back would otherwise be waited out on every later open. The
-        /// orphan is dropped, not cancelled - it can only ever fill slots nobody reads.</summary>
-        public static void AbandonAll() => _prefetch = null;
+        /// a worker that never comes back would otherwise be waited out on every later open.
+        ///
+        /// Cancelled as well as dropped, unlike the quest fetch: this worker still has up to three
+        /// requests left to issue, and the getters are about to issue those same three on the main
+        /// thread the moment this returns. See <see cref="_prefetchCancel"/> for what cancellation can
+        /// and cannot stop.</summary>
+        public static void AbandonAll() => DropPrefetch();
 
         /// <summary>Every wanted payload on one pool thread: request, deserialise, Sanitise, then the
         /// next one. No Unity API, no logging and no static state written in here - only the slots it
-        /// was handed, which is what makes it safe off the main thread, and the reason it cannot use
-        /// GetJson: that writes the fetch counters.</summary>
-        private static List<PrefetchSlot> FetchPayloadsOffThread(List<PrefetchSlot> slots)
+        /// was handed and the token it was handed, which is what makes it safe off the main thread,
+        /// and the reason it cannot use GetJson: that writes the fetch counters.</summary>
+        private static List<PrefetchSlot> FetchPayloadsOffThread(List<PrefetchSlot> slots, CancellationToken cancel)
         {
             var budget = System.Diagnostics.Stopwatch.StartNew();
 
             foreach (var slot in slots)
             {
+                // Before each request and never during one: nobody is waiting for this batch any
+                // more, and every payload left in it is one the main thread is about to ask for
+                // itself. Each remaining slot is still given its reason, so a batch that somehow
+                // reaches a publish explains itself in the log like any other failure.
+                if (cancel.IsCancellationRequested)
+                {
+                    slot.Failure = "the prefetch was given up on before this payload was asked for";
+                    continue;
+                }
+
                 if (budget.Elapsed > PrefetchBudget)
                 {
                     // Left absent rather than asked for late - see PrefetchBudget. Absent is the case
-                    // every one of these getters already handles.
+                    // every one of these getters already handles. Flagged as well as explained,
+                    // because what ate the budget decides what the main thread does with this slot -
+                    // see ApplyTimeoutHoldOffs.
+                    slot.Skipped = true;
                     slot.Failure = "the prefetch was out of time before this payload was asked for";
                     continue;
                 }
@@ -865,9 +1045,19 @@ namespace QuestTree.QuestGraph
             {
                 var request = RequestHandler.GetJsonAsync(route);
 
+                // The request is out, whatever comes of it. Set after the call rather than before, so
+                // a GetJsonAsync that throws on its way out is not counted as a round trip.
+                slot.Requested = true;
+
                 // The same cap GetJson applies, on a pool thread that has nothing else to do.
                 if (!request.Wait(RequestTimeout))
+                {
+                    // Recorded on the slot as well as in the message: this is the one failure the main
+                    // thread holds off on - see PrefetchTimeoutHoldOff.
+                    slot.TimedOut = true;
+
                     throw new TimeoutException($"no answer within {RequestTimeout.TotalSeconds:0}s");
+                }
 
                 var json = request.Result;
                 slot.ServerMillis = clock.ElapsedMilliseconds;
@@ -925,8 +1115,10 @@ namespace QuestTree.QuestGraph
             if (prefetch == null) return true;
             if (!prefetch.IsCompleted) return false;
 
-            // Cleared before anything below can throw, so one batch is applied exactly once.
-            _prefetch = null;
+            // Cleared before anything below can throw, so one batch is applied exactly once. Through
+            // DropPrefetch like every other let-go: the batch has finished, so the cancel is a no-op,
+            // and what matters is that the source does not outlive the batch it belonged to.
+            DropPrefetch();
 
             List<PrefetchSlot> slots;
 
@@ -942,6 +1134,10 @@ namespace QuestTree.QuestGraph
                 return true;
             }
 
+            // Before the publish loop, because it reads the batch as a WHOLE: what one slot's timeout
+            // means for a slot that was never reached cannot be decided one slot at a time.
+            var heldOff = ApplyTimeoutHoldOffs(slots);
+
             foreach (var slot in slots)
             {
                 if (slot == null) continue;
@@ -952,9 +1148,27 @@ namespace QuestTree.QuestGraph
                 // waited, and none of it is the main thread's to answer for. Into the same counters
                 // the synchronous fetches feed - see FetchMillis - so the open's remaining
                 // main-thread ": server" splits still measure only what the main thread did.
-                phases.Add(new PrefetchPhase(name, slot.ServerMillis, slot.ParseMillis));
-                FetchMillis += slot.ServerMillis;
-                FetchCount++;
+                //
+                // Only for a slot a request was actually ISSUED for, though. A slot the budget skipped
+                // or cancellation stopped never went to the server: it has no milliseconds to charge,
+                // and counting it made FetchCount - "how many round trips this open made" - report
+                // four where one was made. Its phase pair goes with it, because ": prefetch 0" next to
+                // a ": server" that is about to be the real fifteen seconds reads as the prefetch
+                // having covered a payload nobody asked for.
+                if (slot.Requested)
+                {
+                    phases.Add(new PrefetchPhase(name, slot.ServerMillis, slot.ParseMillis));
+                    FetchMillis += slot.ServerMillis;
+                    FetchCount++;
+                }
+
+                // The accept-then-hang server, and whatever inherited its hold-off. Placed before the
+                // generation guard below, because it is a fact about the SERVER rather than about this
+                // answer's freshness: an Invalidate* says the answer changed, not that the server
+                // started answering. There is never a value to publish on either path, ApplyTimeoutHoldOffs
+                // has already said so in one line, and the "will be fetched where it is used" line further
+                // down would be a lie about a payload now held off - so nothing else in the loop applies.
+                if (heldOff.Contains(slot.Payload)) continue;
 
                 // An Invalidate* while this was in flight means the answer predates the change the
                 // caller was announcing. Dropped, and nothing is cached, so the getter asks again at
@@ -1001,6 +1215,76 @@ namespace QuestTree.QuestGraph
             }
 
             return true;
+        }
+
+        /// <summary>Turns a finished batch's timeouts into hold-offs and returns every payload that now
+        /// has one, so the publish loop can leave those slots alone. One pass over the whole batch
+        /// rather than a test per slot, because of what it has to decide:
+        ///
+        /// a payload the BUDGET never reached inherits the hold-off of a payload that timed out in the
+        /// same batch. The evidence is the batch itself - a server that let one request sit for a full
+        /// <see cref="RequestTimeout"/> is not a healthy server for the next twenty seconds, and the
+        /// budget ran out precisely BECAUSE of that request. Without the inheritance the arithmetic
+        /// defeats the whole hold-off: <see cref="PrefetchBudget"/> is twenty seconds and the cap
+        /// fifteen, and the budget is tested before each request, so a batch against a hanging server
+        /// issues two requests (0 s and 15 s) and skips the rest at 30 s - leaving the last two
+        /// payloads with no hold-off and their getters to block the frame thread for fifteen seconds
+        /// each, inside the very open this exists to keep free of that.
+        ///
+        /// Two things deliberately do NOT inherit:
+        ///   - a CANCELLED slot (<see cref="PrefetchSlot.Skipped"/> false with nothing requested): the
+        ///     panel gave up on the batch, so the server never got the chance to be slow about that
+        ///     payload, and its getter is about to ask on the main thread by the caller's own choice;
+        ///   - anything at all in a batch where NOTHING timed out. A budget spent on requests that all
+        ///     answered says the server is slow, not silent, and a slow server still beats no answer -
+        ///     those getters ask as they always did.
+        ///
+        /// One log line for the batch, not one per payload: four lines saying the same thing about one
+        /// hanging server is how a log stops being read.</summary>
+        private static HashSet<EPayload> ApplyTimeoutHoldOffs(List<PrefetchSlot> slots)
+        {
+            var heldOff = new HashSet<EPayload>();
+            if (slots == null) return heldOff;
+
+            var timedOut = new List<string>();
+            var inherited = new List<string>();
+
+            foreach (var slot in slots)
+                if (slot != null && slot.TimedOut)
+                {
+                    heldOff.Add(slot.Payload);
+                    timedOut.Add(NameOf(slot.Payload));
+                }
+
+            // Nothing hung, so nothing is held off - not even a slot the budget skipped.
+            if (timedOut.Count == 0) return heldOff;
+
+            foreach (var slot in slots)
+                if (slot != null && slot.Skipped && !slot.TimedOut && !heldOff.Contains(slot.Payload))
+                {
+                    heldOff.Add(slot.Payload);
+                    inherited.Add(NameOf(slot.Payload));
+                }
+
+            var until = DateTime.UtcNow + PrefetchTimeoutHoldOff;
+            foreach (var payload in heldOff) _prefetchTimedOutUntil[(int)payload] = until;
+
+            var many = timedOut.Count > 1;
+            var line =
+                $"QuestTree: the {string.Join(", ", timedOut)} payload{(many ? "s" : "")} did not answer within " +
+                $"{RequestTimeout.TotalSeconds:0}s - treating {(many ? "them" : "it")} as unavailable for " +
+                $"{PrefetchTimeoutHoldOff.TotalSeconds:0}s rather than waiting for {(many ? "them" : "it")} again on " +
+                "the thread drawing frames";
+
+            if (inherited.Count > 0)
+            {
+                var manyMore = inherited.Count > 1;
+                line += $"; {string.Join(", ", inherited)} {(manyMore ? "were" : "was")} not asked for after that, " +
+                        $"so {(manyMore ? "they are" : "it is")} held off on the same evidence";
+            }
+
+            Plugin.LogSource?.LogWarning(line + ".");
+            return heldOff;
         }
 
         /// <summary>The phase prefix the open-time line prints for each payload, and the word the
@@ -1097,6 +1381,13 @@ namespace QuestTree.QuestGraph
         public static RaidCheckDto GetRaidCheck()
         {
             if (_raidCheckAttempted) return _raidCheck;
+
+            // The prefetch waited out the full cap on this one - and this is the payload whose request
+            // is the expensive one, a walk of the whole inventory. Null is the NEUTRAL answer, so the
+            // pre-raid screen shows nothing rather than a wrong "you are ready"; see
+            // PrefetchTimeoutHoldOff.
+            if (TimedOutRecently(EPayload.RaidCheck)) return null;
+
             _raidCheckAttempted = true;
 
             try
@@ -1182,6 +1473,13 @@ namespace QuestTree.QuestGraph
         public static ProfilePayloadDto GetProfile()
         {
             if (_profileAttempted) return _profile;
+
+            // The prefetch of this payload waited out the full cap a moment ago. Answered as
+            // unavailable - which is what null means here - rather than spending another fifteen
+            // seconds of the frame thread learning the same thing. Nothing is cached and the flag is
+            // deliberately left false: see PrefetchTimeoutHoldOff for why this is not a latch.
+            if (TimedOutRecently(EPayload.Profile)) return null;
+
             _profileAttempted = true;
 
             try
@@ -1272,6 +1570,12 @@ namespace QuestTree.QuestGraph
 
             if (_markersAttempted) return _markers;
             if (DateTime.UtcNow < _markersRetryAt) return _markers;
+
+            // And the same hold-off for the OTHER reason not to ask: the prefetch of this payload timed
+            // out. The line above is for a server that answered empty, this one for a server that did
+            // not answer at all; both return _markers, which is null here, and the map draws no pins.
+            if (TimedOutRecently(EPayload.Markers)) return _markers;
+
             _markersAttempted = true;
 
             try
@@ -1361,6 +1665,13 @@ namespace QuestTree.QuestGraph
         {
             if (_kappaResult != null) return _kappaResult;
 
+            // The prefetch of this payload timed out a moment ago. Unreachable is what the Kappa tab
+            // already explains in words for a server that cannot be reached, and it is deliberately NOT
+            // stored in _kappaResult: cached it would be a latched failure needing InvalidateKappa or
+            // RetryFailedFetches to undo, where this expires on its own - see PrefetchTimeoutHoldOff.
+            if (TimedOutRecently(EPayload.Kappa))
+                return KappaFetchResult.Failed(EKappaFetchStatus.Unreachable);
+
             _kappaResult = FetchKappa();
             return _kappaResult;
         }
@@ -1409,11 +1720,20 @@ namespace QuestTree.QuestGraph
             // the orphan finishes into a value nobody can read.
             _fetch = null;
 
-            // And the other four payloads' batch, for the same reason. The generations move with it,
-            // so even a batch handed to a take by some later path cannot publish what was fetched for
-            // the profile or server this call is forgetting.
-            _prefetch = null;
+            // And the other four payloads' batch, for the same reason. Cancelled as well as dropped -
+            // AbandonAll's reasoning - so its worker stops asking the server this call is forgetting for
+            // payloads nobody will read. The generations move with it, so even a batch handed to a take
+            // by some later path cannot publish what was fetched for the profile or server this call is
+            // forgetting.
+            DropPrefetch();
             for (var i = 0; i < _generations.Length; i++) Invalidated((EPayload)i);
+
+            // Every hold-off as well: a server that hung, or that answered with no markers at all, is the
+            // PREVIOUS server. A new one must be asked, not told for half a minute that the old one's
+            // silence still stands, nor kept off the markers for a minute over the old one's empty answer.
+            // That empty-answer window used to be cleared on its own line up above; ClearHoldOffs covers
+            // both, and nothing between here and there reads either field.
+            ClearHoldOffs();
         }
 
         // Every name the views will put inside rich text, made literal once here - see RichText.

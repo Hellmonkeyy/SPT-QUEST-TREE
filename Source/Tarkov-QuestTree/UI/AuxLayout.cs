@@ -20,16 +20,25 @@ namespace QuestTree.UI
     {
         public const float Padding = 16f;
 
-        /// <summary>Removes every child of a rebuilt container. Detached before the deferred
-        /// Destroy, so the outgoing rows do not draw over the incoming ones for a frame; walked
-        /// backwards because detaching shifts every later sibling down. Was three copies.</summary>
-        public static void ClearChildren(Transform parent)
+        /// <summary>Removes every child of a rebuilt container, bar one the caller names. Detached
+        /// before the deferred Destroy, so the outgoing rows do not draw over the incoming ones for
+        /// a frame; walked backwards because detaching shifts every later sibling down. Was three
+        /// copies.
+        ///
+        /// <paramref name="keep"/> exists for a child that is too expensive to rebuild when nothing
+        /// about it changed - the map's viewport, its picture and its pins (see
+        /// <see cref="MapView.KeptViewport"/>). Spared in place rather than lifted out and put back:
+        /// a child that is never unparented cannot be left an orphan by a throw in between, and it
+        /// stays the first sibling, which is the draw order a fresh build gives it anyway.</summary>
+        public static void ClearChildren(Transform parent, Transform keep = null)
         {
             if (parent == null) return;
 
             for (var i = parent.childCount - 1; i >= 0; i--)
             {
                 var child = parent.GetChild(i);
+                if (keep != null && child == keep) continue;
+
                 child.SetParent(null);
                 UnityEngine.Object.Destroy(child.gameObject);
             }

@@ -1572,19 +1572,35 @@ namespace QuestTree.UI
             // Detached before destroying (see AuxLayout.ClearChildren): that was invisible when
             // this ran once per tab click, but the Maps dropdown rebuilds the view on every open,
             // close and select, where the ghost frame reads as flicker.
-            AuxLayout.ClearChildren(_auxContent);
+            //
+            // The map's viewport is spared when the map is what is being built and nothing it draws
+            // has changed - a dropdown opening is the common case - and destroyed here otherwise,
+            // including on the way to any other AUX tab. A tree tab never reaches this method (see
+            // MapView.KeptViewport for why the viewport is allowed to outlive that visit).
+            AuxLayout.ClearChildren(_auxContent, MapView.KeptViewport(_selectedTraderId == MapsTabId));
 
             var size = AuxViewportSize();
 
             var height = _selectedTraderId == DoNextTabId
                 ? DoNextView.Build(_auxContent, _graph, size, FocusNode, () =>
                 {
+                    // First, and for the reason every Refresh link here calls it first - see
+                    // QuestDataClient.ClearHoldOffs. An Invalidate* alone would be answered from the
+                    // hold-off a timed-out prefetch left, so the press would redraw the same page.
+                    QuestDataClient.ClearHoldOffs();
+
                     QuestDataClient.InvalidateProfile();
                     RenderSelectedTab();
                 }, ShowOnMap)
                 : _selectedTraderId == MapsTabId
                 ? MapView.Build(_auxContent, _graph, RenderSelectedTab, () =>
                 {
+                    // First, because the two Invalidate* calls below deliberately do not do it and on
+                    // their own they would be answered from the hold-off a timed-out prefetch left -
+                    // a Refresh that repainted the same empty map. Pressing it is the player saying
+                    // "ask now"; see QuestDataClient.ClearHoldOffs.
+                    QuestDataClient.ClearHoldOffs();
+
                     QuestDataClient.InvalidateProfile();
 
                     // The raid check too: "Take with you" reads the same stash, and the whole
@@ -1601,12 +1617,20 @@ namespace QuestTree.UI
                 : _selectedTraderId == ItemsTabId
                 ? ItemWatchlistView.Build(_auxContent, _graph, size, FocusNode, () =>
                 {
+                    // First - see QuestDataClient.ClearHoldOffs, and the Do next link above.
+                    QuestDataClient.ClearHoldOffs();
+
                     QuestDataClient.InvalidateProfile();
                     RenderSelectedTab();
                 })
                 : _selectedTraderId == KappaTabId
                 ? KappaView.Build(_auxContent, _graph, size, FocusNode, () =>
                 {
+                    // First, and this is the tab where leaving it out showed worst: the page says the
+                    // server cannot be reached, and the Refresh button under that sentence did nothing
+                    // at all for half a minute. See QuestDataClient.ClearHoldOffs.
+                    QuestDataClient.ClearHoldOffs();
+
                     QuestDataClient.InvalidateKappa();
                     QuestDataClient.InvalidateProfile();
                     RenderSelectedTab();

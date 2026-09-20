@@ -129,6 +129,74 @@ namespace QuestTree.UI
         private static float _savedScale;
         private static Vector2 _savedPan;
 
+        /// <summary>The viewport of the last build, kept so the next one can reuse it.
+        ///
+        /// Opening a dropdown, closing it again and re-picking the entry already shown are the three
+        /// commonest clicks in this view and none of them changes the map, yet each one destroyed the
+        /// picture, the mask, the pan handler, every place name and up to two hundred-odd pins to
+        /// draw exactly the same thing. The sidebar and the pickers are cheap and are still rebuilt
+        /// every time; this is the part that was not.</summary>
+        private static GameObject _keptViewport;
+
+        /// <summary>Everything the kept viewport was built from, or null when there is nothing to
+        /// keep. A member here for anything a pin's position, colour, name or click target reads, so
+        /// a change to any of it misses and the viewport is rebuilt in full - which is why the graph
+        /// version, the marker payload and the pin-label mode are in it and not just the map's
+        /// identity. The two picker flags are deliberately absent: they are exactly the state that
+        /// is allowed to change without touching the map.</summary>
+        private static (string Map, int Level, int Version, MapMarkerSetDto Markers, int Art,
+            bool Started, bool Guides, bool Mirror, int Rotation,
+            ModSettings.PinLabelMode Labels, string Selected, int Width, int Height,
+            int Settings)? _keptFrom;
+
+        /// <summary>How many pins the kept viewport actually drew - see <see cref="BuildMarkers"/>,
+        /// which is the only thing that knows, and the sidebar's pin count, which is the only thing
+        /// that asks. Kept alongside the viewport because a build that keeps one draws no pins.</summary>
+        private static int _drawnMarkers;
+
+        /// <summary>The viewport the next build may keep, for the panel to spare while it clears the
+        /// aux content, or null when there is nothing to keep.
+        ///
+        /// Told whether the tab about to be built is this one, because a kept object nobody rebuilds
+        /// into is a leak with no symptom: this view is the only one that ever keeps a child, so on
+        /// the way to any other AUX tab the viewport is destroyed here instead of spared.
+        ///
+        /// A tree tab does not come through here at all - QuestTreePanel.RenderSelectedTab takes the
+        /// ShowGraph path and only deactivates the aux panel - so the viewport survives a visit to the
+        /// tree, inactive, and is reused when the map comes back. That is deliberate and safe rather
+        /// than an oversight: nothing on a tree tab can move what the map drew without moving the key
+        /// with it. The graph's statuses bump Graph.Version, GroupByMap reads no setting the tree
+        /// controls own, and any setting change at all bumps ModSettings.Generation, which is in the
+        /// key. If that ever stops being true, this is the line to call from ShowGraph.</summary>
+        public static Transform KeptViewport(bool mapTabShowing)
+        {
+            if (!mapTabShowing) DiscardViewport();
+
+            return _keptViewport != null ? _keptViewport.transform : null;
+        }
+
+        /// <summary>Destroys the kept viewport, if it still exists, and forgets what it was built
+        /// from. Detached first, exactly as AuxLayout.ClearChildren does it: Destroy is deferred to
+        /// the end of the frame, and a child still in the hierarchy would be walked - and drawn - by
+        /// the rest of this build.</summary>
+        private static void DiscardViewport()
+        {
+            _keptFrom = null;
+            _drawnMarkers = 0;
+
+            // Unity's null: true as well for a viewport already destroyed with the panel around it,
+            // which is how a torn-down menu leaves this static.
+            if (_keptViewport == null)
+            {
+                _keptViewport = null;
+                return;
+            }
+
+            _keptViewport.transform.SetParent(null);
+            UnityEngine.Object.Destroy(_keptViewport);
+            _keptViewport = null;
+        }
+
         /// <summary>Which map the view is showing. Static so it survives a re-render - switching map
         /// rebuilds the whole aux panel, and resetting to the first map each time would make the
         /// picker unusable.</summary>
@@ -267,6 +335,10 @@ namespace QuestTree.UI
         /// selected quest and saved view until it clicked past them.</summary>
         public static void ResetSession()
         {
+            // Including the viewport: it is the last profile's map, drawn from the last profile's
+            // statuses, and it is on screen until something replaces it.
+            DiscardViewport();
+
             _viewStateKey = null;
             _savedScale = 0f;
             _savedPan = Vector2.zero;
@@ -367,6 +439,10 @@ namespace QuestTree.UI
 
             if (byMap.Count == 0)
             {
+                // The clear spared the kept viewport for a build that then draws no map at all, so
+                // without this the last map would sit over this notice for the rest of the session.
+                DiscardViewport();
+
                 var empty = AuxLayout.Padding;
                 AuxLayout.AddHeading(parent, ref empty, "By map");
                 AuxLayout.AddText(parent, ref empty,
@@ -797,17 +873,62 @@ namespace QuestTree.UI
             if (_selectedQuestId != null && !shownIds.Contains(_selectedQuestId))
                 _selectedQuestId = null;
 
-            if (sprite != null)
+            // What this build would draw, against what the kept viewport was drawn from. Built here
+            // rather than at the top of the method because the selection is still being dropped
+            // three lines above: the key has to describe the pins that were actually drawn, not the
+            // ones the build set out to draw.
+            var key = (
+                Map: _selectedLocationKey,
+                Level: layer?.Level ?? int.MinValue,
+                Version: graph.Version,
+                Markers: MarkerSetFor(entry),
+                Art: sprite != null ? sprite.GetInstanceID() : 0,
+                Started: StartedOnly,
+                Guides: ShowGuides,
+                Mirror: MirrorArtwork,
+                Rotation: ArtworkRotation,
+                Labels: ModSettings.Ready ? ModSettings.PinLabels.Value : ModSettings.PinLabelMode.HoverOnly,
+                Selected: _selectedQuestId,
+                Width: Mathf.RoundToInt(mapWidth),
+                Height: Mathf.RoundToInt(height),
+                // Every OTHER setting, as one number - see ModSettings.Generation. The four map
+                // entries above are named because the map reads them itself; the pin colours it does
+                // not: they arrive through QuestNodeView.ColorFor and GameStyle.AccentColor, and
+                // changing one of those from the F12 menu raises Changed and re-renders the view with
+                // this key otherwise unmoved. The kept viewport then held every pin in the old palette
+                // beside a legend rebuilt in the new one.
+                Settings: ModSettings.Ready ? ModSettings.Generation : 0);
+
+            // Two things outside the key also have to reach the build. A fly-to is consumed in
+            // there, so keeping the viewport past one would leave the request to fire on whichever
+            // map renders next; and ResetView (F) asks for the floor to be fitted again, which is
+            // the one thing restoring the old pan and zoom refuses to do - _viewStateKey being null
+            // is how it says so.
+            var keep = sprite != null && _keptViewport != null &&
+                       _keptFrom.HasValue && _keptFrom.Value == key &&
+                       _pendingFocusQuestId == null && _viewStateKey != null;
+
+            // A kept viewport needs nothing done to it: it was never unparented, so it is still in
+            // place, still the first child of the content, and its pan and zoom are wherever the
+            // player left them. Everything else in this build is rebuilt exactly as before.
+            if (!keep)
             {
-                BuildMapViewport(parent, entry, layer, sprite, left, top, mapWidth, height, graph, shownIds, onRepaint);
-            }
-            else if (!spritePending)
-            {
-                // The focus request is consumed inside the viewport build, so with no viewport it
-                // would survive to fire on whichever map next renders - flying that map to a quest
-                // nobody asked about. A PENDING picture keeps it: the repaint that brings the map
-                // is the one that should fly to the quest.
-                _pendingFocusQuestId = null;
+                DiscardViewport();
+
+                if (sprite != null)
+                {
+                    _drawnMarkers = BuildMapViewport(
+                        parent, entry, layer, sprite, left, top, mapWidth, height, graph, shownIds, onRepaint);
+                    _keptFrom = key;
+                }
+                else if (!spritePending)
+                {
+                    // The focus request is consumed inside the viewport build, so with no viewport it
+                    // would survive to fire on whichever map next renders - flying that map to a quest
+                    // nobody asked about. A PENDING picture keeps it: the repaint that brings the map
+                    // is the one that should fly to the quest.
+                    _pendingFocusQuestId = null;
+                }
             }
 
             PanelOpenTimer.Mark("map: viewport+pins");
@@ -815,7 +936,8 @@ namespace QuestTree.UI
             var sidebarX = sprite != null ? left + mapWidth + AuxLayout.Padding : left;
             var sidebarSpan = sprite != null ? sidebarWidth : Mathf.Max(sidebarWidth, panelSize.x - AuxLayout.Padding * 2f);
 
-            BuildSidebar(parent, sidebarX, top, sidebarSpan, height, quests, visible, entry, sprite, spritePending, graph, onRepaint, onRefresh);
+            BuildSidebar(parent, sidebarX, top, sidebarSpan, height, quests, visible, entry, sprite,
+                spritePending, _drawnMarkers, graph, onRepaint, onRefresh);
             PanelOpenTimer.Mark("map: sidebar rows");
 
             return top + height + AuxLayout.Padding;
@@ -854,7 +976,8 @@ namespace QuestTree.UI
         private static void BuildSidebar(
             RectTransform parent, float x, float top, float width, float height,
             List<QuestNode> quests, List<QuestNode> visible, DynamicMapsLibrary.MapEntry entry,
-            Sprite sprite, bool spritePending, QuestGraphBuilder graph, Action onRepaint, Action onRefresh)
+            Sprite sprite, bool spritePending, int drawn, QuestGraphBuilder graph, Action onRepaint,
+            Action onRefresh)
         {
             var mapName = DisplayNameFor(_selectedLocationKey, quests);
             var set = MarkerSetFor(entry);
@@ -947,8 +1070,11 @@ namespace QuestTree.UI
             {
                 var facts = new List<string> { "Drag to pan, wheel to zoom" };
                 if (entry != null && entry.Layers.Count > 1) facts.Add($"{entry.Layers.Count} floors");
+                // Both numbers whenever the map is showing fewer pins than the payload holds - the
+                // accepted-only filter, or the not-started cap on a map with hundreds of spawns.
+                // "340 pins" over a map with twelve on it reads as pins that failed to draw.
                 var spawns = MarkerCountFor(entry);
-                if (spawns > 0) facts.Add($"{spawns} pins");
+                if (spawns > 0) facts.Add(drawn < spawns ? $"{drawn} of {spawns} pins" : $"{spawns} pins");
                 AddAt(content, $"<color=#FFFFFF60>{string.Join("  ·  ", facts)}</color>", listX, ref y, 18f, 11, inner);
 
                 // The pins encode two more things than the tree's legend covers - what kind of
@@ -1176,14 +1302,21 @@ namespace QuestTree.UI
         /// The viewport carries <see cref="PanZoomHandler"/>, the same component the quest graph
         /// uses. Handling drag and scroll there is also what stops the surrounding aux ScrollRect
         /// stealing the gesture: Unity delivers to the first handler it finds walking up.
+        ///
+        /// Returns how many pins were drawn, which only <see cref="BuildMarkers"/> knows and only
+        /// the sidebar's pin count asks for.
         /// </summary>
-        private static void BuildMapViewport(
+        private static int BuildMapViewport(
             RectTransform parent, DynamicMapsLibrary.MapEntry entry, DynamicMapsLibrary.MapLayer layer,
             Sprite sprite, float x, float y, float width, float height, QuestGraphBuilder graph,
             HashSet<string> shownIds, Action onRepaint)
         {
             var viewportGo = new GameObject(
                 "MapViewport", typeof(RectTransform), typeof(Image), typeof(RectMask2D));
+
+            // The one this build may be reused instead of; the caller records what it was built from.
+            _keptViewport = viewportGo;
+
             var viewport = (RectTransform)viewportGo.transform;
             viewport.SetParent(parent, worldPositionStays: false);
             viewport.anchorMin = viewport.anchorMax = new Vector2(0f, 1f);
@@ -1256,11 +1389,13 @@ namespace QuestTree.UI
             _savedPan = space.anchoredPosition;
 
             BuildPlaceLabels(space, entry, layer, panZoom);
-            BuildMarkers(space, entry, layer, panZoom, graph, shownIds, onRepaint);
+            var drawn = BuildMarkers(space, entry, layer, panZoom, graph, shownIds, onRepaint);
 
             // Last, so it overrides the restored pan and zoom above - and after the markers, since
             // FocusOn re-applies their counter-scale for the zoom it lands on.
             FocusPendingQuest(entry, layer, panZoom, fit);
+
+            return drawn;
         }
 
         /// <summary>
@@ -1614,15 +1749,18 @@ namespace QuestTree.UI
             return (clickId, status, clickId == null ? fallback : null);
         }
 
-        private static void BuildMarkers(
+        /// <summary>Draws the pins and returns how many it drew, which is the map's own count and not
+        /// the payload's: the accepted-only filter and the cap below both leave pins undrawn, and the
+        /// sidebar used to print the payload's total beside a map showing a fraction of it.</summary>
+        private static int BuildMarkers(
             RectTransform space, DynamicMapsLibrary.MapEntry entry,
             DynamicMapsLibrary.MapLayer layer, PanZoomHandler panZoom, QuestGraphBuilder graph,
             HashSet<string> shownIds, Action onRepaint)
         {
-            if (entry == null) return;
+            if (entry == null) return 0;
 
             var set = MarkerSetFor(entry);
-            if (set?.Markers == null) return;
+            if (set?.Markers == null) return 0;
 
             // Active quests first, then this floor, so the pin that draws on top of a pile is the
             // one you have started and could walk to right now.
@@ -1878,6 +2016,9 @@ namespace QuestTree.UI
                 placedAt = scale;
                 PlaceRestLabels(restLabels, scale);
             };
+
+            // The loop above makes one pin per entry and skips none, so this is the count drawn.
+            return ordered.Count;
         }
 
         /// <summary>A pin name that may be shown at rest: where it is, whether it is the selected

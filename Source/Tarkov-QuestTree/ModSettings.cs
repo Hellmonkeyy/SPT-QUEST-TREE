@@ -20,6 +20,17 @@ namespace QuestTree
         /// has to throw its pooled views away rather than just repaint.</summary>
         public static event Action<bool> Changed;
 
+        /// <summary>Bumped by every setting change, from either editor, and by a section reset. For a
+        /// view that keeps part of itself across a rebuild and has to decide whether anything it drew
+        /// from a setting has moved since - see MapView's kept viewport.
+        ///
+        /// ONE number rather than a list of the entries that happen to matter to that view: the pin
+        /// colours reach the map through QuestNodeView.ColorFor and GameStyle.AccentColor rather than
+        /// through any read the map itself makes, so naming entries meant the map kept pins in the old
+        /// palette after a colour was changed from the F12 menu. A counter cannot be short of an entry
+        /// added later either.</summary>
+        public static int Generation { get; private set; }
+
         public static ConfigEntry<bool> HideUnobtainable { get; private set; }
         public static ConfigEntry<bool> HideCompleted { get; private set; }
         public static ConfigEntry<bool> HideTraderless { get; private set; }
@@ -228,6 +239,7 @@ namespace QuestTree
             }
 
             ColorCache.Clear();
+            Generation++;
             Changed?.Invoke(true);
         }
 
@@ -610,6 +622,7 @@ namespace QuestTree
             if (_resetDepth > 0) return;
 
             ColorCache.Clear();
+            Generation++;
 
             // Node geometry changes with density, the node budget, and whether titles may take
             // two lines; those need the pooled views thrown away. Tooltips too: the component is
