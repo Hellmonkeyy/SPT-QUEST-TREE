@@ -180,10 +180,11 @@ namespace QuestTreeServer
         /// measured a map that had never been measured.</summary>
         private string? _extentLineLogged;
 
-        /// <summary>Map plus percentage-pin count already reported this boot. The count is an INPUT to
-        /// the calibration work, not a warning about this build, so it is said once rather than on
-        /// every rebuild - and keyed on the count as well, because a later harvest covering a quest
-        /// lowers it and the new number is the one to work from. Both fields are only ever touched
+        /// <summary>Map plus its kept and dropped percentage-pin counts, already reported this boot. The
+        /// kept count is an INPUT to the calibration work, not a warning about this build, so it is said
+        /// once rather than on every rebuild - and keyed on both counts, because a later harvest covering
+        /// a quest moves pins from kept to dropped and the new pair is the one to work from. A rebuild
+        /// after a harvest therefore says the line again, which is the point. Both fields are only ever touched
         /// inside _buildLock, which both callers of Build already hold.</summary>
         private readonly HashSet<string> _calibrationReported = new(StringComparer.OrdinalIgnoreCase);
 
@@ -270,8 +271,9 @@ namespace QuestTreeServer
             var payload = new MapMarkerPayloadDto { Version = ModInfo.Version };
             var wantedByLocation = BuildWantedItems();
 
-            // Per map, for the two boot lines at the end of this method.
-            var percentagePins = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+            // Per map, for the two boot lines at the end of this method: the percentage pins that
+            // survived the harvest filter (the calibration work) and the ones it dropped.
+            var percentagePins = new Dictionary<string, (int Kept, int Dropped)>(StringComparer.OrdinalIgnoreCase);
 
             // Grouped once here rather than scanned once per map below: with a few thousand modded
             // quests, thirteen maps each walking the whole table was the bulk of the build.
@@ -328,13 +330,19 @@ namespace QuestTreeServer
                         objectivesByMap[locationId!].Where(o => !harvested.CoveredQuestIds.Contains(o.QuestId))));
 
                     // Held rather than added straight in, so the pins that carry PERCENTAGES instead
-                    // of world coordinates can be counted: they are the only ones that cannot be
-                    // drawn from an extent alone, because a percentage is measured against whichever
-                    // map image its source used. Counted here and not by scanning markers for a
-                    // non-zero LeftPercent - an objective pin legitimately sitting at 0,0 of its image
-                    // would be missed, and a world-coordinate pin at x=0 would not.
-                    var gps = GpsMarkersFor(locationId!, questsByLocation, locale, harvested.CoveredQuestIds);
-                    markers.AddRange(gps);
+                    // of world coordinates can be filtered and counted: they are the only ones that
+                    // cannot be drawn from an extent alone, because a percentage is measured against
+                    // whichever map image its source used. Counted here and not by scanning markers
+                    // for a non-zero LeftPercent - an objective pin legitimately sitting at 0,0 of its
+                    // image would be missed, and a world-coordinate pin at x=0 would not.
+                    //
+                    // Every quest's percentage pins are built, the harvest-covered ones included, and
+                    // the drop happens in the one place below. Skipping them earlier would leave the
+                    // dropped count in the boot line reporting whatever this call declined to build
+                    // rather than what the payload actually lost.
+                    var gps = GpsMarkersFor(locationId!, questsByLocation, locale);
+                    var keptGps = KeepUncoveredPercentagePins(harvested.Markers, gps, out var droppedGps);
+                    markers.AddRange(keptGps);
 
                     // A map with nothing to pin and nothing to locate stays out - a harvest file
                     // alone (Ground Zero's other variant, aliased) is not a reason to list it.
@@ -356,7 +364,8 @@ namespace QuestTreeServer
                         Extent = zones?.Extent
                     });
 
-                    if (gps.Count > 0) percentagePins[internalName!] = gps.Count;
+                    if (keptGps.Count > 0 || droppedGps > 0)
+                        percentagePins[internalName!] = (keptGps.Count, droppedGps);
                 }
                 catch (Exception ex)
                 {
@@ -383,9 +392,13 @@ namespace QuestTreeServer
         ///
         /// The second is the input to the pin calibration: a percentage pin is placed against whichever
         /// map image its source measured against, so every one of them has to be re-checked once a map
-        /// carries an in-house picture instead. The count per map is how much of that work each map is.
+        /// carries an in-house picture instead. Only the pins that SURVIVED the harvest filter are
+        /// counted as that work - a dropped pin never reaches a picture, so calibrating it would be
+        /// calibrating something nobody sees. The dropped count is said alongside it so the two numbers
+        /// can be read against the previous boot's single one.
         /// </summary>
-        private void ReportExtents(MapMarkerPayloadDto payload, Dictionary<string, int> percentagePins)
+        private void ReportExtents(
+            MapMarkerPayloadDto payload, Dictionary<string, (int Kept, int Dropped)> percentagePins)
         {
             var withExtent = payload.Maps.Count(m => m.Extent != null);
             var line = $"Quest Tracker: {withExtent} of {payload.Maps.Count} maps carry a harvested extent.";
@@ -398,11 +411,12 @@ namespace QuestTreeServer
 
             foreach (var entry in percentagePins.OrderBy(e => e.Key, StringComparer.OrdinalIgnoreCase))
             {
-                if (!_calibrationReported.Add($"{entry.Key}|{entry.Value}")) continue;
+                if (!_calibrationReported.Add($"{entry.Key}|{entry.Value.Kept}|{entry.Value.Dropped}")) continue;
 
                 logger.Detail(
-                    $"Quest Tracker: {entry.Key} has {entry.Value} percentage pins that will need " +
-                    "calibration on an in-house picture.");
+                    $"Quest Tracker: {entry.Key} - {entry.Value.Kept} percentage pin(s) kept " +
+                    $"(no harvested pin for their quest yet), {entry.Value.Dropped} dropped as " +
+                    "covered by harvested pins.");
             }
         }
 
@@ -771,10 +785,13 @@ namespace QuestTreeServer
         /// Positions are passed through as percentages. The conversion needs the map image's
         /// rectangle and rotation, which live on the client with the rest of the map geometry, and
         /// duplicating that here is how a second source of truth gets born.
+        ///
+        /// Every quest's pins are built, the harvest-covered ones too. Which of them the payload keeps
+        /// is <see cref="KeepUncoveredPercentagePins"/>'s decision alone, so there is one place that
+        /// knows the rule and one count of what it dropped.
         /// </summary>
         private List<MapMarkerDto> GpsMarkersFor(
-            string locationId, Dictionary<string, List<Quest>> questsByLocation, Dictionary<string, string> locale,
-            HashSet<string> skipQuestIds)
+            string locationId, Dictionary<string, List<Quest>> questsByLocation, Dictionary<string, string> locale)
         {
             var markers = new List<MapMarkerDto>();
 
@@ -788,9 +805,6 @@ namespace QuestTreeServer
                 try
                 {
                     var questId = quest.Id.ToString();
-
-                    // A quest the harvest placed keeps the harvest's pins only.
-                    if (skipQuestIds.Contains(questId)) continue;
                     var questName = QuestPayloadBuilder.ResolveQuestName(quest, questId, locale);
 
                     foreach (var condition in quest.Conditions?.AvailableForFinish ?? [])
@@ -823,6 +837,70 @@ namespace QuestTreeServer
             }
 
             return markers;
+        }
+
+        /// <summary>
+        /// The percentage pins worth sending for one map: the ones whose quest the harvest has not
+        /// already placed there.
+        ///
+        /// A percentage pin states a point as a fraction across and down the image its SOURCE measured
+        /// against - tarkov.dev's map picture. Drawn against any other rectangle, including the one an
+        /// in-raid capture measures, it lands somewhere else. Where a raid has already harvested a
+        /// world-coordinate pin for the same quest on the same map, the percentage pin is therefore both
+        /// redundant and wrong, and the harvested one is strictly better: it is a real position from the
+        /// loaded scene, drawn through the map's own extent.
+        ///
+        /// Per QUEST, not per objective or per point: the harvested and percentage sources describe the
+        /// same quest through different condition ids and different geometry, so there is no honest way
+        /// to pair one pin with another. A quest the harvest reached on this map keeps the harvest's pins
+        /// alone; a quest it has not reached keeps all of its percentage pins, because for that quest
+        /// they are the only positions anything has.
+        ///
+        /// Both harvested kinds count as coverage. An item pin is where a raid actually found the thing
+        /// the quest wants - a world position for that quest on this map, the same as a zone pin.
+        ///
+        /// Pure and static so it can be tested on hand-built lists: the rule is the whole feature, and
+        /// the rest of this class needs a running SPT to reach.
+        /// </summary>
+        /// <param name="harvestedMarkers">This map's harvested markers, and only those. tarkov.dev's
+        /// world-coordinate objective pins are NOT harvest coverage - they are the same kind of
+        /// second-hand guess as the percentage pins, so they suppress nothing.</param>
+        /// <param name="percentagePins">This map's percentage pins.</param>
+        /// <param name="dropped">How many pins were dropped, for the boot line.</param>
+        internal static List<MapMarkerDto> KeepUncoveredPercentagePins(
+            IReadOnlyCollection<MapMarkerDto> harvestedMarkers,
+            IReadOnlyCollection<MapMarkerDto> percentagePins,
+            out int dropped)
+        {
+            dropped = 0;
+            if (percentagePins.Count == 0) return new List<MapMarkerDto>();
+
+            var harvestedQuestIds = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var marker in harvestedMarkers)
+            {
+                foreach (var questId in marker?.QuestIds ?? [])
+                    if (!string.IsNullOrWhiteSpace(questId)) harvestedQuestIds.Add(questId);
+            }
+
+            if (harvestedQuestIds.Count == 0) return percentagePins.ToList();
+
+            var kept = new List<MapMarkerDto>(percentagePins.Count);
+
+            foreach (var pin in percentagePins)
+            {
+                // A pin naming no quest cannot be covered by one, so it is kept: dropping it would
+                // silently lose a position on the strength of missing data.
+                if (pin != null && (pin.QuestIds?.Any(harvestedQuestIds.Contains) ?? false))
+                {
+                    dropped++;
+                    continue;
+                }
+
+                if (pin != null) kept.Add(pin);
+            }
+
+            return kept;
         }
 
         /// <summary>What the pin says. The objective's own localized text where there is one, since

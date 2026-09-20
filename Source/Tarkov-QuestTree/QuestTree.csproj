@@ -153,14 +153,15 @@
       <HintPath>$(ManagedPath)\UnityEngine.ImageConversionModule.dll</HintPath>
       <Private>False</Private>
     </Reference>
-    <!-- NavMesh.CalculateTriangulation, for the Phase 0 map-capture experiment's floor bands and
-         extent fallback. THROWAWAY together with QuestGraph/MapCaptureExperiment.cs - except that
-         Phase A wants the same triangulation, so this reference is likely to be kept. -->
+    <!-- NavMesh.CalculateTriangulation, which MapExtentProbe reads a map's extent and its floor
+         bands out of (the walkable world is the best measurement of a map there is - see that file's
+         ranking) and MapCapture then draws to. -->
     <Reference Include="UnityEngine.AIModule">
       <HintPath>$(ManagedPath)\UnityEngine.AIModule.dll</HintPath>
       <Private>False</Private>
     </Reference>
-    <!-- Terrain.activeTerrains, for the same experiment's second extent source. -->
+    <!-- Terrain.activeTerrains, MapExtentProbe's second-ranked extent source, for the maps with no
+         NavMesh to measure. -->
     <Reference Include="UnityEngine.TerrainModule">
       <HintPath>$(ManagedPath)\UnityEngine.TerrainModule.dll</HintPath>
       <Private>False</Private>

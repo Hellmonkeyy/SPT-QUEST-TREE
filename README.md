@@ -22,14 +22,17 @@ containing `EscapeFromTarkov.exe`) and let them merge. You should end up with:
 [SPT folder]\SPT_Runtime\user\mods\QuestTree\QuestTreeServer.dll
 [SPT folder]\SPT_Runtime\user\mods\QuestTree\zones\*.json
 [SPT folder]\SPT_Runtime\user\mods\QuestTree\cache\weapon-builds.json
+[SPT folder]\SPT_Runtime\user\mods\QuestTree\maps\*\*.jpg
 ```
 
 The archive also carries this README and the release notes beside those two folders; they are for
 reading, not for installing.
 
-The `zones` and `cache` files are data the mod ships so a fresh install starts with map zones already
-known and weapon builds already solved. Nothing breaks without them, but they come back slowly: a map's
-zones are learned by raiding it, and the builds improve a little on each server start. Keep them.
+The `zones`, `cache` and `maps` files are data the mod ships so a fresh install starts with map
+zones already known, weapon builds already solved and whatever map pictures were captured for this
+release. Nothing breaks without them, but they come back slowly: a map's zones are learned by
+raiding it, its picture by capturing it, and the builds improve a little on each server start. Keep
+them.
 
 Start the server first, then the game. A **Quest Tracker** button appears in the bottom taskbar, and
 **Ctrl+Q** opens the tracker from anywhere in the menu - including the raid ready-up screen, where
@@ -79,9 +82,78 @@ first time you load into it (the line above the map tells you how many zones it 
 the quest's status colour, name themselves on hover, and open the quest on click. **Accepted quests
 only** narrows the pins and the list to what you have actually taken.
 
-Map images are read from [DynamicMaps](https://github.com/mpstark/DynamicMaps)' own map folder when
-you have it - nothing is bundled, copied or redistributed, and each map's author is credited in the
-view. Without DynamicMaps you get the list alone.
+### Map pictures
+
+**A map's picture comes from one of three places, and you decide the order.** Settings > Map >
+**Map pictures come from**:
+
+- **DynamicMaps when it has the map, else my captures** - the default, so an install that has been
+  using [DynamicMaps](https://github.com/mpstark/DynamicMaps) sees the map it saw before.
+- **my captures when I have one, else DynamicMaps** - your own pictures first, its artwork for the
+  maps you have not captured.
+- **my captures only** - DynamicMaps is not consulted at all, and a map with no capture shows its
+  bounds and its pins.
+
+DynamicMaps is **optional** and nothing of it is bundled, copied or redistributed: its files are
+read out of its own folder when you have it, and each map's author is credited under the map. A
+picture your host holds is used right after your own capture of the same map, and never before it.
+
+**A map with no picture at all is still a map.** The rectangle a map occupies in game coordinates
+and its floor bands are measured during the same in-raid pass that harvests the quest zones, so one
+raid on a location - any location, including a modded one - is enough for it to draw: a plain dark
+backdrop over that rectangle, the alignment guides on, the floor picker working, and every pin
+where it belongs. The line above the map reads `No map picture yet - capture one in raid (Ctrl+F9)`
+and the credit line says `Map extent harvested in raid; no picture yet.`
+
+**Ctrl+F9 inside a raid takes the picture.** The game draws the map from straight above, one
+picture per floor band, and writes it beside the plugin. It needs *Harvest quest zones in raid* on
+(the picture is drawn to exactly the rectangle that harvest measured) and a living player in a raid;
+it is rebindable in the F12 menu under **Map > Capture map picture key**, including to nothing at
+all, and the Settings tab shows the key it is bound to without rebinding it. The work is spread over
+frames - a handful of short hitches, not one long freeze - and takes a second or two per floor.
+
+- **Press it again from somewhere else.** The game streams distant chunks out, so any one capture of
+  a large map has regions the camera found empty. Each press fills in what the earlier ones could
+  not see, and where two captures cover the same spot the one taken from closer wins, so a map gets
+  sharper rather than merely newer. The log line says how much was newly drawn, how much was kept
+  and how much is still empty.
+- **Roofs are in it.** The topmost floor is photographed from 300 m up, so buildings, roofs and
+  shadows draw rather than a set of floor slabs; a floor with another above it is shot from just
+  under that one, so the ceiling is what gets cut away.
+- **The colours are muted** and the highlights held back deliberately, so the picture reads as a map
+  and a coloured pin is the brightest thing on the screen. Water is left out - it renders as flat
+  cyan placeholder blocks from any camera that is not the player's - and the ground under it draws.
+- **A capture can be refused, and nothing is written when it is.** Too dark to be a map, which is
+  heavy weather or night: `QuestTree: bigmap "Ground" rendered too dark to be a map (p98 0.0087) -
+  nothing was written. Heavy weather or night; try again in daylight.` Or taken under different
+  light from the pictures already on disk, which cannot be merged into them without a seam:
+  `QuestTree: bigmap was captured under different light than the picture on disk (p98 0.0104 vs
+  0.5051 stored) - nothing was changed. Capture at a similar time of day to add to it, or delete
+  BepInEx/plugins/QuestTree/captures/bigmap to start over.`
+- **Capture resolution** is 4096 px on the longest side, or 2048 for files a quarter the size.
+  Neither ever draws more than two pixels to the metre.
+
+**The files land in `BepInEx\plugins\QuestTree\captures\<key>\`** - one PNG per floor, a
+`<key>.map.json` saying which world rectangle those pixels cover, and a `.dist.png` beside each
+floor that only the next capture's merge reads. Deleting a map's folder starts that map over.
+
+**Labels** are set by Settings > Map > **Map labels**: *Extracts only* (the default), *All* - which
+adds the cleaned-up bot zone names, a lot of text on a big map - or *None*. They are read from the
+scene, they are drawn on captured pictures only, and DynamicMaps' artwork keeps its author's own
+labels whatever this says.
+
+**Sharing is through the host.** A server started with `tools/server-host.cmd` - which sets
+`QUESTTREE_ACCEPT_MAPS=1` and nothing else - accepts uploaded pictures, and **Share captured maps**
+(on by default) offers each finished capture to it one floor at a time as a JPEG. Every client of
+that host then picks up the maps it does not have itself, once per session, the first time the Maps
+tab reaches a map nothing on that machine can already draw a picture of. A host without the variable
+refuses, says so in one line, and is not asked again that session; captures stay on the machine that
+took them. A solo player needs none of this - your own
+captures are read straight out of the folder above. The limits: one floor a post, up to 2.5 MB a
+floor and 8 floors a map, 20 MB a map and 300 MB in all on the host, and at most 60 MB downloaded
+per session. The credit line under a captured map is ours and names the build and the raid rather
+than a licence: `Map: captured in-game with Quest Tracker 1.19.0, 3 captures since 2026-09-19
+(10:49)`.
 
 ## The tree
 
@@ -378,6 +450,7 @@ around it.
 | `Esc` | Close the hint, then the quest detail, then the tracker |
 | `?` button | Show the controls hint again |
 | `Ctrl+Q` | Open or close the tracker from anywhere in the menu (rebindable in F12) |
+| `Ctrl+F9` | In a raid: take this map's picture for the Maps tab (rebindable in F12) |
 
 **The keys are split by view.** `F`, `M`, `X`, `C` and `/` are the tree's, and only fire there: on
 **Maps** the only keys are `F` and `[` `]`, and on **Do next**, **Items**, **Kappa** and **Settings**
@@ -403,7 +476,9 @@ to its own defaults from the last row in it.
   accepted are counted when working out what to take into a raid, how many "do next" rows, which
   pins carry their name at rest (hover only / in progress and available / all), sidebar width, the
   artwork rotation and mirror overrides, and the alignment guides that outline the area a map's
-  coordinates cover and mark its origin.
+  coordinates cover and mark its origin. Plus the map pictures: where they come from, which labels a
+  captured one carries, the capture resolution, and whether a capture is offered to the host. The
+  capture key itself is rebound in F12.
 - **Colours** - the six status colours (in progress, available, completed, level gated, locked,
   **failed**) and the accent, with presets in-game and any hex colour in F12, plus **Restore the
   pre-1.10 colours** for anyone who preferred the old palette.
@@ -475,8 +550,28 @@ report is worth the restart.
   host's half; the joiner's version is not the one that decides.
 - **A map says "not harvested yet"** - it is a map the release did not ship zones for. One raid on
   it fixes that for everyone on the server.
-- **A map has no image** - that map has no DynamicMaps image, which is expected for a few of them.
-  The quest list still works.
+- **A map has no picture** - nothing has drawn one yet: DynamicMaps does not ship that location, you
+  have not captured it, and no host has sent one. The map still draws its harvested rectangle with
+  every pin on it, and one raid with the capture key gives it a picture. See "Map pictures" above.
+- **A capture is black or has holes** - a black or nearly black picture is weather or night: our
+  capture camera gets the scene's direct sunlight, and heavy rain takes the sun away. That case is
+  refused rather than written, with `rendered too dark to be a map (p98 ...) - nothing was written.
+  Heavy weather or night; try again in daylight.`, so try it again in clear daylight. Holes - blank
+  regions in an otherwise good picture - are chunks the game had streamed out of memory because the
+  player was far from them; press the key again from another part of the map and the second capture
+  fills what the first could not see. The log line ends with how much of the floor is still empty.
+- **Uploads say the host does not accept map pictures** - that is the host opting out, which is the
+  default: a picture is the one thing a peer can post that everyone else then looks at. Start the
+  host's server from `tools/server-host.cmd` (it sets `QUESTTREE_ACCEPT_MAPS=1` and starts
+  `SPT.Server.exe`), or set that variable in whatever starts the server. The host's own log says
+  which mode it booted in - `Quest Tracker: map uploads from clients are accepted
+  (QUESTTREE_ACCEPT_MAPS=1).` or `... are declined (QUESTTREE_ACCEPT_MAPS=1 accepts them).` Your
+  captures are unaffected either way; they are read from your own folder.
+- **The map I captured is not shown** - the picture order prefers DynamicMaps by default, so on a
+  map it ships you get its artwork even after you have captured your own. Settings > Map > **Map
+  pictures come from** > *my captures when I have one, else DynamicMaps* (or *my captures only*)
+  switches it, and the map repaints. If the credit line still says "via DynamicMaps", the setting is
+  the reason.
 - **`tarkovdev-last-failure.txt` in `SPT_Runtime\user\mods\QuestTree`** - tarkov.dev could not be
   reached, so the server stops asking for a day rather than paying the attempt on every boot. Delete
   the file to retry sooner. A successful download lands beside it as `tarkovdev-quests.json` and

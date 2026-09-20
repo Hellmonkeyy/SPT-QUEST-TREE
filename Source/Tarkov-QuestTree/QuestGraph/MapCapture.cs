@@ -41,7 +41,16 @@ namespace QuestTree.QuestGraph
     ///   - a replacement unlit shader drew flat-coloured objects and NO terrain at all. Rejected.
     /// So: copy the live camera's settings (DeferredShading, HDR), render into a HALF-FLOAT target so
     /// the values survive, and do the exposure ourselves - a percentile stretch per floor, which needs
-    /// no scene knowledge and cannot blow out a night map. <see cref="BuildCamera"/>,
+    /// no scene knowledge and cannot blow out a night map.
+    ///
+    /// A daytime raid IN RAIN then showed that was not enough: the capture came back black with a few
+    /// specks, exposure 0.0000..0.5051 - every drawn pixel at exactly zero and a 98th percentile read
+    /// off a handful of emissive objects - where a sunny noon capture of the same map on the same code
+    /// was correct. Our camera receives the scene's DIRECT sun and nothing else; EFT's ambient and sky
+    /// light are produced by components on the first-person camera that CopyFrom does not bring. So the
+    /// capture brings a light of its own (<see cref="CaptureLightIntensity"/>), enabled only while a
+    /// tile renders, and a floor whose brightest 2 % is still under <see cref="MinUsableHigh"/> is
+    /// refused rather than developed into noise. <see cref="BuildCamera"/>,
     /// <see cref="RenderTile"/>, <see cref="Measure"/> and <see cref="Develop"/> are the whole of it.
     ///
     /// WHERE the camera goes is two rules, not one, and both were learnt from a picture that was
@@ -140,6 +149,31 @@ namespace QuestTree.QuestGraph
 
         private const float NearClip = 0.05f;
 
+        /// <summary>Intensity of the capture's OWN directional light. Tunable, and the one number to
+        /// change if pictures come out too dark or washed out; changing it changes
+        /// <see cref="LightingTag"/>, which makes every capture taken under the old value be replaced
+        /// rather than merged into - see <see cref="LoadPrevious"/>.
+        ///
+        /// It exists because of a daytime Customs raid IN RAIN: the capture came back black with a few
+        /// specks, its exposure reading 0.0000..0.5051, which is every drawn pixel at exactly zero and
+        /// a 98th percentile taken from a handful of emissive objects. A sunny noon capture of the same
+        /// map with the same code was bright and correct. So our camera receives the scene's DIRECT
+        /// sunlight and nothing else: EFT's ambient and sky lighting come out of its own pipeline, on
+        /// components attached to the first-person camera (SSAA, Prism) that a CopyFrom deliberately
+        /// does not bring. Overcast weather removes the sun, and with it everything we had.
+        ///
+        /// A light of our own is the fix that needs no knowledge of that pipeline: deferred shading
+        /// SUMS lights, so the scene's sun still draws its shadows when there is one, and this
+        /// guarantees a floor of illumination when there is not.</summary>
+        private const float CaptureLightIntensity = 1.5f;
+
+        /// <summary>What the meta records about how a capture was lit, and what a later capture has to
+        /// match before it may be merged into it. "own-1.5" is the current lighting; a capture from
+        /// before this light existed records nothing and is therefore replaced, which is what has to
+        /// happen to the black rain-era pictures.</summary>
+        private static string LightingTag =>
+            "own-" + CaptureLightIntensity.ToString("0.###", CultureInfo.InvariantCulture);
+
         /// <summary>Added to the far plane so the band's own floor is comfortably inside it rather
         /// than exactly on it.</summary>
         private const float FarClipSlack = 1f;
@@ -192,6 +226,13 @@ namespace QuestTree.QuestGraph
         /// numbers and the accepted case prints the drift as a percentage in the debug log, so the
         /// threshold can be moved from evidence rather than from this paragraph.</summary>
         private const float MaxExposureDrift = 0.35f;
+
+        /// <summary>The dimmest 98th percentile a FRESH capture may have and still be a map. Below
+        /// this, the picture is the rain capture: a black field with a few emissive specks in it, whose
+        /// percentile stretch would multiply near-nothing by two hundred and write noise. 0.02 of
+        /// linear white is far under anything daylight produces and far over what an unlit scene
+        /// does.</summary>
+        private const float MinUsableHigh = 0.02f;
 
         /// <summary>The narrowest luminance range the stretch will believe. Under it the floor is one
         /// flat tone - a picture of nothing, or a bug - and stretching it would amplify noise into a
@@ -298,6 +339,11 @@ namespace QuestTree.QuestGraph
         private bool _warnedOnPoll;
 
         private Camera _camera;
+
+        /// <summary>The capture's own light - see <see cref="CaptureLightIntensity"/>. Enabled only
+        /// for the instant each tile renders, so the player's own view is never lit by it.</summary>
+        private Light _light;
+
         private RenderTexture _rt;
 
         /// <summary>The texture each tile is read back into, one tile wide and tall, reused for every
@@ -1193,6 +1239,18 @@ namespace QuestTree.QuestGraph
                     return null;
                 }
 
+                if (!string.Equals(meta.Lighting, LightingTag, StringComparison.Ordinal))
+                {
+                    // The lighting is part of what a pixel's brightness MEANS. A capture taken before
+                    // the capture light existed records no lighting at all and is one of the black
+                    // rain-era pictures this replaces; one taken at a different intensity would merge
+                    // into a visible seam.
+                    Fresh(plan, string.IsNullOrEmpty(meta.Lighting)
+                        ? $"it was taken before the capture light existed, and this one is lit {LightingTag}"
+                        : $"it was lit {meta.Lighting} and this one is lit {LightingTag}");
+                    return null;
+                }
+
                 var gamma = needsGamma ? 1f / 2.2f : 1f;
 
                 foreach (var floor in meta.Floors)
@@ -1518,6 +1576,22 @@ namespace QuestTree.QuestGraph
 
             var low = Percentile(samples, ExposureLowPercentile);
             var high = Percentile(samples, ExposureHighPercentile);
+
+            // The check the rain capture would have failed. Judged on the RAW linear percentile,
+            // before any stretch: a floor whose brightest 2 % is under a fiftieth of white was not lit,
+            // and stretching it would multiply a near-nothing by two hundred and write a field of
+            // noise with a few emissive specks in it - which is exactly the picture that came back,
+            // 80 kB for two million pixels, and which the stretch reported as a successful
+            // 0.0000..0.5051 exposure. A fresh capture is therefore refused outright rather than
+            // developed; a merge cannot reach this, because a merge keeps the exposure the first
+            // capture stored and never measures.
+            if (high < MinUsableHigh)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: {plan.Key} \"{floor.Dto.Name}\" rendered too dark to be a map (p98 {E(high)}) - " +
+                    "nothing was written. Heavy weather or night; try again in daylight.");
+                return null;
+            }
 
             // The percentiles can sit on top of each other on a floor that is mostly one tone - a
             // basement, or a render that failed - and then the full range is the better description.
@@ -1967,8 +2041,10 @@ namespace QuestTree.QuestGraph
             _camera.useOcclusionCulling = false;
             _camera.allowMSAA = false;
             _camera.depth = -100f;
-            _camera.cullingMask = CaptureMask(copied);
+            var mask = CaptureMask(copied);
+            _camera.cullingMask = mask;
 
+            BuildLight(mask);
             BuildTarget();
 
             // Assigned for the whole capture, not per tile: WorldToScreenPoint reads the camera's
@@ -1980,7 +2056,47 @@ namespace QuestTree.QuestGraph
                 ? $"{note}, half-float target"
                 : $"{note}, EIGHT-BIT target (no half-float support)";
 
+            if (_light != null)
+            {
+                note = $"{note}, own light {CaptureLightIntensity.ToString("0.###", CultureInfo.InvariantCulture)}";
+            }
+
             return true;
+        }
+
+        /// <summary>Adds the capture's own directional light, disabled. Straight DOWN, so it casts no
+        /// long shadows of its own and the scene's sun keeps whatever shadows it is drawing; white,
+        /// shadowless, per-pixel, and on exactly the layers the capture draws, so it lights the map and
+        /// nothing else. A failure here is one debug line: a capture in sunlight does not need it.</summary>
+        /// <param name="mask">The capture's culling mask, so the light reaches what the camera sees.</param>
+        private void BuildLight(int mask)
+        {
+            try
+            {
+                var go = new GameObject("QuestTreeCaptureLight");
+                go.transform.SetParent(null, worldPositionStays: true);
+                go.transform.rotation = Quaternion.Euler(90f, 0f, 0f);
+
+                _light = go.AddComponent<Light>();
+                _light.type = LightType.Directional;
+                _light.color = Color.white;
+                _light.intensity = CaptureLightIntensity;
+                _light.shadows = LightShadows.None;
+                _light.cullingMask = mask;
+                _light.renderMode = LightRenderMode.ForcePixel;
+
+                // Off until a tile is actually being rendered - see RenderOnce. A directional light
+                // left enabled would light the player's own frame as well, which is a cheat and looks
+                // like one.
+                _light.enabled = false;
+            }
+            catch (Exception ex)
+            {
+                _light = null;
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: the capture's own light could not be made ({ex.GetType().Name}: {ex.Message}) - " +
+                    "the picture will be as bright as the scene's own lighting makes it.");
+            }
         }
 
         /// <summary>The render target and the texture tiles are read back into, half-float when the
@@ -2053,10 +2169,16 @@ namespace QuestTree.QuestGraph
             try
             {
                 RenderSettings.fog = false;
+                if (_light != null) _light.enabled = true;
+
                 _camera.Render();
             }
             finally
             {
+                // Both restored by the same statement that changed them, and for the same reason: the
+                // player's next frame must be drawn with the scene's own fog and the scene's own
+                // lights, not ours.
+                if (_light != null) _light.enabled = false;
                 RenderSettings.fog = fog;
             }
         }
@@ -2162,6 +2284,14 @@ namespace QuestTree.QuestGraph
                     _camera.targetTexture = null;
                     _camera = null;
                     Destroy(go);
+                }
+
+                if (_light != null)
+                {
+                    var light = _light.gameObject;
+                    _light.enabled = false;
+                    _light = null;
+                    Destroy(light);
                 }
 
                 if (_rt != null)
@@ -2402,6 +2532,7 @@ namespace QuestTree.QuestGraph
                     FirstCapturedAt = string.IsNullOrEmpty(plan.FirstCapturedAt) ? now : plan.FirstCapturedAt,
                     Captures = plan.Captures,
                     ModVersion = ModInfo.Stamp,
+                    Lighting = LightingTag,
                     TimeOfDay = TimeOfDay(),
                     Floors = floors,
                     Labels = plan.Labels,
@@ -3009,6 +3140,13 @@ namespace QuestTree.QuestGraph
             [JsonProperty("captures")] public int Captures { get; set; }
 
             [JsonProperty("modVersion")] public string ModVersion { get; set; }
+
+            /// <summary>How the capture was LIT: "own-1.5" for the capture light this build adds at
+            /// that intensity, and absent in a capture taken before it existed. Not decoration - it is
+            /// what stops a picture taken under one lighting being merged pixel by pixel into one taken
+            /// under another, which would seam the two together; see <see cref="LoadPrevious"/> and
+            /// <see cref="CaptureLightIntensity"/>.</summary>
+            [JsonProperty("lighting")] public string Lighting { get; set; }
 
             /// <summary>The raid's own clock, "HH:mm", or "" when it could not be read. A map
             /// captured at 03:00 is a dark map and worth taking again.</summary>

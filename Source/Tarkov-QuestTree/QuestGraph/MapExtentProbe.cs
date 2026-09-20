@@ -52,7 +52,8 @@ namespace QuestTree.QuestGraph
     ///
     /// The member names for the scene reads (BorderZone.Collider, BorderZone._extents,
     /// Terrain.activeTerrains, LocationScene.GetAll, SpawnPointMarker) are the ones Phase 0's
-    /// throwaway MapCaptureExperiment proved live in this game version.
+    /// throwaway experiment proved live in this game version, in raid, before any of this was built
+    /// on them.
     ///
     /// The three source names are spelled LOWERCASE ("borderzone", "terrain", "navmesh") because
     /// that is the canonical casing ZoneStore normalises an accepted extent to and therefore the

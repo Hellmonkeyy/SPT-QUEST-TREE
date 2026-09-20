@@ -1,3 +1,56 @@
+# Quest Tracker 1.19.0
+
+**Every location can have a map, including the ones no mod draws.** The Maps tab took its picture,
+its world bounds, its floors and its place names out of the DynamicMaps mod's art folder, so a
+location that mod does not ship - every modded map - showed "No map image for this location." and a
+list. The mod now measures each map itself in the raid pass that harvests the quest zones: the
+rectangle the world occupies in game coordinates, ranked NavMesh first, and the height bands that
+read as floors. That alone draws a map - a dark backdrop over its own rectangle, guides on, floor
+picker working, every pin where it belongs - after one raid on it.
+
+**Ctrl+F9 in a raid takes the picture.** The game draws the map from straight above, one picture per
+floor band, into `BepInEx\plugins\QuestTree\captures\<key>\`, at up to 4096 px and never past two
+pixels to the metre, spread over frames as short hitches rather than one freeze. It is drawn to
+exactly the rectangle harvest measured, so a pin lands on the right building without anything
+agreeing twice. Pressing the key again from somewhere else adds to what is there rather than
+replacing it - the game streams distant chunks out, so each capture has holes another fills - and
+where two cover the same ground the pixel seen from closer wins, so a map gets sharper the more
+often it is captured. The top floor is shot from 300 m up so roofs and buildings draw; colours are
+muted so a pin is the brightest thing on screen; a render too dark to be a map, or one under
+different light from the pictures on disk, is refused rather than written.
+
+**Captures travel through the host.** Each finished capture is offered one floor at a time as a
+2048-px JPEG, and every client of that host picks up the maps it lacks on the first Maps-tab open of
+a session. The host decides: uploads are refused unless it runs with `QUESTTREE_ACCEPT_MAPS=1`
+(`tools/server-host.cmd` sets it), the refusal is one line and is not retried that session, and a
+set only ever moves into place whole. The release ships whatever map sets exist, gated on layout,
+1.5 MB per image, 40 MB in total, the meta schema and `tools/check-maps-pack.py`, with coverage of
+the eleven vanilla maps a warning naming the missing ones rather than a gate.
+
+**DynamicMaps stays a selectable source.** "Map pictures come from" chooses DynamicMaps first (the
+default, so nothing changes for an install already using it), our captures first, or our captures
+only. Nothing of its artwork is bundled or copied, and each map's author is still credited; a
+captured map carries our own credit line naming the build, the date and the raid's clock.
+
+## Also
+
+- The zone file is schema v2: each map's record carries its extent (four edges, the source that
+  produced it, when) and its floor bands with names and height ranges, copied onto the marker
+  payload. Both halves refuse an extent that does not contain the zones already harvested, so a
+  wrong rectangle is dropped rather than drawn; a host older than the client refuses the harvest by
+  schema exactly as before.
+- Three routes on the zone harvest's pattern: a per-floor upload, an index carrying a sha256 stamp
+  per map, and one that serves a floor. An older host answering with SPT's HTML and a newer one
+  answering with an unknown index shape are both silent fallbacks to what the client already had.
+- Captured place names come from the scene - the extraction points, optionally the cleaned-up bot
+  zone names - and are drawn small on a plate, never overlapping. "Map labels" is extracts only by
+  default.
+- Water is left out of a capture: it renders as flat cyan placeholder blocks from a camera that is
+  not the player's, and the ground under it reads as a map should.
+- `tools/check-capture.py` checks a fresh capture against its own meta and the server's zone file
+  for that map; `tools/server-host.cmd` starts the server as a picture host.
+---
+
 # Quest Tracker 1.18.5
 
 **The server console prints what a player needs and nothing else.** A normal boot wrote 109 `Quest

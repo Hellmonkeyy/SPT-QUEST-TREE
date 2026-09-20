@@ -197,12 +197,6 @@ namespace QuestTree
         /// session. Off is for the player who would rather not offer at all.</summary>
         public static ConfigEntry<bool> UploadCaptures { get; private set; }
 
-        /// <summary>THROWAWAY. The debug key that runs the Phase 0 map-capture experiments in raid -
-        /// see QuestGraph/MapCaptureExperiment.cs. Deliberately not in Entries, so no row for it
-        /// appears in the in-panel Settings tab; it exists in the F12 menu and the cfg file only.
-        /// Delete this entry, its bind and the experiment file together.</summary>
-        public static ConfigEntry<KeyboardShortcut> ExperimentKey { get; private set; }
-
         /// <summary>Which of the two quest marks the boxes wear. Kappa is the canonical list;
         /// Collector is what this install actually gates Collector behind, which a quest mod can
         /// make a very different set.</summary>
@@ -687,16 +681,6 @@ namespace QuestTree
             OpenTracker = config.Bind(
                 "Behaviour", "Open tracker shortcut", new KeyboardShortcut(KeyCode.Q, KeyCode.LeftControl),
                 "Opens and closes the tracker anywhere in the menu, including the raid ready-up screen where the taskbar is hidden.");
-
-            // THROWAWAY, to be deleted with QuestGraph/MapCaptureExperiment.cs once Phase 0 of the
-            // in-house map pictures work has its numbers. Its own section so it sits away from the
-            // real settings, and kept out of Entries below so the in-panel Settings tab shows nothing.
-            ExperimentKey = config.Bind(
-                "Advanced", "Map capture experiment key (throwaway)", new KeyboardShortcut(KeyCode.F10, KeyCode.LeftControl),
-                "Debug only, and temporary. Pressed inside a raid it renders one top-down picture of " +
-                "the map and writes four measurement lines to BepInEx/plugins/QuestTree/experiments/. " +
-                "It exists to decide how the mod will draw its own maps and will be removed again; " +
-                "nothing in the mod depends on it.");
 
             Entries.AddRange(new ConfigEntryBase[]
             {
