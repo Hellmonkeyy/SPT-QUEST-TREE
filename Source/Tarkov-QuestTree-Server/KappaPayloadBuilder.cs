@@ -64,7 +64,8 @@ namespace QuestTreeServer
         public string GetPayloadJson(MongoId sessionId) =>
             JsonSerializer.Serialize(Build(sessionId), WireJson.Options);
 
-        /// <summary>See ProfilePayloadBuilder._timed: first request and slow ones at Info.</summary>
+        /// <summary>See ProfilePayloadBuilder._timed: slow ones at Info, the first request as a Detail
+        /// line.</summary>
         private bool _timed;
 
         private KappaPayloadDto Build(MongoId sessionId)
@@ -160,7 +161,10 @@ namespace QuestTreeServer
                 $"Quest Tracker: Kappa checklist built - {payload.Items.Count} items, " +
                 $"{payload.Items.Count(i => i.HandedIn)} already handed in, in {clock.ElapsedMilliseconds} ms.";
 
-            if (!_timed || clock.ElapsedMilliseconds > ProfilePayloadBuilder.SlowRequestMs) { _timed = true; logger.Info(line); }
+            // A SLOW answer is news for the player - the panel froze and this says where. The first
+            // answer's timing is news only for whoever is working on the mod, so it is a Detail line.
+            if (clock.ElapsedMilliseconds > ProfilePayloadBuilder.SlowRequestMs) { _timed = true; logger.Info(line); }
+            else if (!_timed) { _timed = true; logger.Detail(line); }
             else logger.Debug(line);
 
             return payload;
@@ -239,7 +243,7 @@ namespace QuestTreeServer
                     }
                 }
 
-                logger.Info($"Quest Tracker: Kappa quest list read from the shipped database - {ids.Count} quests.");
+                logger.Detail($"Quest Tracker: Kappa quest list read from the shipped database - {ids.Count} quests.");
                 return ids;
             }
             catch (Exception ex)

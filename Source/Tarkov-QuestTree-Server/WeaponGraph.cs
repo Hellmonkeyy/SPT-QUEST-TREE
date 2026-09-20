@@ -214,7 +214,7 @@ namespace QuestTreeServer
 
                 _built = true;
 
-                logger.Info(
+                logger.Detail(
                     $"Quest Tracker: weapon graph over {_parts.Count:N0} templates, {slotted:N0} of which have slots.");
             }
         }
@@ -310,7 +310,7 @@ namespace QuestTreeServer
                 return;
             }
 
-            logger.Info(
+            logger.Detail(
                 $"Quest Tracker: walked the slot graph of {surveyed} quest weapon(s); the widest is " +
                 $"'{widestWeapon}' at {widest:N0} reachable parts.");
 

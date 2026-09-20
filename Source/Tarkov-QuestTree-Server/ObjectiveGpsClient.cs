@@ -133,7 +133,7 @@ namespace QuestTreeServer
                 // A local edit is allowed - it is the user's file - but noted, so a map that
                 // looks wrong has a first place to look.
                 var hash = Sha256(bytes);
-                logger.Info(
+                logger.Detail(
                     $"Quest Tracker: {cached.Count} objective locations from the cached " +
                     $"{CacheFileName}. Delete it to refresh." +
                     (hash == KnownSha256 ? "" : " Note: this file differs from the known copy (edited locally?)."));
@@ -178,7 +178,7 @@ namespace QuestTreeServer
                 if (!response.IsSuccessStatusCode)
                 {
                     var status = (int)response.StatusCode;
-                    logger.Info(
+                    logger.Detail(
                         $"Quest Tracker: objective locations returned {status} on attempt {attempt}/{Attempts}: " +
                         Excerpt(json));
 
@@ -201,11 +201,11 @@ namespace QuestTreeServer
 
                 if (places == null || places.Count == 0)
                 {
-                    logger.Info("Quest Tracker: the objective location file held nothing usable.");
+                    logger.Detail("Quest Tracker: the objective location file held nothing usable.");
                     return (null, false);
                 }
 
-                logger.Info($"Quest Tracker: fetched {places.Count} objective locations from tarkovdata.");
+                logger.Detail($"Quest Tracker: fetched {places.Count} objective locations from tarkovdata.");
                 WriteCache(bytes);
 
                 return (places, false);
@@ -213,7 +213,7 @@ namespace QuestTreeServer
             catch (Exception ex)
             {
                 // Offline is the normal case for a lot of SPT installs, so this is Info, not Warning.
-                logger.Info(
+                logger.Detail(
                     $"Quest Tracker: could not fetch objective locations on attempt {attempt}/{Attempts} ({ex.Message}).");
                 return (null, true);
             }

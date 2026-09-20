@@ -147,14 +147,14 @@ namespace QuestTreeServer
 
             if (cached != null && age < CacheLifetime)
             {
-                logger.Info(
+                logger.Detail(
                     $"Quest Tracker: using the {Describe(age)}-old tarkov.dev cache. Delete {CacheFileName} to refresh " +
                     $"it now; it refreshes on its own after {CacheLifetime.TotalDays:0} days.");
                 return _locations = cached;
             }
 
             if (cached != null)
-                logger.Info($"Quest Tracker: the tarkov.dev cache is {Describe(age)} old - refreshing it.");
+                logger.Detail($"Quest Tracker: the tarkov.dev cache is {Describe(age)} old - refreshing it.");
 
             if (RecentFailure(out var since))
             {
@@ -177,7 +177,7 @@ namespace QuestTreeServer
             WriteFailureStamp();
 
             if (cached != null)
-                logger.Info($"Quest Tracker: keeping the {Describe(age)}-old tarkov.dev cache, since the refresh failed.");
+                logger.Detail($"Quest Tracker: keeping the {Describe(age)}-old tarkov.dev cache, since the refresh failed.");
 
             return _locations = cached ?? new List<ObjectiveLocation>();
         }
@@ -264,7 +264,7 @@ namespace QuestTreeServer
                 age = DateTime.UtcNow - System.IO.File.GetLastWriteTimeUtc(path);
                 if (age < TimeSpan.Zero) age = TimeSpan.Zero;
 
-                logger.Info($"Quest Tracker: {cached.Count} quest objective locations in {CacheFileName}.");
+                logger.Detail($"Quest Tracker: {cached.Count} quest objective locations in {CacheFileName}.");
 
                 return cached;
             }
@@ -334,7 +334,7 @@ namespace QuestTreeServer
                     // The body is the diagnosis. A bare "422" once hid an upstream outage
                     // ("GraphQL server unavailable") behind what looked like a bad query.
                     var status = (int)response.StatusCode;
-                    logger.Info(
+                    logger.Detail(
                         $"Quest Tracker: tarkov.dev returned {status} on attempt {attempt}/{Attempts}: " +
                         Excerpt(json));
 
@@ -345,11 +345,11 @@ namespace QuestTreeServer
 
                 if (locations.Count == 0)
                 {
-                    logger.Info("Quest Tracker: tarkov.dev returned no objective locations.");
+                    logger.Detail("Quest Tracker: tarkov.dev returned no objective locations.");
                     return (null, false);
                 }
 
-                logger.Info($"Quest Tracker: fetched {locations.Count} quest objective locations from tarkov.dev.");
+                logger.Detail($"Quest Tracker: fetched {locations.Count} quest objective locations from tarkov.dev.");
                 WriteCache(locations);
 
                 return (locations, false);
@@ -357,7 +357,7 @@ namespace QuestTreeServer
             catch (Exception ex)
             {
                 // Offline is the normal case for a lot of SPT installs, so this is Info, not Warning.
-                logger.Info(
+                logger.Detail(
                     $"Quest Tracker: could not reach tarkov.dev on attempt {attempt}/{Attempts} ({ex.Message}).");
                 return (null, true);
             }

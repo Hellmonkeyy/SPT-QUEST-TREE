@@ -116,7 +116,7 @@ namespace QuestTreeServer
             // and the survey covers the rest.
             weaponBuildCache.Flush();
 
-            logger.Info(_improved > 0
+            logger.Detail(_improved > 0
                 ? $"Quest Tracker: this boot found smaller builds for {_improved} requirement(s)."
                 : "Quest Tracker: no smaller build found during startup.");
 
@@ -174,7 +174,7 @@ namespace QuestTreeServer
         {
             var coverage = partPrices.SharedCoverage;
 
-            logger.Info(
+            logger.Detail(
                 $"Quest Tracker: the shared builds are priced at the cheapest trader cash price across " +
                 $"{coverage.Traders} trader(s) at any loyalty (Fence excluded) - {coverage.FromTraders:N0} " +
                 $"template(s) priced that way, {coverage.FleaOnly:N0} sold by no trader and priced at handbook " +
@@ -216,7 +216,8 @@ namespace QuestTreeServer
         /// deliberately: it is asking whether the search works, not whether this profile can afford
         /// the answer, and conflating the two would make a solver bug look like a poor trader level.
         ///
-        /// Debug, because it is a developer's question. The one-line summary is Info.</summary>
+        /// Debug, because it is a developer's question. The one-line summary is a Detail line - the same
+        /// question, one level louder, and still only for whoever asked it with QUESTTREE_DEBUG.</summary>
         private void SurveySolver()
         {
             // Snapshotted under the lock, once, for the guard and the walk and the count in the summary line
@@ -370,7 +371,7 @@ namespace QuestTreeServer
                 }
             }
 
-            logger.Info(
+            logger.Detail(
                 $"Quest Tracker: weapon solver dry run - {solved} of {requirements.Count} build requirement(s) " +
                 $"satisfied from the full parts list" +
                 (ceiling > 0 ? $", {ceiling} hit the search budget" : "") +
@@ -386,7 +387,7 @@ namespace QuestTreeServer
             // The objective's own line: what the shared builds cost under the pricing they were solved
             // under. No claim of minimality follows it any more - the cost floor that used to close this
             // sentence is gone with the rest of the proof machinery, for the reason given above the counters.
-            logger.Info(
+            logger.Detail(
                 $"Quest Tracker: the objective - {cost:N0} roubles across {solved} build(s) at the cheapest trader " +
                 $"cash price, or handbook x{partPrices.FleaOnlyMultiple} where no trader sells the part, plus " +
                 $"{partPrices.PerPurchase:N0} per purchase ({(solved > 0 ? cost / Math.Max(1, solved) : 0):N0} per " +
@@ -396,12 +397,12 @@ namespace QuestTreeServer
                 $"templates in the handbook.");
 
             if (reasons.Count > 0)
-                logger.Info(
+                logger.Detail(
                     "Quest Tracker: solver misses by - " +
                     string.Join(", ", reasons.OrderByDescending(r => r.Value).Take(6).Select(r => $"{r.Key} x{r.Value}")));
 
             foreach (var line in failed.Take(12))
-                logger.Info($"Quest Tracker: unsolved - {line}");
+                logger.Detail($"Quest Tracker: unsolved - {line}");
         }
 
         /// <summary>One unmet reason with every required-part id in it replaced by the part's
@@ -570,7 +571,12 @@ namespace QuestTreeServer
                 }
             }
 
-            logger.Info($"Quest Tracker {ModInfo.Stamp}: serving {payload.Quests.Count} quests to the client mod.");
+            // The one line the README tells a player to look for, and the one that says which halves they
+            // are running. The diagnostics sentence rides along on it rather than taking a line of its own,
+            // so a quiet console explains its own quietness at the exact moment the mod first speaks.
+            logger.Info(
+                $"Quest Tracker {ModInfo.Stamp}: serving {payload.Quests.Count} quests to the client mod. " +
+                QuestLog.Mode);
             return payload;
         }
 
@@ -1005,7 +1011,7 @@ namespace QuestTreeServer
             // own tree - so a disagreement means one of them is reading the preset differently and the panel
             // would show a diff that does not match the objective the build was chosen by.
             if (defaults != null && changes != result.Changes)
-                logger.Warning(
+                logger.Detail(
                     $"Quest Tracker: the panel counts {changes} change(s) for '{build.WeaponName}' and the " +
                     $"search counted {result.Changes}. They read the same preset, so one of them is wrong.");
 
@@ -1338,7 +1344,7 @@ namespace QuestTreeServer
                         Interlocked.Increment(ref _improved);
                         weaponBuildCache.Flush();
 
-                        logger.Info(
+                        logger.Detail(
                             $"Quest Tracker: a smaller build for '{requirement.Quest}' - {_improved} found so " +
                             "far. It will be used from the next start.");
                     }
@@ -1529,13 +1535,13 @@ namespace QuestTreeServer
             }
             catch (Exception ex)
             {
-                logger.Info($"Quest Tracker: no profiles to check part availability against ({ex.Message}).");
+                logger.Detail($"Quest Tracker: no profiles to check part availability against ({ex.Message}).");
                 return;
             }
 
             if (profiles.Count == 0)
             {
-                logger.Info("Quest Tracker: no profiles on this install, so part availability cannot be checked.");
+                logger.Detail("Quest Tracker: no profiles on this install, so part availability cannot be checked.");
                 return;
             }
 
@@ -1678,7 +1684,7 @@ namespace QuestTreeServer
                     if (earlyBlockedHere) earlyBlocked++;
                 }
 
-                logger.Info(
+                logger.Detail(
                     $"Quest Tracker: part availability for profile {id} (level {pmc.Info?.Level}, " +
                     $"{sources.Traders} trader(s) read) - {unbuildable} of {requirements.Count} build(s) name a " +
                     $"part this profile cannot get, {missing.Count} distinct part(s): {gatedOnly.Count} sold but " +
@@ -1696,7 +1702,7 @@ namespace QuestTreeServer
                 var noRoute = missing.Where(template => !sources.Flea.ContainsKey(template)).ToList();
                 var noRouteModded = noRoute.Count(template => !sources.IsVanilla(template));
 
-                logger.Info(
+                logger.Detail(
                     $"Quest Tracker: the flea market for profile {id} - " +
                     $"{(sources.FleaAccess ? "OPEN" : $"CLOSED until level {sources.FleaLevel}")} at level {pmc.Info?.Level}. " +
                     $"Of the {missing.Count} part(s) no trader sells this profile, {fleaOnly.Count} are flea-listable " +
@@ -1706,7 +1712,7 @@ namespace QuestTreeServer
                     $"buildable and {withFlea} would stay blocked regardless.");
 
                 if (missing.Count > 0)
-                    logger.Info(
+                    logger.Detail(
                         "Quest Tracker: template ids no trader offers this profile - " +
                         string.Join(", ", missing.Take(12).Select(template => template.ToString())) +
                         (missing.Count > 12 ? $" and {missing.Count - 12} more" : "") +
@@ -1834,7 +1840,7 @@ namespace QuestTreeServer
             // to it forever.
             if (standing is { Found: false })
             {
-                logger.Info(
+                logger.Detail(
                     $"Quest Tracker: the remembered weapon build for '{weapon}' cannot be re-seated on this " +
                     "install, so a verified smaller one replaces it rather than being measured against it - " +
                     string.Join("; ", standing.Unmet.Distinct().Take(3)) + ".");
@@ -1970,7 +1976,7 @@ namespace QuestTreeServer
                 }
                 else
                 {
-                    logger.Info(
+                    logger.Detail(
                         $"Quest Tracker: a remembered weapon build for '{weapon}' does not hold up on this install, " +
                         "so it is being solved again - " +
                         string.Join("; ", standing.Unmet.Distinct().Take(3)) + ".");

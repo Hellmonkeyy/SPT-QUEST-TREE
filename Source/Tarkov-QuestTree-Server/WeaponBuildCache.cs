@@ -170,9 +170,12 @@ namespace QuestTreeServer
         ///
         /// Every launch improves the builds either way. This only decides whether it stops after one round
         /// or keeps going, which is the difference between a player's machine helping a little and a
-        /// developer's machine producing the history that ships.</summary>
-        public bool Training =>
-            Environment.GetEnvironmentVariable("QUESTTREE_TRAIN") is "1" or "true" or "TRUE" or "yes";
+        /// developer's machine producing the history that ships.
+        ///
+        /// Read through QuestLog.Enabled so this and QuestLog.Diagnostics - which training turns on,
+        /// because a training console with the progress lines hidden is a blank window - can never
+        /// disagree about what counts as yes.</summary>
+        public bool Training => QuestLog.Enabled(QuestLog.TrainingVariable);
 
         /// <summary>Search seeds one boot gets through, and therefore the stride between boots. Wide
         /// enough that no two boots ever try the same starting point.</summary>
@@ -347,7 +350,7 @@ namespace QuestTreeServer
 
                     _dirty = false;
 
-                    logger.Info(
+                    logger.Detail(
                         $"Quest Tracker: remembered {_file.Builds.Count} weapon build(s) for the next boot " +
                         $"(generation {_file.Generation}).");
                 }

@@ -35,15 +35,16 @@ namespace QuestTreeServer
         {
             var json = Serialise(sessionId, out var phases);
 
-            // ONCE at Info, and the PHASES rather than the total. The first answer after a boot cost 745 ms
-            // against 10 and 6 ms for the two after it, on a route the client now refetches on every
+            // ONCE, as a Detail line, and the PHASES rather than the total. The first answer after a boot
+            // cost 745 ms against 10 and 6 ms for the two after it, on a route the client refetches on every
             // matchmaker show - synchronously, on Unity's main thread, where 745 ms is a freeze rather than a
-            // slow request. A total says only that it was slow; the split says which phase to warm, and it
-            // stays here at Debug so a regression says so too.
+            // slow request. A total says only that it was slow; the split says which phase to warm. It is a
+            // measurement for whoever is working on the mod rather than news for a player, so it needs
+            // QUESTTREE_DEBUG, and every one after the first stays at Debug so a regression says so too.
             if (!_phased)
             {
                 _phased = true;
-                logger.Info($"Quest Tracker: raid check phases, first request - {phases}.");
+                logger.Detail($"Quest Tracker: raid check phases, first request - {phases}.");
             }
             else logger.Debug($"Quest Tracker: raid check phases - {phases}.");
 
@@ -93,7 +94,7 @@ namespace QuestTreeServer
                     var clock = System.Diagnostics.Stopwatch.StartNew();
                     var json = JsonSerializer.Serialize(payload, WireJson.Options);
 
-                    logger.Info(
+                    logger.Detail(
                         $"Quest Tracker: raid check warmed off the boot path - {built}, serialise " +
                         $"{clock.Elapsed.TotalMilliseconds:0.0} ms, {json.Length:N0} bytes. The first request " +
                         "from the game pays for none of it.");
@@ -101,7 +102,7 @@ namespace QuestTreeServer
                     return;
                 }
 
-                logger.Info(
+                logger.Detail(
                     "Quest Tracker: no profile to warm the raid check with - the first request will pay for it.");
             }
             catch (Exception ex)
@@ -112,17 +113,18 @@ namespace QuestTreeServer
             }
         }
 
-        /// <summary>See ProfilePayloadBuilder._timed: first request and slow ones at Info.</summary>
+        /// <summary>See ProfilePayloadBuilder._timed: slow ones at Info, the first request as a Detail
+        /// line.</summary>
         private bool _timed;
 
-        /// <summary>Whether the per-phase split has been reported at Info yet. Separate from _timed so a
+        /// <summary>Whether the per-phase split has been reported yet. Separate from _timed so a
         /// warm-up pass cannot spend the one line the first real request is meant to print.</summary>
         private bool _phased;
 
         /// <summary>One answer. <paramref name="warming"/> when it is the boot-path warm-up rather than a
-        /// request, which is what keeps the tally line below at Debug for it: _timed spends its single Info
-        /// line on the first caller, and the caller that line is FOR is the first real request. Warm's own
-        /// Info line reports the warm-up.</summary>
+        /// request, which is what keeps the tally line below at Debug for it: _timed spends its single
+        /// first-request line on the first caller, and the caller that line is FOR is the first real
+        /// request. Warm's own line reports the warm-up.</summary>
         private RaidCheckDto Build(MongoId sessionId, bool warming, out string phases)
         {
             var clock = System.Diagnostics.Stopwatch.StartNew();
@@ -227,10 +229,15 @@ namespace QuestTreeServer
                 $"{payload.Held.Values.Count(h => h.InTaskItems > 0)} of {payload.Held.Count} items in the " +
                 $"task-item containers, in {clock.ElapsedMilliseconds} ms.";
 
-            if (!warming && (!_timed || clock.ElapsedMilliseconds > ProfilePayloadBuilder.SlowRequestMs))
+            if (!warming && clock.ElapsedMilliseconds > ProfilePayloadBuilder.SlowRequestMs)
             {
                 _timed = true;
                 logger.Info(line);
+            }
+            else if (!warming && !_timed)
+            {
+                _timed = true;
+                logger.Detail(line);
             }
             else logger.Debug(line);
 

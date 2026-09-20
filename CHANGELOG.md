@@ -1,3 +1,33 @@
+# Quest Tracker 1.18.5
+
+**The server console prints what a player needs and nothing else.** A normal boot wrote 109 `Quest
+Tracker` lines, all at Information because that is what SPT's shipped `sptLogger.json` prints, and most
+of them were solver working notes - the per-profile parts bill, the pricing and flea coverage, the
+solver dry run, the per-map zone counts, one line per weapon build. It now prints about five: the
+version and quest count, the remembered builds, the background search and its result, the map markers,
+plus anything wrong or degraded and one line per raid event.
+
+**Forty-eight lines became diagnostic lines**, Information when `QUESTTREE_DEBUG` is `1`/`true`/`yes`/
+`on` and Debug otherwise, read once at startup. None of their text changed, so anything that greps for
+one still finds it. `tools/server-debug.cmd` sets the variable and starts the server in a visible
+console; `QUESTTREE_TRAIN=1` implies it, because a training run exists to be watched. The stamp line
+always says which mode the boot is in, so a quiet console explains its own quietness.
+
+## Also
+
+- Two self-checks demoted from warnings to diagnostic lines: the copy budget against the served rows,
+  and the panel's count of preset changes against the search's. Both compare two internal counts of the
+  same thing, neither is actionable by a player, and both still print under `QUESTTREE_DEBUG`. Every
+  other warning and every error is untouched.
+- A slow request still logs at Information every time it passes 200 ms - that line is the one the README
+  tells a player to quote. Only the first-request timing moved.
+- `QUESTTREE_TRAIN` is now read through the same parser as `QUESTTREE_DEBUG`, so the flag that turns
+  training on and the flag that turns its console output on can never disagree about what counts as yes.
+- The client half is unchanged apart from its version constant. Both halves still have to ship together:
+  the Kappa check compares the two versions for equality.
+
+---
+
 # Quest Tracker 1.18.4
 
 **The map stops flickering and resetting when you click a dropdown.** Opening the map picker, closing

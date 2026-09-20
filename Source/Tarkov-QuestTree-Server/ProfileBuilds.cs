@@ -498,7 +498,7 @@ namespace QuestTreeServer
 
             if (!fresh) _answers[profileId] = answer;
 
-            logger.Info(
+            logger.Detail(
                 $"Quest Tracker: builds for {who} - {ok} of {requirements.Count} shared build(s) usable as " +
                 $"they are, {repaired} repaired within what this profile can get, {traderLevel} blocked by trader " +
                 $"level, {needsFlea} blocked until the flea market, {unsold} blocked because no trader but Fence " +
@@ -508,7 +508,7 @@ namespace QuestTreeServer
                 $"cost {cash:N0} roubles plus {barters} barter(s).");
 
             if (repaired > 0)
-                logger.Info(
+                logger.Detail(
                     $"Quest Tracker: the cost of restriction for {who} - over the {repaired} repaired build(s), " +
                     $"{(double)sharedParts / repaired:0.##} parts and {(double)sharedCash / repaired:N0} roubles per shared " +
                     $"build (priced parts only; {sharedUnpriced} absent or barter part(s) carry no price) against " +
@@ -537,7 +537,7 @@ namespace QuestTreeServer
             // total counts - so a profile served all sixty as shared reads "of 1" repeated, charged 1 only
             // when it holds exactly one copy of that part, and 0 when it holds none or both. "0 of 0" means no
             // build served here fits anything twice and this line proves nothing this boot.
-            logger.Info(
+            logger.Detail(
                 $"Quest Tracker: repeated parts for {who} - {copies.Charged} charged and {copies.Unsourced} " +
                 $"with nobody to buy another from, of {copies.Repeated} part instance(s) past the first of " +
                 $"their template. Recounted from the served rows: {copies.Owed} owed beyond the copies this " +
@@ -545,7 +545,7 @@ namespace QuestTreeServer
                 "free.");
 
             if (copies.Charged + copies.Unsourced != copies.Owed)
-                logger.Warning(
+                logger.Detail(
                     $"Quest Tracker: the copy budget and the served rows DISAGREE for {who} - the rows were " +
                     $"charged for {copies.Charged} instance(s) beyond the free copies and {copies.Unsourced} " +
                     $"more had no seller, {copies.Charged + copies.Unsourced} together, but counting the same " +
@@ -561,7 +561,7 @@ namespace QuestTreeServer
                     .Select(entry =>
                         $"'{entry.Quest}': handbook {entry.Handbook:N0} / objective {entry.Objective:N0} vs paid {entry.Paid:N0}");
 
-                logger.Info(
+                logger.Detail(
                     $"Quest Tracker: the objective against the bill for {who} - over the {shared} build(s) served as " +
                     $"shared with something to buy ({nothingToBuy} with nothing to buy, repaired builds excluded), the " +
                     $"handbook values the parts to buy at {handbookTotal:N0} roubles, the objective the search actually " +
@@ -586,7 +586,7 @@ namespace QuestTreeServer
             // valuation nobody is charged, and the count beside it says how many builds that valuation
             // dominates.
             if (repaired > 0)
-                logger.Info(
+                logger.Detail(
                     $"Quest Tracker: the objective against the bill for the repaired builds for {who} - over the " +
                     $"{repaired} repaired build(s), the objective the restricted search used values their parts " +
                     $"at {repairedObjectiveTotal:N0} roubles and the bill charges {repairedPaidTotal:N0}. The " +
@@ -754,7 +754,7 @@ namespace QuestTreeServer
                 }
             }
 
-            logger.Info(
+            logger.Detail(
                 $"Quest Tracker: {who} - '{dto.QuestName}' ({dto.WeaponName}): {dto.Status}" +
                 (dto.Status == "repaired"
                     ? $" - {dto.Parts.Count} part(s), {dto.Cash:N0} roubles + {dto.Barters} barter(s)" +

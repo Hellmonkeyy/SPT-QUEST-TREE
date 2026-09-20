@@ -588,7 +588,7 @@ namespace QuestTreeServer
                 file.Triggers ??= new List<HarvestedTrigger>();
                 file.QuestItems ??= new List<HarvestedQuestItem>();
 
-                logger.Info(
+                logger.Detail(
                     $"Quest Tracker: {file.Triggers.Count} zones and {file.QuestItems.Count} quest items " +
                     $"known for '{key}' (harvested {file.HarvestedAt}).");
 

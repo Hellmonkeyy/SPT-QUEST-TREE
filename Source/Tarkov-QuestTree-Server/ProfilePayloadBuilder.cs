@@ -38,9 +38,9 @@ namespace QuestTreeServer
         public string GetPayloadJson(MongoId sessionId) =>
             JsonSerializer.Serialize(Build(sessionId), WireJson.Options);
 
-        /// <summary>Whether the timing line has been written this process. The first request and
-        /// any slow one go to the log at Info; the rest stay at Debug, where a default install never
-        /// sees them - which is fine for the hundredth line and was wrong for the first.</summary>
+        /// <summary>Whether the timing line has been written this process. Any SLOW request goes to the
+        /// log at Info every time; the first request goes there as a QuestLog.Detail line, so it is seen
+        /// while working on the mod and is quiet on a player's console; the rest stay at Debug.</summary>
         private bool _timed;
 
         /// <summary>A per-profile route slower than this is logged at Info every time. The client
@@ -113,16 +113,18 @@ namespace QuestTreeServer
 
             WalkQuests(profile, payload);
 
-            // Once at Info, then Debug: this runs on every panel open, and at Info every time it was
-            // the loudest thing in the server console - but at Debug every time it was invisible on a
-            // default install (sptLogger.json ships Information), so the cost of the biggest
-            // per-request walk on the server had never once been seen. A slow one is always news.
+            // A SLOW one is always news and always at Info: it is the one the README tells a player to
+            // quote when the panel is slow to open. The FIRST one is a measurement for whoever is
+            // working on the mod, so it is a Detail line - visible under QUESTTREE_DEBUG, at Debug
+            // otherwise - and every one after that stays at Debug, because this runs on every panel
+            // open and at Info it was the loudest thing in the server console.
             var line =
                 $"Quest Tracker: profile payload - level {payload.Level}, {payload.Traders.Count} traders, " +
                 $"{payload.ConditionProgress.Count} counters, {payload.LockReasons.Count} locked quests explained, " +
                 $"in {clock.ElapsedMilliseconds} ms.";
 
-            if (!_timed || clock.ElapsedMilliseconds > SlowRequestMs) { _timed = true; logger.Info(line); }
+            if (clock.ElapsedMilliseconds > SlowRequestMs) { _timed = true; logger.Info(line); }
+            else if (!_timed) { _timed = true; logger.Detail(line); }
             else logger.Debug(line);
 
             return payload;

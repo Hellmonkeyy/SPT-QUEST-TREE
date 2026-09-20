@@ -62,7 +62,7 @@ namespace QuestTreeServer
                 // synchronous request handler that serves the client - but SPT does wait on this,
                 // so they run together and say so first: a quiet pause at boot with no line in the
                 // log reads as a hang.
-                logger.Info("Quest Tracker: fetching quest objective locations (tarkov.dev, tarkovdata)...");
+                logger.Detail("Quest Tracker: fetching quest objective locations (tarkov.dev, tarkovdata)...");
 
                 // Started together, awaited apart: with Task.WhenAll one source's fault threw
                 // away the other's answer too.
@@ -117,7 +117,7 @@ namespace QuestTreeServer
                 GetPayloadJson();
 
                 if (_cachedJson != null)
-                    logger.Info($"Quest Tracker: map markers built in the background in {build.ElapsedMilliseconds:N0} ms; the boot paid {boot:N0} ms for the objective sources.");
+                    logger.Detail($"Quest Tracker: map markers built in the background in {build.ElapsedMilliseconds:N0} ms; the boot paid {boot:N0} ms for the objective sources.");
                 else
                     logger.Warning($"Quest Tracker: the background map marker build did not produce markers after {build.ElapsedMilliseconds:N0} ms - see the error above; it retries in a minute.");
             });
