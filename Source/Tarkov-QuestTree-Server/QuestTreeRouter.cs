@@ -32,10 +32,10 @@ namespace QuestTreeServer
             KappaPayloadBuilder kappaBuilder, ProfilePayloadBuilder profileBuilder,
             MapMarkerPayloadBuilder markerBuilder, ZoneStore zoneStore, QuestFacts facts,
             RaidCheckPayloadBuilder raidCheckBuilder, ProfileBuilds profileBuilds,
-            WeaponPresetWriter presetWriter)
+            WeaponPresetWriter presetWriter, MapStore mapStore)
             : base(jsonUtil, BuildRoutes(
                 jsonUtil, logger, payloadBuilder, kappaBuilder, profileBuilder, markerBuilder, zoneStore,
-                facts, raidCheckBuilder, profileBuilds, presetWriter))
+                facts, raidCheckBuilder, profileBuilds, presetWriter, mapStore))
         {
         }
 
@@ -56,7 +56,7 @@ namespace QuestTreeServer
             KappaPayloadBuilder kappaBuilder, ProfilePayloadBuilder profileBuilder,
             MapMarkerPayloadBuilder markerBuilder, ZoneStore zoneStore, QuestFacts facts,
             RaidCheckPayloadBuilder raidCheckBuilder, ProfileBuilds profileBuilds,
-            WeaponPresetWriter presetWriter) =>
+            WeaponPresetWriter presetWriter, MapStore mapStore) =>
             new List<RouteAction>
             {
                 // Profile-scoped: the weapon builds as THIS player can assemble them. Answered from what
@@ -128,7 +128,42 @@ namespace QuestTreeServer
                     "/questtree/mapmarkers",
                     (url, info, sessionId, output, cancellationToken) =>
                         Guarded(logger, url, markerBuilder.GetPayloadJson,
-                            () => new MapMarkerPayloadDto { Version = ModInfo.Version }))
+                            () => new MapMarkerPayloadDto { Version = ModInfo.Version })),
+
+                // The three map picture routes (1.19.0). One POST per floor, because a four-floor map
+                // at 2.5 MB a floor is a 10 MB body; the store groups the posts by the capture's own
+                // timestamp and only serves a set once every floor has arrived. See MapStore.
+                //
+                // IsRealLocation is handed in as a delegate rather than injected into the store, so the
+                // store's limits can be exercised without a database - the same gate the zone harvest
+                // route applies two routes above, on the same reasoning: on Fika any peer can post here.
+                new RouteAction<MapUploadRequest>(
+                    "/questtree/maps/upload",
+                    (url, request, sessionId, output, cancellationToken) =>
+                        Guarded(logger, url,
+                            () => JsonSerializer.Serialize(mapStore.Accept(request, facts.IsRealLocation), WireJson.Options),
+                            () => new MapUploadResponse
+                            {
+                                Outcome = "rejected",
+                                Reason = "the server could not store the picture"
+                            })),
+
+                // Cheap and answered from memory: a client asks for this every time the Maps tab
+                // opens, to compare stamps against what it has already downloaded.
+                new RouteAction<EmptyRequestData>(
+                    "/questtree/maps",
+                    (url, info, sessionId, output, cancellationToken) =>
+                        Guarded(logger, url, () => JsonSerializer.Serialize(mapStore.Index(), WireJson.Options),
+                            () => new MapIndexDto())),
+
+                // A POST with a body rather than /questtree/maps/<key>/<level>, because SPT's static
+                // routers match a URL exactly; a path parameter would need a dynamic router, whose
+                // prefix matching answers for every URL beginning with ours.
+                new RouteAction<MapImageRequest>(
+                    "/questtree/maps/image",
+                    (url, request, sessionId, output, cancellationToken) =>
+                        Guarded(logger, url, () => JsonSerializer.Serialize(mapStore.Image(request), WireJson.Options),
+                            () => new MapImageDto()))
             };
 
         /// <summary>Rejections already logged this boot, by map and reason, so a client that

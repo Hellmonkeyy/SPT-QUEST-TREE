@@ -364,10 +364,38 @@ namespace QuestTree.UI
             }
         }
 
+        /// <summary>
+        /// Where a place name came from, which is what decides how it is drawn - see
+        /// MapView.BuildPlaceLabels.
+        ///
+        /// <see cref="Place"/> is the default deliberately: it is what a DynamicMaps config's
+        /// hand-placed names are, and they must keep the look they have had for releases. The other
+        /// two are a capture's own names, collected in bulk by the writer - one map's 41 zone names
+        /// in the place-name font overlapped each other and the pins - and they are drawn smaller,
+        /// on a plate, and only where they fit.
+        /// </summary>
+        internal enum MapLabelKind
+        {
+            /// <summary>Hand-placed by a map's author. The only kind before captures existed.</summary>
+            Place = 0,
+
+            /// <summary>An extract, from the capture meta. Worth the space on the map: an exfil is
+            /// somewhere you have to go.</summary>
+            Exfil,
+
+            /// <summary>A bot zone's cleaned name, from the capture meta. There are dozens per map
+            /// and they are the ones that yield.</summary>
+            Zone
+        }
+
         /// <summary>A place name the map config carries. The SVGs contain no text at all, so without
         /// these the picture is unlabelled.</summary>
         internal sealed class MapLabel
         {
+            /// <summary>What sort of name this is, and so how it is drawn. See
+            /// <see cref="MapLabelKind"/>; the default leaves a DynamicMaps label untouched.</summary>
+            public MapLabelKind Kind = MapLabelKind.Place;
+
             public string Text = "";
             public Vector2 Position;
 

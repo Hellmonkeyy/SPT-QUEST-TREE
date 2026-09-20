@@ -297,6 +297,9 @@ namespace QuestTree.UI
             Toggle(column, ref y, "Mirror map artwork",
                 "Mirrors the map picture left-to-right. Markers are not mirrored.",
                 ModSettings.MirrorMapArtwork);
+            Toggle(column, ref y, "Share captured maps",
+                "Offer a map picture you capture in raid to the server, so others on the same host get it. A host that does not collect them refuses.",
+                ModSettings.UploadCaptures);
             Toggle(column, ref y, "Show map alignment guides",
                 "Diagnostic: outline the area the map's coordinates cover, and mark its origin.",
                 ModSettings.ShowMapGuides);
@@ -315,6 +318,21 @@ namespace QuestTree.UI
                 width - AuxLayout.Padding * 2f);
 
             AuxLayout.AddSpacer(ref y, 6f);
+            Dropdown(column, ref y, width, deferred, "Map pictures come from",
+                new[]
+                {
+                    "DynamicMaps when it has the map, else my captures",
+                    "my captures when I have one, else DynamicMaps",
+                    "my captures only"
+                },
+                (int)ModSettings.MapPictureSource.Value,
+                index => ModSettings.MapPictureSource.Value = (ModSettings.PictureSource)index);
+
+            Dropdown(column, ref y, width, deferred, "Map labels",
+                new[] { "Extracts only", "All", "None" },
+                (int)ModSettings.MapLabels.Value,
+                index => ModSettings.MapLabels.Value = (ModSettings.LabelMode)index);
+
             Dropdown(column, ref y, width, deferred, "Capture resolution",
                 new[] { "2048 px", "4096 px" },
                 ModSettings.CaptureResolution.Value <= 2048 ? 0 : 1,
@@ -336,7 +354,8 @@ namespace QuestTree.UI
                 ModSettings.CountUnacceptedQuests, ModSettings.ShowCredits,
                 ModSettings.MirrorMapArtwork, ModSettings.ShowMapGuides, ModSettings.DoNextRows,
                 ModSettings.MapArtworkRotation, ModSettings.PinLabels, ModSettings.SidebarWidth,
-                ModSettings.CaptureMapKey, ModSettings.CaptureResolution);
+                ModSettings.CaptureMapKey, ModSettings.CaptureResolution, ModSettings.UploadCaptures,
+                ModSettings.MapPictureSource, ModSettings.MapLabels);
         }
 
         /// <summary>The Map section's one paragraph about capturing a picture: which key does it, and

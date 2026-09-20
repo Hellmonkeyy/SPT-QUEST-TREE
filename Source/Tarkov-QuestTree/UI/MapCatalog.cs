@@ -50,14 +50,21 @@ namespace QuestTree.UI
         /// <summary>
         /// The map to draw for a location, or null when there is nothing to draw it from.
         ///
-        /// In order:
-        /// 1. Our own capture, from the install's captures folder, which carries its own bounds,
-        ///    floors and place names - and then, in the stage that adds the transport, the picture
-        ///    this profile's host has cached, read out of the same meta shape.
-        /// 2. DynamicMaps, while it is still a supported source: a real picture with hand-placed
-        ///    place names beats a bare rectangle.
-        /// 3. The harvested extent on the marker set: bounds and floor bands with no picture.
-        /// 4. Nothing - the sidebar says so and the view draws its list alone, exactly as before.
+        /// The order of the three real pictures is the player's, through
+        /// ModSettings.MapPictureSource (see <see cref="SourcePreference"/>); the last two rungs are
+        /// fixed:
+        /// <list type="number">
+        ///   <item>Our own capture, from the install's captures folder, which carries its own
+        ///   bounds, floors and place names.</item>
+        ///   <item>The picture set this profile's HOST holds, downloaded into the maps folder by
+        ///   <see cref="QuestGraph.MapTransfer"/> and read out of the same meta shape. Always just
+        ///   after our own capture, never before it: a capture taken on this machine is certainly of
+        ///   this machine's version of the map, and the player who took it meant to.</item>
+        ///   <item>DynamicMaps: hand-drawn artwork with hand-placed place names, for the locations
+        ///   it ships. First by default, so an install that has been using it sees no change.</item>
+        ///   <item>The harvested extent on the marker set: bounds and floor bands, no picture.</item>
+        ///   <item>Nothing - the sidebar says so and the view draws its list alone.</item>
+        /// </list>
         /// </summary>
         /// <param name="locationKey">The map's internal id ("bigmap"), as a quest's LocationKey and
         /// the marker payload both key it.</param>
@@ -70,22 +77,60 @@ namespace QuestTree.UI
         {
             if (string.IsNullOrEmpty(locationKey)) return null;
 
-            // ---- (a) our own capture, from a raid on this map. It brings its own bounds, floors
+            var preference = SourcePreference();
+
+            // ---- (a) DynamicMaps first, when that is what the player asked for. Kept as one branch
+            // rather than a sorted list of delegates: there are three orders and each is two lines.
+            //
+            // One consequence worth knowing: returning here skips HostCache, which is what starts
+            // the download of the host's pictures. So on a default install the sync begins at the
+            // first map DynamicMaps does NOT ship - which is precisely the first map a host picture
+            // could help with - and switching the setting to prefer captures starts it on the
+            // repaint that follows. Deliberately not started unconditionally: that would pull tens
+            // of megabytes onto a machine that has asked to be shown the artwork it already has.
+            if (preference == ModSettings.PictureSource.PreferDynamicMaps)
+            {
+                var artwork = DynamicMapsLibrary.FindByLocationKey(locationKey);
+                if (artwork != null) return artwork;
+            }
+
+            // ---- (b) our own capture, from a raid on this map. It brings its own bounds, floors
             // and place names out of its meta file, and its picture is the one thing here that is
             // certainly of THIS install's version of the map.
-            //
-            // (The host's cached copy of someone else's capture goes next, in the stage that adds
-            // the transport; it reads the same meta shape out of a different folder.)
             var captured = LocalCapture(locationKey, displayName);
             if (captured != null) return captured;
 
-            // ---- (b) DynamicMaps, if the player has it and it ships this location.
-            var installed = DynamicMapsLibrary.FindByLocationKey(locationKey);
-            if (installed != null) return installed;
+            // ---- (c) the host's copy of somebody's capture, read out of the same meta shape from a
+            // different folder. This is also where the download that fills that folder is started -
+            // see HostCache.
+            var shared = HostCache(locationKey, displayName);
+            if (shared != null) return shared;
 
-            // ---- (c) the harvested extent.
+            // ---- (d) DynamicMaps as the fallback, unless the player asked for our pictures only,
+            // in which case it is not consulted at all and a map with no capture shows its
+            // rectangle. "Only" has to mean only, or the setting is a preference twice over.
+            if (preference == ModSettings.PictureSource.PreferCaptures)
+            {
+                var installed = DynamicMapsLibrary.FindByLocationKey(locationKey);
+                if (installed != null) return installed;
+            }
+
+            // ---- (e) the harvested extent.
             return Synthesise(locationKey, set, displayName);
         }
+
+        /// <summary>
+        /// The player's picture order.
+        ///
+        /// Read on every Resolve rather than kept: the F12 menu can change it between two repaints,
+        /// and the Maps tab repaints when it does. The Ready test is the same one every other reader
+        /// of a setting in this mod makes - a config that failed to bind leaves the entries null, and
+        /// the answer then is the setting's own default rather than a crash in the Maps tab.
+        /// </summary>
+        private static ModSettings.PictureSource SourcePreference() =>
+            ModSettings.Ready
+                ? ModSettings.MapPictureSource.Value
+                : ModSettings.PictureSource.PreferDynamicMaps;
 
         /// <summary>
         /// The objective data's floor vocabulary, mapped onto the level numbers <see cref="Synthesise"/>
@@ -180,7 +225,7 @@ namespace QuestTree.UI
         private sealed class Capture
         {
             /// <summary>What has to change on disk for the entry to be rebuilt rather than kept -
-            /// see <see cref="ScanCaptures"/>.</summary>
+            /// see <see cref="ScanFolder"/>.</summary>
             public string Stamp = "";
 
             /// <summary>When the raid that made it happened, for choosing between two captures of
@@ -195,6 +240,13 @@ namespace QuestTree.UI
         /// session: the folder only changes when a raid writes to it, and the writer says so
         /// through <see cref="InvalidateCaptures"/>.</summary>
         private static Dictionary<string, Capture> _captures;
+
+        /// <summary>The HOST's picture sets by location key, or null before the first scan - the
+        /// same thing as <see cref="_captures"/> out of a different folder, and invalidated by the
+        /// same call, because the thing that fills that folder
+        /// (<see cref="QuestGraph.MapTransfer"/>) finishes on the main thread just as a capture
+        /// does.</summary>
+        private static Dictionary<string, Capture> _hostMaps;
 
         /// <summary>
         /// Re-reads the captures folder, for the capture writer to call when a capture has just
@@ -214,16 +266,28 @@ namespace QuestTree.UI
         internal static void InvalidateCaptures()
         {
             var previous = _captures;
+            var previousHost = _hostMaps;
 
-            // Never scanned: nothing is held, and the next Resolve reads the folder fresh.
-            if (previous == null) return;
+            // Neither folder scanned: nothing is held, and the next Resolve reads both fresh.
+            if (previous == null && previousHost == null) return;
 
             // Before anything is freed. The view may still be holding the very sprite this is about
             // to destroy - see MapView.ForgetDrawnMap, which is where the reason is written down.
             MapView.ForgetDrawnMap();
 
-            _captures = ScanCaptures(previous);
-            ReleaseDropped(previous, _captures);
+            // Each side is rescanned only if it was ever scanned: a null dictionary means "the next
+            // Resolve reads it", and building one here would read a folder nothing has asked for.
+            if (previous != null)
+            {
+                _captures = ScanFolder(previous, CapturesRoot(), "captured map");
+                ReleaseDropped(previous, _captures);
+            }
+
+            if (previousHost != null)
+            {
+                _hostMaps = ScanFolder(previousHost, QuestGraph.MapTransfer.MapsRoot(), "host map");
+                ReleaseDropped(previousHost, _hostMaps);
+            }
 
             // And a redraw, so the map area does not sit empty where the viewport just was. A no-op
             // when no panel is listening, which is the normal case for a capture taken in a raid -
@@ -232,14 +296,35 @@ namespace QuestTree.UI
             ModSettings.RequestRepaint();
         }
 
-        /// <summary>Whether this entry came from one of our own captures, asked by identity for the
-        /// same reason <see cref="IsSynthesised"/> is: the credit line under the map depends on the
-        /// answer, and a map file is free to claim any attribution string it likes.</summary>
+        /// <summary>
+        /// Whether this entry came from a capture this mod took - on this machine or on whichever one
+        /// the host got its copy from - asked by identity for the same reason
+        /// <see cref="IsSynthesised"/> is: the credit line under the map depends on the answer, and a
+        /// map file is free to claim any attribution string it likes.
+        ///
+        /// The host's sets count. They are captures, read from the same meta by the same code, and
+        /// both things that ask this want the same answer for them: the credit line is the capture's
+        /// own sentence ("captured in-game with Quest Tracker 1.19.0, ...") rather than a DynamicMaps
+        /// attribution, and their floors are named the way the harvester names bands - see
+        /// <see cref="UsesBandFloorNames"/>, where getting this wrong would put every floor-naming
+        /// objective pin on whichever storey was being looked at.
+        /// </summary>
+        /// <param name="entry">The entry the view is drawing.</param>
         internal static bool IsLocalCapture(DynamicMapsLibrary.MapEntry entry)
         {
-            if (entry == null || _captures == null) return false;
+            if (entry == null) return false;
 
-            foreach (var capture in _captures.Values)
+            return Holds(_captures, entry) || Holds(_hostMaps, entry);
+        }
+
+        /// <summary>Whether one of these read sets is where an entry came from, by identity.</summary>
+        /// <param name="captures">A scanned folder's entries, or null when it has not been scanned.</param>
+        /// <param name="entry">The entry to look for.</param>
+        private static bool Holds(Dictionary<string, Capture> captures, DynamicMapsLibrary.MapEntry entry)
+        {
+            if (captures == null) return false;
+
+            foreach (var capture in captures.Values)
                 if (ReferenceEquals(capture.Entry, entry)) return true;
 
             return false;
@@ -267,8 +352,52 @@ namespace QuestTree.UI
         /// <param name="displayName">What the view calls this map, or null.</param>
         private static DynamicMapsLibrary.MapEntry LocalCapture(string locationKey, string displayName)
         {
-            var captures = _captures ??= ScanCaptures(null);
+            var captures = _captures ??= ScanFolder(null, CapturesRoot(), "captured map");
 
+            return EntryFor(captures, locationKey, displayName);
+        }
+
+        /// <summary>
+        /// The HOST's picture set for this map, or null when it has none.
+        ///
+        /// The same folder shape, the same meta and the same rules as a local capture - which is the
+        /// point: a downloaded set is a capture somebody else took, and nothing past this line needs
+        /// to know which machine photographed the map.
+        ///
+        /// This is also where the download is STARTED, the first time anything asks for a map at all.
+        /// Deliberately here rather than beside QuestDataClient.BeginAll: a session that never opens
+        /// the Maps tab never asks a host for pictures, and the first Resolve is exactly the moment
+        /// the answer starts to matter. MapTransfer.BeginSync returns at once and runs once per
+        /// session; its result is applied on this thread by its own watcher, through
+        /// <see cref="InvalidateCaptures"/>, so nothing here waits for it - this open draws whatever
+        /// is on disk now, and the download repaints the view when it lands.
+        /// </summary>
+        /// <param name="locationKey">The map's internal id, as the view spells it.</param>
+        /// <param name="displayName">What the view calls this map, or null.</param>
+        private static DynamicMapsLibrary.MapEntry HostCache(string locationKey, string displayName)
+        {
+            if (_hostMaps == null)
+            {
+                _hostMaps = ScanFolder(null, QuestGraph.MapTransfer.MapsRoot(), "host map");
+
+                // After the scan, not before: the sync's own watcher can only invalidate a folder
+                // that has been read, and starting it first would let a very fast host land its
+                // pictures into a dictionary this line is about to overwrite.
+                QuestGraph.MapTransfer.BeginSync();
+            }
+
+            return EntryFor(_hostMaps, locationKey, displayName);
+        }
+
+        /// <summary>One read folder's entry for a location, with the alias fallback and the display
+        /// name both sides want - see <see cref="LocalCapture"/>, whose comment is the reason for
+        /// every line of it.</summary>
+        /// <param name="captures">The scanned folder.</param>
+        /// <param name="locationKey">The map's internal id, as the view spells it.</param>
+        /// <param name="displayName">What the view calls this map, or null.</param>
+        private static DynamicMapsLibrary.MapEntry EntryFor(
+            Dictionary<string, Capture> captures, string locationKey, string displayName)
+        {
             if (!captures.TryGetValue(locationKey, out var capture))
             {
                 var aliased = AliasOf(locationKey);
@@ -312,18 +441,31 @@ namespace QuestTree.UI
         /// Two folders claiming the same map is settled by capturedAt, newest first, so a copied-in
         /// capture cannot displace a fresh one. Nothing here throws: a bad file costs one warning
         /// and that map falls through to DynamicMaps or its harvested rectangle.
+        ///
+        /// Used for BOTH folders this class reads - this machine's captures/ and the host's maps/ -
+        /// because they hold the same thing in the same shape. The label is only for the log line.
         /// </summary>
-        private static Dictionary<string, Capture> ScanCaptures(Dictionary<string, Capture> previous)
+        /// <param name="previous">The last scan of THIS folder, whose unchanged entries are carried
+        /// over, or null for a first read.</param>
+        /// <param name="root">The folder to read, or null when there is none.</param>
+        /// <param name="label">What one of these is called in the log line ("captured map").</param>
+        private static Dictionary<string, Capture> ScanFolder(
+            Dictionary<string, Capture> previous, string root, string label)
         {
             var captures = new Dictionary<string, Capture>(StringComparer.OrdinalIgnoreCase);
 
             try
             {
-                var root = CapturesRoot();
                 if (root == null || !Directory.Exists(root)) return captures;
 
                 foreach (var folder in Directory.GetDirectories(root))
                 {
+                    // A folder whose name starts with a dot is the transport's own workspace, where a
+                    // set is assembled before it replaces the one in place - see
+                    // MapTransfer.IncomingFolder. Reading it would draw half a download.
+                    var name = Path.GetFileName(folder);
+                    if (!string.IsNullOrEmpty(name) && name[0] == '.') continue;
+
                     foreach (var meta in Directory.GetFiles(folder, "*" + MetaSuffix))
                     {
                         var parsed = ReadMeta(meta, folder);
@@ -352,7 +494,7 @@ namespace QuestTree.UI
                 if (captures.Count > 0)
                 {
                     Plugin.LogSource?.LogInfo(
-                        $"QuestTree: {captures.Count} captured map(s) " +
+                        $"QuestTree: {captures.Count} {label}(s) " +
                         $"({captures.Values.Sum(c => c.Entry.Layers.Count)} floors) to draw from.");
                 }
             }
@@ -361,7 +503,7 @@ namespace QuestTree.UI
                 // The folder itself: missing permissions, a file in place of a directory. One line,
                 // and every map falls back to what it had before captures existed.
                 Plugin.LogSource?.LogWarning(
-                    $"QuestTree: could not read the captured maps ({ex.Message}) - using the map " +
+                    $"QuestTree: could not read the {label}s ({ex.Message}) - using the map " +
                     $"sources that were there before.");
             }
 
@@ -404,7 +546,7 @@ namespace QuestTree.UI
             public float MinX, MinZ, MaxX, MaxZ;
             public int Rotation;
             public readonly List<(int Level, string Name, string File, float MinY, float MaxY)> Floors = new();
-            public readonly List<(string Text, float X, float Z)> Labels = new();
+            public readonly List<(string Text, float X, float Z, DynamicMapsLibrary.MapLabelKind Kind)> Labels = new();
         }
 
         /// <summary>
@@ -484,8 +626,16 @@ namespace QuestTree.UI
                 parsed.Rotation = rotation == 90 || rotation == 180 || rotation == 270 ? rotation : 0;
 
                 var pxPerMetre = Number(root, "pxPerMetre");
+
+                // capturedAt is the LATEST capture in the set and is what decides which of two
+                // folders is newer; firstCapturedAt is when the set was started and is what the
+                // credit line means by "captured on". A meta written before merging existed carries
+                // only the first, and then they are the same thing.
                 var capturedAt = ((string)Field(root, "capturedAt") ?? "").Trim();
                 parsed.CapturedAt = ParseTimestamp(capturedAt);
+
+                var firstCapturedAt = ((string)Field(root, "firstCapturedAt") ?? "").Trim();
+                if (firstCapturedAt.Length == 0) firstCapturedAt = capturedAt;
 
                 ReadFloors(root, folder, name, pxPerMetre, parsed);
                 if (parsed.Floors.Count == 0)
@@ -497,8 +647,8 @@ namespace QuestTree.UI
                 ReadLabels(root, parsed);
 
                 parsed.Attribution = Attribution(
-                    (string)Field(root, "modVersion"), capturedAt, parsed.CapturedAt,
-                    (string)Field(root, "timeOfDay"));
+                    (string)Field(root, "modVersion"), firstCapturedAt,
+                    (int?)Field(root, "captures") ?? 1, (string)Field(root, "timeOfDay"));
 
                 // What has to change for the entry to be rebuilt: the capture's own identity plus
                 // the file's write time, which catches a re-capture written within the same second
@@ -608,8 +758,17 @@ namespace QuestTree.UI
                 $"stretched onto the extent and may not line up.");
         }
 
-        /// <summary>The capture's place names: exfils and cleaned zone names, at a ground position
-        /// and no height. Anything without both is dropped.</summary>
+        /// <summary>
+        /// The capture's place names: exfils and cleaned zone names, at a ground position and no
+        /// height. Anything without both is dropped.
+        ///
+        /// The "kind" field decides how prominently the name is drawn, and ZONE is what anything
+        /// unrecognised becomes - an absent kind (a capture written before the field existed), a
+        /// spelling this build has never heard of, a kind a newer writer adds. That is the safe
+        /// default in both directions: a zone name is the quieter treatment and the first to be
+        /// dropped when names collide, so a misread kind costs a name its prominence rather than
+        /// burying the extracts under it.
+        /// </summary>
         private static void ReadLabels(JObject root, ParsedCapture parsed)
         {
             var labels = Field(root, "labels") as JArray;
@@ -626,7 +785,12 @@ namespace QuestTree.UI
                 var z = Number(node, "z");
                 if (!IsFinite(x) || !IsFinite(z)) continue;
 
-                parsed.Labels.Add((text, x, z));
+                var kind = string.Equals((string)Field(node, "kind") ?? "", "exfil",
+                    StringComparison.OrdinalIgnoreCase)
+                    ? DynamicMapsLibrary.MapLabelKind.Exfil
+                    : DynamicMapsLibrary.MapLabelKind.Zone;
+
+                parsed.Labels.Add((text, x, z, kind));
             }
         }
 
@@ -688,6 +852,10 @@ namespace QuestTree.UI
                 {
                     Text = label.Text,
 
+                    // Exfil or zone, never Place: these are collected by the capture writer, not
+                    // placed by hand, and MapView draws them accordingly.
+                    Kind = label.Kind,
+
                     // Map space: the label's x and z, in the same coordinates every marker uses.
                     Position = new Vector2(label.X, label.Z),
 
@@ -703,18 +871,39 @@ namespace QuestTree.UI
             return entry;
         }
 
-        /// <summary>The credit line for a captured map: ours, so it names the build and the raid
-        /// rather than a licence. Shown by MapView.AddCredit.</summary>
+        /// <summary>
+        /// The credit line for a captured map: ours, so it names the build and the raid rather than a
+        /// licence. Shown by MapView.AddCredit.
+        ///
+        /// The count is in it because a set grows: the writer merges each new capture of a map into
+        /// the one on disk, so "3 captures since 2026-09-19" is the honest description of a picture
+        /// whose holes were filled over three raids, and it is the number a player watches go up
+        /// while they do it. One capture says nothing about the count, because "1 capture" reads like
+        /// an apology.
+        ///
+        /// Every part is optional. A field the meta lacks is left out rather than printed empty, so
+        /// the worst case is the bare sentence.
+        /// </summary>
+        /// <param name="modVersion">The build that took it, from the meta.</param>
+        /// <param name="firstCapturedAtText">The meta's firstCapturedAt (or capturedAt, where it has
+        /// no first), as written.</param>
+        /// <param name="captures">How many captures are merged into the set; 1 for a fresh one.</param>
+        /// <param name="timeOfDay">The raid clock of the latest capture, or empty.</param>
         private static string Attribution(
-            string modVersion, string capturedAtText, DateTime? capturedAt, string timeOfDay)
+            string modVersion, string firstCapturedAtText, int captures, string timeOfDay)
         {
             var version = string.IsNullOrEmpty(modVersion) ? "" : $" {modVersion.Trim()}";
 
-            var date = capturedAt.HasValue
-                ? capturedAt.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)
-                : (capturedAtText ?? "").Trim();
+            // Parsed to get the date alone, and falling back to the raw text: a timestamp this build
+            // cannot parse is still more use in the credit than nothing at all.
+            var parsed = ParseTimestamp(firstCapturedAtText);
+            var date = parsed.HasValue
+                ? parsed.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)
+                : (firstCapturedAtText ?? "").Trim();
 
-            var when = date.Length > 0 ? $", {date}" : "";
+            var when = date.Length > 0
+                ? captures > 1 ? $", {captures} captures since {date}" : $", {date}"
+                : captures > 1 ? $", {captures} captures" : "";
 
             var light = string.IsNullOrEmpty(timeOfDay) ? "" : $" ({timeOfDay.Trim()})";
 

@@ -43,6 +43,7 @@ CLIENT_FILES = [
     CLIENT / "ProfileBuildsDto.cs",
     CLIENT / "RaidCheckDto.cs",
     CLIENT / "ZoneHarvestDto.cs",
+    CLIENT / "MapTransferDto.cs",
     CLIENT / "QuestDataClient.cs",  # holds the nested SavePresetResult
     CLIENT / "KappaFetchResult.cs",  # a wrapper AROUND KappaPayloadDto, not a mirror of anything
 ]
@@ -57,6 +58,8 @@ SAME_NAME = """
     MapMarkerPayloadDto MapMarkerSetDto MapMarkerDto
     ZoneHarvestRequest HarvestedTrigger HarvestedQuestItem ZoneHarvestResponse
     MapExtentDto MapFloorDto
+    MapRectDto MapCaptureFloorDto MapLabelDto MapCaptureMetaDto
+    MapUploadRequest MapUploadResponse MapIndexEntryDto MapIndexDto MapImageRequest MapImageDto
 """.split()
 
 # The ones whose client copy carries a different name. server type -> client type.

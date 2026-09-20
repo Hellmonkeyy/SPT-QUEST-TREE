@@ -1001,4 +1001,237 @@ namespace QuestTreeServer
 
         public float Z { get; set; }
     }
+
+    /// <summary>One rectangle of world, in metres, on the XZ plane. The picture a capture produces
+    /// covers exactly this, so the client can turn a world position into a pixel by dividing.
+    ///
+    /// A SEPARATE type from MapExtentDto (ZoneHarvestDtos.cs), which carries the same four corners
+    /// plus how they were measured. This one is the geometry only: a captured picture's rectangle is
+    /// a statement about the IMAGE - what it was rendered to cover - and it must not gain a source
+    /// rank or a sample time that something might then use to prefer one picture over another. The
+    /// zone file's extent stays the authority on where the map is; a capture merely records the
+    /// rectangle it was taken with, so a mismatch between the two is visible rather than merged.</summary>
+    public sealed class MapRectDto
+    {
+        [JsonPropertyName("minX")] public double MinX { get; set; }
+        [JsonPropertyName("minZ")] public double MinZ { get; set; }
+        [JsonPropertyName("maxX")] public double MaxX { get; set; }
+        [JsonPropertyName("maxZ")] public double MaxZ { get; set; }
+    }
+
+    /// <summary>One captured floor: which height band it is, and the picture that was rendered for
+    /// it.</summary>
+    public sealed class MapCaptureFloorDto
+    {
+        /// <summary>The same level numbering the zone file's floors use - 0 is the ground the spawns
+        /// are on - so a pin already assigned a floor needs no second rule to find its picture.</summary>
+        [JsonPropertyName("level")] public int Level { get; set; }
+
+        [JsonPropertyName("name")] public string Name { get; set; } = "";
+
+        /// <summary>The picture's file name, no directory part. REWRITTEN by the server when a set is
+        /// stored, to the name the server itself gave the file (<c>&lt;key&gt;-&lt;level&gt;.jpg</c>) -
+        /// never the client's own name for it. A file name arriving from a Fika peer is a path, and a
+        /// path from a peer is how a stored set escapes its folder.</summary>
+        [JsonPropertyName("file")] public string File { get; set; } = "";
+
+        [JsonPropertyName("width")] public int Width { get; set; }
+        [JsonPropertyName("height")] public int Height { get; set; }
+
+        /// <summary>The height band this floor's camera covered, copied from the zone file's floors so
+        /// a picture can be matched to the band whose pins belong on it.</summary>
+        [JsonPropertyName("minY")] public float MinY { get; set; }
+        [JsonPropertyName("maxY")] public float MaxY { get; set; }
+    }
+
+    /// <summary>A place name drawn on the picture - an exfil, a named bot zone - which is what
+    /// replaces DynamicMaps' hand-placed labels. World coordinates, never pixels: the client already
+    /// knows the rectangle, and a pixel would be wrong the moment the capture resolution changed.</summary>
+    public sealed class MapLabelDto
+    {
+        [JsonPropertyName("text")] public string Text { get; set; } = "";
+        [JsonPropertyName("x")] public double X { get; set; }
+        [JsonPropertyName("z")] public double Z { get; set; }
+    }
+
+    /// <summary>Everything about one map's captured picture set except the pictures: exactly the
+    /// client's <c>&lt;key&gt;.map.json</c>, field for field.
+    ///
+    /// The same class is the file on disk, the body of an upload and an entry in the index, and that
+    /// is deliberate: the sentence "what the client captured is what the host serves" is only true if
+    /// nothing re-describes it on the way. A second declaration for the index side would drift the
+    /// moment one of them gained a field, and the drift would show up as a picture drawn against the
+    /// wrong rectangle while every log line on both sides said the set was stored.</summary>
+    public sealed class MapCaptureMetaDto
+    {
+        /// <summary>The only capture shape this server reads. The client mirror declares the same
+        /// number: change either and change the other in the same commit.</summary>
+        public const int CurrentSchemaVersion = 1;
+
+        [JsonPropertyName("schemaVersion")] public int SchemaVersion { get; set; }
+
+        /// <summary>The map's internal name ("bigmap"), as GameWorld reports it.</summary>
+        [JsonPropertyName("map")] public string Map { get; set; } = "";
+
+        /// <summary>The world rectangle every floor's picture covers.</summary>
+        [JsonPropertyName("extent")] public MapRectDto? Extent { get; set; }
+
+        /// <summary>Degrees the picture is rotated relative to the world; 0 in this release, stored so
+        /// a later one can differ out loud rather than silently.</summary>
+        [JsonPropertyName("rotation")] public float Rotation { get; set; }
+
+        /// <summary>Pixels per metre the capture was rendered at. Checked against each floor's
+        /// width and height: the three numbers describe one projection, so disagreement means the
+        /// picture does not cover the rectangle it claims.</summary>
+        [JsonPropertyName("pxPerMetre")] public float PxPerMetre { get; set; }
+
+        /// <summary>The tile the capture was rendered in, one tile per frame. Informational.</summary>
+        [JsonPropertyName("tileSize")] public int TileSize { get; set; }
+
+        /// <summary>When the raid this was captured in ran, ISO-8601 UTC. THE VERSION of a set: the
+        /// host accepts a newer one and refuses an older or equal one, and the floors of one upload
+        /// are grouped by it while they arrive one post at a time.</summary>
+        [JsonPropertyName("capturedAt")] public string CapturedAt { get; set; } = "";
+
+        /// <summary>The Quest Tracker version that took the capture, for the credits line and for
+        /// telling a re-capture after a game update from the picture it replaced.</summary>
+        [JsonPropertyName("modVersion")] public string ModVersion { get; set; } = "";
+
+        /// <summary>"day" or "night" - recorded, never changed: a capture takes the raid's light as it
+        /// finds it, and a night Factory picture is still a Factory picture.</summary>
+        [JsonPropertyName("timeOfDay")] public string TimeOfDay { get; set; } = "";
+
+        [JsonPropertyName("floors")] public List<MapCaptureFloorDto> Floors { get; set; } = new();
+
+        [JsonPropertyName("labels")] public List<MapLabelDto> Labels { get; set; } = new();
+    }
+
+    /// <summary>The body of POST /questtree/maps/upload: ONE floor's picture, with the whole set's
+    /// meta repeated on every post.
+    ///
+    /// One floor per post because a four-floor map at 2.5 MB a floor is a 10 MB body, and the meta
+    /// repeats because that is what lets the host group the posts without a session: the floors of one
+    /// capture share a CapturedAt, and the set completes when every level the meta names has arrived.
+    /// A post whose meta names a different CapturedAt is a different set and never completes this one.
+    ///
+    /// Named with explicit JsonPropertyName because SPT's JsonUtil deserializes request bodies with
+    /// no naming policy - without these a camelCase body lands in no property at all, silently. The
+    /// client mirrors this shape in QuestGraph/MapCaptureDto.cs.</summary>
+    public sealed class MapUploadRequest : IRequestData
+    {
+        /// <summary>The newest upload shape this server understands. An upload claiming a newer shape
+        /// is refused rather than stored: the deserializer drops fields this build cannot see, and a
+        /// half-understood capture written into maps\ would be served to every other client as
+        /// complete. The client mirror declares the same number.</summary>
+        public const int SupportedSchemaVersion = 1;
+
+        [JsonPropertyName("schemaVersion")] public int SchemaVersion { get; set; }
+
+        /// <summary>The map's internal name, as GameWorld reports it. Folded to its canonical name by
+        /// the store, so a Factory night capture serves Factory day as well.</summary>
+        [JsonPropertyName("map")] public string Map { get; set; } = "";
+
+        [JsonPropertyName("clientVersion")] public string ClientVersion { get; set; } = "";
+
+        [JsonPropertyName("meta")] public MapCaptureMetaDto? Meta { get; set; }
+
+        /// <summary>Which of the meta's floors this post carries. Must be one of them; nothing else
+        /// says which picture these bytes are.</summary>
+        [JsonPropertyName("level")] public int Level { get; set; }
+
+        /// <summary>"jpg" or "png", and the bytes must actually start with that format's magic
+        /// numbers - the extension a client claims decides nothing.</summary>
+        [JsonPropertyName("format")] public string Format { get; set; } = "";
+
+        [JsonPropertyName("imageBase64")] public string ImageBase64 { get; set; } = "";
+    }
+
+    /// <summary>What POST /questtree/maps/upload answers.</summary>
+    public sealed class MapUploadResponse
+    {
+        /// <summary>"stored" (this floor is held, the set is waiting on others), "complete" (the set
+        /// is now the one this host serves), "declined" (this host does not take uploads at all) or
+        /// "rejected" (this post will never be accepted as sent).
+        ///
+        /// Four outcomes rather than a bool because the client says a different sentence for each:
+        /// "declined" is the host's settled policy and stops it trying again this session, "rejected"
+        /// names a fault in the capture, and "stored" is progress.</summary>
+        [JsonPropertyName("outcome")] public string Outcome { get; set; } = "";
+
+        /// <summary>Why, in words the client prints verbatim. Empty on success.</summary>
+        [JsonPropertyName("reason")] public string Reason { get; set; } = "";
+
+        /// <summary>How many floors of this set the host is holding, so the client can show progress
+        /// and tell a lost post from a slow one.</summary>
+        [JsonPropertyName("floorsHeld")] public int FloorsHeld { get; set; }
+    }
+
+    /// <summary>One complete set the host holds.</summary>
+    public sealed class MapIndexEntryDto
+    {
+        /// <summary>The CANONICAL map name - factory4_night folded to factory4_day, Sandbox_high to
+        /// Sandbox - because the two share a scene and therefore a picture. A client asking for either
+        /// name gets this set.</summary>
+        [JsonPropertyName("map")] public string Map { get; set; } = "";
+
+        /// <summary>sha256 over the stored meta's bytes and every floor's bytes in level order: the
+        /// one value a client compares against what it already downloaded. It changes when any part of
+        /// the set changes and not otherwise, so a cached set is never re-downloaded and a replaced one
+        /// always is. Computed by the host, never sent by a client.</summary>
+        [JsonPropertyName("stamp")] public string Stamp { get; set; } = "";
+
+        [JsonPropertyName("capturedAt")] public string CapturedAt { get; set; } = "";
+
+        /// <summary>The pictures' total size on disk, so a client can say what a download will cost
+        /// before starting it.</summary>
+        [JsonPropertyName("bytes")] public long Bytes { get; set; }
+
+        [JsonPropertyName("meta")] public MapCaptureMetaDto? Meta { get; set; }
+    }
+
+    /// <summary>What GET /questtree/maps answers: everything a client needs to decide what to
+    /// download, and nothing it has to download to find out.</summary>
+    public sealed class MapIndexDto
+    {
+        public const int CurrentSchemaVersion = 1;
+
+        [JsonPropertyName("schemaVersion")] public int SchemaVersion { get; set; } = CurrentSchemaVersion;
+
+        /// <summary>Whether this host takes uploads at all. Sent so a client can say "this host keeps
+        /// its own pictures" once instead of posting a 10 MB set to be refused floor by floor.</summary>
+        [JsonPropertyName("acceptsUploads")] public bool AcceptsUploads { get; set; }
+
+        [JsonPropertyName("maps")] public List<MapIndexEntryDto> Maps { get; set; } = new();
+    }
+
+    /// <summary>The body of POST /questtree/maps/image: one floor of one map.
+    ///
+    /// A POST with a body rather than a path such as /questtree/maps/bigmap/0 because SPT's static
+    /// routers match a URL exactly - a path parameter needs a dynamic router, whose prefix matching
+    /// would then answer for every URL starting with ours.</summary>
+    public sealed class MapImageRequest : IRequestData
+    {
+        [JsonPropertyName("map")] public string Map { get; set; } = "";
+        [JsonPropertyName("level")] public int Level { get; set; }
+    }
+
+    /// <summary>One floor's picture, base64-encoded.
+    ///
+    /// ImageBase64 and Stamp are both EMPTY when the host has no such picture, rather than an error:
+    /// asking for a floor is how a client finds out, and every caller already draws the bounds-only
+    /// backdrop when there is no picture.</summary>
+    public sealed class MapImageDto
+    {
+        [JsonPropertyName("map")] public string Map { get; set; } = "";
+        [JsonPropertyName("level")] public int Level { get; set; }
+
+        /// <summary>The whole SET's stamp, not this floor's - it is what the client stores beside the
+        /// downloaded files and compares against the index, and a per-floor value would let a
+        /// half-downloaded set look current.</summary>
+        [JsonPropertyName("stamp")] public string Stamp { get; set; } = "";
+
+        [JsonPropertyName("format")] public string Format { get; set; } = "";
+
+        [JsonPropertyName("imageBase64")] public string ImageBase64 { get; set; } = "";
+    }
 }

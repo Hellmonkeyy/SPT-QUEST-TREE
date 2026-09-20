@@ -1554,6 +1554,10 @@ namespace QuestTree.UI
             _savedScale = space.localScale.x;
             _savedPan = space.anchoredPosition;
 
+            // Labels first, pins second, and the order is the whole of what puts pins on top:
+            // Unity draws UI siblings in hierarchy order, so the later child wins. A pin half
+            // hidden under a place name cannot be clicked with any confidence, and the name is the
+            // less important of the two.
             BuildPlaceLabels(space, entry, layer, panZoom);
             var drawn = BuildMarkers(space, entry, layer, panZoom, graph, shownIds, onRepaint);
 
@@ -1702,8 +1706,39 @@ namespace QuestTree.UI
         {
             if (entry == null) return;
 
-            foreach (var label in entry.Labels)
+            // Only our own names are governed by the mode, so a DynamicMaps map is never silenced
+            // by it - see LabelModeFor.
+            var mode = LabelModeFor(entry);
+
+            // Map units per screen pixel, for the collision test below. A label's rect is in screen
+            // pixels - PanZoomHandler.KeepConstantScale counter-scales it against the container - so
+            // its footprint on the map is its size divided by the container's scale. Taken once,
+            // at the zoom this build opens at: a later zoom moves the names apart or together and
+            // this is not recomputed, which is the accepted cost of deciding at build time.
+            var scale = space.localScale.x;
+            if (scale <= 0f) scale = 1f;
+
+            // What has already been drawn, in map units. Only our own names are tested: a
+            // DynamicMaps config's names are hand-placed to sit where they fit.
+            var taken = new List<Rect>();
+
+            // Extracts before zones, so a zone name is the one that yields when two collide. Stable
+            // within a kind, so a DynamicMaps map - every name of which is a Place - keeps the order
+            // and therefore the appearance it had.
+            foreach (var label in entry.Labels.OrderBy(
+                l => l.Kind == DynamicMapsLibrary.MapLabelKind.Exfil ? 0 : 1))
             {
+                // Ours, collected in bulk, and drawn small on a plate; a hand-placed name is not.
+                var compact = label.Kind != DynamicMapsLibrary.MapLabelKind.Place;
+
+                if (compact)
+                {
+                    if (mode == ModSettings.LabelMode.None) continue;
+
+                    if (mode == ModSettings.LabelMode.ExtractsOnly &&
+                        label.Kind != DynamicMapsLibrary.MapLabelKind.Exfil) continue;
+                }
+
                 // Which floor the place is on, by the same height-band test the markers use. A name
                 // whose height matches no band is treated as being on the floor you are looking at,
                 // rather than dropped - the bands do not tile the world, and a real place name is
@@ -1717,13 +1752,52 @@ namespace QuestTree.UI
                     : entry.LayerFor(label.Position.x, label.Position.y, label.Height);
                 var onThisFloor = owner == null || owner == layer;
 
-                var go = new GameObject("PlaceLabel", typeof(RectTransform));
+                // The box the name needs, in screen pixels. Estimated from the character count
+                // rather than measured: TMP only knows a string's width after a layout pass, which
+                // would mean building every label, forcing a rebuild, and then destroying the ones
+                // that did not fit. An estimate that is a few pixels generous costs a name at the
+                // margin; measuring costs the frame.
+                var size = compact
+                    ? new Vector2(label.Text.Length * CompactLabelFontSize * 0.62f + 12f,
+                        CompactLabelFontSize + 6f)
+                    : new Vector2(160f, 18f);
+
+                if (compact)
+                {
+                    // Does it land on a name already drawn? In map units, with a pixel of gutter so
+                    // two plates cannot touch. Skipped rather than nudged: moving a name off the
+                    // place it names is worse than not drawing it, because the reader cannot tell.
+                    var footprint = new Rect(
+                        label.Position.x - (size.x * 0.5f + 1f) / scale,
+                        label.Position.y - (size.y * 0.5f + 1f) / scale,
+                        (size.x + 2f) / scale,
+                        (size.y + 2f) / scale);
+
+                    if (taken.Any(r => r.Overlaps(footprint))) continue;
+                    taken.Add(footprint);
+                }
+
+                // A plate behind our own names, and none behind a hand-placed one. At 9 points over
+                // a photographic map the shared outline alone is not enough to read a name against
+                // pale concrete, and the plate is also what makes a skipped neighbour obvious
+                // rather than looking like a rendering fault.
+                var go = compact
+                    ? new GameObject("PlaceLabel", typeof(RectTransform), typeof(Image))
+                    : new GameObject("PlaceLabel", typeof(RectTransform));
+
                 var rect = (RectTransform)go.transform;
                 rect.SetParent(space, worldPositionStays: false);
                 rect.anchorMin = rect.anchorMax = new Vector2(0.5f, 0.5f);
                 rect.pivot = new Vector2(0.5f, 0.5f);
                 rect.anchoredPosition = label.Position;
-                rect.sizeDelta = new Vector2(160f, 18f);
+                rect.sizeDelta = size;
+
+                if (compact)
+                {
+                    var plate = go.GetComponent<Image>();
+                    plate.color = new Color(0f, 0f, 0f, onThisFloor ? 0.55f : 0.3f);
+                    plate.raycastTarget = false;
+                }
 
                 // Negated because these angles are clockwise-positive, as screen and SVG angles are,
                 // while Unity's Z rotation is counter-clockwise - the same negation DynamicMaps
@@ -1735,9 +1809,25 @@ namespace QuestTree.UI
 
                 panZoom.KeepConstantScale(rect);
 
-                var text = go.AddComponent<TextMeshProUGUI>();
+                // Its own object when there is a plate: Unity allows one Graphic per GameObject, so
+                // the Image and the text cannot share one. Stretched to the plate, so the plate's
+                // size is the only place a label's geometry is decided.
+                var textGo = go;
+
+                if (compact)
+                {
+                    textGo = new GameObject("Text", typeof(RectTransform));
+                    var textRect = (RectTransform)textGo.transform;
+                    textRect.SetParent(rect, worldPositionStays: false);
+                    textRect.anchorMin = Vector2.zero;
+                    textRect.anchorMax = Vector2.one;
+                    textRect.offsetMin = Vector2.zero;
+                    textRect.offsetMax = Vector2.zero;
+                }
+
+                var text = textGo.AddComponent<TextMeshProUGUI>();
                 text.text = label.Text;
-                text.fontSize = 15;
+                text.fontSize = compact ? CompactLabelFontSize : 15;
 
                 // Full strength and bold, against a background that is teal, tan and grey by turns.
                 // At 75% white it washed out over the pale buildings; the black outline the shared
@@ -1747,13 +1837,42 @@ namespace QuestTree.UI
                 // Names on another floor recede rather than disappear. Hiding them would strip 63
                 // of Interchange's 77 off its ground floor and take the sense of place with them.
                 text.color = onThisFloor ? Color.white : new Color(1f, 1f, 1f, 0.45f);
-                text.fontStyle = onThisFloor ? FontStyles.Bold : FontStyles.Normal;
+
+                // Bold at 15 points reads as a place name; bold at 9 on a plate reads as a smudge.
+                text.fontStyle = onThisFloor && !compact ? FontStyles.Bold : FontStyles.Normal;
 
                 text.alignment = TextAlignmentOptions.Center;
                 text.enableWordWrapping = false;
                 text.raycastTarget = false;
+
+                // The outline stays on the plated names too: the plate is translucent, so the map
+                // still shows through behind the glyphs.
                 GameStyle.ApplyOutlined(text);
             }
+        }
+
+        /// <summary>Point size for a captured map's own names. About 60 % of the place-name size:
+        /// these are collected in bulk and there are dozens of them, so they have to sit beside the
+        /// map rather than on top of it.</summary>
+        private const float CompactLabelFontSize = 9f;
+
+        /// <summary>
+        /// Which of this map's own names to draw - ModSettings.MapLabels.
+        ///
+        /// Applies to a capture's names only. The caller tests it against the plated (compact)
+        /// labels and never against a hand-placed one, so a DynamicMaps map shows all of its names
+        /// whatever this says, which is what the setting's own description promises.
+        ///
+        /// The Ready test is the one every other setting in this view makes: a config that failed to
+        /// bind leaves the entries null, and the answer then is the setting's own default.
+        /// </summary>
+        /// <param name="entry">The map being drawn; unused while the setting is global, and kept so
+        /// it can later be overridden per map without changing the call site.</param>
+        private static ModSettings.LabelMode LabelModeFor(DynamicMapsLibrary.MapEntry entry)
+        {
+            _ = entry;
+
+            return ModSettings.Ready ? ModSettings.MapLabels.Value : ModSettings.LabelMode.ExtractsOnly;
         }
 
         /// <summary>

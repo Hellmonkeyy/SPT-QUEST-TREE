@@ -172,6 +172,31 @@ namespace QuestTree
         /// <summary>Longest side, in pixels, of a captured map picture. 2048 or 4096.</summary>
         public static ConfigEntry<int> CaptureResolution { get; private set; }
 
+        /// <summary>Where the Maps tab takes a map's PICTURE from when it has more than one to choose
+        /// between: the DynamicMaps mod's hand-made artwork, or one this mod captured in raid.
+        ///
+        /// A choice rather than a rule, because neither is better everywhere. DynamicMaps' art is
+        /// drawn by hand, clean and complete; our captures are photographs of the real world with the
+        /// real buildings in the real places, and they exist for maps DynamicMaps has never shipped.
+        /// The default prefers DynamicMaps for anyone who already has it - nothing about their map
+        /// changes when they install this version - and falls through to our own pictures for
+        /// everything it does not cover.</summary>
+        public static ConfigEntry<PictureSource> MapPictureSource { get; private set; }
+
+        /// <summary>Which place names are drawn on a CAPTURED picture (ours, or one from the host).
+        /// DynamicMaps' own artwork carries its author's labels and is not affected either way.
+        ///
+        /// Extracts only by default: a capture's labels come from the scene, which on a big map means
+        /// forty bot-zone names printed over the buildings they name, and the extracts are the ones
+        /// worth having on a map you are reading before a raid.</summary>
+        public static ConfigEntry<LabelMode> MapLabels { get; private set; }
+
+        /// <summary>Whether a finished capture is offered to the host this profile plays on - see
+        /// QuestGraph/MapTransfer.cs. On by default because the HOST decides: a host that does not
+        /// want other people's pictures refuses them itself, and its refusal costs one line a
+        /// session. Off is for the player who would rather not offer at all.</summary>
+        public static ConfigEntry<bool> UploadCaptures { get; private set; }
+
         /// <summary>THROWAWAY. The debug key that runs the Phase 0 map-capture experiments in raid -
         /// see QuestGraph/MapCaptureExperiment.cs. Deliberately not in Entries, so no row for it
         /// appears in the in-panel Settings tab; it exists in the F12 menu and the cfg file only.
@@ -186,6 +211,32 @@ namespace QuestTree
             Both,
             Kappa,
             Collector
+        }
+
+        /// <summary>Where a map's picture comes from. See <see cref="MapPictureSource"/>.</summary>
+        public enum PictureSource
+        {
+            /// <summary>DynamicMaps where it has the map, our capture where it does not.</summary>
+            PreferDynamicMaps,
+
+            /// <summary>Our capture where we have one, DynamicMaps where we do not.</summary>
+            PreferCaptures,
+
+            /// <summary>Our captures only; a map with no capture shows its bounds and its pins.</summary>
+            CapturesOnly
+        }
+
+        /// <summary>Which labels a captured picture carries. See <see cref="MapLabels"/>.</summary>
+        public enum LabelMode
+        {
+            /// <summary>The extraction points only.</summary>
+            ExtractsOnly,
+
+            /// <summary>Extracts and the cleaned-up bot zone names.</summary>
+            All,
+
+            /// <summary>No labels of ours at all.</summary>
+            None
         }
 
         /// <summary>Which map pins carry their name at rest. Hover always shows a name.</summary>
@@ -580,6 +631,25 @@ namespace QuestTree
                     "record, only a bigger file.",
                     new AcceptableValueList<int>(2048, 4096)));
 
+            MapPictureSource = config.Bind(
+                "Map", "Map pictures come from", PictureSource.PreferDynamicMaps,
+                "Which picture the Maps tab draws when there is a choice. DynamicMaps' artwork is drawn " +
+                "by hand and covers the vanilla maps; a capture is this mod's own photograph of the map " +
+                "from above, taken in raid, and is the only option for a map DynamicMaps does not ship. " +
+                "'My captures only' ignores DynamicMaps entirely.");
+
+            MapLabels = config.Bind(
+                "Map", "Map labels", LabelMode.ExtractsOnly,
+                "Which place names are drawn on a CAPTURED picture: the extracts only, everything the " +
+                "capture found (which adds the bot zone names - a lot of text on a big map), or none. " +
+                "DynamicMaps' own artwork carries its author's labels whatever this says.");
+
+            UploadCaptures = config.Bind(
+                "Map", "Share captured maps", true,
+                "Offer a map picture you have just captured to the Quest Tracker server mod, so anyone " +
+                "else playing on the same host gets it too. A host that does not collect map pictures " +
+                "refuses the offer and nothing is sent; turn this off to not offer at all.");
+
             PinLabels = config.Bind(
                 "Map", "Pin labels", PinLabelMode.HoverOnly,
                 "Which pins carry their name at rest. Hovering a pin always shows its name. HoverOnly keeps clusters readable; Actionable names in-progress and available quests; All names every pin.");
@@ -638,7 +708,8 @@ namespace QuestTree
                 ShowTakeWithYou, CountUnacceptedQuests, ShowTraderColours,
                 TraderColours, ShowCredits,
                 PinLabels, ColorActive, ColorAvailable, ColorCompleted, ColorLocked, ColorGated, ColorFailed, ColorAccent, Tooltips,
-                HoverSounds, RememberLastView, OpenTracker, CaptureMapKey, CaptureResolution
+                HoverSounds, RememberLastView, OpenTracker, CaptureMapKey, CaptureResolution,
+                UploadCaptures, MapPictureSource, MapLabels
             });
 
             // One handler per entry rather than a single global hook, so this only fires for
@@ -683,6 +754,11 @@ namespace QuestTree
             // F12 menu has to repaint the page or the row keeps naming the old key.
             CaptureMapKey.SettingChanged += Raise;
             CaptureResolution.SettingChanged += Raise;
+            UploadCaptures.SettingChanged += Raise;
+
+            // Both change what the map DRAWS, so both have to repaint it.
+            MapPictureSource.SettingChanged += Raise;
+            MapLabels.SettingChanged += Raise;
             ColorActive.SettingChanged += Raise;
             ColorAvailable.SettingChanged += Raise;
             ColorCompleted.SettingChanged += Raise;
