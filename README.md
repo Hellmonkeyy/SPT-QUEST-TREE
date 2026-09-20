@@ -273,6 +273,9 @@ trader level - AK Zenit PT Lock from Skier at loyalty 2; closest attempt missed:
 needs <= 275 (short by 5.67); the shared build needed AK Zenit PT Lock
 ```
 
+That one is a diagnostic line, so it needs `QUESTTREE_DEBUG=1` (see Troubleshooting) - the panel says
+the same thing without it.
+
 That is a goal, not a dead end. "You need Skier at loyalty 2" is worth knowing; "no build found" is
 not. Where a quest *names* a part you cannot buy, the row says the quest names it - nothing can
 avoid that one.
@@ -433,13 +436,27 @@ to its own defaults from the last row in it.
 every line `QuestTree`; the server half writes to the server console and its own log, and prefixes
 every line `Quest Tracker:`. A symptom that could be either is worth grepping for both.
 
+**The server console is quiet on purpose.** A normal boot prints about five `Quest Tracker` lines -
+the version and quest count, the remembered weapon builds, the background build search and its
+result, and the map markers - plus a line for anything that went wrong. Everything the mod measures
+about itself (the per-profile parts bill, the pricing and flea coverage, the solver's dry run, one
+line per weapon build, the per-map zone counts, the request timings) is a **diagnostic** line, hidden
+unless you ask for it. To see them, set `QUESTTREE_DEBUG=1` in the environment the server starts in -
+an environment variable rather than a config file, because it cannot be packaged into a release by
+accident. Starting the server from Explorer gives a shell no chance to set one, so the source repo
+ships `tools/server-debug.cmd`, which sets it and starts the server in a visible console; a one-line
+`.cmd` beside `SPT.Server.exe` does the same job. The stamp line says which mode you are in:
+`Diagnostics off (QUESTTREE_DEBUG=1 turns them on).` Training (`QUESTTREE_TRAIN=1`) turns them on by
+itself, since the whole point of a training run is to watch it. Quoting the diagnostic lines in a bug
+report is worth the restart.
+
 - **No taskbar button** - check `BepInEx\LogOutput.log` for lines starting `QuestTree`. The load
   line carries the build stamp (`QuestTree 1.18.1+abc1234: loaded.`), which is what to quote.
 - **The tracker is slow to open** - `LogOutput.log` carries one line per open with the time in each
   phase: `QuestTree: panel open - 499 ms: quests: server 29, quests: parse 233, graph 61, ...`. The
   quest fetch and its parse run on a worker thread, so the game is drawing frames through those two.
-  The server half logs each per-profile request's time on the first one and again whenever it passes
-  200 ms. Quote both lines rather than a feeling.
+  The server half logs each per-profile request's time whenever it passes 200 ms, and the first
+  request's time as a diagnostic line (`QUESTTREE_DEBUG=1`). Quote both lines rather than a feeling.
 - **Tree only shows unlocked quests, no pins** - the server half is missing, or you are on someone
   else's server that does not have it. See "Both halves are required" above. The server half says so
   in its own log every time it answers - `Quest Tracker <stamp>: serving 558 quests to the client

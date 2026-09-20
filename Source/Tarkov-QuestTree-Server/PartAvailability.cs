@@ -808,7 +808,7 @@ namespace QuestTreeServer
 
             // Info once, Debug on every refresh after that. The counts are worth seeing at boot and
             // would be a line a minute for the rest of the server's life otherwise.
-            if (first) logger.Info(line);
+            if (first) logger.Detail(line);
             else logger.Debug(line + " (re-read; the server's flea prices move on their own clock)");
 
             return _fleaRead = new FleaRead { Prices = prices, Banned = banned, At = DateTime.UtcNow };
@@ -836,7 +836,7 @@ namespace QuestTreeServer
                     foreach (var property in document.RootElement.EnumerateObject())
                         if (property.Name.TryParseMongoId(out var id)) ids.Add(id);
 
-                    logger.Info($"Quest Tracker: {ids.Count:N0} template id(s) in the vanilla items file, for telling mod-injected parts apart.");
+                    logger.Detail($"Quest Tracker: {ids.Count:N0} template id(s) in the vanilla items file, for telling mod-injected parts apart.");
                 }
                 catch (Exception ex)
                 {

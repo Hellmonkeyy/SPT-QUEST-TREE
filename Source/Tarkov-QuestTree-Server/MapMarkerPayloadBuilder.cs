@@ -62,7 +62,7 @@ namespace QuestTreeServer
                 // synchronous request handler that serves the client - but SPT does wait on this,
                 // so they run together and say so first: a quiet pause at boot with no line in the
                 // log reads as a hang.
-                logger.Info("Quest Tracker: fetching quest objective locations (tarkov.dev, tarkovdata)...");
+                logger.Detail("Quest Tracker: fetching quest objective locations (tarkov.dev, tarkovdata)...");
 
                 // Started together, awaited apart: with Task.WhenAll one source's fault threw
                 // away the other's answer too.
@@ -117,7 +117,7 @@ namespace QuestTreeServer
                 GetPayloadJson();
 
                 if (_cachedJson != null)
-                    logger.Info($"Quest Tracker: map markers built in the background in {build.ElapsedMilliseconds:N0} ms; the boot paid {boot:N0} ms for the objective sources.");
+                    logger.Detail($"Quest Tracker: map markers built in the background in {build.ElapsedMilliseconds:N0} ms; the boot paid {boot:N0} ms for the objective sources.");
                 else
                     logger.Warning($"Quest Tracker: the background map marker build did not produce markers after {build.ElapsedMilliseconds:N0} ms - see the error above; it retries in a minute.");
             });
@@ -372,6 +372,11 @@ namespace QuestTreeServer
         /// <summary>The two lines that say what the maps have to work with, written once each per boot
         /// rather than per rebuild (see the fields they dedup through).
         ///
+        /// DIAGNOSTIC lines (<see cref="QuestLog.Detail"/>): both are per-map statistics for whoever is
+        /// running the capture campaign, not news a player can act on, so they print at Information only
+        /// under QUESTTREE_DEBUG and at Debug otherwise. The dedup stays either way - a Debug line
+        /// repeated on every rebuild is still a log line.
+        ///
         /// The first answers the question the 1.19.0 capture campaign turns on: how many of the maps
         /// this install serves have been measured in a raid. Without it the only way to know would be
         /// to count files in zones\ and open each one.
@@ -388,14 +393,14 @@ namespace QuestTreeServer
             if (_extentLineLogged != line)
             {
                 _extentLineLogged = line;
-                logger.Info(line);
+                logger.Detail(line);
             }
 
             foreach (var entry in percentagePins.OrderBy(e => e.Key, StringComparer.OrdinalIgnoreCase))
             {
                 if (!_calibrationReported.Add($"{entry.Key}|{entry.Value}")) continue;
 
-                logger.Info(
+                logger.Detail(
                     $"Quest Tracker: {entry.Key} has {entry.Value} percentage pins that will need " +
                     "calibration on an in-house picture.");
             }

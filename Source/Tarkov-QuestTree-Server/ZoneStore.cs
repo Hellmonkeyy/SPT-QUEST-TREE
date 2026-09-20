@@ -914,7 +914,7 @@ namespace QuestTreeServer
                 // throws the first time anything counts it - the log line right below, for one.
                 if (file.Extent != null) file.Extent.Floors ??= new List<MapFloorDto>();
 
-                logger.Info(
+                logger.Detail(
                     $"Quest Tracker: {file.Triggers.Count} zones and {file.QuestItems.Count} quest items " +
                     $"known for '{key}' (harvested {file.HarvestedAt})" +
                     (file.Extent != null
