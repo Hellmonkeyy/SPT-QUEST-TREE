@@ -48,12 +48,17 @@
 # Usage:  .\package.ps1                 build, stage, zip, verify
 #         .\package.ps1 -RefreshZones   first copy zones\*.json from the install into the repo
 #         .\package.ps1 -RefreshMaps    first copy maps\<key>\*.jpg and *.map.json from the install
+#         .\package.ps1 -RefreshBuilds  first copy the trained cache\weapon-builds.json over the seed
+#                                       (refuses while SPT.Server.exe is up, and prints the seed's
+#                                       stamp, build count and trader/flea/unpriced split either side
+#                                       of the copy so a worse training run is visible)
 #         .\package.ps1 -SkipBuild      stage and verify what bin\ already holds
 
 param(
     [string]$SptPath = "C:\Games\SPT",
     [switch]$RefreshZones,
     [switch]$RefreshMaps,
+    [switch]$RefreshBuilds,
     [switch]$SkipBuild
 )
 
@@ -108,6 +113,48 @@ if ($LASTEXITCODE -ne 0) {
     Fail "the server DTOs and the client mirrors disagree (see above) - fix the mirror, in the same commit as the change that moved it"
 }
 Write-Host "Server DTOs and client mirrors agree." -ForegroundColor Green
+
+# ---------------------------------------------------------------- the build seed, optionally refreshed
+# The solver is TRAINED between releases: a server started by tools\train.ps1 or
+# tools\train-all-threads.cmd keeps looking for cheaper builds for hours and writes every improvement
+# straight into the install's cache\weapon-builds.json. That file is the seed the release ships, and
+# until now it reached the repo by hand - the same hand-copy the zones folder used to need, with the
+# same failure mode: a release that quietly ships the PREVIOUS training run, since nothing else here
+# reads the install. The gate below catches a seed from a different SOLVER; it cannot tell one training
+# run from a newer one.
+function SeedFacts($path) {
+    # count-seed-sources.py prints the stamp, the build count, the instance count and the split of
+    # every part instance into trader-priced / flea-only / unpriced, all in one line.
+    $out = & python (Join-Path $repo "tools/count-seed-sources.py") $path 2>&1
+    if ($LASTEXITCODE -ne 0) { return "count-seed-sources.py exited $LASTEXITCODE - $($out -join ' ')" }
+    return ($out -join " ")
+}
+
+if ($RefreshBuilds) {
+    $seedPath = Join-Path $server "weapon-builds.json"
+    $installSeed = Join-Path $SptPath "SPT_Runtime\user\mods\QuestTree\cache\weapon-builds.json"
+    if (-not (Test-Path $installSeed)) { Fail "no build cache at $installSeed" }
+
+    # NOT while the server is up. A training server rewrites this file the moment it finds a cheaper
+    # build, so a copy taken mid-run can be a half-written file - and the user may be in a raid on that
+    # server, which is never something this script interrupts. It refuses and says so; stopping the
+    # server is the user's call, not this script's.
+    $serverRunning = @(Get-Process -Name "SPT.Server" -ErrorAction SilentlyContinue)
+    if ($serverRunning.Count -gt 0) {
+        Fail "SPT.Server.exe is running (pid $(($serverRunning | ForEach-Object { $_.Id }) -join ', ')) - it rewrites cache\weapon-builds.json as it trains, so a copy taken now can be half-written. Stop the server yourself and re-run; nothing has been copied."
+    }
+
+    # Before AND after, for both files, because the interesting failure is not a copy that breaks - it
+    # is a copy that works and ships a WORSE seed. Training optimises price, and it can do that by
+    # choosing parts no trader sells for cash; that shows up here as flea-only rising, which is exactly
+    # the number 1.18.0's objective change was measured against. A drop in builds is the other one: a
+    # cache from a server that had not finished its first boot carries fewer than the 60 models.
+    Write-Host "  repo seed before:  $(SeedFacts $seedPath)"
+    Write-Host "  install seed:      $(SeedFacts $installSeed)"
+    Copy-Item $installSeed $seedPath -Force
+    Write-Host "  repo seed after:   $(SeedFacts $seedPath)" -ForegroundColor Yellow
+    Write-Host "Refreshed weapon-builds.json from the install. Compare the three lines above before committing it." -ForegroundColor Yellow
+}
 
 # ---------------------------------------------------------------- the shipped build history must be from the current solver
 # The cache's SolverVersion is what decides whether a boot trusts the shipped builds or re-opens

@@ -53,6 +53,15 @@ namespace QuestTree.QuestGraph
     /// refused rather than developed into noise. <see cref="BuildCamera"/>,
     /// <see cref="RenderTile"/>, <see cref="Measure"/> and <see cref="Develop"/> are the whole of it.
     ///
+    /// One fact about the path, since the paragraph above is written in terms of the game's: this
+    /// camera is ORTHOGRAPHIC, and Unity's built-in pipeline does not do deferred shading for an
+    /// orthographic projection - it falls back to forward, whatever DeferredShading the CopyFrom
+    /// brought and whatever renderingPath reports. It changes none of the conclusions above (both
+    /// paths sum lights, and the darkness and the half-float fix were both measured on this same
+    /// orthographic camera), and it is why the capture's own light may carry a narrow culling mask and
+    /// ForcePixel: in forward rendering both are honoured exactly, where deferred supports a culling
+    /// mask for at most four layers and would draw artifacts for ours.
+    ///
     /// WHERE the camera goes is two rules, not one, and both were learnt from a picture that was
     /// wrong (<see cref="BeginFloor"/>). The topmost band of a map is photographed from 300 m above
     /// the world, because a camera three metres over the ground has every roof and upper wall BEHIND
@@ -68,10 +77,19 @@ namespace QuestTree.QuestGraph
     /// repeated captures converge on the sharpest view of every spot instead of overwriting it with
     /// the blurriest. <see cref="LoadPrevious"/> says when a merge is refused and why.
     ///
-    /// Known limitation, not a bug: terrain and mesh LOD follow the PLAYER, not our camera, so the
-    /// far half of a large map is drawn at its lowest detail and looks soft next to the ground the
-    /// player is standing on. Capturing the same map from two or three places is what fixes it, which
-    /// is the other reason the merge prefers the nearest view of each pixel.
+    /// TWO different things hide the far half of a map from this camera, and only one of them is a
+    /// limitation:
+    ///   - EFT's own distance culling (the DisablerCullingObject layer, and the terrain and building
+    ///     chunks the game streams out) is measured from the PLAYER, not from our camera, and nothing
+    ///     here can reach it. That is what walking somewhere else and pressing the key again covers -
+    ///     it is why the merge exists and why it prefers the nearest view of each pixel.
+    ///   - Unity's own LOD selection is measured from the RENDERING camera, and for an orthographic
+    ///     one it is measured against <c>orthographicSize</c> rather than a distance: a 20 m building
+    ///     is 2 % of a 1024 m tall tile, under the cull threshold of most of EFT's LOD groups, so the
+    ///     whole object disappeared and the terrain and roads - which carry no LODGroup - were all
+    ///     that came back. That produced the "no buildings anywhere, at any camera height" picture,
+    ///     and it is fixed here rather than worked around: <see cref="RenderOnce"/> raises
+    ///     <see cref="CaptureLodBias"/> for the one render and puts it back.
     ///
     /// Cost. Phase 0 timed a 2048 tile in a live raid at 10-61 ms to read back and 58-68 ms to
     /// encode, so the work is spread one step to a frame: each tile's render and readback, then, per
@@ -151,7 +169,7 @@ namespace QuestTree.QuestGraph
 
         /// <summary>Intensity of the capture's OWN directional light. Tunable, and the one number to
         /// change if pictures come out too dark or washed out; changing it changes
-        /// <see cref="LightingTag"/>, which makes every capture taken under the old value be replaced
+        /// <see cref="RenderTag"/>, which makes every capture taken under the old value be replaced
         /// rather than merged into - see <see cref="LoadPrevious"/>.
         ///
         /// It exists because of a daytime Customs raid IN RAIN: the capture came back black with a few
@@ -162,17 +180,53 @@ namespace QuestTree.QuestGraph
         /// components attached to the first-person camera (SSAA, Prism) that a CopyFrom deliberately
         /// does not bring. Overcast weather removes the sun, and with it everything we had.
         ///
-        /// A light of our own is the fix that needs no knowledge of that pipeline: deferred shading
-        /// SUMS lights, so the scene's sun still draws its shadows when there is one, and this
-        /// guarantees a floor of illumination when there is not.</summary>
+        /// A light of our own is the fix that needs no knowledge of that pipeline: lights SUM, so the
+        /// scene's sun still draws its shadows when there is one, and this guarantees a floor of
+        /// illumination when there is not. (The path is forward, not the deferred one the CopyFrom asked
+        /// for - see the class doc: an orthographic camera never gets deferred shading. Both sum lights,
+        /// and forward is the path in which this light's culling mask and ForcePixel mean what
+        /// <see cref="BuildLight"/> intends.)</summary>
         private const float CaptureLightIntensity = 1.5f;
 
-        /// <summary>What the meta records about how a capture was lit, and what a later capture has to
-        /// match before it may be merged into it. "own-1.5" is the current lighting; a capture from
-        /// before this light existed records nothing and is therefore replaced, which is what has to
-        /// happen to the black rain-era pictures.</summary>
-        private static string LightingTag =>
-            "own-" + CaptureLightIntensity.ToString("0.###", CultureInfo.InvariantCulture);
+        /// <summary>The LOD bias held for the length of one tile's render - see
+        /// <see cref="RenderOnce"/>. Unity picks an LOD group's level from the object's size relative
+        /// to the view, and for an orthographic camera the view is <c>orthographicSize</c>: a 20 m
+        /// building against our 512 m half-height is 2 %, which is under the threshold at which most of
+        /// EFT's LOD groups cull the object entirely. That is the whole of the "warehouses and dorms
+        /// draw as flat footprints at every camera height" picture. A bias this large is not a quality
+        /// setting here but an OFF switch for LOD selection: multiply that 2 % by a thousand and every
+        /// group is at its highest level, which is the only level whose geometry is the building.
+        ///
+        /// Global, so it is restored by the same statement that changed it; one render, not a
+        /// frame of gameplay, is what pays for it.</summary>
+        private const float CaptureLodBias = 1000f;
+
+        /// <summary>The terrain base-map distance held for the length of one tile's render - see
+        /// <see cref="RenderOnce"/>. Zero means every terrain patch, at any distance, draws with the
+        /// terrain's pre-averaged BASE MAP instead of its detail splat layers, which from 300 m up at
+        /// half a metre to the pixel is the difference between smooth ground and a 4-pixel checker: the
+        /// detail textures tile about every two metres, and two metres is four pixels.
+        ///
+        /// The cheap, geometry-preserving one of the three ways to fix that. Blurring the picture
+        /// afterwards would soften the buildings and the roads with it;
+        /// QualitySettings.masterTextureLimit would re-upload every texture in the scene twice per
+        /// capture and hitch the raid. This changes one float per terrain and puts it back.</summary>
+        private const float CaptureBasemapDistance = 0f;
+
+        /// <summary>What the meta records about HOW a capture was rendered, and what a later capture has
+        /// to match before it may be merged into it: the capture light, the LOD bias and the terrain
+        /// base-map distance, each of which changes what a pixel is a picture OF.
+        ///
+        /// "own-1.5;lod1000;basemap0" is the current recipe. Every one of the three is read from the
+        /// constant that is actually applied, so tuning any of them replaces the older captures instead
+        /// of merging into them - which is exactly what has to happen to the black rain-era pictures and
+        /// to the building-less ones taken before the LOD bias. A capture written before this field
+        /// existed records nothing and is replaced for the same reason. See
+        /// <see cref="LoadPrevious"/>.</summary>
+        private static string RenderTag =>
+            "own-" + CaptureLightIntensity.ToString("0.###", CultureInfo.InvariantCulture) +
+            ";lod" + CaptureLodBias.ToString("0.###", CultureInfo.InvariantCulture) +
+            ";basemap" + CaptureBasemapDistance.ToString("0.###", CultureInfo.InvariantCulture);
 
         /// <summary>Added to the far plane so the band's own floor is comfortably inside it rather
         /// than exactly on it.</summary>
@@ -1101,7 +1155,22 @@ namespace QuestTree.QuestGraph
         private static void Stage(string path, byte[] bytes) => File.WriteAllBytes(Staged(path), bytes);
 
         /// <summary>Puts a staged file in place, and does nothing when none was staged - a floor
-        /// whose sidecar could not be encoded, for instance.</summary>
+        /// whose sidecar could not be encoded, for instance.
+        ///
+        /// The ONE window this leaves, stated plainly because no sequence of single-file moves closes it:
+        /// <see cref="WriteMeta"/> commits the floors one at a time and writes the meta last, so a process
+        /// killed between two floors leaves new pixels under a floor's old file name with the OLD meta
+        /// still describing them. A floor keeps its name across captures, so nothing is missing and
+        /// nothing is half-written; the only thing that can be wrong is the SIZE the old meta claims. On a
+        /// merge it cannot be: LoadPrevious accepted the merge because the extent and the scale match to
+        /// the double, so the new pixels are the size the old meta says. On a fresh capture after the
+        /// harvest re-measured the extent, the old meta's width and height are the previous extent's, and
+        /// the reader stretches the picture onto the extent it is given - MapCatalog.CheckPictureSize
+        /// compares the meta's own numbers against the meta's own extent, not against the PNG, so it does
+        /// not catch this. Accepted rather than fixed: the crash has to land inside the few milliseconds
+        /// between two File.Move calls AND the map's extent has to have changed since the last capture,
+        /// and the next capture of that map corrects it. Closing it properly means a fresh name per
+        /// capture, which is the stale-picture sweep, the upload and the host cache as well.</summary>
         /// <param name="path">The file to end up with.</param>
         private static void Commit(string path)
         {
@@ -1239,15 +1308,16 @@ namespace QuestTree.QuestGraph
                     return null;
                 }
 
-                if (!string.Equals(meta.Lighting, LightingTag, StringComparison.Ordinal))
+                if (!string.Equals(meta.Render, RenderTag, StringComparison.Ordinal))
                 {
-                    // The lighting is part of what a pixel's brightness MEANS. A capture taken before
-                    // the capture light existed records no lighting at all and is one of the black
-                    // rain-era pictures this replaces; one taken at a different intensity would merge
-                    // into a visible seam.
-                    Fresh(plan, string.IsNullOrEmpty(meta.Lighting)
-                        ? $"it was taken before the capture light existed, and this one is lit {LightingTag}"
-                        : $"it was lit {meta.Lighting} and this one is lit {LightingTag}");
+                    // The render recipe is part of what a pixel IS. A capture taken before the recipe was
+                    // recorded is one of the black rain-era or building-less pictures this replaces; one
+                    // taken under a different light would merge into a visible seam, and one taken without
+                    // the LOD bias would win the distance test over ground that actually has buildings in
+                    // it. Any difference at all, and this capture starts fresh.
+                    Fresh(plan, string.IsNullOrEmpty(meta.Render)
+                        ? $"it was taken before the render recipe was recorded, and this one is rendered {RenderTag}"
+                        : $"it was rendered {meta.Render} and this one is rendered {RenderTag}");
                     return null;
                 }
 
@@ -1583,8 +1653,14 @@ namespace QuestTree.QuestGraph
             // noise with a few emissive specks in it - which is exactly the picture that came back,
             // 80 kB for two million pixels, and which the stretch reported as a successful
             // 0.0000..0.5051 exposure. A fresh capture is therefore refused outright rather than
-            // developed; a merge cannot reach this, because a merge keeps the exposure the first
-            // capture stored and never measures.
+            // developed.
+            //
+            // A MERGE reaches this too, and is meant to: MeasureFloor measures on a merge as well - not
+            // to develop with, but for the light test - so a dark render of a floor that already has a
+            // good picture fails HERE first, the floor is marked failed, and Carried keeps the picture
+            // already on disk. That is the same outcome by a shorter road than the drift test. The line
+            // below names the FLOOR for that reason: "nothing was written" is about that floor, and on a
+            // multi-floor map the other floors are decided on their own pixels.
             if (high < MinUsableHigh)
             {
                 Plugin.LogSource?.LogWarning(
@@ -2008,7 +2084,7 @@ namespace QuestTree.QuestGraph
                 // Settings only - rendering path, HDR, layer mask, clear flags - and no components.
                 _camera.CopyFrom(main);
                 copied = main.cullingMask;
-                note = $"settings copied from \"{main.name}\" ({_camera.renderingPath}/{_camera.actualRenderingPath})";
+                note = $"settings copied from \"{main.name}\"";
             }
             else
             {
@@ -2044,6 +2120,13 @@ namespace QuestTree.QuestGraph
             var mask = CaptureMask(copied);
             _camera.cullingMask = mask;
 
+            // Read HERE and not at the CopyFrom above, which is the whole point of the move: the path a
+            // camera reports changes with its projection - an orthographic camera does not get deferred
+            // shading in this pipeline - so a path read before the orthographic switch describes the
+            // camera we copied FROM and not the one that renders. The header said DeferredShading for a
+            // capture that cannot have been deferred.
+            note = $"{note} ({_camera.renderingPath}/{_camera.actualRenderingPath}, orthographic)";
+
             BuildLight(mask);
             BuildTarget();
 
@@ -2060,6 +2143,11 @@ namespace QuestTree.QuestGraph
             {
                 note = $"{note}, own light {CaptureLightIntensity.ToString("0.###", CultureInfo.InvariantCulture)}";
             }
+
+            // Named in the header because they are the two settings that decide whether the picture has
+            // buildings in it and whether its ground is smooth - see RenderOnce - and a capture that came
+            // back wrong should say on the record what it was rendered under.
+            note = $"{note}, lod bias {CaptureLodBias.ToString("0.###", CultureInfo.InvariantCulture)}, terrain basemap";
 
             return true;
         }
@@ -2154,32 +2242,114 @@ namespace QuestTree.QuestGraph
             _camera.transform.position = new Vector3((float)centreX, floor.CameraY, (float)centreZ);
         }
 
-        /// <summary>One render of the camera where it stands, with fog off - a hundred metres of aerial
-        /// perspective over a map read from above is a grey wash - and restored by the finally, so a
-        /// player's own next frame is drawn with the scene's own settings whatever happens here.
+        /// <summary>One render of the camera where it stands, under four settings this capture needs and
+        /// the player's own frame must not see:
+        ///   - fog OFF: a hundred metres of aerial perspective over a map read from above is a grey wash;
+        ///   - the capture's own light ON (<see cref="CaptureLightIntensity"/>), which is what makes an
+        ///     overcast raid produce a picture at all;
+        ///   - the LOD bias at <see cref="CaptureLodBias"/> and the maximum LOD level at 0, which is what
+        ///     makes the BUILDINGS draw for an orthographic camera;
+        ///   - every terrain's base-map distance at <see cref="CaptureBasemapDistance"/>, which is what
+        ///     stops the ground being a two-metre checker.
+        /// Every one of them is a GLOBAL or a scene object's own field, so each is restored in the finally
+        /// by the statement that changed it - the whole reason this is one method and not four.
         ///
-        /// Nothing is done to the lighting. Phase 0 round 2 forced flat white ambient on two of its
-        /// five variants and the pictures came back the same as the ones without it, so
-        /// RenderSettings.ambient has no effect on this scene's deferred output and changing it would
-        /// be a side effect with no benefit.</summary>
+        /// RenderSettings.ambient is deliberately NOT touched: Phase 0 round 2 forced flat white ambient
+        /// on two of its five variants and the pictures came back identical to the ones without it, so it
+        /// would be a side effect with no benefit.</summary>
         private void RenderOnce()
         {
             var fog = RenderSettings.fog;
+            var lodBias = QualitySettings.lodBias;
+            var maximumLod = QualitySettings.maximumLODLevel;
+
+            // Declared out here and assigned inside the try, so that everything this method changes is
+            // changed under the finally that puts it back.
+            List<KeyValuePair<Terrain, float>> basemaps = null;
 
             try
             {
                 RenderSettings.fog = false;
                 if (_light != null) _light.enabled = true;
+                basemaps = HoldTerrainBasemaps();
+
+                // The LOD switch, not a quality preference - see CaptureLodBias. maximumLODLevel is
+                // usually already 0 and setting it costs nothing; where the game's quality level has
+                // raised it, it is a second way for the detailed mesh to be unreachable.
+                QualitySettings.lodBias = CaptureLodBias;
+                QualitySettings.maximumLODLevel = 0;
 
                 _camera.Render();
             }
             finally
             {
-                // Both restored by the same statement that changed them, and for the same reason: the
-                // player's next frame must be drawn with the scene's own fog and the scene's own
-                // lights, not ours.
+                // All four restored by the statements that changed them, and for the same reason: the
+                // player's next frame must be drawn with the scene's own fog, the scene's own lights, the
+                // player's own LOD distances and the terrain's own detail.
+                ReleaseTerrainBasemaps(basemaps);
+                QualitySettings.maximumLODLevel = maximumLod;
+                QualitySettings.lodBias = lodBias;
                 if (_light != null) _light.enabled = false;
                 RenderSettings.fog = fog;
+            }
+        }
+
+        /// <summary>Sets every active terrain's base-map distance to <see cref="CaptureBasemapDistance"/>
+        /// and hands back what each of them had, for <see cref="ReleaseTerrainBasemaps"/> to put back.
+        ///
+        /// Null on any failure, which <see cref="ReleaseTerrainBasemaps"/> reads as "nothing was changed":
+        /// a tiling ground is a worse picture, not a broken one, and it is not worth a capture. A failure
+        /// PART WAY through puts back the terrains it had already changed before saying so, so there is no
+        /// path out of here that leaves a terrain holding our value.</summary>
+        private static List<KeyValuePair<Terrain, float>> HoldTerrainBasemaps()
+        {
+            var held = new List<KeyValuePair<Terrain, float>>();
+
+            try
+            {
+                var terrains = Terrain.activeTerrains;
+                if (terrains == null || terrains.Length == 0) return null;
+
+                foreach (var terrain in terrains)
+                {
+                    if (terrain == null) continue;
+
+                    held.Add(new KeyValuePair<Terrain, float>(terrain, terrain.basemapDistance));
+                    terrain.basemapDistance = CaptureBasemapDistance;
+                }
+
+                return held;
+            }
+            catch (Exception ex)
+            {
+                ReleaseTerrainBasemaps(held);
+
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: the terrain base map could not be forced ({ex.GetType().Name}: {ex.Message}) - " +
+                    "the ground will show its detail textures tiling.");
+                return null;
+            }
+        }
+
+        /// <summary>Puts every terrain's own base-map distance back. Guarded and null-safe: a terrain
+        /// destroyed between the two calls is skipped rather than allowed to cost the restore of the
+        /// others, and the player's ground must come back however this render went.</summary>
+        /// <param name="held">What <see cref="HoldTerrainBasemaps"/> returned, or null.</param>
+        private static void ReleaseTerrainBasemaps(List<KeyValuePair<Terrain, float>> held)
+        {
+            if (held == null) return;
+
+            foreach (var entry in held)
+            {
+                try
+                {
+                    if (entry.Key != null) entry.Key.basemapDistance = entry.Value;
+                }
+                catch (Exception ex)
+                {
+                    Plugin.LogSource?.LogDebug(
+                        $"QuestTree: a terrain's base map distance could not be restored ({ex.Message}).");
+                }
             }
         }
 
@@ -2532,7 +2702,7 @@ namespace QuestTree.QuestGraph
                     FirstCapturedAt = string.IsNullOrEmpty(plan.FirstCapturedAt) ? now : plan.FirstCapturedAt,
                     Captures = plan.Captures,
                     ModVersion = ModInfo.Stamp,
-                    Lighting = LightingTag,
+                    Render = RenderTag,
                     TimeOfDay = TimeOfDay(),
                     Floors = floors,
                     Labels = plan.Labels,
@@ -3141,12 +3311,18 @@ namespace QuestTree.QuestGraph
 
             [JsonProperty("modVersion")] public string ModVersion { get; set; }
 
-            /// <summary>How the capture was LIT: "own-1.5" for the capture light this build adds at
-            /// that intensity, and absent in a capture taken before it existed. Not decoration - it is
-            /// what stops a picture taken under one lighting being merged pixel by pixel into one taken
-            /// under another, which would seam the two together; see <see cref="LoadPrevious"/> and
-            /// <see cref="CaptureLightIntensity"/>.</summary>
-            [JsonProperty("lighting")] public string Lighting { get; set; }
+            /// <summary>HOW the capture was rendered - "own-1.5;lod1000;basemap0": the capture light's
+            /// intensity, the LOD bias the render was taken under and the terrain base-map distance. Absent
+            /// in a capture taken before the field existed. Not decoration - it is the one gate that stops a
+            /// picture taken under one recipe being merged pixel by pixel into one taken under another,
+            /// which would seam the two together or let building-less ground win the distance test; see
+            /// <see cref="RenderTag"/> and <see cref="LoadPrevious"/>.
+            ///
+            /// Read by nothing but <see cref="LoadPrevious"/>: the Maps tab's reader takes the fields it
+            /// names and ignores the rest, tools/check-capture.py the same, and the upload's
+            /// MapCaptureMetaDto does not carry it - so a set synced from a host has no recipe, which is
+            /// correct, since a merge only ever happens against this machine's own captures folder.</summary>
+            [JsonProperty("render")] public string Render { get; set; }
 
             /// <summary>The raid's own clock, "HH:mm", or "" when it could not be read. A map
             /// captured at 03:00 is a dark map and worth taking again.</summary>
@@ -3212,6 +3388,69 @@ namespace QuestTree.QuestGraph
 
             [JsonProperty("x")] public float X { get; set; }
             [JsonProperty("z")] public float Z { get; set; }
+        }
+
+        // --- driving a capture from outside ------------------------------------------------------
+
+        /// <summary>The capture installed in the current raid, remembered so the two members below do
+        /// not scan the scene on every frame of a campaign's wait loop. Unity's == null is true for a
+        /// DESTROYED object as well as a missing one, so a reference left over from the previous raid
+        /// is looked up again rather than handed back.</summary>
+        private static MapCapture _current;
+
+        private static MapCapture Current()
+        {
+            if (_current != null) return _current;
+
+            _current = UnityEngine.Object.FindObjectOfType<MapCapture>();
+            return _current;
+        }
+
+        /// <summary>Whether a capture is running right now - for anything that must not start a second
+        /// one, or move the player, while a picture is being taken. See <see cref="MapCampaign"/>,
+        /// which is the only caller: the streamer loads the world around the PLAYER, so a capture is
+        /// a photograph of wherever the player was standing when it started.</summary>
+        public static bool IsCapturing
+        {
+            get
+            {
+                try
+                {
+                    var runner = Current();
+                    return runner != null && runner._running;
+                }
+                catch
+                {
+                    return false;
+                }
+            }
+        }
+
+        /// <summary>Starts a capture exactly as the key press does, for a caller that wants one without
+        /// a key: the same refusals (one already running, no living player) and the same coroutine.
+        /// False - having said nothing - means nothing was started, because there is no capture
+        /// installed in this raid, one is already running, or there is nobody alive to photograph
+        /// from; the caller knows what a refusal means for IT and says so itself.</summary>
+        public static bool TryStartCapture()
+        {
+            try
+            {
+                var runner = Current();
+                if (runner == null) return false;
+                if (runner._running) return false;
+                if (!runner.PlayerIsAlive()) return false;
+
+                // Set before the coroutine is started, for the same reason the key press does it: a
+                // second caller in the same frame must be refused rather than fight for the camera.
+                runner._running = true;
+                runner.StartCoroutine(runner.Run());
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning($"QuestTree: a map capture could not be started ({ex.Message}).");
+                return false;
+            }
         }
     }
 }

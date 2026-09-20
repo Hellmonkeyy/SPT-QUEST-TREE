@@ -37,6 +37,12 @@ namespace QuestTree.Patches
                 // until the key is pressed - and guards and catches for itself.
                 MapCapture.Install(__instance);
 
+                // The two ways to capture a whole map without walking it - the campaign key and
+                // automatic capture as you play - which drive that same capture rather than rendering
+                // anything themselves, so they sit behind the same gate. Also a watcher only: nothing
+                // moves and nothing renders until a key is pressed or the setting is on.
+                MapCampaign.Install(__instance);
+
                 __instance.StartCoroutine(ZoneHarvester.HarvestCoroutine(__instance));
             }
             catch (Exception ex)

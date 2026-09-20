@@ -317,6 +317,10 @@ namespace QuestTree.UI
             AuxLayout.AddWrapped(column, CaptureNote(), AuxLayout.Padding, ref y,
                 width - AuxLayout.Padding * 2f);
 
+            AuxLayout.AddSpacer(ref y, 4f);
+            AuxLayout.AddWrapped(column, CampaignNote(), AuxLayout.Padding, ref y,
+                width - AuxLayout.Padding * 2f);
+
             AuxLayout.AddSpacer(ref y, 6f);
             Dropdown(column, ref y, width, deferred, "Map pictures come from",
                 new[]
@@ -354,7 +358,8 @@ namespace QuestTree.UI
                 ModSettings.CountUnacceptedQuests, ModSettings.ShowCredits,
                 ModSettings.MirrorMapArtwork, ModSettings.ShowMapGuides, ModSettings.DoNextRows,
                 ModSettings.MapArtworkRotation, ModSettings.PinLabels, ModSettings.SidebarWidth,
-                ModSettings.CaptureMapKey, ModSettings.CaptureResolution, ModSettings.UploadCaptures,
+                ModSettings.CaptureMapKey, ModSettings.CampaignKey, ModSettings.AutoCapture,
+                ModSettings.AutoCaptureSeconds, ModSettings.CaptureResolution, ModSettings.UploadCaptures,
                 ModSettings.MapPictureSource, ModSettings.MapLabels);
         }
 
@@ -376,6 +381,32 @@ namespace QuestTree.UI
                    "map from above, one picture per floor, into BepInEx/plugins/QuestTree/captures/. Needs " +
                    "\"Harvest quest zones in raid\" on, since the picture is drawn to the rectangle that harvest " +
                    "measures. One raid per map is enough.</color>";
+        }
+
+        /// <summary>The paragraph beside it about capturing a WHOLE map without walking it: the
+        /// campaign key, and whether automatic capture is on. Both are read-only here for the same
+        /// reason the capture key is - this page has no key-binding control and the F12 menu is where
+        /// they live - and both are said out loud because a player who does not know the campaign key
+        /// exists will walk a kilometre of Customs pressing the other one.</summary>
+        private static string CampaignNote()
+        {
+            var shortcut = ModSettings.CampaignKey.Value;
+
+            var whole = shortcut.MainKey == KeyCode.None
+                ? "no key is bound for capturing the whole map at once - bind one in the F12 menu " +
+                  "(Map > Capture the whole map key)"
+                : $"press <b>{ModSettings.KeyText(shortcut, " + ")}</b> to capture the WHOLE map in one go - it " +
+                  "teleports you from stop to stop, captures at each, and puts you back where you pressed it";
+
+            var auto = ModSettings.AutoCapture.Value
+                ? $"Automatic capture is ON: one every {ModSettings.AutoCaptureSeconds.Value} s once you have " +
+                  "moved. It hitches every few seconds - turn it off in the F12 menu when you are not building " +
+                  "a map."
+                : "The F12 menu can also capture automatically as you play, for a raid set aside for " +
+                  "map-building.";
+
+            return $"<color=#FFFFFF80>Whole map: {whole}. Start such a raid with AI set to none - nothing here " +
+                   $"disables bots. {auto}</color>";
         }
 
         /// <summary>A labelled dropdown.

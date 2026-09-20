@@ -117,19 +117,28 @@ only once.
 floors, 0 of 282 zones outside`); one full capture of Customs end to end - rendered in two tiles in
 415 ms, written as a 3.5 MB picture, and found and catalogued by the Maps tab on the next open (`1
 captured map(s) (1 floors) to draw from`); an upload accepted and stored by a local host under
-`user\mods\QuestTree\maps\bigmap\`; and the refusal when a second capture's light did not match the
-first's, which fired exactly as intended and left the set alone.
+`user\mods\QuestTree\maps\bigmap\`; the refusal when a second capture's light did not match the
+first's, which fired exactly as intended and left the set alone; **the captured picture itself drawn
+in the viewport with the pins over it**, once the picture order was set to prefer captures, and
+zoomed in far enough to read the ground; and **several presses merging into one set** - by the end
+with no holes left in it and the colour right.
 
-**Not seen yet:** a captured picture actually drawn in the viewport - the setting prefers DynamicMaps
-by default and DynamicMaps ships Customs, so the capture was catalogued but the artwork is what was
-on screen; a merge that added ground from a second spot (the second press was the one the light test
-refused); a second client downloading a set from the host; any map with more than one floor, so the
-multi-floor camera and the floor picker over a captured picture are untested in game; the labels'
-appearance on a real picture; the extent-only backdrop, since this install has DynamicMaps for all
-eleven vanilla maps and no modded map to try it on; the three picture-order settings taking effect;
-and the too-dark refusal, which was written *after* the rain capture that prompted it, along with the
-capture light meant to keep a cloudy raid usable. The capture campaign that fills `maps\` is what
-exercises all of it.
+That last pair is also how the two things this release fixes last were found, both of them visible
+in that viewport and neither of them a thing a log line would have said: every building drawing as a
+flat footprint at both camera heights (Unity's LOD selection culling whole objects against a 512 m
+orthographic view, now overridden for the render), and the terrain's detail textures tiling as a
+two-metre checker (now forced to the terrain's smooth base map for the render). The pictures that
+showed both were taken before either fix; a capture taken now does not merge into them, by design.
+
+**Not seen yet:** the buildings and the smooth ground the last two fixes are for - they are written
+against a diagnosis, not against a picture, and the next capture is what confirms them; a second
+client downloading a set from the host; any map with more than one floor, so the multi-floor camera
+and the floor picker over a captured picture are untested in game; the labels' appearance on a real
+picture; the extent-only backdrop, since this install has DynamicMaps for all eleven vanilla maps and
+no modded map to try it on; the other two picture-order settings (prefer-captures is the one that was
+exercised); and the too-dark refusal, which was written *after* the rain capture that prompted it,
+along with the capture light meant to keep a cloudy raid usable. The capture campaign that fills
+`maps\` is what exercises all of it.
 
 ## What to look for
 

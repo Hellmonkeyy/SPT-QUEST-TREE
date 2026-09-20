@@ -24,6 +24,9 @@ if (-not (Test-Path $exe)) {
 }
 
 $env:QUESTTREE_TRAIN = "1"
+# Map uploads accepted too: a capture raid run against a training server has to be able to hand its
+# pictures over, and a server launched from here is already a diagnostics server, not a player's.
+$env:QUESTTREE_ACCEPT_MAPS = "1"
 
 Write-Host "Training on. The server searches for cheaper builds until 340,000 attempts or 5 hours, or until you stop it." -ForegroundColor Yellow
 Write-Host "Progress appears in the server log every 20 seconds." -ForegroundColor Yellow

@@ -169,6 +169,21 @@ namespace QuestTree
         /// nothing at all, and shown (not edited) in the in-panel Settings tab.</summary>
         public static ConfigEntry<KeyboardShortcut> CaptureMapKey { get; private set; }
 
+        /// <summary>The key that captures the WHOLE map in one press: it teleports the player across a
+        /// grid of standable spots, captures at each, and puts them back - see
+        /// QuestGraph/MapCampaign.cs. One modifier more than the single capture's key, because it
+        /// moves the player and should be harder to hit by accident than a key that only costs a few
+        /// frames.</summary>
+        public static ConfigEntry<KeyboardShortcut> CampaignKey { get; private set; }
+
+        /// <summary>Whether a raid captures the map by itself every few seconds as the player moves
+        /// about it - the map-building raid's setting. Off by default: it hitches every few seconds,
+        /// which is a price only somebody building a map picture is getting anything for.</summary>
+        public static ConfigEntry<bool> AutoCapture { get; private set; }
+
+        /// <summary>Seconds between automatic captures, when <see cref="AutoCapture"/> is on.</summary>
+        public static ConfigEntry<int> AutoCaptureSeconds { get; private set; }
+
         /// <summary>Longest side, in pixels, of a captured map picture. 2048 or 4096.</summary>
         public static ConfigEntry<int> CaptureResolution { get; private set; }
 
@@ -615,6 +630,40 @@ namespace QuestTree
                 "Needs 'Harvest quest zones in raid' on, since the picture is drawn to the rectangle that " +
                 "harvest measures.");
 
+            // Ctrl+Shift+F9, one modifier more than the single capture above it. BepInEx triggers a
+            // shortcut on its exact combination only - any other key held blocks it - so Ctrl+Shift+F9
+            // does not also fire Ctrl+F9, and the two can share a main key.
+            //
+            // It reads back as "Shift + Ctrl + F9" wherever KeyText prints it: BepInEx sorts a
+            // shortcut's modifiers by KeyCode, and LeftShift is 304 against LeftControl's 306. The
+            // same combination either way round; said here so the spelling in the panel is not read
+            // as a different key.
+            CampaignKey = config.Bind(
+                "Map", "Capture the whole map key", new KeyboardShortcut(KeyCode.F9, KeyCode.LeftControl, KeyCode.LeftShift),
+                "Pressed inside a raid, this captures the WHOLE map without you walking it: it teleports " +
+                "you across a grid of standable spots 200 m apart, takes a capture at each, and returns you " +
+                "to where you pressed it. Start the raid with AI set to none - it does not disable bots, and " +
+                "it leaves you standing still for a second and a half at every stop. Customs is about 16 " +
+                "stops and a couple of minutes. Needs 'Harvest quest zones in raid' on, like the single " +
+                "capture key.");
+
+            AutoCapture = config.Bind(
+                "Map", "Capture the map automatically while I play", false,
+                "Capture the map by itself, every few seconds, whenever you have moved since the last one, " +
+                "so a raid spent walking about builds the picture as you go; each capture merges into the " +
+                "map, nearest capture winning per pixel. This WILL hitch every few seconds - it is a " +
+                "map-building tool for a raid you have set aside for it, not something to leave on while you " +
+                "play for real. Needs 'Harvest quest zones in raid' on, and starts as soon as the raid has " +
+                "measured the map's rectangle a few seconds in.");
+
+            AutoCaptureSeconds = config.Bind(
+                "Map", "Seconds between automatic captures", 5,
+                new ConfigDescription(
+                    "How long to wait after one automatic capture before another may be taken. Low numbers " +
+                    "build the map fastest and hitch most; the wait is measured from when a capture starts, " +
+                    "and no capture is taken at all until you have moved 15 m from the last one.",
+                    new AcceptableValueRange<int>(2, 120)));
+
             CaptureResolution = config.Bind(
                 "Map", "Capture resolution", 4096,
                 new ConfigDescription(
@@ -692,7 +741,8 @@ namespace QuestTree
                 ShowTakeWithYou, CountUnacceptedQuests, ShowTraderColours,
                 TraderColours, ShowCredits,
                 PinLabels, ColorActive, ColorAvailable, ColorCompleted, ColorLocked, ColorGated, ColorFailed, ColorAccent, Tooltips,
-                HoverSounds, RememberLastView, OpenTracker, CaptureMapKey, CaptureResolution,
+                HoverSounds, RememberLastView, OpenTracker, CaptureMapKey, CampaignKey,
+                AutoCapture, AutoCaptureSeconds, CaptureResolution,
                 UploadCaptures, MapPictureSource, MapLabels
             });
 
@@ -737,6 +787,9 @@ namespace QuestTree
             // The Settings tab PRINTS the capture key and the resolution, so a change made in the
             // F12 menu has to repaint the page or the row keeps naming the old key.
             CaptureMapKey.SettingChanged += Raise;
+            CampaignKey.SettingChanged += Raise;
+            AutoCapture.SettingChanged += Raise;
+            AutoCaptureSeconds.SettingChanged += Raise;
             CaptureResolution.SettingChanged += Raise;
             UploadCaptures.SettingChanged += Raise;
 

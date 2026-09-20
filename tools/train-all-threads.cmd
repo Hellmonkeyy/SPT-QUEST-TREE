@@ -7,6 +7,9 @@ rem Runs from the server's own folder, because SPT.Server.exe reads .\sptLogger.
 rem and calls the exe by full path, because cmd resolves a bare name against PATH, not the folder.
 set QUESTTREE_TRAIN=1
 set QUESTTREE_TRAIN_THREADS=%NUMBER_OF_PROCESSORS%
+rem Map uploads accepted too: a capture raid run against a training server has to be able to hand its
+rem pictures over, and a server launched from here is already a diagnostics server, not a player's.
+set QUESTTREE_ACCEPT_MAPS=1
 cd /d C:\Games\SPT\SPT_Runtime
 echo Training on %NUMBER_OF_PROCESSORS% threads. Close this window to stop.
 "C:\Games\SPT\SPT_Runtime\SPT.Server.exe"
