@@ -307,6 +307,19 @@ namespace QuestTree.UI
             Stepper(column, ref y, "Extra map artwork rotation", ModSettings.MapArtworkRotation, 90, -270, 270,
                 "Added to the rotation each map already declares. 0 is right for every shipped map.");
 
+            // The capture key is SHOWN here, not edited: this page has no key-binding control (the
+            // tracker's own shortcut is not editable here either), and a player who cannot find the
+            // key is a player who never captures a map. The F12 menu is where it is rebound.
+            AuxLayout.AddSpacer(ref y, 6f);
+            AuxLayout.AddWrapped(column, CaptureNote(), AuxLayout.Padding, ref y,
+                width - AuxLayout.Padding * 2f);
+
+            AuxLayout.AddSpacer(ref y, 6f);
+            Dropdown(column, ref y, width, deferred, "Capture resolution",
+                new[] { "2048 px", "4096 px" },
+                ModSettings.CaptureResolution.Value <= 2048 ? 0 : 1,
+                index => ModSettings.CaptureResolution.Value = index == 0 ? 2048 : 4096);
+
             AuxLayout.AddSpacer(ref y, 6f);
             Dropdown(column, ref y, width, deferred, "Pin labels",
                 new[] { "Hover only", "In progress and available", "All pins" },
@@ -322,7 +335,28 @@ namespace QuestTree.UI
                 ModSettings.MarkStartedOnly, ModSettings.ShowItemsSection, ModSettings.ShowTakeWithYou,
                 ModSettings.CountUnacceptedQuests, ModSettings.ShowCredits,
                 ModSettings.MirrorMapArtwork, ModSettings.ShowMapGuides, ModSettings.DoNextRows,
-                ModSettings.MapArtworkRotation, ModSettings.PinLabels, ModSettings.SidebarWidth);
+                ModSettings.MapArtworkRotation, ModSettings.PinLabels, ModSettings.SidebarWidth,
+                ModSettings.CaptureMapKey, ModSettings.CaptureResolution);
+        }
+
+        /// <summary>The Map section's one paragraph about capturing a picture: which key does it, and
+        /// the two things that stop it working. Written out rather than left to the F12 menu's
+        /// description because the key is useless if nobody knows it exists.</summary>
+        private static string CaptureNote()
+        {
+            var shortcut = ModSettings.CaptureMapKey.Value;
+
+            if (shortcut.MainKey == KeyCode.None)
+            {
+                return "<color=#FFFFFF80>Map pictures: no capture key is bound. Bind one in the F12 menu " +
+                       "(Map > Capture map picture key) and press it inside a raid to draw this mod's own " +
+                       "picture of the map.</color>";
+            }
+
+            return $"<color=#FFFFFF80>Map pictures: press <b>{ModSettings.KeyText(shortcut, " + ")}</b> inside a raid to draw the " +
+                   "map from above, one picture per floor, into BepInEx/plugins/QuestTree/captures/. Needs " +
+                   "\"Harvest quest zones in raid\" on, since the picture is drawn to the rectangle that harvest " +
+                   "measures. One raid per map is enough.</color>";
         }
 
         /// <summary>A labelled dropdown.

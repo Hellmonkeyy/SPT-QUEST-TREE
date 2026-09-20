@@ -33,3 +33,6 @@ tarkovdev-quests.json
 
 # Offline export of the SPT modding docs, the source of truth for SPT 4.1.x changes - third-party text, kept local.
 spt-modding-docs.md
+
+# Python bytecode from the tools/ scripts.
+__pycache__/

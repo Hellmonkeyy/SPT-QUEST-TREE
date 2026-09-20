@@ -70,6 +70,29 @@ namespace QuestTree.UI
             return true;
         }
 
+        /// <summary>The capture key's default, for the case where the settings never bound - the
+        /// F12 config failed and <see cref="ModSettings.Ready"/> is false. Has to agree with the
+        /// default in ModSettings.CaptureMapKey.</summary>
+        private const string DefaultCaptureKeyText = "Ctrl+F9";
+
+        /// <summary>
+        /// What to press in raid to capture this map, as a player would write it, for the sidebar
+        /// line that says so. Empty when the player has unbound the key, which is a different
+        /// sentence rather than an instruction to press nothing.
+        ///
+        /// Spelled by ModSettings.KeyText, which the Settings tab's capture note also uses - with a
+        /// wider separator, since a paragraph reads better with spaces than a hint in brackets does.
+        /// </summary>
+        private static string CaptureKeyText
+        {
+            get
+            {
+                if (!ModSettings.Ready) return DefaultCaptureKeyText;
+
+                return ModSettings.KeyText(ModSettings.CaptureMapKey.Value, "+");
+            }
+        }
+
         private const float SidebarInset = 12f;
 
         /// <summary>The map's own control row - pickers, the accepted-only toggle, coverage -
@@ -183,6 +206,29 @@ namespace QuestTree.UI
             return _keptViewport != null ? _keptViewport.transform : null;
         }
 
+        /// <summary>
+        /// Lets go of the map on screen, for a caller that is about to free the pictures behind it.
+        ///
+        /// Called by <see cref="MapCatalog.InvalidateCaptures"/>, which replaces a capture's
+        /// MapEntry and then destroys the Texture2D of the one it replaced. The kept viewport's
+        /// Image holds that sprite, and an Image whose texture has been destroyed under it draws a
+        /// blank quad and logs for every frame until something rebuilds - which the kept-viewport
+        /// key would eventually do, since the art's instance id is in it, but not before the next
+        /// repaint. Dropping the viewport first makes the order right whatever the state of the
+        /// menu, rather than relying on a raid having torn it down.
+        ///
+        /// The pending-picture latch goes with it: it would otherwise point at a layer whose sprite
+        /// has just been freed, and IsReadyToBuild never answers again for a released read.
+        ///
+        /// The selection - map, floor, quest, pan and zoom - is deliberately untouched: this is not
+        /// a profile change, and a capture finishing is no reason to move the player's view.
+        /// </summary>
+        internal static void ForgetDrawnMap()
+        {
+            DiscardViewport();
+            _awaitingLayer = null;
+        }
+
         /// <summary>Destroys the kept viewport, if it still exists, and forgets what it was built
         /// from. Detached first, exactly as AuxLayout.ClearChildren does it: Destroy is deferred to
         /// the end of the frame, and a child still in the hierarchy would be walked - and drawn - by
@@ -247,8 +293,14 @@ namespace QuestTree.UI
 
         /// <summary>Maps that load the same scene, in either direction. Mirrors ZoneStore.Aliases
         /// on the server, and is only consulted when DynamicMaps is not installed to answer the
-        /// same question from its own MapInternalNames.</summary>
-        private static readonly (string A, string B)[] SceneAliases =
+        /// same question from its own MapInternalNames.
+        ///
+        /// Read by <see cref="MapCatalog"/> too, rather than copied there: a capture is written
+        /// under the location id the RAID had (factory4_night, Sandbox_high) while this view only
+        /// ever asks by the folded key (<see cref="CanonicalMapKey"/>), so the capture reader needs
+        /// exactly these pairs to find it. A third copy of the table is a third thing to keep in
+        /// step with the server's.</summary>
+        internal static readonly (string A, string B)[] SceneAliases =
         {
             ("factory4_night", "factory4_day"),
             ("Sandbox_high", "Sandbox")
@@ -347,6 +399,16 @@ namespace QuestTree.UI
             // Including the viewport: it is the last profile's map, drawn from the last profile's
             // statuses, and it is on screen until something replaces it.
             DiscardViewport();
+
+            // And the pictures behind it. Six cached captured floors of a big map is a quarter of a
+            // gigabyte of texture, held for a profile nobody is playing any more; the pictures are
+            // read back off disk in a few hundred milliseconds when they are next wanted. Bitmaps
+            // only - see ReleaseCachedSprites - so a DynamicMaps map does not pay 900 ms of
+            // tessellation for a profile switch. The pending-picture latch goes with them: it points
+            // at a layer whose sprite has just been freed, and the poll it drives would otherwise
+            // report a picture ready that nothing asked for.
+            DynamicMapsLibrary.ReleaseCachedSprites();
+            _awaitingLayer = null;
 
             _viewStateKey = null;
             _savedScale = 0f;
@@ -856,8 +918,13 @@ namespace QuestTree.UI
             // every map until someone captures it - is still a map: drawn as a plain dark backdrop
             // over the bounds, with the guides on and the pins where they belong. Only ever when no
             // artwork is coming, so it can never flash in front of one that is still rendering.
+            //
+            // ArtworkFailed counts as no picture: a capture whose PNG will not decode, or an SVG
+            // too dense to tessellate, used to cost the whole map - no bounds, no scale, no pins,
+            // just the sidebar - when the rectangle behind it was still perfectly good.
             var backdrop = sprite == null && !spritePending &&
-                           layer != null && layer.HasBounds && !layer.HasArtwork;
+                           layer != null && layer.HasBounds &&
+                           (!layer.HasArtwork || layer.ArtworkFailed);
 
             // Whether this build draws a map at all, picture or backdrop. Everything that used to
             // ask "is there a sprite" means this.
@@ -1084,7 +1151,17 @@ namespace QuestTree.UI
             {
                 // The map IS drawn - to scale, with its pins - it just has no picture behind them
                 // yet, and the one thing that would fix it is a raid here with the capture key.
-                AddAt(content, "<color=#FFFFFF60>No map picture yet - capture one in raid (Ctrl+F9)</color>",
+                // Unless there WAS a picture and it would not load, which is a different sentence:
+                // telling someone to capture a map they have already captured sends them back into
+                // a raid to fix a file that is already on their disk.
+                var failed = ResolveLayer(entry)?.ArtworkFailed == true;
+                var key = CaptureKeyText;
+
+                AddAt(content, failed
+                        ? "<color=#FFFFFF60>The map picture could not be loaded - drawing its extent instead.</color>"
+                        : key.Length > 0
+                            ? $"<color=#FFFFFF60>No map picture yet - capture one in raid ({key})</color>"
+                            : "<color=#FFFFFF60>No map picture yet - bind a capture key in Settings, then press it in raid</color>",
                     listX, ref y, 18f, 11, inner);
             }
             else if (sprite == null && DynamicMapsLibrary.Available)
@@ -1329,9 +1406,13 @@ namespace QuestTree.UI
         /// to the viewport is then one localScale on the container, which cannot desynchronise the
         /// picture from what is drawn on it because it moves both.
         ///
-        /// Drawn with <see cref="SVGImage"/> rather than a plain <see cref="Image"/>: BuildSprite
-        /// returns a sprite backed by tessellated geometry with no texture behind it, and Image
-        /// draws a sprite by texturing a quad, so it drew nothing at all.
+        /// A tessellated SVG is drawn with <see cref="SVGImage"/> rather than a plain
+        /// <see cref="Image"/>: BuildSprite returns a sprite backed by geometry with no texture
+        /// behind it, and Image draws a sprite by texturing a quad, so it drew nothing at all. A
+        /// captured PNG is the exact opposite case - a sprite that is nothing but a texture - and
+        /// SVGImage has no mesh to draw for it, so that one takes the plain Image. The layer says
+        /// which it is (DynamicMapsLibrary.MapLayer.IsRaster); neither component is asked to draw
+        /// what it cannot.
         ///
         /// The viewport carries <see cref="PanZoomHandler"/>, the same component the quest graph
         /// uses. Handling drag and scroll there is also what stops the surrounding aux ScrollRect
@@ -1391,12 +1472,17 @@ namespace QuestTree.UI
 
             _viewStateKey = stateKey;
 
-            // A tessellated sprite needs SVGImage (see the remarks); the backdrop is a flat colour,
-            // which is exactly what a plain Image with no sprite draws - and SVGImage with no sprite
-            // draws nothing at all.
-            var imageGo = sprite != null
-                ? new GameObject("MapImage", typeof(RectTransform), typeof(SVGImage))
-                : new GameObject("MapBackdrop", typeof(RectTransform), typeof(Image));
+            // Three cases, one object: a captured bitmap through Image, a tessellated SVG through
+            // SVGImage, and no picture at all through an Image with no sprite - which is exactly
+            // what a flat colour is, and what SVGImage with no sprite would refuse to draw.
+            var raster = sprite != null && layer.IsRaster;
+
+            var imageGo = sprite == null
+                ? new GameObject("MapBackdrop", typeof(RectTransform), typeof(Image))
+                : raster
+                    ? new GameObject("MapImage", typeof(RectTransform), typeof(Image))
+                    : new GameObject("MapImage", typeof(RectTransform), typeof(SVGImage));
+
             var image = (RectTransform)imageGo.transform;
             image.SetParent(space, worldPositionStays: false);
             image.anchorMin = image.anchorMax = new Vector2(0.5f, 0.5f);
@@ -1404,12 +1490,34 @@ namespace QuestTree.UI
 
             if (sprite != null)
             {
+                // The same placement for both kinds of picture, and it has to be: rotation and the
+                // mirror setting are the player's, not the format's.
                 PlaceArtwork(image, entry, layer, bounds);
 
-                var svg = imageGo.GetComponent<SVGImage>();
-                svg.sprite = sprite;
-                svg.preserveAspect = false;
-                svg.raycastTarget = false;
+                if (raster)
+                {
+                    var picture = imageGo.GetComponent<Image>();
+                    picture.sprite = sprite;
+
+                    // Simple and preserveAspect off: the rect PlaceArtwork just set IS the world
+                    // rectangle the capture covers, so the picture is stretched onto it exactly.
+                    // Preserving the aspect would letterbox it inside that rect and shift every
+                    // metre of the map by half the difference.
+                    picture.type = Image.Type.Simple;
+                    picture.preserveAspect = false;
+
+                    // White, explicitly: a UI Image tints its sprite by this, and nothing here
+                    // styles it the way the panel plates are styled.
+                    picture.color = Color.white;
+                    picture.raycastTarget = false;
+                }
+                else
+                {
+                    var svg = imageGo.GetComponent<SVGImage>();
+                    svg.sprite = sprite;
+                    svg.preserveAspect = false;
+                    svg.raycastTarget = false;
+                }
             }
             else
             {
@@ -1491,6 +1599,13 @@ namespace QuestTree.UI
         /// DynamicMapsLibrary.LoadSvgSprite - so the sprite IS the rectangle ImageBounds describes
         /// and there is nothing to convert. Everything this method used to do was compensating for
         /// a sprite that had been sized to its ink instead, and none of it was ever right.
+        ///
+        /// A captured bitmap needs nothing more, and for the same reason: its whole picture covers
+        /// exactly the layer's bounds by construction (the capture renders that rectangle and
+        /// records it), and a UI Image stretches a Simple sprite's rect onto the RectTransform's
+        /// rect. The sprite's pivot and pixels-per-unit take no part in that - they matter to a
+        /// SpriteRenderer, not to a Graphic - so Sprite.Create's centred pivot needs no correction
+        /// here. Setting the rect is the whole placement for both kinds of picture.
         /// </summary>
         private static void PlaceArtwork(
             RectTransform image, DynamicMapsLibrary.MapEntry entry,
@@ -1593,7 +1708,13 @@ namespace QuestTree.UI
                 // whose height matches no band is treated as being on the floor you are looking at,
                 // rather than dropped - the bands do not tile the world, and a real place name is
                 // worth more than a tidy rule.
-                var owner = entry.LayerFor(label.Position.x, label.Position.y, label.Height);
+                //
+                // A captured map's names skip the test outright (FloorAgnostic): the capture records
+                // a ground position and no height, and asking the bands about height 0 would file
+                // every exfil on whichever storey happens to contain y=0 and fade it on the rest.
+                var owner = label.FloorAgnostic
+                    ? null
+                    : entry.LayerFor(label.Position.x, label.Position.y, label.Height);
                 var onThisFloor = owner == null || owner == layer;
 
                 var go = new GameObject("PlaceLabel", typeof(RectTransform));
@@ -1733,9 +1854,10 @@ namespace QuestTree.UI
         /// The comparison is exact rather than a substring, because "Underground_Level" contains
         /// "Ground_Level" and a loose match would put underground pins on the ground floor.
         ///
-        /// On a map synthesised from a harvested extent there is no artwork and so no filename to
-        /// take that vocabulary from - the bands are named from their level - so there the name is
-        /// translated to a level first (MapCatalog.FloorLevelAliases) and the layer found by that.
+        /// On a map of ours - a synthesised rectangle or one of our captures - there is no artwork
+        /// filename to take that vocabulary from, and the floors are named from their level, so
+        /// there the name is translated to a level first (MapCatalog.FloorLevelAliases) and the
+        /// layer found by that.
         ///
         /// Null means "no idea", which the caller draws on whatever floor is being viewed. That is
         /// the honest answer for a marker with no coordinates: the height-band test below only
@@ -1757,9 +1879,10 @@ namespace QuestTree.UI
                 // floor-naming pin on a multi-band map resolved to nothing. The alias table turns
                 // the name into a level, which a synthesised layer does have.
                 //
-                // Synthesised entries only, and after the exact match, so a DynamicMaps map's pins
+                // Our own entries only - synthesised or captured, both of which name their floors
+                // from the harvested bands - and after the exact match, so a DynamicMaps map's pins
                 // are placed by exactly the rule they were before - see MapCatalog.FloorLevelAliases.
-                if (MapCatalog.IsSynthesised(entry))
+                if (MapCatalog.UsesBandFloorNames(entry))
                 {
                     var level = MapCatalog.LevelForFloorName(marker.Floor);
                     if (level.HasValue)
@@ -2234,6 +2357,16 @@ namespace QuestTree.UI
                 // because "via DynamicMaps" under a map DynamicMaps never touched credits the wrong
                 // people, and a player looking at a bare rectangle deserves to be told what it is.
                 AddAt(parent, "<color=#FFFFFF50>Map extent harvested in raid; no picture yet.</color>",
+                    x, ref y, 15f, 10, width);
+            }
+            else if (MapCatalog.IsLocalCapture(entry))
+            {
+                // Also ours, and the attribution the capture wrote is already the whole sentence -
+                // "captured in-game with Quest Tracker 1.19.0, 2026-09-19 (day)". Deliberately not
+                // sent through the branch below: "via DynamicMaps" after that would credit a mod
+                // that had nothing to do with this picture, and the build and date are here because
+                // they are what tells you whether the picture is of the map you are playing.
+                AddAt(parent, $"<color=#FFFFFF50>Map: {entry.Attribution}</color>",
                     x, ref y, 15f, 10, width);
             }
             else if (!string.IsNullOrEmpty(entry.Attribution))

@@ -20,20 +20,35 @@ namespace QuestTree.QuestGraph
     /// The scene, on the other hand, knows exactly: BorderZone is the invisible wall that stops a
     /// player leaving, Terrain is the heightmap, and the NavMesh is where a bot can stand.
     ///
-    /// Three sources, best first, because each fails differently:
-    ///   1 BorderZone - the playable area as the game itself defines it. Absent on some maps, and on
-    ///     others a single fence volume can be far larger than the world.
-    ///   2 Terrain - right for outdoor maps, absent on the ones built entirely from meshes (Factory,
-    ///     Labs).
-    ///   3 NavMesh triangulation - present on everything with AI, but it stops at walls and water and
-    ///     so under-reports the visible world.
-    /// Whichever wins is then clamped to the NavMesh box plus 50 m, which is what stops source 1's
-    /// oversized fence: a rectangle much bigger than anywhere a bot can walk is wrong whatever
-    /// declared it.
+    /// Three sources, best first, because each fails differently. The order is the one a measured
+    /// Customs raid produced, NOT the one the plan guessed (it had BorderZone first):
+    ///   1 NavMesh triangulation - the walkable world, present on everything with AI. It stops at
+    ///     walls and water and so under-reports roofs and rooftops, which is what the 4 % pad below
+    ///     is for. On Customs its box is -344,-265..690,234 against DynamicMaps' hand-made
+    ///     -372,-306..698,235 - within about 40 m on a kilometre-wide map, and closer once padded.
+    ///   2 Terrain - the heightmaps' union. Right shape outdoors, but it reaches far past anywhere
+    ///     the map is played: Customs' terrains span -553,-359..847,341, 1400x700 m around a
+    ///     playable 1034x499, and Interchange's four span -647,-810..753,590 around a NavMesh box of
+    ///     -361,-455..531,401. Absent on the maps built entirely from meshes (Factory, Labs).
+    ///   3 BorderZone - the invisible walls. The plan expected this to be the playable area as the
+    ///     game itself defines it; on Customs the five zones union to -59,-326..222,364, an interior
+    ///     box 323x647 m that left 180 of 282 harvested zones outside and was thrown away by the
+    ///     containment check below, and Interchange has none at all. Whatever these volumes are on a
+    ///     given map, they are not the world's edge, so they are the last resort.
+    /// Nothing clamps the winner against anything else. An earlier draft held a lower-ranked box
+    /// inside the NavMesh box plus 50 m, which was the guard for source 1 being absurdly large when
+    /// BorderZone ranked first; with the NavMesh box ranked first that clamp could never do anything
+    /// - Terrain and BorderZone are reached only when there is no NavMesh box to clamp against - so
+    /// it is gone rather than sitting here as unreachable arithmetic. The containment check below is
+    /// what catches a wrong rectangle now, whichever source produced it.
     ///
     /// Run on the harvester's SECOND pass (27 s in), on the main thread, inside the pass that is
     /// already reading the scene. Every step is guarded: this is a player's raid frame, and an extent
     /// is a nicety - the harvest's zones are not, and they are sent whatever happens here.
+    ///
+    /// Read a second time by the capture key (<see cref="MapCapture"/>), which must draw its picture
+    /// to the same rectangle the harvest sent rather than a second measurement of its own; that is
+    /// what <see cref="TryProbeForCapture"/> is for.
     ///
     /// The member names for the scene reads (BorderZone.Collider, BorderZone._extents,
     /// Terrain.activeTerrains, LocationScene.GetAll, SpawnPointMarker) are the ones Phase 0's
@@ -47,11 +62,6 @@ namespace QuestTree.QuestGraph
     /// </summary>
     internal static class MapExtentProbe
     {
-        /// <summary>How far outside the NavMesh box a better-ranked source is allowed to reach. A
-        /// BorderZone volume that stretches a kilometre past anywhere a bot can walk is a fence
-        /// somebody left large, not the world.</summary>
-        private const float NavMeshClampPad = 50f;
-
         /// <summary>Margin added to each side of the measured rectangle, as a fraction of that axis'
         /// size and never less than <see cref="MinimumPad"/> metres. Every source under-reports
         /// something (the NavMesh stops at walls, BorderZones sit inside the visible skyline), and a
@@ -67,13 +77,37 @@ namespace QuestTree.QuestGraph
 
         /// <summary>Share of ALL NavMesh vertices one bin must hold to count as part of a floor.
         /// A deliberately high bar: what is wanted is the two or three heights a map is mostly
-        /// built at, not every ledge. Bins under it are the empty air between floors.</summary>
+        /// built at, not every ledge. Bins under it are the empty air between floors.
+        ///
+        /// The one number to tune if a map reads with too few floors, together with
+        /// <see cref="BandGap"/>. Measured so far: Customs' histogram is one unbroken run from
+        /// y = -3 to y = 7 - its terrain simply slopes - so Customs is one "Ground" band at this
+        /// setting, which is right for it. Nothing else in the floor code needs touching to try a
+        /// different value.
+        ///
+        /// Open risk, which only a raid settles: Phase 0 measured its histograms in 1 m bins, and
+        /// <see cref="BinHeight"/> here is 0.5 m, so the same 2 % bar is twice as hard to clear.
+        /// Interchange's parking garage holds 11532 of 382k vertices in its 1 m bin - 3.0 %, over the
+        /// bar - but spread evenly over two half-metre bins that is 1.5 % each, under it, and the
+        /// garage would vanish instead of becoming its own floor. A garage floor is flat, so its
+        /// vertices should pile into one half-metre bin rather than split evenly, which is why the
+        /// number is left at 0.02; if a raid reports Interchange with three bands and no basement,
+        /// this is the line to halve.</summary>
         private const float BandBinShare = 0.02f;
 
         /// <summary>Metres of thin bins that must separate two bands for them to be different floors.
         /// Under a storey height: two bands closer than this are one floor read twice (a mezzanine, a
-        /// sloping ground) and are merged.</summary>
-        private const float BandGap = 2.5f;
+        /// sloping ground) and are merged. The second of the two tuning numbers - see
+        /// <see cref="BandBinShare"/>.
+        ///
+        /// 2.0 rather than the 2.5 first written, because of Interchange. Its dense 1 m bins are
+        /// y = 18 (the parking garage, 11532 verts), y = 21-23 (the ground run, 140768/13818/9572),
+        /// y = 27 (114635) and y = 36 (33588), of 382k; the thin bins between the garage and the
+        /// ground are y = 19 and y = 20, so the garage's band ends at 19 and the ground's begins at
+        /// 21 - a gap of exactly 2.0 m. At 2.5 the garage merged into the ground and Interchange lost
+        /// the floor a player is most often shot from; at 2.0 it splits off as its own band below.
+        /// The runs above the ground are 3 m and 8 m clear, so they are unaffected either way.</summary>
+        private const float BandGap = 2.0f;
 
         /// <summary>Added above and below each band's bins, so a pin standing on a floor rather than
         /// inside its walkable surface still falls in the band. Half the gap, so bands cannot come
@@ -105,6 +139,40 @@ namespace QuestTree.QuestGraph
         /// Mirrored as the same arithmetic in the same precision rather than a tighter number, so
         /// what this side accepts the other side accepts too, exactly.</summary>
         private const double MinTriggerCoverage = 0.9d;
+
+        /// <summary>The last extent this probe accepted, and the map it was measured on. Written by
+        /// the one place that produces an extent, read by <see cref="TryProbeForCapture"/>.</summary>
+        private static string _lastMap;
+
+        private static MapExtentDto _lastExtent;
+
+        /// <summary>The extent a capture of <paramref name="map"/> must be drawn to: the very one the
+        /// harvest sent, when this raid has already measured it, and a fresh measurement otherwise.
+        /// Null when nothing usable can be measured - the caller then captures nothing.
+        ///
+        /// Why not simply call <see cref="TryProbe"/> again with no triggers: the containment check
+        /// would then run over the spawn point markers alone, a different population from the one the
+        /// harvest tested, and a rectangle the harvest accepted at 2 % outside could fail here at
+        /// 4 % - two halves of the same release logging opposite verdicts about one rectangle, which
+        /// is the trap <see cref="MinTriggerCoverage"/> exists to keep out of this file. Reusing the
+        /// accepted result also guarantees the meta's extent is bit-for-bit the one on the wire, so a
+        /// pin drawn from the server's copy lands on the picture.
+        ///
+        /// The memo outlives the raid on purpose. It is keyed by map name, and a map's BorderZones,
+        /// Terrain and NavMesh are the same geometry every time it loads, so a capture in a second
+        /// raid on the same map is drawn to the same rectangle as the first. A different map has a
+        /// different key and is measured afresh.</summary>
+        /// <param name="map">The map's internal name, as the harvest spells it.</param>
+        public static MapExtentDto TryProbeForCapture(string map)
+        {
+            if (!string.IsNullOrEmpty(map) && _lastExtent != null &&
+                string.Equals(_lastMap, map, StringComparison.OrdinalIgnoreCase))
+            {
+                return _lastExtent;
+            }
+
+            return TryProbe(map, null);
+        }
 
         /// <summary>Measures the current scene. Returns null - never throws - when there is nothing
         /// to measure, when the result fails its own containment check, or on any error; the caller
@@ -139,18 +207,26 @@ namespace QuestTree.QuestGraph
             var border = BorderZoneBox();
             var terrain = TerrainBox();
 
-            var chosen = border.Valid ? border : terrain.Valid ? terrain : nav;
+            // NavMesh first - see the ranking in the class comment. This order is measured, not
+            // assumed: on Customs the BorderZone union that used to win here was an interior box
+            // that left 64 % of the harvested zones outside it, and the containment check below
+            // threw the whole extent away.
+            var chosen = nav.Valid ? nav : terrain.Valid ? terrain : border;
             if (!chosen.Valid)
             {
                 Plugin.LogSource?.LogWarning(
-                    $"QuestTree: nothing on {map} to measure an extent from (no BorderZone, no Terrain, " +
-                    "no NavMesh) - the harvest is sent without one.");
+                    $"QuestTree: nothing on {map} to measure an extent from (no NavMesh, no Terrain, " +
+                    "no BorderZone) - the harvest is sent without one.");
                 return null;
             }
 
             var spawns = SpawnMarkerPositions();
 
-            var box = Clamp(chosen, nav, map);
+            // The rectangle everything below measures against: the chosen source's own box, with
+            // nothing done to it. Named because four lines below read it, and because this is where
+            // the clamp used to be - see the class comment for why there is none.
+            var box = chosen;
+
             var rect = Pad(box);
             var floors = Floors(map, vertices, spawns, box, nav);
 
@@ -178,10 +254,11 @@ namespace QuestTree.QuestGraph
             var width = (int)(rect.MaxX - rect.MinX);
             var height = (int)(rect.MaxZ - rect.MinZ);
 
-            // The check that can fail. It CAN: a BorderZone box covering only the compound of a map
-            // whose quests reach outside it, or a NavMesh-only Factory whose triggers sit on catwalks
-            // off the mesh, both put zones outside. Proven able to fail by measuring against a
-            // rectangle it was not built from - see the stage's report.
+            // The check that can fail, and HAS: on Customs the BorderZone union this file used to
+            // rank first left 180 of 282 zones and spawn points outside, 63.8 %, and this is what
+            // threw it away and sent the harvest without an extent. That measurement is why the
+            // ranking now starts at the NavMesh. A NavMesh-only Factory whose triggers sit on
+            // catwalks off the mesh is the case that can still trip it.
             if (total > 0 && outside > total * MaxOutsideShare)
             {
                 Plugin.LogSource?.LogWarning(
@@ -214,7 +291,7 @@ namespace QuestTree.QuestGraph
                 $" (navmesh {vertices.Length} verts, {spawns.Length} spawn markers, " +
                 $"rect {F(rect.MinX)},{F(rect.MinZ)}..{F(rect.MaxX)},{F(rect.MaxZ)}).");
 
-            return new MapExtentDto
+            var extent = new MapExtentDto
             {
                 MinX = rect.MinX,
                 MinZ = rect.MinZ,
@@ -225,6 +302,14 @@ namespace QuestTree.QuestGraph
                 SampledAt = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture),
                 Floors = floors
             };
+
+            // Remembered for the capture key, which must draw its picture to this exact rectangle
+            // and no other - see TryProbeForCapture. Only an ACCEPTED extent is kept: every return
+            // above is a rectangle this file decided was wrong.
+            _lastMap = map;
+            _lastExtent = extent;
+
+            return extent;
         }
 
         private static bool Outside(Rect rect, float x, float z) =>
@@ -233,10 +318,14 @@ namespace QuestTree.QuestGraph
 
         // --- the rectangle --------------------------------------------------------------------
 
-        /// <summary>Union of the XZ AABBs of every BorderZone's collider - the invisible walls that
-        /// bound the playable area. Read through LocationScene's registered array, so a zone the game
+        /// <summary>Union of the XZ AABBs of every BorderZone's collider - the invisible walls a
+        /// player cannot pass. Read through LocationScene's registered array, so a zone the game
         /// keeps disabled counts too; its Collider field is the box, and _extents is the serialised
-        /// half-size to build one from when there is no collider component.</summary>
+        /// half-size to build one from when there is no collider component.
+        ///
+        /// Last of the three sources, because measurement says these volumes are not the world's
+        /// edge: Customs' five zones union to an interior box a third of the map's width (see the
+        /// class comment).</summary>
         private static Box BorderZoneBox()
         {
             var box = new Box("borderzone");
@@ -283,7 +372,8 @@ namespace QuestTree.QuestGraph
         }
 
         /// <summary>Union of every active Terrain's AABB, from its transform position and
-        /// terrainData.size.</summary>
+        /// terrainData.size. Second of the three sources: a heightmap runs out to the horizon, so it
+        /// is only right where there is no NavMesh to measure the walkable world with.</summary>
         private static Box TerrainBox()
         {
             var box = new Box("terrain");
@@ -314,59 +404,10 @@ namespace QuestTree.QuestGraph
             return box;
         }
 
-        /// <summary>Holds the chosen box inside the NavMesh box grown by 50 m. The whole point of the
-        /// clamp is that source 1 can be absurdly large, so it is the one rule that may override the
-        /// ranking; if it were to leave nothing at all (a BorderZone disjoint from the NavMesh - not
-        /// seen, but the arithmetic allows it) the NavMesh box is used outright, and says so in its
-        /// Source.</summary>
-        /// <param name="chosen">The best-ranked box that was found.</param>
-        /// <param name="nav">The NavMesh box, or an invalid one when there is no NavMesh.</param>
-        /// <param name="map">The map's name, for the log line.</param>
-        private static Box Clamp(Box chosen, Box nav, string map)
-        {
-            if (!nav.Valid || chosen.Source == nav.Source) return chosen;
-
-            var minX = Mathf.Max(chosen.MinX, nav.MinX - NavMeshClampPad);
-            var minZ = Mathf.Max(chosen.MinZ, nav.MinZ - NavMeshClampPad);
-            var maxX = Mathf.Min(chosen.MaxX, nav.MaxX + NavMeshClampPad);
-            var maxZ = Mathf.Min(chosen.MaxZ, nav.MaxZ + NavMeshClampPad);
-
-            if (maxX <= minX || maxZ <= minZ)
-            {
-                Plugin.LogSource?.LogWarning(
-                    $"QuestTree: {map}'s {chosen.Source} extent does not overlap its NavMesh - using the " +
-                    "NavMesh box instead.");
-                return nav;
-            }
-
-            var clipped =
-                minX > chosen.MinX + 0.5f || minZ > chosen.MinZ + 0.5f ||
-                maxX < chosen.MaxX - 0.5f || maxZ < chosen.MaxZ - 0.5f;
-
-            if (clipped)
-            {
-                Plugin.LogSource?.LogDebug(
-                    $"QuestTree: {map}'s {chosen.Source} extent reached past the NavMesh box + " +
-                    $"{F(NavMeshClampPad)} m and was clipped to it.");
-            }
-
-            return new Box(chosen.Source)
-            {
-                Count = chosen.Count,
-                MinX = minX,
-                MinZ = minZ,
-                MaxX = maxX,
-                MaxZ = maxZ,
-                MinY = chosen.MinY,
-                MaxY = chosen.MaxY,
-                Valid = true
-            };
-        }
-
         /// <summary>Grows the box by 4 % of each axis (at least 20 m) and rounds outward to whole
         /// metres, so the number in the log and the number on disk are the same and a re-measurement
         /// of the same map does not drift by centimetres.</summary>
-        /// <param name="box">The clamped box.</param>
+        /// <param name="box">The box the ranking chose.</param>
         private static Rect Pad(Box box)
         {
             var padX = Mathf.Max((box.MaxX - box.MinX) * PadFraction, MinimumPad);
@@ -389,7 +430,7 @@ namespace QuestTree.QuestGraph
         /// <param name="map">The map's name, for the log line.</param>
         /// <param name="vertices">The NavMesh triangulation's vertices.</param>
         /// <param name="spawns">Spawn point marker positions; their median Y names the ground floor.</param>
-        /// <param name="box">The clamped box, for the single-floor fallback's Y range.</param>
+        /// <param name="box">The box the ranking chose, for the single-floor fallback's Y range.</param>
         /// <param name="nav">The NavMesh box, whose Y range joins the fallback's: a BorderZone volume
         /// is often far shorter than the world is tall, and the one floor of a map with no readable
         /// bands has to cover everything a pin could stand on.</param>
@@ -453,7 +494,7 @@ namespace QuestTree.QuestGraph
         }
 
         /// <summary>The half-metre histogram of NavMesh vertex Y, reduced to bands: maximal runs of
-        /// bins each holding at least 2 % of all vertices, with runs less than 2.5 m apart merged.
+        /// bins each holding at least 2 % of all vertices, with runs less than BandGap apart merged.
         /// Ascending by height. Empty when there are no usable vertices.</summary>
         /// <param name="vertices">The NavMesh triangulation's vertices.</param>
         private static List<Band> Bands(Vector3[] vertices)

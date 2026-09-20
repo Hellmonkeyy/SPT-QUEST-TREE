@@ -163,6 +163,15 @@ namespace QuestTree
         /// see TrackerHotkey.</summary>
         public static ConfigEntry<KeyboardShortcut> OpenTracker { get; private set; }
 
+        /// <summary>The key that takes the map's picture from inside a raid - see
+        /// QuestGraph/MapCapture.cs. A modifier by default, like the tracker's own shortcut, so it
+        /// cannot be pressed by accident in a firefight; rebindable in the F12 menu, including to
+        /// nothing at all, and shown (not edited) in the in-panel Settings tab.</summary>
+        public static ConfigEntry<KeyboardShortcut> CaptureMapKey { get; private set; }
+
+        /// <summary>Longest side, in pixels, of a captured map picture. 2048 or 4096.</summary>
+        public static ConfigEntry<int> CaptureResolution { get; private set; }
+
         /// <summary>THROWAWAY. The debug key that runs the Phase 0 map-capture experiments in raid -
         /// see QuestGraph/MapCaptureExperiment.cs. Deliberately not in Entries, so no row for it
         /// appears in the in-panel Settings tab; it exists in the F12 menu and the cfg file only.
@@ -204,6 +213,50 @@ namespace QuestTree
         /// <summary>Asks the panel to redraw without any setting having changed - the Settings page
         /// uses it to open and close its dropdowns, which are part of the page it rebuilds.</summary>
         public static void RequestRepaint() => Changed?.Invoke(false);
+
+        /// <summary>
+        /// A shortcut written the way a player would write it - "Ctrl + F9" - rather than the way
+        /// BepInEx stores it, which is the main key first and the modifiers after it ("F9 +
+        /// LeftControl"), and with the sided key names ("LeftControl") reduced to the one name a
+        /// keyboard has printed on it.
+        ///
+        /// Here rather than in either view because two of them print the same shortcut: the
+        /// Settings tab's capture note and the Maps sidebar's "capture one in raid" line. The two
+        /// want different spacing - a settings paragraph reads better with spaces, a parenthesised
+        /// hint inside a sentence without - so the separator is the caller's, and the naming is not.
+        /// </summary>
+        /// <param name="shortcut">The bound shortcut. A MainKey of None gives "".</param>
+        /// <param name="separator">What to put between the keys, e.g. " + " or "+".</param>
+        public static string KeyText(KeyboardShortcut shortcut, string separator)
+        {
+            if (shortcut.MainKey == KeyCode.None) return "";
+
+            var parts = new List<string>();
+            foreach (var modifier in shortcut.Modifiers) parts.Add(KeyName(modifier));
+            parts.Add(KeyName(shortcut.MainKey));
+
+            return string.Join(separator ?? " + ", parts.ToArray());
+        }
+
+        /// <summary>One key as a player would name it: "Ctrl", not "LeftControl".</summary>
+        /// <param name="key">The key to name.</param>
+        private static string KeyName(KeyCode key)
+        {
+            switch (key)
+            {
+                case KeyCode.LeftControl:
+                case KeyCode.RightControl:
+                    return "Ctrl";
+                case KeyCode.LeftShift:
+                case KeyCode.RightShift:
+                    return "Shift";
+                case KeyCode.LeftAlt:
+                case KeyCode.RightAlt:
+                    return "Alt";
+                default:
+                    return key.ToString();
+            }
+        }
 
         /// <summary>Parsed once per change rather than per read. ColorFor runs for every box and
         /// every edge on every zoom step, and parsing the hex string each time allocated a trimmed
@@ -506,6 +559,27 @@ namespace QuestTree
                 "Map", "Show map credits", true,
                 "Show the map and pin-icon attributions at the bottom of the sidebar.");
 
+            // Ctrl+F9 for the same reasons the tracker's own shortcut is Ctrl+Q: a modifier so it
+            // cannot be hit by accident, and a function key no raid control already uses.
+            CaptureMapKey = config.Bind(
+                "Map", "Capture map picture key", new KeyboardShortcut(KeyCode.F9, KeyCode.LeftControl),
+                "Pressed inside a raid, this draws the map from above - one picture per floor - and " +
+                "writes it to BepInEx/plugins/QuestTree/captures/, which the Maps tab then uses instead " +
+                "of another mod's artwork. It takes a second or two and costs a few frames; one raid per " +
+                "map is enough, and a map you never capture simply keeps the picture it already had. " +
+                "Needs 'Harvest quest zones in raid' on, since the picture is drawn to the rectangle that " +
+                "harvest measures.");
+
+            CaptureResolution = config.Bind(
+                "Map", "Capture resolution", 4096,
+                new ConfigDescription(
+                    "Longest side, in pixels, of a captured map picture. 4096 is the sharpest the mod " +
+                    "will draw; 2048 halves it, which makes the files a quarter of the size and is the " +
+                    "setting to use if a capture is refused for being too large. Neither ever stretches " +
+                    "a map past two pixels per metre - past that there is no more detail in the world to " +
+                    "record, only a bigger file.",
+                    new AcceptableValueList<int>(2048, 4096)));
+
             PinLabels = config.Bind(
                 "Map", "Pin labels", PinLabelMode.HoverOnly,
                 "Which pins carry their name at rest. Hovering a pin always shows its name. HoverOnly keeps clusters readable; Actionable names in-progress and available quests; All names every pin.");
@@ -564,7 +638,7 @@ namespace QuestTree
                 ShowTakeWithYou, CountUnacceptedQuests, ShowTraderColours,
                 TraderColours, ShowCredits,
                 PinLabels, ColorActive, ColorAvailable, ColorCompleted, ColorLocked, ColorGated, ColorFailed, ColorAccent, Tooltips,
-                HoverSounds, RememberLastView, OpenTracker
+                HoverSounds, RememberLastView, OpenTracker, CaptureMapKey, CaptureResolution
             });
 
             // One handler per entry rather than a single global hook, so this only fires for
@@ -604,6 +678,11 @@ namespace QuestTree
             CountUnacceptedQuests.SettingChanged += Raise;
             ShowCredits.SettingChanged += Raise;
             PinLabels.SettingChanged += Raise;
+
+            // The Settings tab PRINTS the capture key and the resolution, so a change made in the
+            // F12 menu has to repaint the page or the row keeps naming the old key.
+            CaptureMapKey.SettingChanged += Raise;
+            CaptureResolution.SettingChanged += Raise;
             ColorActive.SettingChanged += Raise;
             ColorAvailable.SettingChanged += Raise;
             ColorCompleted.SettingChanged += Raise;

@@ -67,6 +67,19 @@ namespace QuestTree.UI
             public string ImagePath = "";
 
             /// <summary>
+            /// Whether <see cref="ImagePath"/> is a bitmap - one of our own captured PNGs - rather
+            /// than one of DynamicMaps' SVGs.
+            ///
+            /// Two loaders and two components to draw the result with, which is why this is a flag
+            /// and not a guess at the extension. An SVG becomes a sprite backed by tessellated
+            /// geometry with no texture behind it, which only SVGImage can draw; a captured PNG
+            /// becomes a sprite backed by a Texture2D, which only a plain Image can draw
+            /// (MapView.BuildMapViewport branches on this). Set by <see cref="MapCatalog"/> when it
+            /// reads a capture's meta file.
+            /// </summary>
+            public bool IsRaster;
+
+            /// <summary>
             /// The floor's name as the map ARTWORK calls it - the part of the image filename after
             /// the map's own name, so "Interchange-First_Floor.svg" gives "First_Floor". Empty for a
             /// map whose image carries no suffix, as Lighthouse's plain "Lighthouse.svg" does not.
@@ -93,6 +106,12 @@ namespace QuestTree.UI
             /// these rather than starting a tessellation of the empty path.</summary>
             public bool HasArtwork => !string.IsNullOrEmpty(ImagePath);
 
+            /// <summary>Whether the picture has been tried and cannot be had: a PNG that would not
+            /// decode, an SVG with no viewBox or too dense to tessellate. The view reads it to draw
+            /// the floor's rectangle as a backdrop instead, so a picture that fails costs the
+            /// picture rather than the map, its scale and its pins.</summary>
+            public bool ArtworkFailed => _spriteFailed;
+
             public Vector2 BoundsSize => BoundsMax - BoundsMin;
             public Vector2 BoundsCentre => (BoundsMin + BoundsMax) * 0.5f;
 
@@ -103,12 +122,26 @@ namespace QuestTree.UI
             private Sprite _sprite;
             private bool _spriteFailed;
 
+            /// <summary>The PNG read in flight on a worker thread, or null. Only the READ is off
+            /// the main thread: decoding it is ImageConversion.LoadImage, which touches the
+            /// graphics device. See TryGetRasterSprite.</summary>
+            private Task<byte[]> _loadingBytes;
+
+            /// <summary>How much texture memory this floor's decoded picture holds, or 0 when it
+            /// holds none. Summed by <see cref="ResidentRasterBytes"/>: one captured floor of a big
+            /// map is around 43 MB, so the cache ceiling is worth being able to see. A field rather
+            /// than a property with a private setter because the loader that knows the answer is
+            /// BuildRasterSprite, in the enclosing class, which private would shut out.</summary>
+            public long RasterBytes;
+
             /// <summary>The tessellation in flight on a worker thread, or null. See TryGetSprite.</summary>
             private Task<PreparedArtwork> _preparing;
 
             /// <summary>Whether a tessellation has finished and the sprite only awaits the main
             /// thread. Polled once a frame by the panel while the map is up.</summary>
-            public bool IsReadyToBuild => _preparing != null && _preparing.IsCompleted;
+            public bool IsReadyToBuild =>
+                (_preparing != null && _preparing.IsCompleted) ||
+                (_loadingBytes != null && _loadingBytes.IsCompleted);
 
             /// <summary>Rasterised on first use and kept - tessellating a 340KB SVG is not something
             /// to repeat every time a floor is switched back to. Kept for the most recently used
@@ -130,6 +163,19 @@ namespace QuestTree.UI
                 }
 
                 if (_spriteFailed) return null;
+
+                if (IsRaster)
+                {
+                    // Read and decoded here and now. Nothing on the view's open path comes through
+                    // GetSprite any more - TryGetSprite below is what it uses - so the blocking
+                    // read is only for a caller that would rather block, and for a worker-thread
+                    // read that faulted.
+                    _loadingBytes = null;
+                    _sprite = LoadRasterSprite(ImagePath, this);
+                    _spriteFailed = _sprite == null;
+                    if (_sprite != null) NoteSpriteUse(this);
+                    return _sprite;
+                }
 
                 _preparing = null;
                 _sprite = LoadSvgSprite(ImagePath, this);
@@ -175,6 +221,10 @@ namespace QuestTree.UI
                     sprite = null;
                     return true;
                 }
+
+                // A captured PNG: no vector library, no tessellation, no lock - just a file read
+                // and a decode, split across the two threads that can do each.
+                if (IsRaster) return TryGetRasterSprite(out sprite);
 
                 if (_preparing == null)
                 {
@@ -228,7 +278,59 @@ namespace QuestTree.UI
                 return true;
             }
 
-            /// <summary>Frees the rasterised floor; the next TryGetSprite tessellates again.</summary>
+            /// <summary>
+            /// The captured picture's half of <see cref="TryGetSprite"/>: the same contract, with a
+            /// file read where the tessellation was.
+            ///
+            /// The split is where the thread rule falls. Reading 8 MB of PNG off a disk is exactly
+            /// what a worker thread is for, and decoding it is not: ImageConversion.LoadImage
+            /// uploads a texture through the graphics device and is main-thread only, and calling
+            /// it from a worker either throws or corrupts the device state. So the read goes to a
+            /// task, the frame after it lands decodes it here, and the caller paints its list in
+            /// between - the same "list first, picture a moment later" the SVG path gives.
+            /// </summary>
+            private bool TryGetRasterSprite(out Sprite sprite)
+            {
+                if (_loadingBytes == null)
+                {
+                    var path = ImagePath;
+                    _loadingBytes = Task.Run(() => File.ReadAllBytes(path));
+                    sprite = null;
+                    return false;
+                }
+
+                if (!_loadingBytes.IsCompleted)
+                {
+                    sprite = null;
+                    return false;
+                }
+
+                var task = _loadingBytes;
+                _loadingBytes = null;
+
+                if (task.IsFaulted)
+                {
+                    // Answered rather than retried: the file is missing, locked or unreadable, and
+                    // the next repaint would find it exactly as missing. The view draws the floor's
+                    // rectangle instead - see ArtworkFailed.
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: could not read the map picture '{Path.GetFileName(ImagePath)}' " +
+                        $"({task.Exception?.GetBaseException().Message}) - drawing its extent instead.");
+                    _spriteFailed = true;
+                    sprite = null;
+                    return true;
+                }
+
+                _sprite = BuildRasterSprite(task.Result, this);
+                _spriteFailed = _sprite == null;
+                if (_sprite != null) NoteSpriteUse(this);
+
+                sprite = _sprite;
+                return true;
+            }
+
+            /// <summary>Frees the rasterised floor; the next TryGetSprite tessellates again, or
+            /// reads and decodes the PNG again.</summary>
             internal void ReleaseSprite()
             {
                 if (_sprite != null)
@@ -243,6 +345,12 @@ namespace QuestTree.UI
 
                 _sprite = null;
                 _spriteFailed = false;
+                RasterBytes = 0;
+
+                // A read in flight is abandoned rather than awaited: its bytes are for a picture
+                // nothing is showing any more, and leaving the task here would make the next
+                // TryGetSprite decode them into a texture this layer had just given up.
+                _loadingBytes = null;
             }
 
             public bool Covers(float x, float y, float height)
@@ -268,6 +376,13 @@ namespace QuestTree.UI
             /// exactly the way a quest marker is. Mostly 0, but 63 of Interchange's 77 names sit on
             /// the mall's upper storeys.</summary>
             public float Height;
+
+            /// <summary>Whether this name belongs to no particular floor, so every floor shows it
+            /// at full strength. True for a captured map's labels: the capture meta carries a name
+            /// and a ground position and no height at all, and <see cref="Height"/> 0 would put an
+            /// exfil on whichever band happens to contain y=0 and dim it on every other storey.
+            /// See MapView.BuildPlaceLabels.</summary>
+            public bool FloorAgnostic;
 
             /// <summary>The angle the name is meant to be written at, for places that run along
             /// something rather than sitting on a point. All 22 of Reserve's names are set to 14.5
@@ -337,6 +452,68 @@ namespace QuestTree.UI
                 var oldest = _spriteUse[0];
                 _spriteUse.RemoveAt(0);
                 oldest.ReleaseSprite();
+            }
+        }
+
+        /// <summary>How much texture memory the cached captured pictures hold. Only the bitmaps
+        /// count: a tessellated SVG is a mesh, and the biggest of those is a fraction of one
+        /// 4096x3540 floor.</summary>
+        internal static long ResidentRasterBytes
+        {
+            get
+            {
+                var bytes = 0L;
+                foreach (var layer in _spriteUse) bytes += layer.RasterBytes;
+                return bytes;
+            }
+        }
+
+        /// <summary>Drops one floor's picture out of the cache and frees it. For a capture that has
+        /// just been replaced by a fresh one: its layer objects are about to be thrown away, and a
+        /// released-but-still-listed layer would sit in the LRU holding 43 MB that nothing can ever
+        /// show again.</summary>
+        internal static void ReleaseLayer(MapLayer layer)
+        {
+            if (layer == null) return;
+
+            // Only a floor the cache is listing can have a picture to free: every loader here calls
+            // NoteSpriteUse the moment it has one, and every eviction releases as it removes. So an
+            // unlisted layer has nothing, and skipping it also keeps this method out of Unity
+            // altogether for that case - ReleaseSprite compares a Sprite against null, which is
+            // Unity's own operator and a native call - which is what lets the capture reader be
+            // exercised outside a running game.
+            if (_spriteUse.Remove(layer)) layer.ReleaseSprite();
+        }
+
+        /// <summary>
+        /// Frees every cached picture, or only the bitmaps.
+        ///
+        /// Called on a profile change (MapView.ResetSession), where the pictures held are the last
+        /// profile's and the ceiling of six captured floors is a quarter of a gigabyte of texture.
+        /// Bitmaps only by default because they are the memory: an SVG costs a 900 ms tessellation
+        /// to get back and a mesh to keep, so throwing those away trades a real cost for almost
+        /// nothing.
+        /// </summary>
+        internal static void ReleaseCachedSprites(bool rasterOnly = true)
+        {
+            var freed = 0L;
+            var floors = 0;
+
+            for (var i = _spriteUse.Count - 1; i >= 0; i--)
+            {
+                var layer = _spriteUse[i];
+                if (rasterOnly && !layer.IsRaster) continue;
+
+                freed += layer.RasterBytes;
+                floors++;
+                _spriteUse.RemoveAt(i);
+                layer.ReleaseSprite();
+            }
+
+            if (floors > 0)
+            {
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: released {floors} cached map floor(s), {freed / (1024f * 1024f):F1} MB of pictures.");
             }
         }
 
@@ -821,6 +998,132 @@ namespace QuestTree.UI
 
             LogArtworkGeometry(layer, sprite);
             return sprite;
+        }
+
+        /// <summary>The blocking raster path: read the file and decode it. Main thread only, like
+        /// <see cref="BuildRasterSprite"/>, and for the same reason.</summary>
+        private static Sprite LoadRasterSprite(string path, MapLayer layer)
+        {
+            try
+            {
+                return BuildRasterSprite(File.ReadAllBytes(path), layer);
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: could not read the map picture '{Path.GetFileName(path)}' " +
+                    $"({ex.Message}) - drawing its extent instead.");
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// A captured PNG's bytes, decoded into a sprite. MAIN THREAD ONLY.
+        ///
+        /// Three arguments here are decisions rather than defaults:
+        ///
+        /// Mipmaps off, because the picture is stretched onto its floor's world rectangle and the
+        /// view's zoom is a container scale - there is no minification chain worth 33 % more memory
+        /// on a 43 MB texture. Bilinear filtering, so zooming in blurs rather than blocks.
+        ///
+        /// markNonReadable, which drops the CPU-side copy the decode leaves behind. That copy is
+        /// the same size as the texture - 43 MB per floor of a big map, and the cache holds six -
+        /// and nothing here ever reads a pixel back. It is also why the sprite is built with
+        /// SpriteMeshType.FullRect rather than the default tight mesh: a tight mesh is traced from
+        /// the texture's alpha, which a non-readable texture cannot be asked for. FullRect is the
+        /// right answer anyway, since the picture covers its whole rectangle by construction.
+        ///
+        /// The pivot and pixels-per-unit are formalities: MapView draws this through a UI Image
+        /// sized to the floor's bounds, which stretches the sprite's rect onto that rect and
+        /// consults neither. They are centred and 100 so the sprite is well-formed for anything
+        /// that does.
+        /// </summary>
+        private static Sprite BuildRasterSprite(byte[] bytes, MapLayer layer)
+        {
+            var name = Path.GetFileName(layer.ImagePath);
+
+            if (bytes == null || bytes.Length == 0)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: the map picture '{name}' is empty - drawing its extent instead.");
+                return null;
+            }
+
+            Texture2D texture = null;
+
+            try
+            {
+                var clock = System.Diagnostics.Stopwatch.StartNew();
+
+                texture = new Texture2D(2, 2, TextureFormat.RGB24, mipChain: false);
+
+                if (!texture.LoadImage(bytes, markNonReadable: true))
+                {
+                    // The texture is a native allocation, so a failed decode has to destroy it -
+                    // the same trap QuestPin above fell into once.
+                    UnityEngine.Object.Destroy(texture);
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: the map picture '{name}' could not be decoded " +
+                        $"({bytes.Length} bytes) - drawing its extent instead.");
+                    return null;
+                }
+
+                texture.filterMode = FilterMode.Bilinear;
+                texture.wrapMode = TextureWrapMode.Clamp;
+
+                var sprite = Sprite.Create(
+                    texture, new Rect(0f, 0f, texture.width, texture.height),
+                    new Vector2(0.5f, 0.5f), 100f, 0, SpriteMeshType.FullRect);
+
+                if (sprite == null)
+                {
+                    UnityEngine.Object.Destroy(texture);
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: the map picture '{name}' decoded but no sprite could be made of it.");
+                    return null;
+                }
+
+                // Not a viewBox - there is no SVG here - but the same thing it stands for: the
+                // pixel rectangle that lands on the layer's bounds. LogArtworkGeometry reads it.
+                layer.Viewport = new Rect(0f, 0f, texture.width, texture.height);
+                layer.RasterBytes = TextureBytes(texture);
+
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: map picture '{name}' {texture.width}x{texture.height} decoded in " +
+                    $"{clock.ElapsedMilliseconds} ms ({layer.RasterBytes / (1024f * 1024f):F1} MB); " +
+                    $"{(ResidentRasterBytes + layer.RasterBytes) / (1024f * 1024f):F1} MB of pictures " +
+                    $"resident, ceiling {MaxCachedSprites} floors.");
+
+                LogArtworkGeometry(layer, sprite);
+                return sprite;
+            }
+            catch (Exception ex)
+            {
+                if (texture != null) UnityEngine.Object.Destroy(texture);
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: could not build the map picture '{name}' ({ex.Message}) - " +
+                    $"drawing its extent instead.");
+                return null;
+            }
+        }
+
+        /// <summary>What a decoded picture costs, from its format rather than from the file: a PNG
+        /// with no alpha decodes to RGB24 at three bytes a pixel, one with alpha to RGBA32 at four.
+        /// An unrecognised format is counted at four, so the number in the log is never optimistic.</summary>
+        private static long TextureBytes(Texture2D texture)
+        {
+            var bytesPerPixel = texture.format switch
+            {
+                TextureFormat.RGB24 => 3,
+                TextureFormat.RGBA32 => 4,
+                TextureFormat.ARGB32 => 4,
+                TextureFormat.BGRA32 => 4,
+                TextureFormat.R8 => 1,
+                TextureFormat.Alpha8 => 1,
+                _ => 4
+            };
+
+            return (long)texture.width * texture.height * bytesPerPixel;
         }
 
         private static bool OverBudget(List<VectorUtils.Geometry> geometry)

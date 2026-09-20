@@ -36,6 +36,12 @@ namespace QuestTree.Patches
                 if (ModSettings.Ready && !ModSettings.HarvestZones.Value) return;
                 if (__instance == null) return;
 
+                // The capture key, behind the same gate as the harvest itself: the picture is drawn
+                // to the rectangle the harvest measures, so a raid that is not harvesting has
+                // nothing for a capture to be aligned to. Installs a watcher only - nothing renders
+                // until the key is pressed - and guards and catches for itself.
+                MapCapture.Install(__instance);
+
                 __instance.StartCoroutine(ZoneHarvester.HarvestCoroutine(__instance));
             }
             catch (Exception ex)
