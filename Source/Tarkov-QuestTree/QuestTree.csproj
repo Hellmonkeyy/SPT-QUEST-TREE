@@ -153,6 +153,18 @@
       <HintPath>$(ManagedPath)\UnityEngine.ImageConversionModule.dll</HintPath>
       <Private>False</Private>
     </Reference>
+    <!-- NavMesh.CalculateTriangulation, for the Phase 0 map-capture experiment's floor bands and
+         extent fallback. THROWAWAY together with QuestGraph/MapCaptureExperiment.cs - except that
+         Phase A wants the same triangulation, so this reference is likely to be kept. -->
+    <Reference Include="UnityEngine.AIModule">
+      <HintPath>$(ManagedPath)\UnityEngine.AIModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <!-- Terrain.activeTerrains, for the same experiment's second extent source. -->
+    <Reference Include="UnityEngine.TerrainModule">
+      <HintPath>$(ManagedPath)\UnityEngine.TerrainModule.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
     <Reference Include="UnityEngine.TextRenderingModule">
       <HintPath>$(ManagedPath)\UnityEngine.TextRenderingModule.dll</HintPath>
       <Private>False</Private>

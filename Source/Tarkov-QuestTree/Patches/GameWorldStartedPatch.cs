@@ -26,6 +26,11 @@ namespace QuestTree.Patches
             // Inside the game's own raid start; nothing thrown here may reach it.
             try
             {
+                // THROWAWAY (Phase 0 of the in-house map pictures): the map-capture experiment key.
+                // Ahead of the HarvestZones gate on purpose - it is a debug key, not part of the
+                // harvest - and it null-checks and catches for itself.
+                MapCaptureExperiment.Install(__instance);
+
                 // Only an explicit "off" stops the harvest: with settings unbound (Plugin.Awake
                 // guards that failure separately) the default, on, applies.
                 if (ModSettings.Ready && !ModSettings.HarvestZones.Value) return;
