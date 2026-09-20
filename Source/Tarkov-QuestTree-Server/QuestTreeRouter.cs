@@ -16,7 +16,7 @@ namespace QuestTreeServer
     /// Serves the full quest list to the Quest Tracker client mod on /questtree/quests.
     ///
     /// TypePriority is OnLoadOrder.Routers + 1 because this is a brand new URL rather than an
-    /// override of one SPT already answers - per the wiki, a custom route always sits above the
+    /// override of one SPT already answers - per SPT's modding docs, a custom route always sits above the
     /// built-in routers (which all sit on OnLoadOrder.Routers exactly), since there is nothing of
     /// SPT's to order against.
     ///

@@ -41,7 +41,7 @@ $ErrorActionPreference = "Stop"
 $repo = $PSScriptRoot
 $client = Join-Path $repo "Source\Tarkov-QuestTree"
 $server = Join-Path $repo "Source\Tarkov-QuestTree-Server"
-$sptVersion = "4.1.5"
+$sptVersion = "4.1.6"
 
 function Fail($message) {
     Write-Host ""

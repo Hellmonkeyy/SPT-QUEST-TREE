@@ -191,7 +191,7 @@ namespace QuestTree.QuestGraph
 
         private static void CollectQuestItems(GameWorld gameWorld, Dictionary<string, HarvestedQuestItem> into, List<string> added)
         {
-            // _iteration is the public backing list in 4.1.5; DynamicMaps reaches it by reflection
+            // _iteration is the public backing list in 4.1.x; DynamicMaps reaches it by reflection
             // from older builds, which is not needed here.
             var loot = gameWorld?.LootItems?._iteration;
             if (loot == null) return;

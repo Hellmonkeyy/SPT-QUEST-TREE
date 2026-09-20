@@ -6,7 +6,7 @@ progression - every quest in the game, including the ones you have not unlocked 
 tree coloured by your progress. Plus the things a wiki cannot tell you: what your quests will ask
 you not to sell, why a quest is locked, what to do next, and how far you are from Kappa.
 
-**Built for SPT 4.1.5.** Not to be confused with DrakiaXYZ's *QuestTracker*, a different mod that
+**Built for SPT 4.1.6.** Not to be confused with DrakiaXYZ's *QuestTracker*, a different mod that
 lists your active quests in raid; the two coexist, and this one's folder is `QuestTree`.
 
 ---
@@ -448,7 +448,7 @@ every line `Quest Tracker:`. A symptom that could be either is worth grepping fo
 - **`Http response status code: NotFound` on `/questtree/...`** - same cause: the server you are on
   has no Quest Tracker server half, or one older than this client.
 - **Server refuses to load the mod** - the server half must match your SPT version. This build
-  targets SPT 4.1.5.
+  targets SPT 4.1.6.
 - **On Fika, a map stops learning zones once someone joins with a newer build** - the host's server
   half is older than the joiner's client, so it refuses a harvest whose schema it cannot read in full
   rather than storing half of one, and it skips any zone file already stamped newer than it reads.

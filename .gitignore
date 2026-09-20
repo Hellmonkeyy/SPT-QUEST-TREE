@@ -31,5 +31,5 @@ quest-tree-readability-spec.md
 objective-gps.json
 tarkovdev-quests.json
 
-# SPT wiki export for reading the 4.1.x changes - third-party text, kept local.
-spt_wiki_export.md
+# Offline export of the SPT modding docs, the source of truth for SPT 4.1.x changes - third-party text, kept local.
+spt-modding-docs.md
