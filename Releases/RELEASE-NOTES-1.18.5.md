@@ -61,3 +61,5 @@ Nothing here changes what the mod does, only what it writes down.
   (QUESTTREE_DEBUG).` and the boot should be as talkative as 1.18.4 was.
 - Open the tracker, hand a quest in, raid a map. The panel, the pins and the builds should be exactly
   as they were.
+
+Archive sha256: 156a46112bda516e9e8d977d3bd8889d058752337c3e15f36edcb26cbfc7360e
