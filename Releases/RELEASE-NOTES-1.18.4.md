@@ -78,3 +78,5 @@ What to look for on the first session with this build:
   on the map.
 - Only with a server that hangs: one warning line in the log saying the payloads "did not answer
   within 15s", and no fifteen-second freeze of the game after it.
+
+Archive sha256: 0f1dd03f09975f4124781f051472c58a19d5a0d77c8952003ef39a32b05412a1
