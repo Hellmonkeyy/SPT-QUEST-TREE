@@ -15,9 +15,22 @@ exactly the rectangle harvest measured, so a pin lands on the right building wit
 agreeing twice. Pressing the key again from somewhere else adds to what is there rather than
 replacing it - the game streams distant chunks out, so each capture has holes another fills - and
 where two cover the same ground the pixel seen from closer wins, so a map gets sharper the more
-often it is captured. The top floor is shot from 300 m up so roofs and buildings draw; colours are
-muted so a pin is the brightest thing on screen; a render too dark to be a map, or one under
-different light from the pictures on disk, is refused rather than written.
+often it is captured. The top floor is shot from 300 m up so roofs draw; the level-of-detail
+selection that culled every building against a kilometre-tall orthographic view is switched off for
+the render, and the terrain is put on its averaged base map, so buildings are buildings and the
+ground is not a two-metre checker; colours are muted so a pin is the brightest thing on screen; a
+render too dark to be a map, or one under different light from the pictures on disk, is refused
+rather than written. The meta records the render recipe - the light, the LOD bias, the terrain
+base-map distance - and a set made under another recipe is replaced, not merged into.
+
+**Ctrl+Shift+F9 captures a whole map without you walking it.** One press plans a grid of stops 200 m
+apart, finds somewhere standable in each cell, teleports the player from stop to stop, captures at
+each and returns them to where they pressed it - about sixteen stops and a couple of minutes on
+Customs, and 200 m because that is inside the radius the streamer keeps loaded, which is what the
+nearest-capture-wins merge needs. It disables no bots and touches nothing but the player's position:
+start such a raid with AI set to none. "Capture the map automatically while I play" (off by default)
+does the same job as you walk, one capture every few seconds - 5 by default, 2 to 120 - once you have
+moved 15 m; it hitches every few seconds and is meant for a raid set aside for map-building.
 
 **Captures travel through the host.** Each finished capture is offered one floor at a time as a
 2048-px JPEG, and every client of that host picks up the maps it lacks on the first Maps-tab open of
@@ -47,8 +60,20 @@ captured map carries our own credit line naming the build, the date and the raid
   default.
 - Water is left out of a capture: it renders as flat cyan placeholder blocks from a camera that is
   not the player's, and the ground under it reads as a map should.
+- A quest with a harvested position on a map loses its percentage-placed pins there, and a harvested
+  ITEM spot now counts as that coverage the same way a trigger zone does - it is a real world
+  position for that quest. The boot line says how many percentage pins each map kept and how many
+  were dropped, instead of one number that quietly meant the kept ones.
+- The capture camera is orthographic, and Unity's built-in pipeline never gives one deferred
+  shading - it falls back to forward. The code no longer claims otherwise, and that is why the
+  capture light's narrow culling mask and per-pixel setting are honoured.
+- `package.ps1 -RefreshBuilds` copies the trained weapon-build cache over the shipped seed, printing
+  the stamp, the build count and the trader/flea/unpriced split either side of the copy so a worse
+  training run is visible, and refusing outright while `SPT.Server.exe` is running. The training
+  launchers also accept map uploads now, so a capture raid can hand its pictures to a training server.
 - `tools/check-capture.py` checks a fresh capture against its own meta and the server's zone file
   for that map; `tools/server-host.cmd` starts the server as a picture host.
+
 ---
 
 # Quest Tracker 1.18.5

@@ -100,11 +100,16 @@ namespace QuestTree.QuestGraph
     /// calls - so a capture is a handful of short hitches on a key the player pressed, rather than
     /// one long freeze.
     ///
-    /// Memory, at the worst moment of a 2360x2040 floor: 58 MB of float buffer (three floats a pixel,
-    /// freed as soon as the floor is developed), a 33 MB half-float staging texture shared by every
-    /// tile, 14 MB of eight-bit picture, 4.8 MB each for the drawn mask and the distance sidecar, and
-    /// on a merge 19 MB of the previous picture plus 4.8 MB of its sidecar, both dropped as soon as
-    /// the merge is done. One floor at a time, by construction.
+    /// Memory, at the worst moment of a MERGE of Customs at 4472x2156 (9.6 million pixels, which is
+    /// what 0.25 m/px asks for): 116 MB of float buffer (three floats a pixel, freed as soon as the
+    /// floor is developed), 39 MB of the previous picture and 9.6 MB of its distances, 29 MB of
+    /// eight-bit picture and 29 MB of distance texture, 9.6 MB each for the drawn mask and this
+    /// capture's distances, a 34 MB half-float staging texture shared by every tile, and the PNG -
+    /// about 300 MB at the peak, and about 190 MB for a fresh capture that reads nothing back. It is
+    /// large and it is bounded: one floor at a time by construction, every pass runs a band or a chunk
+    /// to a frame so no single allocation is bigger than the picture itself, and ReleaseTexture frees
+    /// all of it the moment the floor is written. A 2048-setting capture is a sixteenth of the
+    /// pixels.
     ///
     /// Everything here is guarded and reversible. It runs on a player's raid frame: fog is restored by
     /// the same statement that changed it, the camera is destroyed in a finally and again in
@@ -120,12 +125,127 @@ namespace QuestTree.QuestGraph
         /// larger tile would be a longer hitch for no gain.</summary>
         private const int TileSize = 2048;
 
-        /// <summary>Most pixels per metre, whatever the resolution setting allows. A capture is a
-        /// photograph of a 3D scene: past about two pixels to the metre there is no more detail in
-        /// the world to record, only a bigger file. It matters for the small maps - Factory's extent
-        /// is a couple of hundred metres, and without this cap a 4096 long side would ask for twenty
-        /// pixels per metre.</summary>
-        private const float MaxPixelsPerMetre = 2f;
+        /// <summary>Most pixels per metre, whatever the resolution setting allows. Four - a quarter of
+        /// a metre to the pixel.
+        ///
+        /// Two was the first value, and the campaign capture of Customs at half a metre to the pixel is
+        /// what argued it up: the buildings, vehicles and trees the LOD fix brought back are read at
+        /// ten to forty pixels across at 0.5 m/px, which is enough to see that a warehouse is there and
+        /// not enough to tell one door from the next. At 0.25 m/px a 4 m vehicle is 16 px and a
+        /// stairwell is visible. Past four there is genuinely no more detail in the scene to record -
+        /// the terrain base map and the LOD meshes run out - only a bigger file.
+        ///
+        /// It is a CAP, not a target: it binds only where the long-side setting does not, which is
+        /// every map under about 2 km across at the 8192 setting, and it is what stops Factory's
+        /// two-hundred-metre extent asking for forty pixels per metre.</summary>
+        private const float MaxPixelsPerMetre = 4f;
+
+        /// <summary>Whether the cyan water quads are painted out. The off switch for the whole step -
+        /// <see cref="Inpaint"/> and the classifier below - for the case where a map's real content is
+        /// being eaten by it. It is part of <see cref="RenderTag"/>, so turning it off replaces older
+        /// captures rather than merging into them.
+        ///
+        /// Static readonly rather than const, like SmoothingEnabled below and for the same reason: a
+        /// const folds the branches and the compiler then reports the off-path as unreachable code,
+        /// which this project treats as an error. A switch nobody can flip without a build error is
+        /// not a switch.</summary>
+        private static readonly bool FillWaterCyan = true;
+
+        /// <summary>How a water quad is recognised, in RAW linear light, before any stretch: both green
+        /// and blue over <see cref="WaterCyanChannelFloor"/>, with red under
+        /// <see cref="WaterCyanRedShare"/> of the smaller of them.
+        ///
+        /// Puddles and pools after rain draw through a water shader that has nothing to reflect from a
+        /// camera that is not the player's, and what it writes instead is a flat, strongly saturated
+        /// cyan - the last visible fault in the Customs campaign capture. The Water LAYER is already
+        /// excluded (see ExcludedLayerNames); these quads are on ordinary layers and cannot be dropped
+        /// by mask.
+        ///
+        /// The thresholds are read against what the rest of a map measures. A capture's 98th percentile
+        /// comes in around 0.25-0.5 of linear white, so 0.45 in BOTH green and blue is already at the
+        /// bright end of anything real; and the red test is what makes it a water test rather than a
+        /// brightness test - a lit roof or a white van is bright in all three channels and keeps its
+        /// red, while these quads have almost none. Grass is green without being blue, rust is red,
+        /// the sky is not drawn. Nothing else on a map is strongly cyan.</summary>
+        private const float WaterCyanChannelFloor = 0.45f;
+
+        private const float WaterCyanRedShare = 0.35f;
+
+        /// <summary>Square windows the inpainting tries, in pixels a side, smallest first: the mean of
+        /// the non-cyan drawn pixels in the first one that holds any replaces the quad. 5 keeps a
+        /// puddle's edge looking like the ground it is in, 17 reaches across the biggest pool on
+        /// Customs at four pixels to the metre; a pixel with nothing but cyan and holes within 17 px is
+        /// marked undrawn and left for another capture to fill.</summary>
+        private static readonly int[] InpaintWindows = { 5, 9, 17 };
+
+        /// <summary>Cyan pixels repainted per frame. Each is up to 289 samples of the float buffer, so
+        /// twenty thousand of them is about the same work as one band of development - the unit the
+        /// frame budget is built in.</summary>
+        private const int InpaintChunkPixels = 20000;
+
+        /// <summary>Whether the edge-preserving smoothing runs. Part of <see cref="RenderTag"/>, so
+        /// turning it off replaces older captures rather than merging into them. Static readonly, not
+        /// const, so both paths stay compiled - see FillWaterCyan.</summary>
+        private static readonly bool SmoothingEnabled = true;
+
+        /// <summary>Reach of the smoothing kernel in pixels: 2, a 5x5 window. What it is for is the
+        /// speckle left in a photographed map - terrain detail textures that tile every couple of
+        /// metres, foliage billboards, the dither in a half-float readback - none of which is
+        /// information about the map, all of which survives a percentile stretch. A 5x5 window at
+        /// 0.25 m/px is a metre and a quarter across, which is smaller than anything on a map that
+        /// matters and bigger than the speckle.</summary>
+        private const int SmoothingRadius = 2;
+
+        /// <summary>Spread of the spatial weights, in pixels. 1.2 puts the corner of a 5x5 window at
+        /// about a sixth of the centre's weight - a soft kernel rather than a box blur, so the result
+        /// looks photographic rather than posterised.</summary>
+        private const float SmoothingSigmaSpatial = 1.2f;
+
+        /// <summary>Spread of the RANGE weight, in stretched units - the same 0..1 scale the grade
+        /// works in, which is what makes the strength of the filter independent of the map's exposure.
+        /// 0.06 is about a sixteenth of the picture's tonal range: two pixels that differ by less than
+        /// that are the same surface and are averaged together, and anything sharper - a roof edge, a
+        /// road margin, a wall's shadow - is left alone. That is the whole point of a bilateral filter
+        /// over a blur, and it is why the buildings the LOD fix brought back survive this pass.</summary>
+        private const float SmoothingSigmaRange = 0.06f;
+
+        /// <summary>How many sigmas of luminance difference are worth computing. Past four the weight
+        /// is under e^-8, and skipping those neighbours outright is what makes the filter affordable:
+        /// at a real edge most of the window is skipped.</summary>
+        private const float SmoothingRangeReach = 4f;
+
+        /// <summary>Entries in the range-weight table. The filter needs one exp() per neighbour; a
+        /// 256-entry table over the reach above replaces all of them with an index, which was worth
+        /// about a third of the pass's time when measured.</summary>
+        private const int SmoothingRangeSteps = 256;
+
+        /// <summary>Rows of the picture developed in one frame when the smoothing is on, against
+        /// <see cref="PixelBandRows"/> when it is off.
+        ///
+        /// Thirty-two, from a measurement rather than a guess: the exact inner loop over a 4472x2156
+        /// floor (Customs at 0.25 m/px, 9.6 million pixels, 12 % of them holes) was timed at 1748 ms
+        /// on a warm .NET 9 JIT, 0.81 ms a row. Mono in a raid is slower than that, so 256 rows would
+        /// be a third of a second of frozen frame and 32 rows is around 26 ms there and 40-80 ms here
+        /// - the same order as the tile readbacks Phase 0 measured at 10-61 ms. It costs sixty-eight
+        /// frames instead of nine on a map that size, which is a second of wall clock nobody
+        /// notices.</summary>
+        private const int SmoothingBandRows = 32;
+
+        /// <summary>The spatial weights, built once: (2r+1)^2 of them, indexed row-major from the
+        /// window's top-left.</summary>
+        private static readonly float[] SmoothingKernel = BuildSmoothingKernel();
+
+        /// <summary>The range weights, built once, indexed by luminance difference scaled by
+        /// <see cref="SmoothingRangeScale"/>.</summary>
+        private static readonly float[] SmoothingRangeWeights = BuildSmoothingRangeWeights();
+
+        /// <summary>The luminance difference past which a neighbour is skipped.</summary>
+        private const float SmoothingRangeCut = SmoothingRangeReach * SmoothingSigmaRange;
+
+        private const float SmoothingRangeScale = (SmoothingRangeSteps - 1) / SmoothingRangeCut;
+
+        /// <summary>Rows developed in one frame: fewer when every pixel costs a 5x5 window.</summary>
+        private static int DevelopBandRows => SmoothingEnabled ? SmoothingBandRows : PixelBandRows;
 
         /// <summary>Metres above the TOPMOST band the camera sits. Three hundred - the height Phase 0
         /// rendered its pictures from, and high enough to be above anything any map builds.
@@ -226,16 +346,22 @@ namespace QuestTree.QuestGraph
         private static string RenderTag =>
             "own-" + CaptureLightIntensity.ToString("0.###", CultureInfo.InvariantCulture) +
             ";lod" + CaptureLodBias.ToString("0.###", CultureInfo.InvariantCulture) +
-            ";basemap" + CaptureBasemapDistance.ToString("0.###", CultureInfo.InvariantCulture);
+            ";basemap" + CaptureBasemapDistance.ToString("0.###", CultureInfo.InvariantCulture) +
+            ";water" + (FillWaterCyan ? "1" : "0") +
+            ";smooth" + (SmoothingEnabled ? (SmoothingRadius * 2 + 1).ToString(CultureInfo.InvariantCulture) : "0");
 
         /// <summary>Added to the far plane so the band's own floor is comfortably inside it rather
         /// than exactly on it.</summary>
         private const float FarClipSlack = 1f;
 
-        /// <summary>A floor's PNG is not written past this. 12 MB is well over what a 4096-pixel
-        /// render of a real map encodes to (a few MB), so hitting it means something is wrong -
-        /// noise, or a resolution nobody wants in a release zip.</summary>
-        private const int MaxFloorBytes = 12 * 1024 * 1024;
+        /// <summary>A floor's PNG is not written past this. 48 MB, four times the first value, because
+        /// the pixel count went up four times with <see cref="MaxPixelsPerMetre"/>: Customs is
+        /// 4472x2156 now, 9.6 million pixels, which a PNG of a photographed map encodes to somewhere
+        /// around 10-25 MB. Hitting 48 still means something is wrong - noise rather than a map, or a
+        /// resolution nobody wants - and the local capture is the only thing this bounds: what travels
+        /// to a host and what ships in the zip are downscaled to 2048 long side by MapTransfer and
+        /// package.ps1 respectively.</summary>
+        private const int MaxFloorPngBytes = 48 * 1024 * 1024;
 
         /// <summary>How far a projected point may sit from where the meta's arithmetic puts it, in
         /// pixels, before the floor is abandoned. One pixel: the two calculations are of the same
@@ -526,6 +652,16 @@ namespace QuestTree.QuestGraph
                         // The whole point of the coroutine: one render and one readback per frame,
                         // never two.
                         yield return null;
+                    }
+
+                    // The water quads go before the exposure is measured, not just before the merge:
+                    // a flat cyan pool is one of the brightest things in a capture, and the rain
+                    // capture's 98th percentile was read off exactly this kind of object. Painting
+                    // them out first means the exposure describes the map.
+                    if (!floor.Failed)
+                    {
+                        var inpaint = Inpaint(plan, floor);
+                        while (inpaint.MoveNext()) yield return inpaint.Current;
                     }
 
                     // The rest of the floor, never two of these in one frame: its brightness, its
@@ -985,7 +1121,7 @@ namespace QuestTree.QuestGraph
                     return;
                 }
 
-                if (png.Length > MaxFloorBytes)
+                if (png.Length > MaxFloorPngBytes)
                 {
                     // Not written rather than written and large: these files ship in the release zip
                     // and are uploaded to Fika hosts, and a floor this size is a sign the picture is
@@ -993,7 +1129,7 @@ namespace QuestTree.QuestGraph
                     floor.Failed = true;
                     Plugin.LogSource?.LogInfo(
                         $"QuestTree: {plan.Key} \"{floor.Dto.Name}\" encoded to {png.Length} bytes, over the " +
-                        $"{MaxFloorBytes / (1024 * 1024)} MB a floor may take - it was not written. Set Settings > " +
+                        $"{MaxFloorPngBytes / (1024 * 1024)} MB a floor may take - it was not written. Set Settings > " +
                         "Map > Capture resolution to 2048 and capture again.");
                     return;
                 }
@@ -1014,6 +1150,12 @@ namespace QuestTree.QuestGraph
                     $"{E(floor.Exposure.Low)}..{E(floor.Exposure.High)} " +
                     $"({(_hdr ? "half-float" : "8-bit")}, gamma {G(floor.Exposure.Gamma)}" +
                     (floor.ReusedExposure ? ", kept from the first capture" : "") + ")";
+
+                if (floor.CyanFilled > 0 || floor.CyanDropped > 0)
+                {
+                    line += $", {floor.CyanFilled} cyan water pixels filled";
+                    if (floor.CyanDropped > 0) line += $" and {floor.CyanDropped} left as holes";
+                }
 
                 if (floor.Merged)
                 {
@@ -1742,7 +1884,7 @@ namespace QuestTree.QuestGraph
 
             floor.Merged = floor.PreviousColour != null;
 
-            for (var y0 = 0; y0 < plan.HeightPx; y0 += PixelBandRows)
+            for (var y0 = 0; y0 < plan.HeightPx; y0 += DevelopBandRows)
             {
                 yield return null;
                 if (!DevelopBand(plan, floor, y0)) yield break;
@@ -1750,6 +1892,384 @@ namespace QuestTree.QuestGraph
 
             yield return null;
             DevelopFinish(plan, floor);
+        }
+
+        // --- the water quads ---------------------------------------------------------------------
+
+        /// <summary>
+        /// Paints out the flat cyan water quads, in the float buffer, before anything reads it.
+        ///
+        /// Two passes, both spread over frames. The first finds them - one band of rows to a frame,
+        /// appending to <see cref="FloorPlan.Cyan"/>. The second replaces each with the mean of the
+        /// non-cyan drawn pixels around it, <see cref="InpaintChunkPixels"/> to a frame, growing the
+        /// window until it finds some; a pixel with nothing usable within the largest window is marked
+        /// UNDRAWN, which makes it a hole another capture may fill rather than a patch of invented
+        /// colour.
+        ///
+        /// The fill reads the buffer as it goes, so a pixel already repainted can be the source for its
+        /// neighbour and the fill spreads inward from a pool's edge. That is deliberate: a strict
+        /// version reading only original pixels would leave the middle of a large pool unfilled, and a
+        /// pool's interior is exactly what has to go. It makes the result depend on the scan order,
+        /// which is fixed (rows, then columns), so two captures of the same scene still produce the
+        /// same picture.
+        ///
+        /// Skipped entirely, and cheaply, when <see cref="FillWaterCyan"/> is off.
+        /// </summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="floor">The floor whose pixels are to be cleaned.</param>
+        private IEnumerator Inpaint(Plan plan, FloorPlan floor)
+        {
+            if (!FillWaterCyan || floor.Pixels == null || floor.Drawn == null) yield break;
+
+            floor.Cyan = new List<int>();
+
+            for (var y0 = 0; y0 < plan.HeightPx; y0 += PixelBandRows)
+            {
+                yield return null;
+                if (!ClassifyBand(plan, floor, y0)) yield break;
+            }
+
+            if (floor.Cyan.Count == 0)
+            {
+                floor.Cyan = null;
+                yield break;
+            }
+
+            for (var from = 0; from < floor.Cyan.Count; from += InpaintChunkPixels)
+            {
+                yield return null;
+                if (!FillChunk(plan, floor, from)) yield break;
+            }
+
+            Plugin.LogSource?.LogDebug(
+                $"QuestTree: {plan.Key} \"{floor.Dto.Name}\" - {floor.Cyan.Count} cyan water pixels found, " +
+                $"{floor.CyanFilled} painted out, {floor.CyanDropped} left as holes.");
+
+            floor.Cyan = null;
+        }
+
+        /// <summary>One band of rows searched for water quads. False, having failed the floor, on any
+        /// error.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="floor">The floor being cleaned.</param>
+        /// <param name="y0">The band's first row, counting from the bottom.</param>
+        private static bool ClassifyBand(Plan plan, FloorPlan floor, int y0)
+        {
+            try
+            {
+                var rows = Math.Min(PixelBandRows, plan.HeightPx - y0);
+                var pixels = floor.Pixels;
+
+                for (var row = 0; row < rows; row++)
+                {
+                    var index = (y0 + row) * plan.WidthPx;
+
+                    for (var col = 0; col < plan.WidthPx; col++, index++)
+                    {
+                        if (!floor.Drawn[index]) continue;
+
+                        var at = index * 3;
+                        if (IsWaterCyan(pixels[at], pixels[at + 1], pixels[at + 2])) floor.Cyan.Add(index);
+                    }
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                floor.Failed = true;
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: {plan.Key} \"{floor.Dto?.Name}\" could not be searched for water " +
+                    $"({ex.GetType().Name}: {ex.Message}).");
+                return false;
+            }
+        }
+
+        /// <summary>One chunk of the found water pixels repainted. False, having failed the floor, on
+        /// any error.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="floor">The floor being cleaned.</param>
+        /// <param name="from">The first index of this chunk in <see cref="FloorPlan.Cyan"/>.</param>
+        private static bool FillChunk(Plan plan, FloorPlan floor, int from)
+        {
+            try
+            {
+                var until = Math.Min(from + InpaintChunkPixels, floor.Cyan.Count);
+                var pixels = floor.Pixels;
+
+                for (var i = from; i < until; i++)
+                {
+                    var index = floor.Cyan[i];
+                    var row = index / plan.WidthPx;
+                    var col = index - row * plan.WidthPx;
+
+                    if (Mean(plan, floor, row, col, out var r, out var g, out var b))
+                    {
+                        var at = index * 3;
+                        pixels[at] = r;
+                        pixels[at + 1] = g;
+                        pixels[at + 2] = b;
+                        floor.CyanFilled++;
+                    }
+                    else
+                    {
+                        // Nothing to copy from: the middle of a pool whose every neighbour is water or
+                        // hole. Left UNDRAWN, so the merge keeps whatever the last capture had there
+                        // and the log counts it among the pixels still to fill.
+                        floor.Drawn[index] = false;
+                        floor.CyanDropped++;
+                    }
+                }
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                floor.Failed = true;
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: {plan.Key} \"{floor.Dto?.Name}\" could not have its water painted out " +
+                    $"({ex.GetType().Name}: {ex.Message}).");
+                return false;
+            }
+        }
+
+        /// <summary>The mean of the drawn, non-water pixels in the smallest window around one pixel that
+        /// holds any. False when even the largest window holds none.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="floor">The floor being cleaned.</param>
+        /// <param name="row">The pixel's row, counting from the bottom.</param>
+        /// <param name="col">The pixel's column.</param>
+        /// <param name="r">The mean red.</param>
+        /// <param name="g">The mean green.</param>
+        /// <param name="b">The mean blue.</param>
+        private static bool Mean(
+            Plan plan, FloorPlan floor, int row, int col, out float r, out float g, out float b)
+        {
+            var pixels = floor.Pixels;
+
+            foreach (var window in InpaintWindows)
+            {
+                var reach = window / 2;
+                var rowFrom = Math.Max(0, row - reach);
+                var rowUntil = Math.Min(plan.HeightPx - 1, row + reach);
+                var colFrom = Math.Max(0, col - reach);
+                var colUntil = Math.Min(plan.WidthPx - 1, col + reach);
+
+                var sumR = 0f;
+                var sumG = 0f;
+                var sumB = 0f;
+                var found = 0;
+
+                for (var y = rowFrom; y <= rowUntil; y++)
+                {
+                    var index = y * plan.WidthPx + colFrom;
+
+                    for (var x = colFrom; x <= colUntil; x++, index++)
+                    {
+                        if (!floor.Drawn[index]) continue;
+
+                        var at = index * 3;
+                        var pr = pixels[at];
+                        var pg = pixels[at + 1];
+                        var pb = pixels[at + 2];
+
+                        // A pixel that still tests as water is not a source, whether it is one this
+                        // pass has yet to reach or the one being filled.
+                        if (IsWaterCyan(pr, pg, pb)) continue;
+
+                        sumR += pr;
+                        sumG += pg;
+                        sumB += pb;
+                        found++;
+                    }
+                }
+
+                if (found == 0) continue;
+
+                r = sumR / found;
+                g = sumG / found;
+                b = sumB / found;
+                return true;
+            }
+
+            r = 0f;
+            g = 0f;
+            b = 0f;
+            return false;
+        }
+
+        /// <summary>Whether one raw linear pixel is one of the flat cyan water quads - see
+        /// <see cref="WaterCyanChannelFloor"/>.</summary>
+        /// <param name="r">Linear red.</param>
+        /// <param name="g">Linear green.</param>
+        /// <param name="b">Linear blue.</param>
+        private static bool IsWaterCyan(float r, float g, float b) =>
+            g > WaterCyanChannelFloor &&
+            b > WaterCyanChannelFloor &&
+            r < WaterCyanRedShare * Math.Min(g, b);
+
+        // --- edge-preserving smoothing -----------------------------------------------------------
+
+        /// <summary>The spatial half of the bilateral kernel: a Gaussian of
+        /// <see cref="SmoothingSigmaSpatial"/> over the window, unnormalised, since the filter divides
+        /// by the weight it actually used.</summary>
+        private static float[] BuildSmoothingKernel()
+        {
+            var side = SmoothingRadius * 2 + 1;
+            var kernel = new float[side * side];
+
+            for (var dy = -SmoothingRadius; dy <= SmoothingRadius; dy++)
+            {
+                for (var dx = -SmoothingRadius; dx <= SmoothingRadius; dx++)
+                {
+                    kernel[(dy + SmoothingRadius) * side + (dx + SmoothingRadius)] = (float)Math.Exp(
+                        -(dx * dx + dy * dy) / (2d * SmoothingSigmaSpatial * SmoothingSigmaSpatial));
+                }
+            }
+
+            return kernel;
+        }
+
+        /// <summary>The range half, as a table: exp(-d^2 / 2 sigma^2) sampled over the reach.</summary>
+        private static float[] BuildSmoothingRangeWeights()
+        {
+            var weights = new float[SmoothingRangeSteps];
+
+            for (var i = 0; i < SmoothingRangeSteps; i++)
+            {
+                var d = SmoothingRangeCut * i / (SmoothingRangeSteps - 1);
+                weights[i] = (float)Math.Exp(-(d * d) / (2d * SmoothingSigmaRange * SmoothingSigmaRange));
+            }
+
+            return weights;
+        }
+
+        /// <summary>
+        /// One pixel through the 5x5 bilateral filter, in linear light, reading the floor's own
+        /// unmodified buffer.
+        ///
+        /// A bilateral filter is a blur whose weights fall off with BRIGHTNESS DIFFERENCE as well as
+        /// distance, which is what lets it take the speckle out of a field of grass and leave the edge
+        /// of the warehouse beside it exactly where it was. The difference is measured on the STRETCHED
+        /// luminance - the 0..1 scale the grade works in, precomputed for the band - so a dark map and
+        /// a bright one are smoothed by the same amount rather than by whatever their raw values
+        /// happen to be.
+        ///
+        /// Undrawn neighbours are skipped, so a hole neither bleeds into the picture nor pulls its edge
+        /// toward black; a pixel that finds no usable neighbour at all keeps its own value.
+        ///
+        /// No copy of the buffer and no halo bookkeeping: the whole float buffer is in memory and this
+        /// only ever READS it, writing its result into the band's Color32 block by way of
+        /// <see cref="Grade"/>. That is the one design decision here worth stating - the alternative
+        /// was a second 116 MB float buffer at 0.25 m/px, on top of a merge that already peaks near
+        /// 300 MB.
+        /// </summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="floor">The floor being developed, for its pixels, its drawn mask and the band's
+        /// luminance.</param>
+        /// <param name="lumFrom">The first picture row the band's luminance buffer covers.</param>
+        /// <param name="row">The pixel's row, counting from the bottom.</param>
+        /// <param name="col">The pixel's column.</param>
+        /// <param name="r">The filtered red.</param>
+        /// <param name="g">The filtered green.</param>
+        /// <param name="b">The filtered blue.</param>
+        private static void Smooth(
+            Plan plan, FloorPlan floor, int lumFrom, int row, int col,
+            out float r, out float g, out float b)
+        {
+            var pixels = floor.Pixels;
+            var drawn = floor.Drawn;
+            var lum = floor.LumBand;
+            var width = plan.WidthPx;
+            var side = SmoothingRadius * 2 + 1;
+
+            var centre = lum[(row - lumFrom) * width + col];
+
+            var rowFrom = Math.Max(0, row - SmoothingRadius);
+            var rowUntil = Math.Min(plan.HeightPx - 1, row + SmoothingRadius);
+            var colFrom = Math.Max(0, col - SmoothingRadius);
+            var colUntil = Math.Min(width - 1, col + SmoothingRadius);
+
+            var sumR = 0f;
+            var sumG = 0f;
+            var sumB = 0f;
+            var sumW = 0f;
+
+            for (var y = rowFrom; y <= rowUntil; y++)
+            {
+                var pixelRow = y * width;
+                var lumRow = (y - lumFrom) * width;
+                var kernelRow = (y - row + SmoothingRadius) * side;
+
+                for (var x = colFrom; x <= colUntil; x++)
+                {
+                    var other = pixelRow + x;
+                    if (!drawn[other]) continue;
+
+                    var difference = lum[lumRow + x] - centre;
+                    if (difference < 0f) difference = -difference;
+                    if (difference >= SmoothingRangeCut) continue;
+
+                    var weight =
+                        SmoothingKernel[kernelRow + (x - col + SmoothingRadius)] *
+                        SmoothingRangeWeights[(int)(difference * SmoothingRangeScale)];
+
+                    var at = other * 3;
+                    sumR += pixels[at] * weight;
+                    sumG += pixels[at + 1] * weight;
+                    sumB += pixels[at + 2] * weight;
+                    sumW += weight;
+                }
+            }
+
+            var here = (row * width + col) * 3;
+
+            if (sumW <= 0f)
+            {
+                r = pixels[here];
+                g = pixels[here + 1];
+                b = pixels[here + 2];
+                return;
+            }
+
+            var inverse = 1f / sumW;
+            r = sumR * inverse;
+            g = sumG * inverse;
+            b = sumB * inverse;
+        }
+
+        /// <summary>Fills the band's stretched-luminance buffer, including the two rows of halo above
+        /// and below that the filter reads. Returns the first picture row it covers, which is what
+        /// indexes it.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="floor">The floor being developed.</param>
+        /// <param name="y0">The band's first row.</param>
+        /// <param name="rows">How many rows the band has.</param>
+        /// <param name="low">The exposure's low percentile.</param>
+        /// <param name="scale">1 / (high - low).</param>
+        private static int FillLuminance(Plan plan, FloorPlan floor, int y0, int rows, float low, float scale)
+        {
+            var from = Math.Max(0, y0 - SmoothingRadius);
+            var until = Math.Min(plan.HeightPx - 1, y0 + rows - 1 + SmoothingRadius);
+
+            var pixels = floor.Pixels;
+            var lum = floor.LumBand;
+            var width = plan.WidthPx;
+
+            for (var y = from; y <= until; y++)
+            {
+                var pixelRow = y * width;
+                var lumRow = (y - from) * width;
+
+                for (var x = 0; x < width; x++)
+                {
+                    var at = (pixelRow + x) * 3;
+                    var value = (Luminance(pixels[at], pixels[at + 1], pixels[at + 2]) - low) * scale;
+                    lum[lumRow + x] = value < 0f ? 0f : value > 1f ? 1f : value;
+                }
+            }
+
+            return from;
         }
 
         /// <summary>The development's first step: the checks, the floor's eight-bit texture, and the
@@ -1771,7 +2291,14 @@ namespace QuestTree.QuestGraph
             try
             {
                 floor.Texture = new Texture2D(plan.WidthPx, plan.HeightPx, TextureFormat.RGB24, mipChain: false);
-                floor.Block = new Color32[plan.WidthPx * PixelBandRows];
+                floor.Block = new Color32[plan.WidthPx * DevelopBandRows];
+
+                // One band's stretched luminance plus the filter's halo - 640 KB at 0.25 m/px, against
+                // the 116 MB a second full float buffer would have cost. See Smooth.
+                if (SmoothingEnabled)
+                {
+                    floor.LumBand = new float[plan.WidthPx * (DevelopBandRows + SmoothingRadius * 2)];
+                }
 
                 // The squared X distance of every column from the player, once for the whole floor
                 // rather than once per pixel: the per-pixel work is then one add and one square root.
@@ -1816,7 +2343,10 @@ namespace QuestTree.QuestGraph
                 var gamma = floor.Exposure.Gamma;
                 var scale = 1f / (floor.Exposure.High - floor.Exposure.Low);
 
-                var rows = Math.Min(PixelBandRows, plan.HeightPx - y0);
+                var rows = Math.Min(DevelopBandRows, plan.HeightPx - y0);
+
+                var clock = Stopwatch.StartNew();
+                var lumFrom = SmoothingEnabled ? FillLuminance(plan, floor, y0, rows, low, scale) : 0;
 
                 for (var row = 0; row < rows; row++)
                 {
@@ -1869,8 +2399,19 @@ namespace QuestTree.QuestGraph
 
                         if (take)
                         {
-                            block[target + col] = Grade(
-                                pixels[at], pixels[at + 1], pixels[at + 2], low, scale, gamma);
+                            // Smoothed for every pixel this capture supplies, and only for those: a
+                            // pixel the merge keeps from disk was smoothed when IT was captured, and
+                            // filtering it again here would soften it once per capture.
+                            if (SmoothingEnabled)
+                            {
+                                Smooth(plan, floor, lumFrom, textureRow, col, out var sr, out var sg, out var sb);
+                                block[target + col] = Grade(sr, sg, sb, low, scale, gamma);
+                            }
+                            else
+                            {
+                                block[target + col] = Grade(
+                                    pixels[at], pixels[at + 1], pixels[at + 2], low, scale, gamma);
+                            }
 
                             floor.Filled++;
                         }
@@ -1886,6 +2427,7 @@ namespace QuestTree.QuestGraph
                 }
 
                 floor.Texture.SetPixels32(0, y0, plan.WidthPx, rows, Slice(block, plan.WidthPx * rows));
+                floor.SmoothMs += clock.Elapsed.TotalMilliseconds;
                 return true;
             }
             catch (Exception ex)
@@ -1917,6 +2459,16 @@ namespace QuestTree.QuestGraph
             }
             finally
             {
+                // What the development cost, in work rather than in frames - the smoothing is most of
+                // it on a large floor, and this is the number that decides SmoothingBandRows.
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: {plan.Key} \"{floor.Dto?.Name}\" developed in {Ms(floor.SmoothMs)} ms of " +
+                    $"main-thread work over {(plan.HeightPx + DevelopBandRows - 1) / DevelopBandRows} band(s) of " +
+                    $"{DevelopBandRows} rows" +
+                    (SmoothingEnabled
+                        ? $", the {SmoothingRadius * 2 + 1}x{SmoothingRadius * 2 + 1} bilateral filter included."
+                        : ", with no smoothing."));
+
                 // Everything the development held and nothing else: floor.Dist stays, because the
                 // sidecar is written out of it a frame later.
                 floor.Pixels = null;
@@ -1924,6 +2476,7 @@ namespace QuestTree.QuestGraph
                 floor.PreviousDist = null;
                 floor.Block = null;
                 floor.DxSquared = null;
+                floor.LumBand = null;
             }
         }
 
@@ -2499,6 +3052,8 @@ namespace QuestTree.QuestGraph
             floor.PreviousDist = null;
             floor.Block = null;
             floor.DxSquared = null;
+            floor.LumBand = null;
+            floor.Cyan = null;
 
             if (floor.Texture != null)
             {
@@ -3122,7 +3677,7 @@ namespace QuestTree.QuestGraph
         {
             var value = ModSettings.Ready && ModSettings.CaptureResolution != null
                 ? ModSettings.CaptureResolution.Value
-                : 4096;
+                : 8192;
 
             return Mathf.Clamp(value, 512, 8192);
         }
@@ -3230,6 +3785,27 @@ namespace QuestTree.QuestGraph
             public Color32[] PreviousColour;
 
             public byte[] PreviousDist;
+
+            /// <summary>The pixels this floor's water quads were found at, in scan order, held only
+            /// between the two passes of <see cref="Inpaint"/>. Up to a few hundred thousand ints on a
+            /// rainy map - under a megabyte - and null the moment the fill is done.</summary>
+            public List<int> Cyan;
+
+            /// <summary>How many water pixels were painted out with the ground around them, and how many
+            /// had nothing to copy from and were left as holes. Both go in the floor's log line.</summary>
+            public int CyanFilled;
+
+            public int CyanDropped;
+
+            /// <summary>One band's stretched luminance, with the smoothing filter's halo rows above and
+            /// below it - what the range weight is measured on. Refilled per band by FillLuminance and
+            /// dropped by DevelopFinish.</summary>
+            public float[] LumBand;
+
+            /// <summary>Wall time spent developing this floor's bands, the smoothing included, for the
+            /// debug line. Accumulated across the band frames, so it is work rather than elapsed
+            /// frames.</summary>
+            public double SmoothMs;
 
             /// <summary>The two buffers the development works from: one band's worth of finished
             /// pixels, reused for every band, and every column's squared X distance from the
@@ -3428,9 +4004,10 @@ namespace QuestTree.QuestGraph
 
         /// <summary>Starts a capture exactly as the key press does, for a caller that wants one without
         /// a key: the same refusals (one already running, no living player) and the same coroutine.
-        /// False - having said nothing - means nothing was started, because there is no capture
-        /// installed in this raid, one is already running, or there is nobody alive to photograph
-        /// from; the caller knows what a refusal means for IT and says so itself.</summary>
+        /// False - having said nothing itself, though <see cref="Prepare"/> will have said why - means
+        /// nothing is being captured: there is no capture installed in this raid, one is already
+        /// running, there is nobody alive to photograph from, or the capture refused this raid in its
+        /// own first step. The caller knows what a refusal means for IT and says so itself.</summary>
         public static bool TryStartCapture()
         {
             try
@@ -3444,7 +4021,14 @@ namespace QuestTree.QuestGraph
                 // second caller in the same frame must be refused rather than fight for the camera.
                 runner._running = true;
                 runner.StartCoroutine(runner.Run());
-                return true;
+
+                // The flag, not a bare true: StartCoroutine runs the coroutine's body up to its first
+                // yield THERE AND THEN, so a capture whose Prepare refused this raid has already run its
+                // finally and cleared the flag by the time this line reads it. Saying "started" for that
+                // would tell a campaign a picture was taken at this stop - eighteen "captured" lines for
+                // a raid that wrote nothing - and would hide the refusal from a caller counting failures.
+                // A capture that really started has yielded and is still running.
+                return runner._running;
             }
             catch (Exception ex)
             {

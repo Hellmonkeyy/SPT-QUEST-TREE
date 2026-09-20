@@ -40,8 +40,13 @@ namespace QuestTree.QuestGraph
     ///   - it does not touch god mode, health, or any other player state. The only thing it writes to
     ///     the player is a position, through the game's own <c>Player.Teleport</c>.
     ///   - it does not run on a Fika headless client (no player to move) and does not sync the
-    ///     teleport to anyone else: this is a solo map-building tool, so the teleport is the local
-    ///     one, <c>onServerToo</c> left at its default false.
+    ///     teleport to anyone else: the teleport is the local one, <c>onServerToo</c> left at its
+    ///     default false. Which is why the campaign REFUSES a raid anybody else is in - see
+    ///     <see cref="ModEnvironment.RaidIsSolo"/>. Fika syncs the local player's position to its
+    ///     peers from the transform, so a campaign in a co-op raid would either drag the other
+    ///     players' copies of you across the map every second and a half or leave them looking at a
+    ///     ghost; a map-building tool is not worth doing that to somebody's raid. Automatic capture
+    ///     has no such gate, because it moves nobody.
     /// </summary>
     internal sealed class MapCampaign : MonoBehaviour
     {
@@ -55,20 +60,37 @@ namespace QuestTree.QuestGraph
         /// at this size, a few minutes of captures.</summary>
         internal const float CampaignCellMetres = 200f;
 
-        /// <summary>How far from a cell's centre a standable point may be found, in metres. Just under
-        /// a third of a cell, so a spot found for one cell is still unambiguously in that cell and
-        /// two neighbouring cells cannot both settle on the same patch of ground. A cell with nothing
-        /// walkable inside this radius - open water, the void past a map's edge, the 4 % pad the
-        /// extent adds on each side - is dropped from the plan rather than captured from somewhere
-        /// else.</summary>
+        /// <summary>How far from a cell's centre a standable point may be found, in metres, on a grid
+        /// whose cells are the nominal size. A cell with nothing walkable inside this radius - open
+        /// water, an interior courtyard, the void past a map's edge - is dropped from the plan rather
+        /// than captured from somewhere else.
+        ///
+        /// A CEILING, not the radius used: see <see cref="SampleRadius"/>, which takes the smaller of
+        /// this and a third of the actual cell, since the grid's cells are as small as the extent
+        /// divided by a whole number of them and 60 m around the centre of a 105 m cell reaches into
+        /// the neighbour's ground.</summary>
         private const float CampaignSampleRadius = 60f;
+
+        /// <summary>The largest share of a cell's shorter side the sample radius may be - see
+        /// <see cref="SampleRadius"/>. Just under a third, so a spot found for one cell is still
+        /// unambiguously in that cell and two neighbouring cells cannot both settle on the same patch
+        /// of ground and photograph it twice.</summary>
+        private const float CampaignSampleShare = 0.3f;
 
         /// <summary>Metres the player is put ABOVE the sampled point. The sample is a point ON the
         /// walkable surface, and materialising a capsule exactly there can leave it interpenetrating
         /// the ground; two metres is clear of that and of the kerbs and debris a NavMesh is draped
-        /// over. The drop is harmless: <c>Player.Teleport</c> calls
-        /// <c>MovementContext.ResetFlying</c>, which re-bases the fall height to the new position, so
-        /// the game never sees a fall at all.</summary>
+        /// over.
+        ///
+        /// Why two and not five. The game DOES see this as a fall - the claim that it does not was
+        /// wrong: <c>Player.Teleport</c> sets the transform and then calls
+        /// <c>MovementContext.ResetFlying</c>, which re-bases the fall height to the NEW position,
+        /// which is this one, two metres up. <c>CheckFlying</c> then measures the drop from there to
+        /// the ground and hands it to <c>ActiveHealthController.HandleFall</c>, which does nothing
+        /// below the globals' <c>Health.Falling.SafeHeight</c> - 3 m on this server. So what the
+        /// teleport itself saves the player is the 500 m fall; the two metres are a real fall with a
+        /// metre of headroom, which is why this number stays small. Raising it to four would break
+        /// both of the player's legs at every stop.</summary>
         private const float CampaignTeleportRise = 2f;
 
         /// <summary>Seconds waited between arriving at a stop and starting its capture, for the
@@ -79,12 +101,31 @@ namespace QuestTree.QuestGraph
         /// neighbour's loaded ones.</summary>
         private const float CampaignSettleSeconds = 1.5f;
 
-        /// <summary>Captures that may fail to START, in a row, before the campaign gives up. Two
-        /// rather than one because a single refusal has an innocent explanation (a capture from the
-        /// key still finishing); two in a row means <see cref="MapCapture"/> is refusing this raid -
-        /// no map name, no extent, a dead player - and the remaining stops would each refuse in the
-        /// same way, teleporting the player across the map for nothing.</summary>
+        /// <summary>Stops that may fail, in a row, before the campaign gives up - a capture that would
+        /// not start, or a teleport that threw. Two rather than one because a single failure has an
+        /// innocent explanation (a capture from the key still finishing, a teleport that landed in the
+        /// one frame of an animation that objects); two in a row means this raid is refusing the whole
+        /// exercise - no map name, no extent, a dead player, a player the game will not move - and the
+        /// remaining stops would each fail in the same way, teleporting the player across the map for
+        /// nothing.</summary>
         private const int MaxStartFailures = 2;
+
+        /// <summary>Seconds a single stop will wait for its capture to finish before the campaign
+        /// stops, having said so, and puts the player back.
+        ///
+        /// Deliberately far above anything a capture should take, because it is not a performance
+        /// budget: it is the one thing standing between a capture that has stopped finishing and a
+        /// player left at the far end of the map for the rest of the raid. The wait watches a flag
+        /// another component owns, and the one state it cannot tell from work in progress is work that
+        /// stopped with the flag still set - a coroutine Unity abandoned while the object lived, a step
+        /// that hung on a file.
+        ///
+        /// Three minutes rather than the one first written, because the capture is allowed to be slow:
+        /// a picture of a multi-floor map at the sharpest resolution setting is tens of tile renders and
+        /// a per-floor develop and encode of tens of millions of pixels, each spread over frames on
+        /// purpose. A ceiling that a legitimate capture could reach would abort campaigns instead of
+        /// rescuing them, which is the worse failure of the two.</summary>
+        private const float MaxCaptureWaitSeconds = 180f;
 
         /// <summary>Metres the player must have moved since the last automatic capture STARTED before
         /// another one is taken. A capture from where the last one was taken is a second photograph of
@@ -101,16 +142,16 @@ namespace QuestTree.QuestGraph
         ///
         /// Why the two are separate: the interval is re-based on each capture that actually starts, so
         /// a tick that skips must not push the next chance a whole interval away - a player who has
-        /// moved 14 m at one tick and 40 m a second later should be captured a second later. One
-        /// second is also as often as this may run: the extent poll below reaches
-        /// <see cref="MapExtentProbe"/>, and an unmeasured map costs a NavMesh triangulation there.</summary>
+        /// moved 14 m at one tick and 40 m a second later should be captured a second later. Every
+        /// check an evaluation makes is a field read or a distance: the expensive question, whether the
+        /// map has an extent, is asked of the memo alone (<see cref="MapExtentProbe.HasExtentFor"/>) and
+        /// never measures.</summary>
         private const float AutoCaptureEvalSeconds = 1f;
 
-        /// <summary>Seconds between evaluations while the map has no measured extent yet. Longer than
-        /// <see cref="AutoCaptureEvalSeconds"/> because that is the one expensive case: with no extent
-        /// memoised, <see cref="MapExtentProbe.TryProbeForCapture"/> triangulates the whole NavMesh,
-        /// which is hundreds of thousands of vertices on a large map. Five seconds is a handful of
-        /// probes over the window before the harvester's second pass has measured one for us.</summary>
+        /// <summary>Seconds between evaluations while the map has no measured extent yet - the window
+        /// before the harvester's second pass (27 s in) has measured one. Nothing can be captured in
+        /// it, so the poll simply slows down rather than asking the same question every second and
+        /// writing the same skip.</summary>
         private const float AutoCaptureProbeSeconds = 5f;
 
         /// <summary>Adds the campaign key and the automatic-capture ticker to a raid that has just
@@ -225,6 +266,11 @@ namespace QuestTree.QuestGraph
                     return;
                 }
 
+                // A raid with anybody else in it is refused: the teleport is local and unannounced -
+                // see the class comment - so a campaign in a Fika co-op raid is something done TO the
+                // other players. Unknown counts as not solo.
+                if (!SoloRaid()) return;
+
                 if (!Prepare(out var stops, out var start, out var map)) return;
 
                 // Set here rather than inside the coroutine: Update can run again before the
@@ -238,6 +284,27 @@ namespace QuestTree.QuestGraph
                 _warnedOnPoll = true;
                 Plugin.LogSource?.LogWarning($"QuestTree: the capture campaign key failed ({ex.Message}).");
             }
+        }
+
+        /// <summary>Whether this raid is one nobody else is in, which is the only kind a campaign may
+        /// run in - and says why when it is not. See <see cref="ModEnvironment.RaidIsSolo"/>: a plain
+        /// SPT install always answers yes, and a Fika client whose own answer cannot be read answers
+        /// "unknown", which is refused rather than risked.</summary>
+        private static bool SoloRaid()
+        {
+            var solo = ModEnvironment.RaidIsSolo;
+            if (solo == true) return true;
+
+            Plugin.LogSource?.LogInfo(solo == false
+                ? "QuestTree: no capture campaign - this raid has other players in it, and the campaign " +
+                  "teleports you across the map without telling them, which would leave their view of you " +
+                  "wrong for as long as it ran. Run it in a solo raid; the single capture key still works " +
+                  "here."
+                : "QuestTree: no capture campaign - Fika is loaded and this build could not read whether this " +
+                  "raid is a solo one, so it refuses rather than teleport you in front of other players. The " +
+                  "single capture key still works here.");
+
+            return false;
         }
 
         // --- the plan --------------------------------------------------------------------------
@@ -284,8 +351,17 @@ namespace QuestTree.QuestGraph
                 return false;
             }
 
+            // The extent is the PADDED rectangle - at least 20 m of deliberate empty border on each
+            // side, which on many maps is past the level border that kills a player who crosses it. The
+            // picture covers the pad; the player is not sent into it. See MapExtentProbe.Inset: the
+            // grid is planned over the measured rectangle, so every cell centre a point is sampled
+            // around is ground the NavMesh actually reached.
+            MapExtentProbe.Inset(
+                extent.MinX, extent.MinZ, extent.MaxX, extent.MaxZ,
+                out var minX, out var minZ, out var maxX, out var maxZ);
+
             var cells = MapCampaignGrid.Plan(
-                extent.MinX, extent.MinZ, extent.MaxX, extent.MaxZ, CampaignCellMetres, start.x, start.z);
+                minX, minZ, maxX, maxZ, CampaignCellMetres, start.x, start.z, out var stepX, out var stepZ);
 
             if (cells.Count == 0)
             {
@@ -296,34 +372,77 @@ namespace QuestTree.QuestGraph
                 return false;
             }
 
-            stops = Standable(cells, extent, start, out var dropped);
+            // Cells are the extent divided by a whole number of them, so they can be a good deal
+            // smaller than the nominal 200 m; the search radius follows the cell it searches.
+            var radius = SampleRadius(cells, stepX, stepZ);
+
+            stops = Standable(cells, extent, start, radius, out var dropped);
 
             if (stops.Count == 0)
             {
                 Plugin.LogSource?.LogWarning(
                     $"QuestTree: no capture campaign on {map} - none of its {cells.Count} cells has anywhere " +
-                    $"to stand within {Whole(CampaignSampleRadius)} m of its centre (is there a NavMesh on this " +
+                    $"to stand within {Whole(radius)} m of its centre (is there a NavMesh on this " +
                     "map?).");
                 return false;
             }
 
+            // The REAL spacing, not the nominal 200 m: the planner divides the measured rectangle into a
+            // whole number of cells, so the stops on Customs are 173 m apart one way and 166 m the
+            // other, and this line is what a reader judges the plan by.
             Plugin.LogSource?.LogInfo(
-                $"QuestTree: capture campaign on {map} - {stops.Count} stop(s) {Whole(CampaignCellMetres)} m " +
-                $"apart, starting from {At(start)}.");
+                $"QuestTree: capture campaign on {map} - {stops.Count} stop(s) on a {F(stepX)}x{F(stepZ)} m " +
+                $"grid, starting from {At(start)}.");
 
             if (dropped > 0)
             {
                 Plugin.LogSource?.LogDebug(
                     $"QuestTree: {dropped} of {cells.Count} campaign cells on {map} had nothing standable " +
-                    $"within {Whole(CampaignSampleRadius)} m and were dropped from the plan.");
+                    $"within {Whole(radius)} m and were dropped from the plan.");
             }
 
             return true;
         }
 
+        /// <summary>How far from a cell's centre a standable point may be found on THIS grid: the
+        /// smaller of <see cref="CampaignSampleRadius"/> and <see cref="CampaignSampleShare"/> of the
+        /// shorter side of a cell - counting only the axes that have more than one cell.
+        ///
+        /// The cell, not the nominal 200 m, because the planner divides the rectangle into a whole
+        /// number of cells and takes what that gives: a 210 m wide map is two 105 m columns, and a flat
+        /// 60 m search from each centre reaches into the neighbour's half - two stops on the same patch
+        /// of ground, one of the two captures paying for a photograph the other already took.
+        ///
+        /// Only the axes with a neighbour to collide with, because that is the whole reason for the
+        /// limit. A small map is one cell across, its stop is the only stop, and narrowing its search
+        /// could only drop the one cell there is and cancel the campaign. Same reason a degenerate step
+        /// falls back to the ceiling rather than to zero.</summary>
+        /// <param name="cells">The planned cells, whose highest Col and Row give the grid's shape.</param>
+        /// <param name="stepX">One cell's size along x, in metres.</param>
+        /// <param name="stepZ">One cell's size along z, in metres.</param>
+        private static float SampleRadius(List<MapCampaignGrid.Stop> cells, double stepX, double stepZ)
+        {
+            var columns = 1;
+            var rows = 1;
+
+            foreach (var cell in cells)
+            {
+                if (cell.Col + 1 > columns) columns = cell.Col + 1;
+                if (cell.Row + 1 > rows) rows = cell.Row + 1;
+            }
+
+            var limit = double.PositiveInfinity;
+            if (columns > 1) limit = Math.Min(limit, stepX);
+            if (rows > 1) limit = Math.Min(limit, stepZ);
+
+            if (double.IsNaN(limit) || double.IsInfinity(limit) || limit <= 0d) return CampaignSampleRadius;
+
+            return Mathf.Min(CampaignSampleRadius, (float)(limit * CampaignSampleShare));
+        }
+
         /// <summary>The sampled world position of each cell that has one, in the order given. A cell
-        /// whose centre has no NavMesh within <see cref="CampaignSampleRadius"/> at any of the heights
-        /// tried is dropped.
+        /// whose centre has no NavMesh within <paramref name="radius"/> at any of the heights tried is
+        /// dropped.
         ///
         /// The heights tried, in order, because SamplePosition searches a SPHERE around the point it
         /// is given and a cell centre has no height of its own: the ground band's middle (right for
@@ -333,9 +452,10 @@ namespace QuestTree.QuestGraph
         /// <param name="cells">The planned cells, in visiting order.</param>
         /// <param name="extent">The map's extent, for its floor bands' heights.</param>
         /// <param name="start">Where the player is standing, for the second height tried.</param>
+        /// <param name="radius">How far from a cell's centre to search - see <see cref="SampleRadius"/>.</param>
         /// <param name="dropped">How many cells had nothing standable.</param>
         private static List<Vector3> Standable(
-            List<MapCampaignGrid.Stop> cells, MapExtentDto extent, Vector3 start, out int dropped)
+            List<MapCampaignGrid.Stop> cells, MapExtentDto extent, Vector3 start, float radius, out int dropped)
         {
             var heights = Heights(extent, start.y);
             var stops = new List<Vector3>(cells.Count);
@@ -348,7 +468,7 @@ namespace QuestTree.QuestGraph
                 foreach (var y in heights)
                 {
                     if (!NavMesh.SamplePosition(
-                            new Vector3(cell.X, y, cell.Z), out var hit, CampaignSampleRadius, NavMesh.AllAreas))
+                            new Vector3(cell.X, y, cell.Z), out var hit, radius, NavMesh.AllAreas))
                     {
                         continue;
                     }
@@ -427,12 +547,31 @@ namespace QuestTree.QuestGraph
 
                     var stop = stops[i];
 
-                    // Two metres up, and nothing else touched: see CampaignTeleportRise for why the
-                    // drop is free, and the class comment for what is deliberately NOT changed.
+                    // Two metres up, and nothing else touched: see CampaignTeleportRise for what the
+                    // drop costs, and the class comment for what is deliberately NOT changed.
+                    //
+                    // A failure here is treated as the stop failing rather than as the campaign
+                    // failing, and counts against the same budget as a capture that would not start:
+                    // the game can refuse to move a player for reasons that pass (an animation, an
+                    // interaction), and one such frame should cost one stop. Two in a row is a player
+                    // the game will not move, and the campaign gives up - with the restore still
+                    // running, which is the point of the budget.
                     if (!Teleport(new Vector3(stop.x, stop.y + CampaignTeleportRise, stop.z)))
                     {
-                        stopped = "the player could not be moved";
-                        break;
+                        skipped++;
+                        failures++;
+
+                        Plugin.LogSource?.LogInfo(
+                            $"QuestTree: campaign stop {i + 1} of {stops.Count} at {At(stop)} - you could not " +
+                            "be moved there.");
+
+                        if (failures >= MaxStartFailures)
+                        {
+                            stopped = $"{failures} stops in a row could not be reached";
+                            break;
+                        }
+
+                        continue;
                     }
 
                     // The streamer's turn: nothing here can hurry it, so this is simply time.
@@ -464,14 +603,36 @@ namespace QuestTree.QuestGraph
                     // The capture drives itself a tile a frame; the campaign's only job is not to move
                     // the player out from under it, because the streamer loads the world around the
                     // PLAYER and the picture is of whatever it has loaded.
+                    //
+                    // Bounded, because this watches a flag another component clears - see
+                    // MaxCaptureWaitSeconds. The timeout is recorded rather than acted on here: the
+                    // line below re-asks WhyStop first, so that a player who died during the capture is
+                    // reported as having died rather than as a slow capture.
+                    var waitUntil = Time.time + MaxCaptureWaitSeconds;
+                    var timedOut = false;
+
                     while (MapCapture.IsCapturing)
                     {
                         if (!PlayerIsAlive() || _gameWorld == null) break;
+
+                        if (Time.time >= waitUntil)
+                        {
+                            timedOut = true;
+                            break;
+                        }
+
                         yield return null;
                     }
 
                     stopped = WhyStop();
                     if (stopped != null) break;
+
+                    if (timedOut)
+                    {
+                        stopped =
+                            $"the capture at stop {i + 1} had not finished after {Whole(MaxCaptureWaitSeconds)} s";
+                        break;
+                    }
 
                     captured++;
 
@@ -657,10 +818,15 @@ namespace QuestTree.QuestGraph
                     return;
                 }
 
-                // Nothing can be drawn before there is a rectangle to draw it to. The harvester's
-                // second pass measures one a few seconds in; until then this polls, at its own slower
-                // cadence because an unmeasured map costs a NavMesh triangulation here.
-                if (MapExtentProbe.TryProbeForCapture(map) == null)
+                // Nothing can be drawn before there is a rectangle to draw it to. HasExtentFor, not
+                // TryProbeForCapture: the question here is whether one has ALREADY been measured, and
+                // asking for one would measure it - a triangulation of the whole NavMesh, every poll,
+                // for the first half minute of every raid this setting is on (see
+                // MapExtentProbe.HasExtentFor). Waiting for the harvester's second pass also means the
+                // first automatic capture is drawn to the rectangle the harvest accepted rather than to
+                // one of this poll's own, which that pass would then supersede - a picture measured to
+                // a superseded rectangle is replaced, not merged into.
+                if (!MapExtentProbe.HasExtentFor(map))
                 {
                     _autoEvalAt = now + AutoCaptureProbeSeconds;
                     Skip("the map's extent has not been measured yet");
@@ -772,11 +938,16 @@ namespace QuestTree.QuestGraph
     /// needs a raid: no NavMesh, no player, no Unity object. That is deliberate, and it is what lets
     /// both rules be TESTED against known numbers rather than argued about.
     ///
-    /// The grid: the extent is divided into whole cells, at most
+    /// The grid: the rectangle handed in is divided into whole cells, at most
     /// <see cref="MapCampaign.CampaignCellMetres"/> across - ceil, so the cells are a little SMALLER
-    /// than the nominal size rather than hanging over the edge of the map (Customs' 1118x539 m becomes
-    /// 6x3 cells of 186x180 m). Every stop is then the centre of its cell, which is inside the extent
-    /// by construction.
+    /// than the nominal size rather than hanging over the edge of the map (Customs' measured 1035x499 m
+    /// becomes 6x3 cells of 173x166 m). Every stop is then the centre of its cell, which is inside that
+    /// rectangle by construction. The cells can be a good deal smaller than 200 m, which is why the
+    /// step sizes are handed back: see <see cref="MapCampaign.SampleRadius"/>.
+    ///
+    /// The rectangle is the MEASURED one, not the padded extent the pictures are drawn to - the caller
+    /// insets it first (<see cref="MapCampaign.Prepare"/>), because the pad is ground the map does not
+    /// have and a stop is a place the player is put.
     ///
     /// The order: a serpentine, starting at the cell the player is standing in. Rows are visited from
     /// the player's own row to the far edge and then back past it to the near one, and each row after
@@ -817,10 +988,18 @@ namespace QuestTree.QuestGraph
         /// <param name="cellMetres">Longest a cell may be on either axis.</param>
         /// <param name="playerX">World x the player is standing at, which decides the first cell.</param>
         /// <param name="playerZ">World z the player is standing at.</param>
+        /// <param name="stepX">One cell's size along x, in metres - zero when no stops were planned.
+        /// Handed back because it is not the nominal cell size and the caller's search radius has to
+        /// follow the cell it searches.</param>
+        /// <param name="stepZ">One cell's size along z, in metres - zero when no stops were planned.</param>
         internal static List<Stop> Plan(
-            double minX, double minZ, double maxX, double maxZ, float cellMetres, float playerX, float playerZ)
+            double minX, double minZ, double maxX, double maxZ, float cellMetres, float playerX, float playerZ,
+            out double stepX, out double stepZ)
         {
             var stops = new List<Stop>();
+
+            stepX = 0d;
+            stepZ = 0d;
 
             var width = maxX - minX;
             var height = maxZ - minZ;
@@ -834,8 +1013,8 @@ namespace QuestTree.QuestGraph
             if (columns < 1) columns = 1;
             if (rows < 1) rows = 1;
 
-            var stepX = width / columns;
-            var stepZ = height / rows;
+            stepX = width / columns;
+            stepZ = height / rows;
 
             var playerColumn = Cell(playerX, minX, stepX, columns);
             var playerRow = Cell(playerZ, minZ, stepZ, rows);

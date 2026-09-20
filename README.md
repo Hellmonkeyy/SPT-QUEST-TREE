@@ -82,6 +82,13 @@ first time you load into it (the line above the map tells you how many zones it 
 the quest's status colour, name themselves on hover, and open the quest on click. **Accepted quests
 only** narrows the pins and the list to what you have actually taken.
 
+Where a raid has harvested a real position for a quest on a map - a trigger zone, or the spot an item
+was found - the second-hand pins placed by *percentage* against somebody else's map picture are
+dropped for that quest. A percentage is measured against the image its source used, so on any other
+picture it lands somewhere else, and a harvested position is strictly better. A quest the harvest has
+not reached keeps all of its percentage pins, because for that quest they are the only positions
+anything has.
+
 ### Map pictures
 
 **A map's picture comes from one of three places, and you decide the order.** Settings > Map >
@@ -120,6 +127,13 @@ frames - a handful of short hitches, not one long freeze - and takes a second or
 - **Roofs are in it.** The topmost floor is photographed from 300 m up, so buildings, roofs and
   shadows draw rather than a set of floor slabs; a floor with another above it is shot from just
   under that one, so the ceiling is what gets cut away.
+- **Buildings and smooth ground.** A camera looking at a whole map from above measures a building
+  against a kilometre-tall view, and the game's own level-of-detail rules answer that a 20 m
+  warehouse is too small to draw at all - which is why early captures had roads and terrain and no
+  buildings anywhere. The capture turns that selection off for the length of one render, and puts
+  the terrain on its averaged base texture for the same instant, so the ground reads as ground
+  instead of a two-metre checkerboard. Both are put back by the statement that changed them: your
+  next frame is drawn with your own settings.
 - **The colours are muted** and the highlights held back deliberately, so the picture reads as a map
   and a coloured pin is the brightest thing on the screen. Water is left out - it renders as flat
   cyan placeholder blocks from any camera that is not the player's - and the ground under it draws.
@@ -132,6 +146,26 @@ frames - a handful of short hitches, not one long freeze - and takes a second or
   BepInEx/plugins/QuestTree/captures/bigmap to start over.`
 - **Capture resolution** is 4096 px on the longest side, or 2048 for files a quarter the size.
   Neither ever draws more than two pixels to the metre.
+- **A capture taken by a different build may replace yours rather than add to it.** The meta records
+  how a picture was rendered - the capture light, the level-of-detail switch, the terrain texture -
+  and two pictures may only be merged when all of that matches, or identical ground would become
+  different pixels. When it does not match, the log says so and the new capture starts the map over:
+  `QuestTree: the capture of bigmap already on disk cannot be added to - it was taken before the
+  render recipe was recorded, and this one is rendered own-1.5;lod1000;basemap0 - so this one replaces
+  it.`
+
+**Ctrl+Shift+F9 captures the whole map in one press.** Instead of walking a kilometre of Customs
+pressing the other key, this teleports you across a grid of standable spots 200 m apart, takes a
+capture at each, and puts you back exactly where you pressed it - about sixteen stops and a couple
+of minutes on Customs. **Start such a raid with AI set to none: it does not disable bots**, and it
+leaves you standing still for a second and a half at every stop. It moves nothing but your position,
+it is local to you on a Fika raid, and the log names every stop and what happened there.
+
+**Or let it capture as you play.** Settings > Map > *Capture the map automatically while I play* (off
+by default) takes a capture every few seconds - *Seconds between automatic captures*, 5 by default,
+anything from 2 to 120 - and only once you have moved 15 m since the last one, so a raid spent
+walking a map builds its picture by itself. It **will** hitch every few seconds; it is meant for a
+raid you have set aside for map-building, not for one you are playing for real.
 
 **The files land in `BepInEx\plugins\QuestTree\captures\<key>\`** - one PNG per floor, a
 `<key>.map.json` saying which world rectangle those pixels cover, and a `.dist.png` beside each
@@ -451,6 +485,7 @@ around it.
 | `?` button | Show the controls hint again |
 | `Ctrl+Q` | Open or close the tracker from anywhere in the menu (rebindable in F12) |
 | `Ctrl+F9` | In a raid: take this map's picture for the Maps tab (rebindable in F12) |
+| `Ctrl+Shift+F9` | In a raid: capture the whole map, stop by stop, and return you (rebindable in F12) |
 
 **The keys are split by view.** `F`, `M`, `X`, `C` and `/` are the tree's, and only fire there: on
 **Maps** the only keys are `F` and `[` `]`, and on **Do next**, **Items**, **Kappa** and **Settings**
@@ -477,8 +512,9 @@ to its own defaults from the last row in it.
   pins carry their name at rest (hover only / in progress and available / all), sidebar width, the
   artwork rotation and mirror overrides, and the alignment guides that outline the area a map's
   coordinates cover and mark its origin. Plus the map pictures: where they come from, which labels a
-  captured one carries, the capture resolution, and whether a capture is offered to the host. The
-  capture key itself is rebound in F12.
+  captured one carries, the capture resolution, whether a capture is offered to the host, and whether
+  the map is captured automatically as you play and how often. The two capture keys are shown here
+  and rebound in F12.
 - **Colours** - the six status colours (in progress, available, completed, level gated, locked,
   **failed**) and the accent, with presets in-game and any hex colour in F12, plus **Restore the
   pre-1.10 colours** for anyone who preferred the old palette.
@@ -560,6 +596,13 @@ report is worth the restart.
   regions in an otherwise good picture - are chunks the game had streamed out of memory because the
   player was far from them; press the key again from another part of the map and the second capture
   fills what the first could not see. The log line ends with how much of the floor is still empty.
+  `Ctrl+Shift+F9` does the walking for you, and *Capture the map automatically while I play* fills
+  the map in as you cross it.
+- **A capture replaced the one I had instead of adding to it** - two pictures are only merged when
+  they were rendered the same way, and the log line names what differed: a new build's render recipe,
+  a changed extent, a different resolution, a different set of floors. The map starts over from this
+  capture, which is the right answer - the old pixels no longer mean the same thing as the new ones.
+  Use `Ctrl+Shift+F9` once and the map is whole again in a couple of minutes.
 - **Uploads say the host does not accept map pictures** - that is the host opting out, which is the
   default: a picture is the one thing a peer can post that everyone else then looks at. Start the
   host's server from `tools/server-host.cmd` (it sets `QUESTTREE_ACCEPT_MAPS=1` and starts

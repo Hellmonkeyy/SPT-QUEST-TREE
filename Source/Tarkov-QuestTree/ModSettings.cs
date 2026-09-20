@@ -665,14 +665,17 @@ namespace QuestTree
                     new AcceptableValueRange<int>(2, 120)));
 
             CaptureResolution = config.Bind(
-                "Map", "Capture resolution", 4096,
+                "Map", "Capture resolution", 8192,
                 new ConfigDescription(
-                    "Longest side, in pixels, of a captured map picture. 4096 is the sharpest the mod " +
-                    "will draw; 2048 halves it, which makes the files a quarter of the size and is the " +
-                    "setting to use if a capture is refused for being too large. Neither ever stretches " +
-                    "a map past two pixels per metre - past that there is no more detail in the world to " +
-                    "record, only a bigger file.",
-                    new AcceptableValueList<int>(2048, 4096)));
+                    "Longest side, in pixels, of a captured map picture. 8192 is the sharpest the mod " +
+                    "will draw and what a map of Customs is worth - a quarter of a metre to the pixel, " +
+                    "where a vehicle is 16 pixels across; 4096 halves that and 2048 quarters it, each " +
+                    "step making the files four times smaller and the raid's frames cheaper, which is " +
+                    "the setting for a weak machine or a capture refused for being too large. None of " +
+                    "them ever stretches a map past four pixels per metre - past that there is no more " +
+                    "detail in the scene to record, only a bigger file. What is shared with a host or " +
+                    "shipped in the release is downscaled to 2048 whatever this says.",
+                    new AcceptableValueList<int>(2048, 4096, 8192)));
 
             MapPictureSource = config.Bind(
                 "Map", "Map pictures come from", PictureSource.PreferDynamicMaps,

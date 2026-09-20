@@ -175,6 +175,25 @@ namespace QuestTree.QuestGraph
             return TryProbe(map, null);
         }
 
+        /// <summary>Whether this raid ALREADY has an extent for <paramref name="map"/> - the memo test
+        /// above without the measurement below it.
+        ///
+        /// It exists because <see cref="TryProbeForCapture"/> is expensive on a miss: it triangulates
+        /// the whole NavMesh, hundreds of thousands of vertices on a large map, which is a visible
+        /// hitch in a player's raid. That is the right price for a key press and the wrong one for
+        /// anything that POLLS - automatic capture asks every few seconds, and before the harvester's
+        /// second pass (27 s in) every one of those asks would have measured the map again. Callers
+        /// that can simply wait ask this first.
+        ///
+        /// Waiting is also the better answer for a different reason: an extent measured here, with no
+        /// harvested triggers to check containment against, is not necessarily the rectangle the
+        /// harvest goes on to accept - and a capture drawn to a rectangle the harvest then supersedes
+        /// is replaced rather than merged into.</summary>
+        /// <param name="map">The map's internal name, as the harvest spells it.</param>
+        public static bool HasExtentFor(string map) =>
+            !string.IsNullOrEmpty(map) && _lastExtent != null &&
+            string.Equals(_lastMap, map, StringComparison.OrdinalIgnoreCase);
+
         /// <summary>Measures the current scene. Returns null - never throws - when there is nothing
         /// to measure, when the result fails its own containment check, or on any error; the caller
         /// sends the harvest either way.</summary>
@@ -421,6 +440,62 @@ namespace QuestTree.QuestGraph
                 MaxX = Math.Ceiling(box.MaxX + padX),
                 MaxZ = Math.Ceiling(box.MaxZ + padZ)
             };
+        }
+
+        /// <summary>The MEASURED rectangle recovered from a padded one: <see cref="Pad"/> run
+        /// backwards, to within the whole metre it rounded outward to.
+        ///
+        /// Why anything needs it. The extent a capture is drawn to, and the one the server stores, is
+        /// the padded rectangle - deliberately, because a pin clipped off the edge of a picture is
+        /// worse than an empty border. But the pad is, by construction, ground the map does NOT have:
+        /// at least 20 m past the last NavMesh vertex, past the invisible walls, and on many maps past
+        /// the level border that kills a player who crosses it. Anything that means to put the PLAYER
+        /// somewhere inside the map has to plan inside this rectangle rather than the padded one; the
+        /// picture still covers the pad.
+        ///
+        /// Every output equals its input when the rectangle is too small to inset or is not a
+        /// rectangle at all, so a caller may use the result unconditionally.</summary>
+        /// <param name="minX">West edge of the padded rectangle.</param>
+        /// <param name="minZ">South edge of the padded rectangle.</param>
+        /// <param name="maxX">East edge of the padded rectangle.</param>
+        /// <param name="maxZ">North edge of the padded rectangle.</param>
+        /// <param name="insetMinX">West edge with the pad taken off.</param>
+        /// <param name="insetMinZ">South edge with the pad taken off.</param>
+        /// <param name="insetMaxX">East edge with the pad taken off.</param>
+        /// <param name="insetMaxZ">North edge with the pad taken off.</param>
+        public static void Inset(
+            double minX, double minZ, double maxX, double maxZ,
+            out double insetMinX, out double insetMinZ, out double insetMaxX, out double insetMaxZ)
+        {
+            var padX = PadTakenOff(maxX - minX);
+            var padZ = PadTakenOff(maxZ - minZ);
+
+            insetMinX = minX + padX;
+            insetMaxX = maxX - padX;
+            insetMinZ = minZ + padZ;
+            insetMaxZ = maxZ - padZ;
+        }
+
+        /// <summary>How much <see cref="Pad"/> added to ONE side of an axis, worked out from the padded
+        /// length alone, or zero when it cannot be taken off.
+        ///
+        /// Pad adds max(4 % of the measured length, 20 m) per side, so a padded length S is either
+        /// 1.08 x the measured one (the fractional case, which is the one over 500 m) or the measured
+        /// one plus 40 m. Inverting the first gives S x 0.04 / 1.08 and the second gives 20, and the
+        /// LARGER of the two is the one that was used: the fractional pad beats 20 m exactly when
+        /// S >= 540 m, which is exactly when the measured length was over 500 m. So one max() recovers
+        /// both cases, to within the metre Pad rounded outward to.</summary>
+        /// <param name="padded">The padded length of one axis.</param>
+        private static double PadTakenOff(double padded)
+        {
+            if (double.IsNaN(padded) || double.IsInfinity(padded) || padded <= 0d) return 0d;
+
+            var pad = Math.Max(padded * PadFraction / (1d + 2d * PadFraction), MinimumPad);
+
+            // A rectangle the pad would consume keeps what it has: a map measured smaller than 40 m
+            // across is not one anybody is planning a route over, and an inverted rectangle would be
+            // worse than a padded one.
+            return padded - 2d * pad <= 1d ? 0d : pad;
         }
 
         // --- the floors ----------------------------------------------------------------------

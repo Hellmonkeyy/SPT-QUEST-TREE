@@ -338,9 +338,9 @@ namespace QuestTree.UI
                 index => ModSettings.MapLabels.Value = (ModSettings.LabelMode)index);
 
             Dropdown(column, ref y, width, deferred, "Capture resolution",
-                new[] { "2048 px", "4096 px" },
-                ModSettings.CaptureResolution.Value <= 2048 ? 0 : 1,
-                index => ModSettings.CaptureResolution.Value = index == 0 ? 2048 : 4096);
+                new[] { "2048 px", "4096 px", "8192 px (sharpest)" },
+                ModSettings.CaptureResolution.Value <= 2048 ? 0 : ModSettings.CaptureResolution.Value <= 4096 ? 1 : 2,
+                index => ModSettings.CaptureResolution.Value = index == 0 ? 2048 : index == 1 ? 4096 : 8192);
 
             AuxLayout.AddSpacer(ref y, 6f);
             Dropdown(column, ref y, width, deferred, "Pin labels",

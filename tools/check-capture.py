@@ -14,7 +14,7 @@ What it checks, per capture folder <key>/:
   1. <key>.map.json parses, is schemaVersion 1, and its "map" is the folder name (case-insensitive).
   2. every floor's PNG exists; the IHDR width/height read out of the file's first chunk equal the
      meta's width/height; those in turn equal ceil(extent span * pxPerMetre) on each axis within 1
-     px; the file is under 12 MB; floor levels are distinct and names non-empty.
+     px; the file is under 48 MB; floor levels are distinct and names non-empty.
   3. if zones\\<key>.json carries a v2 extent, the capture's four edges match it within 0.5 m and the
      floor LEVELS are the same set, and the zone file's source/sampledAt are printed beside the
      capture's capturedAt. A v1 zone file (every shipped seed) or a missing one is a WARN, not a
@@ -51,7 +51,7 @@ ZONES = Path(sys.argv[2]) if len(sys.argv) > 2 else Path(
     r"C:\Games\SPT\SPT_Runtime\user\mods\QuestTree\zones")
 
 SCHEMA_VERSION = 1     # the capture-meta shape this script reads
-MAX_PNG_BYTES = 12 * 1024 * 1024
+MAX_PNG_BYTES = 48 * 1024 * 1024  # MapCapture.MaxFloorPngBytes: 0.25 m/px floors run 10-25 MB
 PIXEL_TOLERANCE = 1     # px, on each axis, against ceil(span * pxPerMetre)
 EDGE_TOLERANCE = 0.5    # m, on each of the four edges, against the zone file's extent
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
