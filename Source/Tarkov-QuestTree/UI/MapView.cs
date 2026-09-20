@@ -14,9 +14,11 @@ namespace QuestTree.UI
     /// "I'm going to Customs - what can I do there?"
     ///
     /// A map picker and a floor picker along the top, the map itself filling most of the width, and
-    /// that map's outstanding quests down the right. The pictures come from the DynamicMaps mod when
-    /// it is installed (see <see cref="DynamicMapsLibrary"/>); without it the quest list is shown on
-    /// its own and nothing else changes.
+    /// that map's outstanding quests down the right. Where the map itself comes from is
+    /// <see cref="MapCatalog"/>'s decision: a picture from the DynamicMaps mod when it is installed
+    /// (see <see cref="DynamicMapsLibrary"/>), else the rectangle and floor bands the server
+    /// harvested in raid, drawn as a backdrop with the pins on it. With neither, the quest list is
+    /// shown on its own and nothing else changes.
     ///
     /// The map is drawn in MAP SPACE: the container's local units are the map's own coordinates, the
     /// picture is a rect sized to the floor's ImageBounds, and a marker is placed at its raw
@@ -120,6 +122,12 @@ namespace QuestTree.UI
         /// Fully opaque like them: the "not started" dimming is applied to every pin alike where
         /// they are drawn, and baking a second helping in here made these near invisible.</summary>
         private static readonly Color UnknownMarkerColor = new(0.62f, 0.62f, 0.60f, 1f);
+
+        /// <summary>The slab drawn over a floor's bounds when there is no picture of it. A shade
+        /// lighter than the viewport's own backing plate (black at 25%) on purpose: the point of it
+        /// is that the map's rectangle is visible as a rectangle, which it is not if the ground
+        /// reads the same as the space around it.</summary>
+        private static readonly Color BackdropColor = new(0.17f, 0.18f, 0.19f, 0.95f);
 
         /// <summary>Pan and zoom, kept across the rebuild that every dropdown click causes. Switching
         /// floor used to throw them away, which is useless when the whole point of switching floors
@@ -292,8 +300,9 @@ namespace QuestTree.UI
         }
 
         /// <summary>The map key for a location's internal name: the name itself when the quest data
-        /// keys a map by it, else a key that DynamicMaps lists as the same map (Factory has a day
-        /// and a night id, Ground Zero a low- and a high-level one), else the same pairs from
+        /// keys a map by it, else a key the map's own source lists as the same map (DynamicMaps'
+        /// Factory covers a day and a night id, Ground Zero a low- and a high-level one; a
+        /// harvested extent covers only its own), else the same pairs from
         /// <see cref="SceneAliases"/> for an install without DynamicMaps.</summary>
         private static string ResolveMapKey(string internalName, IEnumerable<string> keys)
         {
@@ -305,7 +314,7 @@ namespace QuestTree.UI
             var exact = Find(internalName);
             if (exact != null) return exact;
 
-            var entry = DynamicMapsLibrary.FindByLocationKey(internalName);
+            var entry = MapCatalog.Resolve(internalName, MarkerSetForKey(internalName));
             if (entry != null)
             {
                 foreach (var name in entry.InternalNames)
@@ -370,7 +379,7 @@ namespace QuestTree.UI
         /// and on a map with one floor, so the caller knows whether there is anything to redraw.</summary>
         public static bool StepFloor(int direction)
         {
-            var entry = DynamicMapsLibrary.FindByLocationKey(_selectedLocationKey);
+            var entry = MapCatalog.Resolve(_selectedLocationKey, MarkerSetForKey(_selectedLocationKey));
             if (entry == null || entry.Layers.Count < 2) return false;
 
             // By level, not config order: "up" has to mean the storey above.
@@ -420,7 +429,7 @@ namespace QuestTree.UI
             _pickerOpen = false;
             _floorPickerOpen = false;
 
-            SelectFloorFor(node.Id, DynamicMapsLibrary.FindByLocationKey(key));
+            SelectFloorFor(node.Id, MapCatalog.Resolve(key, MarkerSetForKey(key)));
 
             if (StartedOnly && node.Status != ENodeStatus.Active && ModSettings.Ready)
                 ModSettings.MarkStartedOnly.Value = false;
@@ -462,7 +471,10 @@ namespace QuestTree.UI
             // "any" or blank, so reading the map identity off the first node returns null here -
             // and the map then loses its image, its floors and every pin. Whether it broke at all
             // came down to node ordering, which reads as an intermittent bug.
-            var entry = DynamicMapsLibrary.FindByLocationKey(_selectedLocationKey);
+            var entry = MapCatalog.Resolve(
+                _selectedLocationKey,
+                MarkerSetForKey(_selectedLocationKey),
+                DisplayNameFor(_selectedLocationKey, selected));
             var layer = ResolveLayer(entry);
 
             // The map and list are built first and the dropdowns last, even though the dropdowns sit
@@ -840,6 +852,17 @@ namespace QuestTree.UI
             _awaitingLayer = spritePending ? layer : null;
             PanelOpenTimer.Mark("map: sprite");
 
+            // A floor that knows its rectangle but has no picture - a harvested extent, which is
+            // every map until someone captures it - is still a map: drawn as a plain dark backdrop
+            // over the bounds, with the guides on and the pins where they belong. Only ever when no
+            // artwork is coming, so it can never flash in front of one that is still rendering.
+            var backdrop = sprite == null && !spritePending &&
+                           layer != null && layer.HasBounds && !layer.HasArtwork;
+
+            // Whether this build draws a map at all, picture or backdrop. Everything that used to
+            // ask "is there a sprite" means this.
+            var hasMap = sprite != null || backdrop;
+
             // The map takes everything the sidebar does not, in both directions. The sidebar
             // yields first: on a narrow panel the setting's width is cut back so the map keeps
             // 360px, where the two used to overlap.
@@ -904,7 +927,7 @@ namespace QuestTree.UI
             // map renders next; and ResetView (F) asks for the floor to be fitted again, which is
             // the one thing restoring the old pan and zoom refuses to do - _viewStateKey being null
             // is how it says so.
-            var keep = sprite != null && _keptViewport != null &&
+            var keep = hasMap && _keptViewport != null &&
                        _keptFrom.HasValue && _keptFrom.Value == key &&
                        _pendingFocusQuestId == null && _viewStateKey != null;
 
@@ -915,7 +938,7 @@ namespace QuestTree.UI
             {
                 DiscardViewport();
 
-                if (sprite != null)
+                if (hasMap)
                 {
                     _drawnMarkers = BuildMapViewport(
                         parent, entry, layer, sprite, left, top, mapWidth, height, graph, shownIds, onRepaint);
@@ -933,11 +956,11 @@ namespace QuestTree.UI
 
             PanelOpenTimer.Mark("map: viewport+pins");
 
-            var sidebarX = sprite != null ? left + mapWidth + AuxLayout.Padding : left;
-            var sidebarSpan = sprite != null ? sidebarWidth : Mathf.Max(sidebarWidth, panelSize.x - AuxLayout.Padding * 2f);
+            var sidebarX = hasMap ? left + mapWidth + AuxLayout.Padding : left;
+            var sidebarSpan = hasMap ? sidebarWidth : Mathf.Max(sidebarWidth, panelSize.x - AuxLayout.Padding * 2f);
 
             BuildSidebar(parent, sidebarX, top, sidebarSpan, height, quests, visible, entry, sprite,
-                spritePending, _drawnMarkers, graph, onRepaint, onRefresh);
+                spritePending, backdrop, _drawnMarkers, graph, onRepaint, onRefresh);
             PanelOpenTimer.Mark("map: sidebar rows");
 
             return top + height + AuxLayout.Padding;
@@ -976,8 +999,8 @@ namespace QuestTree.UI
         private static void BuildSidebar(
             RectTransform parent, float x, float top, float width, float height,
             List<QuestNode> quests, List<QuestNode> visible, DynamicMapsLibrary.MapEntry entry,
-            Sprite sprite, bool spritePending, int drawn, QuestGraphBuilder graph, Action onRepaint,
-            Action onRefresh)
+            Sprite sprite, bool spritePending, bool backdrop, int drawn, QuestGraphBuilder graph,
+            Action onRepaint, Action onRefresh)
         {
             var mapName = DisplayNameFor(_selectedLocationKey, quests);
             var set = MarkerSetFor(entry);
@@ -1057,6 +1080,13 @@ namespace QuestTree.UI
             {
                 AddAt(content, "<color=#FFFFFF60>Rendering the map...</color>", listX, ref y, 18f, 11, inner);
             }
+            else if (backdrop)
+            {
+                // The map IS drawn - to scale, with its pins - it just has no picture behind them
+                // yet, and the one thing that would fix it is a raid here with the capture key.
+                AddAt(content, "<color=#FFFFFF60>No map picture yet - capture one in raid (Ctrl+F9)</color>",
+                    listX, ref y, 18f, 11, inner);
+            }
             else if (sprite == null && DynamicMapsLibrary.Available)
             {
                 AddAt(content, "<color=#FFFFFF60>No map image for this location.</color>", listX, ref y, 18f, 11, inner);
@@ -1066,7 +1096,11 @@ namespace QuestTree.UI
                 AddAt(content, "<color=#FFFFFF60>Install the DynamicMaps mod to see map images here.</color>",
                     listX, ref y, 18f, 11, inner);
             }
-            else
+
+            // What the map can do and how much of it is pinned - for a backdrop too, which is why
+            // this is no longer the else of the chain above: a rectangle with pins on it pans,
+            // zooms, switches floors and counts its spawns exactly like a picture does.
+            if (sprite != null || backdrop)
             {
                 var facts = new List<string> { "Drag to pan, wheel to zoom" };
                 if (entry != null && entry.Layers.Count > 1) facts.Add($"{entry.Layers.Count} floors");
@@ -1357,20 +1391,44 @@ namespace QuestTree.UI
 
             _viewStateKey = stateKey;
 
-            var imageGo = new GameObject("MapImage", typeof(RectTransform), typeof(SVGImage));
+            // A tessellated sprite needs SVGImage (see the remarks); the backdrop is a flat colour,
+            // which is exactly what a plain Image with no sprite draws - and SVGImage with no sprite
+            // draws nothing at all.
+            var imageGo = sprite != null
+                ? new GameObject("MapImage", typeof(RectTransform), typeof(SVGImage))
+                : new GameObject("MapBackdrop", typeof(RectTransform), typeof(Image));
             var image = (RectTransform)imageGo.transform;
             image.SetParent(space, worldPositionStays: false);
             image.anchorMin = image.anchorMax = new Vector2(0.5f, 0.5f);
             image.pivot = new Vector2(0.5f, 0.5f);
 
-            PlaceArtwork(image, entry, layer, bounds);
+            if (sprite != null)
+            {
+                PlaceArtwork(image, entry, layer, bounds);
 
-            if (ShowGuides) BuildGuides(space, layer);
+                var svg = imageGo.GetComponent<SVGImage>();
+                svg.sprite = sprite;
+                svg.preserveAspect = false;
+                svg.raycastTarget = false;
+            }
+            else
+            {
+                // Straight onto the bounds, and NOT through PlaceArtwork: that turns and mirrors the
+                // picture into the map's frame, and a featureless rectangle has no orientation to
+                // correct - a quarter turn from the artwork-rotation setting would only stretch it
+                // into the wrong shape and leave it no longer over the bounds it stands for.
+                image.sizeDelta = bounds;
+                image.anchoredPosition = layer.BoundsCentre;
 
-            var svg = imageGo.GetComponent<SVGImage>();
-            svg.sprite = sprite;
-            svg.preserveAspect = false;
-            svg.raycastTarget = false;
+                var plate = imageGo.GetComponent<Image>();
+                plate.color = BackdropColor;
+                plate.raycastTarget = false;
+            }
+
+            // Forced on for a backdrop, whatever the setting says. The rectangle IS the map here, so
+            // its edges and the origin cross are the only things that say where the world is and how
+            // big it is; without them the pins float on an unmarked slab.
+            if (ShowGuides || sprite == null) BuildGuides(space, layer);
 
             // The handler is created before the overlays because they register with it to be held
             // at a constant on-screen size. Zoom limits and step are scaled by the fit, since the
@@ -1675,6 +1733,10 @@ namespace QuestTree.UI
         /// The comparison is exact rather than a substring, because "Underground_Level" contains
         /// "Ground_Level" and a loose match would put underground pins on the ground floor.
         ///
+        /// On a map synthesised from a harvested extent there is no artwork and so no filename to
+        /// take that vocabulary from - the bands are named from their level - so there the name is
+        /// translated to a level first (MapCatalog.FloorLevelAliases) and the layer found by that.
+        ///
         /// Null means "no idea", which the caller draws on whatever floor is being viewed. That is
         /// the honest answer for a marker with no coordinates: the height-band test below only
         /// applies to item spawns, which have real ones. Asking it about a marker whose position is
@@ -1689,6 +1751,23 @@ namespace QuestTree.UI
                     string.Equals(l.FloorName, marker.Floor, StringComparison.OrdinalIgnoreCase));
 
                 if (named != null) return named;
+
+                // A harvested map's bands are named from their level ("Ground", "Floor 2"), not in
+                // the artwork vocabulary the line above matches, so the two never meet and every
+                // floor-naming pin on a multi-band map resolved to nothing. The alias table turns
+                // the name into a level, which a synthesised layer does have.
+                //
+                // Synthesised entries only, and after the exact match, so a DynamicMaps map's pins
+                // are placed by exactly the rule they were before - see MapCatalog.FloorLevelAliases.
+                if (MapCatalog.IsSynthesised(entry))
+                {
+                    var level = MapCatalog.LevelForFloorName(marker.Floor);
+                    if (level.HasValue)
+                    {
+                        var aliased = entry.Layers.FirstOrDefault(l => l.Level == level.Value);
+                        if (aliased != null) return aliased;
+                    }
+                }
 
                 // A map drawn as a single image names no floor in its filename, so any floor the
                 // data gives is that one map.
@@ -2081,6 +2160,47 @@ namespace QuestTree.UI
         private static DynamicMapsLibrary.MapEntry _setEntry;
         private static MapMarkerSetDto _set;
 
+        /// <summary>
+        /// This location's marker set by KEY, for <see cref="MapCatalog.Resolve"/> - which needs the
+        /// set to read its harvested extent, and so cannot be given an entry to look it up with.
+        ///
+        /// Deliberately not <see cref="MarkerSetFor"/>'s cache: that one is keyed on the entry, and
+        /// this runs before there is one.
+        ///
+        /// The alias pair is tried second because the two ids are one place with one geometry - a
+        /// Factory extent harvested at night describes the day map exactly, and the view folds both
+        /// onto one key (<see cref="CanonicalMapKey"/>), so without this a night-only harvest would
+        /// leave "Factory" with no map. It only ever supplies the shape: the pins still come from
+        /// the set the entry's own name matches, since MapCatalog gives a synthesised entry that one
+        /// name and no other.
+        /// </summary>
+        private static MapMarkerSetDto MarkerSetForKey(string locationKey)
+        {
+            if (string.IsNullOrEmpty(locationKey)) return null;
+
+            var payload = QuestDataClient.GetMapMarkers();
+            if (payload?.Maps == null) return null;
+
+            MapMarkerSetDto Find(string key) => payload.Maps.FirstOrDefault(m =>
+                m?.LocationKey != null && string.Equals(m.LocationKey, key, StringComparison.OrdinalIgnoreCase));
+
+            var exact = Find(locationKey);
+            if (exact != null) return exact;
+
+            foreach (var (a, b) in SceneAliases)
+            {
+                var other = string.Equals(a, locationKey, StringComparison.OrdinalIgnoreCase) ? b
+                    : string.Equals(b, locationKey, StringComparison.OrdinalIgnoreCase) ? a
+                    : null;
+                if (other == null) continue;
+
+                var aliased = Find(other);
+                if (aliased != null) return aliased;
+            }
+
+            return null;
+        }
+
         /// <summary>Where a quest is on this map, or null if it has no marker here. An objective pin
         /// is where the quest actually happens; an item marker is only somewhere one of the things it
         /// asks for can spawn - so the objective wins when a quest has both.</summary>
@@ -2108,7 +2228,15 @@ namespace QuestTree.UI
         {
             if (entry == null) return;
 
-            if (!string.IsNullOrEmpty(entry.Attribution))
+            if (MapCatalog.IsSynthesised(entry))
+            {
+                // Ours, so there is no licence to satisfy - but the line still has to be here,
+                // because "via DynamicMaps" under a map DynamicMaps never touched credits the wrong
+                // people, and a player looking at a bare rectangle deserves to be told what it is.
+                AddAt(parent, "<color=#FFFFFF50>Map extent harvested in raid; no picture yet.</color>",
+                    x, ref y, 15f, 10, width);
+            }
+            else if (!string.IsNullOrEmpty(entry.Attribution))
             {
                 AddAt(parent, $"<color=#FFFFFF50>Map: {entry.Attribution}, via DynamicMaps</color>",
                     x, ref y, 15f, 10, width);

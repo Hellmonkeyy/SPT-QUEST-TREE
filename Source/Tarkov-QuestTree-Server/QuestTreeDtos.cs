@@ -910,7 +910,14 @@ namespace QuestTreeServer
     public class MapMarkerPayloadDto
     {
         /// <summary>2: per-map zone coverage fields on MapMarkerSetDto (1.3.0). 3: Template on
-        /// item markers (1.5.0).</summary>
+        /// item markers (1.5.0).
+        ///
+        /// NOT raised for Extent in 1.19.0, although that added a field. The client compares this
+        /// number against its own and warns on any difference (QuestDataClient.NoteMarkers), so the
+        /// two halves have to move in the same commit; Extent is additive - an older client reads the
+        /// unknown field as absent and pins exactly as before - so raising it would buy a log line
+        /// saying "update both halves" for players whose halves are fine. The next CHANGE to an
+        /// existing field takes 4.</summary>
         public int SchemaVersion { get; set; } = 3;
 
         public string Version { get; set; } = "";
@@ -933,6 +940,20 @@ namespace QuestTreeServer
 
         /// <summary>When this map was last harvested (UTC), or empty if never.</summary>
         public string HarvestedAt { get; set; } = "";
+
+        /// <summary>The map's measured world rectangle and floor bands, or null on a map no v2
+        /// harvest has reached. Copied straight from the zone file by MapMarkerPayloadBuilder.Build.
+        ///
+        /// THE SAME CLASS the harvest arrives as (ZoneHarvestDtos.cs), deliberately: what goes out
+        /// is what came in, and a second declaration for the payload side would drift the moment one
+        /// of them gained a field - the two halves would then disagree about a rectangle while every
+        /// log line on both sides said the map was measured. It is the one DTO in this file carrying
+        /// JsonPropertyName attributes, and they spell exactly what the camelCase policy here would
+        /// have produced, so this payload's JSON is unchanged by the reuse.
+        ///
+        /// This is how the client learns which stretch of world a map covers: without it a captured
+        /// picture cannot be placed and pins have nothing to be drawn against.</summary>
+        public MapExtentDto? Extent { get; set; }
     }
 
     public class MapMarkerDto

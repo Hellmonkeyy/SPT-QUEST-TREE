@@ -652,6 +652,16 @@ namespace QuestTree.QuestGraph
         /// <summary>When this map was last harvested (UTC), or empty if never.</summary>
         [JsonProperty("harvestedAt")]
         public string HarvestedAt { get; set; }
+
+        /// <summary>The map's world rectangle and height bands, as some client measured in a raid and
+        /// the server kept - the geometry the Maps tab needs to draw a map of its own rather than
+        /// borrow DynamicMaps'. NULL for a map nobody has harvested on a 1.19.0-or-newer client yet,
+        /// and for one whose extent failed its checks; the view falls back as it always did.
+        ///
+        /// Declared here and in ZoneHarvestRequest as the same type (MapExtentDto, ZoneHarvestDto.cs)
+        /// because it is the same record travelling back down.</summary>
+        [JsonProperty("extent")]
+        public MapExtentDto Extent { get; set; }
     }
 
     internal sealed class MapMarkerDto

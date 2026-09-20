@@ -86,6 +86,13 @@ namespace QuestTree.UI
 
             public bool HasBounds => BoundsMax.x > BoundsMin.x && BoundsMax.y > BoundsMin.y;
 
+            /// <summary>Whether there is an image file to draw at all. False for a floor
+            /// <see cref="MapCatalog"/> synthesised from a harvested extent: it knows the rectangle
+            /// and the height band, and the view draws a plain backdrop over the rectangle instead
+            /// of a picture. Both sprite calls answer "no sprite, and none is coming" for one of
+            /// these rather than starting a tessellation of the empty path.</summary>
+            public bool HasArtwork => !string.IsNullOrEmpty(ImagePath);
+
             public Vector2 BoundsSize => BoundsMax - BoundsMin;
             public Vector2 BoundsCentre => (BoundsMin + BoundsMax) * 0.5f;
 
@@ -114,6 +121,8 @@ namespace QuestTree.UI
             /// that would rather block than repaint.</summary>
             public Sprite GetSprite()
             {
+                if (!HasArtwork) return null;
+
                 if (_sprite != null)
                 {
                     NoteSpriteUse(this);
@@ -145,6 +154,15 @@ namespace QuestTree.UI
             /// own. True with a null sprite means there really is no usable image.</summary>
             public bool TryGetSprite(out Sprite sprite)
             {
+                // Answered, not pending: there is no file, so no repaint would ever bring one. A
+                // floor with no artwork used to hand Task.Run an empty path, which made the view
+                // wait for a tessellation of nothing and log its failure.
+                if (!HasArtwork)
+                {
+                    sprite = null;
+                    return true;
+                }
+
                 if (_sprite != null)
                 {
                     NoteSpriteUse(this);

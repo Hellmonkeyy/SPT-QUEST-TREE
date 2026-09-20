@@ -355,7 +355,21 @@ namespace QuestTreeServer
 
             // Entries the file could not hold or the map could not draw go first, so the counts
             // below describe what will actually be kept.
-            var dropped = ZoneStore.Sanitise(request);
+            //
+            // The extent's own rejections come back through the callback rather than as a refusal:
+            // a rectangle this server will not store is not a reason to throw away the triggers
+            // posted with it, and the harvest is fire-and-forget, so the line below is the only
+            // trace of it anywhere. Deduped through the same capped set as Reject, for the same
+            // reason - the route is unauthenticated HTTP on Fika.
+            void WarnOnce(string line)
+            {
+                bool first;
+                lock (RejectionsLogged)
+                    first = RejectionsLogged.Count < MaxRejectionsLogged && RejectionsLogged.Add(line);
+                if (first) logger.Warning(line);
+            }
+
+            var dropped = ZoneStore.Sanitise(request, WarnOnce);
 
             var count = (request.Triggers?.Count ?? 0) + (request.QuestItems?.Count ?? 0);
             if (count == 0) return Reject(dropped > 0 ? "nothing usable harvested" : "nothing harvested", mapIsValid: true);
@@ -366,7 +380,7 @@ namespace QuestTreeServer
             // the clock.
             var drained = zoneStore.DrainPending();
 
-            var saved = zoneStore.SaveOrBuffer(request, out var added, out var buffered);
+            var saved = zoneStore.SaveOrBuffer(request, out var added, out var extentChanged, out var buffered);
 
             if (saved == null && buffered)
             {
@@ -401,13 +415,19 @@ namespace QuestTreeServer
             // derived onto, so rebuilding only the markers would give such a quest its pins while
             // its map on the client stayed empty until the next server restart - the "in the list
             // with no pins, or the reverse" split the derivation exists to prevent.
-            if (added > 0 || drained)
+            // extentChanged is a rebuild reason in its own right, and the ONLY one for the post the
+            // second pass now makes: on a map whose zones all arrived in the first three seconds the
+            // extent-carrying post adds no entry, so `added` is 0, and without this the rectangle
+            // would sit in zones\<map>.json while the cached marker payload kept saying the map had
+            // never been measured - until the next server restart. That is the whole delivery path
+            // for the extent, so it would have failed silently while both halves logged success.
+            if (added > 0 || extentChanged || drained)
             {
                 markerBuilder.Rebuild();
                 payloadBuilder.Rebuild();
             }
 
-            var message = added > 0 ? "saved" : "saved, nothing new";
+            var message = added > 0 ? "saved" : extentChanged ? "saved the map's extent" : "saved, nothing new";
             if (dropped > 0) message += $"; {dropped} unusable entries dropped";
 
             return Reply(new ZoneHarvestResponse

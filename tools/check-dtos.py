@@ -56,6 +56,7 @@ SAME_NAME = """
     RaidCheckDto RaidCheckMapDto RaidCheckRequirementDto
     MapMarkerPayloadDto MapMarkerSetDto MapMarkerDto
     ZoneHarvestRequest HarvestedTrigger HarvestedQuestItem ZoneHarvestResponse
+    MapExtentDto MapFloorDto
 """.split()
 
 # The ones whose client copy carries a different name. server type -> client type.

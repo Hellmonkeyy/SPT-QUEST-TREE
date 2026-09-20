@@ -173,6 +173,20 @@ namespace QuestTreeServer
         private readonly object _buildLock = new();
         private string? _cachedJson;
 
+        /// <summary>The extent-coverage line last written, so a rebuild that changes nothing about it
+        /// stays quiet. A harvest rebuilds every map's markers, and this line would otherwise repeat
+        /// three times a raid; kept as the LINE rather than a flag so the boot line is written again
+        /// when the count actually moves - which is the moment worth seeing, since it means a raid
+        /// measured a map that had never been measured.</summary>
+        private string? _extentLineLogged;
+
+        /// <summary>Map plus percentage-pin count already reported this boot. The count is an INPUT to
+        /// the calibration work, not a warning about this build, so it is said once rather than on
+        /// every rebuild - and keyed on the count as well, because a later harvest covering a quest
+        /// lowers it and the new number is the one to work from. Both fields are only ever touched
+        /// inside _buildLock, which both callers of Build already hold.</summary>
+        private readonly HashSet<string> _calibrationReported = new(StringComparer.OrdinalIgnoreCase);
+
         private readonly RebuildGate _gate = new(60);
 
         /// <summary>Builds again now. Called by the zones route after a harvest lands, so the cost
@@ -256,6 +270,9 @@ namespace QuestTreeServer
             var payload = new MapMarkerPayloadDto { Version = ModInfo.Version };
             var wantedByLocation = BuildWantedItems();
 
+            // Per map, for the two boot lines at the end of this method.
+            var percentagePins = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
             // Grouped once here rather than scanned once per map below: with a few thousand modded
             // quests, thirteen maps each walking the whole table was the bulk of the build.
             var questsByLocation = QuestsByLocation();
@@ -309,7 +326,15 @@ namespace QuestTreeServer
 
                     markers.AddRange(ObjectiveMarkersFor(
                         objectivesByMap[locationId!].Where(o => !harvested.CoveredQuestIds.Contains(o.QuestId))));
-                    markers.AddRange(GpsMarkersFor(locationId!, questsByLocation, locale, harvested.CoveredQuestIds));
+
+                    // Held rather than added straight in, so the pins that carry PERCENTAGES instead
+                    // of world coordinates can be counted: they are the only ones that cannot be
+                    // drawn from an extent alone, because a percentage is measured against whichever
+                    // map image its source used. Counted here and not by scanning markers for a
+                    // non-zero LeftPercent - an objective pin legitimately sitting at 0,0 of its image
+                    // would be missed, and a world-coordinate pin at x=0 would not.
+                    var gps = GpsMarkersFor(locationId!, questsByLocation, locale, harvested.CoveredQuestIds);
+                    markers.AddRange(gps);
 
                     // A map with nothing to pin and nothing to locate stays out - a harvest file
                     // alone (Ground Zero's other variant, aliased) is not a reason to list it.
@@ -321,8 +346,17 @@ namespace QuestTreeServer
                         Markers = markers,
                         ZonesWanted = harvested.ZonesWanted.Count,
                         ZonesKnown = harvested.ZonesKnown.Count,
-                        HarvestedAt = zones?.HarvestedAt ?? ""
+                        HarvestedAt = zones?.HarvestedAt ?? "",
+
+                        // Straight from the zone file, the same object rather than a copy: the
+                        // rectangle a raid measured is the rectangle the client draws against, and a
+                        // transform on the way out is a second source of truth for map geometry. Null
+                        // on a map no v2 harvest has reached, which the client reads as "no picture
+                        // can be placed here yet".
+                        Extent = zones?.Extent
                     });
+
+                    if (gps.Count > 0) percentagePins[internalName!] = gps.Count;
                 }
                 catch (Exception ex)
                 {
@@ -330,7 +364,41 @@ namespace QuestTreeServer
                 }
             }
 
+            ReportExtents(payload, percentagePins);
+
             return payload;
+        }
+
+        /// <summary>The two lines that say what the maps have to work with, written once each per boot
+        /// rather than per rebuild (see the fields they dedup through).
+        ///
+        /// The first answers the question the 1.19.0 capture campaign turns on: how many of the maps
+        /// this install serves have been measured in a raid. Without it the only way to know would be
+        /// to count files in zones\ and open each one.
+        ///
+        /// The second is the input to the pin calibration: a percentage pin is placed against whichever
+        /// map image its source measured against, so every one of them has to be re-checked once a map
+        /// carries an in-house picture instead. The count per map is how much of that work each map is.
+        /// </summary>
+        private void ReportExtents(MapMarkerPayloadDto payload, Dictionary<string, int> percentagePins)
+        {
+            var withExtent = payload.Maps.Count(m => m.Extent != null);
+            var line = $"Quest Tracker: {withExtent} of {payload.Maps.Count} maps carry a harvested extent.";
+
+            if (_extentLineLogged != line)
+            {
+                _extentLineLogged = line;
+                logger.Info(line);
+            }
+
+            foreach (var entry in percentagePins.OrderBy(e => e.Key, StringComparer.OrdinalIgnoreCase))
+            {
+                if (!_calibrationReported.Add($"{entry.Key}|{entry.Value}")) continue;
+
+                logger.Info(
+                    $"Quest Tracker: {entry.Key} has {entry.Value} percentage pins that will need " +
+                    "calibration on an in-house picture.");
+            }
         }
 
         /// <summary>What one map's harvest yielded, and what it therefore supersedes.</summary>

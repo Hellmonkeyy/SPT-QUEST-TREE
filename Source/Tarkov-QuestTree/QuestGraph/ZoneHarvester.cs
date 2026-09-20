@@ -46,14 +46,17 @@ namespace QuestTree.QuestGraph
         {
             yield return new WaitForSeconds(FirstPassDelay);
 
-            var request = TryCollect(gameWorld, previous: null, out var map);
+            var request = TryCollect(gameWorld, previous: null, withExtent: false, out var map);
             if (request == null) yield break;
 
             Post(request, "first pass");
 
             yield return new WaitForSeconds(SecondPassDelay);
 
-            var second = TryCollect(gameWorld, previous: request, out var secondMap);
+            // The extent is measured on this pass only: three seconds into a raid the scene is still
+            // streaming in, and a NavMesh or a Terrain that is half there would measure a map smaller
+            // than it is - which, unlike a missing zone, no later pass would correct.
+            var second = TryCollect(gameWorld, previous: request, withExtent: true, out var secondMap);
             if (second == null) yield break;
 
             // Defensive: the notes record that a transit loads a fresh GameWorld, whose own
@@ -71,7 +74,17 @@ namespace QuestTree.QuestGraph
 
             if (newZones <= 0 && newItems <= 0)
             {
-                Plugin.LogSource?.LogInfo($"QuestTree: second pass on {map} found nothing new.");
+                // Since 1.19.0 the second pass has something to say even when it found no new zone:
+                // it is the pass that measured the map. Posting only on new zones would have thrown
+                // the extent away on every map whose zones all arrive in the first three seconds -
+                // which is most of them - and the extent would then never reach the server at all.
+                if (second.Extent == null)
+                {
+                    Plugin.LogSource?.LogInfo($"QuestTree: second pass on {map} found nothing new.");
+                    yield break;
+                }
+
+                Post(second, "second pass, no new zones but the map's extent");
                 yield break;
             }
 
@@ -80,7 +93,13 @@ namespace QuestTree.QuestGraph
 
         /// <summary>One read of the scene, unioned with an earlier one when given. Null when
         /// there is nothing to say - no map name, or nothing found. Never throws.</summary>
-        private static ZoneHarvestRequest TryCollect(GameWorld gameWorld, ZoneHarvestRequest previous, out string map)
+        /// <param name="gameWorld">The raid's world.</param>
+        /// <param name="previous">The earlier pass to union with, or null for a fresh read.</param>
+        /// <param name="withExtent">Whether to measure the map's rectangle and floors as well
+        /// (<see cref="MapExtentProbe"/>). True on the late pass only - see the call site.</param>
+        /// <param name="map">The map this read belongs to, set even when the read comes back null.</param>
+        private static ZoneHarvestRequest TryCollect(
+            GameWorld gameWorld, ZoneHarvestRequest previous, bool withExtent, out string map)
         {
             map = null;
 
@@ -138,12 +157,19 @@ namespace QuestTree.QuestGraph
                     $"QuestTree: harvested {triggers.Count} zones and {items.Count} quest items on {map}" +
                     (previous != null ? $" (was {before.Item1}/{before.Item2})" : "") + ".");
 
+                var harvested = new List<HarvestedTrigger>(triggers.Values);
+
                 return new ZoneHarvestRequest
                 {
                     Map = map,
                     ClientVersion = ModInfo.Version,
-                    Triggers = new List<HarvestedTrigger>(triggers.Values),
-                    QuestItems = new List<HarvestedQuestItem>(items.Values)
+                    Triggers = harvested,
+                    QuestItems = new List<HarvestedQuestItem>(items.Values),
+
+                    // Measured against the zones this same read found, so its containment check has
+                    // the map's own places to test itself with. Null on failure or on that check
+                    // failing; the zones above are sent either way.
+                    Extent = withExtent ? MapExtentProbe.TryProbe(map, harvested) : null
                 };
             }
             catch (Exception ex)
