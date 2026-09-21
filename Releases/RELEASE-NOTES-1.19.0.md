@@ -50,31 +50,52 @@ Smaller things that are all lessons from a picture that came out wrong:
   back by the statement that changed them - your next frame is your own.
 - **The roofs draw wherever you stood.** EFT hides distant geometry by switching renderers off rather
   than by letting a camera cull them, so a warehouse's roof and upper walls were off while its floor
-  was drawn, and the campaign capture of Customs had the boiler room, Big Red and several warehouses
-  as patches of ground with a black wall outline round them. Every renderer those culling volumes hold
-  is forced on for the instant a tile renders and put back afterwards. The game's own force-enable
-  could not be used: it switches twenty-five components a frame, and a tile is one frame.
+  was drawn, and an early campaign capture of Customs had the boiler room, Big Red and several
+  warehouses as patches of ground with a black wall outline round them. Every renderer those culling
+  volumes hold is forced on for the whole of one floor - once before its first tile, put back after its
+  last - because a stop on Customs flattens some twenty-seven thousand components out of them and doing
+  that twice per tile would be a hitch of its own, twenty-four times over. The game's own force-enable
+  could not be used at all: it switches twenty-five components a frame, and a tile is one frame. The
+  cost is stated rather than hidden: for the second or two a floor takes, the player's own frames draw
+  that distant geometry too and their water is the flat capture blue, and both undo themselves when the
+  floor is done.
 - **The edges are clean.** Each tile is rendered at twice the resolution it is kept at and averaged
-  back down, with multisampling asked of the target on top; a pixel half covered by a roof edge takes
+  back down, into a four-sample multisampled target the camera is told to use; a pixel half covered by
+  a roof edge takes
   the colour of the samples that were drawn rather than a blend with the clear colour. Then a despeckle
   pass replaces a pixel that disagrees with all eight of its neighbours by their median - the specular
   glints and single black pixels that a smoothing pass keeps, because a smoothing pass reads an
   isolated outlier as an edge.
 - The colours are muted and the highlights held back, so the picture reads as a map and a coloured
   pin is the brightest thing on the screen.
-- **Water, glass and transparent effects are left out.** All of them are drawn by shaders that expect
-  the player's camera behind them, and from above they came back as flat cyan blocks by Dorms, blue
-  streaks across the crane and the railway, and a translucent sheet over the warehouse yard. The
-  renderers are switched off for the render and the ground under them draws instead; anything the
-  shader test misses is still painted out of the picture from its surroundings before the exposure is
-  measured.
-- **The picture says where the world ends.** A capture's rectangle is padded and clamped past the
-  playable area, so it takes in hillside and skybox terrain that looks exactly like the map and is not
-  part of it, and nothing on the picture said so. The game's own navigation mesh is the one thing in
-  the scene that knows where a player can go: it is rasterised into a mask, grown 8 m so no roof, yard
-  or interior is caught, and everything outside it is drawn 45 % darker and half desaturated, fading
-  in over 6 m so the boundary reads as a vignette and not as a wall somebody might believe in. The
-  per-floor line says how much: `... 34 % outside the walkable area`.
+- **Water is painted a flat map blue.** Its own shader has nothing to reflect from a camera that is not
+  the player's, so it came back as flat cyan blocks by Dorms and a sheet of sky over the warehouse
+  yard. Hiding the water renderers - which is what the build before this did - fixed that and took the
+  Customs river out of the map, leaving its bed showing, which is worse: a map of Customs without its
+  river is a map missing a landmark. So the water is drawn, every surface of it, in a colour that reads
+  as water on a map. Anything the shader test misses is still painted out from its surroundings before
+  the exposure is measured, and that test now reads every material a renderer has rather than only its
+  first.
+- **Glass and transparent effects are left out**, for the same reason and with no such loss: from above
+  they were blue streaks lying across the crane and the railway, and the crane and the rails are what a
+  map should show.
+- **Reflective surfaces reflect a flat grey** rather than the sky. A wet metal roof under an empty sky
+  mirrors it and reads as a hole in the map, so the capture hands the scene a tiny neutral-grey
+  reflection environment for the render at a modest intensity - a wet roof still looks wet, and still
+  looks like a roof. Baked reflection probes are untouched, so an interior still reflects its own room.
+- **The world ends where the map ends.** A capture's rectangle is padded and clamped past the playable
+  area, so it takes in hillside and skybox terrain that looks exactly like the map and is not part of
+  it, and nothing on the picture said so. The game's own navigation mesh is the one thing in the scene
+  that knows where a player can go: it is rasterised into a mask, grown 8 m so no roof, yard or
+  interior is caught, and everything outside it is **cut out of the picture** - written as transparent,
+  fading out over the last 6 m, so the Maps tab's own dark plate is what you see where the map is not.
+  It was a 45 % darken and a half desaturation first, and looking at it said the area should be gone
+  rather than dimmed: a dimmed hillside is still a hillside somebody will try to walk to. Cutting it
+  also solves the streamed-out chunks for free - a hole is transparent too, which reads as "no picture
+  here" instead of as a black building. The per-floor line says how much: `... 34 % outside the
+  walkable area`. Nothing else about a capture changes: the merge, the sidecar, the drawn mask and the
+  exposure all work on the same numbers, and a host copy or a zip copy - a JPEG, which cannot carry
+  transparency - is flattened onto the same black the viewport puts behind it.
 - A capture that came back too dark to be a map is **refused rather than written**, and says so:
   heavy weather takes the sun away, and the stretch that would have made a picture of it makes a
   field of noise. A capture taken under different light from the pictures already on disk also
@@ -85,9 +106,10 @@ Smaller things that are all lessons from a picture that came out wrong:
   install a build that did - and the next capture replaces the map rather than merging into it, and
   says which recipe each was made under. That is how the black rain-era and building-less pictures get
   thrown away instead of being blended into good ones.
-- Place names come from the scene: the extraction points, and optionally the cleaned-up bot zone
-  names. **Map labels** is *Extracts only* by default, because forty zone names over a big map is a
-  lot of text. DynamicMaps' artwork keeps its author's own labels whatever this is set to.
+- Place names come from the scene: the extraction points and the cleaned-up bot zone names. **Map
+  labels** shows all of them by default now - the zone names are held back until you zoom in, so the
+  wide view stays clean and nothing has to be switched off to get it. DynamicMaps' artwork keeps its
+  author's own labels whatever this is set to.
 - **The names are readable over a photograph.** White text, or the accent colour for an extract, on a
   nearly solid dark plate; a fixed size on screen at any zoom rather than a size in map units; a small
   dot on the exact spot with the plate above it; a name that would land on one already drawn is
@@ -109,6 +131,12 @@ every stop, and puts you back exactly where you pressed it. Customs is about six
 couple of minutes. 200 m is the spacing the merge wants: at half a metre to the pixel that is 400 px
 between stops, comfortably inside the region the game keeps loaded around a player, so every pixel of
 the map is, at some stop, both loaded and that stop's nearest - which is the pixel the merge keeps.
+
+**The campaign keeps a journal.** Every run appends its stop lines to
+`captures\<key>\<key>.campaign.txt` beside the pictures, the last twenty runs of that map, because the
+game log is gone the moment the game restarts and the run that captured 11 of 16 stops had nothing left
+to say why by the time anybody looked. Nothing reads it but a person: the uploader and the packager
+both ignore it.
 
 **Start such a raid with AI set to none.** Nothing here disables bots, and a campaign is a player
 standing still for a second and a half at sixteen places on the map. It writes nothing to you but a
@@ -180,23 +208,26 @@ carries our own credit instead: `Map: captured in-game with Quest Tracker 1.19.0
   about the wrong camera.
 - **The render recipe now carries eleven things**, not three: the light, the LOD bias, the terrain
   base-map distance, whether cyan water is painted out, whether the distance culling was forced
-  visible, how many water shader tokens are suppressed, the smoothing window, the despeckle pass, the
-  walkable mask, the supersampling factor and the multisampling level the device actually gave. Each
+  visible, which generation of the water treatment drew it, the smoothing window, the despeckle pass,
+  whether the walkable mask is alpha or shading, the supersampling factor and the multisampling level
+  the device actually gave. Each
   changes what a pixel is a picture of, so each has to force a replacement rather than a merge - which
   is why every set captured before this release is replaced by the first capture taken after it.
-  Multisampling is asked for at 8, 4, 2 and 1 in turn and the level achieved is recorded, since two
-  machines that resolved differently did not make the same picture; the honest caveat, written in the
-  code beside the constant, is that Unity ignores multisampling on some paths, so the supersampling is
-  what does the work and the MSAA is what costs nothing to ask for.
+  Multisampling is asked for at 4, then 2, then 1, and the level achieved is recorded, since two
+  machines that resolved differently did not make the same picture. Four rather than eight because a
+  2048 half-float tile at eight samples is four hundred megabytes of video memory on a machine that is
+  also running a raid, and the difference on geometry that is already supersampled two by two is not
+  something anybody will find in the picture. The camera is told to use what the target was granted, so
+  the samples are used rather than merely allocated.
 - **The walkable mask** is a 2 m grid over the extent - 150 thousand cells on a kilometre of map -
   built by marking every cell a NavMesh triangle covers (bounding box plus a barycentric test on the
   cell centre, so one large triangle fills its cells rather than marking their corners), then a
   two-sweep chamfer distance transform outward, then a weight that is full inside the 8 m dilation and
-  ramps to zero over 6 m. It is applied to the finished picture rather than to the light, after the
-  S-curve and before the highlight ceiling, so the exposure a map was developed with is untouched and
-  a merge stays byte-stable: the mask is a property of the map and is identical in every capture of it.
-  No NavMesh means no mask and nothing dimmed, which is exactly how the picture looked before this
-  existed.
+  ramps to zero over 6 m. That weight becomes the picture's alpha, which is why a capture's PNG is RGBA
+  now and a quarter larger than it was; the colour underneath is left exactly as it was developed, so
+  the exposure is untouched and a merge stays byte-stable - the mask is a property of the map and is
+  identical in every capture of it. No NavMesh means no mask and nothing cut, which is exactly how the
+  picture looked before this existed.
 - **The percentage-pin rule counts item spots too.** A quest with a harvested position on a map loses
   its percentage-placed pins there, and a harvested *item* spot now counts as that coverage in the
   same way a trigger zone does: it is a real world position for that quest from a loaded scene. The
@@ -231,26 +262,26 @@ in the viewport with the pins over it**, once the picture order was set to prefe
 zoomed in far enough to read the ground; and **several presses merging into one set** - by the end
 with no holes left in it and the colour right.
 
-**A whole campaign has been run and looked at**, on Customs, with the LOD fix and the terrain base map
-in: the buildings were buildings, the ground was smooth, the merge left no holes anywhere in the map,
-and the place names were legible - which is how the rest of this release's picture work was found,
-because everything below is a fault that campaign's picture showed and no log line could have said.
+**Two whole campaigns have been run on Customs and looked at.** The second of them - with the forced
+culling, the supersampling, the despeckle, the walkable mask and the new labels in - had roofs on the
+buildings everywhere, clean edges, plated names that could be read over the photograph, a green diamond
+on every extract, and the unreachable ground marked off. That is most of this release's picture work
+confirmed on screen rather than argued for, and it is also where the rest of it came from: everything
+below is a fault that picture showed.
 
-**Not seen yet**, all of it written against that picture rather than confirmed by a newer one: the
-supersampled and despeckled edges; the roofs of the buildings EFT's distance culler had switched off -
-which that capture showed as patches of ground with a wall outline round them; water, glass and
-transparent effects gone from the render; the unreachable ground darkened, so nothing yet confirms
-where the shading falls or that no roof or yard is caught by it; the extract diamonds; and the
-labels' new size, plate and overlap rules - the campaign's names were readable but sat too low in
-contrast on a photograph, which is why they changed. Beyond the picture: **the campaign key's own
-mechanics have now been exercised**, but automatic capture has not been left on for a raid; no second
-client has downloaded a set from the host; no map with more than one floor has been captured, so the
-multi-floor camera and the floor picker over a captured picture are untried; the extent-only backdrop
-is untested, since this install has DynamicMaps for all eleven vanilla maps and no modded map; the
-other two picture-order settings are untried (prefer-captures is the one that was exercised); and the
-too-dark refusal was written *after* the rain capture that prompted it, along with the capture light
-meant to keep a cloudy raid usable. The capture campaign that fills `maps\` is what exercises the
-rest.
+**Not seen yet**, all of it written against that picture rather than confirmed by a newer one: **the
+cut-out** - the unreachable area was shaded grey in that capture, and this build makes it transparent
+instead, so nothing yet shows how the fade reads against the panel or that no roof or yard is caught by
+it; **the blue water**, which replaces having hidden it and is meant to put the Customs river back on
+the map; **the grey reflections**, for the wet roofs that mirrored the sky; and **the campaign journal**
+and the four-sample target, neither of which has been produced once. Beyond the picture: automatic
+capture has not been left on for a raid; no second client has downloaded a set from the host; no map
+with more than one floor has been captured, so the multi-floor camera and the floor picker over a
+captured picture are untried; the extent-only backdrop is untested, since this install has DynamicMaps
+for all eleven vanilla maps and no modded map; the other two picture-order settings are untried
+(prefer-captures is the one that was exercised); and the too-dark refusal was written *after* the rain
+capture that prompted it, along with the capture light meant to keep a cloudy raid usable. The capture
+campaign that fills `maps\` is what exercises the rest.
 
 ## What to look for
 
@@ -261,17 +292,15 @@ rest.
   2236x1078 px (0.50 m/px), 2 tiles, 475 ms, ...`. A tail saying some of it was not drawn is an
   invitation to press the key again somewhere else - do, and watch the second line say how much was
   newly drawn.
-- **The roofs.** Zoom in on the boiler room, Big Red and the warehouses. Each should be a building with
-  a roof on it, not a patch of ground with a black wall outline round it - that outline is what the
-  last campaign's picture showed, and forcing the game's switched-off renderers on for the render is
-  the fix that has not been looked at yet.
-- **The edges and the surfaces.** A railing, a roofline or a wire should be a line rather than a
-  staircase, there should be no single bright or black pixels left in open ground, and the pools by
-  Dorms, the sheet over the warehouse yard and the blue streaks over the crane and the railway should
-  all be gone, with ground and rails in their place.
-- **The grey border.** The picture should fade darker and greyer where the playable area stops, over a
-  few metres rather than at a line - and nothing inside the map, no roof, no yard and no interior,
-  should be caught by it. The capture line says how much of the floor it dimmed.
+- **The water.** The Customs river and the ponds should be on the map, in a flat blue that reads as
+  water - not a sheet of reflected sky, and not a dry riverbed. The wet roofs should look like roofs
+  rather than mirrors, and the blue streaks over the crane and the railway should be gone.
+- **The cut-out edge.** The picture should fade out into the panel where the playable area stops, over
+  a few metres rather than at a line, and nothing inside the map - no roof, no yard, no interior -
+  should be caught by it. The capture line says how much of the floor was outside. A transparent patch
+  in the middle of the map is a hole, not the edge: press the key again somewhere else and it fills.
+- **The campaign journal.** After a campaign, `captures\<key>\<key>.campaign.txt` should hold that
+  run's stop lines with timestamps, and still hold them after the game is restarted.
 - **The names and the extracts.** Every extract should carry a green diamond at any zoom, with
   "extract" in the legend and a count in the facts line above the sidebar. Names should be readable at
   a glance over the photograph, the same size however far you zoom, never stacked on each other, and

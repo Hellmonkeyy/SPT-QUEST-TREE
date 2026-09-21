@@ -14,35 +14,43 @@ pixels to the metre - a quarter of a metre to the pixel on Customs, 4472x2156 ac
 spread over frames as short hitches rather than one freeze. It is drawn to exactly the rectangle
 harvest measured, so a pin lands on the right building without anything agreeing twice. Pressing the
 key again from somewhere else adds to what is there rather than replacing it - the game streams
-distant chunks out, so each capture has holes another fills - and where two cover the same ground the
-pixel seen from closer wins, so a map gets sharper the more often it is captured. What is shared with
-a host or shipped in a release is downscaled to 2048 whatever the setting says.
+distant chunks out, so each capture has holes another fills - and where two cover the same ground
+the pixel seen from closer wins, so a map gets sharper the more often it is captured. What is shared
+with a host or shipped in a release is downscaled to 2048 whatever the setting says.
 
-**What the render does and does not draw** is most of the work in this release. The top floor is shot
-from 300 m up so roofs draw; the level-of-detail selection that culled every building against a
+**What the render does and does not draw** is most of the work in this release. The top floor is
+shot from 300 m up so roofs draw; the level-of-detail selection that culled every building against a
 kilometre-tall orthographic view is switched off for the render and the terrain put on its averaged
 base map, so buildings are buildings and the ground is not a two-metre checker; every renderer EFT's
-distance culling had switched off is forced visible for each render, because a capture showed
-warehouses as patches of ground with a wall outline round them, and the game's own force-enable is a
-twenty-five-components-a-frame coroutine that would do nothing inside one tile. Each tile renders at
-twice the output resolution into a multisampled target and is box-averaged back, a half-covered edge
-taking the colour of its drawn samples alone, and a despeckle pass medians the isolated outliers a
-smoothing pass preserves as edges. Water, glass and transparent effects - all drawn by shaders that
-expect the player's camera behind them - are left out, and cyan water the shader test misses is still
-painted over from its surroundings. The NavMesh is rasterised into a walkable mask, grown 8 m with a
-6 m ramp, and everything outside it is drawn 45 % darker and half desaturated, so the picture shows
-where the world ends; the per-floor line says how much was outside. Colours are muted so a pin is the
-brightest thing on screen; a render too dark to be a map, or one under different light from the
-pictures on disk, is refused rather than written. The meta records the whole recipe - eleven values,
-from the light to the multisampling the device actually gave - and a set made under another recipe is
-replaced, not merged into.
+distance culling had switched off is forced visible for the whole of a FLOOR - once before its first
+tile, put back after its last, because a stop on Customs flattens twenty-seven thousand components
+out of the culling objects and the game's own force-enable is a twenty-five-a-frame coroutine that
+would do nothing inside one tile - which is why a capture no longer shows warehouses as patches of
+ground with a wall outline, and why for the second or two a floor takes the player's own frames draw
+that distant geometry too and their water is the flat capture blue. Each tile renders at twice the
+output resolution into a four-sample multisampled target the camera is told to use, and is box-
+averaged back, a half-covered edge taking the colour of its drawn samples alone; a despeckle pass
+medians the isolated outliers a smoothing pass preserves as edges. Water is painted a flat map blue
+rather than hidden - hiding it took the Customs river out of the picture and left its bed showing -
+while glass and transparent effects are left out, cyan the shader test misses is still painted over
+from its surroundings, and reflective surfaces reflect a neutral grey instead of the sky, so a wet
+roof is a roof and not a mirror. The NavMesh is rasterised into a walkable mask, grown 8 m with a 6
+m ramp, and everything outside it is CUT OUT - the mask is the picture's alpha, so the skirt of
+hillside and skybox terrain past the playable area is transparent and the Maps tab's own dark plate
+shows through, which is also what a streamed-out hole now looks like; the per-floor line says how
+much was outside, and host and release copies, being JPEGs, are flattened onto that same black.
+Colours are muted so a pin is the brightest thing on screen; a render too dark to be a map, or one
+under different light from the pictures on disk, is refused rather than written. The meta records
+the whole recipe - eleven values, from the light to the multisampling the device actually gave - and
+a set made under another recipe is replaced, not merged into.
 
-**A captured map's names are readable and its extracts are marked.** White text, the accent colour for
-an extract, on a nearly solid dark plate at a fixed size on screen whatever the zoom, a dot on the
-spot with the plate above it, a name that would land on one already drawn dropped, and zone names held
-back until there is room for them. Every extract carries an exit-sign-green diamond whatever the label
-setting says, since the names can be turned off and the extracts should not be; the legend names the
-diamond and the facts line counts them.
+**A captured map's names are readable and its extracts are marked.** White text, the accent colour
+for an extract, on a nearly solid dark plate at a fixed size on screen whatever the zoom, a dot on
+the spot with the plate above it, a name that would land on one already drawn dropped, and zone
+names held back until there is room for them - which is why "Map labels" shows all of them by
+default now. Every extract carries an exit-sign-green diamond whatever the label setting says, since
+the names can be turned off and the extracts should not be; the legend names the diamond and the
+facts line counts them.
 
 **Ctrl+Shift+F9 captures a whole map without you walking it.** One press plans a grid of stops 200 m
 apart, finds somewhere standable in each cell, teleports the player from stop to stop, captures at
@@ -50,8 +58,8 @@ each and returns them to where they pressed it - about sixteen stops and a coupl
 Customs, and 200 m because that is inside the radius the streamer keeps loaded, which is what the
 nearest-capture-wins merge needs. It disables no bots and touches nothing but the player's position:
 start such a raid with AI set to none. "Capture the map automatically while I play" (off by default)
-does the same job as you walk, one capture every few seconds - 5 by default, 2 to 120 - once you have
-moved 15 m; it hitches every few seconds and is meant for a raid set aside for map-building.
+does the same job as you walk, one capture every few seconds - 5 by default, 2 to 120 - once you
+have moved 15 m; it hitches every few seconds and is meant for a raid set aside for map-building.
 
 **Captures travel through the host.** Each finished capture is offered one floor at a time as a
 2048-px JPEG, and every client of that host picks up the maps it lacks on the first Maps-tab open of
@@ -76,25 +84,28 @@ captured map carries our own credit line naming the build, the date and the raid
 - Three routes on the zone harvest's pattern: a per-floor upload, an index carrying a sha256 stamp
   per map, and one that serves a floor. An older host answering with SPT's HTML and a newer one
   answering with an unknown index shape are both silent fallbacks to what the client already had.
-- Captured place names come from the scene - the extraction points, optionally the cleaned-up bot
-  zone names. "Map labels" is extracts only by default, and the labels are re-culled when the zoom
-  moves by a quarter rather than on every pan.
+- Captured place names come from the scene - the extraction points and the cleaned-up bot zone
+  names, all of them by default now - and are re-culled when the zoom moves by a quarter rather than
+  on every pan.
+- A capture campaign appends its stop lines to `captures\<key>\<key>.campaign.txt`, the last twenty
+  runs of that map, because a game log is gone the moment the game restarts. Nothing reads it but a
+  person; the uploader and the packager both ignore it.
 - A quest with a harvested position on a map loses its percentage-placed pins there, and a harvested
   ITEM spot now counts as that coverage the same way a trigger zone does - it is a real world
   position for that quest. The boot line says how many percentage pins each map kept and how many
   were dropped, instead of one number that quietly meant the kept ones.
 - The capture header no longer prints a rendering path copied from the player's camera before the
   orthographic switch, which is not the path that renders. Multisampling is asked for at 8, 4, 2 and
-  1 in turn and the level the device actually gave is recorded in the header and the render tag, since
-  two machines that resolved differently did not make the same picture; the supersampling is what does
-  the antialiasing either way.
+  1 in turn and the level the device actually gave is recorded in the header and the render tag,
+  since two machines that resolved differently did not make the same picture; the supersampling is
+  what does the antialiasing either way.
 - `package.ps1 -RefreshBuilds` copies the trained weapon-build cache over the shipped seed, printing
   the stamp, the build count and the trader/flea/unpriced split either side of the copy so a worse
   training run is visible, and refusing outright while `SPT.Server.exe` is running. The training
-  launchers also accept map uploads now, so a capture raid can hand its pictures to a training server.
+  launchers also accept map uploads now, so a capture raid can hand its pictures to a training
+  server.
 - `tools/check-capture.py` checks a fresh capture against its own meta and the server's zone file
   for that map; `tools/server-host.cmd` starts the server as a picture host.
-
 ---
 
 # Quest Tracker 1.18.5
