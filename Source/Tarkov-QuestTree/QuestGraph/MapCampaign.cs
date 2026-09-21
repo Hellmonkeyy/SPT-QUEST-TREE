@@ -394,6 +394,14 @@ namespace QuestTree.QuestGraph
                 $"QuestTree: capture campaign on {map} - {stops.Count} stop(s) on a {F(stepX)}x{F(stepZ)} m " +
                 $"grid, starting from {At(start)}.");
 
+            // The line that OPENS this run in the map's journal, which is also what the journal counts to
+            // keep the last twenty runs and throw the older ones away - see MapCapture.Journal.
+            MapCapture.Journal(
+                map,
+                $"campaign on {map} with {ModInfo.Stamp} - {stops.Count} stop(s) on a {F(stepX)}x{F(stepZ)} m grid, " +
+                $"starting from {At(start)}.",
+                startsRun: true);
+
             if (dropped > 0)
             {
                 Plugin.LogSource?.LogDebug(
@@ -565,6 +573,11 @@ namespace QuestTree.QuestGraph
                             $"QuestTree: campaign stop {i + 1} of {stops.Count} at {At(stop)} - you could not " +
                             "be moved there.");
 
+                        // Into the journal as well as the log - see MapCapture.Journal. A game log does
+                        // not survive the game being restarted, and these are the lines somebody asks
+                        // about days later.
+                        MapCapture.Journal(map, $"stop {i + 1} of {stops.Count} at {At(stop)} - could not be moved there.");
+
                         if (failures >= MaxStartFailures)
                         {
                             stopped = $"{failures} stops in a row could not be reached";
@@ -588,6 +601,8 @@ namespace QuestTree.QuestGraph
                         Plugin.LogSource?.LogInfo(
                             $"QuestTree: campaign stop {i + 1} of {stops.Count} at {At(stop)} - the capture " +
                             "did not start.");
+
+                        MapCapture.Journal(map, $"stop {i + 1} of {stops.Count} at {At(stop)} - the capture did not start.");
 
                         if (failures >= MaxStartFailures)
                         {
@@ -660,6 +675,10 @@ namespace QuestTree.QuestGraph
                 Plugin.LogSource?.LogInfo(stopped == null
                     ? $"QuestTree: capture campaign on {map} done - {counts}"
                     : $"QuestTree: capture campaign on {map} stopped ({stopped}) - {counts}");
+
+                MapCapture.Journal(map, stopped == null
+                    ? $"done - {counts}"
+                    : $"stopped ({stopped}) - {counts}");
             }
         }
 

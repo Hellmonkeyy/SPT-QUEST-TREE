@@ -9,19 +9,40 @@ read as floors. That alone draws a map - a dark backdrop over its own rectangle,
 picker working, every pin where it belongs - after one raid on it.
 
 **Ctrl+F9 in a raid takes the picture.** The game draws the map from straight above, one picture per
-floor band, into `BepInEx\plugins\QuestTree\captures\<key>\`, at up to 4096 px and never past two
-pixels to the metre, spread over frames as short hitches rather than one freeze. It is drawn to
-exactly the rectangle harvest measured, so a pin lands on the right building without anything
-agreeing twice. Pressing the key again from somewhere else adds to what is there rather than
-replacing it - the game streams distant chunks out, so each capture has holes another fills - and
-where two cover the same ground the pixel seen from closer wins, so a map gets sharper the more
-often it is captured. The top floor is shot from 300 m up so roofs draw; the level-of-detail
-selection that culled every building against a kilometre-tall orthographic view is switched off for
-the render, and the terrain is put on its averaged base map, so buildings are buildings and the
-ground is not a two-metre checker; colours are muted so a pin is the brightest thing on screen; a
-render too dark to be a map, or one under different light from the pictures on disk, is refused
-rather than written. The meta records the render recipe - the light, the LOD bias, the terrain
-base-map distance - and a set made under another recipe is replaced, not merged into.
+floor band, into `BepInEx\plugins\QuestTree\captures\<key>\`, at up to 8192 px and never past four
+pixels to the metre - a quarter of a metre to the pixel on Customs, 4472x2156 across fifteen tiles -
+spread over frames as short hitches rather than one freeze. It is drawn to exactly the rectangle
+harvest measured, so a pin lands on the right building without anything agreeing twice. Pressing the
+key again from somewhere else adds to what is there rather than replacing it - the game streams
+distant chunks out, so each capture has holes another fills - and where two cover the same ground the
+pixel seen from closer wins, so a map gets sharper the more often it is captured. What is shared with
+a host or shipped in a release is downscaled to 2048 whatever the setting says.
+
+**What the render does and does not draw** is most of the work in this release. The top floor is shot
+from 300 m up so roofs draw; the level-of-detail selection that culled every building against a
+kilometre-tall orthographic view is switched off for the render and the terrain put on its averaged
+base map, so buildings are buildings and the ground is not a two-metre checker; every renderer EFT's
+distance culling had switched off is forced visible for each render, because a capture showed
+warehouses as patches of ground with a wall outline round them, and the game's own force-enable is a
+twenty-five-components-a-frame coroutine that would do nothing inside one tile. Each tile renders at
+twice the output resolution into a multisampled target and is box-averaged back, a half-covered edge
+taking the colour of its drawn samples alone, and a despeckle pass medians the isolated outliers a
+smoothing pass preserves as edges. Water, glass and transparent effects - all drawn by shaders that
+expect the player's camera behind them - are left out, and cyan water the shader test misses is still
+painted over from its surroundings. The NavMesh is rasterised into a walkable mask, grown 8 m with a
+6 m ramp, and everything outside it is drawn 45 % darker and half desaturated, so the picture shows
+where the world ends; the per-floor line says how much was outside. Colours are muted so a pin is the
+brightest thing on screen; a render too dark to be a map, or one under different light from the
+pictures on disk, is refused rather than written. The meta records the whole recipe - eleven values,
+from the light to the multisampling the device actually gave - and a set made under another recipe is
+replaced, not merged into.
+
+**A captured map's names are readable and its extracts are marked.** White text, the accent colour for
+an extract, on a nearly solid dark plate at a fixed size on screen whatever the zoom, a dot on the
+spot with the plate above it, a name that would land on one already drawn dropped, and zone names held
+back until there is room for them. Every extract carries an exit-sign-green diamond whatever the label
+setting says, since the names can be turned off and the extracts should not be; the legend names the
+diamond and the facts line counts them.
 
 **Ctrl+Shift+F9 captures a whole map without you walking it.** One press plans a grid of stops 200 m
 apart, finds somewhere standable in each cell, teleports the player from stop to stop, captures at
@@ -56,17 +77,17 @@ captured map carries our own credit line naming the build, the date and the raid
   per map, and one that serves a floor. An older host answering with SPT's HTML and a newer one
   answering with an unknown index shape are both silent fallbacks to what the client already had.
 - Captured place names come from the scene - the extraction points, optionally the cleaned-up bot
-  zone names - and are drawn small on a plate, never overlapping. "Map labels" is extracts only by
-  default.
-- Water is left out of a capture: it renders as flat cyan placeholder blocks from a camera that is
-  not the player's, and the ground under it reads as a map should.
+  zone names. "Map labels" is extracts only by default, and the labels are re-culled when the zoom
+  moves by a quarter rather than on every pan.
 - A quest with a harvested position on a map loses its percentage-placed pins there, and a harvested
   ITEM spot now counts as that coverage the same way a trigger zone does - it is a real world
   position for that quest. The boot line says how many percentage pins each map kept and how many
   were dropped, instead of one number that quietly meant the kept ones.
-- The capture camera is orthographic, and Unity's built-in pipeline never gives one deferred
-  shading - it falls back to forward. The code no longer claims otherwise, and that is why the
-  capture light's narrow culling mask and per-pixel setting are honoured.
+- The capture header no longer prints a rendering path copied from the player's camera before the
+  orthographic switch, which is not the path that renders. Multisampling is asked for at 8, 4, 2 and
+  1 in turn and the level the device actually gave is recorded in the header and the render tag, since
+  two machines that resolved differently did not make the same picture; the supersampling is what does
+  the antialiasing either way.
 - `package.ps1 -RefreshBuilds` copies the trained weapon-build cache over the shipped seed, printing
   the stamp, the build count and the trader/flea/unpriced split either side of the copy so a worse
   training run is visible, and refusing outright while `SPT.Server.exe` is running. The training

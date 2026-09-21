@@ -144,8 +144,34 @@ frames - a handful of short hitches, not one long freeze - and takes a second or
   `QuestTree: bigmap was captured under different light than the picture on disk (p98 0.0104 vs
   0.5051 stored) - nothing was changed. Capture at a similar time of day to add to it, or delete
   BepInEx/plugins/QuestTree/captures/bigmap to start over.`
-- **Capture resolution** is 4096 px on the longest side, or 2048 for files a quarter the size.
-  Neither ever draws more than two pixels to the metre.
+- **Every pixel is an average of four, and the edges are cleaned up.** Each tile is rendered at twice
+  the resolution it is kept at, with multisampling on top where the hardware gives it, and averaged
+  back down - a pixel half covered by a roof edge takes the roof's colour rather than the roof mixed
+  with nothing. A last pass replaces a pixel that disagrees with all eight of its neighbours by their
+  median, which is what removes the specular glints and the single black pixels a smoothing pass
+  preserves because it reads them as edges. Zoom in on a railing or a roofline: it is a line, not a
+  staircase.
+- **Glass, transparent effects and water surfaces are left out.** Both were drawn by shaders that
+  expect the player's camera behind them, and from above they came back as blue streaks over the crane
+  and the railway and as flat sheets over the warehouse yard. What is under them - the crane, the
+  rails, the ground - is what a map should show. Anything the shader test misses is still painted out
+  of the picture from its surroundings.
+- **Buildings the game had switched off are switched back on for the render.** EFT hides distant
+  geometry by disabling renderers rather than by letting a camera cull them, so a warehouse's roof and
+  upper walls were off while its floor was drawn, and a capture showed a patch of ground with a wall
+  outline round it. Every one of those renderers is forced visible for the instant a tile renders and
+  put back afterwards, so roofs draw wherever you took the capture from.
+- **The ground outside the playable area is darkened and desaturated**, fading in over a few metres so
+  it reads as a vignette rather than a drawn line. The extent is padded and clamped past the edge of
+  the world, so a capture carries a border of hillside and skybox terrain that looks exactly like the
+  map and is not part of it; the walkable area the game's own navigation mesh describes, grown 8 m so
+  no roof, yard or interior is dimmed, is what says where that stops. The per-floor log line says how
+  much of the picture was outside it.
+- **Capture resolution** is 8192 px on the longest side by default - a quarter of a metre to the
+  pixel on Customs, where a vehicle is 16 pixels across - with 4096 and 2048 each a step smaller,
+  four times cheaper in file size and in raid frames. None of them draws more than four pixels to the
+  metre, and whatever you capture at, what is shared with a host or shipped in a release is downscaled
+  to 2048.
 - **A capture taken by a different build may replace yours rather than add to it.** The meta records
   how a picture was rendered - the capture light, the level-of-detail switch, the terrain texture -
   and two pictures may only be merged when all of that matches, or identical ground would become
@@ -175,6 +201,18 @@ floor that only the next capture's merge reads. Deleting a map's folder starts t
 adds the cleaned-up bot zone names, a lot of text on a big map - or *None*. They are read from the
 scene, they are drawn on captured pictures only, and DynamicMaps' artwork keeps its author's own
 labels whatever this says.
+
+A name on a captured map is white text - the accent colour for an extract - on a nearly solid dark
+plate, because the thing behind it is a photograph of concrete and roofs and anything lighter could
+not be read. It stays the same size on screen at any zoom, sits just above a small dot marking the
+exact spot, and is dropped when it would land on a name already drawn. Zone names appear only once
+you are zoomed in far enough for them to fit; extract names are drawn at any zoom.
+
+**Every extract a capture found is marked with a green diamond**, whatever the label setting says -
+the names can be turned off, the extracts cannot, because on a picture of a map they are the first
+thing you look for. The legend under the map names the diamond, and the facts line above the sidebar
+counts them, which is also how you tell a capture that found no extracts at all and wants taking
+again.
 
 **Sharing is through the host.** A server started with `tools/server-host.cmd` - which sets
 `QUESTTREE_ACCEPT_MAPS=1` and nothing else - accepts uploaded pictures, and **Share captured maps**
@@ -598,6 +636,12 @@ report is worth the restart.
   fills what the first could not see. The log line ends with how much of the floor is still empty.
   `Ctrl+Shift+F9` does the walking for you, and *Capture the map automatically while I play* fills
   the map in as you cross it.
+- **The map is grey and dark around the edges** - that is deliberate, and it is where the world ends.
+  A capture's rectangle is padded past the playable area, so it takes in hillside, water and skybox
+  terrain that looks exactly like the map and is not part of it. Everything outside the area the game's
+  own navigation mesh describes - grown by 8 m, so no roof, yard or interior is caught by it - is drawn
+  darker and greyer, fading in over a few metres. The capture line says how much: `... 34 % outside the
+  walkable area`. Nothing is wrong, and nothing is missing from the picture.
 - **A capture replaced the one I had instead of adding to it** - two pictures are only merged when
   they were rendered the same way, and the log line names what differed: a new build's render recipe,
   a changed extent, a different resolution, a different set of floors. The map starts over from this

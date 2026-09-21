@@ -58,6 +58,20 @@ namespace QuestTree.QuestGraph
         /// 2048-side floor lands at 0.5-1.2 MB, and the artefacts are invisible under the pins.</summary>
         private const int JpegQuality = 80;
 
+        /// <summary>What the transparent part of a capture is flattened onto before it becomes a JPEG.
+        ///
+        /// A capture's picture is RGBA now: the walkable mask is its alpha, so everything outside the
+        /// playable world - and every chunk the game had streamed out - is transparent, and the Maps tab
+        /// shows its own backdrop through it (MapCapture.ReachIsAlpha). A JPEG cannot carry alpha at all,
+        /// so a host copy has to be flattened onto SOMETHING, and that something has to be what the local
+        /// picture looks like against the tab it is drawn in or the two will not match.
+        ///
+        /// Black, because the viewport's own backing plate is black at 25 % and the slab drawn where there
+        /// is no picture is (0.17, 0.18, 0.19) at 95 % - UI/MapView.cs:150-153, which records both - and
+        /// the plate is the darker of the two. A transparent skirt shows the plate, not the slab, so the
+        /// plate is what it is flattened onto.</summary>
+        private static readonly Color32 BackdropFill = new Color32(0, 0, 0, 255);
+
         /// <summary>The most one encoded floor may weigh before this side declines to offer it.
         /// Mirrors the host's own per-floor ceiling: a floor over it would be rejected, and a
         /// rejection stops the whole upload, so the client skips the floor instead and still offers
@@ -419,6 +433,61 @@ namespace QuestTree.QuestGraph
             return true;
         }
 
+        /// <summary>Flattens a picture's transparency onto <see cref="BackdropFill"/>, in place, so what
+        /// a host receives looks like what the capturing player sees. Straight source-over: the colour is
+        /// already premultiplied by nothing, so it is c*a + fill*(1-a), and every pixel comes out opaque.
+        ///
+        /// Guarded like everything else on this path: a picture that cannot be read back is sent as it is
+        /// rather than not sent, because a JPEG with a black skirt is a worse picture and no picture is a
+        /// worse map.</summary>
+        /// <param name="picture">The texture to flatten, which is changed in place and applied.</param>
+        private static void Composite(Texture2D picture)
+        {
+            try
+            {
+                var pixels = picture.GetPixels32();
+                var flattened = 0;
+
+                for (var i = 0; i < pixels.Length; i++)
+                {
+                    var pixel = pixels[i];
+                    if (pixel.a == 255) continue;
+
+                    flattened++;
+
+                    if (pixel.a == 0)
+                    {
+                        pixels[i] = BackdropFill;
+                        continue;
+                    }
+
+                    var alpha = pixel.a;
+                    var rest = 255 - alpha;
+
+                    pixels[i] = new Color32(
+                        (byte)((pixel.r * alpha + BackdropFill.r * rest) / 255),
+                        (byte)((pixel.g * alpha + BackdropFill.g * rest) / 255),
+                        (byte)((pixel.b * alpha + BackdropFill.b * rest) / 255),
+                        255);
+                }
+
+                if (flattened == 0) return;
+
+                picture.SetPixels32(pixels);
+                picture.Apply(updateMipmaps: false);
+
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: {flattened} of {pixels.Length} pixel(s) of this floor were transparent and are " +
+                    "flattened onto the map backdrop for the host copy.");
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: a floor's transparency could not be flattened ({ex.GetType().Name}: " +
+                    $"{ex.Message}) - it is offered as it is.");
+            }
+        }
+
         /// <summary>
         /// One floor's picture, scaled to fit <see cref="MaxLongSide"/> and encoded as a JPEG, as
         /// base64 on the floor. MAIN THREAD - every line of it is Texture2D work.
@@ -442,7 +511,10 @@ namespace QuestTree.QuestGraph
             {
                 var bytes = File.ReadAllBytes(floor.Path);
 
-                source = new Texture2D(2, 2, TextureFormat.RGB24, mipChain: false);
+                // RGBA, not RGB: the picture on disk carries the walkable mask in its alpha and the
+                // composite below needs it. LoadImage reformats to suit the PNG anyway; asking for RGBA
+                // is what stops the alpha being dropped on the way in.
+                source = new Texture2D(2, 2, TextureFormat.RGBA32, mipChain: false);
 
                 // Readable on purpose (no markNonReadable): EncodeToJPG and the orientation check
                 // below both read pixels back.
@@ -469,7 +541,7 @@ namespace QuestTree.QuestGraph
 
                     RenderTexture.active = render;
 
-                    scaled = new Texture2D(width, height, TextureFormat.RGB24, mipChain: false);
+                    scaled = new Texture2D(width, height, TextureFormat.RGBA32, mipChain: false);
                     scaled.ReadPixels(new Rect(0f, 0f, width, height), 0, 0);
                     scaled.Apply(updateMipmaps: false);
 
@@ -489,6 +561,11 @@ namespace QuestTree.QuestGraph
                         "not describe its own pictures, so this floor is not offered. Capture the map again.");
                     return false;
                 }
+
+                // The alpha flattened onto the tab's own backdrop, because a JPEG has none - see
+                // BackdropFill. Done on the SCALED picture, so it is two million pixels at most whatever
+                // the capture's resolution was.
+                Composite(encodeFrom);
 
                 var jpg = encodeFrom.EncodeToJPG(JpegQuality);
 

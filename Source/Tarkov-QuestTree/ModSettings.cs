@@ -201,9 +201,12 @@ namespace QuestTree
         /// <summary>Which place names are drawn on a CAPTURED picture (ours, or one from the host).
         /// DynamicMaps' own artwork carries its author's labels and is not affected either way.
         ///
-        /// Extracts only by default: a capture's labels come from the scene, which on a big map means
-        /// forty bot-zone names printed over the buildings they name, and the extracts are the ones
-        /// worth having on a map you are reading before a raid.</summary>
+        /// ALL of them by default. A player reading a map before a raid wants the place names on it, and
+        /// the zone names are the only place names the scene has - our pictures carry no hand-drawn
+        /// lettering the way DynamicMaps' artwork does. The fear behind the old default, that forty zone
+        /// names would bury a big map in text, is answered by the Maps tab drawing them only from a zoom
+        /// in: the wide view stays clean, and the names appear as you go looking for them. Extracts only
+        /// and None remain for anyone who disagrees.</summary>
         public static ConfigEntry<LabelMode> MapLabels { get; private set; }
 
         /// <summary>Whether a finished capture is offered to the host this profile plays on - see
@@ -685,10 +688,11 @@ namespace QuestTree
                 "'My captures only' ignores DynamicMaps entirely.");
 
             MapLabels = config.Bind(
-                "Map", "Map labels", LabelMode.ExtractsOnly,
-                "Which place names are drawn on a CAPTURED picture: the extracts only, everything the " +
-                "capture found (which adds the bot zone names - a lot of text on a big map), or none. " +
-                "DynamicMaps' own artwork carries its author's labels whatever this says.");
+                "Map", "Map labels", LabelMode.All,
+                "Which place names are drawn on a CAPTURED picture: everything the capture found (the " +
+                "extracts and the map's own zone names, which only appear once you zoom in, so the wide " +
+                "view stays clean), the extracts alone, or none. DynamicMaps' own artwork carries its " +
+                "author's labels whatever this says.");
 
             UploadCaptures = config.Bind(
                 "Map", "Share captured maps", true,

@@ -129,7 +129,7 @@ namespace QuestTree.UI
 
             /// <summary>How much texture memory this floor's decoded picture holds, or 0 when it
             /// holds none. Summed by <see cref="ResidentRasterBytes"/>: one captured floor of a big
-            /// map is around 43 MB, so the cache ceiling is worth being able to see. A field rather
+            /// map is around 58 MB (4096x3540 RGBA32), so the cache ceiling is worth seeing. A field rather
             /// than a property with a private setter because the loader that knows the answer is
             /// BuildRasterSprite, in the enclosing class, which private would shut out.</summary>
             public long RasterBytes;
@@ -491,7 +491,7 @@ namespace QuestTree.UI
 
         /// <summary>Drops one floor's picture out of the cache and frees it. For a capture that has
         /// just been replaced by a fresh one: its layer objects are about to be thrown away, and a
-        /// released-but-still-listed layer would sit in the LRU holding 43 MB that nothing can ever
+        /// released-but-still-listed layer would sit in the LRU holding 58 MB that nothing can ever
         /// show again.</summary>
         internal static void ReleaseLayer(MapLayer layer)
         {
@@ -510,7 +510,7 @@ namespace QuestTree.UI
         /// Frees every cached picture, or only the bitmaps.
         ///
         /// Called on a profile change (MapView.ResetSession), where the pictures held are the last
-        /// profile's and the ceiling of six captured floors is a quarter of a gigabyte of texture.
+        /// profile's and the ceiling of six captured floors is about a third of a gigabyte of texture.
         /// Bitmaps only by default because they are the memory: an SVG costs a 900 ms tessellation
         /// to get back and a mesh to keep, so throwing those away trades a real cost for almost
         /// nothing.
@@ -1041,23 +1041,42 @@ namespace QuestTree.UI
         /// <summary>
         /// A captured PNG's bytes, decoded into a sprite. MAIN THREAD ONLY.
         ///
-        /// Three arguments here are decisions rather than defaults:
+        /// TRANSPARENCY, which everything below has to survive: a capture is an RGBA PNG whose alpha
+        /// is 0 outside the walkable area, so the panel shows through where the map has nothing to
+        /// say. A host's cached set may instead be JPEG, which has no alpha and is opaque; both go
+        /// through this one path.
+        ///
+        /// Four arguments here are decisions rather than defaults:
+        ///
+        /// RGBA32 as the constructed format. LoadImage reinitialises the texture to suit the file it
+        /// decodes - an alpha PNG becomes RGBA32, a JPEG becomes RGB24 - so this is the format only
+        /// until the next line. It is RGBA32 anyway because that is the one choice that cannot lose
+        /// the alpha if a Unity version ever declines to reformat: a picture decoded into an RGB24
+        /// texture would come out opaque, the map would be a rectangle of black or grey over the
+        /// panel outside its walkable area, and nothing about it would look like a bug in a format
+        /// argument. The accounting reads the format BACK off the texture afterwards, so an opaque
+        /// JPEG is still counted at three bytes a pixel - see <see cref="TextureBytes"/>.
         ///
         /// Mipmaps off, because the picture is stretched onto its floor's world rectangle and the
         /// view's zoom is a container scale - there is no minification chain worth 33 % more memory
-        /// on a 43 MB texture. Bilinear filtering, so zooming in blurs rather than blocks.
+        /// on a 58 MB texture. Bilinear filtering, so zooming in blurs rather than blocks.
         ///
-        /// markNonReadable, which drops the CPU-side copy the decode leaves behind. That copy is
-        /// the same size as the texture - 43 MB per floor of a big map, and the cache holds six -
-        /// and nothing here ever reads a pixel back. It is also why the sprite is built with
-        /// SpriteMeshType.FullRect rather than the default tight mesh: a tight mesh is traced from
-        /// the texture's alpha, which a non-readable texture cannot be asked for. FullRect is the
-        /// right answer anyway, since the picture covers its whole rectangle by construction.
+        /// markNonReadable, which drops the CPU-side copy the decode leaves behind. That copy is the
+        /// same size as the texture - 4096x3540 at RGBA32 is 58 MB per floor of a big map, and the
+        /// cache holds six - and nothing here ever reads a pixel back.
+        ///
+        /// SpriteMeshType.FullRect rather than the default tight mesh, which matters twice over now.
+        /// A tight mesh is traced from the texture's ALPHA, which a non-readable texture cannot be
+        /// asked for - and on a picture that is deliberately transparent around its edges, tracing
+        /// it would crop the sprite to the walkable area and then stretch THAT onto the floor's
+        /// rectangle, moving every metre of the map. FullRect keeps the rectangle the capture
+        /// recorded, which is the only rectangle its coordinates mean anything in.
         ///
         /// The pivot and pixels-per-unit are formalities: MapView draws this through a UI Image
         /// sized to the floor's bounds, which stretches the sprite's rect onto that rect and
         /// consults neither. They are centred and 100 so the sprite is well-formed for anything
-        /// that does.
+        /// that does. The Image's white tint is full alpha, so the picture's own alpha is what
+        /// reaches the screen, and the default UI material blends it - see MapView.BuildMapViewport.
         /// </summary>
         private static Sprite BuildRasterSprite(byte[] bytes, MapLayer layer)
         {
@@ -1076,7 +1095,9 @@ namespace QuestTree.UI
             {
                 var clock = System.Diagnostics.Stopwatch.StartNew();
 
-                texture = new Texture2D(2, 2, TextureFormat.RGB24, mipChain: false);
+                // RGBA32, not RGB24: see the remarks. LoadImage picks the file's own format, and
+                // this is the one that cannot discard alpha if it ever does not.
+                texture = new Texture2D(2, 2, TextureFormat.RGBA32, mipChain: false);
 
                 if (!texture.LoadImage(bytes, markNonReadable: true))
                 {
@@ -1109,9 +1130,14 @@ namespace QuestTree.UI
                 layer.Viewport = new Rect(0f, 0f, texture.width, texture.height);
                 layer.RasterBytes = TextureBytes(texture);
 
+                // The FORMAT is in the line because it is the one fact that decides both the cost
+                // and whether the picture can be transparent at all: RGBA32 is our own capture with
+                // its alpha intact, RGB24 is an opaque one (a host's JPEG, or a PNG saved without an
+                // alpha channel), and anything else is a Unity version doing something unexpected.
                 Plugin.LogSource?.LogDebug(
-                    $"QuestTree: map picture '{name}' {texture.width}x{texture.height} decoded in " +
-                    $"{clock.ElapsedMilliseconds} ms ({layer.RasterBytes / (1024f * 1024f):F1} MB); " +
+                    $"QuestTree: map picture '{name}' {texture.width}x{texture.height} {texture.format} " +
+                    $"decoded in {clock.ElapsedMilliseconds} ms " +
+                    $"({layer.RasterBytes / (1024f * 1024f):F1} MB); " +
                     $"{(ResidentRasterBytes + layer.RasterBytes) / (1024f * 1024f):F1} MB of pictures " +
                     $"resident, ceiling {MaxCachedSprites} floors.");
 
@@ -1128,17 +1154,27 @@ namespace QuestTree.UI
             }
         }
 
-        /// <summary>What a decoded picture costs, from its format rather than from the file: a PNG
-        /// with no alpha decodes to RGB24 at three bytes a pixel, one with alpha to RGBA32 at four.
-        /// An unrecognised format is counted at four, so the number in the log is never optimistic.</summary>
+        /// <summary>
+        /// What a decoded picture costs, from the format the texture ENDED UP in rather than from the
+        /// one it was constructed with or the file's extension: our captures are RGBA PNGs and decode
+        /// to RGBA32 at four bytes a pixel (58 MB for a 4096x3540 floor), a host's JPEG and any PNG
+        /// without an alpha channel decode to RGB24 at three (43 MB for the same floor).
+        ///
+        /// An unrecognised format is counted at four, so the number in the log is never optimistic.
+        /// </summary>
         private static long TextureBytes(Texture2D texture)
         {
             var bytesPerPixel = texture.format switch
             {
-                TextureFormat.RGB24 => 3,
+                // The two LoadImage actually produces for our files.
                 TextureFormat.RGBA32 => 4,
+                TextureFormat.RGB24 => 3,
+
+                // The rest are here so an unexpected answer is still counted rather than guessed at.
                 TextureFormat.ARGB32 => 4,
                 TextureFormat.BGRA32 => 4,
+                TextureFormat.RGBAHalf => 8,
+                TextureFormat.RGBAFloat => 16,
                 TextureFormat.R8 => 1,
                 TextureFormat.Alpha8 => 1,
                 _ => 4

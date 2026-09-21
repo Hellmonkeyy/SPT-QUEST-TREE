@@ -36,7 +36,7 @@ namespace QuestTree.QuestGraph
     ///     and a cut-down culling mask all drew the SAME picture - the terrain, the roads, every
     ///     building and the river - and all four drew it very dark. Identical output means the
     ///     components on the game's camera do not matter and RenderSettings.ambientLight does nothing
-    ///     here; the darkness is the deferred pipeline's raw linear output landing in an 8-bit target
+    ///     here; the darkness is the pipeline's raw linear output landing in an 8-bit target
     ///     with none of the exposure and tonemapping the player's own view gets.
     ///   - a replacement unlit shader drew flat-coloured objects and NO terrain at all. Rejected.
     /// So: copy the live camera's settings (DeferredShading, HDR), render into a HALF-FLOAT target so
@@ -94,22 +94,30 @@ namespace QuestTree.QuestGraph
     /// Cost. Phase 0 timed a 2048 tile in a live raid at 10-61 ms to read back and 58-68 ms to
     /// encode, so the work is spread one step to a frame: each tile's render and readback, then, per
     /// floor, its exposure measurement, its development into eight bits - itself a step for the
-    /// previous picture, one for that picture's sidecar and one per 256 rows, because the whole of
-    /// it is half a second - its encode and write, and its sidecar. None of it can move off the main
+    /// previous picture, one for that picture's sidecar and one per band of
+    /// <see cref="SmoothingBandRows"/> rows, because the whole of it is a second and a half - its
+    /// encode and write, and its sidecar. None of it can move off the main
     /// thread - ReadPixels, GetPixels, SetPixels32 and EncodeToPNG are all main-thread Texture2D
     /// calls - so a capture is a handful of short hitches on a key the player pressed, rather than
     /// one long freeze.
     ///
     /// Memory, at the worst moment of a MERGE of Customs at 4472x2156 (9.6 million pixels, which is
     /// what 0.25 m/px asks for): 116 MB of float buffer (three floats a pixel, freed as soon as the
-    /// floor is developed), 39 MB of the previous picture and 9.6 MB of its distances, 29 MB of
-    /// eight-bit picture and 29 MB of distance texture, 9.6 MB each for the drawn mask and this
+    /// floor is developed), 39 MB of the previous picture and 9.6 MB of its distances, 39 MB of
+    /// four-channel picture and 29 MB of distance texture, 9.6 MB each for the drawn mask and this
     /// capture's distances, a 34 MB half-float staging texture shared by every tile, and the PNG -
-    /// about 300 MB at the peak, and about 190 MB for a fresh capture that reads nothing back. It is
+    /// about 310 MB at the peak, and about 200 MB for a fresh capture that reads nothing back. The
+    /// picture and the previous picture it decodes are a quarter larger than they were, because the
+    /// walkable mask travels as their ALPHA (see ReachIsAlpha) and that is a fourth byte a pixel. It is
     /// large and it is bounded: one floor at a time by construction, every pass runs a band or a chunk
     /// to a frame so no single allocation is bigger than the picture itself, and ReleaseTexture frees
     /// all of it the moment the floor is written. A 2048-setting capture is a sixteenth of the
     /// pixels.
+    ///
+    /// That count is MANAGED memory. The tile target is video memory and is not in it: 2048 square at
+    /// half-float is 34 MB, times the multisampling the device granted - up to 4, which is 134 MB plus
+    /// 67 MB of depth, held for the length of the capture. See <see cref="MsaaLevels"/> for why it is
+    /// four and not eight.
     ///
     /// Everything here is guarded and reversible. It runs on a player's raid frame: fog is restored by
     /// the same statement that changed it, the camera is destroyed in a finally and again in
@@ -211,13 +219,64 @@ namespace QuestTree.QuestGraph
         /// that resolved differently did not produce the same picture and must not merge into one
         /// another.
         ///
-        /// Honest caveat, written here because the log cannot say it: MSAA applies to FORWARD rendering,
-        /// and this camera copies the game's own path, which is DeferredShading. Unity ignores
-        /// multisampling on a deferred camera, so on this path the number in the header is what the
-        /// target was allocated with and not necessarily what antialiased the picture. The
-        /// supersampling above is what does the work; this costs nothing to ask for and helps if the
-        /// path is ever forward.</summary>
-        private static readonly int[] MsaaLevels = { 8, 4, 2, 1 };
+        /// The samples are USED, not merely allocated: <see cref="BuildTarget"/> sets the camera's own
+        /// allowMSAA from what the target was granted, which is Unity's switch for it. The path is forward
+        /// - an orthographic camera never gets deferred shading, whatever the CopyFrom brought, see the
+        /// class doc - so multisampling applies here in a way it would not on a deferred camera.
+        ///
+        /// Four rather than eight because of what it costs in video memory, on a machine that is also
+        /// running a raid: a 2048 half-float target at 8 samples is 268 MB of colour plus 134 MB of
+        /// depth, four hundred megabytes for a tile. At 4 it is half that, and the difference between
+        /// four and eight samples on geometry that is ALSO being supersampled two by two is not
+        /// something anybody will find in the picture.</summary>
+        private static readonly int[] MsaaLevels = { 4, 2, 1 };
+
+        /// <summary>Shade of the flat reflection environment the capture renders against, as linear
+        /// light, and how strongly it is reflected.
+        ///
+        /// One kind of blue-grey sheet came from here. The block by the warehouse yard and the basin at
+        /// the fuel tanks are not water at all: they are reflective roof and metal materials reflecting
+        /// the SKY, and our camera has no reflection environment of its own, so they sample whatever the
+        /// scene default is and come back as a flat sheet of sky seen from above. The water pass below
+        /// correctly left them alone.
+        ///
+        /// The fix is a reflection environment with no sky in it: a tiny cubemap of one neutral grey, at
+        /// a modest intensity, so a reflective surface reads as the metal it is. 0.35 of linear white is
+        /// the middle of the range these captures work in, and 0.6 keeps the reflection present - a wet
+        /// roof should still look wet - without letting it dominate the surface own colour.
+        ///
+        /// Baked ReflectionProbe components are deliberately untouched: an interior with a probe in it
+        /// reflects its own room, which is correct, and switching probes off would darken every interior
+        /// the map has.</summary>
+        private const float ReflectionGrey = 0.35f;
+
+        private const float ReflectionIntensity = 0.6f;
+
+        /// <summary>Side of the reflection cubemap, in pixels. Sixteen: it holds one colour, and the only
+        /// reason not to make it 1 is that some drivers dislike a one-pixel cubemap with mips off.</summary>
+        private const int ReflectionCubeSize = 16;
+
+        /// <summary>The colour real water is painted in the capture - a muted map blue, as a display
+        /// colour, which Unity converts to linear for the shader.
+        ///
+        /// This replaced hiding the water renderers, and the reason is the river. Switching them off took
+        /// the Customs river out of the picture and left its bed showing, which is worse than a flat
+        /// sheet: a map of Customs without its river is a map missing a landmark. So the renderers stay
+        /// on and their materials are swapped for one flat unlit blue for the render - the water is drawn,
+        /// in a colour that reads as water on a map, and nothing reflects the sky through it.</summary>
+        private static readonly Color WaterPaint = new Color(0.30f, 0.50f, 0.68f, 1f);
+
+        /// <summary>Shaders the flat water material is built from, in order: the first that this build has
+        /// wins. Unlit/Color takes a colour directly; Unlit/Texture has no colour property, so it is given
+        /// a one-pixel texture of the colour instead; Legacy Shaders/Diffuse is the last resort and is lit
+        /// rather than unlit, which for a flat blue at this scale is a difference nobody will see.</summary>
+        private static readonly string[] WaterShaders = { "Unlit/Color", "Unlit/Texture", "Legacy Shaders/Diffuse" };
+
+        /// <summary>Which generation of the water treatment a capture was rendered with, for the render
+        /// tag. 1 was nothing, 2 hid the water renderers - which lost the river - and 3 paints them flat.
+        /// Bumped by hand when the treatment changes, because a picture with a blue river in it must not
+        /// be merged pixel by pixel into one with a dry riverbed.</summary>
+        private const int WaterPassVersion = 3;
 
         /// <summary>Whether the per-player distance culling is forced visible while a tile renders.
         ///
@@ -233,12 +292,26 @@ namespace QuestTree.QuestGraph
         /// The game's own ForceEnable is no use here, because SetComponentsEnabled starts a coroutine
         /// that switches twenty-five components a frame (CustomCullingCommon.SetComponentsEnabledWorker),
         /// and a tile is rendered inside one frame. So the components are switched directly, with
-        /// ComponentExtensions.SetEnabledUniversal - the very call the game's own worker makes - and put
-        /// back in the finally of the same method.</summary>
+        /// ComponentExtensions.SetEnabledUniversal - the very call the game's own worker makes.
+        ///
+        /// Held for a FLOOR, not for a render, and that is a measurement rather than a preference: a
+        /// campaign stop on Customs flattens some twenty-seven THOUSAND components out of the culling
+        /// objects, and the game's own worker considers twenty-five of these switches a frame's worth of
+        /// work. Two full passes per tile - one to force them on, one to put them back - is then a
+        /// hitch of its own on top of the render and the readback, twenty-four times over on a
+        /// six-by-four floor. Taking the hold once before a floor's first tile and releasing it after
+        /// its last is the same two passes for the whole floor.
+        ///
+        /// The trade, stated because it is real: for the second or so a floor takes, the player's own
+        /// frames draw the distant geometry too (slower frames, and pop-in that undoes itself), and the
+        /// water is missing from them. And if the player walks INTO a culling collider during that
+        /// second, the game switches those components on while we hold them and the release switches
+        /// them back off - the roof over their head goes until they cross the collider again. A second
+        /// of that, on a key they pressed, against a picture with buildings in it.</summary>
         private static readonly bool ForceCulling = true;
 
         /// <summary>Shader name fragments that mean a renderer is water. Matched case-insensitively
-        /// against Renderer.sharedMaterial.shader.name.
+        /// against the shader name of EVERY shared material the renderer has, not just its first.
         ///
         /// The cyan test in <see cref="Inpaint"/> catches the small flat quads; what it cannot catch is
         /// the large blue-grey translucent sheet over the warehouse yard, which is desaturated rather
@@ -255,7 +328,7 @@ namespace QuestTree.QuestGraph
         /// 150 thousand cells - nothing to build and nothing to hold.</summary>
         private const float ReachCellMetres = 2f;
 
-        /// <summary>How far the mask is grown outward from the walkable area before anything is dimmed.
+        /// <summary>How far the mask is grown outward from the walkable area before anything is cut away.
         /// Eight metres, because the NavMesh is not the map: it stops at every wall, under every
         /// staircase and short of every railing, and a player standing on a catwalk or shooting across a
         /// yard is looking at ground no bot can walk on. Eight metres is wide enough that no roof, no
@@ -266,13 +339,19 @@ namespace QuestTree.QuestGraph
         /// as a soft vignette rather than as a drawn line somebody might mistake for a wall.</summary>
         private const float ReachRampMetres = 6f;
 
-        /// <summary>How much darker a pixel outside the walkable area is drawn, and how much of its
-        /// colour is taken out. Forty-five per cent darker and half desaturated: clearly a different
-        /// kind of ground at a glance, and still legible enough to navigate by, since the scenery out
-        /// there is what a player orients on even when they cannot go to it.</summary>
-        private const float ReachDarken = 0.45f;
-
-        private const float ReachDesaturate = 0.5f;
+        /// <summary>What the mask DOES to a pixel outside the walkable area: nothing at all is drawn
+        /// there. The weight becomes the picture's ALPHA - 255 inside, falling to 0 over the ramp - so the
+        /// out-of-bounds skirt is transparent and the Maps tab shows its own backdrop through it.
+        ///
+        /// It was a 45 % darken and a half desaturation first, and the user's answer to seeing it was
+        /// that the area should be gone rather than dimmed: a dimmed hillside is still a hillside
+        /// somebody will try to walk to. Removing it also solves the holes for free - a chunk the game
+        /// had streamed out is transparent too, which reads as "no picture here" instead of as a black
+        /// building.
+        ///
+        /// Nothing else changes: the merge, the sidecar, the drawn mask and the exposure all work on the
+        /// same numbers they did, and the meta gains no field.</summary>
+        private const bool ReachIsAlpha = true;
 
         /// <summary>Whether the despeckle pass runs. Static readonly, not const, for the same reason as
         /// the two switches below it.</summary>
@@ -338,14 +417,20 @@ namespace QuestTree.QuestGraph
         /// <summary>Rows of the picture developed in one frame when the smoothing is on, against
         /// <see cref="PixelBandRows"/> when it is off.
         ///
-        /// Thirty-two, from a measurement rather than a guess: the exact inner loop over a 4472x2156
-        /// floor (Customs at 0.25 m/px, 9.6 million pixels, 12 % of them holes) was timed at 1748 ms
-        /// on a warm .NET 9 JIT, 0.81 ms a row. Mono in a raid is slower than that, so 256 rows would
-        /// be a third of a second of frozen frame and 32 rows is around 26 ms there and 40-80 ms here
-        /// - the same order as the tile readbacks Phase 0 measured at 10-61 ms. It costs sixty-eight
-        /// frames instead of nine on a map that size, which is a second of wall clock nobody
-        /// notices.</summary>
-        private const int SmoothingBandRows = 32;
+        /// Sixteen, from a measurement rather than a guess. The exact inner loop over a 4472x2156 floor
+        /// (Customs at 0.25 m/px, 9.6 million pixels, 12 % of them holes) was timed at 1748 ms on a warm
+        /// .NET 9 JIT, 0.81 ms a row: 32 rows is 26 ms there, and Mono in a raid put the same band at
+        /// 40-80 ms. Every pixel then gained a reach sample and a despeckle window on top of that
+        /// measurement, so 32 rows is now over the 40 ms that a capture's other steps are budgeted
+        /// against - hence half of it, 13-20 ms on .NET and 20-45 ms in a raid, which is the same order
+        /// as the tile readbacks Phase 0 measured at 10-61 ms.
+        ///
+        /// The band is a WORK SPLIT and nothing else: the luminance buffer carries the filter's halo
+        /// either side (<see cref="FillLuminance"/>) and the smoothing reads the whole float buffer, so
+        /// the picture is byte for byte the same at any band size. It costs a hundred and thirty-five
+        /// frames instead of sixty-eight on a map that size, which is another second of wall clock and
+        /// a shorter hitch in each of them.</summary>
+        private const int SmoothingBandRows = 16;
 
         /// <summary>The spatial weights, built once: (2r+1)^2 of them, indexed row-major from the
         /// window's top-left.</summary>
@@ -469,10 +554,11 @@ namespace QuestTree.QuestGraph
             ";basemap" + CaptureBasemapDistance.ToString("0.###", CultureInfo.InvariantCulture) +
             ";water" + (FillWaterCyan ? "1" : "0") +
             ";cull" + (ForceCulling ? "1" : "0") +
-            ";wr" + WaterShaderTokens.Length.ToString(CultureInfo.InvariantCulture) +
+            ";refl" + (_reflection != null ? "1" : "0") +
+            ";wr" + WaterPassVersion.ToString(CultureInfo.InvariantCulture) +
             ";smooth" + (SmoothingEnabled ? (SmoothingRadius * 2 + 1).ToString(CultureInfo.InvariantCulture) : "0") +
             ";despeckle" + (DespeckleEnabled ? "1" : "0") +
-            ";reach" + (ReachEnabled ? "1" : "0") +
+            ";reach" + (ReachEnabled ? (ReachIsAlpha ? "2" : "1") : "0") +
             ";ss" + SupersampleFactor.ToString(CultureInfo.InvariantCulture) +
             ";msaa" + _msaa.ToString(CultureInfo.InvariantCulture);
 
@@ -658,9 +744,14 @@ namespace QuestTree.QuestGraph
         private RenderTexture _rt;
 
         /// <summary>The texture each tile is read back into, one tile wide and tall, reused for every
-        /// tile of every floor. Half-float when the hardware will render one, so the deferred
-        /// pipeline's values arrive intact instead of clipped into eight bits.</summary>
+        /// tile of every floor. Half-float when the hardware will render one, so the pipeline's
+        /// linear values arrive intact instead of clipped into eight bits.</summary>
         private Texture2D _stage;
+
+        /// <summary>The flat grey reflection environment this capture renders against, built once and
+        /// destroyed with the rest - see <see cref="ReflectionGrey"/>. Null when it could not be built,
+        /// and then the scene own reflections are used and the render tag says so.</summary>
+        private Cubemap _reflection;
 
         /// <summary>Every renderer and LOD group the scene's distance culling switches off, flattened
         /// out of the DisablerCullingObjects once per capture, with room to remember what each was set
@@ -676,13 +767,31 @@ namespace QuestTree.QuestGraph
         /// See <see cref="WaterShaderTokens"/>.</summary>
         private Renderer[] _water;
 
-        private bool[] _waterWasEnabled;
+        /// <summary>What each water renderer was drawing before this capture painted it flat, read once
+        /// in <see cref="CollectWater"/> because a scene does not reassign water materials mid-raid, and
+        /// put back by <see cref="ReleaseWater"/>. The whole ARRAY per renderer, so a mesh whose second
+        /// submesh is the water restores every slot exactly as it was.</summary>
+        private Material[][] _waterMaterials;
 
-        /// <summary>How many entries of each list the current render actually took hold of - see
-        /// <see cref="HoldScene"/>.</summary>
+        /// <summary>The flat blue the water is painted with, one material shared by every water renderer,
+        /// and the one-pixel texture behind it when the shader that resolved needs one. Null when no
+        /// shader resolved, and then the water is left exactly as the game draws it.</summary>
+        private Material _waterFlat;
+
+        private Texture2D _waterFlatTexture;
+
+        /// <summary>Arrays of <see cref="_waterFlat"/>, one per material-slot count seen in the scene, so
+        /// a render assigns a cached array rather than allocating one per renderer per tile.</summary>
+        private Dictionary<int, Material[]> _waterFlatArrays;
+
+        /// <summary>How many water renderers the current render swapped, so the restore walks exactly as
+        /// far as the swap got.</summary>
+        private int _waterSwapped;
+
+        /// <summary>How many entries of the culling list the current FLOOR actually took hold of - see
+        /// <see cref="HoldScene"/>. The water has its own count above, because it is painted per
+        /// render.</summary>
         private int _cullingHeld;
-
-        private int _waterHeld;
 
         /// <summary>Samples of multisampling the tile target was actually allocated with, 1 when the
         /// device refused all of them. Part of <see cref="RenderTag"/> and of the capture header.</summary>
@@ -801,6 +910,19 @@ namespace QuestTree.QuestGraph
                         continue;
                     }
 
+                    // The scene's distance culling forced visible and its water hidden for the whole
+                    // floor, rather than around each render: see ForceCulling for the measurement that
+                    // decides it and for what the player's own frames look like meanwhile. Never
+                    // throws, and the release below runs however the tiles went - including a floor
+                    // abandoned at its first tile - while Cleanup releases it again for a raid that
+                    // ends mid-floor.
+                    HoldScene();
+
+                    // Its own frame, like every other step here: the hold is the one pass over all
+                    // twenty-seven thousand components, and putting it in the same frame as the first
+                    // tile's render and readback would make that frame the longest of the capture.
+                    yield return null;
+
                     for (var tile = 0; tile < plan.TileCount; tile++)
                     {
                         RenderTile(plan, floor, tile);
@@ -810,6 +932,8 @@ namespace QuestTree.QuestGraph
                         // never two.
                         yield return null;
                     }
+
+                    ReleaseScene();
 
                     // The water quads go before the exposure is measured, not just before the merge:
                     // a flat cyan pool is one of the brightest things in a capture, and the rain
@@ -1790,7 +1914,7 @@ namespace QuestTree.QuestGraph
             if (plan.Previous == null) return;
 
             floor.PreviousColour = ReadPicture(
-                Path.Combine(plan.Dir, floor.File), plan, floor, "picture", TextureFormat.RGB24);
+                Path.Combine(plan.Dir, floor.File), plan, floor, "picture", TextureFormat.RGBA32);
         }
 
         /// <summary>The distance sidecar beside the picture <see cref="LoadPreviousColour"/> just
@@ -2136,9 +2260,9 @@ namespace QuestTree.QuestGraph
         ///
         /// Three passes, all cheap on a 150-thousand-cell grid: mark every cell a NavMesh triangle covers
         /// (by the triangle's own bounding box and a barycentric test on the cell centre, so a triangle
-        /// larger than a cell fills it rather than only marking its corners); a two-sweep chamfer distance
-        /// transform outward from the marked cells; then the weight, 255 inside the dilation, falling to 0
-        /// over the ramp.
+        /// larger than a cell fills it rather than only marking its corners); a two-sweep distance
+        /// transform outward from the marked cells - city block, see <see cref="Sweep"/>; then the weight,
+        /// 255 inside the dilation, falling to 0 over the ramp.
         ///
         /// Null, having said so, when there is no NavMesh - and then nothing is dimmed, which is the
         /// right failure: a map with no mask looks exactly as it did before this existed.
@@ -2322,8 +2446,16 @@ namespace QuestTree.QuestGraph
             return true;
         }
 
-        /// <summary>A two-sweep chamfer distance transform: the number of cells from each cell to the
-        /// nearest walkable one, near enough for a mask measured in metres.</summary>
+        /// <summary>A two-sweep distance transform: the number of cells from each cell to the nearest
+        /// walkable one, near enough for a mask measured in metres.
+        ///
+        /// Four-neighbour, so the distance it produces is CITY BLOCK and not Euclidean - the dilation is
+        /// a diamond, and where the nearest walkable cell lies diagonally the 8 m of
+        /// <see cref="ReachDilateMetres"/> reaches 5.7 m and the ramp ends at 9.9 m instead of 14. That
+        /// is written down rather than fixed: the dilation exists to stop a catwalk or a yard being
+        /// dimmed, nothing real is 6 m diagonally from every walkable cell around it, and a diagonal
+        /// term would change every byte of every capture already on disk for a boundary nobody can see
+        /// the shape of.</summary>
         /// <param name="distance">The seeded field, changed in place.</param>
         /// <param name="cellsX">Grid width.</param>
         /// <param name="cellsZ">Grid height.</param>
@@ -2476,13 +2608,14 @@ namespace QuestTree.QuestGraph
             }
         }
 
-        /// <summary>Finds every renderer whose material is a water shader, once per capture, and logs the
-        /// distinct shader names so the token list can be checked against what a map actually uses.
-        /// See <see cref="WaterShaderTokens"/>.</summary>
+        /// <summary>Finds every renderer whose material is a water shader, once per capture, keeps the
+        /// materials each of them draws with, and logs the distinct shader names so the token list can be
+        /// checked against what a map actually uses. See <see cref="WaterShaderTokens"/> and
+        /// <see cref="WaterPaint"/>.</summary>
         private void CollectWater()
         {
             _water = null;
-            _waterWasEnabled = null;
+            _waterMaterials = null;
 
             try
             {
@@ -2490,38 +2623,63 @@ namespace QuestTree.QuestGraph
                 var found = new List<Renderer>();
                 var shaders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
+                // Reused for every renderer in the scene: the alternative is renderer.sharedMaterials,
+                // which allocates an array apiece - tens of thousands of them on a map this size.
+                var materials = new List<Material>(4);
+
                 foreach (var renderer in FindObjectsOfType<Renderer>())
                 {
                     if (renderer == null) continue;
 
-                    // sharedMaterial, not material: reading material INSTANTIATES a copy of it on the
-                    // renderer, which would leak a material per water surface per capture.
-                    var material = renderer.sharedMaterial;
-                    var shader = material != null && material.shader != null ? material.shader.name : null;
-                    if (string.IsNullOrEmpty(shader)) continue;
+                    // sharedMaterial(s), not material(s): reading material INSTANTIATES a copy of it on
+                    // the renderer, which would leak a material per water surface per capture. ALL of
+                    // them, not slot 0 alone: a mesh whose second submesh is the water and whose first
+                    // is the bank around it is still a renderer that must not draw, and the sheet over
+                    // the warehouse yard is exactly the kind of object that has more than one.
+                    materials.Clear();
+                    renderer.GetSharedMaterials(materials);
 
-                    var water = false;
-                    foreach (var token in WaterShaderTokens)
+                    string shader = null;
+
+                    foreach (var material in materials)
                     {
-                        if (shader.IndexOf(token, StringComparison.OrdinalIgnoreCase) < 0) continue;
-                        water = true;
-                        break;
+                        if (material == null || material.shader == null) continue;
+
+                        var name = material.shader.name;
+                        if (string.IsNullOrEmpty(name)) continue;
+
+                        foreach (var token in WaterShaderTokens)
+                        {
+                            if (name.IndexOf(token, StringComparison.OrdinalIgnoreCase) < 0) continue;
+                            shader = name;
+                            break;
+                        }
+
+                        if (shader != null) break;
                     }
 
-                    if (!water) continue;
+                    if (shader == null) continue;
 
                     found.Add(renderer);
                     shaders.Add(shader);
                 }
 
                 _water = found.ToArray();
-                _waterWasEnabled = new bool[_water.Length];
+
+                // Read ONCE, not per render: a scene does not reassign its water materials mid-raid, and
+                // sharedMaterials allocates an array every time it is read.
+                _waterMaterials = new Material[_water.Length][];
+                for (var i = 0; i < _water.Length; i++) _waterMaterials[i] = _water[i].sharedMaterials;
 
                 if (_water.Length > 0)
                 {
+                    BuildWaterPaint();
+
                     Plugin.LogSource?.LogInfo(
-                        $"QuestTree: {_water.Length} water renderer(s) will be left out of the capture, on shader(s) " +
-                        $"[{string.Join(", ", shaders.ToArray())}], found in {Ms(clock.Elapsed.TotalMilliseconds)} ms.");
+                        $"QuestTree: {_water.Length} water renderer(s) will be painted " +
+                        (_waterFlat != null ? "flat blue" : "NOTHING - no flat shader resolved, so they draw as they are") +
+                        $", on shader(s) [{string.Join(", ", shaders.ToArray())}], found in " +
+                        $"{Ms(clock.Elapsed.TotalMilliseconds)} ms.");
                 }
                 else
                 {
@@ -2533,81 +2691,299 @@ namespace QuestTree.QuestGraph
             catch (Exception ex)
             {
                 _water = null;
-                _waterWasEnabled = null;
+                _waterMaterials = null;
                 Plugin.LogSource?.LogWarning(
-                    $"QuestTree: the scene's water renderers could not be found " +
-                    $"({ex.GetType().Name}: {ex.Message}) - pools may appear as flat colour.");
+                    $"QuestTree: the scene water renderers could not be found " +
+                    $"({ex.GetType().Name}: {ex.Message}) - pools may appear as sheets of sky.");
+            }
+        }
+
+        /// <summary>Builds the one flat material every water renderer is painted with, from the first
+        /// shader of <see cref="WaterShaders"/> this build has. Leaves it null, with one Info line, when
+        /// none resolves - and then the water draws as the game draws it, which with the neutral
+        /// reflection above is a duller sheet than it was but still not a river.</summary>
+        private void BuildWaterPaint()
+        {
+            if (_waterFlat != null) return;
+
+            var tried = new List<string>();
+
+            foreach (var name in WaterShaders)
+            {
+                Shader shader = null;
+
+                try
+                {
+                    shader = Shader.Find(name);
+                }
+                catch (Exception ex)
+                {
+                    tried.Add($"{name} threw {ex.GetType().Name}");
+                    continue;
+                }
+
+                if (shader == null)
+                {
+                    tried.Add(name);
+                    continue;
+                }
+
+                try
+                {
+                    var material = new Material(shader) { color = WaterPaint };
+
+                    // Unlit/Texture has no colour property at all, so the colour has to arrive as a
+                    // texture. One pixel of it, which the sampler stretches over the whole surface.
+                    if (material.HasProperty("_MainTex"))
+                    {
+                        _waterFlatTexture = new Texture2D(1, 1, TextureFormat.RGBA32, mipChain: false);
+                        _waterFlatTexture.SetPixel(0, 0, WaterPaint);
+                        _waterFlatTexture.Apply(updateMipmaps: false);
+                        material.mainTexture = _waterFlatTexture;
+                    }
+
+                    _waterFlat = material;
+                    _waterFlatArrays = new Dictionary<int, Material[]>();
+
+                    Plugin.LogSource?.LogDebug(
+                        $"QuestTree: water is painted with \"{name}\" in " +
+                        $"{F(WaterPaint.r)},{F(WaterPaint.g)},{F(WaterPaint.b)}" +
+                        (_waterFlatTexture != null ? " through a one-pixel texture." : "."));
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    tried.Add($"{name} would not make a material ({ex.GetType().Name})");
+                }
+            }
+
+            Plugin.LogSource?.LogInfo(
+                $"QuestTree: no flat shader for the water resolved (tried [{string.Join(", ", tried.ToArray())}]), " +
+                "so water renderers are captured as they are. The cyan pass is still there for whatever comes " +
+                "back flat.");
+        }
+
+        /// <summary>An array of the flat water material as long as a renderer has material slots, cached
+        /// per length: assigning sharedMaterials needs an array of the renderer own length, and building
+        /// one per renderer per tile would be thousands of allocations a floor.</summary>
+        /// <param name="slots">How many material slots the renderer has.</param>
+        private Material[] FlatWaterArray(int slots)
+        {
+            if (_waterFlatArrays.TryGetValue(slots, out var array)) return array;
+
+            array = new Material[slots];
+            for (var i = 0; i < slots; i++) array[i] = _waterFlat;
+
+            _waterFlatArrays[slots] = array;
+            return array;
+        }
+
+        /// <summary>Paints every water renderer flat for the FLOOR that follows, from
+        /// <see cref="HoldScene"/>, and counts how far it got so <see cref="ReleaseWater"/> puts back
+        /// exactly what it changed.
+        ///
+        /// sharedMaterials, never material or materials: the latter two INSTANTIATE the material on the
+        /// renderer, which would leave a copy per water surface behind in the scene for good.</summary>
+        private void HoldWater()
+        {
+            _waterSwapped = 0;
+
+            if (_water == null || _waterFlat == null || _waterMaterials == null) return;
+
+            try
+            {
+                for (var i = 0; i < _water.Length; i++)
+                {
+                    var renderer = _water[i];
+                    _waterSwapped = i + 1;
+
+                    var original = _waterMaterials[i];
+                    if (renderer == null || original == null || original.Length == 0) continue;
+
+                    renderer.sharedMaterials = FlatWaterArray(original.Length);
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: the water could not be painted for this tile ({ex.GetType().Name}: " +
+                    $"{ex.Message}) - whatever was swapped is put back.");
+            }
+        }
+
+        /// <summary>Puts every water renderer back to the materials <see cref="CollectWater"/> found on
+        /// it. Idempotent and never throws: <see cref="ReleaseScene"/> calls it after every floor, and
+        /// <see cref="Cleanup"/> calls it again for a raid that ended mid-floor.</summary>
+        private void ReleaseWater()
+        {
+            if (_water == null || _waterMaterials == null)
+            {
+                _waterSwapped = 0;
+                return;
+            }
+
+            try
+            {
+                for (var i = 0; i < _waterSwapped && i < _water.Length; i++)
+                {
+                    var renderer = _water[i];
+                    var original = _waterMaterials[i];
+
+                    if (renderer == null || original == null || original.Length == 0) continue;
+
+                    renderer.sharedMaterials = original;
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: the water materials could not be put back ({ex.GetType().Name}: {ex.Message}).");
+            }
+            finally
+            {
+                _waterSwapped = 0;
+            }
+        }
+
+        /// <summary>Builds the one-colour cubemap the capture reflects, or leaves it null with a warning.
+        /// A half-float cubemap so the value written is the LINEAR value meant - an eight-bit one would be
+        /// read as sRGB and reflect a third of the intended brightness - with an eight-bit fallback whose
+        /// grey is converted so both reflect the same light.</summary>
+        private void BuildReflection()
+        {
+            try
+            {
+                var half = SystemInfo.SupportsTextureFormat(TextureFormat.RGBAHalf);
+
+                var cube = new Cubemap(
+                    ReflectionCubeSize,
+                    half ? TextureFormat.RGBAHalf : TextureFormat.RGBA32,
+                    mipChain: false);
+
+                var grey = half
+                    ? new Color(ReflectionGrey, ReflectionGrey, ReflectionGrey, 1f)
+                    : new Color(ReflectionGrey, ReflectionGrey, ReflectionGrey, 1f).gamma;
+
+                var face = new Color[ReflectionCubeSize * ReflectionCubeSize];
+                for (var i = 0; i < face.Length; i++) face[i] = grey;
+
+                cube.SetPixels(face, CubemapFace.PositiveX);
+                cube.SetPixels(face, CubemapFace.NegativeX);
+                cube.SetPixels(face, CubemapFace.PositiveY);
+                cube.SetPixels(face, CubemapFace.NegativeY);
+                cube.SetPixels(face, CubemapFace.PositiveZ);
+                cube.SetPixels(face, CubemapFace.NegativeZ);
+                cube.Apply(updateMipmaps: false);
+
+                _reflection = cube;
+
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: the capture reflects a flat {F(ReflectionGrey)} grey " +
+                    $"({(half ? "half-float" : "eight-bit")}) at {F(ReflectionIntensity)} intensity, so reflective " +
+                    "roofs and metal do not come back as sheets of sky.");
+            }
+            catch (Exception ex)
+            {
+                _reflection = null;
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: the capture reflection environment could not be built " +
+                    $"({ex.GetType().Name}: {ex.Message}) - reflective surfaces may appear as flat sheets of sky " +
+                    "colour.");
             }
         }
 
         /// <summary>Switches every hidden renderer on and every water renderer off, remembering what each
-        /// was, for the one render that follows. Both undone by <see cref="ReleaseScene"/> in the same
-        /// method's finally.</summary>
+        /// was, for the FLOOR that follows - see <see cref="ForceCulling"/> for why it is a floor and not
+        /// a render. Undone by <see cref="ReleaseScene"/>, which the floor loop calls after the last tile
+        /// however that tile went, and which <see cref="Cleanup"/> calls again for the raid that ends in
+        /// the middle of one.
+        ///
+        /// Never throws. A hold that failed halfway would otherwise take the floor down with it, and
+        /// what it has already switched is recorded as it goes, so the release puts back exactly the
+        /// entries this got to and no others.</summary>
         private void HoldScene()
         {
-            // How far each loop got, so a throw partway through cannot have the restore below act on
-            // entries still holding the PREVIOUS tile's states - which would switch off geometry the
-            // game had on and leave it off.
+            // How far each loop got, so a throw partway through cannot have the restore act on entries
+            // still holding the PREVIOUS floor's states - which would switch off geometry the game had
+            // on and leave it off.
             _cullingHeld = 0;
-            _waterHeld = 0;
 
-            if (_culling != null)
+            try
             {
-                for (var i = 0; i < _culling.Length; i++)
+                var clock = Stopwatch.StartNew();
+                var forced = 0;
+
+                if (_culling != null)
                 {
-                    var component = _culling[i];
-                    _cullingHeld = i + 1;
+                    for (var i = 0; i < _culling.Length; i++)
+                    {
+                        var component = _culling[i];
+                        _cullingHeld = i + 1;
 
-                    if (component == null) continue;
+                        if (component == null) continue;
 
-                    _cullingWasEnabled[i] = component.IsEnabledUniversal();
-                    if (!_cullingWasEnabled[i]) component.SetEnabledUniversal(true);
+                        _cullingWasEnabled[i] = component.IsEnabledUniversal();
+                        if (_cullingWasEnabled[i]) continue;
+
+                        component.SetEnabledUniversal(true);
+                        forced++;
+                    }
                 }
+
+                // The water goes flat here too, on the same schedule and for the same reason: once a
+                // floor is cheaper than once a tile, and a floor is the unit the scene is held for.
+                HoldWater();
+
+                // The measurement the per-floor hold rests on - see ForceCulling. Once a floor, and
+                // only interesting when a capture hitches, so debug rather than info.
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: the scene is held for a floor - {forced} of {_cullingHeld} culled " +
+                    $"component(s) forced visible and {_waterSwapped} water renderer(s) painted flat in " +
+                    $"{Ms(clock.Elapsed.TotalMilliseconds)} ms.");
             }
-
-            if (_water == null) return;
-
-            for (var i = 0; i < _water.Length; i++)
+            catch (Exception ex)
             {
-                var renderer = _water[i];
-                _waterHeld = i + 1;
-
-                if (renderer == null) continue;
-
-                _waterWasEnabled[i] = renderer.enabled;
-                if (_waterWasEnabled[i]) renderer.enabled = false;
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: the scene could not be held for this floor ({ex.GetType().Name}: " +
+                    $"{ex.Message}) - whatever it had already switched is put back, and the floor is " +
+                    "captured with what the game is drawing.");
             }
         }
 
         /// <summary>Puts every renderer back to what <see cref="HoldScene"/> found it at. Only the ones
-        /// that were changed are written to, so the player's own frame is left exactly as the game had
-        /// it and nothing is touched twice.</summary>
+        /// that were changed are written to, so the scene is left as the game had it and nothing is
+        /// touched twice; only as far as the hold actually got, so a hold that threw cannot have this
+        /// switch off something it never switched on.
+        ///
+        /// Idempotent and never throws, because the floor loop calls it and <see cref="Cleanup"/> calls
+        /// it again: the counts are cleared here, so the second call has nothing to do.</summary>
         private void ReleaseScene()
         {
-            if (_culling != null)
+            try
             {
-                for (var i = 0; i < _cullingHeld; i++)
+                if (_culling != null)
                 {
-                    var component = _culling[i];
-                    if (component == null || _cullingWasEnabled[i]) continue;
+                    for (var i = 0; i < _cullingHeld && i < _culling.Length; i++)
+                    {
+                        var component = _culling[i];
+                        if (component == null || _cullingWasEnabled[i]) continue;
 
-                    component.SetEnabledUniversal(false);
+                        component.SetEnabledUniversal(false);
+                    }
                 }
+
             }
-
-            _cullingHeld = 0;
-
-            if (_water == null) return;
-
-            for (var i = 0; i < _waterHeld; i++)
+            catch (Exception ex)
             {
-                var renderer = _water[i];
-                if (renderer == null || !_waterWasEnabled[i]) continue;
-
-                renderer.enabled = true;
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: the scene could not be put back after a floor ({ex.GetType().Name}: " +
+                    $"{ex.Message}).");
             }
-
-            _waterHeld = 0;
+            finally
+            {
+                _cullingHeld = 0;
+                ReleaseWater();
+            }
         }
 
         // --- the water quads ---------------------------------------------------------------------
@@ -3105,7 +3481,10 @@ namespace QuestTree.QuestGraph
 
             try
             {
-                floor.Texture = new Texture2D(plan.WidthPx, plan.HeightPx, TextureFormat.RGB24, mipChain: false);
+                // RGBA, not RGB: the walkable mask travels as the picture's alpha and EncodeToPNG keeps
+                // it. A quarter more memory than the eight-bit RGB it replaces - see the memory note on
+                // the class - and the only thing in the pipeline that changes.
+                floor.Texture = new Texture2D(plan.WidthPx, plan.HeightPx, TextureFormat.RGBA32, mipChain: false);
                 floor.Block = new Color32[plan.WidthPx * DevelopBandRows];
 
                 // One band's stretched luminance plus the filter's halo - 640 KB at 0.25 m/px, against
@@ -3223,6 +3602,10 @@ namespace QuestTree.QuestGraph
                         // there, which for a first capture is black.
                         var take = drawn && (!oldDrawn || distance < oldDistance);
 
+                        // A pixel nothing has drawn is TRANSPARENT rather than black, for the same reason
+                        // the out-of-bounds skirt is: a hole should read as no picture, not as a dark
+                        // building. Only what this capture draws is written here; a pixel kept from the
+                        // previous capture keeps that capture's own alpha with its colour.
                         if (take)
                         {
                             // Smoothed for every pixel this capture supplies, and only for those: a
@@ -3373,20 +3756,16 @@ namespace QuestTree.QuestGraph
             // dimmed is the PICTURE and the exposure the map was developed with is untouched - which is
             // what keeps a merge byte-stable: the mask is a property of the map, identical in every
             // capture of it.
-            if (reach < 1f)
-            {
-                var outside = 1f - reach;
-                var grey = Luminance(sr, sg, sb);
-                var toGrey = ReachDesaturate * outside;
-                var dim = 1f - ReachDarken * outside;
-
-                sr = (sr + (grey - sr) * toGrey) * dim;
-                sg = (sg + (grey - sg) * toGrey) * dim;
-                sb = (sb + (grey - sb) * toGrey) * dim;
-            }
+            // The mask is the ALPHA, and the colour is left alone - see ReachIsAlpha. A pixel outside
+            // the walkable area is not dimmed, it is not there.
+            var alpha = reach >= 1f
+                ? (byte)255
+                : reach <= 0f
+                    ? (byte)0
+                    : (byte)(reach * 255f + 0.5f);
 
             return new Color32(
-                Encode(sr, gamma), Encode(sg, gamma), Encode(sb, gamma), 255);
+                Encode(sr, gamma), Encode(sg, gamma), Encode(sb, gamma), alpha);
         }
 
         /// <summary>The percentile stretch alone: black at the low percentile, white at the high one,
@@ -3475,9 +3854,12 @@ namespace QuestTree.QuestGraph
         /// rendering path, without this file having to name any of them. CopyFrom copies settings and
         /// no components, so none of the game's own scripts come with it. Only the framing, the
         /// background, the culling mask and the target are then overridden - and the target is a
-        /// half-float one, which is the other half of the fix: the deferred pipeline's output is
-        /// linear light well outside 0..1, and eight bits of it is the near-black picture round 1
-        /// produced.
+        /// half-float one, which is the other half of the fix: the pipeline's output is linear light
+        /// well outside 0..1, and eight bits of it is the near-black picture round 1 produced.
+        ///
+        /// What the copied DeferredShading actually renders as is forward, because this camera is
+        /// orthographic - see the class doc, and the header line below, which reads the path back AFTER
+        /// the projection is set rather than trusting the copy.
         ///
         /// With no live camera to copy - not seen in a raid, but Camera.main is null in some loading
         /// states - a bare camera is used instead and said so in the note. It renders through the
@@ -3528,6 +3910,12 @@ namespace QuestTree.QuestGraph
             _camera.nearClipPlane = NearClip;
             _camera.farClipPlane = 1000f;
             _camera.useOcclusionCulling = false;
+
+            // Unity's own switch for multisampling, and it is OFF while BuildTarget asks for a
+            // multisampled target - see MsaaLevels, where the contradiction and its cost are written
+            // down. Left false deliberately rather than flipped blind: the tiles that exist were read
+            // back off this camera, and whether ReadPixels resolves a target this camera is actually
+            // rendering multisampled is a thing only a raid can answer.
             _camera.allowMSAA = false;
             _camera.depth = -100f;
             var mask = CaptureMask(copied);
@@ -3669,6 +4057,13 @@ namespace QuestTree.QuestGraph
                 _hdr ? TextureFormat.RGBAHalf : TextureFormat.RGBA32,
                 mipChain: false);
 
+            // Unity's own switch for the samples the target was granted: without it the multisampled
+            // target is allocated and resolved and nothing is antialiased by it. BuildCamera sets it
+            // false, which is right until this is known - and it is known here.
+            _camera.allowMSAA = _msaa > 1;
+
+            BuildReflection();
+
             Plugin.LogSource?.LogDebug(
                 $"QuestTree: capture target {_rt.format} with {_msaa}x multisampling, staging {_stage.format}, " +
                 $"{SupersampleFactor}x{SupersampleFactor} samples a pixel, colour space " +
@@ -3713,6 +4108,9 @@ namespace QuestTree.QuestGraph
             var fog = RenderSettings.fog;
             var lodBias = QualitySettings.lodBias;
             var maximumLod = QualitySettings.maximumLODLevel;
+            var reflectionMode = RenderSettings.defaultReflectionMode;
+            var customReflection = RenderSettings.customReflectionTexture;
+            var reflectionIntensity = RenderSettings.reflectionIntensity;
 
             // Declared out here and assigned inside the try, so that everything this method changes is
             // changed under the finally that puts it back.
@@ -3724,15 +4122,24 @@ namespace QuestTree.QuestGraph
                 if (_light != null) _light.enabled = true;
                 basemaps = HoldTerrainBasemaps();
 
-                // The scene's own distance culling forced visible and its water hidden, for this render
-                // only - see ForceCulling and WaterShaderTokens.
-                HoldScene();
+                // The scene's own distance culling and its water are NOT held here: they are held once
+                // per floor by the run loop, because two passes over twenty-seven thousand components
+                // per tile is a hitch of its own - see ForceCulling.
 
                 // The LOD switch, not a quality preference - see CaptureLodBias. maximumLODLevel is
                 // usually already 0 and setting it costs nothing; where the game's quality level has
                 // raised it, it is a second way for the detailed mesh to be unreachable.
                 QualitySettings.lodBias = CaptureLodBias;
                 QualitySettings.maximumLODLevel = 0;
+
+                // The sky taken out of every reflective surface - see ReflectionGrey. Baked
+                // ReflectionProbes are untouched, so an interior still reflects its own room.
+                if (_reflection != null)
+                {
+                    RenderSettings.defaultReflectionMode = UnityEngine.Rendering.DefaultReflectionMode.Custom;
+                    RenderSettings.customReflectionTexture = _reflection;
+                    RenderSettings.reflectionIntensity = ReflectionIntensity;
+                }
 
                 _camera.Render();
             }
@@ -3741,7 +4148,9 @@ namespace QuestTree.QuestGraph
                 // All four restored by the statements that changed them, and for the same reason: the
                 // player's next frame must be drawn with the scene's own fog, the scene's own lights, the
                 // player's own LOD distances and the terrain's own detail.
-                ReleaseScene();
+                RenderSettings.reflectionIntensity = reflectionIntensity;
+                RenderSettings.customReflectionTexture = customReflection;
+                RenderSettings.defaultReflectionMode = reflectionMode;
                 ReleaseTerrainBasemaps(basemaps);
                 QualitySettings.maximumLODLevel = maximumLod;
                 QualitySettings.lodBias = lodBias;
@@ -3892,6 +4301,21 @@ namespace QuestTree.QuestGraph
         {
             try
             {
+                // First, and before anything is freed: a raid that ended between a floor's first and
+                // last tile left the scene's culling forced on and its water off, and this is the only
+                // thing that ever runs on that path. Idempotent, so the ordinary path - where the floor
+                // loop has already released - pays nothing.
+                ReleaseScene();
+
+                // And then let the scene go. These two arrays are tens of thousands of component
+                // references collected in Prepare; held past the capture they would keep a whole raid's
+                // renderers reachable until the next key press replaced them.
+                _culling = null;
+                _cullingWasEnabled = null;
+                _cullingObjects = 0;
+                _water = null;
+                _waterMaterials = null;
+
                 if (_plan != null)
                 {
                     foreach (var floor in _plan.Floors) ReleaseTexture(floor);
@@ -3933,6 +4357,32 @@ namespace QuestTree.QuestGraph
                     var stage = _stage;
                     _stage = null;
                     Destroy(stage);
+                }
+
+                // The water is put back first: a raid that ended mid-tile has it painted flat, and the
+                // materials this destroys below are what it is painted with.
+                ReleaseWater();
+
+                if (_waterFlat != null)
+                {
+                    var flat = _waterFlat;
+                    _waterFlat = null;
+                    _waterFlatArrays = null;
+                    Destroy(flat);
+                }
+
+                if (_waterFlatTexture != null)
+                {
+                    var texture = _waterFlatTexture;
+                    _waterFlatTexture = null;
+                    Destroy(texture);
+                }
+
+                if (_reflection != null)
+                {
+                    var reflection = _reflection;
+                    _reflection = null;
+                    Destroy(reflection);
                 }
             }
             catch (Exception ex)
@@ -4552,6 +5002,89 @@ namespace QuestTree.QuestGraph
             "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
             "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
         };
+
+        /// <summary>The name of the per-map campaign journal, beside the meta.</summary>
+        private const string JournalSuffix = ".campaign.txt";
+
+        /// <summary>How many campaign runs the journal keeps. Twenty: enough to see whether a map has
+        /// always been awkward or has just started being, small enough that the file stays a few
+        /// kilobytes and can be pasted whole into a report.</summary>
+        private const int JournalRuns = 20;
+
+        /// <summary>The line that starts a run in the journal. Counted to trim the file, so it has to be
+        /// something no reason line can begin with.</summary>
+        private const string JournalRunMark = "=== ";
+
+        /// <summary>
+        /// Appends one line to a map's campaign journal, <c>captures/&lt;key&gt;/&lt;key&gt;.campaign.txt</c>.
+        ///
+        /// It exists because the evidence kept being lost. A campaign reports what it did in the game log,
+        /// and a game log is gone the moment the game is restarted - the run that captured 11 of 16 stops
+        /// had nothing left to say why by the time anybody looked. The journal is small, per map, and next
+        /// to the pictures it describes, so it survives the game and travels with the capture folder.
+        ///
+        /// Nothing reads it but a person. It is not in the meta, nothing validates it, and the uploader
+        /// and the packager both ignore it - see DropStalePictures, which keeps only the files the meta
+        /// names and matches PNGs alone.
+        ///
+        /// Never throws: a campaign must not fail because a text file would not open.
+        /// </summary>
+        /// <param name="map">The map's internal name, which is also its capture folder.</param>
+        /// <param name="line">One line, without a newline, in whatever words the caller used in the log.</param>
+        /// <param name="startsRun">True for the line that begins a campaign, which is what the trimming
+        /// counts and what carries the timestamp.</param>
+        internal static void Journal(string map, string line, bool startsRun = false)
+        {
+            try
+            {
+                if (string.IsNullOrEmpty(map) || string.IsNullOrEmpty(line)) return;
+                if (!IsUsableKey(map)) return;
+
+                var dir = CaptureDir(map);
+                if (dir == null) return;
+
+                var path = Path.Combine(dir, map + JournalSuffix);
+                var stamp = DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+
+                var entry = startsRun
+                    ? $"{JournalRunMark}{stamp} {line}"
+                    : $"    {stamp} {line}";
+
+                var kept = new List<string>();
+
+                if (File.Exists(path))
+                {
+                    var existing = File.ReadAllLines(path);
+
+                    // Trimmed by RUNS, not by lines: a campaign writes as many lines as it had stops, so
+                    // a line budget would keep a different number of runs on every map.
+                    var runs = 0;
+                    var from = 0;
+
+                    for (var i = existing.Length - 1; i >= 0; i--)
+                    {
+                        if (!existing[i].StartsWith(JournalRunMark, StringComparison.Ordinal)) continue;
+
+                        runs++;
+                        if (runs < JournalRuns) continue;
+
+                        from = i;
+                        break;
+                    }
+
+                    for (var i = from; i < existing.Length; i++) kept.Add(existing[i]);
+                }
+
+                kept.Add(entry);
+                File.WriteAllLines(path, kept.ToArray());
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: the campaign journal for {map} could not be written ({ex.GetType().Name}: " +
+                    $"{ex.Message}) - the log line above is all there is.");
+            }
+        }
 
         /// <summary>BepInEx/plugins/QuestTree/captures/&lt;key&gt;/, created on demand. Null when the
         /// plugin has no file location - the case KappaQuests and the experiment both guard.</summary>

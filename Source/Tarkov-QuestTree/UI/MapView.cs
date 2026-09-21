@@ -429,13 +429,13 @@ namespace QuestTree.UI
             // statuses, and it is on screen until something replaces it.
             DiscardViewport();
 
-            // And the pictures behind it. Six cached captured floors of a big map is a quarter of a
-            // gigabyte of texture, held for a profile nobody is playing any more; the pictures are
-            // read back off disk in a few hundred milliseconds when they are next wanted. Bitmaps
-            // only - see ReleaseCachedSprites - so a DynamicMaps map does not pay 900 ms of
-            // tessellation for a profile switch. The pending-picture latch goes with them: it points
-            // at a layer whose sprite has just been freed, and the poll it drives would otherwise
-            // report a picture ready that nothing asked for.
+            // And the pictures behind it. Six cached captured floors of a big map is about a third
+            // of a gigabyte of texture - 4096x3540 at RGBA32 is 58 MB each - held for a profile
+            // nobody is playing any more; they are read back off disk in a few hundred milliseconds
+            // when they are next wanted. Bitmaps only, see ReleaseCachedSprites, so a DynamicMaps
+            // map does not pay 900 ms of tessellation for a profile switch. The pending-picture
+            // latch goes with them: it points at a layer whose sprite has just been freed, and the
+            // poll it drives would otherwise report a picture ready that nothing asked for.
             DynamicMapsLibrary.ReleaseCachedSprites();
             _awaitingLayer = null;
 
@@ -1492,6 +1492,12 @@ namespace QuestTree.UI
 
             // A visible backing plate, which also gives the viewport a raycast target - without a
             // Graphic here the drag and scroll handlers would never receive anything.
+            //
+            // It is also what a captured picture's transparent edges reveal: a capture is alpha 0
+            // outside the walkable area, and this plate - dark over the aux panel, and the styled
+            // panel sprite rather than a flat fill - is what is behind it. Nothing in this viewport
+            // is white, which is what a transparent picture drawn over a default Image would have
+            // sat on.
             var backing = viewportGo.GetComponent<Image>();
             backing.color = new Color(0f, 0f, 0f, 0.25f);
             GameStyle.ApplyPanel(backing);
@@ -1557,8 +1563,12 @@ namespace QuestTree.UI
                     picture.type = Image.Type.Simple;
                     picture.preserveAspect = false;
 
-                    // White, explicitly: a UI Image tints its sprite by this, and nothing here
-                    // styles it the way the panel plates are styled.
+                    // White at full alpha, explicitly: a UI Image MULTIPLIES its sprite by this, so
+                    // any other colour would tint the map and any other alpha would fade it. Our
+                    // captures are transparent outside the walkable area on purpose, and what shows
+                    // through there is the viewport's own plate above - a dark panel, never white -
+                    // with the aux panel behind it. The default UI material blends, so the alpha
+                    // needs nothing else turned on.
                     picture.color = Color.white;
                     picture.raycastTarget = false;
                 }

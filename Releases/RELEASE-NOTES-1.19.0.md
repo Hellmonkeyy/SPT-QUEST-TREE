@@ -48,10 +48,33 @@ Smaller things that are all lessons from a picture that came out wrong:
   texture for the same instant, because its detail textures tile about every two metres and two
   metres is four pixels from up there. Both this and the setting above are globals, and both are put
   back by the statement that changed them - your next frame is your own.
+- **The roofs draw wherever you stood.** EFT hides distant geometry by switching renderers off rather
+  than by letting a camera cull them, so a warehouse's roof and upper walls were off while its floor
+  was drawn, and the campaign capture of Customs had the boiler room, Big Red and several warehouses
+  as patches of ground with a black wall outline round them. Every renderer those culling volumes hold
+  is forced on for the instant a tile renders and put back afterwards. The game's own force-enable
+  could not be used: it switches twenty-five components a frame, and a tile is one frame.
+- **The edges are clean.** Each tile is rendered at twice the resolution it is kept at and averaged
+  back down, with multisampling asked of the target on top; a pixel half covered by a roof edge takes
+  the colour of the samples that were drawn rather than a blend with the clear colour. Then a despeckle
+  pass replaces a pixel that disagrees with all eight of its neighbours by their median - the specular
+  glints and single black pixels that a smoothing pass keeps, because a smoothing pass reads an
+  isolated outlier as an edge.
 - The colours are muted and the highlights held back, so the picture reads as a map and a coloured
   pin is the brightest thing on the screen.
-- Water is left out. It renders as flat cyan placeholder blocks from any camera that is not the
-  player's; the ground under it draws instead, which is what a map should show.
+- **Water, glass and transparent effects are left out.** All of them are drawn by shaders that expect
+  the player's camera behind them, and from above they came back as flat cyan blocks by Dorms, blue
+  streaks across the crane and the railway, and a translucent sheet over the warehouse yard. The
+  renderers are switched off for the render and the ground under them draws instead; anything the
+  shader test misses is still painted out of the picture from its surroundings before the exposure is
+  measured.
+- **The picture says where the world ends.** A capture's rectangle is padded and clamped past the
+  playable area, so it takes in hillside and skybox terrain that looks exactly like the map and is not
+  part of it, and nothing on the picture said so. The game's own navigation mesh is the one thing in
+  the scene that knows where a player can go: it is rasterised into a mask, grown 8 m so no roof, yard
+  or interior is caught, and everything outside it is drawn 45 % darker and half desaturated, fading
+  in over 6 m so the boundary reads as a vignette and not as a wall somebody might believe in. The
+  per-floor line says how much: `... 34 % outside the walkable area`.
 - A capture that came back too dark to be a map is **refused rather than written**, and says so:
   heavy weather takes the sun away, and the stretch that would have made a picture of it makes a
   field of noise. A capture taken under different light from the pictures already on disk also
@@ -65,6 +88,18 @@ Smaller things that are all lessons from a picture that came out wrong:
 - Place names come from the scene: the extraction points, and optionally the cleaned-up bot zone
   names. **Map labels** is *Extracts only* by default, because forty zone names over a big map is a
   lot of text. DynamicMaps' artwork keeps its author's own labels whatever this is set to.
+- **The names are readable over a photograph.** White text, or the accent colour for an extract, on a
+  nearly solid dark plate; a fixed size on screen at any zoom rather than a size in map units; a small
+  dot on the exact spot with the plate above it; a name that would land on one already drawn is
+  dropped, and the overlaps are worked out again when the zoom moves by a quarter. Zone names wait
+  until you are zoomed in far enough for them to fit - below that a map's forty-odd tags are a wall of
+  text over everything - and extract names are drawn at any zoom. At nine pixels on a dark plate at
+  55 % the text was sitting on concrete and could not be read; both numbers moved because of that.
+- **Every extract is marked with a green diamond**, whatever the label setting says. The names can be
+  switched off; the extracts cannot, because on a picture of a map they are the first thing anybody
+  looks for. It is an exit-sign green rather than the accent, so it cannot be mistaken for a quest
+  pin; the legend names it, and the facts line counts the extracts - which is how a capture that found
+  none at all announces that it wants taking again.
 
 ## Or capture a whole map without walking it
 
@@ -138,13 +173,30 @@ carries our own credit instead: `Map: captured in-game with Quest Tracker 1.19.0
   against its meta and its meta against the extent's own arithmetic. Each was proven able to fail
   against a planted fake set, one fault at a time. How many maps are covered is a **warning** naming
   the missing ones, not a gate, because a map with no set falls back instead of breaking.
-- **The render recipe is a field.** The capture camera is orthographic, and Unity's built-in pipeline
-  does not give an orthographic camera deferred shading - it falls back to forward whatever the
-  copied settings say, which the code used to claim otherwise and now states, and which is why the
-  capture light may carry a narrow culling mask and per-pixel lighting and have them honoured. The
-  meta's `render` field records the three things that decide what a pixel is a picture of - the
-  light's intensity, the level-of-detail bias, the terrain base-map distance - and any difference at
-  all replaces the set instead of merging into it.
+- **The render recipe is a field.** The meta's `render` field records what decides whether two pictures
+  are pictures of the same thing, and any difference at all replaces the set instead of merging into
+  it. The capture header also stopped printing a rendering path taken from the player's camera before
+  the orthographic switch: that is not the path that renders, and a header that named it was a fact
+  about the wrong camera.
+- **The render recipe now carries eleven things**, not three: the light, the LOD bias, the terrain
+  base-map distance, whether cyan water is painted out, whether the distance culling was forced
+  visible, how many water shader tokens are suppressed, the smoothing window, the despeckle pass, the
+  walkable mask, the supersampling factor and the multisampling level the device actually gave. Each
+  changes what a pixel is a picture of, so each has to force a replacement rather than a merge - which
+  is why every set captured before this release is replaced by the first capture taken after it.
+  Multisampling is asked for at 8, 4, 2 and 1 in turn and the level achieved is recorded, since two
+  machines that resolved differently did not make the same picture; the honest caveat, written in the
+  code beside the constant, is that Unity ignores multisampling on some paths, so the supersampling is
+  what does the work and the MSAA is what costs nothing to ask for.
+- **The walkable mask** is a 2 m grid over the extent - 150 thousand cells on a kilometre of map -
+  built by marking every cell a NavMesh triangle covers (bounding box plus a barycentric test on the
+  cell centre, so one large triangle fills its cells rather than marking their corners), then a
+  two-sweep chamfer distance transform outward, then a weight that is full inside the 8 m dilation and
+  ramps to zero over 6 m. It is applied to the finished picture rather than to the light, after the
+  S-curve and before the highlight ceiling, so the exposure a map was developed with is untouched and
+  a merge stays byte-stable: the mask is a property of the map and is identical in every capture of it.
+  No NavMesh means no mask and nothing dimmed, which is exactly how the picture looked before this
+  existed.
 - **The percentage-pin rule counts item spots too.** A quest with a harvested position on a map loses
   its percentage-placed pins there, and a harvested *item* spot now counts as that coverage in the
   same way a trigger zone does: it is a real world position for that quest from a loaded scene. The
@@ -179,24 +231,26 @@ in the viewport with the pins over it**, once the picture order was set to prefe
 zoomed in far enough to read the ground; and **several presses merging into one set** - by the end
 with no holes left in it and the colour right.
 
-That last pair is also how the two things this release fixes last were found, both of them visible
-in that viewport and neither of them a thing a log line would have said: every building drawing as a
-flat footprint at both camera heights (Unity's LOD selection culling whole objects against a 512 m
-orthographic view, now overridden for the render), and the terrain's detail textures tiling as a
-two-metre checker (now forced to the terrain's smooth base map for the render). The pictures that
-showed both were taken before either fix; a capture taken now does not merge into them, by design.
+**A whole campaign has been run and looked at**, on Customs, with the LOD fix and the terrain base map
+in: the buildings were buildings, the ground was smooth, the merge left no holes anywhere in the map,
+and the place names were legible - which is how the rest of this release's picture work was found,
+because everything below is a fault that campaign's picture showed and no log line could have said.
 
-**Not seen yet:** the buildings and the smooth ground the last two fixes are for - they are written
-against a diagnosis, not against a picture, and the next capture is what confirms them; **the campaign
-key**, which has not been pressed in a raid, so the grid, the teleports and the return to where you
-pressed it are untried; **automatic capture**, which has not been left on for a raid; a second
-client downloading a set from the host; any map with more than one floor, so the multi-floor camera
-and the floor picker over a captured picture are untested in game; the labels' appearance on a real
-picture; the extent-only backdrop, since this install has DynamicMaps for all eleven vanilla maps and
-no modded map to try it on; the other two picture-order settings (prefer-captures is the one that was
-exercised); and the too-dark refusal, which was written *after* the rain capture that prompted it,
-along with the capture light meant to keep a cloudy raid usable. The capture campaign that fills
-`maps\` is what exercises all of it.
+**Not seen yet**, all of it written against that picture rather than confirmed by a newer one: the
+supersampled and despeckled edges; the roofs of the buildings EFT's distance culler had switched off -
+which that capture showed as patches of ground with a wall outline round them; water, glass and
+transparent effects gone from the render; the unreachable ground darkened, so nothing yet confirms
+where the shading falls or that no roof or yard is caught by it; the extract diamonds; and the
+labels' new size, plate and overlap rules - the campaign's names were readable but sat too low in
+contrast on a photograph, which is why they changed. Beyond the picture: **the campaign key's own
+mechanics have now been exercised**, but automatic capture has not been left on for a raid; no second
+client has downloaded a set from the host; no map with more than one floor has been captured, so the
+multi-floor camera and the floor picker over a captured picture are untried; the extent-only backdrop
+is untested, since this install has DynamicMaps for all eleven vanilla maps and no modded map; the
+other two picture-order settings are untried (prefer-captures is the one that was exercised); and the
+too-dark refusal was written *after* the rain capture that prompted it, along with the capture light
+meant to keep a cloudy raid usable. The capture campaign that fills `maps\` is what exercises the
+rest.
 
 ## What to look for
 
@@ -207,9 +261,21 @@ along with the capture light meant to keep a cloudy raid usable. The capture cam
   2236x1078 px (0.50 m/px), 2 tiles, 475 ms, ...`. A tail saying some of it was not drawn is an
   invitation to press the key again somewhere else - do, and watch the second line say how much was
   newly drawn.
-- **The buildings.** Zoom in on a captured picture: warehouses, Dorms and Big Red should be buildings
-  with roofs and shadows, not flat footprints, and the ground between them should be smooth rather
-  than a two-metre checkerboard. Both are new in this release and neither has been seen yet.
+- **The roofs.** Zoom in on the boiler room, Big Red and the warehouses. Each should be a building with
+  a roof on it, not a patch of ground with a black wall outline round it - that outline is what the
+  last campaign's picture showed, and forcing the game's switched-off renderers on for the render is
+  the fix that has not been looked at yet.
+- **The edges and the surfaces.** A railing, a roofline or a wire should be a line rather than a
+  staircase, there should be no single bright or black pixels left in open ground, and the pools by
+  Dorms, the sheet over the warehouse yard and the blue streaks over the crane and the railway should
+  all be gone, with ground and rails in their place.
+- **The grey border.** The picture should fade darker and greyer where the playable area stops, over a
+  few metres rather than at a line - and nothing inside the map, no roof, no yard and no interior,
+  should be caught by it. The capture line says how much of the floor it dimmed.
+- **The names and the extracts.** Every extract should carry a green diamond at any zoom, with
+  "extract" in the legend and a count in the facts line above the sidebar. Names should be readable at
+  a glance over the photograph, the same size however far you zoom, never stacked on each other, and
+  the zone names should appear only as you zoom in.
 - **The campaign key.** Start a raid with AI set to none, press **Ctrl+Shift+F9**, and let it run. It
   should name each stop as it goes (`campaign stop 4 of 16 at ... - captured.`), finish with a count
   and a time, and leave you standing where you pressed it. Then look at the map: it should be whole.
