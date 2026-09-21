@@ -21,28 +21,36 @@ with a host or shipped in a release is downscaled to 2048 whatever the setting s
 **What the render does and does not draw** is most of the work in this release. The top floor is
 shot from 300 m up so roofs draw; the level-of-detail selection that culled every building against a
 kilometre-tall orthographic view is switched off for the render and the terrain put on its averaged
-base map, so buildings are buildings and the ground is not a two-metre checker; every renderer EFT's
-distance culling had switched off is forced visible for the whole of a FLOOR - once before its first
-tile, put back after its last, because a stop on Customs flattens twenty-seven thousand components
-out of the culling objects and the game's own force-enable is a twenty-five-a-frame coroutine that
-would do nothing inside one tile - which is why a capture no longer shows warehouses as patches of
-ground with a wall outline, and why for the second or two a floor takes the player's own frames draw
-that distant geometry too and their water is the flat capture blue. Each tile renders at twice the
-output resolution into a four-sample multisampled target the camera is told to use, and is box-
-averaged back, a half-covered edge taking the colour of its drawn samples alone; a despeckle pass
-medians the isolated outliers a smoothing pass preserves as edges. Water is painted a flat map blue
-rather than hidden - hiding it took the Customs river out of the picture and left its bed showing -
-while glass and transparent effects are left out, cyan the shader test misses is still painted over
-from its surroundings, and reflective surfaces reflect a neutral grey instead of the sky, so a wet
-roof is a roof and not a mirror. The NavMesh is rasterised into a walkable mask, grown 8 m with a 6
-m ramp, and everything outside it is CUT OUT - the mask is the picture's alpha, so the skirt of
-hillside and skybox terrain past the playable area is transparent and the Maps tab's own dark plate
-shows through, which is also what a streamed-out hole now looks like; the per-floor line says how
-much was outside, and host and release copies, being JPEGs, are flattened onto that same black.
-Colours are muted so a pin is the brightest thing on screen; a render too dark to be a map, or one
-under different light from the pictures on disk, is refused rather than written. The meta records
-the whole recipe - eleven values, from the light to the multisampling the device actually gave - and
-a set made under another recipe is replaced, not merged into.
+base map, so buildings are buildings and the ground is not a two-metre checker; every renderer AND
+every whole object EFT's distance culling had switched off is forced visible for the whole of a
+FLOOR - the objects one at a time, each guarded, because activating one runs the game's own Awake
+and OnEnable - once before its first tile, put back after its last, because a stop on Customs
+flattens twenty-seven thousand components out of the culling objects and the game's own force-enable
+is a twenty-five-a-frame coroutine that would do nothing inside one tile - which is why a capture no
+longer shows warehouses as patches of ground with a wall outline, and why for the second or two a
+floor takes the player's own frames draw that distant geometry too and the water on the Water layer
+in them is the flat capture blue. Each tile renders at twice the output resolution into a
+four-sample multisampled target the camera is told to use, and is box-averaged back, a half-covered
+edge taking the colour of its drawn samples alone; a despeckle pass medians the isolated outliers a
+smoothing pass preserves as edges. The renderers on the game's own WATER LAYER are painted a flat
+map blue - hiding them took the Customs river out of the picture and left its bed showing, and
+painting everything whose shader was merely named like water put blue slabs over yards, the bridge
+deck and interior floors, because most of those are wet-surface decals; the layer is the whole test
+now, no shader-name test is left, and a map with nothing on that layer is captured with its water
+exactly as it draws, which the capture line states either way. Glass and transparent effects are
+left out, a patch that came back flat cyan is painted over from its surroundings by a pass that
+tests the pixel's COLOUR rather than any shader, and reflective surfaces reflect a neutral grey
+instead of the sky, so a wet roof is a roof and not a mirror. The NavMesh is rasterised into a
+walkable mask, grown 8 m with a 6 m ramp, and everything outside it is CUT OUT - the mask is the
+picture's alpha, so the skirt of hillside and skybox terrain past the playable area is transparent
+and the Maps tab's own dark plate shows through, which is also what a streamed-out hole now looks
+like; the per-floor line says how much was outside, and host and release copies, being JPEGs, are
+flattened onto that same plate rather than onto black, so a downloaded picture is the tone the
+picture at home is. Colours are muted so a pin is the brightest thing on screen; a
+render too dark to be a map, or one under different light from the pictures on disk, is refused
+rather than written. The meta records the whole recipe - twelve values, from the light to the
+multisampling the device actually gave, with the grey reflection and the generation of the water
+treatment among them - and a set made under another recipe is replaced, not merged into.
 
 **A captured map's names are readable and its extracts are marked.** White text, the accent colour
 for an extract, on a nearly solid dark plate at a fixed size on screen whatever the zoom, a dot on
@@ -95,10 +103,29 @@ captured map carries our own credit line naming the build, the date and the raid
   position for that quest. The boot line says how many percentage pins each map kept and how many
   were dropped, instead of one number that quietly meant the kept ones.
 - The capture header no longer prints a rendering path copied from the player's camera before the
-  orthographic switch, which is not the path that renders. Multisampling is asked for at 8, 4, 2 and
-  1 in turn and the level the device actually gave is recorded in the header and the render tag,
-  since two machines that resolved differently did not make the same picture; the supersampling is
-  what does the antialiasing either way.
+  orthographic switch, which is not the path that renders. Multisampling is asked for at 4, then 2,
+  then 1, and the level the device actually gave is recorded in the header and the render tag, since
+  two machines that resolved differently did not make the same picture; the supersampling is what
+  does the antialiasing either way. Four and not eight because a 2048 half-float tile at eight
+  samples is four hundred megabytes of video memory on a machine that is also running a raid, and on
+  geometry already supersampled two by two nobody will find the difference in the picture.
+- **A floor is captured inside a memory budget.** One floor may work in 256 MiB of arrays and
+  textures, counted at 26 bytes per output pixel term by term, and the pixels per metre come down
+  half a pixel per metre at a time, to a floor of one, until it fits - deterministically, so two
+  captures of one map still agree on the scale and still merge. Interchange at 4 px/m wanted 331 MB
+  a floor and is exactly what died in a raid ("GetPixels: scripting array creation failed" on one
+  floor, an OutOfMemoryException on the other two); it captures at 3.5 px/m and 254 MB instead, and
+  the header says so: `4 px/m would need 331 MB a floor, over the 256 MB budget, so 3.5 px/m (254
+  MB)`. Customs at 4 px/m is 239 MB, inside the budget and untouched, so the sets already on disk
+  stay mergeable.
+- **Two crashes found in a Customs campaign are fixed.** A half-float HDR render can hand back a NaN
+  sample; it was false to every comparison that would have rejected it, reached the smoothing
+  filter's range-weight lookup, and Mono casts a NaN to int.MinValue rather than to the 0 desktop
+  .NET gives - an index a long way outside the array, and four stops died of it. NaN is now treated
+  as "not drawn" in the three places that can see one. And every readback is a view of the texture's
+  own memory through GetPixelData rather than a managed array from GetPixels - 16 bytes a pixel per
+  staging band, a hundred and twenty-eight of them a floor, plus a whole decoded picture per merge,
+  which is what fragmented the heap under the allocation failures above.
 - `package.ps1 -RefreshBuilds` copies the trained weapon-build cache over the shipped seed, printing
   the stamp, the build count and the trader/flea/unpriced split either side of the copy so a worse
   training run is visible, and refusing outright while `SPT.Server.exe` is running. The training

@@ -435,7 +435,7 @@ namespace QuestTree.UI
         /// Entries are carried over from a previous scan when the file on disk has not changed,
         /// which is not an optimisation: a fresh MapEntry means fresh MapLayer objects, and those
         /// hold the decoded pictures and are what the viewport's kept-from key compares. Rebuilding
-        /// an unchanged map would re-decode 58 MB per floor and throw away the player's pan and
+        /// an unchanged map would re-decode up to 39 MiB per floor and throw away the player's pan and
         /// zoom - the same trap <see cref="Synthesise"/>'s cache exists for.
         ///
         /// Two folders claiming the same map is settled by capturedAt, newest first, so a copied-in

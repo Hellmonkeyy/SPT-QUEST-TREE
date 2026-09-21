@@ -23,14 +23,26 @@ namespace QuestTree.Patches
         [PatchPostfix]
         private static void Postfix(GameWorld __instance)
         {
+            // THROWAWAY (the Big Red roof question): the roof probe key, in a try of its OWN. It used to
+            // share the block below, which put a debug tool in front of the harvest, the capture and the
+            // campaign: anything it threw past its own catch - or in the logging inside that catch -
+            // would have taken all three down, and the warning would have blamed the zone harvest.
+            //
+            // Still first, and still ahead of the HarvestZones gate, because it is not part of the
+            // harvest and a raid with the harvest switched off is exactly the raid the roof question
+            // might be settled in. Delete with QuestGraph/RoofProbe.cs.
+            try
+            {
+                RoofProbe.Install(__instance);
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning($"QuestTree: could not install the roof probe key ({ex.Message}).");
+            }
+
             // Inside the game's own raid start; nothing thrown here may reach it.
             try
             {
-                // THROWAWAY (the Big Red roof question): the roof probe key. Ahead of the HarvestZones
-                // gate on purpose - it is a debug key, not part of the harvest - and it null-checks and
-                // catches for itself. Delete with QuestGraph/RoofProbe.cs.
-                RoofProbe.Install(__instance);
-
                 // Only an explicit "off" stops the harvest: with settings unbound (Plugin.Awake
                 // guards that failure separately) the default, on, applies.
                 if (ModSettings.Ready && !ModSettings.HarvestZones.Value) return;

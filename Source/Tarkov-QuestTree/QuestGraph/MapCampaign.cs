@@ -236,9 +236,11 @@ namespace QuestTree.QuestGraph
 
             try
             {
-                var shortcut = ModSettings.CampaignKey.Value;
-                if (shortcut.MainKey == KeyCode.None) return;
-                if (!shortcut.IsDown()) return;
+                // ModSettings.ShortcutDown, not the shortcut's own IsDown: BepInEx refuses a press
+                // while ANY key outside the combination is held, and a raid always holds something.
+                // A held MODIFIER the shortcut does not name still blocks, so this key stays distinct
+                // from the single capture's one-modifier-fewer key - see ShortcutDown.
+                if (!ModSettings.ShortcutDown(ModSettings.CampaignKey.Value)) return;
 
                 if (_running)
                 {

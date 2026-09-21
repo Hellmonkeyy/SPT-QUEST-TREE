@@ -429,8 +429,9 @@ namespace QuestTree.UI
             // statuses, and it is on screen until something replaces it.
             DiscardViewport();
 
-            // And the pictures behind it. Six cached captured floors of a big map is about a third
-            // of a gigabyte of texture - 4096x3540 at RGBA32 is 58 MB each - held for a profile
+            // And the pictures behind it. Six cached captured floors of a big map is about 235 MiB of
+            // texture - a floor is at most 39 MiB at RGBA32, because MapCapture's 256 MiB per-floor
+            // memory budget caps a capture at 10.3 million pixels - held for a profile
             // nobody is playing any more; they are read back off disk in a few hundred milliseconds
             // when they are next wanted. Bitmaps only, see ReleaseCachedSprites, so a DynamicMaps
             // map does not pay 900 ms of tessellation for a profile switch. The pending-picture
@@ -2229,7 +2230,10 @@ namespace QuestTree.UI
         {
             _ = entry;
 
-            return ModSettings.Ready ? ModSettings.MapLabels.Value : ModSettings.LabelMode.ExtractsOnly;
+            // All, which is what the setting's default became in 1.19.0 - this fallback still said
+            // ExtractsOnly, the default before it, so a config that failed to bind drew a different map
+            // from one that bound and was left alone.
+            return ModSettings.Ready ? ModSettings.MapLabels.Value : ModSettings.LabelMode.All;
         }
 
         /// <summary>

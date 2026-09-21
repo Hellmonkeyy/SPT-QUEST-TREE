@@ -117,9 +117,11 @@ namespace QuestTree.QuestGraph
     /// for a whole decoded picture - which is what fragmented the heap in the first place. Every
     /// readback now goes through GetPixelData, a view of the texture's own memory.
     ///
-    /// Between floors, ReleaseTexture frees everything the floor held and GC.Collect runs once - the
-    /// one place this mod collects by hand, because these are large-object-heap allocations and the
-    /// next floor asks for the same sizes a frame later.
+    /// Between floors, ReleaseTexture frees everything the floor held and GC.Collect runs once, a frame
+    /// later so that Unity's deferred Destroy of the picture has happened first - the one place this mod
+    /// collects by hand, because these are large-object-heap allocations and the next floor asks for the
+    /// same sizes a frame later. After the LAST floor it does not run at all: nothing else is coming,
+    /// and Cleanup drops the rest.
     ///
     /// That count is MANAGED memory. The tile target is video memory and is not in it: 2048 square at
     /// half-float is 34 MB, times the multisampling the device granted - up to 4, which is 134 MB plus
@@ -316,11 +318,26 @@ namespace QuestTree.QuestGraph
         /// its last is the same two passes for the whole floor.
         ///
         /// The trade, stated because it is real: for the second or so a floor takes, the player's own
-        /// frames draw the distant geometry too (slower frames, and pop-in that undoes itself), and the
-        /// water is missing from them. And if the player walks INTO a culling collider during that
+        /// frames draw the distant geometry too (slower frames, and pop-in that undoes itself), and any
+        /// water on the water layer is a flat blue sheet in them - the hold swaps its material rather than
+        /// hiding it, see HoldWater. And if the player walks INTO a culling collider during that
         /// second, the game switches those components on while we hold them and the release switches
         /// them back off - the roof over their head goes until they cross the collider again. A second
-        /// of that, on a key they pressed, against a picture with buildings in it.</summary>
+        /// of that, on a key they pressed, against a picture with buildings in it.
+        ///
+        /// Two limitations of the GameObject half of the hold, stated because neither is obvious from the
+        /// code and both would look like a bug in a picture:
+        ///
+        /// 1. No ancestor climb. A culled object is switched on with SetActive(true), which sets its OWN
+        ///    activeSelf - and an object whose PARENT is inactive stays inactive in the scene however
+        ///    active it is itself. The culling lists hold the objects the game's own ForceEnable switches,
+        ///    so this matches what the game does, but geometry parented under something else's disabled
+        ///    root cannot be brought back this way and will still be missing from the capture.
+        /// 2. The pre-state is read at hold time, not at collect time. HoldScene reads activeSelf as it
+        ///    switches each object and ReleaseScene puts back exactly that, so anything the GAME switched
+        ///    between two floors is honoured. What is not honoured is a change made while the hold is on:
+        ///    the release puts the object back to what it was when the floor started, which is the
+        ///    walked-into-a-collider case above.</summary>
         private static readonly bool ForceCulling = true;
 
         /// <summary>The layer real water bodies live on. Layer 4 is Unity's own "Water", and EFT uses
@@ -490,17 +507,25 @@ namespace QuestTree.QuestGraph
 
         /// <summary>What one output pixel costs while its floor is being captured, in bytes, counted
         /// term by term so the budget can be checked by hand:
-        ///   12  the float buffer, three floats a pixel (MapCapture.Pixels)
-        ///    1  the drawn mask (Drawn)
-        ///    1  this capture's distances (Dist)
-        ///    4  the eight-bit RGBA picture (Texture)
-        ///    3  the distance sidecar's texture (DistTexture)
-        ///    4  on a merge, the previous picture (PreviousColour)
-        ///    1  on a merge, its sidecar (PreviousDist)
+        ///   12  the float buffer, three floats a pixel (FloorPlan.Pixels)
+        ///    1  the drawn mask (FloorPlan.Drawn)
+        ///    1  this capture's distances (FloorPlan.Dist)
+        ///    4  the eight-bit RGBA picture (FloorPlan.Texture, a Texture2D)
+        ///    3  the distance sidecar, an RGB24 texture built and thrown away inside EncodeSidecar
+        ///    4  on a merge, the previous picture (FloorPlan.PreviousColour)
+        ///    1  on a merge, its sidecar (FloorPlan.PreviousDist)
         /// The merge terms are counted ALWAYS, because a capture that fits fresh and not merged would
-        /// fail on its second visit to the map, which is the worst moment to find out. Outside the
-        /// model, and deliberately: the shared 34 MB staging texture (one per capture, not per floor),
-        /// the band buffers (a few hundred KB, proportional to width alone) and the encoded PNG.</summary>
+        /// fail on its second visit to the map, which is the worst moment to find out. There is no
+        /// "DistTexture" field, whatever an earlier version of this list said: the sidecar is a texture
+        /// only for the length of one encode.
+        ///
+        /// It is a MODEL of the peak and not a running total, and these are the ways it is not exact. The
+        /// sidecar's encode holds a Color32 staging array as well as its RGB24 texture, four bytes a pixel
+        /// for the length of that one call, and it runs on the frame after the picture was written and
+        /// after the development's own finally has dropped Pixels, PreviousColour and PreviousDist, so the
+        /// two never peak together. Outside the model, and deliberately: the shared 34 MB staging texture
+        /// (one per capture, not per floor), the band buffers (a few hundred KB, proportional to width
+        /// alone) and the encoded PNG.</summary>
         private const long WorkingSetBytesPerPixel = 26L;
 
         /// <summary>How much the pixels per metre come down by when a floor does not fit the budget, and
@@ -597,12 +622,34 @@ namespace QuestTree.QuestGraph
         private const float CaptureBasemapDistance = 0f;
 
         /// <summary>What the meta records about HOW a capture was rendered, and what a later capture has
-        /// to match before it may be merged into it: the capture light, the LOD bias, the terrain base-map
-        /// distance, whether water and cyan are painted out, whether the distance culling was forced
-        /// visible, how many water-shader tokens were suppressed, the smoothing, the despeckle, the
-        /// walkable mask, the supersampling and the multisampling. Every one of them changes what a pixel
-        /// is a picture OF, and a picture of one thing must not be merged pixel by pixel into a picture of
-        /// another.
+        /// to match before it may be merged into it, twelve terms in this order: the capture light
+        /// (<c>own-</c>), the LOD bias (<c>lod</c>), the terrain base-map distance (<c>basemap</c>),
+        /// whether the flat cyan quads are inpainted afterwards (<c>water</c>, from FillWaterCyan),
+        /// whether the distance culling was forced visible (<c>cull</c>), whether the flat grey reflection
+        /// environment was built (<c>refl</c>), what the water-layer paint pass actually did (<c>wr</c>,
+        /// below), the smoothing (<c>smooth</c>), the despeckle (<c>despeckle</c>), the walkable mask
+        /// (<c>reach</c>), the supersampling (<c>ss</c>) and the multisampling (<c>msaa</c>). Every one of
+        /// them changes what a pixel is a picture OF, and a picture of one thing must not be merged pixel
+        /// by pixel into a picture of another.
+        ///
+        /// Nothing here counts suppressed shader tokens, whatever an earlier version of this comment said:
+        /// there is no shader-name test in the water pass at all, only the LAYER - see
+        /// <see cref="WaterLayerName"/>.
+        ///
+        /// The water term records the OUTCOME, not the intention: <c>wr4p</c> is the version-4 water pass
+        /// with a flat material resolved and the water actually painted, <c>wr4n</c> the same build on a
+        /// machine where <see cref="BuildWaterPaint"/> found none of <see cref="WaterShaders"/> and the
+        /// water therefore drew as the game draws it, and <c>wr0n</c> a build with
+        /// <see cref="PaintWater"/> off. Without the p/n those three merged into each other and a painted
+        /// river was averaged pixel by pixel with an unpainted one. The p/n can be read here because
+        /// <see cref="CollectWater"/> runs before the tag does: <see cref="Prepare"/> calls it alongside
+        /// CollectCulling, a dozen lines ahead of the LoadPrevious that reads this property and long
+        /// before the meta that records it (WriteMeta, which the run reaches before the finally), and
+        /// <see cref="Cleanup"/> nulls <c>_waterFlat</c> again after
+        /// each capture, so one capture's outcome is never read into another's. A map with nothing on the water
+        /// layer never calls BuildWaterPaint at all and so records <c>n</c> - correctly: nothing was
+        /// painted there. Adding the letter changes the tag, so every capture taken before this fix is
+        /// replaced by the next capture of its map rather than merged into - once, and on purpose.
         ///
         /// "own-1.5;lod1000;basemap0" is the current recipe. Every one of the three is read from the
         /// constant that is actually applied, so tuning any of them replaces the older captures instead
@@ -617,7 +664,8 @@ namespace QuestTree.QuestGraph
             ";water" + (FillWaterCyan ? "1" : "0") +
             ";cull" + (ForceCulling ? "1" : "0") +
             ";refl" + (_reflection != null ? "1" : "0") +
-            ";wr" + WaterPassVersion.ToString(CultureInfo.InvariantCulture) +
+            ";wr" + (PaintWater ? WaterPassVersion : 0).ToString(CultureInfo.InvariantCulture) +
+            (_waterFlat != null ? "p" : "n") +
             ";smooth" + (SmoothingEnabled ? (SmoothingRadius * 2 + 1).ToString(CultureInfo.InvariantCulture) : "0") +
             ";despeckle" + (DespeckleEnabled ? "1" : "0") +
             ";reach" + (ReachEnabled ? (ReachIsAlpha ? "2" : "1") : "0") +
@@ -730,10 +778,15 @@ namespace QuestTree.QuestGraph
         /// (Player, PlayerRenderers, Weapon Preview, Weapons, PlayerSpiritAura, PlayerCollisionTest),
         /// everything drawn for a screen rather than a world (UI, Menu Environment, RainDrops, Shells,
         /// Sky - which is above a camera that looks down anyway), the invisible volumes (Triggers,
-        /// CullingMask, DisablerCullingObject, the collider layers), corpses - and Water, which the
-        /// first real capture of Customs showed renders as flat cyan placeholder blocks where the
-        /// pools by Dorms are, because the water shader has nothing to reflect from a camera that is
-        /// not the player's. The ground under it draws instead, which reads as a map should.
+        /// CullingMask, DisablerCullingObject, the collider layers) and corpses.
+        ///
+        /// Water is NOT in this list, whatever an earlier version of this comment said. It was, for one
+        /// build: the first real capture of Customs drew the pools by Dorms as flat cyan placeholder
+        /// blocks - the water shader has nothing to reflect from a camera that is not the player's - and
+        /// the layer was dropped so the ground under it drew instead. A map of Customs with no river in it
+        /// is not the map, so water is kept and PAINTED instead: the renderers on the water layer are
+        /// swapped for one flat blue material for the render (see WaterLayerName, WaterPaint and
+        /// HoldWater), and whatever cyan still gets through is inpainted afterwards (FillWaterCyan).
         ///
         /// TransparentFX went the same way and for the same reason: the campaign capture of Customs has
         /// blue streaks lying across the crane and the railway where glass and transparent effects are
@@ -906,9 +959,11 @@ namespace QuestTree.QuestGraph
 
             try
             {
-                var shortcut = ModSettings.CaptureMapKey.Value;
-                if (shortcut.MainKey == KeyCode.None) return;
-                if (!shortcut.IsDown()) return;
+                // ModSettings.ShortcutDown, not the shortcut's own IsDown: BepInEx refuses a press
+                // while ANY key outside the combination is held, which in a raid means the capture
+                // key did nothing whenever the player was moving. A held modifier the shortcut does
+                // not name still blocks, so Ctrl+Shift+F9 is the campaign's key and not this one.
+                if (!ModSettings.ShortcutDown(ModSettings.CaptureMapKey.Value)) return;
 
                 if (_running)
                 {
@@ -986,6 +1041,13 @@ namespace QuestTree.QuestGraph
                     if (!BeginFloor(plan, floor))
                     {
                         floor.Failed = true;
+
+                        // Whatever it had allocated before it gave up goes back HERE, not at Cleanup.
+                        // The floor's three buffers are the last thing BeginFloor does and an
+                        // allocation failure is one of the ways it fails, so this path is exactly the
+                        // one where the next floor - asking for the same sizes a frame later - must not
+                        // be measured against a heap still holding this one's.
+                        ReleaseTexture(floor);
                         continue;
                     }
 
@@ -1067,15 +1129,23 @@ namespace QuestTree.QuestGraph
 
                     ReleaseTexture(floor);
 
+                    yield return null;
+
                     // The ONE place this mod collects by hand, and a multi-floor map is why. A floor's
                     // working set is a hundred megabytes of arrays well over the large-object heap's
                     // threshold, the LOH is not compacted, and the next floor asks for the same sizes
                     // again a frame later - so without this the second floor of Interchange was looking
-                    // for its buffers in a heap still holding the first floor's. Collecting costs tens
-                    // of milliseconds on a frame that has just written a PNG and is yielding anyway.
-                    GC.Collect();
-
-                    yield return null;
+                    // for its buffers in a heap still holding the first floor's.
+                    //
+                    // AFTER the yield, not before it: ReleaseTexture drops the references and calls
+                    // Object.Destroy on the floor's picture, and Unity's Destroy is deferred to the end
+                    // of the current frame - so a collect in the same frame ran while the texture and
+                    // its wrapper were still alive and reclaimed the arrays only.
+                    //
+                    // Skipped on the LAST floor: there is no next floor to make room for, Cleanup in
+                    // the finally is about to drop everything anyway, and the collect is tens of
+                    // milliseconds on the frame the player gets control back in.
+                    if (!ReferenceEquals(floor, plan.Floors[plan.Floors.Count - 1])) GC.Collect();
                 }
 
                 // Nothing is in place until this runs: it commits every staged picture and then
@@ -1493,7 +1563,13 @@ namespace QuestTree.QuestGraph
                                     // filter, whose range-weight lookup casts a float to an int, and
                                     // Mono's cast of a NaN is int.MinValue rather than the 0 a desktop
                                     // .NET gives - an index a long way outside the array.
-                                    if (!IsFinite(sample.r) || !IsFinite(sample.g) || !IsFinite(sample.b))
+                                    // Alpha is tested too, because alpha is half of the drawn test below:
+                                    // a NaN alpha is false to "a <= 0f", so a sample with three zero
+                                    // colour channels and a NaN alpha would count as DRAWN - an empty
+                                    // pixel recorded as a black one, in the mask the whole picture is
+                                    // composed against.
+                                    if (!IsFinite(sample.r) || !IsFinite(sample.g) || !IsFinite(sample.b) ||
+                                        !IsFinite(sample.a))
                                     {
                                         continue;
                                     }
@@ -2831,15 +2907,25 @@ namespace QuestTree.QuestGraph
 
         // --- what the scene hides ----------------------------------------------------------------
 
-        /// <summary>Flattens every DisablerCullingObject's switch list into one array of renderers and
-        /// LOD groups, once per capture. See <see cref="ForceCulling"/> for why this is needed at all.
+        /// <summary>Flattens every DisablerCullingObject's switch list into one array of renderers and LOD
+        /// groups, and its deactivated GameObjects into a second, once per capture. See
+        /// <see cref="ForceCulling"/> for why this is needed at all.
         ///
-        /// Renderers and LOD groups only. The lists also hold lights, fog lights and lamp controllers,
-        /// and those are deliberately left alone: enabling a hundred distant lights would change the
-        /// exposure between one tile and the next and seam the picture, and the capture brings its own
-        /// light for exactly that reason. The GameObject list (_gameObjectsToTurnOff) is left alone too -
-        /// activating a GameObject runs Awake and OnEnable on whatever is attached to it, which is the
-        /// game's own code running because a map was being photographed.
+        /// Renderers and LOD groups from the component lists, and nothing else from them: the lists also
+        /// hold lights, fog lights and lamp controllers, and those are deliberately left alone - enabling a
+        /// hundred distant lights would change the exposure between one tile and the next and seam the
+        /// picture, and the capture brings its own light for exactly that reason.
+        ///
+        /// The GameObject list (_gameObjectsToTurnOff) IS taken, which this comment used to deny. It was
+        /// left alone at first because activating a GameObject runs Awake and OnEnable on whatever is
+        /// attached to it - the game's own code running because a map was being photographed - and that
+        /// caution cost the capture whole buildings: a culler that deactivates the OBJECT never disables
+        /// the renderer on it, so nothing in the component lists could bring it back, and a capture with
+        /// the components forced still had buildings missing. Interchange's interior floors are in the
+        /// picture since these were taken; Big Red's roof is not, and is what the roof probe is for. So
+        /// they are taken, and the risk is paid for instead: each object is switched one at a time inside
+        /// its own try (HoldScene), its pre-state is recorded before the switch, and ReleaseScene puts back
+        /// only what was changed. <see cref="ForceCulling"/> states the two limitations that remain.
         ///
         /// FindObjectsOfType is the expensive part, so it happens here and never again, and the count
         /// and the time are logged.</summary>
@@ -2930,10 +3016,11 @@ namespace QuestTree.QuestGraph
             }
         }
 
-        /// <summary>Finds every renderer whose material is a water shader, once per capture, keeps the
-        /// materials each of them draws with, and logs the distinct shader names so the token list can be
-        /// checked against what a map actually uses. See <see cref="WaterLayerName"/> and
-        /// <see cref="WaterPaint"/>.</summary>
+        /// <summary>Finds every renderer on the water LAYER, once per capture, keeps the materials each of
+        /// them draws with, and logs the distinct shader names it saw on them - as evidence about what a
+        /// map puts on that layer, not as a test: nothing here looks at a shader's name to decide
+        /// anything, which an earlier version of this summary claimed it did. See
+        /// <see cref="WaterLayerName"/> and <see cref="WaterPaint"/>.</summary>
         private void CollectWater()
         {
             _water = null;
@@ -3266,9 +3353,12 @@ namespace QuestTree.QuestGraph
                         // Guarded ONE BY ONE, not as a block: activating an object runs its Awake and
                         // OnEnable, and a script of the game's own that throws in one must not stop the
                         // rest of the roofs coming back.
+                        var recorded = false;
+
                         try
                         {
                             _cullingObjectWasActive[i] = item.activeSelf;
+                            recorded = true;
                             if (_cullingObjectWasActive[i]) continue;
 
                             item.SetActive(true);
@@ -3276,9 +3366,14 @@ namespace QuestTree.QuestGraph
                         }
                         catch (Exception ex)
                         {
-                            // Left as it was found; the restore skips it because its recorded state is
-                            // whatever activeSelf said, and it was not changed.
-                            _cullingObjectWasActive[i] = true;
+                            // Only when the pre-state was never read. SetActive(true) is what runs the
+                            // object's Awake and OnEnable, so a throw from here means the object may
+                            // ALREADY be active - and writing "was active" over a recorded false would
+                            // make the release skip it and leave a roof switched on for the rest of the
+                            // raid. A record that was taken is left exactly as it was taken; only the
+                            // activeSelf read above, which can throw on a destroyed object before
+                            // anything was written, needs the safe default.
+                            if (!recorded) _cullingObjectWasActive[i] = true;
 
                             Plugin.LogSource?.LogDebug(
                                 $"QuestTree: a culled object would not switch on ({ex.GetType().Name}: {ex.Message}).");
@@ -4302,11 +4397,11 @@ namespace QuestTree.QuestGraph
             _camera.farClipPlane = 1000f;
             _camera.useOcclusionCulling = false;
 
-            // Unity's own switch for multisampling, and it is OFF while BuildTarget asks for a
-            // multisampled target - see MsaaLevels, where the contradiction and its cost are written
-            // down. Left false deliberately rather than flipped blind: the tiles that exist were read
-            // back off this camera, and whether ReadPixels resolves a target this camera is actually
-            // rendering multisampled is a thing only a raid can answer.
+            // Unity's own switch for multisampling, false HERE and set for real in BuildTarget, which is
+            // the first place the samples the device actually granted are known (allowMSAA = _msaa > 1).
+            // False until then rather than true-and-hope: a camera allowed to multisample into a target
+            // that was granted one sample is a resolve of nothing. This comment used to say the switch was
+            // left off for the whole capture, from the build where it was - see MsaaLevels.
             _camera.allowMSAA = false;
             _camera.depth = -100f;
             var mask = CaptureMask(copied);
@@ -5404,9 +5499,9 @@ namespace QuestTree.QuestGraph
         /// <summary>The name of the per-map campaign journal, beside the meta.</summary>
         private const string JournalSuffix = ".campaign.txt";
 
-        /// <summary>How many campaign runs the journal keeps. Twenty: enough to see whether a map has
-        /// always been awkward or has just started being, small enough that the file stays a few
-        /// kilobytes and can be pasted whole into a report.</summary>
+        /// <summary>How many campaign runs the journal keeps, INCLUDING the one being written. Twenty:
+        /// enough to see whether a map has always been awkward or has just started being, small enough
+        /// that the file stays a few kilobytes and can be pasted whole into a report.</summary>
         private const int JournalRuns = 20;
 
         /// <summary>The line that starts a run in the journal. Counted to trim the file, so it has to be
@@ -5456,18 +5551,28 @@ namespace QuestTree.QuestGraph
 
                     // Trimmed by RUNS, not by lines: a campaign writes as many lines as it had stops, so
                     // a line budget would keep a different number of runs on every map.
+                    //
+                    // How many OLD runs may stay depends on what is being appended. A line that starts a
+                    // run makes the file hold one more than it did, so nineteen old ones plus this one is
+                    // the twenty the constant promises - keeping twenty and adding a start wrote
+                    // twenty-one. A continuation line belongs to the run already at the end of the file
+                    // and adds none, so all twenty stay.
+                    var keepRuns = startsRun ? JournalRuns - 1 : JournalRuns;
                     var runs = 0;
-                    var from = 0;
+                    var from = keepRuns > 0 ? 0 : existing.Length;
 
-                    for (var i = existing.Length - 1; i >= 0; i--)
+                    if (keepRuns > 0)
                     {
-                        if (!existing[i].StartsWith(JournalRunMark, StringComparison.Ordinal)) continue;
+                        for (var i = existing.Length - 1; i >= 0; i--)
+                        {
+                            if (!existing[i].StartsWith(JournalRunMark, StringComparison.Ordinal)) continue;
 
-                        runs++;
-                        if (runs < JournalRuns) continue;
+                            runs++;
+                            if (runs < keepRuns) continue;
 
-                        from = i;
-                        break;
+                            from = i;
+                            break;
+                        }
                     }
 
                     for (var i = from; i < existing.Length; i++) kept.Add(existing[i]);
@@ -5519,12 +5624,21 @@ namespace QuestTree.QuestGraph
         /// and a map that threw an OutOfMemoryException is not. It is deterministic - the same map at the
         /// same setting always lands on the same number - which matters because the pixels per metre is
         /// part of what decides whether a later capture may be merged into this one (LoadPrevious), and
-        /// two captures of one map have to agree on it without having to agree on anything else.</summary>
+        /// two captures of one map have to agree on it without having to agree on anything else.
+        ///
+        /// The last step is a short one: the scale asked for is rarely a whole number of steps above the
+        /// floor - the pixel cap hands out numbers like 2.197 px/m - so the walk is clamped to
+        /// <see cref="MinBudgetPpm"/> instead of stopping at the last full step above it. The result is
+        /// the highest step at or above the floor that fits, or the floor itself. The floor is a floor
+        /// and not a promise: a map big enough that even 1 px/m is over the budget is captured at 1 px/m
+        /// anyway, with the note saying so in those words, because a smudged map is worth more than a
+        /// refusal - and a scale the pixel cap already hands back at or under the floor gets that note
+        /// too, having never entered the walk.</summary>
         /// <param name="wanted">The scale the resolution setting and the pixel cap ask for.</param>
         /// <param name="widthM">The extent's width in metres.</param>
         /// <param name="heightM">Its height in metres.</param>
-        /// <param name="note">A phrase for the capture header when the budget lowered the scale, or
-        /// null when it did not have to.</param>
+        /// <param name="note">A phrase for the capture header when the budget lowered the scale, or when
+        /// it could not lower it far enough; null when the scale asked for fits as it is.</param>
         private static float Budget(float wanted, double widthM, double heightM, out string note)
         {
             note = null;
@@ -5532,16 +5646,42 @@ namespace QuestTree.QuestGraph
             var ppm = wanted;
             var first = WorkingSet(widthM, heightM, ppm);
 
-            while (ppm - BudgetPpmStep >= MinBudgetPpm && WorkingSet(widthM, heightM, ppm) > CaptureMemoryBudgetBytes)
+            // Clamped to the floor rather than stopping half a step above it. The old condition was
+            // "ppm - step >= MinBudgetPpm", which can only ever REACH 1 px/m from a scale that is a whole
+            // number of steps above it - and the scale asked for usually is not, because the pixel cap
+            // divides a long side in metres into a power of two and hands back numbers like 2.197. From
+            // 2.197 the old walk went 2.197 -> 1.697 -> 1.197 and stopped there, since 0.697 is under the
+            // floor. On any extent where 1.197 px/m is over the budget and 1 px/m is not - a 2900 m square
+            // is 299 MiB against 208 - that abandoned the walk one step early and captured the floor over
+            // budget anyway, which is the OutOfMemoryException this method exists to prevent.
+            while (ppm > MinBudgetPpm && WorkingSet(widthM, heightM, ppm) > CaptureMemoryBudgetBytes)
             {
-                ppm -= BudgetPpmStep;
+                ppm = Math.Max(MinBudgetPpm, ppm - BudgetPpmStep);
+            }
+
+            var settled = WorkingSet(widthM, heightM, ppm);
+
+            // Said FIRST, and whether or not the walk moved: a map the floor itself cannot fit is
+            // captured over the budget, and that is the one outcome this method cannot make safe, so it
+            // has to be in the header rather than inferred from two numbers in it. Whether or not the
+            // walk moved, because a scale already at or under the floor never enters the loop at all -
+            // the pixel cap hands one back for an extent over 8 km on its long side - and the test below
+            // would then return with no note and nothing said.
+            if (settled > CaptureMemoryBudgetBytes)
+            {
+                note =
+                    $"{Ppm(wanted)} px/m would need {Mb(first)} MB a floor and even {Ppm(ppm)} px/m, the lowest " +
+                    $"scale there is, needs {Mb(settled)} MB - over the {Mb(CaptureMemoryBudgetBytes)} MB budget " +
+                    "even at the floor, so this is captured over budget";
+
+                return ppm;
             }
 
             if (ppm >= wanted) return ppm;
 
             note =
                 $"{Ppm(wanted)} px/m would need {Mb(first)} MB a floor, over the {Mb(CaptureMemoryBudgetBytes)} MB " +
-                $"budget, so {Ppm(ppm)} px/m ({Mb(WorkingSet(widthM, heightM, ppm))} MB)";
+                $"budget, so {Ppm(ppm)} px/m ({Mb(settled)} MB)";
 
             return ppm;
         }

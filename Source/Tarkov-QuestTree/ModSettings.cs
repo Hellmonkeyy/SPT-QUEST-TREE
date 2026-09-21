@@ -166,14 +166,25 @@ namespace QuestTree
         /// <summary>The key that takes the map's picture from inside a raid - see
         /// QuestGraph/MapCapture.cs. A modifier by default, like the tracker's own shortcut, so it
         /// cannot be pressed by accident in a firefight; rebindable in the F12 menu, including to
-        /// nothing at all, and shown (not edited) in the in-panel Settings tab.</summary>
+        /// nothing at all, and shown (not edited) in the in-panel Settings tab.
+        ///
+        /// Tested with <see cref="ShortcutDown(KeyboardShortcut)"/>, not BepInEx's IsDown: the movement keys and mouse
+        /// buttons a raid holds no longer block the press. A modifier key the shortcut does not name
+        /// still does, so Ctrl+Shift+F9 is not this key.</summary>
         public static ConfigEntry<KeyboardShortcut> CaptureMapKey { get; private set; }
 
         /// <summary>The key that captures the WHOLE map in one press: it teleports the player across a
         /// grid of standable spots, captures at each, and puts them back - see
         /// QuestGraph/MapCampaign.cs. One modifier more than the single capture's key, because it
         /// moves the player and should be harder to hit by accident than a key that only costs a few
-        /// frames.</summary>
+        /// frames.
+        ///
+        /// Tested with <see cref="ShortcutDown(KeyboardShortcut)"/> like the capture key, so the movement keys a raid holds
+        /// no longer block it - and the extra modifier still keeps the two apart, because a MODIFIER the
+        /// shortcut does not name does block: Ctrl+Shift+F9 fires this key alone (the capture's Ctrl+F9
+        /// sees a Shift it never asked for), and Ctrl+F9 fires the capture alone (this key's Shift is not
+        /// held). The two may go on sharing a main key, which is what makes "one modifier more" a
+        /// meaningful distinction rather than a decoration.</summary>
         public static ConfigEntry<KeyboardShortcut> CampaignKey { get; private set; }
 
         /// <summary>Whether a raid captures the map by itself every few seconds as the player moves
@@ -206,8 +217,15 @@ namespace QuestTree
         /// lettering the way DynamicMaps' artwork does. The fear behind the old default, that forty zone
         /// names would bury a big map in text, is answered by the Maps tab drawing them only from a zoom
         /// in: the wide view stays clean, and the names appear as you go looking for them. Extracts only
-        /// and None remain for anyone who disagrees.</summary>
+        /// and None remain for anyone who disagrees. An existing config that still holds the old default
+        /// is moved onto this one once - see <see cref="MigrateMapLabels"/>.</summary>
         public static ConfigEntry<LabelMode> MapLabels { get; private set; }
+
+        /// <summary>Whether the one-time move of <see cref="MapLabels"/> off its pre-1.19 default has
+        /// already run for this config file - see <see cref="MigrateMapLabels"/>. State rather than a
+        /// preference, so it is kept out of <see cref="Entries"/> and shows no row in the Settings
+        /// tab.</summary>
+        private static ConfigEntry<bool> MapLabelsMigrated { get; set; }
 
         /// <summary>Whether a finished capture is offered to the host this profile plays on - see
         /// QuestGraph/MapTransfer.cs. On by default because the HOST decides: a host that does not
@@ -219,7 +237,13 @@ namespace QuestTree
         /// player - see QuestGraph/RoofProbe.cs, which exists to settle why one warehouse roof will not
         /// be captured. Deliberately NOT in Entries, so the in-panel Settings tab shows no row for it;
         /// it lives in the F12 menu and the cfg file only. Delete this entry, its bind and RoofProbe.cs
-        /// together.</summary>
+        /// together.
+        ///
+        /// A bare F10 as of the key fix, and tested with <see cref="ShortcutDown(KeyboardShortcut)"/> so the keys a raid
+        /// holds do not block it - though a bare binding means Ctrl, Shift or Alt held WILL, since those
+        /// are the keys a shortcut is made of. A cfg written by an earlier build still holds Ctrl+F10, because Bind never
+        /// overwrites a value that is already in the file - RoofProbe.Install prints the bound key at
+        /// raid start so which one it is can be read rather than assumed.</summary>
         public static ConfigEntry<KeyboardShortcut> RoofProbeKey { get; private set; }
 
         /// <summary>Which of the two quest marks the boxes wear. Kappa is the canonical list;
@@ -306,6 +330,97 @@ namespace QuestTree
             parts.Add(KeyName(shortcut.MainKey));
 
             return string.Join(separator ?? " + ", parts.ToArray());
+        }
+
+        /// <summary>The keys that BLOCK a shortcut by being held when the shortcut does not name them -
+        /// the six sided modifier keys and nothing else. Ctrl, Shift and Alt are the keys a shortcut is
+        /// built out of, so one of them held is a statement about which shortcut was meant; W, a mouse
+        /// button and the rest are what a player's hands are doing anyway and say nothing.
+        ///
+        /// Sided, and compared as the KeyCodes they are: a shortcut bound to LeftControl is not satisfied
+        /// by RightControl (it never was - the modifier test needs the key it names), and holding BOTH
+        /// control keys blocks it, because the second one is a held modifier the shortcut does not name.
+        /// That is the same rule in both directions rather than a special case.</summary>
+        private static readonly KeyCode[] ModifierBlockKeys =
+        {
+            KeyCode.LeftShift, KeyCode.RightShift,
+            KeyCode.LeftControl, KeyCode.RightControl,
+            KeyCode.LeftAlt, KeyCode.RightAlt
+        };
+
+        /// <summary>
+        /// Whether a bound shortcut was pressed THIS frame: the main key went down, every modifier it
+        /// names is held, and no OTHER modifier key is.
+        ///
+        /// Here instead of BepInEx's own <c>KeyboardShortcut.IsDown</c> because that method triggers on
+        /// the EXACT combination: it walks a list of block keys and refuses the press if any key outside
+        /// the shortcut is held. In a raid that is almost always - W, Shift, a mouse button - so a capture
+        /// key pressed while moving silently did nothing, and no modified shortcut in this mod had ever
+        /// fired in a raid. The three raid keys (capture, campaign, roof probe) use this test instead.
+        ///
+        /// The difference from BepInEx is exactly one thing: WHICH held keys block. Only the six sided
+        /// modifier keys do (<see cref="ModifierBlockKeys"/>), so W+Ctrl+F9 fires Ctrl+F9 while
+        /// Ctrl+Shift+F9 does not - the Shift is a modifier the shortcut does not name. That keeps what
+        /// the modifier count was always for: the campaign key is one modifier more than the single
+        /// capture's precisely so that pressing it cannot also be read as the capture, and with the block
+        /// list narrowed rather than emptied, two shortcuts may still share a main key.
+        ///
+        /// What that costs a BARE binding, said plainly because it is the one case that can still
+        /// surprise: a shortcut of one unmodified key does not fire while Ctrl, Shift or Alt is held, and
+        /// Shift is sprint. A capture key rebound to a bare M is therefore silent mid-sprint and fires the
+        /// moment the player stops sprinting. Nothing can be done about that without giving up the
+        /// exclusivity above; anyone who wants a key that fires whatever the hands are doing should bind a
+        /// function key with no modifier and press it standing still, which is what the probe key does.
+        /// </summary>
+        /// <param name="shortcut">The bound shortcut. A MainKey of None never fires.</param>
+        public static bool ShortcutDown(KeyboardShortcut shortcut) =>
+            ShortcutDown(shortcut, Input.GetKeyDown, Input.GetKey);
+
+        /// <summary>The test itself, with the input reads handed in so it can be exercised without a
+        /// running game: a few lines of reflection against the built DLL can walk the whole truth table
+        /// - the raid keys with a movement key held, the two F9 shortcuts against each other, a bare key
+        /// under Shift, an unbound one - which is how the rules above were checked rather than argued
+        /// for. There is no such harness in tools/; it is a throwaway, and this seam is what makes
+        /// writing one a five-minute job.</summary>
+        /// <param name="shortcut">The bound shortcut.</param>
+        /// <param name="wentDown">Whether a key went down this frame - Input.GetKeyDown in the game.</param>
+        /// <param name="held">Whether a key is held - Input.GetKey in the game.</param>
+        internal static bool ShortcutDown(
+            KeyboardShortcut shortcut, Func<KeyCode, bool> wentDown, Func<KeyCode, bool> held)
+        {
+            if (wentDown == null || held == null) return false;
+            if (shortcut.MainKey == KeyCode.None) return false;
+
+            // The main key first, so nothing below runs on a frame this shortcut cannot fire on: it is
+            // false for all but one frame of a press, and the enumerations after it are then never made.
+            if (!wentDown(shortcut.MainKey)) return false;
+
+            var modifiers = shortcut.Modifiers;
+
+            foreach (var modifier in modifiers)
+                if (!held(modifier)) return false;
+
+            foreach (var key in ModifierBlockKeys)
+            {
+                if (!held(key)) continue;
+
+                // A shortcut whose MAIN key is itself a modifier - a bare Shift - is not blocked by its
+                // own key being held, which is what pressing it means.
+                if (key == shortcut.MainKey) continue;
+
+                var named = false;
+                foreach (var modifier in modifiers)
+                {
+                    if (modifier != key) continue;
+
+                    named = true;
+                    break;
+                }
+
+                if (!named) return false;
+            }
+
+            return true;
         }
 
         /// <summary>One key as a player would name it: "Ctrl", not "LeftControl".</summary>
@@ -423,6 +538,40 @@ namespace QuestTree
                     "detail row at every zoom. Settings > Colours > Restore previous colours puts the old " +
                     "palette back.");
             }
+        }
+
+        /// <summary>The label mode this setting defaulted to before 1.19.0, kept so the migration below can
+        /// tell an untouched old default from a deliberate choice - the same test
+        /// <see cref="MigrateColourScheme"/> makes on the colours.</summary>
+        private const LabelMode LegacyMapLabels = LabelMode.ExtractsOnly;
+
+        /// <summary>Moves an existing config onto the new "Map labels" default, once.
+        ///
+        /// 1.19.0 changed that default from extracts only to ALL names, because a captured picture carries
+        /// no hand-drawn lettering and the zone names are the only place names it has - and because the
+        /// Maps tab now draws them from a zoom in, so the wide view stays clean either way. Bind leaves an
+        /// existing value alone, so shipping the new default alone would have fixed it for new installs
+        /// and for nobody else: every config written by 1.15-1.18 holds the old default explicitly.
+        ///
+        /// Only a value that still equals the OLD DEFAULT moves, and only once - the marker entry goes
+        /// down whether anything moved or not. Someone who chose extracts only on purpose, or who chooses
+        /// it again after this has run, keeps it: this is a default catching up, not a preference being
+        /// overruled.</summary>
+        private static void MigrateMapLabels()
+        {
+            if (MapLabelsMigrated == null || MapLabels == null) return;
+            if (MapLabelsMigrated.Value) return;
+
+            MapLabelsMigrated.Value = true;
+
+            if (MapLabels.Value != LegacyMapLabels) return;
+
+            MapLabels.Value = LabelMode.All;
+
+            Plugin.LogSource?.LogInfo(
+                "QuestTree: 'Map labels' moved from extracts only to all names, the 1.19 default - a captured " +
+                "map's zone names appear as you zoom in, so the wide view stays as clean as it was. " +
+                "Settings > Map > Map labels puts it back, and this will not be changed again.");
         }
 
         /// <summary>Rewrites one entry to its new default, but only if it still holds the old one.
@@ -640,9 +789,12 @@ namespace QuestTree
                 "Needs 'Harvest quest zones in raid' on, since the picture is drawn to the rectangle that " +
                 "harvest measures.");
 
-            // Ctrl+Shift+F9, one modifier more than the single capture above it. BepInEx triggers a
-            // shortcut on its exact combination only - any other key held blocks it - so Ctrl+Shift+F9
-            // does not also fire Ctrl+F9, and the two can share a main key.
+            // Ctrl+Shift+F9, one modifier more than the single capture above it, and the two can still
+            // share a main key. This used to credit BepInEx's exact-combination rule for that. The
+            // exactness is what stopped either key working in a raid - any held movement key blocked it -
+            // so both now go through ShortcutDown, which keeps the half of the rule that does the work:
+            // a held MODIFIER the shortcut does not name still blocks, so Ctrl+Shift+F9 is not Ctrl+F9,
+            // while W or a mouse button held blocks nothing.
             //
             // It reads back as "Shift + Ctrl + F9" wherever KeyText prints it: BepInEx sorts a
             // shortcut's modifiers by KeyCode, and LeftShift is 304 against LeftControl's 306. The
@@ -683,7 +835,10 @@ namespace QuestTree
                     "step making the files four times smaller and the raid's frames cheaper, which is " +
                     "the setting for a weak machine or a capture refused for being too large. None of " +
                     "them ever stretches a map past four pixels per metre - past that there is no more " +
-                    "detail in the scene to record, only a bigger file. What is shared with a host or " +
+                    "detail in the scene to record, only a bigger file. A capture also works to a memory " +
+                    "budget of 256 MiB per floor, and on a big map that budget, not this setting, decides " +
+                    "the scale: Interchange comes down to 3.5 pixels per metre, and the capture's header " +
+                    "line in the log says so whenever the budget has lowered one. What is shared with a host or " +
                     "shipped in the release is downscaled to 2048 whatever this says.",
                     new AcceptableValueList<int>(2048, 4096, 8192)));
 
@@ -700,6 +855,17 @@ namespace QuestTree
                 "extracts and the map's own zone names, which only appear once you zoom in, so the wide " +
                 "view stays clean), the extracts alone, or none. DynamicMaps' own artwork carries its " +
                 "author's labels whatever this says.");
+
+            // Its own marker rather than the palette's version stamp, because the two migrations are
+            // unrelated and a config that has had one may not have had the other. Advanced, and out of
+            // Entries below, so the Settings tab shows no row for it: it is state, not a preference.
+            MapLabelsMigrated = config.Bind(
+                "Advanced", "Map labels default migrated", false,
+                "Whether the one-time move of 'Map labels' from its old default (extracts only) to its new " +
+                "one (all names) has already been offered to this file. Do not edit: the mod sets it once " +
+                "and will not touch your choice of labels again afterwards.");
+
+            MigrateMapLabels();
 
             UploadCaptures = config.Bind(
                 "Map", "Share captured maps", true,
@@ -747,8 +913,11 @@ namespace QuestTree
 
             // THROWAWAY, to be deleted with QuestGraph/RoofProbe.cs. Its own section so it sits away
             // from the real settings, and kept out of Entries below so the Settings tab shows nothing.
+            // A BARE F10, no modifier: this is a key pressed once, in a raid set aside for the
+            // experiment, and the two presses that produced nothing were pressed with Ctrl. Nothing
+            // in a raid uses F10, and the probe changes nothing in the scene if it is hit by mistake.
             RoofProbeKey = config.Bind(
-                "Advanced", "Roof probe key (throwaway)", new KeyboardShortcut(KeyCode.F10, KeyCode.LeftControl),
+                "Advanced", "Roof probe key (throwaway)", new KeyboardShortcut(KeyCode.F10),
                 "Debug only, and temporary. Pressed inside a raid it writes what the game knows about every " +
                 "renderer, light and reflection probe in a 40 m column above you to " +
                 "BepInEx/plugins/QuestTree/captures/<map>.roofprobe.txt. It exists to find out why one " +

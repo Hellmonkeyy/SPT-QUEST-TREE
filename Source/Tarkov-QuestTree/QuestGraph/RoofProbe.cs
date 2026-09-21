@@ -58,6 +58,16 @@ namespace QuestTree.QuestGraph
 
                 var probe = go.AddComponent<RoofProbe>();
                 probe._gameWorld = gameWorld;
+
+                // Said out loud once per raid, at Info: the probe's first two runs produced nothing
+                // at all and there was no way to tell a key that never fired from a watcher that was
+                // never installed. The key it prints is the bound one, so a cfg edit is visible here
+                // too. Goes with the rest of RoofProbe.cs when the roof question is settled.
+                var key = ModSettings.Ready && ModSettings.RoofProbeKey != null
+                    ? ModSettings.KeyText(ModSettings.RoofProbeKey.Value, " + ")
+                    : "";
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: roof probe watching {(string.IsNullOrEmpty(key) ? "no key (unbound)" : key)}");
             }
             catch (Exception ex)
             {
@@ -68,6 +78,12 @@ namespace QuestTree.QuestGraph
         private GameWorld _gameWorld;
         private bool _warned;
 
+        /// <summary>Whether this raid has already said that the main key was seen with the modifiers
+        /// missing. Once per raid: the point is to tell "the key never reached us" apart from "the
+        /// binding wants a modifier you were not holding", and a held-down key would otherwise say it
+        /// every frame.</summary>
+        private bool _saidModifiersMissing;
+
         private void Update()
         {
             if (!ModSettings.Ready || ModSettings.RoofProbeKey == null) return;
@@ -76,7 +92,26 @@ namespace QuestTree.QuestGraph
             {
                 var shortcut = ModSettings.RoofProbeKey.Value;
                 if (shortcut.MainKey == KeyCode.None) return;
-                if (!shortcut.IsDown()) return;
+
+                // ModSettings.ShortcutDown, not the shortcut's own IsDown: BepInEx refuses a press
+                // while ANY key outside the combination is held, which is why the first two probe
+                // presses in a raid recorded nothing.
+                if (!ModSettings.ShortcutDown(shortcut))
+                {
+                    // The main key went down and the test still failed, so the modifiers are wrong: one
+                    // the binding names is not held, or one it does not name is. Those are the only two
+                    // ways a press can be swallowed now - a movement key cannot do it any more.
+                    if (!_saidModifiersMissing && Input.GetKeyDown(shortcut.MainKey))
+                    {
+                        _saidModifiersMissing = true;
+                        Plugin.LogSource?.LogInfo(
+                            $"QuestTree: roof probe saw {shortcut.MainKey} but the modifiers were not held " +
+                            $"as bound (it wants exactly {ModSettings.KeyText(shortcut, " + ")}, and Ctrl, Shift " +
+                            "or Alt held on top of that blocks it)");
+                    }
+
+                    return;
+                }
 
                 Run();
             }

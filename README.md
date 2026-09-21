@@ -150,11 +150,20 @@ frames - a handful of short hitches, not one long freeze - and takes a second or
   median, which is what removes the specular glints and the single black pixels a smoothing pass
   preserves because it reads them as edges. Zoom in on a railing or a roofline: it is a line, not a
   staircase.
-- **Water is painted a flat map blue**, so the rivers and the ponds are on the map as water. Left to
-  its own shader it comes back as a sheet of reflected sky, and hiding it instead - which is what an
-  earlier build did - took the Customs river out of the picture and left its bed showing, which is a
-  map missing a landmark. Every water surface keeps drawing, in a colour that reads as water. Anything
-  the shader test misses is still painted out of the picture from its surroundings afterwards.
+- **Water on the game's own Water layer is painted a flat map blue**, so a river, a pond or the sea
+  reads as water rather than as a sheet of reflected sky. Two earlier tries were worse: hiding those
+  renderers took the Customs river out of the picture and left its bed showing, and painting every
+  renderer whose *shader* was merely named like water put blue slabs over yards, the bridge deck and
+  several interior floors, because most of those are wet-surface decals and not water at all. So the
+  test is the layer and nothing else - there is no shader-name test left in the capture - and a
+  wet-looking surface is left to draw itself against the flat grey reflection below. On a map with
+  nothing on that layer the water is photographed exactly as it draws; the capture line says which
+  happened, ending either with a count of `water-layer renderers painted` or with `water drawn as
+  is`.
+- **Flat cyan patches are painted over from their surroundings.** That is a separate pass and a
+  *colour* test rather than a shader one: a pixel that comes back with green and blue both high and
+  red low is a water quad the render flattened to cyan, and it is filled in from the ground around it
+  before the exposure is measured.
 - **Glass and transparent effects are left out**, because they are drawn by shaders that expect the
   player's camera behind them and from above they came back as blue streaks over the crane and the
   railway. The crane and the rails under them are what a map should show.
@@ -168,9 +177,14 @@ frames - a handful of short hitches, not one long freeze - and takes a second or
   it. Every one of those renderers is forced visible for the whole of one floor - once before its
   first tile, put back after its last, because a big map holds tens of thousands of them and doing it
   twice per tile would cost more than the render - so roofs draw wherever you took the capture from.
-  The honest trade: for the second or two a floor takes, **your own frames** draw that distant
-  geometry too, which makes them slower, and the water in them is the flat capture blue. Both undo
-  themselves when the floor is done.
+  **Whole objects it had deactivated are switched on too**, not only renderers: a culling volume also
+  holds a list of GameObjects it turns off outright, and a roof that is one of those cannot be brought
+  back by enabling a renderer. Those are switched on one at a time, each in its own guard, because
+  activating an object runs the game's own Awake and OnEnable code and one script that throws must not
+  stop the rest of the roofs coming back; each is put back exactly as it was found. The honest trade:
+  for the second or two a floor takes, **your own frames** draw that distant geometry too, which makes
+  them slower, and the water on the Water layer in them is the flat capture blue. Both undo themselves
+  when the floor is done.
 - **The ground outside the playable area is cut out of the picture.** The extent is padded and clamped
   past the edge of the world, so a capture takes in a border of hillside and skybox terrain that looks
   exactly like the map and is not part of it. Everything outside the area the game's own navigation
@@ -180,19 +194,33 @@ frames - a handful of short hitches, not one long freeze - and takes a second or
   will try to walk to. It also means a chunk the game had streamed out reads as "no picture here"
   rather than as a black building. The per-floor log line says how much of the floor was outside. A
   JPEG cannot carry transparency, so the copies that go to a host or ship in a release are flattened
-  onto the same black the viewport puts behind them.
+  onto that same dark plate - the colour the tab draws where a floor has no picture, not black, so a
+  picture downloaded from a host is the same tone as the one the player who captured it sees.
 - **Capture resolution** is 8192 px on the longest side by default - a quarter of a metre to the
   pixel on Customs, where a vehicle is 16 pixels across - with 4096 and 2048 each a step smaller,
   four times cheaper in file size and in raid frames. None of them draws more than four pixels to the
-  metre, and whatever you capture at, what is shared with a host or shipped in a release is downscaled
-  to 2048.
+  metre, the memory budget below may take a big map a step coarser still, and whatever you capture at,
+  what is shared with a host or shipped in a release is downscaled to 2048.
+- **A floor is captured inside a memory budget**, rather than asked for and hoped for. One floor may
+  work in **256 MiB** of arrays and textures - 26 bytes per output pixel while it is being built -
+  and when the scale the resolution setting asks for would not fit, the capture brings the pixels
+  per metre down half a pixel per metre at a time until it does, to a floor of one. That is why a
+  big map can come out a little coarser than the setting says, and the capture header tells you when
+  it happened: `4 px/m would need 331 MB a floor, over the 256 MB budget, so 3.5 px/m (254 MB)`.
+  Interchange at four pixels to the metre is exactly what died in a raid with "GetPixels: scripting
+  array creation failed" and an OutOfMemoryException, and it is captured at 3.5 px/m instead;
+  Customs at 4 px/m needs 239 MB, is inside the budget and is untouched, so the captures already on
+  your disk still merge. The scale a map lands on is deterministic - the same map at the same
+  setting always gets the same number - which is what lets two captures of it be merged at all.
 - **A capture taken by a different build may replace yours rather than add to it.** The meta records
-  how a picture was rendered - the capture light, the level-of-detail switch, the terrain texture -
-  and two pictures may only be merged when all of that matches, or identical ground would become
-  different pixels. When it does not match, the log says so and the new capture starts the map over:
+  how a picture was rendered - twelve things, from the capture light and the level-of-detail switch to
+  the multisampling the device actually granted - and two pictures may only be merged when all of it
+  matches, or identical ground would become different pixels. When it does not match, the log says so
+  and the new capture starts the map over:
   `QuestTree: the capture of bigmap already on disk cannot be added to - it was taken before the
-  render recipe was recorded, and this one is rendered own-1.5;lod1000;basemap0 - so this one replaces
-  it.`
+  render recipe was recorded, and this one is rendered
+  own-1.5;lod1000;basemap0;water1;cull1;refl1;wr4p;smooth5;despeckle1;reach2;ss2;msaa4 - so this one
+  replaces it.`
 
 **Ctrl+Shift+F9 captures the whole map in one press.** Instead of walking a kilometre of Customs
 pressing the other key, this teleports you across a grid of standable spots 200 m apart, takes a

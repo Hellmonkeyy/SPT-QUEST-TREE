@@ -55,10 +55,17 @@ Smaller things that are all lessons from a picture that came out wrong:
   volumes hold is forced on for the whole of one floor - once before its first tile, put back after its
   last - because a stop on Customs flattens some twenty-seven thousand components out of them and doing
   that twice per tile would be a hitch of its own, twenty-four times over. The game's own force-enable
-  could not be used at all: it switches twenty-five components a frame, and a tile is one frame. The
-  cost is stated rather than hidden: for the second or two a floor takes, the player's own frames draw
-  that distant geometry too and their water is the flat capture blue, and both undo themselves when the
-  floor is done.
+  could not be used at all: it switches twenty-five components a frame, and a tile is one frame.
+  **Whole GameObjects a culling volume deactivates are switched on too**, not only the renderers on
+  its component list: a volume holds both, and a roof that is a deactivated object cannot be brought
+  back by enabling a renderer. Those are done one at a time, each inside its own guard, because
+  activating an object runs the game's own Awake and OnEnable and one script that throws must not stop
+  the rest of the roofs coming back; each one's state is recorded as it is found and put back. Two
+  limits worth writing down: an object whose *parent* is the deactivated one is not climbed to, and the
+  state a release restores is the state at the moment the hold was taken. The cost is stated rather
+  than hidden: for the second or two a floor takes, the player's own frames draw that distant geometry
+  too and the water on the Water layer in them is the flat capture blue, and both undo themselves when
+  the floor is done.
 - **The edges are clean.** Each tile is rendered at twice the resolution it is kept at and averaged
   back down, into a four-sample multisampled target the camera is told to use; a pixel half covered by
   a roof edge takes
@@ -68,14 +75,22 @@ Smaller things that are all lessons from a picture that came out wrong:
   isolated outlier as an edge.
 - The colours are muted and the highlights held back, so the picture reads as a map and a coloured
   pin is the brightest thing on the screen.
-- **Water is painted a flat map blue.** Its own shader has nothing to reflect from a camera that is not
-  the player's, so it came back as flat cyan blocks by Dorms and a sheet of sky over the warehouse
-  yard. Hiding the water renderers - which is what the build before this did - fixed that and took the
-  Customs river out of the map, leaving its bed showing, which is worse: a map of Customs without its
-  river is a map missing a landmark. So the water is drawn, every surface of it, in a colour that reads
-  as water on a map. Anything the shader test misses is still painted out from its surroundings before
-  the exposure is measured, and that test now reads every material a renderer has rather than only its
-  first.
+- **Water on the game's own Water layer is painted a flat map blue.** Its own shader has nothing to
+  reflect from a camera that is not the player's, so it came back as flat cyan blocks by Dorms and a
+  sheet of sky over the warehouse yard. Two answers to that were wrong before this one. Hiding those
+  renderers took the Customs river out of the map and left its bed showing. Painting every renderer
+  whose *shader* was named like water or like a puddle was worse: that matched 256 renderers on
+  Customs, almost all of them wet-surface decals - the sheen over a yard, the bridge deck, an interior
+  floor - and the picture came back with blue slabs all over the map. So the test is the LAYER and
+  nothing else: Unity's layer 4, "Water", which is where EFT puts a river, a pond or the sea, and a
+  merely wet-looking surface is left to draw itself against the grey reflection below. **No
+  shader-name test is left anywhere in the capture.** On a map with nothing on that layer the water is
+  photographed exactly as it draws, and the capture line states which of the two happened - a count of
+  `water-layer renderers painted`, or `water drawn as is`.
+- **A patch that came back flat cyan is painted over from its surroundings** before the exposure is
+  measured. That is a separate pass and a COLOUR test, not a shader one: in raw linear light, green
+  and blue both high with red low is a water quad the render flattened, and it is filled in from the
+  ground around it.
 - **Glass and transparent effects are left out**, for the same reason and with no such loss: from above
   they were blue streaks lying across the crane and the railway, and the crane and the rails are what a
   map should show.
@@ -95,7 +110,9 @@ Smaller things that are all lessons from a picture that came out wrong:
   here" instead of as a black building. The per-floor line says how much: `... 34 % outside the
   walkable area`. Nothing else about a capture changes: the merge, the sidecar, the drawn mask and the
   exposure all work on the same numbers, and a host copy or a zip copy - a JPEG, which cannot carry
-  transparency - is flattened onto the same black the viewport puts behind it.
+  transparency - is flattened onto that same dark plate. Onto the plate's colour and not onto black:
+  black was the first answer and came back a visibly darker rectangle than the same capture looks
+  like at home, two machines showing one map in two tones.
 - A capture that came back too dark to be a map is **refused rather than written**, and says so:
   heavy weather takes the sun away, and the stretch that would have made a picture of it makes a
   field of noise. A capture taken under different light from the pictures already on disk also
@@ -206,19 +223,48 @@ carries our own credit instead: `Map: captured in-game with Quest Tracker 1.19.0
   it. The capture header also stopped printing a rendering path taken from the player's camera before
   the orthographic switch: that is not the path that renders, and a header that named it was a fact
   about the wrong camera.
-- **The render recipe now carries eleven things**, not three: the light, the LOD bias, the terrain
+- **The render recipe now carries twelve things**, not three: the light, the LOD bias, the terrain
   base-map distance, whether cyan water is painted out, whether the distance culling was forced
-  visible, which generation of the water treatment drew it, the smoothing window, the despeckle pass,
-  whether the walkable mask is alpha or shading, the supersampling factor and the multisampling level
-  the device actually gave. Each
-  changes what a pixel is a picture of, so each has to force a replacement rather than a merge - which
-  is why every set captured before this release is replaced by the first capture taken after it.
-  Multisampling is asked for at 4, then 2, then 1, and the level achieved is recorded, since two
-  machines that resolved differently did not make the same picture. Four rather than eight because a
-  2048 half-float tile at eight samples is four hundred megabytes of video memory on a machine that is
-  also running a raid, and the difference on geometry that is already supersampled two by two is not
-  something anybody will find in the picture. The camera is told to use what the target was granted, so
-  the samples are used rather than merely allocated.
+  visible, whether the grey reflection environment was in place, which generation of the water
+  treatment drew it and whether that pass's paint shader was actually there (the `p` or `n` on the
+  `wr` term, so a capture whose shader the platform stripped cannot merge into one that painted),
+  the smoothing window, the despeckle pass, whether the walkable mask is alpha or shading, the
+  supersampling factor and the multisampling level the device actually gave - which spells
+  `own-1.5;lod1000;basemap0;water1;cull1;refl1;wr4p;smooth5;despeckle1;reach2;ss2;msaa4` on this
+  machine. Each changes what a pixel is a picture of, so each has to force a replacement rather than
+  a merge - which is why every set captured before this release is replaced by the first capture
+  taken after it. Multisampling is asked for at 4, then 2, then 1, and the level achieved is
+  recorded, since two machines that resolved differently did not make the same picture. Four rather
+  than eight because a 2048 half-float tile at eight samples is four hundred megabytes of video
+  memory on a machine that is also running a raid, and the difference on geometry that is already
+  supersampled two by two is not something anybody will find in the picture. The camera is told to
+  use what the target was granted, so the samples are used rather than merely allocated.
+- **Memory is budgeted rather than hoped for.** One floor may work in **256 MiB** of arrays and
+  textures, counted term by term at 26 bytes per output pixel - the float buffer, the drawn mask,
+  two sets of distances, the picture, the sidecar texture and, on a merge, the previous picture and
+  its sidecar - and the pixels per metre come down half a pixel per metre at a time, to a floor of
+  one, until the floor fits. Lowering the scale rather than refusing the map, because a map at 2.5
+  px/m is a map and one that threw an OutOfMemoryException is not, and deterministically, because
+  the scale is part of what decides whether a later capture may be merged into this one. Interchange
+  at 4 px/m is 3728x3584 and 331 MB a floor, which is exactly what died in a raid - "GetPixels:
+  scripting array creation failed" on its first floor and an OutOfMemoryException on the other two -
+  and it is captured at 3.5 px/m and 254 MB instead, with the header saying why: `4 px/m would need
+  331 MB a floor, over the 256 MB budget, so 3.5 px/m (254 MB)`. Customs at 4 px/m is 239 MB, inside
+  the budget and untouched, which also keeps the sets already on disk mergeable. Outside that count
+  and small: the 34 MB half-float staging texture, one per capture, and the video memory the tile
+  target holds. Between floors everything the floor held is released and a collect runs by hand, the
+  one place this mod does that, because these are large-object-heap allocations and the next floor
+  asks for the same sizes a frame later.
+- **Two crashes the Customs campaigns found are fixed.** A half-float HDR render can hand back a
+  NaN - a shader dividing by a zero-length vector is the usual way - and a NaN is false to every
+  comparison that would have rejected it, so it travelled into the smoothing filter, whose
+  range-weight lookup casts a float to an int; Mono casts a NaN to int.MinValue where desktop .NET
+  gives 0, which is an index a long way outside the array, and four stops of a campaign died of it.
+  NaN is now treated as "not drawn" in all three places that can see one. Separately, every readback
+  goes through GetPixelData, a view of the texture's own memory, instead of GetPixels: the managed
+  arrays it handed back - 16 bytes a pixel for each of a hundred and twenty-eight staging bands a
+  floor, plus a whole decoded picture per merge - are what fragmented the heap that the allocation
+  failures above fell out of.
 - **The walkable mask** is a 2 m grid over the extent - 150 thousand cells on a kilometre of map -
   built by marking every cell a NavMesh triangle covers (bounding box plus a barycentric test on the
   cell centre, so one large triangle fills its cells rather than marking their corners), then a
@@ -262,26 +308,37 @@ in the viewport with the pins over it**, once the picture order was set to prefe
 zoomed in far enough to read the ground; and **several presses merging into one set** - by the end
 with no holes left in it and the colour right.
 
-**Two whole campaigns have been run on Customs and looked at.** The second of them - with the forced
-culling, the supersampling, the despeckle, the walkable mask and the new labels in - had roofs on the
-buildings everywhere, clean edges, plated names that could be read over the photograph, a green diamond
-on every extract, and the unreachable ground marked off. That is most of this release's picture work
-confirmed on screen rather than argued for, and it is also where the rest of it came from: everything
-below is a fault that picture showed.
+**Several whole campaigns have been run on Customs and looked at.** The one with the forced culling,
+the supersampling, the despeckle, the walkable mask and the new labels in had roofs on the buildings
+everywhere, clean edges, plated names that could be read over the photograph, a green diamond on
+every extract, and the unreachable ground marked off. Two later ones added the rest of the picture
+work: **the cut-out edge** drawn against the panel rather than argued for, **the grey reflections**
+on the wet roofs, **the campaign journal** written and still there after a restart, and **the
+four-sample target** produced. Those runs are also where the water pass's history comes from: the
+build that painted every water-*shader* renderer blue put **blue slabs** over yards, the bridge deck
+and interior floors on screen, which is what the layer test replaced, and the capture taken after
+that fix showed them gone.
 
-**Not seen yet**, all of it written against that picture rather than confirmed by a newer one: **the
-cut-out** - the unreachable area was shaded grey in that capture, and this build makes it transparent
-instead, so nothing yet shows how the fade reads against the panel or that no roof or yard is caught by
-it; **the blue water**, which replaces having hidden it and is meant to put the Customs river back on
-the map; **the grey reflections**, for the wet roofs that mirrored the sky; and **the campaign journal**
-and the four-sample target, neither of which has been produced once. Beyond the picture: automatic
-capture has not been left on for a raid; no second client has downloaded a set from the host; no map
-with more than one floor has been captured, so the multi-floor camera and the floor picker over a
-captured picture are untried; the extent-only backdrop is untested, since this install has DynamicMaps
-for all eleven vanilla maps and no modded map; the other two picture-order settings are untried
-(prefer-captures is the one that was exercised); and the too-dark refusal was written *after* the rain
-capture that prompted it, along with the capture light meant to keep a cloudy raid usable. The capture
-campaign that fills `maps\` is what exercises the rest.
+**A multi-floor map has been captured.** Interchange came back with **three floors**, and its
+interior floors rendered rather than coming back as empty bands - so the multi-floor camera, which
+shoots a floor with another above it from just under that one, does what it was written to do.
+
+**Not seen yet.** **Big Red's roof** is still missing from the Customs pictures and still
+unexplained: nothing this build forces visible brings it back, so what holds it is still to be
+found. **The garage band on Interchange** - the three-floor capture above ran the older
+floor-banding threshold, and the current one should find a fourth band for the garage, which no
+capture has produced. **The memory budget lowering a scale inside a raid**: the arithmetic is
+checked by hand and printed, but no raid has yet logged the header line that says it stepped a map
+down. **The native readbacks in a raid at all** - no capture has yet been taken on the build that
+has them, and what they exist to fix is heap fragmentation over many captures, which only shows in a
+campaign that runs to the end without an allocation failure. Beyond the picture: automatic capture
+has not been left on for a raid; no second client has downloaded a set from the host; the floor
+picker over a captured multi-floor picture has not been driven; the extent-only backdrop is
+untested, since this install has DynamicMaps for all eleven vanilla maps and no modded map; the
+other two picture-order settings are untried (prefer-captures is the one that was exercised); and
+the too-dark refusal was written *after* the rain capture that prompted it, along with the capture
+light meant to keep a cloudy raid usable. The capture campaign that fills `maps\` is what exercises
+the rest.
 
 ## What to look for
 
@@ -292,9 +349,12 @@ campaign that fills `maps\` is what exercises the rest.
   2236x1078 px (0.50 m/px), 2 tiles, 475 ms, ...`. A tail saying some of it was not drawn is an
   invitation to press the key again somewhere else - do, and watch the second line say how much was
   newly drawn.
-- **The water.** The Customs river and the ponds should be on the map, in a flat blue that reads as
-  water - not a sheet of reflected sky, and not a dry riverbed. The wet roofs should look like roofs
-  rather than mirrors, and the blue streaks over the crane and the railway should be gone.
+- **The water.** No blue slabs anywhere: not over a yard, not on the bridge deck, not across an
+  interior floor. Whatever the map has on the Water layer should read as water rather than as a sheet
+  of reflected sky, and the capture line says which case you got - a count of `water-layer renderers
+  painted`, or `water drawn as is`, which means the map had nothing on that layer and its water was
+  photographed as it draws. The wet roofs should look like roofs rather than mirrors, and the blue
+  streaks over the crane and the railway should be gone.
 - **The cut-out edge.** The picture should fade out into the panel where the playable area stops, over
   a few metres rather than at a line, and nothing inside the map - no roof, no yard, no interior -
   should be caught by it. The capture line says how much of the floor was outside. A transparent patch

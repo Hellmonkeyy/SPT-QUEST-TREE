@@ -228,8 +228,15 @@ namespace QuestTree.QuestGraph
 
                 var triangulation = NavMesh.CalculateTriangulation();
 
-                _lastTriangulationMap = map;
-                _lastTriangulation = triangulation;
+                // Memoised under a REAL map name only. The read above refuses an empty one, so storing a
+                // triangulation under null or "" could never be hit again - it would only throw away the
+                // memo the loaded map already had and make the next real ask triangulate the whole
+                // NavMesh a second time, hundreds of thousands of vertices, in a player's raid frame.
+                if (!string.IsNullOrEmpty(map))
+                {
+                    _lastTriangulationMap = map;
+                    _lastTriangulation = triangulation;
+                }
 
                 return triangulation;
             }

@@ -129,7 +129,9 @@ namespace QuestTree.UI
 
             /// <summary>How much texture memory this floor's decoded picture holds, or 0 when it
             /// holds none. Summed by <see cref="ResidentRasterBytes"/>: one captured floor of a big
-            /// map is around 58 MB (4096x3540 RGBA32), so the cache ceiling is worth seeing. A field rather
+            /// map is around 39 MiB (3262x3136 at RGBA32, which is the largest a floor can be - the
+            /// capture's own memory budget caps one at 256 MiB of working set at 26 B a pixel, so no
+            /// picture reaches 10.4 million pixels), so the cache ceiling is worth seeing. A field rather
             /// than a property with a private setter because the loader that knows the answer is
             /// BuildRasterSprite, in the enclosing class, which private would shut out.</summary>
             public long RasterBytes;
@@ -478,7 +480,7 @@ namespace QuestTree.UI
 
         /// <summary>How much texture memory the cached captured pictures hold. Only the bitmaps
         /// count: a tessellated SVG is a mesh, and the biggest of those is a fraction of one
-        /// 4096x3540 floor.</summary>
+        /// 3262x3136 floor.</summary>
         internal static long ResidentRasterBytes
         {
             get
@@ -491,8 +493,8 @@ namespace QuestTree.UI
 
         /// <summary>Drops one floor's picture out of the cache and frees it. For a capture that has
         /// just been replaced by a fresh one: its layer objects are about to be thrown away, and a
-        /// released-but-still-listed layer would sit in the LRU holding 58 MB that nothing can ever
-        /// show again.</summary>
+        /// released-but-still-listed layer would sit in the LRU holding up to 39 MiB that nothing can
+        /// ever show again.</summary>
         internal static void ReleaseLayer(MapLayer layer)
         {
             if (layer == null) return;
@@ -510,7 +512,7 @@ namespace QuestTree.UI
         /// Frees every cached picture, or only the bitmaps.
         ///
         /// Called on a profile change (MapView.ResetSession), where the pictures held are the last
-        /// profile's and the ceiling of six captured floors is about a third of a gigabyte of texture.
+        /// profile's and the ceiling of six captured floors is about 235 MiB of texture at the worst.
         /// Bitmaps only by default because they are the memory: an SVG costs a 900 ms tessellation
         /// to get back and a mesh to keep, so throwing those away trades a real cost for almost
         /// nothing.
@@ -1059,11 +1061,11 @@ namespace QuestTree.UI
         ///
         /// Mipmaps off, because the picture is stretched onto its floor's world rectangle and the
         /// view's zoom is a container scale - there is no minification chain worth 33 % more memory
-        /// on a 58 MB texture. Bilinear filtering, so zooming in blurs rather than blocks.
+        /// on a 39 MiB texture. Bilinear filtering, so zooming in blurs rather than blocks.
         ///
         /// markNonReadable, which drops the CPU-side copy the decode leaves behind. That copy is the
-        /// same size as the texture - 4096x3540 at RGBA32 is 58 MB per floor of a big map, and the
-        /// cache holds six - and nothing here ever reads a pixel back.
+        /// same size as the texture - 3262x3136 at RGBA32 is 39 MiB, which is the biggest a floor of a
+        /// big map gets, and the cache holds six - and nothing here ever reads a pixel back.
         ///
         /// SpriteMeshType.FullRect rather than the default tight mesh, which matters twice over now.
         /// A tight mesh is traced from the texture's ALPHA, which a non-readable texture cannot be
@@ -1157,8 +1159,9 @@ namespace QuestTree.UI
         /// <summary>
         /// What a decoded picture costs, from the format the texture ENDED UP in rather than from the
         /// one it was constructed with or the file's extension: our captures are RGBA PNGs and decode
-        /// to RGBA32 at four bytes a pixel (58 MB for a 4096x3540 floor), a host's JPEG and any PNG
-        /// without an alpha channel decode to RGB24 at three (43 MB for the same floor).
+        /// to RGBA32 at four bytes a pixel (39 MiB for a 3262x3136 floor, the largest the capture's
+        /// memory budget allows), a host's JPEG and any PNG without an alpha channel decode to RGB24 at
+        /// three (29 MiB for the same floor, and a host's copy is downscaled to 2048 long side anyway).
         ///
         /// An unrecognised format is counted at four, so the number in the log is never optimistic.
         /// </summary>

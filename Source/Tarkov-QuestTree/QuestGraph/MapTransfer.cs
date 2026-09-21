@@ -66,11 +66,18 @@ namespace QuestTree.QuestGraph
         /// so a host copy has to be flattened onto SOMETHING, and that something has to be what the local
         /// picture looks like against the tab it is drawn in or the two will not match.
         ///
-        /// Black, because the viewport's own backing plate is black at 25 % and the slab drawn where there
-        /// is no picture is (0.17, 0.18, 0.19) at 95 % - UI/MapView.cs:150-153, which records both - and
-        /// the plate is the darker of the two. A transparent skirt shows the plate, not the slab, so the
-        /// plate is what it is flattened onto.</summary>
-        private static readonly Color32 BackdropFill = new Color32(0, 0, 0, 255);
+        /// The SLAB, (0.17, 0.18, 0.19) - 43, 46, 48 in eight bits - and not the black the first version
+        /// used. UI/MapView.cs:153 (MapView.BackdropColor) draws that slab over a floor's whole bounds
+        /// wherever there is no picture of it, and the local RGBA picture is drawn on top of it; the
+        /// viewport's black backing plate is behind the slab, not behind the picture. So the skirt of a
+        /// local capture reads as the slab, and a host JPEG flattened onto black came back a visibly
+        /// darker rectangle than the same capture looks like at home - two machines showing the same map
+        /// in two different tones, which is exactly what this constant exists to prevent.
+        ///
+        /// The slab's own 95 % alpha is not carried into this. Composited over the black plate it would be
+        /// 41, 44, 46 instead of 43, 46, 48 - two levels in eight bits, under what a q80 JPEG preserves
+        /// anyway - and a JPEG has no alpha to record it in.</summary>
+        private static readonly Color32 BackdropFill = new Color32(43, 46, 48, 255);
 
         /// <summary>The most one encoded floor may weigh before this side declines to offer it.
         /// Mirrors the host's own per-floor ceiling: a floor over it would be rejected, and a
@@ -437,6 +444,9 @@ namespace QuestTree.QuestGraph
         /// a host receives looks like what the capturing player sees. Straight source-over: the colour is
         /// already premultiplied by nothing, so it is c*a + fill*(1-a), and every pixel comes out opaque.
         ///
+        /// Called on the FULL-SIZE picture, before the downscale - see <see cref="Encode"/> for why the
+        /// order is load-bearing and what the full-size pass costs.
+        ///
         /// Guarded like everything else on this path: a picture that cannot be read back is sent as it is
         /// rather than not sent, because a JPEG with a black skirt is a worse picture and no picture is a
         /// worse map.</summary>
@@ -528,6 +538,26 @@ namespace QuestTree.QuestGraph
 
                 ScaleTo(source.width, source.height, MaxLongSide, out var width, out var height);
 
+                // The alpha flattened onto the tab's own backdrop BEFORE the downscale, because a JPEG
+                // has none - see BackdropFill.
+                //
+                // Before and not after, which is where this used to be: Graphics.Blit filters RGBA
+                // straight, un-premultiplied, so along the cut-out edge it averaged the colour of opaque
+                // ground with the colour BEHIND a transparent pixel - and where nothing was drawn at all
+                // (a streamed-out chunk, the world outside the playable area) the capture leaves that
+                // colour black. The alpha the filter produced was a clean ramp and the colour was a dark
+                // fringe, and compositing afterwards then kept that fringe and only removed the ramp:
+                // every capture offered to a host had a dark outline around the playable area and around
+                // every hole in it. Flattened first, there is no transparency left for the filter to
+                // average against and every pixel it mixes is a colour somebody can see.
+                //
+                // The price is that this runs on the FULL-SIZE picture: GetPixels32 of a 4472x2156
+                // Customs floor is a 38 MB managed array (32 MB for a 4096x2048 one), allocated for the
+                // length of the flatten and gone before the blit. Paid on an upload of a finished
+                // capture, outside a raid frame, and it is the same array this method already allocates
+                // for the encode further down.
+                Composite(source);
+
                 var encodeFrom = source;
 
                 if (width != source.width || height != source.height)
@@ -535,8 +565,8 @@ namespace QuestTree.QuestGraph
                     render = RenderTexture.GetTemporary(width, height, 0, RenderTextureFormat.ARGB32);
 
                     // The GPU does the filtering. The alternative - GetPixels32 and a bilinear loop -
-                    // is 58 MB of managed array and a few hundred milliseconds on the thread drawing
-                    // frames, for the same picture.
+                    // is the same 38 MB of managed array the flatten above pays for, plus a few hundred
+                    // milliseconds on the thread drawing frames, for the same picture.
                     Graphics.Blit(source, render);
 
                     RenderTexture.active = render;
@@ -561,11 +591,6 @@ namespace QuestTree.QuestGraph
                         "not describe its own pictures, so this floor is not offered. Capture the map again.");
                     return false;
                 }
-
-                // The alpha flattened onto the tab's own backdrop, because a JPEG has none - see
-                // BackdropFill. Done on the SCALED picture, so it is two million pixels at most whatever
-                // the capture's resolution was.
-                Composite(encodeFrom);
 
                 var jpg = encodeFrom.EncodeToJPG(JpegQuality);
 
