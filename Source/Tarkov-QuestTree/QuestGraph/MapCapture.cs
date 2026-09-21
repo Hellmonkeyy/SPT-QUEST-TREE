@@ -273,10 +273,16 @@ namespace QuestTree.QuestGraph
         private static readonly string[] WaterShaders = { "Unlit/Color", "Unlit/Texture", "Legacy Shaders/Diffuse" };
 
         /// <summary>Which generation of the water treatment a capture was rendered with, for the render
-        /// tag. 1 was nothing, 2 hid the water renderers - which lost the river - and 3 paints them flat.
-        /// Bumped by hand when the treatment changes, because a picture with a blue river in it must not
-        /// be merged pixel by pixel into one with a dry riverbed.</summary>
-        private const int WaterPassVersion = 3;
+        /// tag, bumped by hand because a picture with a blue river in it must not be merged pixel by
+        /// pixel into one with a dry riverbed.
+        ///
+        /// 1 did nothing. 2 hid every renderer whose shader was named like water, which took the Customs
+        /// river out of the picture and left its bed showing. 3 painted those same renderers flat blue,
+        /// which put blue slabs over every yard, the bridge deck and several interior floors, because
+        /// most of them were wet-surface decals rather than water. 4 paints the renderers on the WATER
+        /// LAYER and nothing else, and leaves the decals to the neutral reflection and the cyan inpaint -
+        /// see WaterLayerName.</summary>
+        private const int WaterPassVersion = 4;
 
         /// <summary>Whether the per-player distance culling is forced visible while a tile renders.
         ///
@@ -310,15 +316,19 @@ namespace QuestTree.QuestGraph
         /// of that, on a key they pressed, against a picture with buildings in it.</summary>
         private static readonly bool ForceCulling = true;
 
-        /// <summary>Shader name fragments that mean a renderer is water. Matched case-insensitively
-        /// against the shader name of EVERY shared material the renderer has, not just its first.
+        /// <summary>The layer real water bodies live on. Layer 4 is Unity's own "Water", and EFT uses
+        /// it for what it is: the river down the middle of Customs, the ponds, the sea.
         ///
-        /// The cyan test in <see cref="Inpaint"/> catches the small flat quads; what it cannot catch is
-        /// the large blue-grey translucent sheet over the warehouse yard, which is desaturated rather
-        /// than cyan and would need a threshold loose enough to eat real roofs. This is the same fault
-        /// fixed at its source: whatever renders as water is not drawn at all, and the ground under it
-        /// is. The cyan pass stays as the second line, for water this misses.</summary>
-        private static readonly string[] WaterShaderTokens = { "water", "puddle" };
+        /// It is the LAYER and not the shader name, and that distinction is the whole of this pass. A
+        /// shader-name search for "water" or "puddle" matched 256 renderers on Customs, almost all of
+        /// them wet-surface DECALS - the sheen over a yard, the bridge deck, an interior floor - and
+        /// painting those flat blue put slabs of blue all over the map. What is on layer 4 is a water
+        /// body; what merely has a wet-looking shader is a surface that should be left to draw
+        /// itself.</summary>
+        private const string WaterLayerName = "Water";
+
+        /// <summary>Whether the water-layer renderers are painted flat at all.</summary>
+        private static readonly bool PaintWater = true;
 
         /// <summary>Whether the walkable-area mask is baked into the picture.</summary>
         private static readonly bool ReachEnabled = true;
@@ -689,7 +699,7 @@ namespace QuestTree.QuestGraph
         {
             "Player", "PlayerRenderers", "PlayerCollisionTest", "PlayerSpiritAura",
             "Weapons", "Weapon Preview", "Shells", "Deadbody",
-            "UI", "Menu Environment", "RainDrops", "Sky", "Water", "TransparentFX",
+            "UI", "Menu Environment", "RainDrops", "Sky", "TransparentFX",
             "Triggers", "CullingMask", "DisablerCullingObject",
             "DoorLowPolyCollider", "HighPolyCollider", "LowPolyCollider", "HitCollider",
             "TransparentCollider"
@@ -760,11 +770,23 @@ namespace QuestTree.QuestGraph
 
         private bool[] _cullingWasEnabled;
 
+        /// <summary>The GameObjects the scene's distance culling DEACTIVATES, flattened out of the same
+        /// culling objects, with room to remember which of them this capture switched on. Separate from
+        /// the component list because they are switched with SetActive rather than an enabled flag, and
+        /// because switching one runs whatever Awake and OnEnable are attached to it.</summary>
+        private GameObject[] _cullingObjectsHeld;
+
+        private bool[] _cullingObjectWasActive;
+
+        /// <summary>How many of the GameObject list the current floor took hold of, so the restore walks
+        /// exactly as far as the hold got.</summary>
+        private int _cullingObjectsHeldCount;
+
         /// <summary>How many culling objects the components came from, for the capture header.</summary>
         private int _cullingObjects;
 
         /// <summary>The water renderers this capture does not draw, and their states while it does not.
-        /// See <see cref="WaterShaderTokens"/>.</summary>
+        /// See <see cref="WaterLayerName"/>.</summary>
         private Renderer[] _water;
 
         /// <summary>What each water renderer was drawing before this capture painted it flat, read once
@@ -1160,7 +1182,9 @@ namespace QuestTree.QuestGraph
                     note = $"{note}, culling forced ({_cullingObjects} objects)";
                 }
 
-                if (_water != null && _water.Length > 0) note = $"{note}, {_water.Length} water renderers off";
+                note = _water != null && _water.Length > 0 && _waterFlat != null
+                    ? $"{note}, {_water.Length} water-layer renderers painted"
+                    : $"{note}, water drawn as is";
                 if (plan.Reach != null) note = $"{note}, reach mask {plan.ReachCellsX}x{plan.ReachCellsZ}";
 
                 Plugin.LogSource?.LogInfo(
@@ -1382,6 +1406,20 @@ namespace QuestTree.QuestGraph
                                     // together rather than either alone: a rendered sample in true black
                                     // shadow has alpha, and a shader that writes no alpha still has
                                     // colour.
+                                    // NOT A NUMBER is treated as not drawn, and this is the first of
+                                    // three places that stop it - see FillLuminance and Smooth for the
+                                    // other two. A half-float HDR render can hand back a NaN (a shader
+                                    // dividing by a zero-length vector is the usual way), it survives
+                                    // every comparison below by being false to all of them, and four
+                                    // stops of a Customs campaign died of one: it reached the smoothing
+                                    // filter, whose range-weight lookup casts a float to an int, and
+                                    // Mono's cast of a NaN is int.MinValue rather than the 0 a desktop
+                                    // .NET gives - an index a long way outside the array.
+                                    if (!IsFinite(sample.r) || !IsFinite(sample.g) || !IsFinite(sample.b))
+                                    {
+                                        continue;
+                                    }
+
                                     if (sample.r <= 0f && sample.g <= 0f && sample.b <= 0f && sample.a <= 0f)
                                     {
                                         continue;
@@ -2565,6 +2603,7 @@ namespace QuestTree.QuestGraph
             {
                 var clock = Stopwatch.StartNew();
                 var components = new List<Component>();
+                var objectsToTurnOn = new List<GameObject>();
                 var objects = FindObjectsOfType<DisablerCullingObject>();
 
                 foreach (var culler in objects)
@@ -2574,23 +2613,54 @@ namespace QuestTree.QuestGraph
                     _cullingObjects++;
                     Take(components, culler._componentsToTurnOff);
                     Take(components, culler._compsToTurnOffWhoIgnoreInversedColliders);
+                    TakeObjects(objectsToTurnOn, culler._gameObjectsToTurnOff);
                 }
 
                 _culling = components.ToArray();
                 _cullingWasEnabled = new bool[_culling.Length];
+                _cullingObjectsHeld = objectsToTurnOn.ToArray();
+                _cullingObjectWasActive = new bool[_cullingObjectsHeld.Length];
 
                 Plugin.LogSource?.LogDebug(
                     $"QuestTree: {_cullingObjects} culling object(s) hold {_culling.Length} renderer(s) and LOD " +
-                    $"group(s) the capture will force visible, found in {Ms(clock.Elapsed.TotalMilliseconds)} ms.");
+                    $"group(s) plus {_cullingObjectsHeld.Length} whole GameObject(s) the capture will force " +
+                    $"visible, found in {Ms(clock.Elapsed.TotalMilliseconds)} ms.");
             }
             catch (Exception ex)
             {
                 _culling = null;
                 _cullingWasEnabled = null;
+                _cullingObjectsHeld = null;
+                _cullingObjectWasActive = null;
                 Plugin.LogSource?.LogWarning(
                     $"QuestTree: the scene's distance culling could not be read " +
                     $"({ex.GetType().Name}: {ex.Message}) - buildings whose roofs are switched off at this " +
                     "distance will be captured as ground.");
+            }
+        }
+
+        /// <summary>Adds one culling object's DEACTIVATED GameObject list to the flat array.
+        ///
+        /// These are what Big Red's and the tower's roofs turned out to be: the component lists hold the
+        /// renderers of a building's shell, but a whole storey - the roof, its beams, the shelving under
+        /// it - is switched by deactivating the object it hangs on, and forcing the components alone left
+        /// those buildings open to the sky with their interiors showing.
+        ///
+        /// Activating a GameObject is a heavier thing than enabling a renderer: whatever is attached to
+        /// it gets Awake and OnEnable, so a particle system starts emitting, a light comes on, an audio
+        /// source begins. The hold lasts a floor and is put back, so the worst of that is a second of a
+        /// distant chimney smoking - but it IS a side effect, it is why each object is switched under its
+        /// own guard, and it is why only objects that were INACTIVE are touched.</summary>
+        /// <param name="into">The flat list being built.</param>
+        /// <param name="objects">One culling object's deactivation list, which may be null.</param>
+        private static void TakeObjects(List<GameObject> into, List<GameObject> objects)
+        {
+            if (objects == null) return;
+
+            foreach (var item in objects)
+            {
+                if (item == null) continue;
+                into.Add(item);
             }
         }
 
@@ -2610,16 +2680,28 @@ namespace QuestTree.QuestGraph
 
         /// <summary>Finds every renderer whose material is a water shader, once per capture, keeps the
         /// materials each of them draws with, and logs the distinct shader names so the token list can be
-        /// checked against what a map actually uses. See <see cref="WaterShaderTokens"/> and
+        /// checked against what a map actually uses. See <see cref="WaterLayerName"/> and
         /// <see cref="WaterPaint"/>.</summary>
         private void CollectWater()
         {
             _water = null;
             _waterMaterials = null;
 
+            if (!PaintWater) return;
+
             try
             {
                 var clock = Stopwatch.StartNew();
+                var layer = LayerMask.NameToLayer(WaterLayerName);
+
+                if (layer < 0)
+                {
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: this game version has no \"{WaterLayerName}\" layer, so water is captured as " +
+                        "the game draws it.");
+                    return;
+                }
+
                 var found = new List<Renderer>();
                 var shaders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
@@ -2631,37 +2713,25 @@ namespace QuestTree.QuestGraph
                 {
                     if (renderer == null) continue;
 
+                    // The layer IS the test - see WaterLayerName. Everything below only collects the
+                    // shader names of what was found, for the log line.
+                    if (renderer.gameObject.layer != layer) continue;
+
+                    found.Add(renderer);
+
                     // sharedMaterial(s), not material(s): reading material INSTANTIATES a copy of it on
-                    // the renderer, which would leak a material per water surface per capture. ALL of
-                    // them, not slot 0 alone: a mesh whose second submesh is the water and whose first
-                    // is the bank around it is still a renderer that must not draw, and the sheet over
-                    // the warehouse yard is exactly the kind of object that has more than one.
+                    // the renderer, which would leak a material per water surface per capture. Read here
+                    // only to NAME what was found - the layer above is what decided it.
                     materials.Clear();
                     renderer.GetSharedMaterials(materials);
-
-                    string shader = null;
 
                     foreach (var material in materials)
                     {
                         if (material == null || material.shader == null) continue;
+                        if (string.IsNullOrEmpty(material.shader.name)) continue;
 
-                        var name = material.shader.name;
-                        if (string.IsNullOrEmpty(name)) continue;
-
-                        foreach (var token in WaterShaderTokens)
-                        {
-                            if (name.IndexOf(token, StringComparison.OrdinalIgnoreCase) < 0) continue;
-                            shader = name;
-                            break;
-                        }
-
-                        if (shader != null) break;
+                        shaders.Add(material.shader.name);
                     }
-
-                    if (shader == null) continue;
-
-                    found.Add(renderer);
-                    shaders.Add(shader);
                 }
 
                 _water = found.ToArray();
@@ -2676,7 +2746,7 @@ namespace QuestTree.QuestGraph
                     BuildWaterPaint();
 
                     Plugin.LogSource?.LogInfo(
-                        $"QuestTree: {_water.Length} water renderer(s) will be painted " +
+                        $"QuestTree: {_water.Length} renderer(s) on the {WaterLayerName} layer will be painted " +
                         (_waterFlat != null ? "flat blue" : "NOTHING - no flat shader resolved, so they draw as they are") +
                         $", on shader(s) [{string.Join(", ", shaders.ToArray())}], found in " +
                         $"{Ms(clock.Elapsed.TotalMilliseconds)} ms.");
@@ -2684,8 +2754,8 @@ namespace QuestTree.QuestGraph
                 else
                 {
                     Plugin.LogSource?.LogDebug(
-                        "QuestTree: no water shader was found in this scene, so the cyan pass is the only thing " +
-                        "standing between a pool and the picture.");
+                        $"QuestTree: nothing in this scene is on the {WaterLayerName} layer, so the cyan pass is the " +
+                        "only thing standing between a pool and the picture.");
                 }
             }
             catch (Exception ex)
@@ -2930,6 +3000,40 @@ namespace QuestTree.QuestGraph
                     }
                 }
 
+                var activated = 0;
+
+                if (_cullingObjectsHeld != null)
+                {
+                    for (var i = 0; i < _cullingObjectsHeld.Length; i++)
+                    {
+                        var item = _cullingObjectsHeld[i];
+                        _cullingObjectsHeldCount = i + 1;
+
+                        if (item == null) continue;
+
+                        // Guarded ONE BY ONE, not as a block: activating an object runs its Awake and
+                        // OnEnable, and a script of the game's own that throws in one must not stop the
+                        // rest of the roofs coming back.
+                        try
+                        {
+                            _cullingObjectWasActive[i] = item.activeSelf;
+                            if (_cullingObjectWasActive[i]) continue;
+
+                            item.SetActive(true);
+                            activated++;
+                        }
+                        catch (Exception ex)
+                        {
+                            // Left as it was found; the restore skips it because its recorded state is
+                            // whatever activeSelf said, and it was not changed.
+                            _cullingObjectWasActive[i] = true;
+
+                            Plugin.LogSource?.LogDebug(
+                                $"QuestTree: a culled object would not switch on ({ex.GetType().Name}: {ex.Message}).");
+                        }
+                    }
+                }
+
                 // The water goes flat here too, on the same schedule and for the same reason: once a
                 // floor is cheaper than once a tile, and a floor is the unit the scene is held for.
                 HoldWater();
@@ -2938,7 +3042,8 @@ namespace QuestTree.QuestGraph
                 // only interesting when a capture hitches, so debug rather than info.
                 Plugin.LogSource?.LogDebug(
                     $"QuestTree: the scene is held for a floor - {forced} of {_cullingHeld} culled " +
-                    $"component(s) forced visible and {_waterSwapped} water renderer(s) painted flat in " +
+                    $"component(s) forced visible, {activated} of {_cullingObjectsHeldCount} culled object(s) " +
+                    $"switched on and {_waterSwapped} water renderer(s) painted flat in " +
                     $"{Ms(clock.Elapsed.TotalMilliseconds)} ms.");
             }
             catch (Exception ex)
@@ -2972,6 +3077,27 @@ namespace QuestTree.QuestGraph
                     }
                 }
 
+                if (_cullingObjectsHeld != null)
+                {
+                    for (var i = 0; i < _cullingObjectsHeldCount && i < _cullingObjectsHeld.Length; i++)
+                    {
+                        var item = _cullingObjectsHeld[i];
+                        if (item == null || _cullingObjectWasActive[i]) continue;
+
+                        // Guarded one by one for the same reason the hold is: OnDisable runs here.
+                        try
+                        {
+                            item.SetActive(false);
+                        }
+                        catch (Exception ex)
+                        {
+                            Plugin.LogSource?.LogDebug(
+                                $"QuestTree: a culled object would not switch off again ({ex.GetType().Name}: " +
+                                $"{ex.Message}) - the game's own culling switches it when the player next moves.");
+                        }
+                    }
+                }
+
             }
             catch (Exception ex)
             {
@@ -2982,6 +3108,7 @@ namespace QuestTree.QuestGraph
             finally
             {
                 _cullingHeld = 0;
+                _cullingObjectsHeldCount = 0;
                 ReleaseWater();
             }
         }
@@ -3302,9 +3429,17 @@ namespace QuestTree.QuestGraph
                     if (difference < 0f) difference = -difference;
                     if (difference >= SmoothingRangeCut) continue;
 
+                    // Clamped, although the guard above should already have made it impossible: this is
+                    // the ONE float-to-int cast in the whole develop path that indexes an array, the
+                    // guard above is a comparison and comparisons are false for a NaN, and Mono casts a
+                    // NaN to int.MinValue. Two lines here against a capture that throws away a floor.
+                    var step = (int)(difference * SmoothingRangeScale);
+                    if (step < 0) step = 0;
+                    else if (step >= SmoothingRangeWeights.Length) step = SmoothingRangeWeights.Length - 1;
+
                     var weight =
                         SmoothingKernel[kernelRow + (x - col + SmoothingRadius)] *
-                        SmoothingRangeWeights[(int)(difference * SmoothingRangeScale)];
+                        SmoothingRangeWeights[step];
 
                     var at = other * 3;
                     sumR += pixels[at] * weight;
@@ -3357,7 +3492,11 @@ namespace QuestTree.QuestGraph
                 {
                     var at = (pixelRow + x) * 3;
                     var value = (Luminance(pixels[at], pixels[at + 1], pixels[at + 2]) - low) * scale;
-                    lum[lumRow + x] = value < 0f ? 0f : value > 1f ? 1f : value;
+
+                    // IsFinite FIRST, because the plain clamp passes a NaN straight through - a NaN is
+                    // neither less than 0 nor greater than 1, so both arms are false and it is stored.
+                    // That is how one bad pixel used to reach Smooth's lookup table. See RenderTile.
+                    lum[lumRow + x] = !IsFinite(value) ? 0f : value < 0f ? 0f : value > 1f ? 1f : value;
                 }
             }
 
@@ -4312,6 +4451,8 @@ namespace QuestTree.QuestGraph
                 // renderers reachable until the next key press replaced them.
                 _culling = null;
                 _cullingWasEnabled = null;
+                _cullingObjectsHeld = null;
+                _cullingObjectWasActive = null;
                 _cullingObjects = 0;
                 _water = null;
                 _waterMaterials = null;
