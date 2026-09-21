@@ -77,24 +77,32 @@ namespace QuestTree.QuestGraph
         private const float BinHeight = 0.5f;
 
         /// <summary>Share of ALL NavMesh vertices one bin must hold to count as part of a floor.
-        /// A deliberately high bar: what is wanted is the two or three heights a map is mostly
-        /// built at, not every ledge. Bins under it are the empty air between floors.
+        /// A deliberately high bar: what is wanted is the two or three heights a map is mostly built
+        /// at, not every ledge. Bins under it are the empty air between floors.
         ///
-        /// The one number to tune if a map reads with too few floors, together with
-        /// <see cref="BandGap"/>. Measured so far: Customs' histogram is one unbroken run from
-        /// y = -3 to y = 7 - its terrain simply slopes - so Customs is one "Ground" band at this
-        /// setting, which is right for it. Nothing else in the floor code needs touching to try a
-        /// different value.
+        /// ONE PER CENT, halved from two after the risk written here came true. The bins are half a
+        /// metre (<see cref="BinHeight"/>) and Phase 0 measured its histograms in whole metres, so the
+        /// same share is twice as hard to clear here as the measurements suggest - and a raid on
+        /// Interchange came back with three bands instead of four, its parking garage missing, exactly
+        /// as the old wording feared.
         ///
-        /// Open risk, which only a raid settles: Phase 0 measured its histograms in 1 m bins, and
-        /// <see cref="BinHeight"/> here is 0.5 m, so the same 2 % bar is twice as hard to clear.
-        /// Interchange's parking garage holds 11532 of 382k vertices in its 1 m bin - 3.0 %, over the
-        /// bar - but spread evenly over two half-metre bins that is 1.5 % each, under it, and the
-        /// garage would vanish instead of becoming its own floor. A garage floor is flat, so its
-        /// vertices should pile into one half-metre bin rather than split evenly, which is why the
-        /// number is left at 0.02; if a raid reports Interchange with three bands and no basement,
-        /// this is the line to halve.</summary>
-        private const float BandBinShare = 0.02f;
+        /// The numbers, from Phase 0's 1 m histogram of Interchange's 382k NavMesh vertices: the garage
+        /// at y = 18 holds 11532 (3.0 %), the ground run y = 21-23 holds 140768 / 13818 / 9572
+        /// (36.8 / 3.6 / 2.5 %), y = 27 holds 114635 (30.0 %) and y = 36 holds 33588 (8.8 %). Split
+        /// across two half-metre bins the garage is about 1.5 % a bin, under a 2 % bar and over a 1 %
+        /// one - so at 1 % Interchange reads garage (-1), ground (0), floor 2 (+1), floor 3 (+2), four
+        /// bands, and the garage is the one this buys.
+        ///
+        /// Customs is unaffected, which is the other half of the check: its dense 1 m bins run from
+        /// y = -3 to y = 7 at 3-30 % each, every one of them far over either bar even when halved, and
+        /// they are CONTIGUOUS - so they were one run at 2 % and they are the same one run at 1 %. A
+        /// lower bar can only add bins to a run that already exists or start a new run where there was
+        /// none; it cannot break a run apart. Customs stays one "Ground" band.
+        ///
+        /// What a lower bar risks in general is a ledge or a catwalk becoming a "floor" on some other
+        /// map. <see cref="BandGap"/> is the guard against that - a run less than 2 m clear of another
+        /// is merged into it - and <see cref="MaxFloors"/> is the backstop.</summary>
+        private const float BandBinShare = 0.01f;
 
         /// <summary>Metres of thin bins that must separate two bands for them to be different floors.
         /// Under a storey height: two bands closer than this are one floor read twice (a mezzanine, a

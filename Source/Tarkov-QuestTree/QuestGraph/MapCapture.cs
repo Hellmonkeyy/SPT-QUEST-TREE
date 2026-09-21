@@ -101,18 +101,25 @@ namespace QuestTree.QuestGraph
     /// calls - so a capture is a handful of short hitches on a key the player pressed, rather than
     /// one long freeze.
     ///
-    /// Memory, at the worst moment of a MERGE of Customs at 4472x2156 (9.6 million pixels, which is
-    /// what 0.25 m/px asks for): 116 MB of float buffer (three floats a pixel, freed as soon as the
-    /// floor is developed), 39 MB of the previous picture and 9.6 MB of its distances, 39 MB of
-    /// four-channel picture and 29 MB of distance texture, 9.6 MB each for the drawn mask and this
-    /// capture's distances, a 34 MB half-float staging texture shared by every tile, and the PNG -
-    /// about 310 MB at the peak, and about 200 MB for a fresh capture that reads nothing back. The
-    /// picture and the previous picture it decodes are a quarter larger than they were, because the
-    /// walkable mask travels as their ALPHA (see ReachIsAlpha) and that is a fourth byte a pixel. It is
-    /// large and it is bounded: one floor at a time by construction, every pass runs a band or a chunk
-    /// to a frame so no single allocation is bigger than the picture itself, and ReleaseTexture frees
-    /// all of it the moment the floor is written. A 2048-setting capture is a sixteenth of the
-    /// pixels.
+    /// Memory is BUDGETED, not hoped for. One floor may work in CaptureMemoryBudgetBytes - 256 MB - of
+    /// arrays and textures, at WorkingSetBytesPerPixel (26 B a pixel: the float buffer, the drawn mask,
+    /// two sets of distances, the picture, the sidecar texture and, on a merge, the previous picture),
+    /// and the pixels per metre come down in half-metre steps until the floor fits. Interchange at
+    /// 4 px/m is 3728x3584 and 331 MB a floor, which is exactly what died in a raid - "GetPixels:
+    /// scripting array creation failed" on its first floor and OutOfMemoryException on the other two -
+    /// and it is captured at 3.5 px/m and 254 MB instead. Customs at 4 px/m is 239 MB and is not
+    /// touched. (Every figure here is what the capture header prints: mebibytes, the way the code
+    /// divides.)
+    ///
+    /// What is outside that budget and small: the 34 MB half-float staging texture (one per CAPTURE),
+    /// two 32 KB sample rows, a band's worth of Color32 and the encoded PNG. What is no longer in it at
+    /// all: the managed arrays GetPixels used to hand back - 16 bytes a pixel for a staging band, four
+    /// for a whole decoded picture - which is what fragmented the heap in the first place. Every
+    /// readback now goes through GetPixelData, a view of the texture's own memory.
+    ///
+    /// Between floors, ReleaseTexture frees everything the floor held and GC.Collect runs once - the
+    /// one place this mod collects by hand, because these are large-object-heap allocations and the
+    /// next floor asks for the same sizes a frame later.
     ///
     /// That count is MANAGED memory. The tile target is video memory and is not in it: 2048 square at
     /// half-float is 34 MB, times the multisampling the device granted - up to 4, which is 134 MB plus
@@ -458,6 +465,51 @@ namespace QuestTree.QuestGraph
         /// <summary>Rows developed in one frame: fewer when every pixel costs a 5x5 window.</summary>
         private static int DevelopBandRows => SmoothingEnabled ? SmoothingBandRows : PixelBandRows;
 
+        /// <summary>Most managed and texture memory one floor of a capture may work in. Two hundred and
+        /// fifty-six megabytes.
+        ///
+        /// Interchange is why it exists. Three floors at 4 px/m is 3728x3584 = 13.4 million pixels each,
+        /// and at <see cref="WorkingSetBytesPerPixel"/> that is 331 MB a floor - so the first floor died
+        /// with "GetPixels: scripting array creation failed, array size or length is too large" at tile
+        /// 12 of 16, and the second and third with OutOfMemoryException. Nothing was written.
+        ///
+        /// The number is not the machine's memory, it is what MONO will hand out in one piece. Every
+        /// allocation here is far over the 85 KB that puts an array on the large-object heap, and the LOH
+        /// is not compacted - so the failure was fragmentation rather than exhaustion.
+        ///
+        /// It is 256 and not the 160 first written, because the two halves of that failure were fixed
+        /// separately. The CHURN - a 16-bytes-a-pixel managed array per staging band, 128 of them a
+        /// floor, plus a whole decoded picture per merge - is gone entirely: every readback now goes
+        /// through GetPixelData, which is a view of the texture's own memory (see ReadSampleRow,
+        /// CopyColours). What is left for this number to guard is the PEAK alone, a handful of long-lived
+        /// arrays allocated once a floor and freed with a collect between floors, and that is a far
+        /// easier thing for an allocator to place. At 256 MB Customs keeps its 4 px/m and its 239 MB -
+        /// which also keeps the captures already on disk mergeable - and Interchange lands at 3.5 px/m
+        /// and 254 MB.</summary>
+        private const long CaptureMemoryBudgetBytes = 256L * 1024L * 1024L;
+
+        /// <summary>What one output pixel costs while its floor is being captured, in bytes, counted
+        /// term by term so the budget can be checked by hand:
+        ///   12  the float buffer, three floats a pixel (MapCapture.Pixels)
+        ///    1  the drawn mask (Drawn)
+        ///    1  this capture's distances (Dist)
+        ///    4  the eight-bit RGBA picture (Texture)
+        ///    3  the distance sidecar's texture (DistTexture)
+        ///    4  on a merge, the previous picture (PreviousColour)
+        ///    1  on a merge, its sidecar (PreviousDist)
+        /// The merge terms are counted ALWAYS, because a capture that fits fresh and not merged would
+        /// fail on its second visit to the map, which is the worst moment to find out. Outside the
+        /// model, and deliberately: the shared 34 MB staging texture (one per capture, not per floor),
+        /// the band buffers (a few hundred KB, proportional to width alone) and the encoded PNG.</summary>
+        private const long WorkingSetBytesPerPixel = 26L;
+
+        /// <summary>How much the pixels per metre come down by when a floor does not fit the budget, and
+        /// the floor under which it will not go. Half a metre a step, and never under one pixel per
+        /// metre: below that a building is a smudge and there is no point capturing at all.</summary>
+        private const float BudgetPpmStep = 0.5f;
+
+        private const float MinBudgetPpm = 1f;
+
         /// <summary>Metres above the TOPMOST band the camera sits. Three hundred - the height Phase 0
         /// rendered its pictures from, and high enough to be above anything any map builds.
         ///
@@ -753,6 +805,11 @@ namespace QuestTree.QuestGraph
 
         private RenderTexture _rt;
 
+        /// <summary>Two rows of samples, reused by every tile of every floor: one per row of a
+        /// supersample block, four floats a sample. 2048 samples is 32 KB a row, which is the entire
+        /// managed cost of the readback now - see ReadSampleRow.</summary>
+        private float[][] _sampleRows;
+
         /// <summary>The texture each tile is read back into, one tile wide and tall, reused for every
         /// tile of every floor. Half-float when the hardware will render one, so the pipeline's
         /// linear values arrive intact instead of clipped into eight bits.</summary>
@@ -1009,6 +1066,15 @@ namespace QuestTree.QuestGraph
                     }
 
                     ReleaseTexture(floor);
+
+                    // The ONE place this mod collects by hand, and a multi-floor map is why. A floor's
+                    // working set is a hundred megabytes of arrays well over the large-object heap's
+                    // threshold, the LOH is not compacted, and the next floor asks for the same sizes
+                    // again a frame later - so without this the second floor of Interchange was looking
+                    // for its buffers in a heap still holding the first floor's. Collecting costs tens
+                    // of milliseconds on a frame that has just written a PNG and is yielding anyway.
+                    GC.Collect();
+
                     yield return null;
                 }
 
@@ -1086,7 +1152,8 @@ namespace QuestTree.QuestGraph
                 }
 
                 var cap = Resolution();
-                var ppm = (float)Math.Min(cap / longSide, MaxPixelsPerMetre);
+                var wanted = (float)Math.Min(cap / longSide, MaxPixelsPerMetre);
+                var ppm = Budget(wanted, widthM, heightM, out var budgetNote);
 
                 if (!(ppm > 0f))
                 {
@@ -1186,6 +1253,8 @@ namespace QuestTree.QuestGraph
                     ? $"{note}, {_water.Length} water-layer renderers painted"
                     : $"{note}, water drawn as is";
                 if (plan.Reach != null) note = $"{note}, reach mask {plan.ReachCellsX}x{plan.ReachCellsZ}";
+
+                if (budgetNote != null) note = $"{note}, {budgetNote}";
 
                 Plugin.LogSource?.LogInfo(
                     $"QuestTree: capturing {key} - {plan.WidthPx}x{plan.HeightPx} px, " +
@@ -1324,10 +1393,16 @@ namespace QuestTree.QuestGraph
         /// tile is the same view size and the arithmetic the self-check proved holds for all of them.
         ///
         /// Two steps rather than one, unlike the eight-bit version this replaces: the render target is
-        /// half-float and cannot be read straight into the RGB24 texture a PNG is made from, so the
-        /// tile lands in the staging texture and its values are copied out as floats. The copy runs in
-        /// bands of <see cref="PixelBandRows"/> rows because GetPixels allocates the array it returns -
-        /// a whole 2048 tile would be a 67 MB allocation per tile, against 8 MB a band.</summary>
+        /// half-float and cannot be read straight into the RGBA texture a PNG is made from, so the tile
+        /// lands in the staging texture and its values are copied out as floats.
+        ///
+        /// The copy goes through <see cref="ReadSampleRow"/> and a NativeArray, NOT GetPixels. GetPixels
+        /// ALLOCATES the array it hands back - sixteen bytes a pixel, so 67 MB for a 2048 tile, or 8 MB
+        /// a band if the copy is banded - and doing that sixteen times a floor on a Mono heap that has
+        /// been running a raid for half an hour is what made Interchange's first floor die at tile 12
+        /// with "scripting array creation failed, array size or length is too large". GetPixelData hands
+        /// back a view of the texture's own memory and allocates nothing at all; the only buffers left
+        /// are two reused rows of <see cref="TileSize"/> samples.</summary>
         /// <param name="plan">The capture's plan.</param>
         /// <param name="floor">The floor being rendered.</param>
         /// <param name="tile">The tile's index, row-major from the top-left.</param>
@@ -1360,7 +1435,7 @@ namespace QuestTree.QuestGraph
                 // below starts at 0 rather than TileSize-th. A clipped tile therefore drops its bottom
                 // and its right, which is exactly the part that lies outside the extent.
                 // No Apply: it would upload the 33 MB staging texture to the GPU, and the only reader
-                // is GetPixels below, which reads the CPU-side copy ReadPixels just filled.
+                // is ReadSampleRow below, which reads the CPU-side copy ReadPixels just filled.
                 _stage.ReadPixels(new Rect(0f, TileSize - th, tw, th), 0, 0);
 
                 // The floor buffer is kept in TEXTURE order - row 0 at the bottom, world -z - because
@@ -1372,17 +1447,16 @@ namespace QuestTree.QuestGraph
                 var outCol0 = px0 / SupersampleFactor;
                 var outCols = tw / SupersampleFactor;
 
-                for (var bandBottom = 0; bandBottom < th; bandBottom += PixelBandRows)
+                // Two sample rows at a time: one output row, and each output pixel's four samples are
+                // all in hand at once, so nothing has to be accumulated across frames. The rows come
+                // out of the staging texture's own memory - see ReadSampleRow.
                 {
-                    var rows = Math.Min(PixelBandRows, th - bandBottom);
-                    var band = _stage.GetPixels(0, bandBottom, tw, rows);
-
-                    // Two sample rows at a time: one output row, and each output pixel's four samples
-                    // are all in hand at once, so nothing has to be accumulated across frames.
-                    for (var row = 0; row + SupersampleFactor <= rows; row += SupersampleFactor)
+                    for (var row = 0; row + SupersampleFactor <= th; row += SupersampleFactor)
                     {
-                        var outRow = (sampleBase + bandBottom + row) / SupersampleFactor;
+                        var outRow = (sampleBase + row) / SupersampleFactor;
                         var pixelRow = outRow * plan.WidthPx + outCol0;
+
+                        for (var dy = 0; dy < SupersampleFactor; dy++) ReadSampleRow(row + dy, tw, _sampleRows[dy]);
 
                         for (var outCol = 0; outCol < outCols; outCol++)
                         {
@@ -1393,11 +1467,15 @@ namespace QuestTree.QuestGraph
 
                             for (var dy = 0; dy < SupersampleFactor; dy++)
                             {
-                                var source = (row + dy) * tw + outCol * SupersampleFactor;
+                                var samples = _sampleRows[dy];
+                                var source = outCol * SupersampleFactor * 4;
 
                                 for (var dx = 0; dx < SupersampleFactor; dx++)
                                 {
-                                    var sample = band[source + dx];
+                                    var sampleAt = source + dx * 4;
+                                    var sample = new Color(
+                                        samples[sampleAt], samples[sampleAt + 1],
+                                        samples[sampleAt + 2], samples[sampleAt + 3]);
 
                                     // The camera clears to (0,0,0,0) and draws nothing over a chunk the
                                     // game has streamed out, so a sample with anything at all in any
@@ -1471,6 +1549,72 @@ namespace QuestTree.QuestGraph
                 RenderTexture.active = previousActive;
             }
         }
+
+        /// <summary>One row of the staging texture as plain floats, four to a pixel, read straight out
+        /// of the texture's own memory.
+        ///
+        /// GetPixelData is a VIEW of that memory - no copy, no managed array, nothing for the large
+        /// object heap to fragment over - which is the whole reason this method exists; see RenderTile.
+        /// The two formats are handled apart rather than through Color, because the half-float one has
+        /// to be converted a channel at a time and the eight-bit one is already bytes.
+        ///
+        /// The branch is per ROW, not per pixel: two thousand pixels of the same format follow every
+        /// test.</summary>
+        /// <param name="stageRow">The row of the staging texture, counting from its bottom.</param>
+        /// <param name="samples">How many samples of that row to read.</param>
+        /// <param name="into">The row buffer to fill, four floats a sample.</param>
+        private void ReadSampleRow(int stageRow, int samples, float[] into)
+        {
+            var from = stageRow * TileSize;
+
+            if (_hdr)
+            {
+                var data = _stage.GetPixelData<Half4>(0);
+
+                for (var x = 0; x < samples; x++)
+                {
+                    var sample = data[from + x];
+                    var at = x * 4;
+
+                    into[at] = Mathf.HalfToFloat(sample.R);
+                    into[at + 1] = Mathf.HalfToFloat(sample.G);
+                    into[at + 2] = Mathf.HalfToFloat(sample.B);
+                    into[at + 3] = Mathf.HalfToFloat(sample.A);
+                }
+
+                return;
+            }
+
+            var bytes = _stage.GetPixelData<Color32>(0);
+
+            for (var x = 0; x < samples; x++)
+            {
+                var sample = bytes[from + x];
+                var at = x * 4;
+
+                into[at] = sample.r / 255f;
+                into[at + 1] = sample.g / 255f;
+                into[at + 2] = sample.b / 255f;
+                into[at + 3] = sample.a / 255f;
+            }
+        }
+
+        /// <summary>One half-float RGBA sample, as it sits in the staging texture's memory. Four
+        /// ushorts, which is what RGBAHalf is; Mathf.HalfToFloat turns each into the number it means.
+        ///
+        /// The four fields are never assigned in C#: GetPixelData hands back the texture's own bytes
+        /// reinterpreted as this struct, so the GPU readback is what writes them and the compiler cannot
+        /// see it. That is what CS0649 is warning about below, and why it is switched off for exactly
+        /// these four lines.</summary>
+#pragma warning disable CS0649
+        private struct Half4
+        {
+            public ushort R;
+            public ushort G;
+            public ushort B;
+            public ushort A;
+        }
+#pragma warning restore CS0649
 
         /// <summary>Encodes a developed floor, writes it and its distance sidecar, and says what the
         /// merge did. The last of the floor's three post-tile frames - measure, develop, encode - which
@@ -1951,8 +2095,26 @@ namespace QuestTree.QuestGraph
         {
             if (plan.Previous == null) return;
 
-            floor.PreviousColour = ReadPicture(
-                Path.Combine(plan.Dir, floor.File), plan, floor, "picture", TextureFormat.RGBA32);
+            Texture2D texture = null;
+
+            try
+            {
+                texture = LoadPicture(Path.Combine(plan.Dir, floor.File), plan, floor, "picture");
+                if (texture == null) return;
+
+                var pixels = new Color32[plan.WidthPx * plan.HeightPx];
+
+                // Out of the texture's own memory into the one array that has to outlive it - no
+                // GetPixels32, which would allocate a SECOND array of the same size first. See
+                // ReadSampleRow for the same reasoning on the staging texture.
+                if (!CopyColours(texture, pixels, plan, floor, "picture")) return;
+
+                floor.PreviousColour = pixels;
+            }
+            finally
+            {
+                if (texture != null) Destroy(texture);
+            }
         }
 
         /// <summary>The distance sidecar beside the picture <see cref="LoadPreviousColour"/> just
@@ -1962,35 +2124,42 @@ namespace QuestTree.QuestGraph
         /// <param name="floor">The floor whose previous sidecar is wanted.</param>
         private static void LoadPreviousDist(Plan plan, FloorPlan floor)
         {
-            // RGBA32 for the read: LoadImage reformats the texture to suit the PNG anyway, and only
-            // the red channel is taken out of it - which is the channel EncodeSidecar wrote the
-            // value into, in all three.
-            var distances = ReadPicture(
-                Path.Combine(plan.Dir, floor.DistFile), plan, floor, "distance sidecar", TextureFormat.RGBA32);
+            Texture2D texture = null;
 
-            if (distances == null)
+            try
             {
-                Plugin.LogSource?.LogInfo(
-                    $"QuestTree: {plan.Key} \"{floor.Dto.Name}\" has a picture but no distance sidecar, so this " +
-                    "capture's own pixels are taken as the better ones everywhere. The sidecar it writes now " +
-                    "makes every later capture choose per pixel.");
-                return;
-            }
+                texture = LoadPicture(Path.Combine(plan.Dir, floor.DistFile), plan, floor, "distance sidecar");
 
-            floor.PreviousDist = new byte[distances.Length];
-            for (var i = 0; i < distances.Length; i++) floor.PreviousDist[i] = distances[i].r;
+                if (texture == null)
+                {
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: {plan.Key} \"{floor.Dto.Name}\" has a picture but no distance sidecar, so this " +
+                        "capture's own pixels are taken as the better ones everywhere. The sidecar it writes now " +
+                        "makes every later capture choose per pixel.");
+                    return;
+                }
+
+                // Straight into ONE byte a pixel. The old path decoded the whole sidecar into a
+                // Color32 array first - four bytes a pixel, 54 MB on an Interchange floor - to read one
+                // channel out of it, which is most of what made the merge unaffordable.
+                var red = new byte[plan.WidthPx * plan.HeightPx];
+                if (!CopyRed(texture, red, plan, floor)) return;
+
+                floor.PreviousDist = red;
+            }
+            finally
+            {
+                if (texture != null) Destroy(texture);
+            }
         }
 
-        /// <summary>One PNG beside the meta as pixels in texture order, or null when it is absent,
-        /// unreadable or the wrong size. Its texture is freed before this returns - only the array
-        /// outlives it.</summary>
+        /// <summary>One PNG beside the meta, decoded into a texture of this floor's size, or null when
+        /// it is absent, unreadable or the wrong size. The CALLER destroys it.</summary>
         /// <param name="path">The file.</param>
         /// <param name="plan">The capture's plan, for the size the picture has to be.</param>
         /// <param name="floor">The floor, for the log lines.</param>
         /// <param name="what">What this file is, for the log lines.</param>
-        /// <param name="format">The texture format to decode into.</param>
-        private static Color32[] ReadPicture(
-            string path, Plan plan, FloorPlan floor, string what, TextureFormat format)
+        private static Texture2D LoadPicture(string path, Plan plan, FloorPlan floor, string what)
         {
             Texture2D texture = null;
 
@@ -1998,13 +2167,17 @@ namespace QuestTree.QuestGraph
             {
                 if (!File.Exists(path)) return null;
 
-                texture = new Texture2D(2, 2, format, mipChain: false);
+                // RGBA32 asked for; LoadImage reformats to suit the PNG anyway, which is why the two
+                // copies below both check what they actually got.
+                texture = new Texture2D(2, 2, TextureFormat.RGBA32, mipChain: false);
 
                 if (!texture.LoadImage(File.ReadAllBytes(path)))
                 {
                     Plugin.LogSource?.LogInfo(
                         $"QuestTree: {plan.Key} \"{floor.Dto.Name}\" has a {what} that is not a readable image - " +
                         "this capture draws over it.");
+
+                    Destroy(texture);
                     return null;
                 }
 
@@ -2013,23 +2186,102 @@ namespace QuestTree.QuestGraph
                     Plugin.LogSource?.LogInfo(
                         $"QuestTree: {plan.Key} \"{floor.Dto.Name}\" has a {what} of {texture.width}x{texture.height} px " +
                         $"where this capture is {plan.WidthPx}x{plan.HeightPx} - this capture draws over it.");
+
+                    Destroy(texture);
                     return null;
                 }
 
-                return texture.GetPixels32();
+                return texture;
             }
             catch (Exception ex)
             {
                 Plugin.LogSource?.LogDebug(
                     $"QuestTree: {plan.Key} \"{floor.Dto?.Name}\" - its {what} could not be read " +
                     $"({ex.GetType().Name}: {ex.Message}).");
+
+                if (texture != null) Destroy(texture);
                 return null;
             }
-            finally
-            {
-                if (texture != null) Destroy(texture);
-            }
         }
+
+        /// <summary>Copies a decoded picture into a Color32 array through the texture's own memory,
+        /// handling the two formats a PNG decode actually produces here: RGBA32 for a picture with an
+        /// alpha channel, which is what this build writes, and RGB24 for one without, which is what
+        /// every capture before the walkable mask wrote. Anything else is refused rather than
+        /// misread.</summary>
+        /// <param name="texture">The decoded picture.</param>
+        /// <param name="into">The array to fill, one entry a pixel.</param>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="floor">The floor, for the log line.</param>
+        /// <param name="what">What this file is, for the log line.</param>
+        private static bool CopyColours(Texture2D texture, Color32[] into, Plan plan, FloorPlan floor, string what)
+        {
+            if (texture.format == TextureFormat.RGBA32)
+            {
+                var data = texture.GetPixelData<Color32>(0);
+                for (var i = 0; i < into.Length; i++) into[i] = data[i];
+                return true;
+            }
+
+            if (texture.format == TextureFormat.RGB24)
+            {
+                var data = texture.GetPixelData<Rgb24>(0);
+
+                for (var i = 0; i < into.Length; i++)
+                {
+                    var pixel = data[i];
+                    into[i] = new Color32(pixel.R, pixel.G, pixel.B, 255);
+                }
+
+                return true;
+            }
+
+            Plugin.LogSource?.LogInfo(
+                $"QuestTree: {plan.Key} \"{floor.Dto.Name}\" has a {what} decoded as {texture.format}, which this " +
+                "build does not read - this capture draws over it.");
+
+            return false;
+        }
+
+        /// <summary>The red channel of a decoded picture, one byte a pixel: the distance sidecar's
+        /// value, whichever of the two formats it came back as. See <see cref="CopyColours"/>.</summary>
+        /// <param name="texture">The decoded sidecar.</param>
+        /// <param name="into">The array to fill, one byte a pixel.</param>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="floor">The floor, for the log line.</param>
+        private static bool CopyRed(Texture2D texture, byte[] into, Plan plan, FloorPlan floor)
+        {
+            if (texture.format == TextureFormat.RGBA32)
+            {
+                var data = texture.GetPixelData<Color32>(0);
+                for (var i = 0; i < into.Length; i++) into[i] = data[i].r;
+                return true;
+            }
+
+            if (texture.format == TextureFormat.RGB24)
+            {
+                var data = texture.GetPixelData<Rgb24>(0);
+                for (var i = 0; i < into.Length; i++) into[i] = data[i].R;
+                return true;
+            }
+
+            Plugin.LogSource?.LogInfo(
+                $"QuestTree: {plan.Key} \"{floor.Dto.Name}\" has a distance sidecar decoded as {texture.format}, " +
+                "which this build does not read - this capture's own pixels win everywhere.");
+
+            return false;
+        }
+
+        /// <summary>One RGB24 pixel as it sits in a decoded texture's memory. Never assigned in C# for
+        /// the same reason <see cref="Half4"/> is not.</summary>
+#pragma warning disable CS0649
+        private struct Rgb24
+        {
+            public byte R;
+            public byte G;
+            public byte B;
+        }
+#pragma warning restore CS0649
 
         private static string Levels(int[] levels) =>
             levels.Length == 0 ? "none" : string.Join("/", levels.Select(Signed).ToArray());
@@ -4196,6 +4448,9 @@ namespace QuestTree.QuestGraph
                 _hdr ? TextureFormat.RGBAHalf : TextureFormat.RGBA32,
                 mipChain: false);
 
+            _sampleRows = new float[SupersampleFactor][];
+            for (var i = 0; i < _sampleRows.Length; i++) _sampleRows[i] = new float[TileSize * 4];
+
             // Unity's own switch for the samples the target was granted: without it the multisampled
             // target is allocated and resolved and nothing is antialiased by it. BuildCamera sets it
             // false, which is right until this is known - and it is known here.
@@ -4499,6 +4754,8 @@ namespace QuestTree.QuestGraph
                     _stage = null;
                     Destroy(stage);
                 }
+
+                _sampleRows = null;
 
                 // The water is put back first: a raid that ended mid-tile has it painted flat, and the
                 // materials this destroys below are what it is painted with.
@@ -5253,6 +5510,57 @@ namespace QuestTree.QuestGraph
                 return null;
             }
         }
+
+        /// <summary>The pixels per metre a floor of this map can actually be captured in: what the
+        /// resolution setting asks for, brought down in <see cref="BudgetPpmStep"/> steps until one
+        /// floor's working set fits <see cref="CaptureMemoryBudgetBytes"/>.
+        ///
+        /// Lowering the scale rather than refusing the map, because a map captured at 2.5 px/m is a map
+        /// and a map that threw an OutOfMemoryException is not. It is deterministic - the same map at the
+        /// same setting always lands on the same number - which matters because the pixels per metre is
+        /// part of what decides whether a later capture may be merged into this one (LoadPrevious), and
+        /// two captures of one map have to agree on it without having to agree on anything else.</summary>
+        /// <param name="wanted">The scale the resolution setting and the pixel cap ask for.</param>
+        /// <param name="widthM">The extent's width in metres.</param>
+        /// <param name="heightM">Its height in metres.</param>
+        /// <param name="note">A phrase for the capture header when the budget lowered the scale, or
+        /// null when it did not have to.</param>
+        private static float Budget(float wanted, double widthM, double heightM, out string note)
+        {
+            note = null;
+
+            var ppm = wanted;
+            var first = WorkingSet(widthM, heightM, ppm);
+
+            while (ppm - BudgetPpmStep >= MinBudgetPpm && WorkingSet(widthM, heightM, ppm) > CaptureMemoryBudgetBytes)
+            {
+                ppm -= BudgetPpmStep;
+            }
+
+            if (ppm >= wanted) return ppm;
+
+            note =
+                $"{Ppm(wanted)} px/m would need {Mb(first)} MB a floor, over the {Mb(CaptureMemoryBudgetBytes)} MB " +
+                $"budget, so {Ppm(ppm)} px/m ({Mb(WorkingSet(widthM, heightM, ppm))} MB)";
+
+            return ppm;
+        }
+
+        /// <summary>What one floor of this map at this scale would work in, in bytes. See
+        /// <see cref="WorkingSetBytesPerPixel"/> for the terms.</summary>
+        /// <param name="widthM">The extent's width in metres.</param>
+        /// <param name="heightM">Its height in metres.</param>
+        /// <param name="ppm">Pixels per metre.</param>
+        private static long WorkingSet(double widthM, double heightM, float ppm)
+        {
+            var width = (long)Math.Ceiling(widthM * ppm);
+            var height = (long)Math.Ceiling(heightM * ppm);
+
+            return width * height * WorkingSetBytesPerPixel;
+        }
+
+        private static string Mb(long bytes) =>
+            (bytes / (1024d * 1024d)).ToString("0", CultureInfo.InvariantCulture);
 
         /// <summary>The long side the picture is allowed, from the setting, held to something a
         /// texture and a release zip can carry whatever a hand-edited config file says.</summary>

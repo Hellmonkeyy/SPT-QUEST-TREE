@@ -26,6 +26,11 @@ namespace QuestTree.Patches
             // Inside the game's own raid start; nothing thrown here may reach it.
             try
             {
+                // THROWAWAY (the Big Red roof question): the roof probe key. Ahead of the HarvestZones
+                // gate on purpose - it is a debug key, not part of the harvest - and it null-checks and
+                // catches for itself. Delete with QuestGraph/RoofProbe.cs.
+                RoofProbe.Install(__instance);
+
                 // Only an explicit "off" stops the harvest: with settings unbound (Plugin.Awake
                 // guards that failure separately) the default, on, applies.
                 if (ModSettings.Ready && !ModSettings.HarvestZones.Value) return;

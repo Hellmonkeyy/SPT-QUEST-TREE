@@ -215,6 +215,13 @@ namespace QuestTree
         /// session. Off is for the player who would rather not offer at all.</summary>
         public static ConfigEntry<bool> UploadCaptures { get; private set; }
 
+        /// <summary>THROWAWAY. The debug key that writes down everything in a 40 m column over the
+        /// player - see QuestGraph/RoofProbe.cs, which exists to settle why one warehouse roof will not
+        /// be captured. Deliberately NOT in Entries, so the in-panel Settings tab shows no row for it;
+        /// it lives in the F12 menu and the cfg file only. Delete this entry, its bind and RoofProbe.cs
+        /// together.</summary>
+        public static ConfigEntry<KeyboardShortcut> RoofProbeKey { get; private set; }
+
         /// <summary>Which of the two quest marks the boxes wear. Kappa is the canonical list;
         /// Collector is what this install actually gates Collector behind, which a quest mod can
         /// make a very different set.</summary>
@@ -737,6 +744,16 @@ namespace QuestTree
             OpenTracker = config.Bind(
                 "Behaviour", "Open tracker shortcut", new KeyboardShortcut(KeyCode.Q, KeyCode.LeftControl),
                 "Opens and closes the tracker anywhere in the menu, including the raid ready-up screen where the taskbar is hidden.");
+
+            // THROWAWAY, to be deleted with QuestGraph/RoofProbe.cs. Its own section so it sits away
+            // from the real settings, and kept out of Entries below so the Settings tab shows nothing.
+            RoofProbeKey = config.Bind(
+                "Advanced", "Roof probe key (throwaway)", new KeyboardShortcut(KeyCode.F10, KeyCode.LeftControl),
+                "Debug only, and temporary. Pressed inside a raid it writes what the game knows about every " +
+                "renderer, light and reflection probe in a 40 m column above you to " +
+                "BepInEx/plugins/QuestTree/captures/<map>.roofprobe.txt. It exists to find out why one " +
+                "warehouse roof is not in its capture, and will be removed again; nothing in the mod depends " +
+                "on it.");
 
             Entries.AddRange(new ConfigEntryBase[]
             {
