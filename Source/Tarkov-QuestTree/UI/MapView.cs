@@ -152,6 +152,31 @@ namespace QuestTree.UI
         /// reads the same as the space around it.</summary>
         private static readonly Color BackdropColor = new(0.17f, 0.18f, 0.19f, 0.95f);
 
+        /// <summary>
+        /// The extract diamond's green - an exit-sign green, and deliberately NOT the accent the
+        /// quest pins wear.
+        ///
+        /// An extract is not a quest, and on a captured map the two are on screen together: if they
+        /// shared a colour the map would read as having twice as many objectives as it has. It is
+        /// also brighter and cooler than the completed-quest green, which is the nearest thing to it
+        /// in the palette; a player who recolours their statuses can bring the two together, and
+        /// that is their business.
+        /// </summary>
+        private static readonly Color ExtractMarkerColor = new(0.10f, 0.85f, 0.42f, 1f);
+
+        /// <summary>The hairline around the diamond, so it reads as a marker over grass as well as
+        /// over concrete. Near-black rather than black: the maps are photographs and a pure black
+        /// edge looks like a hole in them.</summary>
+        private static readonly Color ExtractOutlineColor = new(0.04f, 0.06f, 0.05f, 0.9f);
+
+        /// <summary>The diamond's side, in screen pixels. Read as a shape rather than a point, and
+        /// smaller than a quest pin, which it must not compete with.</summary>
+        private const float ExtractMarkerSize = 10f;
+
+        /// <summary>How far the dark edge stands out past the green, in screen pixels, on each
+        /// side.</summary>
+        private const float ExtractMarkerOutline = 1f;
+
         /// <summary>Pan and zoom, kept across the rebuild that every dropdown click causes. Switching
         /// floor used to throw them away, which is useless when the whole point of switching floors
         /// is to look at the same place one storey up. Reset when the MAP changes, since a different
@@ -670,17 +695,24 @@ namespace QuestTree.UI
         }
 
         /// <summary>What the pins mean, in the colours they are drawn in.</summary>
-        private static string Legend()
+        /// <param name="extracts">Whether this map also draws extract diamonds, which are ours and
+        /// need saying: a green diamond on a photograph of a map is not self-explanatory, and it is
+        /// the one mark here that is not about a quest at all.</param>
+        private static string Legend(bool extracts)
         {
             var active = QuestNodeView.HexFor(ENodeStatus.Active);
             var grey = ColorUtility.ToHtmlStringRGB(UnknownMarkerColor);
             var accent = ColorUtility.ToHtmlStringRGB(GameStyle.AccentColor);
 
+            var extract = extracts
+                ? $"   <color=#{ColorUtility.ToHtmlStringRGB(ExtractMarkerColor)}>\u25c6</color> extract"
+                : "";
+
             var statuses = string.Join("  ", new[] { ENodeStatus.Active, ENodeStatus.Available, ENodeStatus.Completed, ENodeStatus.Gated, ENodeStatus.Locked, ENodeStatus.Failed }
                 .Select(s => $"<color=#{QuestNodeView.HexFor(s)}>\u25a0</color> {QuestNodeView.NameFor(s).ToLowerInvariant()}"));
 
             return "<color=#FFFFFF60>" +
-                   $"<color=#{active}>\u25c6</color> objective   <color=#{active}>\u25cf</color> item   \u25c7 \u25cb other floor\n" +
+                   $"<color=#{active}>\u25c6</color> objective   <color=#{active}>\u25cf</color> item   \u25c7 \u25cb other floor{extract}\n" +
                    $"{statuses}  <color=#{grey}>\u25a0</color> not in your tree  <color=#{accent}>\u25a0</color> selected" +
                    "</color>";
         }
@@ -1190,12 +1222,27 @@ namespace QuestTree.UI
                 // "340 pins" over a map with twelve on it reads as pins that failed to draw.
                 var spawns = MarkerCountFor(entry);
                 if (spawns > 0) facts.Add(drawn < spawns ? $"{drawn} of {spawns} pins" : $"{spawns} pins");
+
+                // Said here because it is a thing the MAP has, like its floors and its pins, and
+                // because it is the number the capture campaign is judged by: a map whose capture
+                // found no extracts at all is one to take again.
+                var extracts = entry != null
+                    ? entry.Labels.Count(l => l.Kind == DynamicMapsLibrary.MapLabelKind.Exfil)
+                    : 0;
+                if (extracts > 0) facts.Add(extracts == 1 ? "1 extract" : $"{extracts} extracts");
+
                 AddAt(content, $"<color=#FFFFFF60>{string.Join("  ·  ", facts)}</color>", listX, ref y, 18f, 11, inner);
 
                 // The pins encode two more things than the tree's legend covers - what kind of
                 // place, and whether it is on this floor - and the tree's legend is hidden here
                 // anyway. Text glyphs stand in for the pin sprite; the colours are the real ones.
-                if (spawns > 0) AuxLayout.AddWrapped(content, Legend(), listX, ref y, inner, 11);
+                // Drawn for the extracts alone as well, not only when there are item pins: a
+                // captured map with no marker payload yet still has diamonds on it that want
+                // explaining, and that is exactly the state every map is in before its first raid.
+                var marks = HasExtractMarkers(entry);
+
+                if (spawns > 0 || marks)
+                    AuxLayout.AddWrapped(content, Legend(marks), listX, ref y, inner, 11);
             }
 
             y += 6f;
@@ -1563,11 +1610,13 @@ namespace QuestTree.UI
             _savedScale = space.localScale.x;
             _savedPan = space.anchoredPosition;
 
-            // Labels first, pins second, and the order is the whole of what puts pins on top:
-            // Unity draws UI siblings in hierarchy order, so the later child wins. A pin half
-            // hidden under a place name cannot be clicked with any confidence, and the name is the
-            // less important of the two.
+            // Names, then extracts, then pins, and the order is the whole of what decides which of
+            // them wins where they land on each other: Unity draws UI siblings in hierarchy order,
+            // so the later child is on top. A quest pin half hidden under a place name cannot be
+            // clicked with any confidence, and between an extract and a pin the pin is the one the
+            // player came to the map for.
             BuildPlaceLabels(space, entry, layer, panZoom);
+            BuildExtractMarkers(space, entry, panZoom);
             var drawn = BuildMarkers(space, entry, layer, panZoom, graph, shownIds, onRepaint);
 
             // Last, so it overrides the restored pan and zoom above - and after the markers, since
@@ -1943,6 +1992,80 @@ namespace QuestTree.UI
         /// tags are a constant size on screen while the distance between their places grows with the
         /// zoom, so the same pair collides at one zoom and not at the next.
         /// </summary>
+        /// <summary>
+        /// A diamond on every extract a capture found.
+        ///
+        /// Separate from the labels on purpose, and unconditional: the MapLabels setting governs
+        /// TEXT - a player who turns the names off wants a readable picture, not a map that has
+        /// stopped saying where the exits are - and at a zoom where the names would collide the
+        /// marks still fit, because a 10 px diamond is a tenth of the width of its name. So the
+        /// diamonds are never culled and never filtered, and the extract's plated name sits on top
+        /// of its diamond when the setting asks for it.
+        ///
+        /// Drawn after the names and before the quest pins, which is what layers them - see
+        /// BuildMapViewport. Only a captured or host map has labels of this kind at all, so a
+        /// DynamicMaps map and a bare rectangle get nothing from here.
+        /// </summary>
+        /// <param name="space">The map container: its local units are map coordinates.</param>
+        /// <param name="entry">The map being drawn.</param>
+        /// <param name="panZoom">The viewport's handler, to hold the diamonds at a constant
+        /// on-screen size the way the names and the pins are held.</param>
+        private static void BuildExtractMarkers(
+            RectTransform space, DynamicMapsLibrary.MapEntry entry, PanZoomHandler panZoom)
+        {
+            if (entry == null) return;
+
+            foreach (var label in entry.Labels)
+            {
+                if (label.Kind != DynamicMapsLibrary.MapLabelKind.Exfil) continue;
+
+                // The outline IS the outer square; the green one inside it is inset by the hairline
+                // on every side, which is cheaper and sharper than any outline shader and needs no
+                // sprite. Turned a quarter turn so a square reads as a diamond: nothing else on this
+                // map is a diamond except the objective pin's glyph fallback, and that one is a
+                // character rather than a shape.
+                var side = ExtractMarkerSize + ExtractMarkerOutline * 2f;
+
+                var go = new GameObject("ExtractMarker", typeof(RectTransform), typeof(Image));
+                var rect = (RectTransform)go.transform;
+                rect.SetParent(space, worldPositionStays: false);
+                rect.anchorMin = rect.anchorMax = new Vector2(0.5f, 0.5f);
+                rect.pivot = new Vector2(0.5f, 0.5f);
+                rect.anchoredPosition = label.Position;
+                rect.sizeDelta = new Vector2(side, side);
+                rect.localRotation = Quaternion.Euler(0f, 0f, 45f);
+
+                var edge = go.GetComponent<Image>();
+                edge.color = ExtractOutlineColor;
+                edge.raycastTarget = false;
+
+                // Registered AFTER the rotation is set, and the two do not interfere: Unity composes
+                // a rect's rotation and scale, and KeepConstantScale only ever writes the scale.
+                // Sizes here are therefore in screen pixels, like the labels' - see
+                // BuildCompactLabel.
+                panZoom.KeepConstantScale(rect);
+
+                var fillGo = new GameObject("Fill", typeof(RectTransform), typeof(Image));
+                var fill = (RectTransform)fillGo.transform;
+                fill.SetParent(rect, worldPositionStays: false);
+                fill.anchorMin = fill.anchorMax = new Vector2(0.5f, 0.5f);
+                fill.pivot = new Vector2(0.5f, 0.5f);
+                fill.anchoredPosition = Vector2.zero;
+                fill.sizeDelta = new Vector2(ExtractMarkerSize, ExtractMarkerSize);
+
+                var green = fillGo.GetComponent<Image>();
+                green.color = ExtractMarkerColor;
+                green.raycastTarget = false;
+            }
+        }
+
+        /// <summary>Whether this map draws extract diamonds, which only a capture's labels carry.
+        /// Asked by the sidebar, so its legend explains a mark the map is actually showing.</summary>
+        /// <param name="entry">The map being drawn.</param>
+        private static bool HasExtractMarkers(DynamicMapsLibrary.MapEntry entry) =>
+            entry != null &&
+            entry.Labels.Any(l => l.Kind == DynamicMapsLibrary.MapLabelKind.Exfil);
+
         /// <summary>One plated name as the cull sees it: where it is in the world, how big its plate
         /// is on screen, and whether it is a zone (which a low zoom drops outright). No scene object,
         /// deliberately - see <see cref="LabelCull.Decide"/>.</summary>

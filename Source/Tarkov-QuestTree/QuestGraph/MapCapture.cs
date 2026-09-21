@@ -219,6 +219,61 @@ namespace QuestTree.QuestGraph
         /// path is ever forward.</summary>
         private static readonly int[] MsaaLevels = { 8, 4, 2, 1 };
 
+        /// <summary>Whether the per-player distance culling is forced visible while a tile renders.
+        ///
+        /// It has to be. The campaign capture of Customs has buildings - the boiler room, Big Red,
+        /// several warehouses - drawn as a patch of ground with a black wall outline around it, because
+        /// EFT hides distant geometry by DISABLING the renderers rather than by letting the camera cull
+        /// them: layer 14 is "DisablerCullingObject", and a DisablerCullingObject holds a list of
+        /// components it switches off whenever no player is inside its collider. Every stop of a
+        /// campaign is outside most of those colliders, so the roof and the upper walls were off in
+        /// every capture while the floor - which belongs to no culling object - was drawn. The merge
+        /// cannot see that as a hole: a drawn floor is a drawn pixel.
+        ///
+        /// The game's own ForceEnable is no use here, because SetComponentsEnabled starts a coroutine
+        /// that switches twenty-five components a frame (CustomCullingCommon.SetComponentsEnabledWorker),
+        /// and a tile is rendered inside one frame. So the components are switched directly, with
+        /// ComponentExtensions.SetEnabledUniversal - the very call the game's own worker makes - and put
+        /// back in the finally of the same method.</summary>
+        private static readonly bool ForceCulling = true;
+
+        /// <summary>Shader name fragments that mean a renderer is water. Matched case-insensitively
+        /// against Renderer.sharedMaterial.shader.name.
+        ///
+        /// The cyan test in <see cref="Inpaint"/> catches the small flat quads; what it cannot catch is
+        /// the large blue-grey translucent sheet over the warehouse yard, which is desaturated rather
+        /// than cyan and would need a threshold loose enough to eat real roofs. This is the same fault
+        /// fixed at its source: whatever renders as water is not drawn at all, and the ground under it
+        /// is. The cyan pass stays as the second line, for water this misses.</summary>
+        private static readonly string[] WaterShaderTokens = { "water", "puddle" };
+
+        /// <summary>Whether the walkable-area mask is baked into the picture.</summary>
+        private static readonly bool ReachEnabled = true;
+
+        /// <summary>Side of one cell of the walkable mask, in metres. Two: the NavMesh is what a bot can
+        /// stand on, its triangles are metres across, and a two-metre grid over a kilometre of map is
+        /// 150 thousand cells - nothing to build and nothing to hold.</summary>
+        private const float ReachCellMetres = 2f;
+
+        /// <summary>How far the mask is grown outward from the walkable area before anything is dimmed.
+        /// Eight metres, because the NavMesh is not the map: it stops at every wall, under every
+        /// staircase and short of every railing, and a player standing on a catwalk or shooting across a
+        /// yard is looking at ground no bot can walk on. Eight metres is wide enough that no roof, no
+        /// interior and no yard is dimmed, and narrow enough that the edge of the world still is.</summary>
+        private const float ReachDilateMetres = 8f;
+
+        /// <summary>Metres over which the dimming fades in past the dilated edge, so the boundary reads
+        /// as a soft vignette rather than as a drawn line somebody might mistake for a wall.</summary>
+        private const float ReachRampMetres = 6f;
+
+        /// <summary>How much darker a pixel outside the walkable area is drawn, and how much of its
+        /// colour is taken out. Forty-five per cent darker and half desaturated: clearly a different
+        /// kind of ground at a glance, and still legible enough to navigate by, since the scenery out
+        /// there is what a player orients on even when they cannot go to it.</summary>
+        private const float ReachDarken = 0.45f;
+
+        private const float ReachDesaturate = 0.5f;
+
         /// <summary>Whether the despeckle pass runs. Static readonly, not const, for the same reason as
         /// the two switches below it.</summary>
         private static readonly bool DespeckleEnabled = true;
@@ -395,8 +450,12 @@ namespace QuestTree.QuestGraph
         private const float CaptureBasemapDistance = 0f;
 
         /// <summary>What the meta records about HOW a capture was rendered, and what a later capture has
-        /// to match before it may be merged into it: the capture light, the LOD bias and the terrain
-        /// base-map distance, each of which changes what a pixel is a picture OF.
+        /// to match before it may be merged into it: the capture light, the LOD bias, the terrain base-map
+        /// distance, whether water and cyan are painted out, whether the distance culling was forced
+        /// visible, how many water-shader tokens were suppressed, the smoothing, the despeckle, the
+        /// walkable mask, the supersampling and the multisampling. Every one of them changes what a pixel
+        /// is a picture OF, and a picture of one thing must not be merged pixel by pixel into a picture of
+        /// another.
         ///
         /// "own-1.5;lod1000;basemap0" is the current recipe. Every one of the three is read from the
         /// constant that is actually applied, so tuning any of them replaces the older captures instead
@@ -409,8 +468,11 @@ namespace QuestTree.QuestGraph
             ";lod" + CaptureLodBias.ToString("0.###", CultureInfo.InvariantCulture) +
             ";basemap" + CaptureBasemapDistance.ToString("0.###", CultureInfo.InvariantCulture) +
             ";water" + (FillWaterCyan ? "1" : "0") +
+            ";cull" + (ForceCulling ? "1" : "0") +
+            ";wr" + WaterShaderTokens.Length.ToString(CultureInfo.InvariantCulture) +
             ";smooth" + (SmoothingEnabled ? (SmoothingRadius * 2 + 1).ToString(CultureInfo.InvariantCulture) : "0") +
             ";despeckle" + (DespeckleEnabled ? "1" : "0") +
+            ";reach" + (ReachEnabled ? "1" : "0") +
             ";ss" + SupersampleFactor.ToString(CultureInfo.InvariantCulture) +
             ";msaa" + _msaa.ToString(CultureInfo.InvariantCulture);
 
@@ -599,6 +661,28 @@ namespace QuestTree.QuestGraph
         /// tile of every floor. Half-float when the hardware will render one, so the deferred
         /// pipeline's values arrive intact instead of clipped into eight bits.</summary>
         private Texture2D _stage;
+
+        /// <summary>Every renderer and LOD group the scene's distance culling switches off, flattened
+        /// out of the DisablerCullingObjects once per capture, with room to remember what each was set
+        /// to while a tile renders. See <see cref="ForceCulling"/>.</summary>
+        private Component[] _culling;
+
+        private bool[] _cullingWasEnabled;
+
+        /// <summary>How many culling objects the components came from, for the capture header.</summary>
+        private int _cullingObjects;
+
+        /// <summary>The water renderers this capture does not draw, and their states while it does not.
+        /// See <see cref="WaterShaderTokens"/>.</summary>
+        private Renderer[] _water;
+
+        private bool[] _waterWasEnabled;
+
+        /// <summary>How many entries of each list the current render actually took hold of - see
+        /// <see cref="HoldScene"/>.</summary>
+        private int _cullingHeld;
+
+        private int _waterHeld;
 
         /// <summary>Samples of multisampling the tile target was actually allocated with, 1 when the
         /// device refused all of them. Part of <see cref="RenderTag"/> and of the capture header.</summary>
@@ -925,6 +1009,13 @@ namespace QuestTree.QuestGraph
                 plan.Labels = Labels(plan);
                 plan.From = CapturePoint();
 
+                // The three scene-wide reads, all of them once per capture rather than once per tile:
+                // what the distance culler has switched off, what renders as water, and where a player
+                // can actually get to.
+                CollectCulling();
+                CollectWater();
+                plan.Reach = BuildReach(plan);
+
                 if (!BuildCamera(plan, out var note))
                 {
                     Plugin.LogSource?.LogWarning($"QuestTree: nothing was captured on {key} - {note}.");
@@ -939,6 +1030,14 @@ namespace QuestTree.QuestGraph
                 plan.FirstCapturedAt = plan.Previous == null
                     ? null
                     : FirstOf(plan.Previous);
+
+                if (_culling != null && _culling.Length > 0)
+                {
+                    note = $"{note}, culling forced ({_cullingObjects} objects)";
+                }
+
+                if (_water != null && _water.Length > 0) note = $"{note}, {_water.Length} water renderers off";
+                if (plan.Reach != null) note = $"{note}, reach mask {plan.ReachCellsX}x{plan.ReachCellsZ}";
 
                 Plugin.LogSource?.LogInfo(
                     $"QuestTree: capturing {key} - {plan.WidthPx}x{plan.HeightPx} px, " +
@@ -1280,6 +1379,7 @@ namespace QuestTree.QuestGraph
                 }
 
                 if (floor.Despeckled > 0) line += $", {floor.Despeckled} speckles medianed";
+                if (floor.Outside > 0) line += $", {Share(floor.Outside, pixels)} % outside the walkable area";
 
                 if (floor.Merged)
                 {
@@ -2021,6 +2121,495 @@ namespace QuestTree.QuestGraph
             DevelopFinish(plan, floor);
         }
 
+        // --- the walkable mask -------------------------------------------------------------------
+
+        /// <summary>
+        /// Rasterises the NavMesh into a coarse grid over the extent, grows it, and turns the distance
+        /// from it into a per-cell weight the picture is dimmed by.
+        ///
+        /// What it is for: the extent is padded and clamped to reach past the playable world, so a
+        /// capture has a border of hillside, water and skybox terrain that looks exactly like the map and
+        /// is not part of it. A player reading the picture cannot tell where the map stops. The NavMesh
+        /// is the one thing in the scene that knows: it is where a bot can stand, so it is the playable
+        /// world, give or take the walls it stops at - which is what <see cref="ReachDilateMetres"/> is
+        /// for.
+        ///
+        /// Three passes, all cheap on a 150-thousand-cell grid: mark every cell a NavMesh triangle covers
+        /// (by the triangle's own bounding box and a barycentric test on the cell centre, so a triangle
+        /// larger than a cell fills it rather than only marking its corners); a two-sweep chamfer distance
+        /// transform outward from the marked cells; then the weight, 255 inside the dilation, falling to 0
+        /// over the ramp.
+        ///
+        /// Null, having said so, when there is no NavMesh - and then nothing is dimmed, which is the
+        /// right failure: a map with no mask looks exactly as it did before this existed.
+        /// </summary>
+        /// <param name="plan">The capture's plan, for the extent the grid covers.</param>
+        private static byte[] BuildReach(Plan plan)
+        {
+            if (!ReachEnabled) return null;
+
+            try
+            {
+                var clock = Stopwatch.StartNew();
+                var triangulation = MapExtentProbe.Triangulation(plan.Key);
+                var vertices = triangulation.vertices;
+                var indices = triangulation.indices;
+
+                if (vertices == null || indices == null || vertices.Length == 0 || indices.Length < 3)
+                {
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: {plan.Key} has no NavMesh to mark its walkable area with, so the whole picture " +
+                        "is drawn as reachable.");
+                    return null;
+                }
+
+                var cellsX = Math.Max(1, (int)Math.Ceiling((plan.Extent.MaxX - plan.Extent.MinX) / ReachCellMetres));
+                var cellsZ = Math.Max(1, (int)Math.Ceiling((plan.Extent.MaxZ - plan.Extent.MinZ) / ReachCellMetres));
+
+                plan.ReachCellsX = cellsX;
+                plan.ReachCellsZ = cellsZ;
+
+                // Distance from the walkable area, in cells, as a chamfer transform. Seeded with 0 on a
+                // walkable cell and a number bigger than anything the sweeps can produce elsewhere.
+                var far = cellsX + cellsZ + 2;
+                var distance = new int[cellsX * cellsZ];
+                for (var i = 0; i < distance.Length; i++) distance[i] = far;
+
+                var triangles = 0;
+                for (var t = 0; t + 2 < indices.Length; t += 3)
+                {
+                    var a = vertices[indices[t]];
+                    var b = vertices[indices[t + 1]];
+                    var c = vertices[indices[t + 2]];
+
+                    if (!Mark(plan, distance, cellsX, cellsZ, a, b, c)) continue;
+                    triangles++;
+                }
+
+                if (triangles == 0)
+                {
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: none of {plan.Key}'s NavMesh falls inside its extent, so the whole picture is " +
+                        "drawn as reachable.");
+                    return null;
+                }
+
+                Sweep(distance, cellsX, cellsZ);
+
+                var inside = Math.Max(1, (int)Math.Round(ReachDilateMetres / ReachCellMetres));
+                var ramp = Math.Max(1, (int)Math.Round(ReachRampMetres / ReachCellMetres));
+
+                var reach = new byte[distance.Length];
+                var dimmed = 0;
+
+                for (var i = 0; i < distance.Length; i++)
+                {
+                    var steps = distance[i] - inside;
+
+                    if (steps <= 0)
+                    {
+                        reach[i] = 255;
+                        continue;
+                    }
+
+                    dimmed++;
+
+                    if (steps >= ramp)
+                    {
+                        reach[i] = 0;
+                        continue;
+                    }
+
+                    reach[i] = (byte)(255 - 255 * steps / ramp);
+                }
+
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: {plan.Key}'s walkable mask is {cellsX}x{cellsZ} cells of {F(ReachCellMetres)} m from " +
+                    $"{triangles} NavMesh triangle(s), grown {F(ReachDilateMetres)} m with a {F(ReachRampMetres)} m " +
+                    $"ramp; {Share(dimmed, distance.Length)} % of its cells are outside, built in " +
+                    $"{Ms(clock.Elapsed.TotalMilliseconds)} ms.");
+
+                return reach;
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: the walkable mask for {plan.Key} could not be built " +
+                    $"({ex.GetType().Name}: {ex.Message}) - the whole picture is drawn as reachable.");
+                return null;
+            }
+        }
+
+        /// <summary>Marks every cell whose centre falls inside one NavMesh triangle, projected onto XZ.
+        /// False when the triangle is outside the extent altogether, which on a map whose NavMesh reaches
+        /// past the padding is most of the far ones.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="distance">The distance field being seeded.</param>
+        /// <param name="cellsX">Grid width.</param>
+        /// <param name="cellsZ">Grid height.</param>
+        /// <param name="a">The triangle's first vertex.</param>
+        /// <param name="b">Its second.</param>
+        /// <param name="c">Its third.</param>
+        private static bool Mark(
+            Plan plan, int[] distance, int cellsX, int cellsZ, Vector3 a, Vector3 b, Vector3 c)
+        {
+            var minX = Math.Min(a.x, Math.Min(b.x, c.x));
+            var maxX = Math.Max(a.x, Math.Max(b.x, c.x));
+            var minZ = Math.Min(a.z, Math.Min(b.z, c.z));
+            var maxZ = Math.Max(a.z, Math.Max(b.z, c.z));
+
+            var fromX = Cell(minX - plan.Extent.MinX, cellsX);
+            var untilX = Cell(maxX - plan.Extent.MinX, cellsX);
+            var fromZ = Cell(minZ - plan.Extent.MinZ, cellsZ);
+            var untilZ = Cell(maxZ - plan.Extent.MinZ, cellsZ);
+
+            if (untilX < 0 || untilZ < 0 || fromX >= cellsX || fromZ >= cellsZ) return false;
+
+            fromX = Math.Max(0, fromX);
+            fromZ = Math.Max(0, fromZ);
+            untilX = Math.Min(cellsX - 1, untilX);
+            untilZ = Math.Min(cellsZ - 1, untilZ);
+
+            // The edge functions of the triangle, once, so the per-cell test is three multiplies.
+            var area = (b.x - a.x) * (c.z - a.z) - (c.x - a.x) * (b.z - a.z);
+            if (Math.Abs(area) < 1e-6f)
+            {
+                // A triangle with no area in XZ - a wall's worth of NavMesh, seen edge on. Its bounding
+                // box is one row or column of cells and marking them all is right.
+                for (var z = fromZ; z <= untilZ; z++)
+                {
+                    for (var x = fromX; x <= untilX; x++) distance[z * cellsX + x] = 0;
+                }
+
+                return true;
+            }
+
+            var inverse = 1f / area;
+            var marked = false;
+
+            for (var z = fromZ; z <= untilZ; z++)
+            {
+                var worldZ = (float)(plan.Extent.MinZ + (z + 0.5d) * ReachCellMetres);
+
+                for (var x = fromX; x <= untilX; x++)
+                {
+                    var worldX = (float)(plan.Extent.MinX + (x + 0.5d) * ReachCellMetres);
+
+                    var u = ((b.x - worldX) * (c.z - worldZ) - (c.x - worldX) * (b.z - worldZ)) * inverse;
+                    if (u < 0f) continue;
+
+                    var v = ((c.x - worldX) * (a.z - worldZ) - (a.x - worldX) * (c.z - worldZ)) * inverse;
+                    if (v < 0f) continue;
+
+                    var w = 1f - u - v;
+                    if (w < 0f) continue;
+
+                    distance[z * cellsX + x] = 0;
+                    marked = true;
+                }
+            }
+
+            // A triangle smaller than a cell can fall between four cell centres and mark none of them,
+            // which would punch a hole in the middle of a walkable floor. Its own cell is marked for it.
+            if (!marked)
+            {
+                var cx = Cell((minX + maxX) * 0.5f - plan.Extent.MinX, cellsX);
+                var cz = Cell((minZ + maxZ) * 0.5f - plan.Extent.MinZ, cellsZ);
+
+                if (cx >= 0 && cz >= 0 && cx < cellsX && cz < cellsZ) distance[cz * cellsX + cx] = 0;
+            }
+
+            return true;
+        }
+
+        /// <summary>A two-sweep chamfer distance transform: the number of cells from each cell to the
+        /// nearest walkable one, near enough for a mask measured in metres.</summary>
+        /// <param name="distance">The seeded field, changed in place.</param>
+        /// <param name="cellsX">Grid width.</param>
+        /// <param name="cellsZ">Grid height.</param>
+        private static void Sweep(int[] distance, int cellsX, int cellsZ)
+        {
+            for (var z = 0; z < cellsZ; z++)
+            {
+                for (var x = 0; x < cellsX; x++)
+                {
+                    var at = z * cellsX + x;
+                    var best = distance[at];
+
+                    if (x > 0 && distance[at - 1] + 1 < best) best = distance[at - 1] + 1;
+                    if (z > 0 && distance[at - cellsX] + 1 < best) best = distance[at - cellsX] + 1;
+
+                    distance[at] = best;
+                }
+            }
+
+            for (var z = cellsZ - 1; z >= 0; z--)
+            {
+                for (var x = cellsX - 1; x >= 0; x--)
+                {
+                    var at = z * cellsX + x;
+                    var best = distance[at];
+
+                    if (x + 1 < cellsX && distance[at + 1] + 1 < best) best = distance[at + 1] + 1;
+                    if (z + 1 < cellsZ && distance[at + cellsX] + 1 < best) best = distance[at + cellsX] + 1;
+
+                    distance[at] = best;
+                }
+            }
+        }
+
+        /// <summary>Which cell a distance from the extent's corner falls in, which can be off the grid at
+        /// either end and is clamped by the caller.</summary>
+        /// <param name="metres">Metres from the extent's minimum on that axis.</param>
+        /// <param name="cells">How many cells the axis has.</param>
+        private static int Cell(double metres, int cells)
+        {
+            var cell = (int)Math.Floor(metres / ReachCellMetres);
+            return cell >= cells ? cells : cell;
+        }
+
+        /// <summary>How reachable one output pixel is, 0 to 1, sampled from the mask with bilinear
+        /// interpolation - the cells are eight pixels across at a quarter of a metre to the pixel, and
+        /// nearest-cell sampling would draw the ramp as a staircase of 8-pixel blocks.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="col">The pixel's column.</param>
+        /// <param name="row">The pixel's row in texture order, counting from the bottom.</param>
+        private static float ReachAt(Plan plan, int col, int row)
+        {
+            var reach = plan.Reach;
+            if (reach == null) return 1f;
+
+            var cellsX = plan.ReachCellsX;
+            var cellsZ = plan.ReachCellsZ;
+
+            // Texture row 0 is the extent's -z edge, and so is cell row 0, so this axis needs no flip.
+            var x = ((col + 0.5f) / plan.Ppm) / ReachCellMetres - 0.5f;
+            var z = ((row + 0.5f) / plan.Ppm) / ReachCellMetres - 0.5f;
+
+            var x0 = (int)Math.Floor(x);
+            var z0 = (int)Math.Floor(z);
+            var fx = x - x0;
+            var fz = z - z0;
+
+            var x1 = x0 + 1;
+            var z1 = z0 + 1;
+
+            if (x0 < 0) { x0 = 0; fx = 0f; }
+            if (z0 < 0) { z0 = 0; fz = 0f; }
+            if (x1 > cellsX - 1) x1 = cellsX - 1;
+            if (z1 > cellsZ - 1) z1 = cellsZ - 1;
+            if (x0 > cellsX - 1) x0 = cellsX - 1;
+            if (z0 > cellsZ - 1) z0 = cellsZ - 1;
+
+            var bottom = reach[z0 * cellsX + x0] + (reach[z0 * cellsX + x1] - reach[z0 * cellsX + x0]) * fx;
+            var top = reach[z1 * cellsX + x0] + (reach[z1 * cellsX + x1] - reach[z1 * cellsX + x0]) * fx;
+
+            return (bottom + (top - bottom) * fz) / 255f;
+        }
+
+        // --- what the scene hides ----------------------------------------------------------------
+
+        /// <summary>Flattens every DisablerCullingObject's switch list into one array of renderers and
+        /// LOD groups, once per capture. See <see cref="ForceCulling"/> for why this is needed at all.
+        ///
+        /// Renderers and LOD groups only. The lists also hold lights, fog lights and lamp controllers,
+        /// and those are deliberately left alone: enabling a hundred distant lights would change the
+        /// exposure between one tile and the next and seam the picture, and the capture brings its own
+        /// light for exactly that reason. The GameObject list (_gameObjectsToTurnOff) is left alone too -
+        /// activating a GameObject runs Awake and OnEnable on whatever is attached to it, which is the
+        /// game's own code running because a map was being photographed.
+        ///
+        /// FindObjectsOfType is the expensive part, so it happens here and never again, and the count
+        /// and the time are logged.</summary>
+        private void CollectCulling()
+        {
+            _culling = null;
+            _cullingWasEnabled = null;
+            _cullingObjects = 0;
+
+            if (!ForceCulling) return;
+
+            try
+            {
+                var clock = Stopwatch.StartNew();
+                var components = new List<Component>();
+                var objects = FindObjectsOfType<DisablerCullingObject>();
+
+                foreach (var culler in objects)
+                {
+                    if (culler == null) continue;
+
+                    _cullingObjects++;
+                    Take(components, culler._componentsToTurnOff);
+                    Take(components, culler._compsToTurnOffWhoIgnoreInversedColliders);
+                }
+
+                _culling = components.ToArray();
+                _cullingWasEnabled = new bool[_culling.Length];
+
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: {_cullingObjects} culling object(s) hold {_culling.Length} renderer(s) and LOD " +
+                    $"group(s) the capture will force visible, found in {Ms(clock.Elapsed.TotalMilliseconds)} ms.");
+            }
+            catch (Exception ex)
+            {
+                _culling = null;
+                _cullingWasEnabled = null;
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: the scene's distance culling could not be read " +
+                    $"({ex.GetType().Name}: {ex.Message}) - buildings whose roofs are switched off at this " +
+                    "distance will be captured as ground.");
+            }
+        }
+
+        /// <summary>Adds the renderers and LOD groups of one switch list to the flat array.</summary>
+        /// <param name="into">The flat list being built.</param>
+        /// <param name="components">One culling object's switch list, which may be null.</param>
+        private static void Take(List<Component> into, List<Component> components)
+        {
+            if (components == null) return;
+
+            foreach (var component in components)
+            {
+                if (component == null) continue;
+                if (component is Renderer || component is LODGroup) into.Add(component);
+            }
+        }
+
+        /// <summary>Finds every renderer whose material is a water shader, once per capture, and logs the
+        /// distinct shader names so the token list can be checked against what a map actually uses.
+        /// See <see cref="WaterShaderTokens"/>.</summary>
+        private void CollectWater()
+        {
+            _water = null;
+            _waterWasEnabled = null;
+
+            try
+            {
+                var clock = Stopwatch.StartNew();
+                var found = new List<Renderer>();
+                var shaders = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                foreach (var renderer in FindObjectsOfType<Renderer>())
+                {
+                    if (renderer == null) continue;
+
+                    // sharedMaterial, not material: reading material INSTANTIATES a copy of it on the
+                    // renderer, which would leak a material per water surface per capture.
+                    var material = renderer.sharedMaterial;
+                    var shader = material != null && material.shader != null ? material.shader.name : null;
+                    if (string.IsNullOrEmpty(shader)) continue;
+
+                    var water = false;
+                    foreach (var token in WaterShaderTokens)
+                    {
+                        if (shader.IndexOf(token, StringComparison.OrdinalIgnoreCase) < 0) continue;
+                        water = true;
+                        break;
+                    }
+
+                    if (!water) continue;
+
+                    found.Add(renderer);
+                    shaders.Add(shader);
+                }
+
+                _water = found.ToArray();
+                _waterWasEnabled = new bool[_water.Length];
+
+                if (_water.Length > 0)
+                {
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: {_water.Length} water renderer(s) will be left out of the capture, on shader(s) " +
+                        $"[{string.Join(", ", shaders.ToArray())}], found in {Ms(clock.Elapsed.TotalMilliseconds)} ms.");
+                }
+                else
+                {
+                    Plugin.LogSource?.LogDebug(
+                        "QuestTree: no water shader was found in this scene, so the cyan pass is the only thing " +
+                        "standing between a pool and the picture.");
+                }
+            }
+            catch (Exception ex)
+            {
+                _water = null;
+                _waterWasEnabled = null;
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: the scene's water renderers could not be found " +
+                    $"({ex.GetType().Name}: {ex.Message}) - pools may appear as flat colour.");
+            }
+        }
+
+        /// <summary>Switches every hidden renderer on and every water renderer off, remembering what each
+        /// was, for the one render that follows. Both undone by <see cref="ReleaseScene"/> in the same
+        /// method's finally.</summary>
+        private void HoldScene()
+        {
+            // How far each loop got, so a throw partway through cannot have the restore below act on
+            // entries still holding the PREVIOUS tile's states - which would switch off geometry the
+            // game had on and leave it off.
+            _cullingHeld = 0;
+            _waterHeld = 0;
+
+            if (_culling != null)
+            {
+                for (var i = 0; i < _culling.Length; i++)
+                {
+                    var component = _culling[i];
+                    _cullingHeld = i + 1;
+
+                    if (component == null) continue;
+
+                    _cullingWasEnabled[i] = component.IsEnabledUniversal();
+                    if (!_cullingWasEnabled[i]) component.SetEnabledUniversal(true);
+                }
+            }
+
+            if (_water == null) return;
+
+            for (var i = 0; i < _water.Length; i++)
+            {
+                var renderer = _water[i];
+                _waterHeld = i + 1;
+
+                if (renderer == null) continue;
+
+                _waterWasEnabled[i] = renderer.enabled;
+                if (_waterWasEnabled[i]) renderer.enabled = false;
+            }
+        }
+
+        /// <summary>Puts every renderer back to what <see cref="HoldScene"/> found it at. Only the ones
+        /// that were changed are written to, so the player's own frame is left exactly as the game had
+        /// it and nothing is touched twice.</summary>
+        private void ReleaseScene()
+        {
+            if (_culling != null)
+            {
+                for (var i = 0; i < _cullingHeld; i++)
+                {
+                    var component = _culling[i];
+                    if (component == null || _cullingWasEnabled[i]) continue;
+
+                    component.SetEnabledUniversal(false);
+                }
+            }
+
+            _cullingHeld = 0;
+
+            if (_water == null) return;
+
+            for (var i = 0; i < _waterHeld; i++)
+            {
+                var renderer = _water[i];
+                if (renderer == null || !_waterWasEnabled[i]) continue;
+
+                renderer.enabled = true;
+            }
+
+            _waterHeld = 0;
+        }
+
         // --- the water quads ---------------------------------------------------------------------
 
         /// <summary>
@@ -2601,6 +3190,13 @@ namespace QuestTree.QuestGraph
                             ? Steps(Mathf.Sqrt(dxSquared[col] + dzSquared))
                             : DistanceEmpty;
 
+                        // Sampled for EVERY pixel, not only the ones this capture supplies: the mask is a
+                        // property of the map, so the share it dims is a fact about the picture rather
+                        // than about this capture, and counting it inside the merge would have reported a
+                        // third of the truth on a merge that kept two thirds of its pixels.
+                        var reach = ReachAt(plan, col, textureRow);
+                        if (reach < 1f) floor.Outside++;
+
                         floor.Dist[index] = distance;
 
                         var oldDistance = previousDist != null && previous != null
@@ -2652,7 +3248,7 @@ namespace QuestTree.QuestGraph
                                 Despeckle(plan, floor, lumFrom, textureRow, col, ref pr, ref pg, ref pb);
                             }
 
-                            block[target + col] = Grade(pr, pg, pb, low, scale, gamma);
+                            block[target + col] = Grade(pr, pg, pb, low, scale, gamma, reach);
 
                             floor.Filled++;
                         }
@@ -2742,7 +3338,10 @@ namespace QuestTree.QuestGraph
         /// <param name="low">The stored luminance that becomes black.</param>
         /// <param name="scale">1 / (high - low) from the stored exposure.</param>
         /// <param name="gamma">The stored exponent, 1/2.2 for linear data or 1 for encoded data.</param>
-        private static Color32 Grade(float r, float g, float b, float low, float scale, float gamma)
+        /// <param name="reach">How reachable this pixel is, 1 inside the walkable area and 0 well outside
+        /// it - see <see cref="BuildReach"/>. A property of the MAP, so it cannot make two captures of one
+        /// map disagree about a pixel.</param>
+        private static Color32 Grade(float r, float g, float b, float low, float scale, float gamma, float reach)
         {
             var sr = Stretch(r, low, scale);
             var sg = Stretch(g, low, scale);
@@ -2766,6 +3365,24 @@ namespace QuestTree.QuestGraph
                 sr *= gain;
                 sg *= gain;
                 sb *= gain;
+            }
+
+            // Outside the walkable area: darker and greyer, by the share of the way out this pixel is,
+            // so the boundary is a ramp rather than a line. Applied after the S-curve and before the
+            // highlight ceiling, i.e. on the finished picture rather than on the light, so that what is
+            // dimmed is the PICTURE and the exposure the map was developed with is untouched - which is
+            // what keeps a merge byte-stable: the mask is a property of the map, identical in every
+            // capture of it.
+            if (reach < 1f)
+            {
+                var outside = 1f - reach;
+                var grey = Luminance(sr, sg, sb);
+                var toGrey = ReachDesaturate * outside;
+                var dim = 1f - ReachDarken * outside;
+
+                sr = (sr + (grey - sr) * toGrey) * dim;
+                sg = (sg + (grey - sg) * toGrey) * dim;
+                sb = (sb + (grey - sb) * toGrey) * dim;
             }
 
             return new Color32(
@@ -3107,6 +3724,10 @@ namespace QuestTree.QuestGraph
                 if (_light != null) _light.enabled = true;
                 basemaps = HoldTerrainBasemaps();
 
+                // The scene's own distance culling forced visible and its water hidden, for this render
+                // only - see ForceCulling and WaterShaderTokens.
+                HoldScene();
+
                 // The LOD switch, not a quality preference - see CaptureLodBias. maximumLODLevel is
                 // usually already 0 and setting it costs nothing; where the game's quality level has
                 // raised it, it is a second way for the detailed mesh to be unreachable.
@@ -3120,6 +3741,7 @@ namespace QuestTree.QuestGraph
                 // All four restored by the statements that changed them, and for the same reason: the
                 // player's next frame must be drawn with the scene's own fog, the scene's own lights, the
                 // player's own LOD distances and the terrain's own detail.
+                ReleaseScene();
                 ReleaseTerrainBasemaps(basemaps);
                 QualitySettings.maximumLODLevel = maximumLod;
                 QualitySettings.lodBias = lodBias;
@@ -4024,6 +4646,16 @@ namespace QuestTree.QuestGraph
             /// the projection against.</summary>
             public float SamplePpm => Ppm * SupersampleFactor;
 
+            /// <summary>How reachable each cell of the map is, 255 inside the walkable area and 0 well
+            /// outside it, with the ramp in between - see <see cref="BuildReach"/>. Null when there is no
+            /// NavMesh to build one from, and then nothing is dimmed. One mask for every floor: it is
+            /// built from the whole triangulation, which covers every band.</summary>
+            public byte[] Reach;
+
+            public int ReachCellsX;
+
+            public int ReachCellsZ;
+
             /// <summary>Where the player was standing when the key was pressed, in world XZ. Every
             /// pixel's distance from here goes into the sidecar, and that is what decides whether this
             /// capture's view of a spot beats the one already on disk.</summary>
@@ -4107,6 +4739,10 @@ namespace QuestTree.QuestGraph
             public float[] NeighbourLum;
 
             public int[] NeighbourIndex;
+
+            /// <summary>How many of this floor's pixels were dimmed as outside the walkable area, for its
+            /// log line.</summary>
+            public int Outside;
 
             /// <summary>How many lone outliers were replaced by their neighbours' median, for the
             /// floor's log line.</summary>

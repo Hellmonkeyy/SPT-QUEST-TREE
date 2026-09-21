@@ -147,6 +147,16 @@ namespace QuestTree.QuestGraph
 
         private static MapExtentDto _lastExtent;
 
+        /// <summary>The NavMesh triangulation this probe last calculated, and the map it belongs to.
+        /// Kept because calculating one copies the whole mesh into managed arrays - hundreds of
+        /// thousands of vertices on Streets, a third of a second - and MapCapture needs the same data a
+        /// few minutes later to work out which parts of the map a player can actually reach. A map's
+        /// NavMesh is the same geometry every time it loads, so the memo outlives the raid exactly as
+        /// the extent memo does.</summary>
+        private static string _lastTriangulationMap;
+
+        private static NavMeshTriangulation _lastTriangulation;
+
         /// <summary>The extent a capture of <paramref name="map"/> must be drawn to: the very one the
         /// harvest sent, when this raid has already measured it, and a fresh measurement otherwise.
         /// Null when nothing usable can be measured - the caller then captures nothing.
@@ -194,6 +204,36 @@ namespace QuestTree.QuestGraph
             !string.IsNullOrEmpty(map) && _lastExtent != null &&
             string.Equals(_lastMap, map, StringComparison.OrdinalIgnoreCase);
 
+        /// <summary>The NavMesh triangulation of the loaded scene, calculated once per map and kept.
+        /// Never throws; an empty triangulation comes back as one with no vertices.</summary>
+        /// <param name="map">The map's internal name, which the memo is keyed by.</param>
+        public static NavMeshTriangulation Triangulation(string map)
+        {
+            try
+            {
+                if (!string.IsNullOrEmpty(map) &&
+                    string.Equals(_lastTriangulationMap, map, StringComparison.OrdinalIgnoreCase) &&
+                    _lastTriangulation.vertices != null && _lastTriangulation.vertices.Length > 0)
+                {
+                    return _lastTriangulation;
+                }
+
+                var triangulation = NavMesh.CalculateTriangulation();
+
+                _lastTriangulationMap = map;
+                _lastTriangulation = triangulation;
+
+                return triangulation;
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: the NavMesh of {map} could not be triangulated " +
+                    $"({ex.GetType().Name}: {ex.Message}).");
+                return default;
+            }
+        }
+
         /// <summary>Measures the current scene. Returns null - never throws - when there is nothing
         /// to measure, when the result fails its own containment check, or on any error; the caller
         /// sends the harvest either way.</summary>
@@ -221,7 +261,7 @@ namespace QuestTree.QuestGraph
             // Calculated exactly once: the triangulation copies the whole NavMesh into managed
             // arrays (hundreds of thousands of vertices on Streets), and both the extent fallback
             // and every floor band are read out of this one result.
-            var vertices = NavMesh.CalculateTriangulation().vertices ?? Array.Empty<Vector3>();
+            var vertices = Triangulation(map).vertices ?? Array.Empty<Vector3>();
 
             var nav = Union("navmesh", vertices);
             var border = BorderZoneBox();
