@@ -104,12 +104,14 @@ namespace QuestTree.QuestGraph
     /// Memory is BUDGETED, not hoped for. One floor may work in CaptureMemoryBudgetBytes - 256 MB - of
     /// arrays and textures, at WorkingSetBytesPerPixel (26 B a pixel: the float buffer, the drawn mask,
     /// two sets of distances, the picture, the sidecar texture and, on a merge, the previous picture),
-    /// and the pixels per metre come down in half-metre steps until the floor fits. Interchange at
-    /// 4 px/m is 3728x3584 and 331 MB a floor, which is exactly what died in a raid - "GetPixels:
+    /// and the pixels per metre come down in half-metre steps until the floor fits. The figures below
+    /// are of the harvested RECTANGLE, not of a map name - the rectangle is what the arithmetic sees,
+    /// and a re-harvest moves it: a 965x925 m one (Interchange's, as this install measured it) at
+    /// 4 px/m is 3860x3700 and 354 MB a floor, which is exactly what died in a raid - "GetPixels:
     /// scripting array creation failed" on its first floor and OutOfMemoryException on the other two -
-    /// and it is captured at 3.5 px/m and 254 MB instead. Customs at 4 px/m is 239 MB and is not
-    /// touched. (Every figure here is what the capture header prints: mebibytes, the way the code
-    /// divides.)
+    /// and it comes down through 3.5 px/m (271 MB, still over) to 3 px/m and 199 MB. A 1118x539 m one
+    /// (Customs) at 4 px/m is 239 MB and is not touched. (Every figure here is what the capture header
+    /// prints: mebibytes, the way the code divides.)
     ///
     /// What is outside that budget and small: the 34 MB half-float staging texture (one per CAPTURE),
     /// two 32 KB sample rows, a band's worth of Color32 and the encoded PNG. What is no longer in it at
@@ -485,9 +487,11 @@ namespace QuestTree.QuestGraph
         /// <summary>Most managed and texture memory one floor of a capture may work in. Two hundred and
         /// fifty-six megabytes.
         ///
-        /// Interchange is why it exists. Three floors at 4 px/m is 3728x3584 = 13.4 million pixels each,
-        /// and at <see cref="WorkingSetBytesPerPixel"/> that is 331 MB a floor - so the first floor died
-        /// with "GetPixels: scripting array creation failed, array size or length is too large" at tile
+        /// Interchange is why it exists - or rather its harvested RECTANGLE is, which is what the
+        /// arithmetic below sees and what a re-harvest can move: 965x925 m as this install measured it.
+        /// Three floors of that at 4 px/m is 3860x3700 = 14.3 million pixels each, and at
+        /// <see cref="WorkingSetBytesPerPixel"/> that is 354 MB a floor - so the first floor died with
+        /// "GetPixels: scripting array creation failed, array size or length is too large" at tile
         /// 12 of 16, and the second and third with OutOfMemoryException. Nothing was written.
         ///
         /// The number is not the machine's memory, it is what MONO will hand out in one piece. Every
@@ -500,9 +504,10 @@ namespace QuestTree.QuestGraph
         /// through GetPixelData, which is a view of the texture's own memory (see ReadSampleRow,
         /// CopyColours). What is left for this number to guard is the PEAK alone, a handful of long-lived
         /// arrays allocated once a floor and freed with a collect between floors, and that is a far
-        /// easier thing for an allocator to place. At 256 MB Customs keeps its 4 px/m and its 239 MB -
-        /// which also keeps the captures already on disk mergeable - and Interchange lands at 3.5 px/m
-        /// and 254 MB.</summary>
+        /// easier thing for an allocator to place. At 256 MB a 1118x539 m rectangle (Customs) keeps its
+        /// 4 px/m and its 239 MB - which also keeps the captures already on disk mergeable - and a
+        /// 965x925 m one (Interchange) walks 4 px/m (354 MB) past 3.5 (271 MB, still over) and lands at
+        /// 3 px/m and 199 MB.</summary>
         private const long CaptureMemoryBudgetBytes = 256L * 1024L * 1024L;
 
         /// <summary>What one output pixel costs while its floor is being captured, in bytes, counted
@@ -2216,8 +2221,9 @@ namespace QuestTree.QuestGraph
                 }
 
                 // Straight into ONE byte a pixel. The old path decoded the whole sidecar into a
-                // Color32 array first - four bytes a pixel, 54 MB on an Interchange floor - to read one
-                // channel out of it, which is most of what made the merge unaffordable.
+                // Color32 array first - four bytes a pixel, 31 MB on a floor of a 965x925 m rectangle at
+                // the 3 px/m its memory budget settles that map on - to read one channel out of it,
+                // which is most of what made the merge unaffordable.
                 var red = new byte[plan.WidthPx * plan.HeightPx];
                 if (!CopyRed(texture, red, plan, floor)) return;
 
@@ -4852,10 +4858,14 @@ namespace QuestTree.QuestGraph
 
                 _sampleRows = null;
 
-                // The water is put back first: a raid that ended mid-tile has it painted flat, and the
-                // materials this destroys below are what it is painted with.
-                ReleaseWater();
-
+                // The flat material and its texture, LAST of the water work and never before it: a
+                // renderer still holding _waterFlat when it is destroyed draws the "missing material"
+                // magenta for the rest of the raid. What guarantees the order is the ReleaseScene at
+                // the TOP of this method - its finally calls ReleaseWater whatever the culling restore
+                // did, which is the path a raid that ended mid-tile takes - and not a second
+                // ReleaseWater here, which is what this used to be: by this line the arrays it reads
+                // are nulled above and the count it works from was cleared by the first call, so it
+                // could never put anything back. A no-op is not a safety net; the release above is.
                 if (_waterFlat != null)
                 {
                     var flat = _waterFlat;

@@ -454,8 +454,18 @@ namespace QuestTreeServer
                         repairedCash += judged.Cash + judged.FleaEstimate;
 
                         // What the restricted search valued this build's purchases at, beside what the bill
-                        // charges for the same build.
-                        var repairedSides = Repaired(judged, sources);
+                        // charges for the same build. The weapon and its preset go with it because free-ness
+                        // is a COUNT per template and cannot be read off the rows - see Repaired().
+                        WeaponPresets.Defaults? judgedDefaults = null;
+                        MongoId? judgedWeapon = null;
+
+                        if (judged.WeaponTemplate.TryParseMongoId(out var judgedTemplate))
+                        {
+                            judgedWeapon = judgedTemplate;
+                            judgedDefaults = presets.For(judgedTemplate);
+                        }
+
+                        var repairedSides = Repaired(judged, sources, judgedDefaults, judgedWeapon);
 
                         repairedObjectiveTotal += repairedSides.Objective;
                         repairedPaidTotal += repairedSides.Paid;
@@ -478,8 +488,15 @@ namespace QuestTreeServer
 
                             foreach (var part in requirement.Baseline)
                             {
+                                // THE WEAPON, not null. Classify only knows a part is already fitted to a copy
+                                // of the quest's gun in the stash if it is told which gun that is, and every
+                                // other caller tells it. Passing null charged the shared side for exactly the
+                                // parts the repaired side gets free - the two lines this comparison is made of
+                                // were reading different questions - and it overstated the shared cost, which
+                                // is the direction the paragraph above promises this never goes.
                                 var (tier, price) = sources.Classify(
-                                    part.Template, sharedDefaults, null, sharedCopies.Next(part.Template));
+                                    part.Template, sharedDefaults, repairedWeapon,
+                                    sharedCopies.Next(part.Template));
 
                                 if (tier is PartAvailability.Tier.Buyable or PartAvailability.Tier.Flea) sharedCash += price ?? 0;
                                 else if (tier is PartAvailability.Tier.Absent or PartAvailability.Tier.Barter) sharedUnpriced++;
@@ -615,27 +632,39 @@ namespace QuestTreeServer
         /// face value - which is what the line reporting it says.
         ///
         /// PerPurchase is out of both, as it is out of the three shared columns: this compares prices with
-        /// prices. A row at a free tier is out of both as well - the search spent a free copy on it from the
-        /// same budget Classify gave the row, and neither side charges for one.</summary>
+        /// prices. A copy the profile already HAS is out of both as well - the search spent a free copy on it
+        /// and neither side charges for one - and which copies those are is counted here rather than read off
+        /// the row's tier. The two are not the same question: a copy past the free ones that nobody sells
+        /// another of keeps the tier of the copy the profile does have, deliberately, so that
+        /// StillObtainable does not read it as a change in circumstances (see Row's `unsourced`). Believing
+        /// that tier dropped exactly those rows out of the objective side while the line beside it says both
+        /// sides cover the same parts.</summary>
         private (long Objective, long Paid, int ValuedUnpaid, int Unpriced) Repaired(
-            ProfileBuildDto dto, PartAvailability.Sources sources)
+            ProfileBuildDto dto,
+            PartAvailability.Sources sources,
+            WeaponPresets.Defaults? defaults,
+            MongoId? questWeapon)
         {
             var objective = 0L;
             var paid = 0L;
             var valuedUnpaid = 0;
             var unpriced = 0;
 
+            // WHICH COPY EACH ROW IS. The same running index Row keeps, against the same FreeCopies budget
+            // Priced spends and Owed() recounts, so all three agree about what the search paid for.
+            var instances = new Copies();
+
             foreach (var part in dto.Parts)
             {
-                // The free tiers, which cost the search nothing and the player nothing. "fitted", "inplace"
-                // and "owned" are Row's spellings of them; anything else is a copy somebody has to obtain.
-                if (part.Tier is "fitted" or "inplace" or "owned") continue;
-
                 if (!part.Template.TryParseMongoId(out var template))
                 {
                     unpriced++;
                     continue;
                 }
+
+                // Advanced for every row, free ones included, or the index this decides on stops being the
+                // copy number.
+                if (instances.Next(template) < sources.FreeCopies(template, defaults, questWeapon)) continue;
 
                 var (tier, price) = sources.Purchase(template);
 

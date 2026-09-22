@@ -1050,6 +1050,15 @@ namespace QuestTreeServer
     public sealed class MapLabelDto
     {
         [JsonPropertyName("text")] public string Text { get; set; } = "";
+
+        /// <summary>Where the name came from: "exfil" for an extraction point, "zone" for a bot zone's
+        /// cleaned-up name. It decides how prominently the client draws it - an extract wears the
+        /// accent and a diamond and is drawn at every zoom, a zone name is white and yields - so
+        /// without it on the wire every borrowed map lost its extract marks. NORMALISED by MapStore to
+        /// one of those two words, anything else becoming "zone", because it reaches a text mesh on
+        /// every other client in the group.</summary>
+        [JsonPropertyName("kind")] public string Kind { get; set; } = "";
+
         [JsonPropertyName("x")] public double X { get; set; }
         [JsonPropertyName("z")] public double Z { get; set; }
     }
@@ -1092,6 +1101,19 @@ namespace QuestTreeServer
         /// host accepts a newer one and refuses an older or equal one, and the floors of one upload
         /// are grouped by it while they arrive one post at a time.</summary>
         [JsonPropertyName("capturedAt")] public string CapturedAt { get; set; } = "";
+
+        /// <summary>When the FIRST capture of this set was taken, which is what the credit line under
+        /// the map means by the date - a set is built over several raids and
+        /// <see cref="CapturedAt"/> is only the latest of them. Carried but never ranked on: the
+        /// version of a set is <see cref="CapturedAt"/> and nothing else. Empty when the capturing
+        /// client wrote no such field, and then the two are the same instant.</summary>
+        [JsonPropertyName("firstCapturedAt")] public string FirstCapturedAt { get; set; } = "";
+
+        /// <summary>How many captures are merged into this set; 1 for a fresh one. The number a player
+        /// watches go up while they fill in a map's holes, so it has to survive the host or every
+        /// borrowed map claims to be somebody's first attempt. Carried, bounded, and read by nothing
+        /// here.</summary>
+        [JsonPropertyName("captures")] public int Captures { get; set; }
 
         /// <summary>The Quest Tracker version that took the capture, for the credits line and for
         /// telling a re-capture after a game update from the picture it replaced.</summary>

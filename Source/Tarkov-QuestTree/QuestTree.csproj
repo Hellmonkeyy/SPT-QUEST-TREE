@@ -198,8 +198,12 @@
     </Exec>
   </Target>
 
-  <!-- Into the build output too, so a release is assembled from bin\ alone. It used to be placed
-       into the archive by hand, which is the kind of step that gets forgotten. -->
+  <!-- Into the build output too, so bin\ holds a complete plugin folder for a hand copy or a local
+       run. It is NOT where the release reads it from: package.ps1's allowlist takes the two DLLs out
+       of bin\ and every other shipped file - this one, weapon-builds.json, zones\ and maps\ - out of
+       the project folder that tracks it, so a file being in bin\ is not what puts it in the zip.
+       Being tracked here is: it used to be placed into the archive by hand, which is the kind of
+       step that gets forgotten. -->
   <ItemGroup>
     <None Include="kappa-quests.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>

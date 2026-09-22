@@ -246,11 +246,14 @@ carries our own credit instead: `Map: captured in-game with Quest Tracker 1.19.0
   one, until the floor fits. Lowering the scale rather than refusing the map, because a map at 2.5
   px/m is a map and one that threw an OutOfMemoryException is not, and deterministically, because
   the scale is part of what decides whether a later capture may be merged into this one. Interchange
-  at 4 px/m is 3728x3584 and 331 MB a floor, which is exactly what died in a raid - "GetPixels:
-  scripting array creation failed" on its first floor and an OutOfMemoryException on the other two -
-  and it is captured at 3.5 px/m and 254 MB instead, with the header saying why: `4 px/m would need
-  331 MB a floor, over the 256 MB budget, so 3.5 px/m (254 MB)`. Customs at 4 px/m is 239 MB, inside
-  the budget and untouched, which also keeps the sets already on disk mergeable. Outside that count
+  at 4 px/m is what died in a raid - "GetPixels: scripting array creation failed" on its first floor
+  and an OutOfMemoryException on the other two - so it comes down a step or two instead, and the
+  header says which and why. The step it lands on is the arithmetic on the rectangle THAT INSTALL's
+  harvest measured, not a constant: on the 965x925 m Interchange this one now measures, 4 px/m is
+  3860x3700 and 354 MB a floor and it captures at 3 px/m and 199 MB (`4 px/m would need 354 MB a
+  floor, over the 256 MB budget, so 3 px/m (199 MB)`); the earlier 932x896 m measurement of the same
+  map settled at 3.5 px/m and 254 MB. Customs at 4 px/m is 239 MB on its 1118x539 m, inside the
+  budget and untouched, which also keeps the sets already on disk mergeable. Outside that count
   and small: the 34 MB half-float staging texture, one per capture, and the video memory the tile
   target holds. Between floors everything the floor held is released and a collect runs by hand, the
   one place this mod does that, because these are large-object-heap allocations and the next floor
@@ -292,6 +295,13 @@ carries our own credit instead: `Map: captured in-game with Quest Tracker 1.19.0
   the server's zone file for that map - the case it exists to catch is an extent three metres off,
   which draws every pin slightly wrong and still looks like a picture. `tools/server-host.cmd` starts
   the server as a picture host. `tools/check-dtos.py` covers the new DTOs on both sides.
+
+- **Six review passes over everything since 1.13.1.** Client data, the weapon solver, the views, the
+  marker payloads, the map pipeline and the tooling were each read by a reviewer told what to break,
+  and the findings were fixed in place - the full list is in the CHANGELOG. Two of them change what
+  you will notice: a map set downloaded from a host keeps its extract labels as extracts (the label
+  kind now travels on the wire), and the weapon solver's remembered builds are solved again once on
+  the first boot of this version, because the solver is now version 12.
 
 ## What has been seen on screen, and what has not
 
@@ -346,7 +356,9 @@ the rest.
   the right way round, with the pins on the right buildings - the Dorms objective pin on Dorms is the
   quickest test. If it looks right, the geometry is right.
 - The log line after a capture, in `BepInEx\LogOutput.log`: `QuestTree: captured bigmap "Ground"
-  2236x1078 px (0.50 m/px), 2 tiles, 475 ms, ...`. A tail saying some of it was not drawn is an
+  2048x988 px (0.55 m/px), 2 tiles, 475 ms, ...` - that is Customs at the 2048 resolution setting,
+  which is what the run above was taken at; the default 8192 setting makes it 4472x2156 px
+  (0.25 m/px) across fifteen tiles. A tail saying some of it was not drawn is an
   invitation to press the key again somewhere else - do, and watch the second line say how much was
   newly drawn.
 - **The water.** No blue slabs anywhere: not over a yard, not on the bridge deck, not across an

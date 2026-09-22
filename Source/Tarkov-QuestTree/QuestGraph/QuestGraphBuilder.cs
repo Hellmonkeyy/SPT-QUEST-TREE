@@ -51,12 +51,16 @@ namespace QuestTree.QuestGraph
         /// that are not the panel's open path and so cannot wait on a worker - see
         /// <see cref="QuestDataClient.TryFetchAll"/>.
         ///
-        /// Marks no phases, unlike the open path: this is not an open. Its one caller never starts
-        /// the panel-open clock and never reports it, so a mark here would be measured against
-        /// whatever the last open left on that clock - a meaningless number, recorded into a list
-        /// nothing prints and the next open clears.</summary>
+        /// Marks no phases, unlike the open path: this is not an open, and it is not merely that the
+        /// numbers would be meaningless. Its one caller is the panel's status-change handler, which
+        /// runs off QuestController's event - an event that stays subscribed through the twenty-odd
+        /// frames an open spends waiting on the workers (see QuestDataClient.TryFetchAll). A mark
+        /// from here lands on a clock that IS running and moves its cursor to now, so the worker's
+        /// fetch and parse numbers are then charged against an interval already spent and clamped to
+        /// nothing - the same corruption the panel's Update guard was added to stop, arriving from
+        /// the other side. So the marks belong to the measured overload alone.</summary>
         public void Build(QuestController questController, IEftSession session) =>
-            Build(questController, session, QuestDataClient.TryFetchAll());
+            Build(questController, session, QuestDataClient.TryFetchAll(), measure: false);
 
         /// <summary>Builds from a quest list somebody else already has.
         ///
@@ -65,8 +69,15 @@ namespace QuestTree.QuestGraph
         /// tree is synthesized from the quests this client has itself unlocked. The panel's open path
         /// passes what QuestDataClient.TryTakeFetched handed it, having fetched and parsed it on a
         /// worker while the loading notice was up; its two phase entries are added there, which is
-        /// why this overload marks none of its own.</summary>
-        public void Build(QuestController questController, IEftSession session, List<QuestDto> quests)
+        /// why this overload adds none of its own for the fetch.</summary>
+        public void Build(QuestController questController, IEftSession session, List<QuestDto> quests) =>
+            Build(questController, session, quests, measure: true);
+
+        /// <summary>The build itself. <paramref name="measure"/> is whether this build is part of a
+        /// panel open and may therefore write to the open-time line - see the two overloads
+        /// above.</summary>
+        private void Build(
+            QuestController questController, IEftSession session, List<QuestDto> quests, bool measure)
         {
             _questController = questController;
             _byId = new Dictionary<string, QuestNode>();
@@ -147,7 +158,7 @@ namespace QuestTree.QuestGraph
             foreach (var node in _byId.Values)
                 node.BuildSearchText(TraderNames.TryGetValue(node.TraderId, out var trader) ? trader : null);
 
-            UI.PanelOpenTimer.Mark("graph");
+            if (measure) UI.PanelOpenTimer.Mark("graph");
 
             var depths = ComputeDepths(_byId);
             foreach (var node in _byId.Values)
@@ -155,7 +166,7 @@ namespace QuestTree.QuestGraph
 
             ComputeUnlockReach(_byId);
 
-            UI.PanelOpenTimer.Mark("depths");
+            if (measure) UI.PanelOpenTimer.Mark("depths");
 
             // A prerequisite the list does not contain is skipped by the depth walk, so such a
             // quest draws as a root. Kept on the node, so the box can wear a mark and the panel can
@@ -173,13 +184,14 @@ namespace QuestTree.QuestGraph
             RefreshKappaFlags();
             RefreshCollectorClosure();
             FindChains();
-            UI.PanelOpenTimer.Mark("kappa flags");
+            if (measure) UI.PanelOpenTimer.Mark("kappa flags");
 
             RefreshStatusesInternal();
 
             var waited = QuestDataClient.FetchMillis;
             ApplyLockGates();
-            UI.PanelOpenTimer.MarkSplit("profile: server", QuestDataClient.FetchMillis - waited, "statuses");
+            if (measure)
+                UI.PanelOpenTimer.MarkSplit("profile: server", QuestDataClient.FetchMillis - waited, "statuses");
 
             Nodes = _byId.Values.ToArray();
             Version++;

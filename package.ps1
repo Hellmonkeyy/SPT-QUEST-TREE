@@ -3,8 +3,11 @@
 # Every release before 1.13.2 was put together by hand, and the zones folder was copied out of the
 # live install - one directory below objective-gps.json and tarkovdev-quests.json, two third-party
 # files with no licence to redistribute. Seventeen zips were clean because one person
-# remembered. This script does not read the install at all (except with -RefreshZones and
-# -RefreshMaps, which copy only zones\*.json and maps\<key>\*.jpg|*.map.json into the repo),
+# remembered. This script does not read the install at all except under the three -Refresh switches,
+# and each of those reads ONE named thing and nothing else: -RefreshZones copies zones\*.json,
+# -RefreshMaps copies maps\<key>\*.jpg|*.map.json, and -RefreshBuilds copies the single file
+# cache\weapon-builds.json. None of the three globs can recurse or reach the parent directory, which
+# is where objective-gps.json and tarkovdev-quests.json live. It
 # assembles exactly the files named below, and then checks the
 # staging folder and the zip against that list: an extra file, a missing file, or any name matching
 # objective-gps / tarkovdev / .bak is a non-zero exit. It also refuses when the four version strings

@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Text;
@@ -53,7 +54,7 @@ namespace QuestTreeServer
         // same promise in the same way. The carry-over branch keeps the builds and re-measures them, so an
         // existing install loses no work: every build is still legal, still verified before use, and the
         // search starts from it rather than from nothing.
-        private const int CurrentSolver = 11;
+        private const int CurrentSolver = 12;
 
         /// <summary>Shape of the file itself, for the day a field is added.</summary>
         private const int CurrentSchema = 1;
@@ -366,7 +367,15 @@ namespace QuestTreeServer
 
         /// <summary>A key that changes whenever the answer would. Everything the search is given, in a
         /// fixed order, hashed - so two quests asking the same thing share an entry and a quest whose
-        /// terms change gets a new one.</summary>
+        /// terms change gets a new one.
+        ///
+        /// INVARIANT, and that is what makes the shipped history worth shipping. A threshold is a double and
+        /// eight of the thirty-two vanilla weapon conditions state a FRACTIONAL weight - Gunsmith 9 at 1.5 kg,
+        /// 2 at 3.5, 7 at 3.8, 11 at 4.5, 10 at 4.8, 13 and 16 at 6.7, 20 at 7.3 - so an interpolated ":R"
+        /// wrote "3,5" on a server whose Windows locale uses a comma and "3.5" on the machine the seed was
+        /// trained on. Nothing fails: those eight simply miss the seed on every install in most of Europe,
+        /// solve from nothing, and write a second entry beside the one they could not find. The same argument
+        /// as Numbers.Grid, which is invariant for the same reason and says so.</summary>
         public static string KeyFor(
             MongoId weapon,
             IReadOnlyList<(string Field, string Compare, double Value)> thresholds,
@@ -380,7 +389,7 @@ namespace QuestTreeServer
             // Sorted, because the order these arrive in is an accident of how the condition was read and
             // must not produce two entries for one question.
             foreach (var threshold in thresholds
-                         .Select(t => $"{t.Field}{t.Compare}{t.Value:R}")
+                         .Select(t => t.Field + t.Compare + t.Value.ToString("R", CultureInfo.InvariantCulture))
                          .OrderBy(t => t, StringComparer.Ordinal))
                 text.Append(threshold).Append(',');
 
@@ -542,14 +551,20 @@ namespace QuestTreeServer
                 var props = item?.Properties;
                 if (props == null) continue;
 
+                // INVARIANT on every double, for the reason KeyFor gives: a comma-decimal locale hashed
+                // every weight and every recoil force differently, so no install outside the invariant-looking
+                // cultures could ever match the fingerprint the shipped seed was stamped with - permanently
+                // the carry-over branch, permanently re-measuring sixty builds to learn what the file already
+                // said. "R" under en-US is byte-for-byte what the invariant culture writes, so the hash the
+                // seed carries is unchanged by saying so.
                 text.Append(id)
-                    .Append(':').Append((props.Ergonomics ?? 0d).ToString("R"))
-                    .Append(':').Append((props.Recoil ?? 0d).ToString("R"))
-                    .Append(':').Append((props.Weight ?? 0d).ToString("R"))
-                    .Append(':').Append(props.SightingRange ?? 0d)
+                    .Append(':').Append((props.Ergonomics ?? 0d).ToString("R", CultureInfo.InvariantCulture))
+                    .Append(':').Append((props.Recoil ?? 0d).ToString("R", CultureInfo.InvariantCulture))
+                    .Append(':').Append((props.Weight ?? 0d).ToString("R", CultureInfo.InvariantCulture))
+                    .Append(':').Append((props.SightingRange ?? 0d).ToString("R", CultureInfo.InvariantCulture))
                     .Append(':').Append(props.Cartridges?.FirstOrDefault()?.MaxCount ?? 0)
-                    .Append(':').Append((props.RecoilForceUp ?? 0d).ToString("R"))
-                    .Append(':').Append((props.RecoilForceBack ?? 0d).ToString("R"));
+                    .Append(':').Append((props.RecoilForceUp ?? 0d).ToString("R", CultureInfo.InvariantCulture))
+                    .Append(':').Append((props.RecoilForceBack ?? 0d).ToString("R", CultureInfo.InvariantCulture));
 
                 // Conflicts, and the grid footprint the size check reads. Neither was here, and both decide
                 // whether a cached build still ASSEMBLES: a mod update that introduces a conflict between a

@@ -312,6 +312,19 @@ namespace QuestTree.UI
             }
             else
             {
+                // The notice comes down here and nowhere else on this path. Hiding the panel
+                // deactivates its GameObject, which kills RebuildGraphDeferred wherever it has got
+                // to - and since 1.13.3 that coroutine goes on yielding for up to six seconds AFTER
+                // it has adopted the controller, holding the notice up until the map's picture is in.
+                // Hidden inside that window, the load dies with the notice still showing and the
+                // controller already adopted, so the next Show lands here, rebuilds nothing, and
+                // leaves the surface covering a tree that is finished: Update's own loading guard
+                // then keeps the sprite poll and every shortcut off for the rest of the menu
+                // session. Show only ever runs on a hidden panel (see the taskbar toggle), so there
+                // is never a live load for this to interrupt - an active surface here is always a
+                // dead one. The two rebuild paths above raise it again themselves.
+                ShowLoading(false);
+
                 // Nothing to rebuild, so the panel comes back exactly as it was left - except for
                 // a setting or a hand-in changed while it was shut (each flag is its deferred
                 // refresh's message to this path), and a raid picked since, which is the one thing
@@ -1599,7 +1612,19 @@ namespace QuestTree.UI
                     // their own they would be answered from the hold-off a timed-out prefetch left -
                     // a Refresh that repainted the same empty map. Pressing it is the player saying
                     // "ask now"; see QuestDataClient.ClearHoldOffs.
-                    QuestDataClient.ClearHoldOffs();
+                    //
+                    // RetryFailedFetches rather than ClearHoldOffs alone, and this is the one link
+                    // that needs the difference: the markers are the payload this page draws and the
+                    // only one no Invalidate* here touches - deliberately, because where an item
+                    // spawns cannot change while the server is up and re-asking costs the whole
+                    // loot-table read. A marker fetch that FAILED is the case that leaves: SPT
+                    // answers an erroring route with an empty body, GetMapMarkers latches
+                    // "attempted" on it, and the map then had no pins for the rest of the session
+                    // with this button unable to do anything about it - the exact bare map under the
+                    // exact button ClearHoldOffs was written for, one failure mode over. This
+                    // un-latches only what came back with nothing, so a marker set already in hand is
+                    // never re-fetched, and it ends in ClearHoldOffs itself.
+                    QuestDataClient.RetryFailedFetches();
 
                     QuestDataClient.InvalidateProfile();
 

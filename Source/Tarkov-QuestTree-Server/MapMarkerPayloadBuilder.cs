@@ -549,7 +549,22 @@ namespace QuestTreeServer
                 {
                     if (!itemsByTemplate.Contains(template)) continue;
 
-                    var places = itemsByTemplate[template].ToList();
+                    // ONE PLACE PER POSITION, not one per sighting, and the same rounding the store
+                    // keys by. Two things made this necessary rather than defensive. The store used to
+                    // key a quest item by the id the raid minted for it, so every raid added another
+                    // entry for the same shelf - the eleven shipped seeds still carry those duplicates,
+                    // Interchange 24 entries at 12 positions and Factory 20 at 14 - and Alternatives
+                    // below is a COUNT of this list, which the client draws as "(1 of N)". Unfolded,
+                    // the map drew each pin twice and told the player the item might be in either of
+                    // two places when both were the same place.
+                    //
+                    // Kept here as well as fixed in the store because a file already on a player's disk
+                    // is not rewritten until a harvest adds something to it, and the seeds ship that way.
+                    var places = itemsByTemplate[template]
+                        .GroupBy(i => $"{Numbers.Grid(i.X)}|{Numbers.Grid(i.Y)}|{Numbers.Grid(i.Z)}")
+                        .Select(group => group.First())
+                        .ToList();
+
                     result.CoveredTemplates.Add(template);
 
                     foreach (var place in places)

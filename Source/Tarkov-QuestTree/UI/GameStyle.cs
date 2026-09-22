@@ -287,6 +287,16 @@ namespace QuestTree.UI
             {
                 var text = char.ConvertFromUtf32(codePoint);
 
+                // Printable ASCII is drawable by anything TMP could be using, including its own
+                // default face before this class has harvested a font - and the ASCII candidates are
+                // the last resort PickGlyph's chain promises. Without this, a session where
+                // CaptureFrom found no font answered false to EVERY character, so every status mark
+                // in the tree, the legend and the lists resolved to "" and stayed that way for the
+                // session (Glyphs caches once): the one channel that is not colour, gone silently.
+                // Proved by a reflection harness against the built DLL, where no font is harvested
+                // and "+" came back undrawable.
+                if (codePoint >= 0x20 && codePoint < 0x7F) return true;
+
                 // Ours. Dynamic. Writing to it is the point.
                 if (_symbolFont != null &&
                     _symbolFont.TryAddCharacters(text, out string missing) &&
@@ -363,6 +373,25 @@ namespace QuestTree.UI
 
                 return null;
             }
+        }
+
+        /// <summary>
+        /// Recolours a button's RESTING face - the colour it returns to when the pointer leaves.
+        ///
+        /// Assigning <c>background.color</c> directly is not enough for a button that carries hover
+        /// feedback, and the case is not exotic: the pointer is inside the button at the moment a
+        /// click recolours it. <see cref="ButtonHover"/> samples the resting colour on pointer ENTER,
+        /// so the pointer exit that follows the click put the pre-click colour back - the view button
+        /// you just pressed, and the Focus and Chains toggles, dropped their lit state the moment the
+        /// mouse moved off them, and nothing repainted it until the next tab change.
+        /// </summary>
+        public static void SetRestingColor(Image background, Color color)
+        {
+            if (background == null) return;
+
+            var feedback = background.GetComponent<ButtonHover>();
+            if (feedback != null) feedback.SetResting(color);
+            else background.color = color;
         }
 
         private static bool _tooltipWarned;
@@ -742,6 +771,18 @@ namespace QuestTree.UI
             public Image Background;
             private Color _resting;
             private bool _hovering;
+
+            /// <summary>Moves the colour this returns to on exit - see
+            /// <see cref="GameStyle.SetRestingColor"/>. While the pointer is inside, the lifted face
+            /// moves with it, so the button does not flatten under the cursor and then change again
+            /// when the pointer leaves.</summary>
+            public void SetResting(Color color)
+            {
+                _resting = color;
+                if (Background == null) return;
+
+                Background.color = _hovering ? Lift(color, 0.12f) : color;
+            }
 
             public void OnPointerEnter(PointerEventData eventData)
             {

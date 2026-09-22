@@ -98,7 +98,14 @@ namespace QuestTreeServer
 
         private readonly Dictionary<MongoId, PartInfo> _parts = new();
         private readonly object _buildLock = new();
-        private bool _built;
+
+        /// <summary>Volatile for the reason PartPrices spells out over its own two lazy reads: this flag is
+        /// tested WITHOUT the lock, and every entry in _parts is written before it is set. Without the
+        /// barrier the JIT may hoist the test and a weakly ordered processor may show a thread the flag
+        /// before the dictionary it is standing for - and a Dictionary read against a half-published one does
+        /// not fail politely. Fifteen training threads plus the request handlers all reach EnsureBuilt, so
+        /// this is the same hazard as the two that were already closed, one file over.</summary>
+        private volatile bool _built;
 
         /// <summary>Everything reachable from a weapon through its slot tree, and the parts
         /// themselves. Null when the weapon is not in the table or its graph could not be walked.</summary>

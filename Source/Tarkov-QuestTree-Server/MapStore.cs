@@ -88,6 +88,19 @@ namespace QuestTreeServer
         private const int MaxLabels = 200;
         private const int MaxLabelLength = 40;
 
+        /// <summary>The only two kinds a stored label may claim, and the default anything else becomes -
+        /// see the labels loop in <see cref="MetaIsUsable"/>. The same two words the client's writer
+        /// emits (MapCapture.LabelKindExfil / LabelKindZone) and its reader matches, which is what makes
+        /// the field mean the same thing on every machine in a group.</summary>
+        private const string ExfilLabelKind = "exfil";
+
+        private const string ZoneLabelKind = "zone";
+
+        /// <summary>The most captures a set may claim to be merged from. A caption's bound, not a rule:
+        /// it takes one raid to add one, so a hundred is already more than anybody will see, and a peer
+        /// posting int.MaxValue should cost the caption rather than the picture.</summary>
+        private const int MaxCaptureCount = 100;
+
         /// <summary>A floor name is a caption on a layer button; the free-text fields (capturedAt,
         /// modVersion, timeOfDay, and a file name before it is replaced) are bounded before they are
         /// parsed or printed, exactly as ZoneStore bounds ClientVersion - a 100 MB string that
@@ -752,6 +765,20 @@ namespace QuestTreeServer
             meta.ModVersion = Clip((meta.ModVersion ?? "").Trim(), MaxFreeTextLength);
             meta.TimeOfDay = Clip((meta.TimeOfDay ?? "").Trim(), MaxNameLength);
 
+            // Carried, not ranked on, and bounded because they are stored and served back: the version
+            // of a set is CapturedAt alone (the check further up), and these two only decide what the
+            // credit line under the map says. A firstCapturedAt that is not a timestamp is blanked
+            // rather than refused - the client then falls back to CapturedAt, which is the honest
+            // answer for a meta that never had the field - and a count outside the floor and the
+            // ceiling is clamped rather than dropped, since "3 captures" is a caption and a peer
+            // claiming two billion of them should cost the caption, not the picture.
+            meta.FirstCapturedAt = Clip((meta.FirstCapturedAt ?? "").Trim(), MaxFreeTextLength);
+
+            if (meta.FirstCapturedAt.Length > 0 && ParseStamp(meta.FirstCapturedAt) == DateTime.MinValue)
+                meta.FirstCapturedAt = "";
+
+            meta.Captures = Math.Clamp(meta.Captures, 1, MaxCaptureCount);
+
             meta.Floors ??= new List<MapCaptureFloorDto>();
 
             if (meta.Floors.Count == 0)
@@ -847,6 +874,16 @@ namespace QuestTreeServer
                 if (label == null) return true;
 
                 label.Text = Clip((label.Text ?? "").Replace('\r', ' ').Replace('\n', ' ').Trim(), MaxLabelLength);
+
+                // One of two words, and NORMALISED rather than validated: the client's reader already
+                // treats anything it does not recognise as a zone (MapCatalog.ReadLabels), so storing
+                // a peer's arbitrary string would serve every other client a field it will read as
+                // "zone" anyway - while leaving an unbounded string in the file and in the index. The
+                // quieter of the two kinds is the safe default in both directions: a misread kind
+                // costs a name its prominence, where the other way round would bury the extracts.
+                label.Kind = string.Equals(label.Kind?.Trim(), ExfilLabelKind, StringComparison.OrdinalIgnoreCase)
+                    ? ExfilLabelKind
+                    : ZoneLabelKind;
 
                 return label.Text.Length == 0 || !InWorld(label.X) || !InWorld(label.Z);
             });
@@ -1040,7 +1077,26 @@ namespace QuestTreeServer
                 : DateTime.MinValue;
         }
 
-        private static string Clip(string value, int max) => value.Length <= max ? value : value[..max];
+        /// <summary>A string from a client cut to a length, with its line breaks turned into spaces.
+        ///
+        /// THE LINE BREAKS ARE THE POINT. Everything clipped here is text a peer chose on an
+        /// unauthenticated route and every one of them is printed into a log line: the claimed format,
+        /// the map the meta names, capturedAt, the client version, a floor's name. A floor called
+        /// "Ground\nQuest Tracker: ..." wrote a SECOND line into the server log reading exactly like
+        /// one of this mod's own - proven in a harness, where the refusal for a bad pixel size arrived
+        /// split across two lines. A floor name and the two free-text fields are also STORED and shown
+        /// on screen, so this is not only about the log.
+        ///
+        /// A space rather than a refusal, for the same reason these are clipped rather than refused:
+        /// they are captions and free text, and they decide nothing about where a pixel lands. The
+        /// label text below already had this treatment spelled out inline; this is the same rule, in
+        /// the one place every caller goes through.</summary>
+        private static string Clip(string value, int max)
+        {
+            var line = value.Replace('\r', ' ').Replace('\n', ' ');
+
+            return line.Length <= max ? line : line[..max];
+        }
 
         private static string Mb(long bytes) => (bytes / 1_048_576d).ToString("0.0", CultureInfo.InvariantCulture);
 

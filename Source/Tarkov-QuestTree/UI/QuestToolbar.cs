@@ -503,10 +503,13 @@ namespace QuestTree.UI
         {
             if (_focusBackground == null) return;
 
+            // The resting colour, not the drawn one - this is called from the toggle's own click, and
+            // the pointer exit after it would otherwise restore the state the button had before the
+            // click. See GameStyle.SetRestingColor.
             var on = ModSettings.Ready && ModSettings.FocusFrontier.Value;
-            _focusBackground.color = on
+            GameStyle.SetRestingColor(_focusBackground, on
                 ? new Color(GameStyle.AccentColor.r, GameStyle.AccentColor.g, GameStyle.AccentColor.b, 0.35f)
-                : GameStyle.PanelColor;
+                : GameStyle.PanelColor);
         }
 
         /// <summary>The Chains toggle, wired like Focus: the setting is the state, and the change
@@ -523,9 +526,9 @@ namespace QuestTree.UI
             if (_chainsBackground == null) return;
 
             var on = ModSettings.Ready && ModSettings.CollapseChains.Value;
-            _chainsBackground.color = on
+            GameStyle.SetRestingColor(_chainsBackground, on
                 ? new Color(GameStyle.AccentColor.r, GameStyle.AccentColor.g, GameStyle.AccentColor.b, 0.35f)
-                : GameStyle.PanelColor;
+                : GameStyle.PanelColor);
         }
 
         /// <summary>The statuses as they look on a node - a bar in the status colour and the
@@ -682,11 +685,11 @@ namespace QuestTree.UI
         /// built once with the toolbar and outlive it.</summary>
         public void SetViewHighlight(string selectedTabId, Color selected, Color unselected)
         {
+            // Through SetRestingColor, not background.color: this runs from inside the button's own
+            // click, with the pointer still on it, and a plain assignment was undone by the pointer
+            // exit that followed - the button you just pressed went dark as you moved away from it.
             foreach (var (tabId, background) in _viewButtonBackgrounds)
-            {
-                if (background != null)
-                    background.color = tabId == selectedTabId ? selected : unselected;
-            }
+                GameStyle.SetRestingColor(background, tabId == selectedTabId ? selected : unselected);
         }
 
         /// <summary>Whether a node survives the current search box contents.

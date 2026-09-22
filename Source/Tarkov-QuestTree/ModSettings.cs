@@ -837,7 +837,7 @@ namespace QuestTree
                     "them ever stretches a map past four pixels per metre - past that there is no more " +
                     "detail in the scene to record, only a bigger file. A capture also works to a memory " +
                     "budget of 256 MiB per floor, and on a big map that budget, not this setting, decides " +
-                    "the scale: Interchange comes down to 3.5 pixels per metre, and the capture's header " +
+                    "the scale: Interchange comes down to about 3 pixels per metre, and the capture's header " +
                     "line in the log says so whenever the budget has lowered one. What is shared with a host or " +
                     "shipped in the release is downscaled to 2048 whatever this says.",
                     new AcceptableValueList<int>(2048, 4096, 8192)));

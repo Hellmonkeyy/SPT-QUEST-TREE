@@ -112,12 +112,14 @@ captured map carries our own credit line naming the build, the date and the raid
 - **A floor is captured inside a memory budget.** One floor may work in 256 MiB of arrays and
   textures, counted at 26 bytes per output pixel term by term, and the pixels per metre come down
   half a pixel per metre at a time, to a floor of one, until it fits - deterministically, so two
-  captures of one map still agree on the scale and still merge. Interchange at 4 px/m wanted 331 MB
-  a floor and is exactly what died in a raid ("GetPixels: scripting array creation failed" on one
-  floor, an OutOfMemoryException on the other two); it captures at 3.5 px/m and 254 MB instead, and
-  the header says so: `4 px/m would need 331 MB a floor, over the 256 MB budget, so 3.5 px/m (254
-  MB)`. Customs at 4 px/m is 239 MB, inside the budget and untouched, so the sets already on disk
-  stay mergeable.
+  captures of one map still agree on the scale and still merge. Interchange, on the 965x925 m
+  rectangle a harvest measures for it, wants 354 MB a floor at 4 px/m - which is exactly what died
+  in a raid ("GetPixels: scripting array creation failed" on one floor, an OutOfMemoryException on
+  the other two) - so it captures at 3 px/m and 199 MB instead, and the header says so: `4 px/m
+  would need 354 MB a floor, over the 256 MB budget, so 3 px/m (199 MB)`. Customs at 4 px/m is
+  239 MB on its 1118x539 m, inside the budget and untouched, so the sets already on disk stay
+  mergeable. Every figure here is the budget's own arithmetic on a measured rectangle, so a map
+  whose harvest comes out differently lands on a different step.
 - **Two crashes found in a Customs campaign are fixed.** A half-float HDR render can hand back a NaN
   sample; it was false to every comparison that would have rejected it, reached the smoothing
   filter's range-weight lookup, and Mono casts a NaN to int.MinValue rather than to the 0 desktop
@@ -132,7 +134,32 @@ captured map carries our own credit line naming the build, the date and the raid
   launchers also accept map uploads now, so a capture raid can hand its pictures to a training
   server.
 - `tools/check-capture.py` checks a fresh capture against its own meta and the server's zone file
-  for that map; `tools/server-host.cmd` starts the server as a picture host.
+  for that map; `tools/server-host.cmd` starts the server as a picture host, `tools/check-dtos.py`
+  and `tools/check-maps-pack.py` are the two gates `package.ps1` runs, and
+  `tools/count-seed-sources.py` prints the seed's stamp, build count and trader/flea/unpriced split.
+- **Six review passes over everything since 1.13.1** (client data, the weapon solver, the views, the
+  marker payloads, the map pipeline, the tooling) fixed what they found rather than filing it. The
+  ones a player could meet: the "loading" notice stayed up for good when the panel was hidden while
+  it was still holding off a fetch; a status rebuild polluted the panel-open timer; Maps > Refresh
+  could not retry a marker set the client had latched as failed; a Tree reset kept the trader
+  colours; the Kappa override list had no cap; the tab highlight vanished when the pointer left it;
+  a downloaded map set carried the wrong pixels-per-metre when its long side had been pinned, and its
+  labels lost their kind on the wire (every extract read as a place name on the receiving machine).
+  The solver ones: a rebuild now resets its tree and locks the named parts with their ancestors, the
+  incumbent is measured rather than asserted, a prune pass may only lower the price, the cache key
+  and fingerprint are culture-invariant, and repair-cost lines are priced against the weapon they
+  belong to. **The solver version is 12**, so the builds remembered from an earlier boot are solved
+  again once on the next start and the shipped seed is refreshed before packaging. A host now
+  strips line breaks from floor names before they reach its log, and item places on the map keep the
+  same identity from raid to raid instead of being re-keyed every time.
+- **A throwaway diagnostic key ships with this release**, which is worth saying out loud because it
+  is not a feature: a bare **F10** in a raid writes what the game knows about every renderer, light
+  and reflection probe in a 40 m column above the player to
+  `BepInEx\plugins\QuestTree\captures\<map>.roofprobe.txt`. It exists to find out why one warehouse
+  roof is missing from the Customs pictures (see the release notes' "not seen yet"), it changes
+  nothing in the scene, nothing in the mod depends on it, and it is meant to be removed again. It
+  lives in the F12 menu under **Advanced > Roof probe key (throwaway)** and is deliberately kept out
+  of the in-game Settings tab.
 ---
 
 # Quest Tracker 1.18.5

@@ -60,19 +60,39 @@ namespace QuestTree.QuestGraph
     internal sealed class MapLabelDto
     {
         [JsonProperty("text")] public string Text { get; set; }
+
+        /// <summary>"exfil" or "zone" - where the name came from, which is the whole of how
+        /// prominently it is drawn: an extract wears the accent, gets a diamond
+        /// (MapView.BuildExtractMarkers) and is drawn at every zoom, a zone name is white and yields.
+        /// On the wire because without it every borrowed map lost its extract marks, drew its
+        /// extracts in plain white, culled them with the zone names, and - for a player whose Map
+        /// labels setting is "extracts only" - drew no place names at all. The host normalises this to
+        /// one of the two words (MapStore's labels loop); the reader treats anything else as a zone,
+        /// which is the quieter of the two.</summary>
+        [JsonProperty("kind")] public string Kind { get; set; }
+
         [JsonProperty("x")] public double X { get; set; }
         [JsonProperty("z")] public double Z { get; set; }
     }
 
     /// <summary>
     /// A capture's meta, field for field the same shape as the <c>&lt;key&gt;.map.json</c> that
-    /// MapCapture.WriteMeta writes and MapCatalog.ReadMeta reads.
+    /// MapCapture.WriteMeta writes and MapCatalog.ReadMeta reads, but for the two fields named below.
     ///
     /// Deliberately the same shape and not a second format: an upload reads the file the capture
     /// just wrote and sends it as it stands, and a download writes what the host sends straight back
     /// out as that same file, so the reader needs no knowledge of where a picture set came from. The
-    /// one thing that differs is which pictures the floors name - see
+    /// one thing that differs by design is which pictures the floors name - see
     /// <see cref="MapCaptureFloorDto"/>.
+    ///
+    /// A round trip through a host is a deserialise into this type and a serialise back out of it, so
+    /// a field neither mirror declares is silently dropped by both - which is why every field of the
+    /// file is here except <c>render</c> and the floors' <c>exposure</c>. Those two are left out ON
+    /// PURPOSE: each exists only to decide whether a LATER capture may be merged pixel by pixel into
+    /// the one on disk (MapCapture.LoadPrevious), and a merge only ever happens against this machine's
+    /// own captures folder, never against a borrowed set. Everything a READER uses - down to a label's
+    /// kind and the count in the credit line - travels, and the day one of them stops travelling is
+    /// the day a borrowed map quietly draws differently from the machine that captured it.
     ///
     /// MapCapture keeps its own private writer types rather than serialising this one: the meta is a
     /// file this mod owns end to end, this is a mirror of a type on the wire, and the day they have
@@ -103,6 +123,20 @@ namespace QuestTree.QuestGraph
         /// <summary>UTC, ISO-8601. What decides between two sets of one map: a local capture newer
         /// than the host's copy is never overwritten by it.</summary>
         [JsonProperty("capturedAt")] public string CapturedAt { get; set; }
+
+        /// <summary>When the FIRST capture of this set was taken - what the credit line under the map
+        /// means by the date, since a set is built over several raids and <see cref="CapturedAt"/> is
+        /// only the latest of them. Never ranked on, by either half: the version of a set is
+        /// <see cref="CapturedAt"/> alone. Empty, and then MapCatalog.Attribution reads
+        /// <see cref="CapturedAt"/> instead, which is the right answer for a capture written before
+        /// this field existed.</summary>
+        [JsonProperty("firstCapturedAt")] public string FirstCapturedAt { get; set; }
+
+        /// <summary>How many captures are merged into this set; 1 for a fresh one. In the credit line
+        /// ("3 captures since 2026-09-19"), and on the wire because a borrowed set is exactly the case
+        /// where somebody else did that work - without it every downloaded map claimed to be a single
+        /// capture taken on the day of the last raid that improved it. The host clamps it.</summary>
+        [JsonProperty("captures")] public int Captures { get; set; }
 
         [JsonProperty("modVersion")] public string ModVersion { get; set; }
 

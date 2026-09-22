@@ -131,14 +131,17 @@
     is the 4.0 location.
   -->
   <!--
-    The trained build history, into the build output under cache\ so a release can be assembled from
-    bin\ alone - the same reason kappa-quests.json is an output item in the client project.
+    The trained build history, into the build output under cache\ so bin\ holds a complete mod folder
+    for a hand copy or a local run - the same reason kappa-quests.json is an output item in the client
+    project. It is NOT where the release reads it from: package.ps1 takes only the DLL out of bin\ and
+    reads this file, zones\ and maps\ from the project folder that tracks them.
   -->
   <ItemGroup>
     <None Include="weapon-builds.json" Link="cache\weapon-builds.json" CopyToOutputDirectory="PreserveNewest" />
     <!-- The harvested zone files, one per map. Shipped since 1.3.0 and, until 1.13.2, copied
          into every release by hand from the live install - which also holds the one file that
-         must never ship. Tracked here and built into bin\ so package.ps1 never reads the install. -->
+         must never ship. TRACKED HERE is what stops that: package.ps1 assembles them from this
+         folder and never reads the install. The copy into bin\ is for a local run, not for the zip. -->
     <None Include="zones\*.json" CopyToOutputDirectory="PreserveNewest" />
   </ItemGroup>
 

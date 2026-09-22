@@ -22,7 +22,8 @@ containing `EscapeFromTarkov.exe`) and let them merge. You should end up with:
 [SPT folder]\SPT_Runtime\user\mods\QuestTree\QuestTreeServer.dll
 [SPT folder]\SPT_Runtime\user\mods\QuestTree\zones\*.json
 [SPT folder]\SPT_Runtime\user\mods\QuestTree\cache\weapon-builds.json
-[SPT folder]\SPT_Runtime\user\mods\QuestTree\maps\*\*.jpg
+[SPT folder]\SPT_Runtime\user\mods\QuestTree\maps\<map>\*.jpg
+[SPT folder]\SPT_Runtime\user\mods\QuestTree\maps\<map>\<map>.map.json
 ```
 
 The archive also carries this README and the release notes beside those two folders; they are for
@@ -206,12 +207,15 @@ frames - a handful of short hitches, not one long freeze - and takes a second or
   and when the scale the resolution setting asks for would not fit, the capture brings the pixels
   per metre down half a pixel per metre at a time until it does, to a floor of one. That is why a
   big map can come out a little coarser than the setting says, and the capture header tells you when
-  it happened: `4 px/m would need 331 MB a floor, over the 256 MB budget, so 3.5 px/m (254 MB)`.
+  it happened: `4 px/m would need 354 MB a floor, over the 256 MB budget, so 3 px/m (199 MB)`.
+  Those are Interchange's numbers on the 965x925 m rectangle a harvest measures for it, and
   Interchange at four pixels to the metre is exactly what died in a raid with "GetPixels: scripting
-  array creation failed" and an OutOfMemoryException, and it is captured at 3.5 px/m instead;
-  Customs at 4 px/m needs 239 MB, is inside the budget and is untouched, so the captures already on
-  your disk still merge. The scale a map lands on is deterministic - the same map at the same
-  setting always gets the same number - which is what lets two captures of it be merged at all.
+  array creation failed" and an OutOfMemoryException; Customs at 4 px/m needs 239 MB on its
+  1118x539 m, is inside the budget and is untouched, so the captures already on your disk still
+  merge. Both figures are the budget's own arithmetic - ceil(span x px/m) per axis at 26 bytes a
+  pixel - so a map whose harvested rectangle differs lands somewhere else. The scale a map lands on
+  is deterministic - the same map at the same setting always gets the same number - which is what
+  lets two captures of it be merged at all.
 - **A capture taken by a different build may replace yours rather than add to it.** The meta records
   how a picture was rendered - twelve things, from the capture light and the level-of-detail switch to
   the multisampling the device actually granted - and two pictures may only be merged when all of it
@@ -232,8 +236,9 @@ writes those lines to `captures\<key>\<key>.campaign.txt`, keeping the last twen
 game log is gone the moment the game restarts and "it captured 11 of 16 stops" is a thing you want to
 still have the next day.
 
-**Or let it capture as you play.** Settings > Map > *Capture the map automatically while I play* (off
-by default) takes a capture every few seconds - *Seconds between automatic captures*, 5 by default,
+**Or let it capture as you play.** *Capture the map automatically while I play* (off by default, and
+in the F12 menu under **Map** rather than in the in-game Settings tab, which only reports whether it
+is on) takes a capture every few seconds - *Seconds between automatic captures*, 5 by default,
 anything from 2 to 120 - and only once you have moved 15 m since the last one, so a raid spent
 walking a map builds its picture by itself. It **will** hitch every few seconds; it is meant for a
 raid you have set aside for map-building, not for one you are playing for real.
@@ -570,6 +575,15 @@ around it.
 | `Ctrl+Q` | Open or close the tracker from anywhere in the menu (rebindable in F12) |
 | `Ctrl+F9` | In a raid: take this map's picture for the Maps tab (rebindable in F12) |
 | `Ctrl+Shift+F9` | In a raid: capture the whole map, stop by stop, and return you (rebindable in F12) |
+| `F10` | In a raid: the roof probe, a diagnostic and temporary key - see below |
+
+**`F10` is not a feature.** Pressed in a raid it writes what the game knows about every renderer,
+light and reflection probe in a 40 m column above you to
+`BepInEx\plugins\QuestTree\captures\<map>.roofprobe.txt`, and nothing else: it changes nothing in the
+scene, nothing in the mod depends on it, and it exists to find out why one warehouse roof is missing
+from the Customs pictures. It is meant to be removed again. Rebind it, or clear it, in the F12 menu
+under **Advanced > Roof probe key (throwaway)**; the in-game Settings tab deliberately does not list
+it.
 
 **The keys are split by view.** `F`, `M`, `X`, `C` and `/` are the tree's, and only fire there: on
 **Maps** the only keys are `F` and `[` `]`, and on **Do next**, **Items**, **Kappa** and **Settings**
@@ -596,9 +610,10 @@ to its own defaults from the last row in it.
   pins carry their name at rest (hover only / in progress and available / all), sidebar width, the
   artwork rotation and mirror overrides, and the alignment guides that outline the area a map's
   coordinates cover and mark its origin. Plus the map pictures: where they come from, which labels a
-  captured one carries, the capture resolution, whether a capture is offered to the host, and whether
-  the map is captured automatically as you play and how often. The two capture keys are shown here
-  and rebound in F12.
+  captured one carries, the capture resolution, and whether a capture is offered to the host. The two
+  capture keys, and whether the map is captured automatically as you play and how often, are
+  *reported* here and set in F12 - this page has no key-binding control and no automatic-capture
+  toggle.
 - **Colours** - the six status colours (in progress, available, completed, level gated, locked,
   **failed**) and the accent, with presets in-game and any hex colour in F12, plus **Restore the
   pre-1.10 colours** for anyone who preferred the old palette.
@@ -646,7 +661,7 @@ itself, since the whole point of a training run is to watch it. Quoting the diag
 report is worth the restart.
 
 - **No taskbar button** - check `BepInEx\LogOutput.log` for lines starting `QuestTree`. The load
-  line carries the build stamp (`QuestTree 1.18.1+abc1234: loaded.`), which is what to quote.
+  line carries the build stamp (`QuestTree 1.19.0+abc1234: loaded.`), which is what to quote.
 - **The tracker is slow to open** - `LogOutput.log` carries one line per open with the time in each
   phase: `QuestTree: panel open - 499 ms: quests: server 29, quests: parse 233, graph 61, ...`. The
   quest fetch and its parse run on a worker thread, so the game is drawing frames through those two.

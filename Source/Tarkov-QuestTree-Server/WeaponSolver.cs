@@ -443,21 +443,39 @@ namespace QuestTreeServer
             // Nothing found means the incumbent stands, which is not a failure: it is a boot's worth of
             // evidence that the size is hard to beat, and the next boot will try again from the same
             // place. Across boots the answer can only get smaller.
-            state.Incumbent = knownGood == null ? null : Rebuild(weapon, knownGood, state);
+            state.Incumbent = knownGood == null ? null : Rebuild(weapon, knownGood, state, required);
 
             if (state.Incumbent != null)
             {
-                bestWhole = 0;
-                bestShortfall = 0d;
+                // MEASURED, NOT ASSUMED. This seeded (0, 0) - "the incumbent satisfies everything" - which is
+                // a claim about a build this method was handed and never looked at. Every caller in this mod
+                // audits the remembered build first, so on a good incumbent the measurement agrees and nothing
+                // changes; what it removes is the case where they do not.
+                //
+                // Seeded at zero a FAILING incumbent is unbeatable, because nothing can score below zero on
+                // either rank: the part ceiling one below it then forbids every build its own size, no attempt
+                // can replace it, and Solve hands it back with Found false for the life of the entry. The
+                // training path reaches exactly that - it seeds from the working point, which is a build that
+                // lost a comparison and was never shown to the verifier.
+                var seeded = Measure(weapon, state.Incumbent, state, new List<MongoId>());
+                var missing = required.Count(part => Find(state.Incumbent, part) == null);
+
+                // Guarded rather than added: an unscorable weapon comes back at int.MaxValue gaps, and
+                // wrapping that to a negative would re-create the unbeatable incumbent by another road.
+                bestWhole = seeded.Gaps == int.MaxValue ? int.MaxValue : seeded.Gaps + missing;
+                bestShortfall = seeded.Shortfall;
                 bestCount = CountParts(state.Incumbent);
                 best = state.Incumbent;
 
                 // The incumbent's PRICE too, not only its size. Left at long.MaxValue, the shrink loop's
                 // first iteration set a cost ceiling of long.MaxValue - 1, which is no ceiling at all, and
-                // burned a full round of restarts against the time budget before any real one applied.
-                (bestCost, _) = Priced(state.Incumbent, state);
+                // burned a full round of restarts against the time budget before any real one applied. It
+                // comes out of the same measurement, which is the number Priced returns for this build.
+                bestCost = seeded.Price;
 
-                state.PartCeiling = bestCount - 1;
+                // ONLY A BUILD THAT WORKS is worth asking for something smaller than. Asking it of one that
+                // does not is how a bad incumbent locks its own replacement out.
+                if (bestWhole == 0 && bestShortfall <= 0d) state.PartCeiling = bestCount - 1;
             }
 
             // An explicit ceiling is how a caller asks a different question. "Find one THIS size" rather
@@ -697,7 +715,7 @@ namespace QuestTreeServer
 
             var required = Required(weapon, mustInclude);
 
-            var root = Rebuild(weapon, parts, state);
+            var root = Rebuild(weapon, parts, state, required);
 
             if (root == null) return result;
 
@@ -1713,8 +1731,15 @@ namespace QuestTreeServer
 
                         var after = Measure(weapon, root, state, buffer);
 
+                        // FEWER PARTS AND NO DEARER. Part count is the tiebreak in Cost.Beats and price is
+                        // the objective above it, so one part standing in for two is an improvement only
+                        // while it does not cost more than both of them plus the purchase it saves - and
+                        // with PerPurchase at ten thousand, a thirty-thousand-rouble handguard replacing two
+                        // cheap rails is a build the search itself ranks worse. This pass wrote over the top
+                        // of the better one, in place and irreversibly, before anything compared the two.
                         if (after.Gaps <= before.Gaps
                             && after.Shortfall <= before.Shortfall + MinGain
+                            && after.Price <= before.Price
                             && after.Parts < before.Parts)
                         {
                             before = after;
@@ -1870,7 +1895,13 @@ namespace QuestTreeServer
 
                 var after = Measure(weapon, root, state, buffer);
 
-                if (after.Gaps <= before.Gaps && after.Shortfall <= before.Shortfall + MinGain)
+                // AND NO DEARER, which this pass can genuinely be. Without a free-copy budget a preset's
+                // part is free where the preset puts it - per (host, slot) - so a passenger re-homed one
+                // level up can stop matching the preset and become a purchase, and the pass would take a
+                // part off the gun and put roubles on the bill. Prune's own doc says it cannot make a build
+                // worse; on the objective that is only true with this line here.
+                if (after.Gaps <= before.Gaps && after.Shortfall <= before.Shortfall + MinGain
+                    && after.Price <= before.Price)
                 {
                     before = after;
                     bypassed = true;
@@ -2314,10 +2345,21 @@ namespace QuestTreeServer
         /// Returning null is the guard on a cache written by an older install: a slot name that no longer
         /// exists, or a parent index out of order, costs a search rather than producing a gun with parts
         /// hanging off nothing.</summary>
-        private static Node? Rebuild(MongoId weapon, IReadOnlyList<FittedPart> parts, SearchState state)
+        private static Node? Rebuild(
+            MongoId weapon, IReadOnlyList<FittedPart> parts, SearchState state,
+            IReadOnlyCollection<MongoId>? required = null)
         {
             var root = new Node { Template = weapon, Locked = true };
             var placed = new List<Node>(parts.Count);
+
+            // THE GUN THE COMPATIBILITY CHECK BELOW IS ASKED ABOUT IS THIS ONE. Counts carried whatever was
+            // on it last instead: in Solve the throwaway skeleton the floor is measured from - Plan and Fill
+            // run against it between ResetTree and here - and in Describe nothing at all, so not even the
+            // weapon. So Compatible was asked whether each stored part conflicts with a gun it is not being
+            // fitted to. Both directions of that are wrong and they fail opposite ways: a skeleton part
+            // conflicting with a remembered one threw away a good history and bought a search in its place,
+            // and a part conflicting with the WEAPON was refused here while Describe admitted it.
+            state.ResetTree(weapon);
 
             foreach (var part in parts)
             {
@@ -2354,6 +2396,28 @@ namespace QuestTreeServer
                 Attach(host, node, state);
                 placed.Add(node);
             }
+
+            // LOCKED, exactly as the planner locks what it places and for the same reason: nothing in Measure
+            // knows about the parts a quest NAMES - Search counts those separately, after the climb - so an
+            // unlocked one is a part the climb may empty a slot of for nothing. The incumbent attempt is
+            // seeded one part over the ceiling and is therefore shopping for something to shed, and a named
+            // part carrying no stat value is the cheapest thing on the gun to drop: the move closes the
+            // ceiling gap, lowers the price, and costs nothing this cost function can see. The attempt then
+            // loses on the missing-part count it has just earned, so the one starting point the whole shrink
+            // strategy is built around was being spent to no purpose - on 23 of the 32 vanilla weapon
+            // conditions, which name one to eight parts each.
+            //
+            // THE ANCESTORS TOO, which is the half a leaf-only lock would miss: a locked part whose host is
+            // not locked comes off the gun when the host does, and a route the planner lays is locked the
+            // whole way down for exactly that reason. Bypass may still take a pass-through out, and should -
+            // it re-homes the passenger, so the named part stays fitted.
+            if (required != null && required.Count > 0)
+                foreach (var node in placed)
+                {
+                    if (!required.Contains(node.Template)) continue;
+
+                    for (var step = node; step != null; step = step.Parent) step.Locked = true;
+                }
 
             return root;
         }

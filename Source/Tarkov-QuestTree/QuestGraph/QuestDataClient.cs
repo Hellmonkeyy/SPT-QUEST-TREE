@@ -88,7 +88,10 @@ namespace QuestTree.QuestGraph
                 var task = Task.Run(() => RequestHandler.PostJsonAsync("/questtree/build/save", body));
 
                 if (!task.Wait(RequestTimeout))
+                {
+                    Abandon(task, "/questtree/build/save");
                     return new SavePresetResult { Reason = "the server did not answer in time" };
+                }
 
                 var reply = JsonConvert.DeserializeObject<SavePresetResult>(task.Result);
 
@@ -118,6 +121,31 @@ namespace QuestTree.QuestGraph
             FetchCount = 0;
         }
 
+        /// <summary>Takes the blame for a request nobody is waiting on any more.
+        ///
+        /// Every wait in this file is RequestHandler.GetJsonAsync (or PostJsonAsync) on a pool thread
+        /// with a Wait(<see cref="RequestTimeout"/>) over it, and when that wait returns false the
+        /// request is still out there. It does fault: the AggregateException filters in this file
+        /// exist precisely because a refused connection or a dead socket comes back as a faulted
+        /// task. A
+        /// fault nobody reads is held by the task until it is collected and then raised through
+        /// TaskScheduler.UnobservedTaskException from the finalizer thread - an error with no call
+        /// site, attributed to whatever the runtime happened to be doing, in the log a player is
+        /// asked to paste. Reading Exception here is what makes it observed; the line says which
+        /// route, at Debug, because the caller has already said the useful part ("no answer within
+        /// 15s") and this is only the aftermath.
+        ///
+        /// Runs wherever the request finishes - the pool, or this thread when it has already failed -
+        /// so it touches nothing but the log.</summary>
+        private static void Abandon(Task request, string route)
+        {
+            request?.ContinueWith(
+                finished => Plugin.LogSource?.LogDebug(
+                    $"QuestTree: the abandoned request to {route} failed after its deadline " +
+                    $"({finished.Exception?.InnerException?.Message ?? finished.Exception?.Message})."),
+                TaskContinuationOptions.OnlyOnFaulted);
+        }
+
         /// <summary>RequestHandler.GetJson with a deadline. Same mechanism SPT uses (the async call
         /// on a pool thread, waited on here), plus the wait having a limit.</summary>
         private static string GetJson(string route)
@@ -128,7 +156,10 @@ namespace QuestTree.QuestGraph
             try
             {
                 if (!task.Wait(RequestTimeout))
+                {
+                    Abandon(task, route);
                     throw new TimeoutException($"no answer within {RequestTimeout.TotalSeconds:0}s");
+                }
             }
             catch (AggregateException ex) when (ex.InnerException != null)
             {
@@ -493,7 +524,10 @@ namespace QuestTree.QuestGraph
                 // connection and then hangs - except the thread it blocks is this pool thread,
                 // which has nothing else to do, rather than the one drawing frames.
                 if (!request.Wait(RequestTimeout))
+                {
+                    Abandon(request, Route);
                     throw new TimeoutException($"no answer within {RequestTimeout.TotalSeconds:0}s");
+                }
 
                 var json = request.Result;
                 result.ServerMillis = clock.ElapsedMilliseconds;
@@ -1055,6 +1089,8 @@ namespace QuestTree.QuestGraph
                     // Recorded on the slot as well as in the message: this is the one failure the main
                     // thread holds off on - see PrefetchTimeoutHoldOff.
                     slot.TimedOut = true;
+
+                    Abandon(request, route);
 
                     throw new TimeoutException($"no answer within {RequestTimeout.TotalSeconds:0}s");
                 }

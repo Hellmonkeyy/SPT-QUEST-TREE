@@ -333,10 +333,27 @@ namespace QuestTreeServer
             return true;
         }
 
-        /// <summary>A client-supplied string cut to a length before it is logged or stored. The same
-        /// treatment HarvestedTrigger.Kind gets above, as a helper because the extent has three of
-        /// them.</summary>
-        private static string Clip(string value, int max) => value.Length <= max ? value : value[..max];
+        /// <summary>A client-supplied string cut to a length before it is logged or stored, with its
+        /// line breaks turned into spaces. The same treatment HarvestedTrigger.Kind gets above, as a
+        /// helper because the extent has three of them.
+        ///
+        /// THE LINE BREAKS ARE THE POINT, and leaving them out was a real hole: both values that pass
+        /// through here - the extent's source and a floor's name - are text a Fika peer chose on an
+        /// unauthenticated route, and both are printed verbatim into a log line by ExtentIsUsable. A
+        /// floor called "Ground\nQuest Tracker: ..." therefore wrote a SECOND line into the server log
+        /// that reads exactly like one of this mod's own. Proven in a harness: the refusal line for a
+        /// bad height band arrived split across two lines. The floor name is also stored and shown on
+        /// a layer button, so this is not only about the log.
+        ///
+        /// A space rather than a refusal, for the reason the name is clipped rather than refused at
+        /// all: it is a caption and it decides nothing - the same repair MapStore already applied to a
+        /// label's text and QuestTreeRouter to a build key.</summary>
+        private static string Clip(string value, int max)
+        {
+            var line = value.Replace('\r', ' ').Replace('\n', ' ');
+
+            return line.Length <= max ? line : line[..max];
+        }
 
         /// <summary>An extent's sample time as a UTC instant, or DateTime.MinValue when it is not a
         /// timestamp at all. MinValue rather than an exception or a null: this is asked both when
@@ -839,13 +856,34 @@ namespace QuestTreeServer
             }
         }
 
-        /// <summary>The same keys the client de-duplicates with, so the two sides agree on what
-        /// "the same zone" means: id plus rounded position, since one zone can be several volumes.</summary>
+        /// <summary>The key the client de-duplicates triggers with as well, so the two sides agree on
+        /// what "the same zone" means: id plus rounded position, since one zone can be several
+        /// volumes.</summary>
         private static string TriggerKey(HarvestedTrigger t) =>
             $"{t.Id}|{Numbers.Grid(t.X)}|{Numbers.Grid(t.Y)}|{Numbers.Grid(t.Z)}";
 
+        /// <summary>The same shape as a trigger's key, and for the same reason: a template at a rounded
+        /// position is one quest-item place, however many raids have seen it.
+        ///
+        /// IT USED TO PREFER THE ITEM'S OWN ID, which is right inside one raid and wrong across them -
+        /// and the shipped seeds prove it. A LootItem's id is minted when the raid generates its loot,
+        /// so the same crate of documents on the same shelf arrives under a new id every raid and was
+        /// stored as a new entry every time. Interchange ships 24 quest-item entries at 12 distinct
+        /// positions and Factory 20 at 14 - every duplicate a second sighting of one place, all with
+        /// distinct ids - while the triggers, which have always been keyed this way, carry not one
+        /// duplicate on any of the eleven seeds.
+        ///
+        /// What that cost: the marker builder emits one pin per ENTRY and reports the count as
+        /// Alternatives, which the client draws as "(1 of N)". So a well-raided map told the player an
+        /// item might be in any of N places when every one of them was the same place, and the number
+        /// grew with the raids played rather than with the spawns. The union also grew per raid instead
+        /// of settling, toward a ceiling that sheds newly harvested entries when it is reached.
+        ///
+        /// The client's own ZoneHarvester still keys its within-raid pass on the item id, which is
+        /// correct there: inside one raid the id is unique per object, and this union is the only place
+        /// the question is "have I seen this before".</summary>
         private static string ItemKey(HarvestedQuestItem i) =>
-            string.IsNullOrEmpty(i.ItemId) ? $"{i.TemplateId}|{Numbers.Grid(i.X)}|{Numbers.Grid(i.Y)}|{Numbers.Grid(i.Z)}" : i.ItemId;
+            $"{i.TemplateId}|{Numbers.Grid(i.X)}|{Numbers.Grid(i.Y)}|{Numbers.Grid(i.Z)}";
 
         private static string PathFor(string key) => System.IO.Path.Combine(Folder, key + ".json");
 

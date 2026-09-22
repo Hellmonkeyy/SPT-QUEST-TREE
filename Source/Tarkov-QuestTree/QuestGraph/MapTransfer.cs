@@ -428,10 +428,34 @@ namespace QuestTree.QuestGraph
 
             meta.Floors = offered;
 
-            // Derived from the rewritten width, so the three numbers the host compares - the extent,
-            // the scale and the pixel size - describe one projection.
-            var metres = meta.Extent != null ? meta.Extent.MaxX - meta.Extent.MinX : 0d;
-            if (metres > 0d) meta.PxPerMetre = (float)(width / metres);
+            // Derived from the side ScaleTo PINNED - the longer one - and not always from the width,
+            // so the three numbers the host compares (the extent, the scale and the pixel size)
+            // describe one projection whatever shape the map is.
+            //
+            // Why the pinned side is the only honest one. ScaleTo sets the long side to MaxLongSide
+            // exactly and ROUNDS the short one, so only the long side's scale is exact. Taking the
+            // scale off a rounded short side multiplies that half-pixel by the aspect ratio when the
+            // other axis is computed back from it: on a portrait extent the declared height and
+            // ceil(heightM x pxPerMetre) then part company by about half the aspect ratio in pixels,
+            // which is past the two pixels BOTH MapStore.MetaIsUsable (PixelTolerance) and
+            // MapCatalog.CheckPictureSize allow - and the host's answer to that is "rejected", which
+            // stops the upload, so the map is never shared at all and the log blames the capture's
+            // own meta. Swept against the real ScaleTo over 4,000,000 extents from 20 to 3020 m a
+            // side: from the width, 13 px at worst and past the tolerance in 24 % of the aspect
+            // space; from the pinned side, 2 px at worst and never past it. Identical arithmetic for
+            // a landscape extent, which is what every vanilla map is, so no map that uploads today
+            // is described differently tomorrow.
+            var metresX = meta.Extent != null ? meta.Extent.MaxX - meta.Extent.MinX : 0d;
+            var metresZ = meta.Extent != null ? meta.Extent.MaxZ - meta.Extent.MinZ : 0d;
+
+            if (height >= width)
+            {
+                if (metresZ > 0d) meta.PxPerMetre = (float)(height / metresZ);
+            }
+            else if (metresX > 0d)
+            {
+                meta.PxPerMetre = (float)(width / metresX);
+            }
 
             Plugin.LogSource?.LogDebug(
                 $"QuestTree: {key} is offered as {width}x{height} px at {meta.PxPerMetre:0.###} px/m, " +
@@ -1491,6 +1515,11 @@ namespace QuestTree.QuestGraph
         /// comparison is by capturedAt and nothing else: a host's set with no timestamp, or one this
         /// side cannot parse, loses - which errs towards keeping the picture that is already being
         /// drawn.
+        ///
+        /// The ALIASED id is tried second, exactly as the reader tries it (MapCatalog.EntryFor): the
+        /// host folds the two ids of a pair onto one and offers the set back under that one, while
+        /// the capture on this disk is filed under whichever id the raid had - see
+        /// <see cref="AliasOf"/>, where the download that costs is written down.
         /// </summary>
         /// <param name="key">The map's internal id.</param>
         /// <param name="entry">The host's entry.</param>
@@ -1499,11 +1528,8 @@ namespace QuestTree.QuestGraph
         {
             try
             {
-                var dir = CaptureDir(key);
-                if (dir == null) return false;
-
-                var path = Path.Combine(dir, key + MetaSuffix);
-                if (!File.Exists(path)) return false;
+                var path = OwnCaptureMeta(key) ?? OwnCaptureMeta(AliasOf(key));
+                if (path == null) return false;
 
                 var mine = JsonConvert.DeserializeObject<MapCaptureMetaDto>(File.ReadAllText(path));
 
@@ -1527,6 +1553,54 @@ namespace QuestTree.QuestGraph
                 result.Debug.Add($"QuestTree: could not compare the captures of {key} ({ex.Message}).");
                 return false;
             }
+        }
+
+        /// <summary>This machine's own capture meta for a map, or null when there is none to read.</summary>
+        /// <param name="key">The map's internal id, or null.</param>
+        private static string OwnCaptureMeta(string key)
+        {
+            if (string.IsNullOrEmpty(key)) return null;
+
+            var dir = CaptureDir(key);
+            if (dir == null) return null;
+
+            var path = Path.Combine(dir, key + MetaSuffix);
+            return File.Exists(path) ? path : null;
+        }
+
+        /// <summary>
+        /// The other id of the pair that loads the same scene as this one, or null when this map has no
+        /// twin - the same lookup MapCatalog.AliasOf makes, over the same table.
+        ///
+        /// Needed because a capture is written under the location id the RAID had - factory4_night,
+        /// Sandbox_high - while the host FOLDS an upload onto the canonical id of the pair
+        /// (ZoneStore.Canonical) and offers it back under that. So a player who captures Factory at
+        /// night and offers it up is then told the host holds "factory4_day", finds no
+        /// captures/factory4_day folder, concludes this machine has no capture of that map and
+        /// downloads its own pictures back over the wire. Nothing is drawn wrongly - the reader tries
+        /// the alias too and prefers the local capture either way - but the download is pure waste,
+        /// and this method's own sentence ("whether this machine's OWN capture is newer") was false
+        /// for two of the eleven vanilla maps.
+        ///
+        /// The table is MapView's, read rather than copied for the reason MapCatalog gives: a third
+        /// copy is a third thing to keep in step with the server's. Safe from the sync worker although
+        /// it is a UI type: the pairs are a plain managed array and every static beside them is a
+        /// string, a bool or a Color struct, and the sync is started from the Maps tab's own first
+        /// resolve (MapCatalog.HostCache), so MapView's statics are already initialised before this
+        /// thread exists.
+        /// </summary>
+        /// <param name="key">The map's internal id, or null.</param>
+        private static string AliasOf(string key)
+        {
+            if (string.IsNullOrEmpty(key)) return null;
+
+            foreach (var (a, b) in UI.MapView.SceneAliases)
+            {
+                if (string.Equals(a, key, StringComparison.OrdinalIgnoreCase)) return b;
+                if (string.Equals(b, key, StringComparison.OrdinalIgnoreCase)) return a;
+            }
+
+            return null;
         }
 
         /// <summary>An ISO UTC timestamp, or null. Invariant and round-tripped: these are written

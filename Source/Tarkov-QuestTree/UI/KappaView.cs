@@ -384,8 +384,12 @@ namespace QuestTree.UI
 
                 // Listed by id rather than dropped silently - a Kappa quest missing from the
                 // loaded set is itself worth seeing.
+                // Safe: this is the only place in the mod that prints a raw server-supplied ID, and
+                // the Kappa payload's id list is not sanitised at ingest the way its item names are.
+                // A quest mod may use any string it likes as an id, and one with a "<" in it would
+                // be markup by the time it reached this label.
                 AuxLayout.AddText(parent, ref y,
-                    $"<color=#FFFFFF40>[     ]</color>  <color=#{GameStyle.ErrorHex}>{ids[index]} (not in the loaded quest set)</color>",
+                    $"<color=#FFFFFF40>[     ]</color>  <color=#{GameStyle.ErrorHex}>{GameStyle.Safe(ids[index])} (not in the loaded quest set)</color>",
                     AuxLayout.RowHeight, 12, indent: 6f);
             }
 
@@ -439,14 +443,22 @@ namespace QuestTree.UI
                 $"<color=#FFFFFF80>Using your own list from kappa-quests.json ({KappaQuests.Count} names). " +
                 "Empty that file to go back to the list derived from Collector.</color>", 32f, 11);
 
-            foreach (var node in kappaNodes
-                         .Where(n => n.Status != ENodeStatus.Completed)
-                         .OrderBy(n => n.TraderName, StringComparer.OrdinalIgnoreCase)
-                         .ThenBy(n => n.Name, StringComparer.OrdinalIgnoreCase))
+            // Capped like every other list on this tab. This one was left out when the caps went in,
+            // and it is the least bounded of them: the file it reads is the player's own, so its
+            // length is whatever they typed, and each row here is a GameObject with a TMP label on it.
+            var outstanding = kappaNodes
+                .Where(n => n.Status != ENodeStatus.Completed)
+                .OrderBy(n => n.TraderName, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(n => n.Name, StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            foreach (var node in outstanding.Take(MaxRows))
             {
                 QuestRow(parent, ref y, node,
                     $"<color=#FFFFFF40>[     ]</color>  {GameStyle.Safe(node.Name)}  <color=#FFFFFF60>{GameStyle.Safe(node.TraderName)}</color>");
             }
+
+            MoreRow(parent, ref y, outstanding.Count);
         }
         // ------------------------------------------------------------------ rows
 

@@ -177,8 +177,12 @@ namespace QuestTree.UI
                 (int)ModSettings.QuestBadges.Value,
                 index => ModSettings.QuestBadges.Value = (ModSettings.BadgeMode)index);
 
+            // Every row this column drew, "Show trader colours" included - it was the one row of the
+            // fifteen the reset walked past, which is exactly the miss the note on ResetLink
+            // describes and the reason that note exists.
             ResetLink(column, ref y, width,
                 ModSettings.CompactLayout, ModSettings.TallTitles, ModSettings.CollapseChains,
+                ModSettings.ShowTraderColours,
                 ModSettings.DrawEdges, ModSettings.FocusFrontier, ModSettings.HideUnobtainable,
                 ModSettings.HideCompleted, ModSettings.HideTraderless, ModSettings.EdgeOpacity,
                 ModSettings.HoverDimStrength, ModSettings.OverviewBelowZoom, ModSettings.FocusRadius,
