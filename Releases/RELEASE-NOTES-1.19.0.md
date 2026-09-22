@@ -229,8 +229,9 @@ carries our own credit instead: `Map: captured in-game with Quest Tracker 1.19.0
   treatment drew it and whether that pass's paint shader was actually there (the `p` or `n` on the
   `wr` term, so a capture whose shader the platform stripped cannot merge into one that painted),
   the smoothing window, the despeckle pass, whether the walkable mask is alpha or shading, the
-  supersampling factor and the multisampling level the device actually gave - which spells
-  `own-1.5;lod1000;basemap0;water1;cull1;refl1;wr4p;smooth5;despeckle1;reach2;ss2;msaa4` on this
+  supersampling factor, the multisampling level the device actually gave and which edition of the
+  excluded-layer list drew it - which spells
+  `own-1.5;lod1000;basemap0;water1;cull1;refl1;wr4p;smooth5;despeckle1;reach2;ss2;msaa4;layers2` on this
   machine. Each changes what a pixel is a picture of, so each has to force a replacement rather than
   a merge - which is why every set captured before this release is replaced by the first capture
   taken after it. Multisampling is asked for at 4, then 2, then 1, and the level achieved is
@@ -333,9 +334,10 @@ that fix showed them gone.
 interior floors rendered rather than coming back as empty bands - so the multi-floor camera, which
 shoots a floor with another above it from just under that one, does what it was written to do.
 
-**Not seen yet.** **Big Red's roof** is still missing from the Customs pictures and still
-unexplained: nothing this build forces visible brings it back, so what holds it is still to be
-found. **The garage band on Interchange** - the three-floor capture above ran the older
+**Not seen yet.** **Big Red with its roof.** The probe run inside it found the cause (its
+walls-and-roof mesh lives on the HighPolyCollider layer, which the capture left out by name) and
+the layer is drawn now, but no Customs capture has been taken on the build that draws it; the first
+one replaces the set on disk (the recipe changed) and is the one to look at. **The garage band on Interchange** - the three-floor capture above ran the older
 floor-banding threshold, and the current one should find a fourth band for the garage, which no
 capture has produced. **The memory budget lowering a scale inside a raid**: the arithmetic is
 checked by hand and printed, but no raid has yet logged the header line that says it stepped a map

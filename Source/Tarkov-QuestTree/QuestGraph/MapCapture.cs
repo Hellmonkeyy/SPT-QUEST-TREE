@@ -627,13 +627,14 @@ namespace QuestTree.QuestGraph
         private const float CaptureBasemapDistance = 0f;
 
         /// <summary>What the meta records about HOW a capture was rendered, and what a later capture has
-        /// to match before it may be merged into it, twelve terms in this order: the capture light
+        /// to match before it may be merged into it, thirteen terms in this order: the capture light
         /// (<c>own-</c>), the LOD bias (<c>lod</c>), the terrain base-map distance (<c>basemap</c>),
         /// whether the flat cyan quads are inpainted afterwards (<c>water</c>, from FillWaterCyan),
         /// whether the distance culling was forced visible (<c>cull</c>), whether the flat grey reflection
         /// environment was built (<c>refl</c>), what the water-layer paint pass actually did (<c>wr</c>,
         /// below), the smoothing (<c>smooth</c>), the despeckle (<c>despeckle</c>), the walkable mask
-        /// (<c>reach</c>), the supersampling (<c>ss</c>) and the multisampling (<c>msaa</c>). Every one of
+        /// (<c>reach</c>), the supersampling (<c>ss</c>), the multisampling (<c>msaa</c>) and which edition of
+        /// the excluded-layer list drew it (<c>layers</c>, see <see cref="LayerListVersion"/>). Every one of
         /// them changes what a pixel is a picture OF, and a picture of one thing must not be merged pixel
         /// by pixel into a picture of another.
         ///
@@ -675,7 +676,8 @@ namespace QuestTree.QuestGraph
             ";despeckle" + (DespeckleEnabled ? "1" : "0") +
             ";reach" + (ReachEnabled ? (ReachIsAlpha ? "2" : "1") : "0") +
             ";ss" + SupersampleFactor.ToString(CultureInfo.InvariantCulture) +
-            ";msaa" + _msaa.ToString(CultureInfo.InvariantCulture);
+            ";msaa" + _msaa.ToString(CultureInfo.InvariantCulture) +
+            ";layers" + LayerListVersion.ToString(CultureInfo.InvariantCulture);
 
         /// <summary>Added to the far plane so the band's own floor is comfortably inside it rather
         /// than exactly on it.</summary>
@@ -811,9 +813,24 @@ namespace QuestTree.QuestGraph
             "Weapons", "Weapon Preview", "Shells", "Deadbody",
             "UI", "Menu Environment", "RainDrops", "Sky", "TransparentFX",
             "Triggers", "CullingMask", "DisablerCullingObject",
-            "DoorLowPolyCollider", "HighPolyCollider", "LowPolyCollider", "HitCollider",
+            "DoorLowPolyCollider", "LowPolyCollider", "HitCollider",
             "TransparentCollider"
         };
+
+        /// <summary>Which edition of <see cref="ExcludedLayerNames"/> a capture was drawn with; part of
+        /// <see cref="RenderTag"/>, so a change to the list replaces the older captures of a map
+        /// instead of merging into them.
+        ///
+        /// 2: HighPolyCollider is DRAWN. The roof probe run inside Customs' Big Red (2026-09-22) found
+        /// the building's own walls-and-roof mesh - "karkas", LOD 0 of its group, real materials, shadows
+        /// on, the thing the player's camera shows - sitting on that layer, and the layer's name had
+        /// put it on the collider list. With it dropped, the only renderers of that building left in
+        /// the picture were its two interior-volume shells drawn with a flat vertex-paint shader, which
+        /// is the translucent teal slab three campaigns showed where a warehouse should be. The
+        /// player's camera draws the layer, so a renderer on it is meant to be seen; the collider
+        /// layers that stay excluded are the ones the game's camera never draws either, which the
+        /// copied mask already removes - the name list only ever subtracts.</summary>
+        private const int LayerListVersion = 2;
 
         /// <summary>The two values a label's "kind" takes. Constants rather than literals because the
         /// Maps tab filters on them and a typo would simply hide a label.</summary>

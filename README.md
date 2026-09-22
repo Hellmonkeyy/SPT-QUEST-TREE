@@ -217,13 +217,13 @@ frames - a handful of short hitches, not one long freeze - and takes a second or
   is deterministic - the same map at the same setting always gets the same number - which is what
   lets two captures of it be merged at all.
 - **A capture taken by a different build may replace yours rather than add to it.** The meta records
-  how a picture was rendered - twelve things, from the capture light and the level-of-detail switch to
+  how a picture was rendered - thirteen things, from the capture light and the level-of-detail switch to
   the multisampling the device actually granted - and two pictures may only be merged when all of it
   matches, or identical ground would become different pixels. When it does not match, the log says so
   and the new capture starts the map over:
   `QuestTree: the capture of bigmap already on disk cannot be added to - it was taken before the
   render recipe was recorded, and this one is rendered
-  own-1.5;lod1000;basemap0;water1;cull1;refl1;wr4p;smooth5;despeckle1;reach2;ss2;msaa4 - so this one
+  own-1.5;lod1000;basemap0;water1;cull1;refl1;wr4p;smooth5;despeckle1;reach2;ss2;msaa4;layers2 - so this one
   replaces it.`
 
 **Ctrl+Shift+F9 captures the whole map in one press.** Instead of walking a kilometre of Customs

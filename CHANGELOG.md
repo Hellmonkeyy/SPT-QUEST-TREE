@@ -48,7 +48,7 @@ like; the per-floor line says how much was outside, and host and release copies,
 flattened onto that same plate rather than onto black, so a downloaded picture is the tone the
 picture at home is. Colours are muted so a pin is the brightest thing on screen; a
 render too dark to be a map, or one under different light from the pictures on disk, is refused
-rather than written. The meta records the whole recipe - twelve values, from the light to the
+rather than written. The meta records the whole recipe - thirteen values, from the light to the
 multisampling the device actually gave, with the grey reflection and the generation of the water
 treatment among them - and a set made under another recipe is replaced, not merged into.
 
@@ -152,6 +152,14 @@ captured map carries our own credit line naming the build, the date and the raid
   again once on the next start and the shipped seed is refreshed before packaging. A host now
   strips line breaks from floor names before they reach its log, and item places on the map keep the
   same identity from raid to raid instead of being re-keyed every time.
+- **Big Red is a building again.** The roof probe below, run inside it, found that the warehouse's
+  own walls-and-roof mesh - the one with real materials that the player's camera draws - sits on the
+  game layer named HighPolyCollider, and that name had put the layer on the capture's list of
+  collider layers to leave out. What was left of the building was its two interior-volume shells
+  drawn with a flat vertex-paint shader: the translucent teal slab three campaigns showed. The layer
+  is drawn now, the recipe carries a `layers` term so every Customs set taken before this is replaced
+  rather than merged into, and the collider layers still excluded are the ones the game's camera never
+  draws either. Not yet seen on screen; the first Customs capture on this build is the proof.
 - **A throwaway diagnostic key ships with this release**, which is worth saying out loud because it
   is not a feature: a bare **F10** in a raid writes what the game knows about every renderer, light
   and reflection probe in a 40 m column above the player to
