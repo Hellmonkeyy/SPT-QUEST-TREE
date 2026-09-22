@@ -821,7 +821,7 @@ namespace QuestTree.QuestGraph
         /// <see cref="RenderTag"/>, so a change to the list replaces the older captures of a map
         /// instead of merging into them.
         ///
-        /// 2: HighPolyCollider is DRAWN. The roof probe run inside Customs' Big Red (2026-09-22) found
+        /// 2: HighPolyCollider is DRAWN. The throwaway probe key, run inside Customs' Big Red (2026-09-22), found
         /// the building's own walls-and-roof mesh - "karkas", LOD 0 of its group, real materials, shadows
         /// on, the thing the player's camera shows - sitting on that layer, and the layer's name had
         /// put it on the collider list. With it dropped, the only renderers of that building left in
@@ -2945,7 +2945,8 @@ namespace QuestTree.QuestGraph
         /// caution cost the capture whole buildings: a culler that deactivates the OBJECT never disables
         /// the renderer on it, so nothing in the component lists could bring it back, and a capture with
         /// the components forced still had buildings missing. Interchange's interior floors are in the
-        /// picture since these were taken; Big Red's roof is not, and is what the roof probe is for. So
+        /// picture since these were taken; Big Red's roof was not, which the throwaway probe key settled
+        /// (its mesh is on the HighPolyCollider layer, which the mask left out by name). So
         /// they are taken, and the risk is paid for instead: each object is switched one at a time inside
         /// its own try (HoldScene), its pre-state is recorded before the switch, and ReleaseScene puts back
         /// only what was changed. <see cref="ForceCulling"/> states the two limitations that remain.
@@ -5623,15 +5624,10 @@ namespace QuestTree.QuestGraph
         {
             try
             {
-                var modPath = Path.GetDirectoryName(typeof(MapCapture).Assembly.Location);
-                if (string.IsNullOrEmpty(modPath))
-                {
-                    Plugin.LogSource?.LogWarning(
-                        "QuestTree: the plugin has no file location, so a map capture cannot be written.");
-                    return null;
-                }
+                var root = CapturesRootDir();
+                if (root == null) return null;
 
-                var dir = Path.Combine(Path.Combine(modPath, "captures"), key);
+                var dir = Path.Combine(root, key);
                 Directory.CreateDirectory(dir);
                 return dir;
             }
@@ -5642,6 +5638,80 @@ namespace QuestTree.QuestGraph
                 return null;
             }
         }
+
+        /// <summary>BepInEx/plugins/QuestTree/captures/ itself, created on demand. Null when the plugin
+        /// has no file location - the case KappaQuests and the experiment both guard.
+        ///
+        /// Split out of <see cref="CaptureDir"/> rather than written twice, because the mesh probe
+        /// writes ONE text file beside the capture folders and a second copy of the path rule is a
+        /// second place for it to drift.</summary>
+        private static string CapturesRootDir()
+        {
+            var modPath = Path.GetDirectoryName(typeof(MapCapture).Assembly.Location);
+            if (string.IsNullOrEmpty(modPath))
+            {
+                Plugin.LogSource?.LogWarning(
+                    "QuestTree: the plugin has no file location, so a map capture cannot be written.");
+                return null;
+            }
+
+            var dir = Path.Combine(modPath, "captures");
+            Directory.CreateDirectory(dir);
+            return dir;
+        }
+
+        // --- THROWAWAY, with QuestGraph/MeshProbe.cs -------------------------------------------------
+        //
+        // Three accessors the Phase 3-0 mesh probe reads, and nothing else in the mod does. They exist
+        // so the probe measures what a CAPTURE would do rather than a second opinion of it: the same
+        // layer mask, the same camera height rule, the same folder. DELETE all three with MeshProbe.cs.
+
+        /// <summary>THROWAWAY: the folder the mesh probe's text file goes in. Delete with
+        /// QuestGraph/MeshProbe.cs.</summary>
+        internal static string ProbeCapturesRoot()
+        {
+            try
+            {
+                return CapturesRootDir();
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: the captures folder could not be made ({ex.GetType().Name}: {ex.Message}).");
+                return null;
+            }
+        }
+
+        /// <summary>THROWAWAY: the culling mask a capture of this raid would draw with, built exactly as
+        /// <see cref="BuildCamera"/> builds it - the live camera's own mask, or ~0 when there is none to
+        /// copy, minus <see cref="ExcludedLayerNames"/>.
+        ///
+        /// The once-per-session layer log line is SUPPRESSED for the probe's call and then put back the way
+        /// it was found, so the line is neither printed by a diagnostic nor stolen from the capture that
+        /// owes it. Saving the flag without setting it first was worse than leaving it alone: the probe's
+        /// call printed the line (the flag was still false), and then the restore un-marked it, so the next
+        /// capture printed the same line again. Delete with QuestGraph/MeshProbe.cs.</summary>
+        internal static int ProbeCaptureMask()
+        {
+            var main = LiveCamera();
+            var logged = _loggedLayers;
+
+            try
+            {
+                _loggedLayers = true;
+                return CaptureMask(main != null ? main.cullingMask : ~0);
+            }
+            finally
+            {
+                _loggedLayers = logged;
+            }
+        }
+
+        /// <summary>THROWAWAY: the metres above the topmost band's maxY a capture's camera stands - see
+        /// <see cref="TopBandCameraHeight"/> and <see cref="BeginFloor"/>. Read rather than copied, so
+        /// the probe's raycast grid starts where the picture's camera does. Delete with
+        /// QuestGraph/MeshProbe.cs.</summary>
+        internal static float ProbeTopBandCameraHeight => TopBandCameraHeight;
 
         /// <summary>The pixels per metre a floor of this map can actually be captured in: what the
         /// resolution setting asks for, brought down in <see cref="BudgetPpmStep"/> steps until one

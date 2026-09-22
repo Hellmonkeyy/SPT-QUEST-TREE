@@ -233,18 +233,26 @@ namespace QuestTree
         /// session. Off is for the player who would rather not offer at all.</summary>
         public static ConfigEntry<bool> UploadCaptures { get; private set; }
 
-        /// <summary>THROWAWAY. The debug key that writes down everything in a 40 m column over the
-        /// player - see QuestGraph/RoofProbe.cs, which exists to settle why one warehouse roof will not
-        /// be captured. Deliberately NOT in Entries, so the in-panel Settings tab shows no row for it;
-        /// it lives in the F12 menu and the cfg file only. Delete this entry, its bind and RoofProbe.cs
-        /// together.
+        /// <summary>THROWAWAY. The debug key of the 3D map experiments - see QuestGraph/MeshProbe.cs,
+        /// which measures in one raid and one menu visit whether a scene mesh can be read back off the
+        /// GPU, whether colliders stream out with the player, which layer has no renderer on it, and
+        /// whether a RenderTexture viewer draws at all. Deliberately NOT in Entries, so the in-panel
+        /// Settings tab shows no row for it; it lives in the F12 menu and the cfg file only. Delete this
+        /// entry, its bind and MeshProbe.cs together.
         ///
-        /// A bare F10 as of the key fix, and tested with <see cref="ShortcutDown(KeyboardShortcut)"/> so the keys a raid
+        /// A bare F10, and tested with <see cref="ShortcutDown(KeyboardShortcut)"/> so the keys a raid
         /// holds do not block it - though a bare binding means Ctrl, Shift or Alt held WILL, since those
-        /// are the keys a shortcut is made of. A cfg written by an earlier build still holds Ctrl+F10, because Bind never
-        /// overwrites a value that is already in the file - RoofProbe.Install prints the bound key at
-        /// raid start so which one it is can be read rather than assumed.</summary>
-        public static ConfigEntry<KeyboardShortcut> RoofProbeKey { get; private set; }
+        /// are the keys a shortcut is made of.
+        ///
+        /// The SECTION AND NAME CHANGED with the rename ("Roof probe key (throwaway)" -> "Mesh probe key
+        /// (throwaway)"), and that is deliberate rather than incidental. Bind never overwrites a value
+        /// already in the cfg file, so under the old name a cfg written by an earlier build would have kept
+        /// its Ctrl+F10 - the binding whose modifier is exactly what stopped the first two presses of the
+        /// old probe from firing. A new name is a new entry, so this one is written fresh as a bare F10 and
+        /// the old line is left orphaned in the cfg, which BepInEx ignores. MeshProbe.Install prints the
+        /// bound key at raid start and the menu watcher at plugin load, so which one is live can be read
+        /// rather than assumed.</summary>
+        public static ConfigEntry<KeyboardShortcut> ProbeKey { get; private set; }
 
         /// <summary>Which of the two quest marks the boxes wear. Kappa is the canonical list;
         /// Collector is what this install actually gates Collector behind, which a quest mod can
@@ -356,7 +364,7 @@ namespace QuestTree
         /// the EXACT combination: it walks a list of block keys and refuses the press if any key outside
         /// the shortcut is held. In a raid that is almost always - W, Shift, a mouse button - so a capture
         /// key pressed while moving silently did nothing, and no modified shortcut in this mod had ever
-        /// fired in a raid. The three raid keys (capture, campaign, roof probe) use this test instead.
+        /// fired in a raid. The three raid keys (capture, campaign, mesh probe) use this test instead.
         ///
         /// The difference from BepInEx is exactly one thing: WHICH held keys block. Only the six sided
         /// modifier keys do (<see cref="ModifierBlockKeys"/>), so W+Ctrl+F9 fires Ctrl+F9 while
@@ -911,18 +919,19 @@ namespace QuestTree
                 "Behaviour", "Open tracker shortcut", new KeyboardShortcut(KeyCode.Q, KeyCode.LeftControl),
                 "Opens and closes the tracker anywhere in the menu, including the raid ready-up screen where the taskbar is hidden.");
 
-            // THROWAWAY, to be deleted with QuestGraph/RoofProbe.cs. Its own section so it sits away
+            // THROWAWAY, to be deleted with QuestGraph/MeshProbe.cs. Its own section so it sits away
             // from the real settings, and kept out of Entries below so the Settings tab shows nothing.
-            // A BARE F10, no modifier: this is a key pressed once, in a raid set aside for the
-            // experiment, and the two presses that produced nothing were pressed with Ctrl. Nothing
-            // in a raid uses F10, and the probe changes nothing in the scene if it is hit by mistake.
-            RoofProbeKey = config.Bind(
-                "Advanced", "Roof probe key (throwaway)", new KeyboardShortcut(KeyCode.F10),
-                "Debug only, and temporary. Pressed inside a raid it writes what the game knows about every " +
-                "renderer, light and reflection probe in a 40 m column above you to " +
-                "BepInEx/plugins/QuestTree/captures/<map>.roofprobe.txt. It exists to find out why one " +
-                "warehouse roof is not in its capture, and will be removed again; nothing in the mod depends " +
-                "on it.");
+            // A BARE F10, no modifier: this is a key pressed a handful of times, in a raid and a menu
+            // visit set aside for the experiment. Nothing in a raid or the menu uses F10, and the probe
+            // changes nothing that outlives the frame if it is hit by mistake.
+            ProbeKey = config.Bind(
+                "Advanced", "Mesh probe key (throwaway)", new KeyboardShortcut(KeyCode.F10),
+                "Debug only, and temporary. It is the diagnostic key of the 3D map experiments: pressed in a " +
+                "raid it measures whether the game's meshes can be read back off the GPU and how much of the " +
+                "map its colliders cover, and pressed in the menu it lists the loaded shaders, cameras and " +
+                "layers and puts a small test view on screen (press again to close it). It writes " +
+                "BepInEx/plugins/QuestTree/captures/<map>.meshprobe.txt and captures/menu.meshprobe.txt and " +
+                "will be removed again; nothing in the mod depends on it.");
 
             Entries.AddRange(new ConfigEntryBase[]
             {

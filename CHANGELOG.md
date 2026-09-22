@@ -152,7 +152,7 @@ captured map carries our own credit line naming the build, the date and the raid
   again once on the next start and the shipped seed is refreshed before packaging. A host now
   strips line breaks from floor names before they reach its log, and item places on the map keep the
   same identity from raid to raid instead of being re-keyed every time.
-- **Big Red is a building again.** The roof probe below, run inside it, found that the warehouse's
+- **Big Red is a building again.** The throwaway probe key below, run inside it, found that the warehouse's
   own walls-and-roof mesh - the one with real materials that the player's camera draws - sits on the
   game layer named HighPolyCollider, and that name had put the layer on the capture's list of
   collider layers to leave out. What was left of the building was its two interior-volume shells
@@ -161,13 +161,16 @@ captured map carries our own credit line naming the build, the date and the raid
   rather than merged into, and the collider layers still excluded are the ones the game's camera never
   draws either. Not yet seen on screen; the first Customs capture on this build is the proof.
 - **A throwaway diagnostic key ships with this release**, which is worth saying out loud because it
-  is not a feature: a bare **F10** in a raid writes what the game knows about every renderer, light
-  and reflection probe in a 40 m column above the player to
-  `BepInEx\plugins\QuestTree\captures\<map>.roofprobe.txt`. It exists to find out why one warehouse
-  roof is missing from the Customs pictures (see the release notes' "not seen yet"), it changes
-  nothing in the scene, nothing in the mod depends on it, and it is meant to be removed again. It
-  lives in the F12 menu under **Advanced > Roof probe key (throwaway)** and is deliberately kept out
-  of the in-game Settings tab.
+  is not a feature: a bare **F10** is the mesh probe of the 3D map experiments, and it writes
+  `BepInEx\plugins\QuestTree\captures\<map>.meshprobe.txt` in a raid - whether the game's own meshes
+  can be read back off the graphics card, and how much of the map its colliders cover from where you
+  stand - and `captures\menu.meshprobe.txt` in the menu, where it lists the loaded shaders, cameras
+  and layers and puts a small test view in the bottom-left corner until it is pressed again. Nothing
+  in the mod depends on it. What it does touch: in a raid it adds a readable buffer target to up to
+  twenty scene meshes for a frame each and puts every one back, and writes down whether the restore
+  took; in the menu the test view lives until the second press and swallows clicks inside its own
+  512 px square. It is meant to be removed again. It lives in the F12 menu under **Advanced > Mesh
+  probe key (throwaway)** and is deliberately kept out of the in-game Settings tab.
 ---
 
 # Quest Tracker 1.18.5

@@ -77,6 +77,13 @@ namespace QuestTree
                 Logger.LogError($"QuestTree: failed to enable the pre-raid button patch: {ex}");
             }
 
+            // THROWAWAY (the 3D map experiments): the MENU half of the mesh probe key, which answers the
+            // shader/camera/layer question and the viewer question in the place the 3D map will actually
+            // be drawn. It guards and catches for itself and does nothing at all until the key is
+            // pressed, and it ignores a press inside a raid so the raid watcher owns the key there.
+            // Delete this call with QuestGraph/MeshProbe.cs.
+            QuestGraph.MenuMeshProbe.Install();
+
             Logger.LogInfo($"QuestTree {ModInfo.Stamp}: loaded.");
         }
     }
