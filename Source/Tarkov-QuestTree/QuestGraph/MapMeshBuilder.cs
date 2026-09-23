@@ -2647,6 +2647,88 @@ namespace QuestTree.QuestGraph
             pixel = new[] { px, py };
         }
 
+        /// <summary>
+        /// The inverse of <see cref="Pixel"/> on the GROUND plane y = <paramref name="yMin"/>: the world
+        /// x, z whose point at that height lands on picture pixel (px, py). What a side's merge measures
+        /// its distance to - the XZ distance from the capturing player to the ground a pixel looks at -
+        /// so two captures of a side are compared by the same rule the top picture's pixels are.
+        ///
+        /// Two equations, dot(r, p) = originR + px / ppm and dot(u, p) = originU + (height - py) / ppm,
+        /// with p.y fixed; solved by Cramer's rule in x and z. For N and S, r is along x and the u
+        /// equation gives z; for E and W, r is along z and the u equation gives x - one solver covers
+        /// both, since the determinant r.x u.z - r.z u.x is 0.707 in magnitude for all four sides.
+        ///
+        /// Out doubles rather than an array, because the merge calls it for every drawn pixel of a side
+        /// - two million on Customs - and an allocation each would be two million of them.
+        /// </summary>
+        /// <param name="right">r.</param>
+        /// <param name="up">u.</param>
+        /// <param name="originR">The picture's originR.</param>
+        /// <param name="originU">The picture's originU.</param>
+        /// <param name="ppm">Its pixels per metre.</param>
+        /// <param name="height">Its height in pixels.</param>
+        /// <param name="yMin">The ground plane's y - the side's yMin.</param>
+        /// <param name="px">The pixel, from the left (fractional; a pixel's centre is col + 0.5).</param>
+        /// <param name="py">The pixel, from the TOP.</param>
+        /// <param name="x">World x of the ground point.</param>
+        /// <param name="z">World z of the ground point.</param>
+        internal static void GroundPointOf(double[] right, double[] up, double originR, double originU, float ppm,
+            int height, double yMin, double px, double py, out double x, out double z)
+        {
+            var sr = originR + px / ppm - right[1] * yMin;
+            var su = originU + (height - py) / ppm - up[1] * yMin;
+            var det = right[0] * up[2] - right[2] * up[0];
+
+            x = (sr * up[2] - right[2] * su) / det;
+            z = (right[0] * su - sr * up[0]) / det;
+        }
+
+        /// <summary>
+        /// Why an earlier picture of a side cannot be merged into this capture's, or null when it can:
+        /// the two must be the same PIXELS - the same width, height and pixels per metre, the same
+        /// originR and originU and the same basis, each to 1e-4. A different y range moves originU and
+        /// the height, so it is caught here too. The geometric half of MapCapture's SidePrevious (the
+        /// exposure and the file name are the other half, and need the meta); here so the harness can
+        /// hold it to real numbers on the shipped assembly.
+        /// </summary>
+        /// <param name="oldWidth">The earlier side's width.</param>
+        /// <param name="oldHeight">Its height.</param>
+        /// <param name="oldPpm">Its pixels per metre.</param>
+        /// <param name="oldOriginR">Its originR.</param>
+        /// <param name="oldOriginU">Its originU.</param>
+        /// <param name="oldForward">Its forward, as the meta stores it.</param>
+        /// <param name="oldRight">Its right.</param>
+        /// <param name="oldUp">Its up.</param>
+        /// <param name="width">This capture's width.</param>
+        /// <param name="height">This capture's height.</param>
+        /// <param name="ppm">This capture's pixels per metre.</param>
+        /// <param name="originR">This capture's originR.</param>
+        /// <param name="originU">This capture's originU.</param>
+        /// <param name="forward">This capture's forward.</param>
+        /// <param name="right">This capture's right.</param>
+        /// <param name="up">This capture's up.</param>
+        internal static string Mismatch(int oldWidth, int oldHeight, float oldPpm, double oldOriginR, double oldOriginU,
+            float[] oldForward, float[] oldRight, float[] oldUp, int width, int height, float ppm, double originR,
+            double originU, double[] forward, double[] right, double[] up)
+        {
+            if (oldWidth != width || oldHeight != height)
+                return $"it is {oldWidth}x{oldHeight} px and this one is {width}x{height}";
+
+            if (Math.Abs(oldPpm - ppm) > 1e-4f) return "it was taken at another scale";
+
+            if (Math.Abs(oldOriginR - originR) > 1e-4 || Math.Abs(oldOriginU - originU) > 1e-4)
+                return "its origins differ (the box's y range moved)";
+
+            if (!Same(oldForward, forward) || !Same(oldRight, right) || !Same(oldUp, up))
+                return "its basis differs";
+
+            return null;
+        }
+
+        private static bool Same(float[] stored, double[] v) =>
+            stored != null && stored.Length == 3 && v != null && v.Length == 3 &&
+            Math.Abs(stored[0] - v[0]) <= 1e-4 && Math.Abs(stored[1] - v[1]) <= 1e-4 && Math.Abs(stored[2] - v[2]) <= 1e-4;
+
         /// <summary>dot(v, (x, y, z)).</summary>
         /// <param name="v">The vector.</param>
         /// <param name="x">x.</param>
@@ -2669,5 +2751,26 @@ namespace QuestTree.QuestGraph
         }
 
         private static double[] ToFloat(double[] v) => new double[] { (float)v[0], (float)v[1], (float)v[2] };
+    }
+
+    /// <summary>
+    /// The one rule the pictures merge by - floors and side views alike: this capture's pixel is TAKEN
+    /// when it drew one and either nothing is there yet or it was seen from closer. Best-of by distance,
+    /// not newest-wins: a pixel rendered from 900 m away is drawn at the game's lowest level of detail,
+    /// so newest-wins would make a map worse the more often it was captured.
+    ///
+    /// A class of its own and Unity-free for one reason: MapCapture.DevelopBand calls it for every pixel
+    /// of every floor and every side, and the harness calls the same method on the shipped assembly -
+    /// so the rule the harness proves is the rule the capture runs, not a copy of it.
+    /// </summary>
+    internal static class CaptureMerge
+    {
+        /// <summary>Whether this capture's pixel replaces what is on disk.</summary>
+        /// <param name="drawn">Whether this capture drew the pixel.</param>
+        /// <param name="distance">Its distance step from the capturing player.</param>
+        /// <param name="oldDrawn">Whether the picture on disk has a pixel there.</param>
+        /// <param name="oldDistance">That pixel's recorded distance step.</param>
+        internal static bool Takes(bool drawn, byte distance, bool oldDrawn, byte oldDistance) =>
+            drawn && (!oldDrawn || distance < oldDistance);
     }
 }

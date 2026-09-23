@@ -36,8 +36,10 @@ What it checks, per capture folder <key>/:
      forward is the contract's vector for that dir, right is normalize(cross(forward, world up)) and
      up is cross(right, forward),
      originR/originU are the minima of dot(right,.)/dot(up,.) over the 8 corners of
-     extent x [yMin, yMax] (1e-3), and width/height are ceil(span * pxPerMetre) within 1 px. A
-     <key>-side-*.png the meta does not list is a WARN.
+     extent x [yMin, yMax] (1e-3), and width/height are ceil(span * pxPerMetre) within 1 px. Its
+     distance sidecar <key>-side-<dir>.dist.png, when present, is the side's size (absent is a WARN:
+     the next capture cannot merge into that side). A <key>-side-*.png the meta does not list is a
+     WARN.
 
 What it does NOT check, by design:
   - the pixels. Whether the PNG is the right map, drawn the right way up, or blank, is exactly what
@@ -708,7 +710,7 @@ def check_sides(meta, folder, key, extent, errors, warnings):
     sides = meta.get("sides")
     on_disk = sorted(p.name for p in folder.iterdir()
                      if p.is_file() and p.name.lower().startswith(f"{key.lower()}-side-")
-                     and p.name.lower().endswith(".png"))
+                     and p.name.lower().endswith(".png") and not p.name.lower().endswith(".dist.png"))
 
     if sides is None or sides == []:
         for name in on_disk:
@@ -760,6 +762,23 @@ def check_sides(meta, folder, key, extent, errors, warnings):
             errors.append(f"{where}: {rel} {why}")
         elif actual != (width, height):
             errors.append(f"{where}: {rel} is {actual[0]}x{actual[1]} but the meta says {width}x{height}")
+
+        # The side's distance sidecar - what the next capture merges this side against. Optional (a side
+        # written before sides merged has none, and the next capture then takes its own pixels
+        # everywhere), but when present it has to be the side's size, or LoadPicture refuses it and every
+        # later merge of this side is silently a replacement.
+        dist_name = f"{key}-side-{direction}.dist.png"
+        dist_path = folder / dist_name
+        if not dist_path.is_file():
+            warnings.append(f"{where}: no {dist_name} - the next capture of this side cannot merge into it and "
+                            f"takes its own pixels everywhere")
+        else:
+            dist_size, dist_why = png_size(dist_path)
+            if dist_size is None:
+                errors.append(f"{where}: {dist_name} {dist_why}")
+            elif dist_size != (width, height):
+                errors.append(f"{where}: {dist_name} is {dist_size[0]}x{dist_size[1]} but the side is "
+                              f"{width}x{height} - the merge would refuse it")
 
         ppm = number(side.get("pxPerMetre"))
         if ppm is None or not (0 < ppm <= SIDE_MAX_PPM + 1e-6):

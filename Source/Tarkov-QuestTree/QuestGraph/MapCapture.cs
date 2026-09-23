@@ -883,11 +883,6 @@ namespace QuestTree.QuestGraph
         /// the coroutine starts and read once, in <see cref="Prepare"/>.</summary>
         private bool _automatic;
 
-        /// <summary>Whether the capture now starting may take the side views, when it is not an
-        /// AutoCapture tick: true for a key press and for a campaign's last stop, false for every other
-        /// campaign stop. Set with <see cref="_automatic"/> and read once, in Prepare.</summary>
-        private bool _sidesAllowed = true;
-
         /// <summary>The 3D mesh build now running, so <see cref="Cleanup"/> can dispose it. An iterator
         /// that is disposed runs its finally blocks, which is where the builder waits for a GPU readback
         /// in flight before releasing its buffer - so a raid that ends in the middle of one is the
@@ -1030,7 +1025,6 @@ namespace QuestTree.QuestGraph
 
                 // A key press is the player asking for this map, so it always builds the 3D mesh.
                 _automatic = false;
-                _sidesAllowed = true;
                 StartCoroutine(Run());
             }
             catch (Exception ex)
@@ -1500,12 +1494,13 @@ namespace QuestTree.QuestGraph
                 // will read, and skipping the build for it would silently lose the map's geometry.
                 plan.WantsMesh = !_automatic || CarriedMesh(plan, null) == null;
 
-                // The side views' gate. An AutoCapture tick: by the mesh's rule and for the same reason -
-                // four floor-sized renders are not something to spend every few seconds on a map that
-                // already has them. Anything else: what the caller said - a key press yes, a campaign
-                // only at its last stop, because each stop's sides would replace the last stop's whole.
-                // A capture that takes none carries the earlier ones forward (CommitSides).
-                plan.WantsSides = _automatic ? CarriedSides(plan).Count == 0 : _sidesAllowed;
+                // The side views' gate. Every key press and every campaign stop takes them: they MERGE
+                // best-of-by-distance now (see SidePrevious), so each stop sharpens the walls near it and
+                // nothing a stop renders is thrown away. An AutoCapture tick: by the mesh's rule and for
+                // the same reason - four floor-sized renders are not something to spend every few
+                // seconds on a map that already has them. A capture that takes none carries the earlier
+                // ones forward (CommitSides).
+                plan.WantsSides = !_automatic || CarriedSides(plan).Count == 0;
 
                 if (_culling != null && _culling.Length > 0)
                 {
@@ -2161,7 +2156,11 @@ namespace QuestTree.QuestGraph
 
             // And the side views, all four by name whether or not this capture got to them - forgetting
             // a .tmp that is not there costs one File.Exists.
-            foreach (var dir in MapSideView.Directions) Forget(plan, SideFileName(plan.Key, dir));
+            foreach (var dir in MapSideView.Directions)
+            {
+                Forget(plan, SideFileName(plan.Key, dir));
+                Forget(plan, SideDistFileName(plan.Key, dir));
+            }
         }
 
         /// <summary>One staged file deleted, if it is there. Guarded on its own: a temporary nobody
@@ -4426,8 +4425,14 @@ namespace QuestTree.QuestGraph
                         var at = index * 3;
 
                         var drawn = floor.Drawn[index];
+                        // THE HOOK for a side view: its pixels are not at (x, z) = (column, row), so its
+                        // distance is to the ground point the pixel looks at - SideSteps - and everything
+                        // else about the merge below is the floors' own code, unchanged. A side's plan
+                        // carries its SideView; a floor's does not.
                         var distance = drawn
-                            ? Steps(Mathf.Sqrt(dxSquared[col] + dzSquared))
+                            ? (plan.Side != null
+                                ? SideSteps(plan, col, textureRow)
+                                : Steps(Mathf.Sqrt(dxSquared[col] + dzSquared)))
                             : DistanceEmpty;
 
                         // Sampled for EVERY pixel, not only the ones this capture supplies: the mask is a
@@ -4461,7 +4466,7 @@ namespace QuestTree.QuestGraph
                         // Take this capture's pixel when it drew one AND either nothing better is
                         // there or it saw the spot from closer. Everything else keeps what was
                         // there, which for a first capture is black.
-                        var take = drawn && (!oldDrawn || distance < oldDistance);
+                        var take = CaptureMerge.Takes(drawn, distance, oldDrawn, oldDistance);
 
                         // A pixel nothing has drawn is TRANSPARENT rather than black, for the same reason
                         // the out-of-bounds skirt is: a hole should read as no picture, not as a dark
@@ -5480,6 +5485,90 @@ namespace QuestTree.QuestGraph
             public FloorPlan Floor;
         }
 
+        /// <summary>A side view's distance sidecar: <c>&lt;key&gt;-side-&lt;dir&gt;.dist.png</c>.</summary>
+        /// <param name="key">The map's key.</param>
+        /// <param name="dir">"N", "S", "E" or "W".</param>
+        private static string SideDistFileName(string key, string dir) => $"{key}-side-{dir}.dist.png";
+
+        /// <summary>
+        /// The meta a side view may be merged into, or null - having said why, once, when there WAS an
+        /// earlier picture of this side and it cannot be added to.
+        ///
+        /// A side merges best-of-by-distance exactly as a floor does, so every campaign stop sharpens the
+        /// walls near it instead of replacing the whole side with the view from wherever the last stop
+        /// stood. The gate is the floors' (LoadPrevious has already required the same extent, render
+        /// recipe and gamma for plan.Previous to exist at all) plus what makes two side pictures the
+        /// same PIXELS: the same width, height and pixels per metre, the same originR and originU and the
+        /// same basis to 1e-4 - a different y range moves originU and the height, so it is caught here -
+        /// and the same exposure, the top band's, as the earlier side was developed with. Anything else
+        /// and this capture's side replaces the earlier one.
+        /// </summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="dir">The side.</param>
+        /// <param name="side">The side's own plan, with its size and pixels per metre.</param>
+        /// <param name="frame">Its frame - see MapSideView.Frame.</param>
+        /// <param name="f">Its forward.</param>
+        /// <param name="r">Its right.</param>
+        /// <param name="u">Its up.</param>
+        /// <param name="exposure">The exposure this capture develops it with.</param>
+        private static CaptureMeta SidePrevious(Plan plan, string dir, Plan side, double[] frame, double[] f,
+            double[] r, double[] u, ExposureResult exposure)
+        {
+            var meta = plan.Previous;
+            if (meta?.Sides == null) return null;
+
+            var old = meta.Sides.FirstOrDefault(s => s != null && s.Dir == dir);
+            if (old == null) return null;
+
+            string why = null;
+
+            if (old.File != SideFileName(plan.Key, dir))
+                why = $"it is filed as {old.File}";
+            else
+                why = MapSideView.Mismatch(old.Width, old.Height, old.PxPerMetre, old.OriginR, old.OriginU,
+                    old.Forward, old.Right, old.Up, side.WidthPx, side.HeightPx, side.Ppm, frame[0], frame[2],
+                    f, r, u);
+
+            if (why == null)
+            {
+                var top = plan.Floors[plan.Floors.Count - 1];
+                var stored = meta.Floors?.FirstOrDefault(fl => fl != null && fl.Level == top.Dto.Level)?.Exposure;
+
+                if (stored == null || exposure == null ||
+                    Math.Abs(stored.Low - exposure.Low) > 1e-6f || Math.Abs(stored.High - exposure.High) > 1e-6f ||
+                    Math.Abs(stored.Gamma - exposure.Gamma) > 1e-6f)
+                    why = "it was developed with a different exposure";
+            }
+
+            if (why == null) return meta;
+
+            Plugin.LogSource?.LogInfo(
+                $"QuestTree: side view {dir} of {plan.Key} already on disk cannot be added to - {why} - so this one " +
+                "replaces it.");
+
+            return null;
+        }
+
+        /// <summary>A side pixel's distance step: the XZ distance from the capturing player to the ground
+        /// point the pixel looks at (MapSideView.GroundPointOf on y = the side's yMin), in the floors'
+        /// four-metre steps. The side branch of DevelopBand's distance term - the hook, not a copy of the
+        /// merge.</summary>
+        /// <param name="side">The side's own plan, carrying its SideView.</param>
+        /// <param name="col">The pixel's column, from the left of the contract's picture.</param>
+        /// <param name="textureRow">Its texture row, 0 at the picture's BOTTOM.</param>
+        private static byte SideSteps(Plan side, int col, int textureRow)
+        {
+            var view = side.Side;
+
+            MapSideView.GroundPointOf(view.Right, view.Up, view.Frame[0], view.Frame[2], side.Ppm, side.HeightPx,
+                view.YMin, col + 0.5d, side.HeightPx - textureRow - 0.5d, out var x, out var z);
+
+            var dx = x - side.From.x;
+            var dz = z - side.From.y;
+
+            return Steps((float)Math.Sqrt(dx * dx + dz * dz));
+        }
+
         /// <summary>A side view's file name: <c>&lt;key&gt;-side-&lt;dir&gt;.png</c>.</summary>
         /// <param name="key">The map's key.</param>
         /// <param name="dir">"N", "S", "E" or "W".</param>
@@ -5576,6 +5665,14 @@ namespace QuestTree.QuestGraph
                         rendered++;
                         sizes.Add($"{view.Plan.WidthPx}x{view.Plan.HeightPx}");
                         scales.Add(view.Plan.Ppm);
+
+                        // The distance sidecar AFTER the picture and only when the picture was
+                        // written, for the floors' reason (see WriteSidecar): a crash between the two
+                        // leaves a sidecar one capture old, which is a coarser merge next time, and never
+                        // a sidecar describing pixels that are not there. Written from floor.Dist, which
+                        // Develop filled in the contract's orientation - MirrorSide ran before it.
+                        yield return null;
+                        WriteSidecar(view.Plan, view.Floor);
                     }
                 }
 
@@ -5598,7 +5695,7 @@ namespace QuestTree.QuestGraph
             Plugin.LogSource?.LogInfo(
                 $"QuestTree: side views for {plan.Key} - {rendered} of {MapSideView.Directions.Length} rendered " +
                 $"{scale} ({string.Join(", ", sizes.ToArray())}), " +
-                $"{(clock.Elapsed.TotalSeconds).ToString("0.0", CultureInfo.InvariantCulture)} s.");
+                $"{(clock.Elapsed.TotalSeconds).ToString("0.0", CultureInfo.InvariantCulture)} s this stop.");
         }
 
         /// <summary>The side views' expected wall time, whole seconds rounded up: the floors' measured
@@ -5744,6 +5841,10 @@ namespace QuestTree.QuestGraph
                 side.TilesX = (side.SampleWidth + TileSize - 1) / TileSize;
                 side.TilesY = (side.SampleHeight + TileSize - 1) / TileSize;
 
+                // What this side may be MERGED into: the previous capture's meta, when its picture of this
+                // side has exactly this geometry and was developed with this exposure. See SidePrevious.
+                side.Previous = SidePrevious(plan, dir, side, frame, f, r, u, exposure);
+
                 var top = plan.Floors[plan.Floors.Count - 1];
 
                 var view = new SideView
@@ -5766,6 +5867,11 @@ namespace QuestTree.QuestGraph
                             MaxY = yMax,
                         },
                         File = SideFileName(plan.Key, dir),
+
+                        // The side's distance sidecar: the same RGB24 steps a floor's is, written by the
+                        // same WriteSidecar, read back by the same LoadPreviousDist - which is what lets
+                        // DevelopBand's merge run on a side unchanged.
+                        DistFile = SideDistFileName(plan.Key, dir),
                         Exposure = exposure,
                         ReusedExposure = true,
                         Clock = Stopwatch.StartNew(),
@@ -6034,6 +6140,11 @@ namespace QuestTree.QuestGraph
                     $"{png.Length} bytes, {Ms(floor.Clock?.Elapsed.TotalMilliseconds ?? 0d)} ms, " +
                     $"lit along f ({F((float)view.Forward[0])}, {F((float)view.Forward[1])}, " +
                     $"{F((float)view.Forward[2])}) at x{SideLightGain.ToString("0.00", CultureInfo.InvariantCulture)}" +
+                    (floor.Merged
+                        ? $", merged: {Share(floor.Kept, floor.Drawn.Length)} % of pixels kept from earlier, " +
+                          $"{Share(floor.Filled, floor.Drawn.Length)} % newly drawn, " +
+                          $"{Share(floor.StillEmpty, floor.Drawn.Length)} % still empty"
+                        : ", fresh (nothing earlier to merge into)") +
                     (floor.CyanFilled > 0 ? $", {floor.CyanFilled} cyan water pixels filled" : "") +
                     (floor.Despeckled > 0 ? $", {floor.Despeckled} speckles medianed" : "") + ".");
 
@@ -6133,6 +6244,21 @@ namespace QuestTree.QuestGraph
                     {
                         Commit(Path.Combine(plan.Dir, written.File));
                         chosen = written;
+
+                        // Its sidecar after it, in its own try: a sidecar that will not move leaves the
+                        // one the previous capture wrote, which is one capture old - a coarser merge
+                        // next time, never a wrong one (see WriteSidecar).
+                        try
+                        {
+                            Commit(Path.Combine(plan.Dir, SideDistFileName(plan.Key, dir)));
+                        }
+                        catch (Exception ex)
+                        {
+                            Forget(plan, SideDistFileName(plan.Key, dir));
+                            Plugin.LogSource?.LogDebug(
+                                $"QuestTree: {plan.Key} side view {dir}'s distance sidecar could not be put in " +
+                                $"place ({ex.Message}).");
+                        }
                     }
                     catch (Exception ex)
                     {
@@ -6162,7 +6288,14 @@ namespace QuestTree.QuestGraph
                     $"QuestTree: {plan.Key} keeps {carriedCount} side view(s) an earlier capture wrote, for the " +
                     $"direction(s) this capture {(plan.SidesTaken ? "could not write" : "did not take")}.");
 
-            foreach (var side in named) keep.Add(side.File);
+            // The picture AND its sidecar: DropStalePictures' {key}-*.png glob matches
+            // {key}-side-N.dist.png as well, and a sidecar swept away is every later capture of that side
+            // taking its own pixels everywhere - the merge silently undone.
+            foreach (var side in named)
+            {
+                keep.Add(side.File);
+                keep.Add(SideDistFileName(plan.Key, side.Dir));
+            }
 
             plan.SidesCarried = carriedCount;
 
@@ -7594,10 +7727,11 @@ namespace QuestTree.QuestGraph
             /// what sends PositionCamera down the side branch. Null on the capture's plan.</summary>
             public SideView Side;
 
-            /// <summary>Whether this capture takes the four side views. True for a key press and a
-            /// campaign stop; for an AutoCapture tick only when there are no earlier side views the meta
-            /// could carry forward (CarriedSides) - they are four floor-sized renders, the same cost
-            /// argument as the mesh's (see WantsMesh).</summary>
+            /// <summary>Whether this capture takes the four side views. True for every key press and
+            /// every campaign stop - the sides merge best-of-by-distance, so each stop adds to them; for
+            /// an AutoCapture tick only when there are no earlier side views the meta could carry forward
+            /// (CarriedSides) - they are four floor-sized renders, the same cost argument as the mesh's
+            /// (see WantsMesh).</summary>
             public bool WantsSides;
 
             /// <summary>Whether the side phase actually RAN this capture - which decides between the
@@ -7996,12 +8130,7 @@ namespace QuestTree.QuestGraph
         /// it takes its pictures exactly as any other capture does, but it builds the 3D mesh only for
         /// a map that has none yet - see <see cref="Plan.WantsMesh"/>. False, the default, for a
         /// campaign stop, which is a place somebody chose.</param>
-        /// <param name="sides">Whether this capture takes the four side views, for a caller that is not
-        /// the AutoCapture tick (whose rule is its own - see <see cref="Plan.WantsSides"/>). A campaign
-        /// passes true for its LAST stop only: every stop's sides replace the previous stop's whole, so
-        /// rendering them at every stop is eighteen sets of four floor-sized renders of which the set
-        /// keeps one. The default, true, is the key press's.</param>
-        public static bool TryStartCapture(bool automatic = false, bool sides = true)
+        public static bool TryStartCapture(bool automatic = false)
         {
             try
             {
@@ -8014,7 +8143,6 @@ namespace QuestTree.QuestGraph
                 // second caller in the same frame must be refused rather than fight for the camera.
                 runner._running = true;
                 runner._automatic = automatic;
-                runner._sidesAllowed = sides;
                 runner.StartCoroutine(runner.Run());
 
                 // The flag, not a bare true: StartCoroutine runs the coroutine's body up to its first
