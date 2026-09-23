@@ -170,7 +170,52 @@ namespace QuestTree.QuestGraph
 
         /// <summary>Layers whose renderers are never buildings, whatever their bounds say. Foliage and
         /// grass produce huge bounds around a scatter of leaves.</summary>
-        private static readonly string[] NotBuildingLayerNames = { "Foliage", "Grass" };
+        private static readonly string[] NotBuildingLayerNames =
+        {
+            "Foliage", "Grass",
+
+            // The map's invisible walls. Both are in the RENDER mask on Customs (the probe's mask line
+            // lists LevelBorder(29)), because a renderer on them draws nothing the eye can see - but a
+            // 3D map that read them as geometry would wall the map in with opaque slabs.
+            "LevelBorder", "TransparentCollider"
+        };
+
+        /// <summary>The tallest a building's world bounds may be, in metres. Nothing on any EFT map is
+        /// three hundred metres tall; what IS that tall is a renderer whose bounds mean "everywhere" -
+        /// see <see cref="SizeVerdict"/>.</summary>
+        private const float MaxBuildingHeight = 300f;
+
+        /// <summary>How far above or below the GROUND's measured heights the file's y range may reach
+        /// to hold a building, in metres. The range is otherwise taken from what is stored, and one
+        /// wild vertex would spread every height in the file over a range it could not use - the
+        /// failure the rain's 3.4e38 bounds produced. A hundred metres is a thirty-storey roof over the
+        /// highest ground hit; Customs' buildings top out under 70 m. A vertex past it clamps, which is
+        /// a roof at the wrong height rather than a map at the wrong height.</summary>
+        internal const float YRangeMarginMetres = 100f;
+
+        /// <summary>World-bounds slack, in metres, for the check that a building's transformed
+        /// vertices land where its renderer says it is - see <see cref="Assemble"/>.</summary>
+        private const float PlausibleSlack = 2f;
+
+        /// <summary>The share of sampled vertices that must land inside the renderer's bounds for a
+        /// transform to be believed.</summary>
+        private const float PlausibleShare = 0.9f;
+
+        /// <summary>Vertices sampled for that check. Enough to catch a wrong matrix (which moves ALL of
+        /// them) at the cost of a few dozen multiplies a building.</summary>
+        private const int PlausibleSamples = 32;
+
+        /// <summary>What <see cref="SizeVerdict"/> answers for a building-sized renderer.</summary>
+        internal const int SizeOk = 0;
+
+        /// <summary>What <see cref="SizeVerdict"/> answers for a crate, a railing or a pipe.</summary>
+        internal const int SizeSmall = 1;
+
+        /// <summary>What <see cref="SizeVerdict"/> answers for bounds bigger than the map itself.</summary>
+        internal const int SizeOversized = 2;
+
+        /// <summary>What <see cref="SizeVerdict"/> answers for bounds that are not numbers.</summary>
+        internal const int SizeNotFinite = 3;
 
         /// <summary>Whether the relief mask's layer names have been logged this session.</summary>
         private static bool _loggedMask;
@@ -335,24 +380,6 @@ namespace QuestTree.QuestGraph
                 Step(job, "the candidate order", () => SortCandidates(job));
             }
 
-            // --- the y range, and the relief quantised over it -------------------------------------
-
-            if (!Step(job, "the mesh's y range", () => SetRange(job))) yield break;
-
-            for (var i = 0; i < job.Bands.Count; i++)
-            {
-                var band = job.Bands[i];
-
-                while (band.Quantised < band.Cells)
-                {
-                    if (!Step(job, $"quantising \"{band.Source.Name}\"", () => QuantiseChunk(job, band))) break;
-
-                    yield return null;
-                }
-
-                Step(job, $"finishing \"{band.Source.Name}\"", () => FinishBand(job, band));
-            }
-
             // --- the buildings ---------------------------------------------------------------------
 
             if (job.WantsBuildings && job.Candidates.Count > 0)
@@ -364,10 +391,19 @@ namespace QuestTree.QuestGraph
                     var candidate = job.Candidates[i];
                     var take = false;
 
-                    if (!Step(job, "a building's size", () => take = Wanted(job, candidate, i))) continue;
-                    if (job.Stopped) break;
-
+                    // Counted BEFORE the step, so a candidate whose Wanted threw still counts toward
+                    // the frame's share: a run of throwing candidates would otherwise be a loop with no
+                    // yield in it.
                     examined++;
+
+                    if (!Step(job, "a building's size", () => take = Wanted(job, candidate, i)))
+                    {
+                        if (examined % CandidatesPerFrame == 0) yield return null;
+
+                        continue;
+                    }
+
+                    if (job.Stopped) break;
 
                     if (!take)
                     {
@@ -407,6 +443,37 @@ namespace QuestTree.QuestGraph
                 Step(job, "the buildings' log line", () => ReportBuildings(job));
             }
 
+            // --- the y range, and everything quantised over it -------------------------------------
+            //
+            // AFTER the buildings, not before them. The range is measured from what this file will
+            // actually store - the rays that hit and the kept buildings' own decoded vertices - and
+            // never from a renderer's bounds: EFT's rain (Weather/DepthPhoto/RainFall, Default layer,
+            // centred on the player) reports bounds of 3.4e38 on every axis, which are FINITE, and one
+            // such number in the range quantised every height on Customs into one flat sheet. So the
+            // buildings keep their y as floats until here (x and z are quantised at once - the extent
+            // is known from the start), and the range is held to the ground's own heights plus or
+            // minus YRangeMarginMetres whatever a building claims. See YRange.
+
+            if (!Step(job, "the mesh's y range", () => SetRange(job))) yield break;
+
+            for (var i = 0; i < job.Bands.Count; i++)
+            {
+                var band = job.Bands[i];
+
+                while (band.Quantised < band.Cells)
+                {
+                    if (!Step(job, $"quantising \"{band.Source.Name}\"", () => QuantiseChunk(job, band))) break;
+
+                    yield return null;
+                }
+
+                Step(job, $"finishing \"{band.Source.Name}\"", () => FinishBand(job, band));
+            }
+
+            // The buildings' heights, and their bands - which can only be chosen now, because a band
+            // is a band once FinishBand has put it in the file and not before.
+            Step(job, "the buildings' heights", () => QuantiseBuildings(job));
+
             Step(job, "the mesh", () => Finish(job, result));
         }
 
@@ -440,6 +507,8 @@ namespace QuestTree.QuestGraph
             internal int RendererCount;
             internal int Scanned;
 
+            /// <summary>The lowest and highest RAY HIT, in metres - the ground, which is what the y range
+            /// is measured from. See YRange.</summary>
             internal float Lowest = float.PositiveInfinity;
             internal float Highest = float.NegativeInfinity;
 
@@ -465,6 +534,37 @@ namespace QuestTree.QuestGraph
 
             internal int OverBudget;
             internal int DroppedTriangles;
+
+            /// <summary>Renderers refused for bounds bigger than the map (<see cref="SizeVerdict"/>) -
+            /// the rain volumes, on Customs. Counted, because a map where this is in the thousands is a
+            /// map whose filter wants looking at.</summary>
+            internal int Oversized;
+
+            /// <summary>Buildings refused because no transform put their vertices inside their own
+            /// renderer's bounds - see <see cref="Assemble"/>.</summary>
+            internal int Implausible;
+
+            /// <summary>Buildings whose transform mirrors them (negative determinant), whose triangles
+            /// were stored with their winding swapped so they are not drawn inside out.</summary>
+            internal int Mirrored;
+
+            /// <summary>The lowest and highest y of every vertex KEPT, in metres - what the y range is
+            /// widened by, within the ground's margin. See <see cref="YRange"/>.</summary>
+            internal float VertexLow = float.PositiveInfinity;
+
+            internal float VertexHigh = float.NegativeInfinity;
+
+            /// <summary>The kept buildings' vertex heights in METRES, one array per building in the
+            /// order of <see cref="MapMeshFile.Buildings"/>, held only until the y range is known and
+            /// then quantised into each building's Y by <see cref="QuantiseBuildings"/>.</summary>
+            internal readonly List<float[]> PendingY = new List<float[]>();
+
+            /// <summary>Each kept building's mean vertex height, same order - its band is chosen from
+            /// this once the bands are in the file.</summary>
+            internal readonly List<float> Centroids = new List<float>();
+
+            /// <summary>The building being assembled's vertex heights in metres, reused.</summary>
+            internal readonly List<float> YMetres = new List<float>();
             internal bool Stopped;
             internal string StoppedWhy;
 
@@ -491,9 +591,14 @@ namespace QuestTree.QuestGraph
             /// entries are ever read, so a reset is that many writes rather than an allocation.</summary>
             internal int[] Remap;
 
-            /// <summary>The chosen LOD level per group, so a group with forty renderers under it is
-            /// decided once.</summary>
-            internal readonly Dictionary<LODGroup, int> Levels = new Dictionary<LODGroup, int>();
+            /// <summary>The renderers of the chosen LOD level per group - null when no level of the group
+            /// is geometry - so a group with forty renderers under it is decided once and each of them is
+            /// answered by a set lookup, not by another GetLODs() allocation.</summary>
+            internal readonly Dictionary<LODGroup, HashSet<Renderer>> Levels =
+                new Dictionary<LODGroup, HashSet<Renderer>>();
+
+            /// <summary>Renderers across every cached LOD level, for the peak-memory line.</summary>
+            internal int LevelRenderers;
 
             internal int Logged;
 
@@ -556,6 +661,28 @@ namespace QuestTree.QuestGraph
             internal int Stride;
             internal int Dimension;
             internal VertexAttributeFormat Format;
+
+            /// <summary>The submeshes that are THIS renderer's: [SubFirst, SubEnd). All of them for an
+            /// ordinary renderer. For one that is part of a static batch, <c>sharedMesh</c> is the
+            /// batch's combined mesh - every renderer in the batch holds the same one - and this
+            /// renderer's share is <c>subMeshStartIndex</c> onwards, one submesh per material. Reading
+            /// every submesh stored the whole batch once per renderer, each copy under a different
+            /// key.</summary>
+            internal int SubFirst;
+
+            internal int SubEnd;
+
+            /// <summary>The transform the mesh's vertices are believed to be in. The renderer's own
+            /// localToWorldMatrix normally; for a static batch, whose combined mesh Unity builds in the
+            /// space of the batch's root (world space when there is none), the identity - the root is
+            /// not public in this Unity. Whichever it is, <see cref="Assemble"/> holds it to the
+            /// renderer's bounds before believing it - see <see cref="Fallback"/>.</summary>
+            internal Matrix4x4 Matrix;
+
+            /// <summary>The other transform worth trying when <see cref="Matrix"/> does not put the
+            /// vertices inside the renderer's bounds, or null. Set only for a static batch, where the
+            /// two candidates are world space and the renderer's own.</summary>
+            internal Matrix4x4? Fallback;
         }
 
         // --- the header ------------------------------------------------------------------------------
@@ -714,6 +841,12 @@ namespace QuestTree.QuestGraph
             var commands = new NativeArray<RaycastCommand>(count, Allocator.TempJob);
             var results = default(NativeArray<RaycastHit>);
 
+            // Cells whose result has been WRITTEN, and the only thing Done advances by - in the finally,
+            // so a throw half way through the results leaves Done at exactly the last cell that holds a
+            // measurement. It used to advance by the whole chunk after the try, which a throw skipped:
+            // the cells already written then sat past Done and FinishBand called them a bug.
+            var written = 0;
+
             try
             {
                 results = new NativeArray<RaycastHit>(count, Allocator.TempJob);
@@ -750,6 +883,7 @@ namespace QuestTree.QuestGraph
                     {
                         band.Metres[n] = float.NaN;
                         band.Distance[n] = MapMeshFile.DistanceEmpty;
+                        written++;
                         continue;
                     }
 
@@ -763,6 +897,8 @@ namespace QuestTree.QuestGraph
 
                     if (hit.point.y < job.Lowest) job.Lowest = hit.point.y;
                     if (hit.point.y > job.Highest) job.Highest = hit.point.y;
+
+                    written++;
                 }
 
                 job.ReliefClock.Stop();
@@ -772,10 +908,10 @@ namespace QuestTree.QuestGraph
                 if (job.ReliefClock.IsRunning) job.ReliefClock.Stop();
                 if (commands.IsCreated) commands.Dispose();
                 if (results.IsCreated) results.Dispose();
-            }
 
-            band.Done += count;
-            job.Rays += count;
+                band.Done += written;
+                job.Rays += written;
+            }
         }
 
         /// <summary>The lowest world y a hit still counts as this band's ground: half a metre under the
@@ -846,36 +982,88 @@ namespace QuestTree.QuestGraph
 
         // --- the y range and the quantisation -----------------------------------------------------------
 
-        /// <summary>Fixes the file's y range from everything this build will store: every ray that hit
-        /// and the world bounds of every building candidate. The candidates go in BEFORE their meshes
-        /// are read, which is the point - a renderer's bounds contain its vertices, so a range that
-        /// covers the bounds cannot clamp a wall, and the alternative (reading every building first
-        /// and keeping its vertices as floats) is the same numbers at three times the memory.
+        /// <summary>Fixes the file's y range from what the file will actually STORE - the rays that hit
+        /// and the kept buildings' decoded vertices - through <see cref="YRange"/>, and says so when a
+        /// building had to be clamped into it.
         ///
-        /// A map where nothing was hit and nothing was found falls back to the bands' own edges, so
-        /// the file is still valid - every cell in it is <see cref="MapMeshFile.NoHit"/>.</summary>
+        /// Not from candidates' bounds any more, which is what this used to do so the range could be
+        /// fixed before any building was read: the rain's bounds of 3.4e38 went straight into it. The
+        /// price is that a building's y is kept as a float until this runs (x and z are quantised at
+        /// once) - four bytes a vertex for at most ~900k vertices, under 4 MB.</summary>
         /// <param name="job">The build.</param>
         private static void SetRange(Job job)
         {
-            var low = job.Lowest;
-            var high = job.Highest;
+            var bandLow = float.PositiveInfinity;
+            var bandHigh = float.NegativeInfinity;
 
-            if (!IsFinite(low) || !IsFinite(high) || high < low)
+            foreach (var band in job.Bands)
             {
-                low = float.PositiveInfinity;
-                high = float.NegativeInfinity;
-
-                foreach (var band in job.Bands)
-                {
-                    if (band.Source.MinY < low) low = band.Source.MinY;
-                    if (band.Source.MaxY > high) high = band.Source.MaxY;
-                }
+                if (band.Source.MinY < bandLow) bandLow = band.Source.MinY;
+                if (band.Source.MaxY > bandHigh) bandHigh = band.Source.MaxY;
             }
 
-            if (!IsFinite(low) || !IsFinite(high) || high < low)
+            if (!YRange(job.Lowest, job.Highest, job.VertexLow, job.VertexHigh, bandLow, bandHigh,
+                    out var low, out var high, out var clamped))
                 throw new InvalidOperationException("nothing measurable was found to quantise heights over");
 
+            if (clamped)
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: a building on {job.Request.Map} reaches {F(job.VertexLow)}..{F(job.VertexHigh)} m, " +
+                    $"past the ground's {F(job.Lowest)}..{F(job.Highest)} m by more than " +
+                    $"{N(YRangeMarginMetres)} m - its heights are clamped to {F(low)}..{F(high)} m so the rest " +
+                    "of the map keeps its resolution.");
+
             job.File.SetYRange(low, high);
+        }
+
+        /// <summary>
+        /// The y range a file stores its heights over, from what it stores. The GROUND decides it -
+        /// the ray hits, or the bands' own edges when nothing was hit - and the kept buildings may widen
+        /// it by at most <see cref="YRangeMarginMetres"/> each way. So a vertex from a mesh nobody
+        /// anticipated (a rain volume, a skybox, a sentinel position) can move a roof, and can no longer
+        /// flatten a map: with the old rule a single 1.7e38 made every other height in the file the same
+        /// sixteen-bit code.
+        ///
+        /// Floats in, floats out, no Unity type - the harness calls it on the shipped assembly with the
+        /// rain's own numbers.
+        /// </summary>
+        /// <param name="hitLow">The lowest ray hit, or +infinity when there was none.</param>
+        /// <param name="hitHigh">The highest ray hit, or -infinity.</param>
+        /// <param name="vertexLow">The lowest kept building vertex, or +infinity when none was kept.</param>
+        /// <param name="vertexHigh">The highest kept building vertex, or -infinity.</param>
+        /// <param name="bandLow">The lowest band's minY - the reference when no ray hit.</param>
+        /// <param name="bandHigh">The highest band's maxY.</param>
+        /// <param name="low">The range's low end, before MapMeshFile adds its own slack.</param>
+        /// <param name="high">The range's high end.</param>
+        /// <param name="clamped">Whether a building reached past the margin and was cut to it.</param>
+        internal static bool YRange(float hitLow, float hitHigh, float vertexLow, float vertexHigh,
+            float bandLow, float bandHigh, out float low, out float high, out bool clamped)
+        {
+            clamped = false;
+
+            var reference = IsFinite(hitLow) && IsFinite(hitHigh) && hitHigh >= hitLow;
+
+            low = reference ? hitLow : bandLow;
+            high = reference ? hitHigh : bandHigh;
+
+            if (!IsFinite(low) || !IsFinite(high) || high < low) return false;
+
+            var floor = low - YRangeMarginMetres;
+            var ceiling = high + YRangeMarginMetres;
+
+            if (IsFinite(vertexLow) && vertexLow < low)
+            {
+                if (vertexLow < floor) clamped = true;
+                low = Math.Max(vertexLow, floor);
+            }
+
+            if (IsFinite(vertexHigh) && vertexHigh > high)
+            {
+                if (vertexHigh > ceiling) clamped = true;
+                high = Math.Min(vertexHigh, ceiling);
+            }
+
+            return true;
         }
 
         /// <summary>One frame's worth of a band's cells turned from metres into the file's sixteen-bit
@@ -954,7 +1142,7 @@ namespace QuestTree.QuestGraph
         }
 
         /// <summary>One frame's worth of the candidate filter: the cheap tests first, the bounds read
-        /// last, and every candidate's bounds folded into the y range the quantisation will use.</summary>
+        /// last. Nothing here touches the y range any more - see SizeVerdict and YRange for why.</summary>
         /// <param name="job">The build.</param>
         private static void FilterChunk(Job job)
         {
@@ -992,9 +1180,11 @@ namespace QuestTree.QuestGraph
                 var bounds = renderer.bounds;
                 var size = bounds.size;
 
-                if (!IsFinite(size.x) || !IsFinite(size.y) || !IsFinite(size.z)) continue;
-                if (size.y < MinBuildingHeight) continue;
-                if (Math.Max(size.x, size.z) < MinBuildingLongSide) continue;
+                var verdict = SizeVerdict(size.x, size.y, size.z,
+                    job.Request.MaxX - job.Request.MinX, job.Request.MaxZ - job.Request.MinZ);
+
+                if (verdict == SizeOversized) job.Oversized++;
+                if (verdict != SizeOk) continue;
 
                 var centre = bounds.center;
                 if (!IsFinite(centre.x) || !IsFinite(centre.y) || !IsFinite(centre.z)) continue;
@@ -1004,6 +1194,10 @@ namespace QuestTree.QuestGraph
                 var mesh = filter != null ? filter.sharedMesh : null;
                 if (mesh == null || mesh.vertexCount < 3) continue;
 
+                // NOT folded into the y range. The range used to be taken from candidates' bounds so it
+                // could be fixed before any building was read, and one renderer with bounds of 3.4e38 -
+                // EFT's rain - made it three hundred undecillion metres tall and every stored height the
+                // same number. It is now taken from what is actually stored; see SetRange and YRange.
                 job.Candidates.Add(new Candidate
                 {
                     Renderer = renderer,
@@ -1011,17 +1205,41 @@ namespace QuestTree.QuestGraph
                     Bounds = bounds,
                     Volume = Math.Abs(size.x * size.y * size.z)
                 });
-
-                // The bounds, not the vertices: this is what lets the y range be fixed before a single
-                // building is read. See SetRange.
-                var top = bounds.max.y;
-                var bottom = bounds.min.y;
-
-                if (bottom < job.Lowest) job.Lowest = bottom;
-                if (top > job.Highest) job.Highest = top;
             }
 
             if (job.Scanned >= job.RendererCount) job.Renderers = null;
+        }
+
+        /// <summary>
+        /// Whether a renderer's world bounds are the size of a building: <see cref="SizeOk"/>, or why
+        /// not.
+        ///
+        /// The upper limits are the finding of the second review, read straight off the probe's file:
+        /// ~30 MeshRenderers under Weather/DepthPhoto/RainFall on the Default layer - which IS in the
+        /// render mask - report bounds of 3.4e38 m on every axis, centred on the player. Those numbers
+        /// are FINITE, so a finiteness test passes them; they are longer than six metres and taller than
+        /// two and a half; their centre is inside the extent. Every test the filter had said "building".
+        /// Nothing real on a map is wider than the map or taller than <see cref="MaxBuildingHeight"/>,
+        /// so bounds that big mean "no bounds", and the renderer is not a building.
+        ///
+        /// Floats in, an int out and no Unity type anywhere, so the harness can call it on the shipped
+        /// assembly and hold it to the rain's own numbers.
+        /// </summary>
+        /// <param name="sizeX">The bounds' size along x, in metres.</param>
+        /// <param name="sizeY">Along y.</param>
+        /// <param name="sizeZ">Along z.</param>
+        /// <param name="spanX">The extent's width, in metres.</param>
+        /// <param name="spanZ">The extent's depth, in metres.</param>
+        internal static int SizeVerdict(float sizeX, float sizeY, float sizeZ, double spanX, double spanZ)
+        {
+            if (!IsFinite(sizeX) || !IsFinite(sizeY) || !IsFinite(sizeZ)) return SizeNotFinite;
+
+            if (sizeX > spanX || sizeZ > spanZ || sizeY > MaxBuildingHeight) return SizeOversized;
+
+            if (sizeY < MinBuildingHeight) return SizeSmall;
+            if (Math.Max(sizeX, sizeZ) < MinBuildingLongSide) return SizeSmall;
+
+            return SizeOk;
         }
 
         /// <summary>The layers of <see cref="NotBuildingLayerNames"/> as a mask, or 0 for the names
@@ -1058,7 +1276,53 @@ namespace QuestTree.QuestGraph
                 candidate.Format = mesh.GetVertexAttributeFormat(VertexAttribute.Position);
                 candidate.Dimension = mesh.GetVertexAttributeDimension(VertexAttribute.Position);
                 candidate.Stride = candidate.Stream >= 0 ? mesh.GetVertexBufferStride(candidate.Stream) : 0;
+
+                Placement(candidate);
             }
+        }
+
+        /// <summary>Which submeshes are this renderer's and what space their vertices are in - the
+        /// two things static batching changes. See <see cref="Candidate.SubFirst"/> and
+        /// <see cref="Candidate.Matrix"/>.</summary>
+        /// <param name="candidate">The candidate to fill in.</param>
+        private static void Placement(Candidate candidate)
+        {
+            var renderer = candidate.Renderer;
+            var mesh = candidate.Mesh;
+            var own = renderer.localToWorldMatrix;
+
+            candidate.SubFirst = 0;
+            candidate.SubEnd = mesh.subMeshCount;
+            candidate.Matrix = own;
+            candidate.Fallback = null;
+
+            if (!renderer.isPartOfStaticBatch) return;
+
+            var materials = renderer.sharedMaterials;
+            var first = renderer.subMeshStartIndex;
+            var count = materials == null ? 0 : materials.Length;
+
+            if (first < 0 || first >= mesh.subMeshCount || count <= 0)
+            {
+                // A batch whose share cannot be told is read as nothing rather than as the whole
+                // batch: the empty range makes Wanted count zero triangles and pass the renderer by.
+                candidate.SubFirst = 0;
+                candidate.SubEnd = 0;
+                return;
+            }
+
+            candidate.SubFirst = first;
+            candidate.SubEnd = Math.Min(mesh.subMeshCount, first + count);
+
+            // Unity builds a static batch's combined mesh in WORLD space - or in the space of the
+            // batch's root, when StaticBatchingUtility.Combine was given one - so the identity is the
+            // first transform to try. The root itself is not public in this Unity (the compiler says
+            // Renderer has no staticBatchRootTransform), so a rooted batch cannot be placed by name:
+            // the renderer's own matrix is the one fallback, and Plausible refuses whichever of the two
+            // does not put the vertices inside the renderer's bounds. A rooted batch that neither fits
+            // is counted as implausible in the log line rather than drawn in the wrong place.
+            candidate.Matrix = Matrix4x4.identity;
+            candidate.Fallback = own;
         }
 
         // --- which candidates are taken ------------------------------------------------------------------
@@ -1089,10 +1353,17 @@ namespace QuestTree.QuestGraph
             var mesh = candidate.Mesh;
             var triangles = 0L;
 
-            for (var s = 0; s < mesh.subMeshCount; s++)
+            // This renderer's submeshes only - for a statically batched one, its share of the batch.
+            for (var s = candidate.SubFirst; s < candidate.SubEnd; s++)
                 if (mesh.GetTopology(s) == MeshTopology.Triangles) triangles += mesh.GetIndexCount(s) / 3;
 
             if (triangles <= 0) return false;
+
+            // What this building can add to the vertex total: never more than three per triangle, and
+            // never more than the mesh has. The first bound is the one that matters for a static batch,
+            // whose mesh holds the whole batch's vertices and would otherwise look like tens of
+            // thousands per renderer.
+            var vertexBound = Math.Min(mesh.vertexCount, triangles * 3L);
 
             // Before the mesh is read, not after: a candidate the budget has no room for costs
             // nothing at all this way, which is what lets the loop go on looking for smaller ones
@@ -1103,13 +1374,13 @@ namespace QuestTree.QuestGraph
                 return false;
             }
 
-            if (mesh.vertexCount > MapMeshFile.MaxVerticesPerBuilding) return false;
+            if (vertexBound > MapMeshFile.MaxVerticesPerBuilding) return false;
 
             // The format's OTHER total, which the triangle budget does not imply: MaxVerticesTotal is
             // the running sum across every building, and a file over it is one MapMeshFile.Write refuses
-            // whole. The mesh's own vertex count is the upper bound on what this building can add (the
-            // remap only ever stores fewer), so this is the cheap test that keeps the write safe.
-            if (job.Vertices + mesh.vertexCount > MapMeshFile.MaxVerticesTotal)
+            // whole. vertexBound is the upper bound on what this building can add (the remap only ever
+            // stores fewer), so this is the cheap test that keeps the write safe.
+            if (job.Vertices + vertexBound > MapMeshFile.MaxVerticesTotal)
             {
                 job.Stopped = true;
                 job.StoppedWhy = $"the format's cap of {N(MapMeshFile.MaxVerticesTotal)} vertices in one file " +
@@ -1143,33 +1414,38 @@ namespace QuestTree.QuestGraph
             var group = candidate.Renderer.GetComponentInParent<LODGroup>(true);
             if (group == null) return true;
 
-            if (!job.Levels.TryGetValue(group, out var chosen))
+            if (!job.Levels.TryGetValue(group, out var members))
             {
-                chosen = ChooseLevel(job, group);
-                job.Levels[group] = chosen;
+                members = null;
+
+                // GetLODs once per GROUP, here - it allocates the whole LOD array every call, and it
+                // used to be called again for every renderer under the group after the level was
+                // already decided.
+                var lods = group.GetLODs();
+                var chosen = ChooseLevel(job, lods);
+
+                if (chosen >= 0 && lods[chosen].renderers != null)
+                {
+                    members = new HashSet<Renderer>();
+
+                    foreach (var renderer in lods[chosen].renderers)
+                        if (renderer != null) members.Add(renderer);
+
+                    job.LevelRenderers += members.Count;
+                }
+
+                job.Levels[group] = members;
             }
 
-            if (chosen < 0) return false;
-
-            var lods = group.GetLODs();
-            if (lods == null || chosen >= lods.Length) return false;
-
-            var renderers = lods[chosen].renderers;
-            if (renderers == null) return false;
-
-            foreach (var renderer in renderers)
-                if (ReferenceEquals(renderer, candidate.Renderer)) return true;
-
-            return false;
+            return members != null && members.Contains(candidate.Renderer);
         }
 
         /// <summary>The level <see cref="InChosenLevel"/> keeps, or -1 when no level of the group is
         /// geometry. Counts the impostor levels it walked past, for the log line.</summary>
         /// <param name="job">The build.</param>
-        /// <param name="group">The LOD group.</param>
-        private static int ChooseLevel(Job job, LODGroup group)
+        /// <param name="lods">The group's levels, as GetLODs returned them.</param>
+        private static int ChooseLevel(Job job, LOD[] lods)
         {
-            var lods = group.GetLODs();
             if (lods == null || lods.Length == 0) return -1;
 
             for (var level = lods.Length - 1; level >= 0; level--)
@@ -1250,7 +1526,7 @@ namespace QuestTree.QuestGraph
             // (mesh.vertices above cannot be reused - Unity allocates that array itself.)
             job.Triangles3.Clear();
 
-            for (var s = 0; s < mesh.subMeshCount; s++)
+            for (var s = candidate.SubFirst; s < candidate.SubEnd; s++)
             {
                 if (mesh.GetTopology(s) != MeshTopology.Triangles) continue;
 
@@ -1502,7 +1778,7 @@ namespace QuestTree.QuestGraph
             var triangles = job.Triangles3;
             triangles.Clear();
 
-            for (var s = 0; s < mesh.subMeshCount; s++)
+            for (var s = candidate.SubFirst; s < candidate.SubEnd; s++)
             {
                 var sub = mesh.GetSubMesh(s);
                 if (sub.topology != MeshTopology.Triangles) continue;
@@ -1555,29 +1831,41 @@ namespace QuestTree.QuestGraph
         // --- turning a mesh into a building ------------------------------------------------------------------
 
         /// <summary>
-        /// One mesh, in its own local space, as a quantised world-space building in the file.
+        /// One mesh, in its own local space, as a world-space building in the file - x and z
+        /// quantised at once, y held in metres until the file's y range is known (see
+        /// <see cref="QuantiseBuildings"/>).
         ///
-        /// What happens to a triangle: its three vertices go through the renderer's
-        /// <c>localToWorldMatrix</c>, and the triangle is DROPPED when any of them is not finite or
-        /// sits more than <see cref="VertexSlack"/> outside the extent - the quantisation has no room
-        /// outside the extent, so keeping it would squash a fence onto the map's edge. A vertex is
-        /// quantised the first time a kept triangle uses it and remembered, so the shared vertices of
-        /// a building are stored once; the dropped triangles' vertices are never stored at all, which
-        /// is what keeps the file to the geometry that is actually on the map.
+        /// What happens to a triangle: its three vertices go through the candidate's transform, and
+        /// the triangle is DROPPED when any of them is not finite or sits more than
+        /// <see cref="VertexSlack"/> outside the extent - the quantisation has no room outside the
+        /// extent, so keeping it would squash a fence onto the map's edge. A vertex is stored the first
+        /// time a kept triangle uses it and remembered, so the shared vertices of a building are stored
+        /// once; the dropped triangles' vertices are never stored at all.
+        ///
+        /// Two things are decided before a triangle is read:
+        ///   - WHICH transform. <see cref="Candidate.Matrix"/> is held to the renderer's own world
+        ///     bounds on a sample of the vertices this building uses; a static batch that fails it tries
+        ///     <see cref="Candidate.Fallback"/>, and a building no transform places inside its own
+        ///     bounds is refused (counted as implausible) rather than drawn somewhere wrong. That is the
+        ///     check that can fail: a wrong matrix moves every vertex, so it cannot pass by accident.
+        ///   - WHICH WAY ROUND. A transform with a negative determinant mirrors the mesh, and a mirror
+        ///     turns every triangle's winding inside out - so the viewer's back-face culling would draw
+        ///     the building's interior and hide its outside. Such a building's triangles are stored with
+        ///     their second and third corners swapped, which is the winding the game itself draws it
+        ///     with.
         ///
         /// Everything the format refuses is checked here rather than at the write, because the write is
         /// one file for the whole map: a building over a cap has to be DROPPED, or one bad renderer
         /// costs the capture its entire mesh. The two per-building rules Write also enforces - no
         /// vertex height of <see cref="MapMeshFile.NoHit"/> and no index past the vertex count - cannot
         /// be broken from here by construction rather than by a check: <see cref="Inside"/> rejects
-        /// every non-finite position before it can be quantised (NoHit is what QuantiseHeight answers
-        /// for a NaN and nothing else), and an index only ever comes back from <see cref="Store"/>,
-        /// which returns a position in the very lists that are about to be handed over. A check for
-        /// either would be one that cannot fail.
+        /// every non-finite position before it can be stored (NoHit is what QuantiseHeight answers for a
+        /// NaN and nothing else), and an index only ever comes back from <see cref="Store"/>, which
+        /// returns a position in the very lists that are about to be handed over.
         /// </summary>
         /// <param name="job">The build.</param>
         /// <param name="candidate">The candidate the mesh came from.</param>
-        /// <param name="local">Its vertex positions, in the renderer's local space.</param>
+        /// <param name="local">Its vertex positions, in the mesh's own space.</param>
         /// <param name="triangles">Its triangle indices into <paramref name="local"/>. The job's own
         /// reused list, so it is valid only for this call.</param>
         private static void Assemble(Job job, Candidate candidate, Vector3[] local, List<int> triangles)
@@ -1585,7 +1873,14 @@ namespace QuestTree.QuestGraph
             if (local == null || triangles == null || triangles.Count < 3) return;
 
             var file = job.File;
-            var matrix = candidate.Renderer.localToWorldMatrix;
+
+            if (!ChooseTransform(candidate, local, triangles, out var matrix))
+            {
+                job.Implausible++;
+                return;
+            }
+
+            var mirrored = matrix.determinant < 0f;
 
             var minX = (float)(file.MinX - VertexSlack);
             var maxX = (float)(file.MaxX + VertexSlack);
@@ -1593,7 +1888,7 @@ namespace QuestTree.QuestGraph
             var maxZ = (float)(file.MaxZ + VertexSlack);
 
             job.X.Clear();
-            job.Y.Clear();
+            job.YMetres.Clear();
             job.Z.Clear();
             job.Indices.Clear();
 
@@ -1610,8 +1905,11 @@ namespace QuestTree.QuestGraph
             for (var t = 0; t + 2 < triangles.Count; t += 3)
             {
                 var a = triangles[t];
-                var b = triangles[t + 1];
-                var c = triangles[t + 2];
+
+                // The mirror swap, here and nowhere else: b and c trade places for a mirrored
+                // transform, so the stored winding is the one the game draws.
+                var b = mirrored ? triangles[t + 2] : triangles[t + 1];
+                var c = mirrored ? triangles[t + 1] : triangles[t + 2];
 
                 if (a < 0 || b < 0 || c < 0 || a >= local.Length || b >= local.Length || c >= local.Length)
                 {
@@ -1655,28 +1953,91 @@ namespace QuestTree.QuestGraph
                 return;
             }
 
-            var centroid = vertices > 0 ? (float)(heightSum / vertices) : candidate.Bounds.center.y;
+            var heights = job.YMetres.ToArray();
 
+            foreach (var y in heights)
+            {
+                if (y < job.VertexLow) job.VertexLow = y;
+                if (y > job.VertexHigh) job.VertexHigh = y;
+            }
+
+            // Level and Y are filled by QuantiseBuildings once the y range and the file's bands exist;
+            // Y is an empty array until then so nothing can mistake it for a quantised one.
             var building = new MapMeshFile.Building
             {
                 Key = MapMeshFile.Building.KeyFor(HierarchyPath(candidate.Renderer.transform),
                     candidate.Bounds.center),
-                Level = LevelFor(job, centroid),
+                Level = 0,
                 X = job.X.ToArray(),
-                Y = job.Y.ToArray(),
+                Y = new ushort[0],
                 Z = job.Z.ToArray(),
                 Indices = job.Indices.ToArray()
             };
 
-            // No scan of Y for NoHit and none of Indices for an out-of-range value: see this method's
-            // summary - Inside and Store make both impossible here, and a loop over every vertex of
-            // every building to prove something that cannot happen is exactly the check this project
-            // does not write. MapMeshFile.Write checks them anyway, on the file, where a value that got
-            // in by some route nobody thought of is still caught before it is written.
             job.File.Buildings.Add(building);
+            job.PendingY.Add(heights);
+            job.Centroids.Add((float)(heightSum / vertices));
+
             job.Kept++;
             job.Triangles += kept;
             job.Vertices += vertices;
+
+            if (mirrored) job.Mirrored++;
+        }
+
+        /// <summary>Picks the transform that puts this building where its renderer says it is: the
+        /// candidate's own <see cref="Candidate.Matrix"/>, or its <see cref="Candidate.Fallback"/> when
+        /// the first does not. False when neither does - the building is then refused.</summary>
+        /// <param name="candidate">The candidate.</param>
+        /// <param name="local">Its vertices, in the mesh's space.</param>
+        /// <param name="triangles">The indices this building uses - the sample is drawn from these, not
+        /// from the whole vertex array, because a static batch's array is every building in the batch.</param>
+        /// <param name="matrix">The transform to use.</param>
+        private static bool ChooseTransform(Candidate candidate, Vector3[] local, List<int> triangles,
+            out Matrix4x4 matrix)
+        {
+            matrix = candidate.Matrix;
+
+            if (Plausible(candidate.Matrix, candidate.Bounds, local, triangles)) return true;
+
+            if (candidate.Fallback.HasValue &&
+                Plausible(candidate.Fallback.Value, candidate.Bounds, local, triangles))
+            {
+                matrix = candidate.Fallback.Value;
+                return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>Whether at least <see cref="PlausibleShare"/> of a sample of the building's vertices
+        /// land inside the renderer's world bounds (plus <see cref="PlausibleSlack"/>) under this
+        /// transform. The bounds are Unity's own, computed from where it DRAWS the renderer, so a
+        /// transform that disagrees with them is the wrong one.</summary>
+        /// <param name="matrix">The transform being tested.</param>
+        /// <param name="bounds">The renderer's world bounds.</param>
+        /// <param name="local">The mesh's vertices.</param>
+        /// <param name="triangles">The indices this building uses.</param>
+        private static bool Plausible(Matrix4x4 matrix, Bounds bounds, Vector3[] local, List<int> triangles)
+        {
+            var box = bounds;
+            box.Expand(PlausibleSlack * 2f);
+
+            var step = Math.Max(1, triangles.Count / PlausibleSamples);
+            var tried = 0;
+            var inside = 0;
+
+            for (var i = 0; i < triangles.Count; i += step)
+            {
+                var index = triangles[i];
+                if (index < 0 || index >= local.Length) continue;
+
+                tried++;
+
+                if (box.Contains(matrix.MultiplyPoint3x4(local[index]))) inside++;
+            }
+
+            return tried > 0 && inside >= tried * PlausibleShare;
         }
 
         /// <summary>Whether a world position is inside the extent with <see cref="VertexSlack"/> of
@@ -1693,9 +2054,10 @@ namespace QuestTree.QuestGraph
             return p.x >= minX && p.x <= maxX && p.z >= minZ && p.z <= maxZ;
         }
 
-        /// <summary>One vertex quantised into the building being assembled, or the index it already
-        /// has. The remap is what keeps a building's shared vertices to one copy and leaves the
-        /// vertices of dropped triangles out of the file altogether.</summary>
+        /// <summary>One vertex stored into the building being assembled, or the index it already has.
+        /// The remap is what keeps a building's shared vertices to one copy and leaves the vertices of
+        /// dropped triangles out of the file altogether. x and z are quantised now; y is kept in
+        /// metres for <see cref="QuantiseBuildings"/>.</summary>
         /// <param name="job">The build.</param>
         /// <param name="map">Local index to stored index, -1 for a vertex not yet stored.</param>
         /// <param name="index">The local vertex index.</param>
@@ -1709,13 +2071,37 @@ namespace QuestTree.QuestGraph
             var at = job.X.Count;
 
             job.X.Add(file.QuantiseX(world.x));
-            job.Y.Add(file.QuantiseHeight(world.y));
+            job.YMetres.Add(world.y);
             job.Z.Add(file.QuantiseZ(world.z));
 
             heightSum += world.y;
             map[index] = at;
 
             return at;
+        }
+
+        /// <summary>Quantises every kept building's heights over the file's y range, now that there is
+        /// one, and gives each its band, now that the bands are in the file. The height arrays in metres
+        /// are dropped as they are used.</summary>
+        /// <param name="job">The build.</param>
+        private static void QuantiseBuildings(Job job)
+        {
+            var file = job.File;
+
+            for (var i = 0; i < file.Buildings.Count && i < job.PendingY.Count; i++)
+            {
+                var metres = job.PendingY[i];
+                var codes = new ushort[metres.Length];
+
+                for (var v = 0; v < metres.Length; v++) codes[v] = file.QuantiseHeight(metres[v]);
+
+                file.Buildings[i].Y = codes;
+                file.Buildings[i].Level = LevelFor(job, job.Centroids[i]);
+
+                job.PendingY[i] = null;
+            }
+
+            job.PendingY.Clear();
         }
 
         /// <summary>The band a building is drawn with: the one whose height range holds its centroid,
@@ -1793,6 +2179,14 @@ namespace QuestTree.QuestGraph
                 (job.OverBudget > 0
                     ? $" {N(job.OverBudget)} did not fit the {N(MaxBuildingTriangles)}-triangle budget."
                     : "") +
+                (job.Oversized > 0
+                    ? $" {N(job.Oversized)} oversized renderer(s) refused (bounds bigger than the map - rain and " +
+                      "other volumes)."
+                    : "") +
+                (job.Implausible > 0
+                    ? $" {N(job.Implausible)} refused because no transform put them inside their own bounds."
+                    : "") +
+                (job.Mirrored > 0 ? $" {N(job.Mirrored)} mirrored, stored with their winding swapped." : "") +
                 (job.Stopped ? $" Stopped early: {job.StoppedWhy}." : "") +
                 (job.DroppedTriangles > 0
                     ? $" {N(job.DroppedTriangles)} triangle(s) reached outside the extent and were dropped."
@@ -1818,6 +2212,17 @@ namespace QuestTree.QuestGraph
                 return;
             }
 
+            // A building whose heights were never quantised - QuantiseBuildings failed part way - has an
+            // empty Y beside a full X, which Write refuses for the WHOLE file. Dropping those keeps the
+            // relief and every building that did finish; it is the same "one bad renderer must not cost
+            // the map its mesh" rule Assemble follows.
+            var unfinished = file.Buildings.RemoveAll(b => b.Y == null || b.Y.Length != b.X.Length);
+
+            if (unfinished > 0)
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: {N(unfinished)} building(s) of {job.Request.Map} never had their heights " +
+                    "quantised and were left out; the relief and the rest are written.");
+
             // Bands and buildings were filled by hand, so they are not bound to the file whose ranges
             // they are quantised over until this runs. Write binds too; a caller that reads the file
             // before writing it would otherwise get an InvalidOperationException.
@@ -1837,19 +2242,23 @@ namespace QuestTree.QuestGraph
             result.ReliefBytes = relief;
             result.BuildingBytes = file.ApproximateBytes() - relief;
 
-            // The peak is the largest things this build held at once: every band's quantised grids,
-            // one band's float heights beside them, the scene's renderer array, the candidate list and
-            // its LOD decisions, the largest single readback and its decoded vertices. Everything in it
-            // is counted - a "peak" with a term left out is a number that reads as a budget and is not
-            // one. What it cannot see is the arrays Unity hands back from mesh.vertices and
-            // GetTriangles, which are the game's allocations, not this build's.
+            // The peak is the largest things this build held at once: every band's quantised grids and
+            // EVERY band's float heights beside them (Prepare allocates them all up front, and they live
+            // until their band is finished - which is now after the buildings), the kept buildings'
+            // heights in metres, the scene's renderer array, the candidate list and its LOD decisions,
+            // the largest single readback and its decoded vertices. What it cannot see is the arrays
+            // Unity hands back from mesh.vertices and GetTriangles, which are the game's allocations,
+            // not this build's.
             var floats = 0L;
 
             foreach (var band in file.Bands)
-                floats = Math.Max(floats, band.CellCount * 4L);
+                floats += band.CellCount * 4L;
 
-            // A Candidate is ten fields and a header; the LOD dictionary is one entry per group seen.
-            var candidates = job.Candidates.Count * 72L + job.Levels.Count * 32L;
+            floats += job.Vertices * 4L;
+
+            // A Candidate is a dozen fields, two matrices and a header; the LOD cache is one set per
+            // group plus one entry per renderer in it.
+            var candidates = job.Candidates.Count * 200L + job.Levels.Count * 48L + job.LevelRenderers * 16L;
             var buffers = (job.Remap?.Length ?? 0) * 4L + job.Triangles3.Capacity * 4L +
                           job.PeakDecodedBytes;
 

@@ -288,6 +288,15 @@ namespace QuestTree.QuestGraph
                         Plugin.LogSource?.LogInfo(
                             $"QuestTree: the host did not answer within {RequestSeconds:0}s while {key} " +
                             $"\"{floor.Name}\" was being offered - the rest of the capture is not sent.");
+
+                        // NOT out of here yet. The post is still in flight on a pool thread, and leaving
+                        // now would clear _uploading (the finally below) while it is: the next capture's
+                        // upload would then run beside it, and the host would interleave two maps' posts -
+                        // which is the one thing the flag exists to prevent. So the routine waits for the
+                        // request to end on its own (SPT's HTTP client times it out) and only then lets go.
+                        // Its late answer is not acted on: the player has been told this upload stopped.
+                        while (!task.IsCompleted) yield return null;
+
                         yield break;
                     }
 
@@ -332,17 +341,34 @@ namespace QuestTree.QuestGraph
 
                     if (!task.IsCompleted)
                     {
+                        // Said at the deadline, and then WAITED OUT rather than abandoned: the post is still
+                        // in flight, _uploading must stay set until it ends (see the floor loop's timeout
+                        // for why), and unlike a floor this answer is still worth hearing - a 16 MB body on a
+                        // slow link can land after the deadline, and if it does the host has the whole set.
+                        // So the line below says it is late, and the verdict that follows says how it ended.
                         Plugin.LogSource?.LogInfo(
-                            $"QuestTree: the host did not answer within {MeshRequestSeconds:0}s while {key}'s " +
-                            $"{Mb(mesh.Length)} MB mesh was being offered - the host holds the floors and drops " +
-                            "them at its next start a day later. Capture the map again.");
-                        yield break;
+                            $"QuestTree: the host has not answered within {MeshRequestSeconds:0}s while {key}'s " +
+                            $"{Mb(mesh.Length)} MB mesh is being offered - still waiting for it before anything else " +
+                            "is offered.");
+
+                        while (!task.IsCompleted) yield return null;
                     }
 
-                    if (JudgeMesh(key, mesh, task)) Done(key, posted, bytes, mesh.Length, clock);
+                    switch (JudgeMesh(key, mesh, task))
+                    {
+                        case MeshVerdict.Stored:
+                            Done(key, posted, bytes, mesh.Length, clock);
+                            break;
+
+                        case MeshVerdict.ServedFlat:
+                            // The pictures ARE on the host - the warning above said the mesh is not - so
+                            // the upload's own line is still true, without the mesh in it.
+                            Done(key, posted, bytes, 0, clock);
+                            break;
+                    }
 
                     // Every other outcome has had its own line from JudgeMesh, which is why nothing
-                    // follows this: two lines about one upload is how a log stops being read.
+                    // follows this.
                     yield break;
                 }
 
@@ -1139,14 +1165,38 @@ namespace QuestTree.QuestGraph
             }
         }
 
-        /// <summary>Whether the host took the mesh, with the line that says what happened. False covers
-        /// three different things and each one gets its own sentence: a host that is not the server half
-        /// (an old one - Debug, because that is the normal state of a host nobody has updated), a host
-        /// that refused it, and a host that took it but is still waiting for a floor.</summary>
+        /// <summary>What became of a mesh post, for the upload's last line.</summary>
+        private enum MeshVerdict
+        {
+            /// <summary>The host took it and serves the whole set in 3D.</summary>
+            Stored,
+
+            /// <summary>The host could never use this mesh (unreadable, does not fit its own pictures,
+            /// over a budget) and serves the pictures WITHOUT it - the capture is shared, flat.</summary>
+            ServedFlat,
+
+            /// <summary>The host already serves this capture, or a newer one. Nothing to do.</summary>
+            AlreadyServed,
+
+            /// <summary>Nothing is served for this capture: refused, unreachable, an old host, or still
+            /// waiting for a floor. The line has been written.</summary>
+            NotServed
+        }
+
+        /// <summary>
+        /// What the host did with the mesh, and the ONE line that says so. Four outcomes, told apart by
+        /// the answer's <c>served</c> flag rather than by reading its words, because the difference that
+        /// matters to the player is whether anything of the capture is still being held: served means the
+        /// map is on the host (in 3D, flat, or already there from before), not served means the floors
+        /// wait there and are dropped at the host's next start a day later.
+        ///
+        /// An old host answers with SPT's own HTML - Debug, because that is the normal state of a host
+        /// nobody has updated, and such a host completed the set on its floors anyway.
+        /// </summary>
         /// <param name="key">The map's internal id.</param>
         /// <param name="bytes">What was sent, for the line.</param>
         /// <param name="task">The finished post.</param>
-        private static bool JudgeMesh(string key, byte[] bytes, Task<string> task)
+        private static MeshVerdict JudgeMesh(string key, byte[] bytes, Task<string> task)
         {
             string reply;
 
@@ -1162,8 +1212,8 @@ namespace QuestTree.QuestGraph
 
                 Plugin.LogSource?.LogInfo(
                     $"QuestTree: the host could not be offered {key}'s mesh ({message}) - it holds the floors and " +
-                    "drops them after a day, so capture the map again once the host is reachable.");
-                return false;
+                    "drops them at its next start a day later, so capture the map again once the host is reachable.");
+                return MeshVerdict.NotServed;
             }
 
             var response = NotOurs<MapMeshUploadResponse>(reply, out var excerpt);
@@ -1174,29 +1224,53 @@ namespace QuestTree.QuestGraph
                 // the pictures (it never saw the mesh block), so nothing is lost but the geometry.
                 Plugin.LogSource?.LogDebug(
                     $"QuestTree: this host takes no 3D meshes, so {key}'s stays on this machine - {excerpt}");
-                return false;
+                return MeshVerdict.NotServed;
             }
 
-            if (!response.Accepted)
+            if (response.Accepted && response.Served) return MeshVerdict.Stored;
+
+            if (response.Served)
             {
+                if ((response.Reason ?? "").StartsWith(MeshAlreadyHeldReason, StringComparison.OrdinalIgnoreCase))
+                {
+                    // A duplicate post, a retry after a reply that was lost, or a second machine's copy of
+                    // the same set. Info, because nothing needs doing.
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: the host already has this capture of {key}, or a newer one - its mesh is not " +
+                        "needed.");
+                    return MeshVerdict.AlreadyServed;
+                }
+
+                // A Warning, because the 3D view of this map is lost on every other machine - but a
+                // warning that says the pictures DID go up, which is the part the old sentence got wrong.
                 Plugin.LogSource?.LogWarning(
-                    $"QuestTree: the host refused {key}'s 3D mesh{Because(response.Reason)} - it holds the floors " +
-                    "and drops them after a day, so that map has no host picture until it is captured again.");
-                return false;
+                    $"QuestTree: the host did not take {key}'s 3D mesh{Because(response.Reason)}. The pictures are " +
+                    "shared without it, so that map draws flat on the other machines until it is captured again.");
+                return MeshVerdict.ServedFlat;
             }
 
-            if (!string.IsNullOrEmpty(response.Reason))
+            if (response.Accepted)
             {
                 // Taken, but the set is not complete: the host is missing a floor this client never
-                // managed to encode. The mesh is held with them and expires with them.
+                // managed to encode. The mesh is held with them and goes with them.
                 Plugin.LogSource?.LogInfo(
                     $"QuestTree: the host took {key}'s {Mb(bytes.Length)} MB mesh but has not got the whole set " +
                     $"yet{Because(response.Reason)} - capture the map again.");
-                return false;
+                return MeshVerdict.NotServed;
             }
 
-            return true;
+            Plugin.LogSource?.LogWarning(
+                $"QuestTree: the host did not take {key}'s 3D mesh{Because(response.Reason)} - it holds the floors " +
+                "and drops them at its next start a day later, so that map has no host picture until it is captured " +
+                "again.");
+            return MeshVerdict.NotServed;
         }
+
+        /// <summary>The start of the host's reason when the mesh is not needed because the host already
+        /// serves that capture or a newer one (MapStore's "older than the set on the host", the words the
+        /// picture route has always used). The <c>served</c> flag says the capture is on the host; this
+        /// prefix only picks the sentence and the level between "already there" and "shared flat".</summary>
+        private const string MeshAlreadyHeldReason = "older than the set on the host";
 
         /// <summary>A byte array's SHA-256 as lower-case hex - the same value MapCapture.Sha256 wrote
         /// into the meta, computed here rather than shared because that one is private to the writer and
@@ -1550,10 +1624,11 @@ namespace QuestTree.QuestGraph
                 }
 
                 // The MESH, after the floors and only when the index said there is one - so an older
-                // host is never asked, and a newer one is asked exactly once per set. Everything about
-                // it degrades: a mesh that does not arrive, does not fit the budget or does not hash to
-                // what the index promised leaves the set installing WITHOUT it and with the meta's block
-                // removed, which is the state every reader already handles (it draws the flat picture).
+                // host is never asked, and a newer one is asked exactly once per set. A PERMANENT failure
+                // (a sha that does not match, a format or size this build refuses) installs the set
+                // WITHOUT it and with the meta's block removed, which is the state every reader already
+                // handles; a TRANSIENT one (a timeout, a dropped connection, a set replaced mid-fetch)
+                // abandons the whole map for this session with no stamp written - see FetchMesh.
                 string meshName = null;
 
                 if (entry.Mesh == null)
@@ -1565,9 +1640,12 @@ namespace QuestTree.QuestGraph
                 }
                 else
                 {
-                    var mesh = FetchMesh(key, entry, bytes, result, out var replacedDuringMesh);
+                    var mesh = FetchMesh(key, entry, bytes, result, out var abandonMap);
 
-                    if (replacedDuringMesh) return 0;
+                    // Nothing has moved out of staging yet, so returning here leaves the map exactly as it
+                    // was and the held stamp still differs from the host's - which is what makes the next
+                    // session try the whole set again.
+                    if (abandonMap) return 0;
 
                     if (mesh == null)
                     {
@@ -1858,11 +1936,22 @@ namespace QuestTree.QuestGraph
         /// <summary>
         /// One map's mesh from the host, decoded and verified, or null when there is none to have.
         ///
-        /// EVERY failure here is "no mesh", not "no set": the caller installs the pictures with the
-        /// meta's mesh block removed, and the map draws flat - which is what it does on every client
-        /// that never had a mesh in the first place. The one exception is the host replacing the set
-        /// mid-download, which is the caller's business because the floors already fetched are the old
-        /// set's (see <see cref="Download"/>).
+        /// Two kinds of failure, and the difference is whether trying again could ever help - because
+        /// the caller writes the host's STAMP after installing a set, and a stamp that matches is what
+        /// stops this machine ever asking for that set again:
+        ///
+        /// PERMANENT - a mesh that does not hash to what the index promised, is a format this build
+        /// cannot read, is over a cap, is not base64, or that the host says it does not have. Asking
+        /// again next session gets the same bytes and the same answer, so these return null and the
+        /// caller installs the pictures FLAT with the meta's mesh block removed - the map draws as it
+        /// does on every client that never had a mesh - and writes the stamp.
+        ///
+        /// TRANSIENT - a timeout, a dropped connection, anything thrown by the request itself, and the
+        /// host replacing the set mid-download. These set <paramref name="abandon"/>, and the caller
+        /// takes NOTHING of the map this session and writes no stamp, exactly as a mid-download
+        /// replacement always did. Installing flat here would have been the worst of both: a mesh lost
+        /// to a slow link, and a stamp saying this machine already has the set, so the mesh would never
+        /// be fetched again until somebody re-captured the map.
         ///
         /// The sha256 is checked against the INDEX ENTRY rather than against the answer's own field: the
         /// answer's is what the host says about what it just sent, the entry's is what the client
@@ -1874,12 +1963,12 @@ namespace QuestTree.QuestGraph
         /// <param name="entry">The index entry being taken. Its <c>Mesh</c> is not null.</param>
         /// <param name="soFar">What this map's pictures already weigh, for the per-map budget.</param>
         /// <param name="result">Where the lines go.</param>
-        /// <param name="replaced">True when the host answered with a DIFFERENT set's stamp - the whole
-        /// map is abandoned, exactly as it is for a picture.</param>
+        /// <param name="abandon">True for a TRANSIENT failure - see the summary. The caller abandons the
+        /// whole map for this session and writes no stamp.</param>
         private static byte[] FetchMesh(
-            string key, MapIndexEntryDto entry, long soFar, SyncResult result, out bool replaced)
+            string key, MapIndexEntryDto entry, long soFar, SyncResult result, out bool abandon)
         {
-            replaced = false;
+            abandon = false;
 
             try
             {
@@ -1924,9 +2013,31 @@ namespace QuestTree.QuestGraph
 
                 var body = JsonConvert.SerializeObject(new MapMeshRequest { Map = key });
 
-                // The longer deadline: a 12 MB mesh is a 16 MB base64 body, and this is a blocking wait
-                // on a worker, so 30 s would be a limit the body loses to rather than the host.
-                var reply = Post(MeshFileRoute, body, MeshRequestTimeout);
+                string reply;
+
+                try
+                {
+                    // The longer deadline: a 12 MB mesh is a 16 MB base64 body, and this is a blocking
+                    // wait on a worker, so 30 s would be a limit the body loses to rather than the host.
+                    reply = Post(MeshFileRoute, body, MeshRequestTimeout);
+                }
+                catch (Exception ex)
+                {
+                    // TRANSIENT, the whole reason for the abandon: a timeout or a broken connection says
+                    // nothing about the mesh, and the next session's attempt may well succeed.
+                    abandon = true;
+
+                    var message = ex is AggregateException aggregate && aggregate.InnerException != null
+                        ? aggregate.InnerException.Message
+                        : ex.Message;
+
+                    result.Debug.Add(
+                        $"QuestTree: the host's 3D mesh for {key} did not arrive ({message}) - nothing of that map " +
+                        "is taken this session, and the whole set is fetched again on the next start rather than " +
+                        "installed flat for good.");
+                    return null;
+                }
+
                 var dto = NotOurs<MapMeshDto>(reply, out var excerpt);
 
                 if (dto == null)
@@ -1948,7 +2059,7 @@ namespace QuestTree.QuestGraph
                 if (!string.IsNullOrEmpty(dto.Stamp) &&
                     !string.Equals(dto.Stamp, entry.Stamp, StringComparison.Ordinal))
                 {
-                    replaced = true;
+                    abandon = true;
 
                     result.Debug.Add(
                         $"QuestTree: the host's set for {key} changed while its mesh was being fetched - the whole " +
@@ -1956,13 +2067,37 @@ namespace QuestTree.QuestGraph
                     return null;
                 }
 
-                var bytes = Convert.FromBase64String(dto.DataBase64);
+                byte[] bytes;
+
+                try
+                {
+                    bytes = Convert.FromBase64String(dto.DataBase64);
+                }
+                catch (FormatException)
+                {
+                    // PERMANENT: the host answered, and what it answered is not base64. It will answer the
+                    // same next time.
+                    result.Debug.Add(
+                        $"QuestTree: the host's 3D mesh for {key} is not base64 - the pictures are taken without it.");
+                    return null;
+                }
 
                 if (bytes.Length == 0 || bytes.Length > MaxMeshBytes)
                 {
                     result.Debug.Add(
                         $"QuestTree: the host's mesh for {key} is {bytes.Length:N0} bytes, which is not a mesh this " +
                         "build will write - the pictures are taken without it.");
+                    return null;
+                }
+
+                // The per-map budget again, against what DECODED rather than what the index claimed: the
+                // check above trusted the host's own number, and a host - or something answering as one -
+                // that under-states it would otherwise walk a map past its ceiling.
+                if (soFar + bytes.Length > MaxMapDownloadBytes)
+                {
+                    result.Debug.Add(
+                        $"QuestTree: {key}'s mesh decoded to {Mb(bytes.Length)} MB, which with its pictures is over " +
+                        $"the {Mb(MaxMapDownloadBytes)} MB a map may take - the mesh is left.");
                     return null;
                 }
 
@@ -1983,9 +2118,14 @@ namespace QuestTree.QuestGraph
             }
             catch (Exception ex)
             {
+                // Anything else is this code failing rather than the host answering, which is not a fact
+                // about the mesh - so it is treated as transient: nothing of the map this session, no
+                // stamp, and the whole set again next start.
+                abandon = true;
+
                 result.Debug.Add(
                     $"QuestTree: the host's 3D mesh for {key} could not be taken ({ex.GetType().Name}: " +
-                    $"{ex.Message}) - the pictures are.");
+                    $"{ex.Message}) - nothing of that map is taken this session.");
                 return null;
             }
         }

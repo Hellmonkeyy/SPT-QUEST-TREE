@@ -178,8 +178,9 @@ The host decides. Uploads are refused unless it runs with `QUESTTREE_ACCEPT_MAPS
 picture is the one thing a peer can post that everybody else then looks at; `tools/server-host.cmd`
 in the source repo sets it and starts the server. A host that has not opted in says so once, nothing
 is sent, and it is not asked again that session. The limits: one floor a post, up to 2.5 MB a floor
-and eight floors a map, 20 MB a map and 300 MB in all on the host, 60 MB downloaded per session. A
-solo player needs none of it - their own captures are read straight out of their own folder.
+and eight floors a map, one 3D mesh a capture up to 12 MB, 32 MB a map and 300 MB in all on the
+host, 120 MB downloaded per session. A solo player needs none of it - their own captures are read
+straight out of their own folder.
 
 ## DynamicMaps is now a choice rather than a dependency
 
@@ -189,6 +190,60 @@ DynamicMaps*, and *my captures only*. Nothing of DynamicMaps' artwork is bundled
 redistributed either way, and each map's author is still credited under the map. A captured map
 carries our own credit instead: `Map: captured in-game with Quest Tracker 1.19.0, 3 captures since
 2026-09-19 (10:49)`.
+
+## The map in three dimensions
+
+**A captured map now opens in 3D**: the ground with its picture draped over it and its buildings
+standing on it. **Drag** to move, **right-drag** to turn and tilt, **scroll** to come closer, and the
+floor picker peels the storeys - the second floor is drawn standing on the first and on the ground, so
+a multi-storey map reads as a building rather than a stack of slabs. Pins, extract diamonds and place
+names sit on the ground at their real height and keep their size on screen. The **3D relief** toggle
+beside the floor picker (and **Map view** in Settings) switches back to the flat picture at any time;
+it is greyed out for a map with no relief captured, and a DynamicMaps map or a bare harvested
+rectangle always draws flat. **Mirror map artwork** and **Extra map artwork rotation** do not apply
+in 3D - the picture is laid on the ground by the coordinates it was measured over. The geometry is
+built once per file and kept across repaints, so clicking a quest row does not rebuild a map.
+
+**The same press measures the map's shape.** Beside the pictures, a capture writes
+`<key>-mesh.bin`: the ground as a raycast grid at two metres a cell, cast from each floor band's own
+camera height, and the buildings as geometry. The experiments measured the whole of Customs at 45 ms
+through `RaycastCommand` against 290 ms one ray at a time, and found that colliders do not stream out
+with the player - so the ground comes back complete from anywhere on the map and needs none of the
+merging the pixels need. The buildings come from the renderers themselves - 184,000 of them on
+Customs, filtered to a few hundred by size and by the layers the picture draws - taking each LOD
+group's last real geometry step rather than its impostor card, and reading the meshes only the
+graphics card holds back asynchronously off their own buffers. A mesh's buffer target is never
+written: doing so killed the game outright on 2026-09-22, and it is forbidden everywhere in this
+feature. The work is spread over frames, capped at 300,000 triangles and twenty seconds, and three
+log lines say what was built and what was cut. A file is about 0.3 MB of ground plus one to three of
+buildings for a map of Customs' size.
+
+**The 3D map travels with the pictures.** The mesh goes up to the host on its own route after the
+floors (`POST /questtree/maps/mesh`) and comes down with them (`POST /questtree/maps/meshfile`), so
+one player's raid gives the whole group a map that pans and tilts. It rides the same single opt-in
+(`QUESTTREE_ACCEPT_MAPS=1`) and the same rule as the pictures: a set whose capture built a mesh is
+not served until both have arrived, so a borrowed map never names geometry the host does not hold.
+The file is identified by its sha256 at every hop, and the host reads the whole of it before storing
+it - its header, every building's heights and triangle indices, and that its rectangle, floors and
+counts are the ones its pictures' meta states. **A mesh problem costs the mesh and never the map**: a
+mesh the host can never use (unreadable, not fitting its own pictures, or too big for the host's
+space) is refused once and the pictures are served without it, so the map draws flat; only a mesh the
+host could not *write* leaves the floors waiting, dropped at the host's first start a day later. On
+the way down, a mesh that does not match is left out and the pictures kept, while one that does not
+arrive at all - a timeout, a dropped connection - leaves that map as it was for the session and is
+fetched again, whole, on the next start. Nothing about it bumps a schema version: an older host stores
+the pictures and ignores the mesh, and an older client never asks.
+
+**A throwaway diagnostic key ships in this build**, said out loud because it is not a feature: a bare
+**F10** is the mesh probe of the 3D experiments. In a raid it writes
+`BepInEx\plugins\QuestTree\captures\<map>.meshprobe.txt` - whether the game's own meshes can be read
+back off the graphics card, and how much of the map its colliders cover from where you stand - and in
+the menu `captures\menu.meshprobe.txt`, listing the loaded shaders, cameras and layers, with a small
+test view in the bottom-left corner until the key is pressed again (it swallows clicks inside its own
+512 px square while it is up). Nothing in the mod depends on it. It reads up to twenty scene meshes
+and asks the graphics card for a copy of one, modifying none of them; the readback test has to
+complete once in the menu before a raid will run it. It lives in the F12 menu under **Advanced > Mesh
+probe key (throwaway)**, is kept out of the in-game Settings tab, and is meant to be removed again.
 
 ## Under the hood
 
@@ -212,12 +267,17 @@ carries our own credit instead: `Map: captured in-game with Quest Tracker 1.19.0
   both fall back silently to whatever the client already had.
 - **Packaging gates the payload.** The release ships whatever map sets exist under
   `Source\Tarkov-QuestTree-Server\maps\` - none to all eleven - and `package.ps1 -RefreshMaps` copies
-  them from the install. Five gates fail the run: the folder layout (nothing but `<key>\*.jpg` and
-  `<key>\*.map.json`), 1.5 MB per image, 40 MB in total, the meta's schema against the constant the
-  shipped client reads, and `tools/check-maps-pack.py`, which checks every floor's JPEG dimensions
-  against its meta and its meta against the extent's own arithmetic. Each was proven able to fail
-  against a planted fake set, one fault at a time. How many maps are covered is a **warning** naming
-  the missing ones, not a gate, because a map with no set falls back instead of breaking.
+  them from the install, refusing while the server is running (a host writes into that folder as
+  sets arrive). There are six gates, and five of them fail the run: the folder layout (nothing but
+  `<key>\*.jpg`, `<key>\*.map.json` and the map's own `<key>\<key>-mesh.bin`), 1.5 MB per image, the
+  meta's schema against the constant the shipped client reads, and `tools/check-maps-pack.py`, which
+  checks every floor's JPEG dimensions against its meta and its meta against the extent's own
+  arithmetic, and holds a set's 3D mesh to the sha256, byte length, extent, floor levels and counts
+  its meta states. The sixth is the payload's total size: printed on every run and a **warning**
+  past 80 MB rather than a failure, because a mesh cannot be made smaller without losing the map.
+  Each gate was proven able to fail against a planted fake set, one fault at a time. How many maps
+  are covered is also a warning naming the missing ones, not a gate, because a map with no set falls
+  back instead of breaking.
 - **The render recipe is a field.** The meta's `render` field records what decides whether two pictures
   are pictures of the same thing, and any difference at all replaces the set instead of merging into
   it. The capture header also stopped printing a rendering path taken from the player's camera before

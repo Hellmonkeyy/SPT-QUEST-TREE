@@ -6,6 +6,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading.Tasks;
 using EFT;
 using EFT.Interactive;
 using Newtonsoft.Json;
@@ -1193,10 +1194,10 @@ namespace QuestTree.QuestGraph
                 //
                 // Inside a hold of its own: the relief's rays do not care what is switched on, but the
                 // building walk reads the renderers the game has streamed out and the culler has
-                // switched off, which is exactly what HoldScene puts back. A GC first, because the last
-                // floor's hundred megabytes have just been dropped and the mesh is about to ask for
-                // arrays of its own; the frame between the two is Unity's deferred Destroy of the
-                // floor's picture happening before the collect, as it is between floors.
+                // switched off, which is exactly what HoldScene puts back. A GC first (inside
+                // BeginMesh), because the last floor's hundred megabytes have just been dropped and the
+                // mesh is about to ask for arrays of its own - and then a FRAME before the hold, so the
+                // collect and the pass over twenty-seven thousand components are never the same frame.
                 //
                 // ReleaseScene is idempotent and Cleanup calls it too, so a raid that ends in the
                 // middle of the build leaves the scene as the game had it.
@@ -1204,6 +1205,12 @@ namespace QuestTree.QuestGraph
 
                 if (mesh != null)
                 {
+                    yield return null;
+
+                    // Never throws (see HoldScene); the frame after it is the hold's own, as it is for
+                    // every floor.
+                    HoldScene();
+
                     yield return null;
 
                     // Driven by hand rather than yielded as a nested coroutine, and each MoveNext in
@@ -1237,7 +1244,16 @@ namespace QuestTree.QuestGraph
 
                     yield return null;
 
-                    StageMesh(plan, mesh);
+                    // The deflate and the hash on a worker, the coroutine waiting a frame at a time: at
+                    // CompressionLevel.Optimal a few megabytes of buildings is well over a frame of
+                    // main-thread work, and nothing in it touches a Unity object - the mesh file is plain
+                    // arrays. The write of the staged file stays here, on this thread, so the abort path
+                    // (DropStaged) can never race a worker still writing a .tmp.
+                    var serialised = SerialiseMesh(plan, mesh);
+
+                    while (serialised != null && !serialised.IsCompleted) yield return null;
+
+                    StageMesh(plan, mesh, serialised);
                 }
 
                 // Nothing is in place until this runs: it commits every staged picture and then
@@ -5406,12 +5422,12 @@ namespace QuestTree.QuestGraph
             }
         }
 
-        /// <summary>Starts the mesh build: the request, the collect, the scene hold and the iterator the
-        /// run will drive. Null - having said why - means the mesh phase does not happen and the capture
-        /// goes straight on to its meta.
+        /// <summary>Starts the mesh build: the request, the iterator the run will drive, and the collect.
+        /// Null - having said why - means the mesh phase does not happen and the capture goes straight on
+        /// to its meta. The scene hold is the run's, a frame later (see Run).
         ///
-        /// All of the setup is in here, inside one try, because none of it can be inside the guarded
-        /// MoveNext loop that follows: a throw from MeshRequest or HoldScene out there would skip
+        /// All of the setup that can throw is in here, inside one try, because none of it can be inside
+        /// the guarded MoveNext loop that follows: a throw from MeshRequest out there would skip
         /// WriteMeta entirely and Cleanup would then drop every staged picture - the capture lost to the
         /// feature that was meant to add to it.</summary>
         /// <param name="plan">The capture's plan.</param>
@@ -5419,6 +5435,18 @@ namespace QuestTree.QuestGraph
         {
             try
             {
+                // WriteMeta returns without writing anything when this capture wrote no picture - carried
+                // floors or not - so a mesh built now would be staged, never committed, and dropped by
+                // Cleanup: a twenty-second hold of the player's view for nothing. Asked with the same
+                // predicate WriteMeta uses.
+                if (!plan.Floors.Any(f => !f.Failed && f.Bytes > 0))
+                {
+                    Plugin.LogSource?.LogDebug(
+                        $"QuestTree: no 3D mesh for {plan.Key} - this capture wrote no picture, so it writes no " +
+                        "meta for a mesh to belong to.");
+                    return null;
+                }
+
                 var request = MeshRequest(plan);
 
                 if (request.Bands.Count == 0)
@@ -5440,18 +5468,20 @@ namespace QuestTree.QuestGraph
                     $"{MapMeshBuilder.SecondsCap.ToString("0", CultureInfo.InvariantCulture)} s, so distant " +
                     "geometry stays drawn while it runs.");
 
-                // The collect and the hold LAST, so nothing above them can leave the scene held.
-                GC.Collect();
-                HoldScene();
-
+                // The collect LAST, so nothing above it can have thrown after it. The hold is NOT here:
+                // Run takes it a frame later, so the collect and the pass over the culled components
+                // are two frames rather than one long one. The iterator is lazy - nothing in Build runs
+                // until the first MoveNext - so holding it in the field now costs nothing and means
+                // Cleanup can dispose it from this line on.
                 _meshBuild = build;
+
+                GC.Collect();
 
                 return result;
             }
             catch (Exception ex)
             {
                 _meshBuild = null;
-                ReleaseScene();
 
                 Plugin.LogSource?.LogWarning(
                     $"QuestTree: the 3D mesh of {plan.Key} could not be started ({ex.GetType().Name}: " +
@@ -5508,6 +5538,43 @@ namespace QuestTree.QuestGraph
             }
         }
 
+        /// <summary>Starts the mesh's deflate and hash on a worker thread, or null when there is nothing
+        /// to write or the worker could not be started (StageMesh then says so). The mesh file is plain
+        /// managed arrays with no Unity object in it, and nothing touches it while the run waits, so the
+        /// worker has it to itself.</summary>
+        /// <param name="plan">The capture's plan, for the log line.</param>
+        /// <param name="mesh">What the builder produced.</param>
+        private static Task<SerialisedMesh> SerialiseMesh(Plan plan, MapMeshBuilder.Result mesh)
+        {
+            if (mesh?.File == null) return null;
+
+            var file = mesh.File;
+
+            try
+            {
+                return Task.Run(() =>
+                {
+                    var bytes = MapMeshFile.ToBytes(file);
+
+                    return new SerialisedMesh { Bytes = bytes, Sha256 = Sha256(bytes) };
+                });
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: the 3D mesh of {plan.Key} could not be handed to a worker ({ex.GetType().Name}: " +
+                    $"{ex.Message}).");
+                return null;
+            }
+        }
+
+        /// <summary>A mesh file's bytes and their hash, as the worker hands them back.</summary>
+        private sealed class SerialisedMesh
+        {
+            public byte[] Bytes;
+            public string Sha256;
+        }
+
         /// <summary>Writes the built mesh beside the pictures as a STAGED file and records what the
         /// meta will say about it - the same Stage/Commit pair the pictures use, for the same reason:
         /// nothing a capture writes is in place until <see cref="WriteMeta"/> puts it there, so a
@@ -5518,14 +5585,27 @@ namespace QuestTree.QuestGraph
         /// exist.</summary>
         /// <param name="plan">The capture's plan.</param>
         /// <param name="mesh">What the builder produced. A null file means nothing was built.</param>
-        private static void StageMesh(Plan plan, MapMeshBuilder.Result mesh)
+        /// <param name="serialised">The worker that deflated and hashed it, already finished - or null
+        /// when none could be started.</param>
+        private static void StageMesh(Plan plan, MapMeshBuilder.Result mesh, Task<SerialisedMesh> serialised)
         {
             if (plan == null || mesh == null || mesh.File == null) return;
 
             try
             {
-                var bytes = MapMeshFile.ToBytes(mesh.File);
-                var sha = Sha256(bytes);
+                if (serialised == null)
+                    throw new InvalidOperationException("the mesh was never serialised");
+
+                // A worker that threw hands its exception back wrapped; the inner one is the reason.
+                if (serialised.IsFaulted)
+                {
+                    var inner = serialised.Exception?.GetBaseException();
+                    throw new InvalidOperationException(
+                        inner == null ? "the worker failed" : $"{inner.GetType().Name}: {inner.Message}", inner);
+                }
+
+                var bytes = serialised.Result.Bytes;
+                var sha = serialised.Result.Sha256;
 
                 Stage(Path.Combine(plan.Dir, plan.MeshFile), bytes);
 
@@ -5766,18 +5846,22 @@ namespace QuestTree.QuestGraph
 
                 // The mesh, before the meta that names it and after the pictures, for the same reason
                 // the sidecars go before it: the meta is the last thing a reader trusts, so a mesh it
-                // names is a mesh that is already there. A capture that built none leaves whatever an
-                // earlier capture wrote on disk and names no mesh at all - the mesh is REBUILT whole by
-                // every capture, never merged, so an unnamed one is simply not read.
-                // A capture that built none keeps the one an earlier capture of this map wrote - the
-                // same rule Carried follows for a floor's picture, and for the same reason: the meta is
-                // rewritten from scratch every time, so a block it does not carry is a file nothing
-                // reads. This is what makes the AutoCapture cost gate free (Plan.WantsMesh): a tick
-                // that skips the build does not cost the map its geometry.
+                // names is a mesh that is already there.
+                //
+                // Three cases, in order:
+                //   - this capture BUILT one: it is checked against the floors below, committed, and
+                //     named. The mesh is rebuilt whole by every capture that builds one, never merged.
+                //   - this capture built NONE (the AutoCapture cost gate, or a mesh phase that failed):
+                //     the one an earlier capture wrote is carried forward, when it is still on disk and
+                //     its floors are this meta's floors - the same rule Carried follows for a floor's
+                //     picture, because the meta is rewritten from scratch every time and a block it does
+                //     not carry is a file nothing reads. See CarriedMesh.
+                //   - neither: the meta names no mesh, and DropStalePictures removes any left on disk.
+                //
                 // The check that can fail: a mesh whose bands are not the floors this meta names is a
                 // mesh the checker refuses and the viewer could not peel, so it is dropped here - with
                 // the numbers in the line - rather than shipped. Normally they are the same set by
-                // construction: both come from the same plan's floors.
+                // construction: both come from WillBeNamed.
                 if (plan.Mesh != null && !SameLevels(plan.MeshLevels, floors))
                 {
                     Plugin.LogSource?.LogWarning(
@@ -6646,10 +6730,11 @@ namespace QuestTree.QuestGraph
             public string MeshFile;
 
             /// <summary>Whether this capture builds the 3D geometry at all. True for a key press and a
-            /// campaign stop; for an AutoCapture tick, only when the map has no mesh file yet. The
-            /// relief is 45 ms, but the building walk is a pass over 184,000 renderers and a handful of
-            /// GPU readbacks, which is not something to spend every five seconds on a map that already
-            /// has one.</summary>
+            /// campaign stop; for an AutoCapture tick, only when there is no earlier mesh this capture's
+            /// meta could carry forward (CarriedMesh) - a mesh file on disk that the previous meta does
+            /// not name, or that was built for other floors, does not count. The relief is 45 ms, but
+            /// the building walk is a pass over 184,000 renderers and a handful of GPU readbacks, which
+            /// is not something to spend every five seconds on a map that already has one.</summary>
             public bool WantsMesh;
 
             /// <summary>What the meta will say about the mesh, once it is staged - null when none was
@@ -6843,9 +6928,11 @@ namespace QuestTree.QuestGraph
             /// drawing the flat picture without it, which is what makes "absent" cost nothing and is
             /// why adding it is not a schema bump.
             ///
-            /// Additive, not merged: the mesh is REBUILT whole by every capture (the relief is 45 ms
-            /// and deterministic), so this block always describes the file THIS capture wrote, and a
-            /// meta carried forward from an earlier capture of a floor says nothing about it.</summary>
+            /// Never merged: a capture that builds a mesh rebuilds it whole (the relief is 45 ms and
+            /// deterministic) and this block describes the file it wrote. A capture that builds none -
+            /// an AutoCapture tick on a map that has one - carries the previous meta's block forward
+            /// unchanged, file, length and hash, when that file is still on disk and was built for the
+            /// same floors (see CarriedMesh). Either way the block describes the file beside it.</summary>
             [JsonProperty("mesh")] public CaptureMesh Mesh { get; set; }
         }
 

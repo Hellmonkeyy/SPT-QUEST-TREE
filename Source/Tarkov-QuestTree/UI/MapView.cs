@@ -104,6 +104,12 @@ namespace QuestTree.UI
 
         private static bool _meshRepaint;
 
+        /// <summary>Why the viewport on screen could not open its map in 3D when the reason is the SCENE
+        /// rather than the file, or null. Lives exactly as long as that viewport: cleared by
+        /// <see cref="DiscardViewport"/>, so every real rebuild tries 3D again. See the attach in
+        /// <see cref="BuildMapViewport"/>.</summary>
+        private static string _sceneRefusal;
+
         /// <summary>This map's usable relief file, or null: no capture, no mesh, the setting says flat, or
         /// this run has already given up on it.</summary>
         /// <param name="entry">The map being drawn.</param>
@@ -367,6 +373,7 @@ namespace QuestTree.UI
         {
             _keptFrom = null;
             _drawnMarkers = 0;
+            _sceneRefusal = null;
 
             // The labels go with the viewport they belong to. Kept any longer, the zoom callback of
             // the NEXT map would be switching destroyed objects on and off.
@@ -708,7 +715,10 @@ namespace QuestTree.UI
             // where it runs off the right edge instead, exactly as the coverage line already does.
             var modeX = Mathf.Max(toggleX + 190f, panelSize.x - AuxLayout.Padding - MapModeToggleWidth);
             AddMapModeToggle(
-                parent, modeX, AuxLayout.Padding, MeshFor(entry) != null, MeshRefusal(entry));
+                parent, modeX, AuxLayout.Padding,
+                MeshFor(entry) != null && _sceneRefusal == null,
+                _sceneRefusal ?? MeshRefusal(entry),
+                sceneProblem: _sceneRefusal != null);
 
             // How much of this map is located, beside the toggle - said out loud because the
             // alternative is pins silently missing, and the fix (one raid here) is not guessable.
@@ -828,8 +838,11 @@ namespace QuestTree.UI
         /// at all, or because the one it has is fine. Only read when <paramref name="hasMesh"/> is
         /// false, where it is the difference between "nobody has captured this yet" and "the file is
         /// there and this is what is wrong with it".</param>
+        /// <param name="sceneProblem">Whether the refusal is about the scene rather than the file, which
+        /// asks the player for nothing - it is tried again on the next rebuild - where a file refusal
+        /// asks for a re-capture.</param>
         private static void AddMapModeToggle(
-            RectTransform parent, float x, float top, bool hasMesh, string refusal)
+            RectTransform parent, float x, float top, bool hasMesh, string refusal, bool sceneProblem = false)
         {
             var wrapperGo = new GameObject("MapModeToggle", typeof(RectTransform));
             var wrapper = (RectTransform)wrapperGo.transform;
@@ -903,8 +916,11 @@ namespace QuestTree.UI
                 refusal == null
                     ? "No 3D relief has been captured for this map yet. Capture it in raid - the same key " +
                       "that takes the picture measures the ground - and this map opens in 3D."
-                    : $"This map's 3D relief was not used: {refusal}. The flat picture is unaffected; the " +
-                      "log line says more, and re-capturing the map in raid replaces the file.");
+                    : sceneProblem
+                        ? $"This map's 3D relief cannot be drawn here: {refusal}. The file is fine and the " +
+                          "flat picture is unaffected; 3D is tried again the next time the map is redrawn."
+                        : $"This map's 3D relief was not used: {refusal}. The flat picture is unaffected; the " +
+                          "log line says more, and re-capturing the map in raid replaces the file.");
         }
 
         /// <summary>The floor to show: the one last chosen if this map has it, else the map's own
@@ -1280,7 +1296,14 @@ namespace QuestTree.UI
                 {
                     _drawnMarkers = BuildMapViewport(
                         parent, entry, layer, sprite, left, top, mapWidth, height, graph, shownIds, onRepaint);
-                    _keptFrom = key;
+
+                    // Recorded with the mesh AS IT IS NOW, not as the key was taken before the build. A
+                    // synchronous refusal inside the build has just made MeshFor answer null, so the next
+                    // repaint's key says null - and a record that still said the path would miss it and
+                    // rebuild the whole viewport once for nothing.
+                    var built = key;
+                    built.Mesh = MeshFor(entry);
+                    _keptFrom = built;
                 }
                 else if (!spritePending)
                 {
@@ -1767,10 +1790,21 @@ namespace QuestTree.UI
             var stateKey = entry != null ? string.Join(",", entry.InternalNames) : "";
             var sameMap = stateKey == _viewStateKey;
 
-            // A different map - or ResetView, which clears the key - means the orbit kept from the last
-            // one describes a rectangle that no longer exists. Dropped here rather than only ignored, so
-            // the build AFTER this one cannot pick a stale one back up.
-            if (!sameMap) _saved3D = null;
+            // A different map - or ResetView, which clears the key - means BOTH saved views describe a
+            // rectangle that no longer exists. Dropped here rather than only ignored, so the build AFTER
+            // this one cannot pick a stale one back up.
+            //
+            // The flat view's pair has to go as well, and it did not used to need to: before 3D every
+            // build wrote _savedScale and _savedPan, so a map change overwrote them with the new map's
+            // fit. A 3D build writes neither. Customs in 2D, then Interchange in 3D, then the toggle back
+            // to 2D, restored Customs' zoom and pan onto Interchange - _viewStateKey said "same map"
+            // because the 3D build had moved it on, and _savedScale was still Customs'.
+            if (!sameMap)
+            {
+                _saved3D = null;
+                _savedScale = 0f;
+                _savedPan = Vector2.zero;
+            }
 
             _viewStateKey = stateKey;
 
@@ -1789,7 +1823,17 @@ namespace QuestTree.UI
                 // The reason is already logged by Attach; what is kept here is the one line the toggle
                 // can show - which Attach leaves in LastRefusal, since it cannot use the callback
                 // without asking for a repaint this build does not need.
-                if (solid == null) NoteMeshRefused(meshPath, Map3DView.LastRefusal);
+                //
+                // Two kinds of reason, kept in two places. One about the FILE is held against the file
+                // until a capture or a profile change clears it. One about the SCENE - no spare layer to
+                // draw on - is not: the file is fine, the next scene may have room, and latching it would
+                // have kept the map flat until the player changed character. It lives only as long as
+                // this viewport, so the next build tries again.
+                if (solid == null)
+                {
+                    if (Map3DView.LastRefusalIsScene) _sceneRefusal = Map3DView.LastRefusal;
+                    else NoteMeshRefused(meshPath, Map3DView.LastRefusal);
+                }
             }
 
             if (solid != null)
@@ -2316,12 +2360,18 @@ namespace QuestTree.UI
         /// names overlap - see LabelCull.OnViewChanged for why a 3D one is different.</summary>
         private const float LabelReCullRatio = 1.25f;
 
-        /// <summary>How far a label has to move on screen before the overlap decision is taken again, in
-        /// canvas units. Four, which is under half the gap between a name's plate and its dot: below that
-        /// no pair of plates can cross from clear to overlapping. The rule exists for 3D, where an orbit
-        /// moves every label without moving the scale, and it is a distance rather than a frame count so
-        /// that a slow drag re-culls as often as a fast one covering the same ground.</summary>
-        private const float LabelMoveTolerance = 4f;
+        /// <summary>Whether a rectangle overlaps any of a list. A loop and not LINQ's Any: both overlap
+        /// deciders run on every 3D drag event, and a lambda capturing the rectangle is an allocation per
+        /// call.</summary>
+        /// <param name="claimed">The rectangles already placed.</param>
+        /// <param name="footprint">The one being tried.</param>
+        private static bool Overlaps(List<Rect> claimed, Rect footprint)
+        {
+            for (var i = 0; i < claimed.Count; i++)
+                if (claimed[i].Overlaps(footprint)) return true;
+
+            return false;
+        }
 
         /// <summary>The cull belonging to the viewport on screen, or null when it has no plated
         /// names. Static because the zoom callback and the next build both have to reach it; dropped
@@ -2451,9 +2501,15 @@ namespace QuestTree.UI
             /// <summary>The zoom the current visibility was decided at, or 0 before the first pass.</summary>
             private float _culledAt;
 
-            /// <summary>Where <see cref="Reference"/> projected when the current visibility was decided.
-            /// The pan half of the "has the view moved" test - see <see cref="OnViewChanged"/>.</summary>
-            private Vector2 _culledFrom;
+            /// <summary>The host's <see cref="IOverlayHost.ViewVersion"/> when the current visibility was
+            /// decided. The pan-and-orbit half of the "has the view moved" test - see
+            /// <see cref="OnViewChanged"/>.</summary>
+            private int _culledVersion;
+
+            /// <summary>Decide's output and scratch, reused across passes so a pass allocates nothing: in
+            /// 3D this runs on every drag event.</summary>
+            private bool[] _visible = new bool[0];
+            private readonly List<Rect> _taken = new();
 
             /// <summary>The view under the labels, for projecting them. Held rather than passed because
             /// this object outlives one build only through MapView._labelCull, which is dropped with the
@@ -2472,20 +2528,19 @@ namespace QuestTree.UI
                 _boxes.Add(new LabelBox(position, size, isZone));
             }
 
-            /// <summary>A map point whose projection stands for the whole view's, for deciding whether
-            /// anything has moved. The first label, because it is a real place on this map and so is
-            /// always somewhere the projection is meaningful.</summary>
-            private Vector2 Reference => _boxes.Count > 0 ? _boxes[0].Position : Vector2.zero;
-
             /// <summary>
             /// Called on every view change, and decides whether the answer can have moved.
             ///
             /// Two tests, not one. The zoom, as before: below a quarter either way nothing can have
-            /// changed enough to matter. And, since 1.19.0, whether the PROJECTION has moved - because in
-            /// 3D an orbit or a pan changes where every label lands on screen while the scale, which is
-            /// the distance to the focus point, does not move at all. Without the second test a turned 3D
-            /// map kept the visibility decided for the angle before it, and names that had come apart
-            /// stayed hidden.
+            /// changed enough to matter. And whether the view has moved in a way the scale does not show
+            /// - the host's <see cref="IOverlayHost.ViewVersion"/>. In 3D an orbit or a pan changes where
+            /// every label lands while the scale (the distance to the focus) does not move; without the
+            /// second test a turned 3D map kept the visibility decided for the angle before it.
+            ///
+            /// A version and not a measured movement, deliberately. Measuring meant projecting one
+            /// reference label, and a label behind the camera has no position at all - so orbiting while
+            /// the reference was behind never registered as a move. In 2D the version is a constant, so
+            /// this test never fires there and the flat cull keeps its quarter-zoom hysteresis exactly.
             /// </summary>
             /// <param name="scale">The view's new scale, in screen pixels per metre.</param>
             internal void OnViewChanged(float scale)
@@ -2496,9 +2551,7 @@ namespace QuestTree.UI
                                scale < _culledAt * LabelReCullRatio &&
                                scale > _culledAt / LabelReCullRatio;
 
-                var moved = _host != null &&
-                            (_host.Project(Reference) - _culledFrom).sqrMagnitude >
-                            LabelMoveTolerance * LabelMoveTolerance;
+                var moved = _host != null && _host.ViewVersion != _culledVersion;
 
                 if (zoomHeld && !moved) return;
 
@@ -2527,9 +2580,11 @@ namespace QuestTree.UI
                 for (var i = 0; i < _boxes.Count; i++)
                     _projected.Add(_host != null ? _host.Project(_boxes[i].Position) : _boxes[i].Position * scale);
 
-                _culledFrom = _host != null ? _host.Project(Reference) : Vector2.zero;
+                _culledVersion = _host != null ? _host.ViewVersion : 0;
 
-                var visible = Decide(_boxes, scale, _projected);
+                if (_visible.Length < _boxes.Count) _visible = new bool[_boxes.Count];
+
+                var visible = Decide(_boxes, scale, _projected, _visible, _taken);
 
                 for (var i = 0; i < _rects.Count; i++)
                 {
@@ -2561,15 +2616,28 @@ namespace QuestTree.UI
             /// <param name="projected">Where each box is on screen, in step with
             /// <paramref name="boxes"/>: <c>position * scale</c> from a flat view, the perspective
             /// projection from a 3D one. Shorter than <paramref name="boxes"/> is treated as the rest
-            /// being off screen, which is what a caller that could not project them means.</param>
-            /// <returns>One flag per box, in the same order.</returns>
-            internal static bool[] Decide(IList<LabelBox> boxes, float scale, IList<Vector2> projected)
+            /// being off screen, which is what a caller that could not project them means. A point that
+            /// is not finite is a point the view cannot place - behind the 3D camera - and is neither
+            /// drawn nor allowed to claim space, so the labels behind the camera do not all pile onto
+            /// one spot and hide each other.</param>
+            /// <param name="visible">An output buffer at least as long as <paramref name="boxes"/>, or null
+            /// for a fresh one. Its first boxes.Count flags are overwritten.</param>
+            /// <param name="taken">A scratch list, cleared here, or null for a fresh one.</param>
+            /// <returns>One flag per box, in the same order - <paramref name="visible"/> when one was
+            /// given.</returns>
+            internal static bool[] Decide(
+                IList<LabelBox> boxes, float scale, IList<Vector2> projected,
+                bool[] visible = null, List<Rect> taken = null)
             {
-                var visible = new bool[boxes.Count];
-                var taken = new List<Rect>();
+                if (visible == null || visible.Length < boxes.Count) visible = new bool[boxes.Count];
+
+                taken ??= new List<Rect>();
+                taken.Clear();
 
                 for (var i = 0; i < boxes.Count; i++)
                 {
+                    visible[i] = false;
+
                     var box = boxes[i];
 
                     // A zone name below the threshold is not drawn and does not claim any space
@@ -2579,12 +2647,16 @@ namespace QuestTree.UI
 
                     if (projected == null || i >= projected.Count) continue;
 
+                    var at = projected[i];
+                    if (float.IsNaN(at.x) || float.IsNaN(at.y) ||
+                        float.IsInfinity(at.x) || float.IsInfinity(at.y)) continue;
+
                     // The plate's own rectangle on screen: where the place projects, plus the constant
                     // offset the plate sits at inside its container. Two pixels of gutter, so two
                     // plates cannot end up edge to edge.
                     var centre = new Vector2(
-                        projected[i].x,
-                        projected[i].y + CompactLabelPlateGap + box.Size.y * 0.5f);
+                        at.x,
+                        at.y + CompactLabelPlateGap + box.Size.y * 0.5f);
 
                     var footprint = new Rect(
                         centre.x - box.Size.x * 0.5f - 1f,
@@ -2593,8 +2665,9 @@ namespace QuestTree.UI
                         box.Size.y + 2f);
 
                     // Skipped rather than nudged: moving a name off the place it names is worse than
-                    // not drawing it, because the reader cannot tell it has been moved.
-                    if (taken.Any(r => r.Overlaps(footprint))) continue;
+                    // not drawing it, because the reader cannot tell it has been moved. A loop rather
+                    // than Any: the lambda closes over footprint and would be an allocation per box.
+                    if (Overlaps(taken, footprint)) continue;
 
                     taken.Add(footprint);
                     visible[i] = true;
@@ -3077,30 +3150,27 @@ namespace QuestTree.UI
 
             selectedRect?.SetAsLastSibling();
 
-            PlaceRestLabels(restLabels, host);
+            // One scratch list for this viewport's whole life, not one per re-placement.
+            var claimed = new List<Rect>();
 
-            // Re-placed whenever the view has moved enough to change the answer: the pins and names keep
-            // their screen size, so the footprint each name claims grows and shrinks against the distance
-            // between them. The same two tests LabelCull.OnViewChanged makes, and for the same reason -
-            // in 3D an orbit moves every name on screen without the scale moving at all.
-            var reference = restLabels.Count > 0 ? restLabels[0].Position : Vector2.zero;
+            PlaceRestLabels(restLabels, host, claimed);
+
+            // Re-placed whenever the view has moved in a way that can change the answer: the pins and
+            // names keep their screen size, so the footprint each name claims grows and shrinks against
+            // the distance between them. The zoom test is the one this always made; the version is the
+            // 3D half (an orbit moves every name without the scale moving) and is a constant in 2D, so
+            // there this is exactly the old test.
             var placedAt = host.Scale;
-            var placedFrom = host.Project(reference);
+            var placedVersion = host.ViewVersion;
 
             host.OnViewChanged += (scale, _) =>
             {
-                var at = host.Project(reference);
-
-                if (Mathf.Approximately(scale, placedAt) &&
-                    (at - placedFrom).sqrMagnitude <= LabelMoveTolerance * LabelMoveTolerance)
-                {
-                    return;
-                }
+                if (Mathf.Approximately(scale, placedAt) && host.ViewVersion == placedVersion) return;
 
                 placedAt = scale;
-                placedFrom = at;
+                placedVersion = host.ViewVersion;
 
-                PlaceRestLabels(restLabels, host);
+                PlaceRestLabels(restLabels, host, claimed);
             };
 
             // The loop above makes one pin per entry and skips none, so this is the count drawn.
@@ -3122,34 +3192,60 @@ namespace QuestTree.UI
         /// Decides which at-rest names are drawn: the selected quest's always, then each of the rest
         /// unless it would land on a name already placed.
         ///
-        /// In SCREEN units, through the host's projection, for the same reason LabelCull.Decide is: the
-        /// names are a constant size on screen while the distance between their pins is not, and in 3D
-        /// that distance is a perspective projection rather than a multiplication. The flat case is
-        /// unchanged arithmetic - the old version divided the screen span by the scale to compare in map
-        /// units, this multiplies the positions by it to compare in screen units, and a common factor on
-        /// both sides of an overlap test changes nothing.
+        /// Two arithmetics, and the split is on purpose. On a FLAT map it is the pre-1.19 code to the
+        /// float: map units, the name's screen span divided by the zoom. Comparing in screen units
+        /// instead is the same test mathematically, but not to the last bit - an exact tie can round
+        /// the other way - and a flat map's labels must decide exactly as they always did. In 3D there
+        /// is no single zoom to divide by (perspective), so the positions are projected to the screen
+        /// and the span used as it is.
+        ///
+        /// Selected first, then the rest, each in list order - which is what the OrderBy this replaced
+        /// did (a stable sort on one flag), without the allocation of a sort on every drag event.
         /// </summary>
         /// <param name="labels">The names that may be shown at rest.</param>
         /// <param name="host">The view they are drawn in.</param>
-        private static void PlaceRestLabels(List<RestLabel> labels, IOverlayHost host)
+        /// <param name="claimed">A scratch list, cleared here.</param>
+        private static void PlaceRestLabels(List<RestLabel> labels, IOverlayHost host, List<Rect> claimed)
         {
-            var span = new Vector2(LabelWidth, LabelHeight);
-            var claimed = new List<Rect>();
+            var projected = host is Map3DView;
+            var scale = host != null ? host.Scale : 1f;
 
-            foreach (var label in labels.OrderBy(l => l.Selected ? 0 : 1))
+            var span = projected
+                ? new Vector2(LabelWidth, LabelHeight)
+                : new Vector2(LabelWidth, LabelHeight) / Mathf.Max(0.0001f, scale);
+
+            claimed.Clear();
+
+            for (var pass = 0; pass < 2; pass++)
             {
-                var at = host != null ? host.Project(label.Position) : label.Position;
+                for (var i = 0; i < labels.Count; i++)
+                {
+                    var label = labels[i];
+                    if (label.Selected != (pass == 0)) continue;
 
-                var footprint = new Rect(
-                    at.x + span.x * 0.1f, at.y - span.y * 0.5f, span.x, span.y);
+                    var at = projected ? host.Project(label.Position) : label.Position;
 
-                var visible = label.Selected || !claimed.Any(other => other.Overlaps(footprint));
-                if (visible) claimed.Add(footprint);
+                    // Not placeable - behind the 3D camera. Hidden, and claims nothing; the next orbit
+                    // that brings it round re-decides it.
+                    var placeable = !float.IsNaN(at.x) && !float.IsNaN(at.y) &&
+                                    !float.IsInfinity(at.x) && !float.IsInfinity(at.y);
 
-                // A name under the cursor stays whatever the collision says; a zoom must not
-                // take it away until the pointer leaves.
-                label.Visible = visible;
-                label.Show(visible || label.Hovered);
+                    var visible = label.Selected;
+
+                    if (placeable)
+                    {
+                        var footprint = new Rect(
+                            at.x + span.x * 0.1f, at.y - span.y * 0.5f, span.x, span.y);
+
+                        visible = label.Selected || !Overlaps(claimed, footprint);
+                        if (visible) claimed.Add(footprint);
+                    }
+
+                    // A name under the cursor stays whatever the collision says; a zoom must not
+                    // take it away until the pointer leaves.
+                    label.Visible = visible;
+                    label.Show(visible || label.Hovered);
+                }
             }
         }
 

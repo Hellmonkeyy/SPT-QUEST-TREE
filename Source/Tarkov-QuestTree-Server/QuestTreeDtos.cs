@@ -1365,6 +1365,14 @@ namespace QuestTreeServer
     {
         [JsonPropertyName("accepted")] public bool Accepted { get; set; }
 
+        /// <summary>Whether the host now SERVES a set for this capture (or a newer one), with or without
+        /// this mesh - i.e. whether anything of the capture is still being held waiting. The field that
+        /// tells the client's three sentences apart: accepted and served (the 3D map is shared), refused
+        /// but served (the mesh could never be used, so the pictures went up flat - or the host already
+        /// had this capture), and refused and NOT served (the floors wait on the host and expire).
+        /// False from an older host that never sets it, which is the safe reading.</summary>
+        [JsonPropertyName("served")] public bool Served { get; set; }
+
         /// <summary>Why not, or what is still missing. Printed by the client as given.</summary>
         [JsonPropertyName("reason")] public string Reason { get; set; } = "";
     }

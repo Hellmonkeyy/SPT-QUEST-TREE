@@ -647,6 +647,11 @@ namespace QuestTree.UI
             // sit in the raid's memory until the next menu built a different one. See
             // MapView.DropMapMemory.
             MapView.DropMapMemory();
+
+            // Said out loud because WHEN this runs - on the way into a raid, or on the way back out - is
+            // asserted two different ways in this file's comments, and the log is what settles it: the
+            // line lands either before the raid's first lines or after its last.
+            Plugin.LogSource?.LogInfo("QuestTree: panel destroyed - 3D map caches dropped.");
         }
 
         private void Unsubscribe()

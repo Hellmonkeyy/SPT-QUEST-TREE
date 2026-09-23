@@ -296,9 +296,9 @@ no relief captured yet, and its tooltip says why. A map from DynamicMaps, and a 
 harvested rectangle, has no relief and always draws flat. Two settings do not apply in 3D and are
 ignored there: **Mirror map artwork** and **Extra map artwork rotation** - the picture is laid onto
 the ground by the coordinates it was measured over, so there is nothing left for them to correct. A
-relief file is about 0.3 MB for a map of Customs' size and is read in the background; if one cannot
-be read, or does not describe the same rectangle as the picture, the map draws flat and the log
-says why.
+relief file is about 0.3 MB of ground plus one to three of buildings for a map of Customs' size,
+and is read in the background; if one cannot be read, or does not describe the same rectangle as the
+picture, the map draws flat and the log says why.
 
 **Sharing is through the host.** A server started with `tools/server-host.cmd` - which sets
 `QUESTTREE_ACCEPT_MAPS=1` and nothing else - accepts uploaded pictures, and **Share captured maps**
@@ -313,11 +313,16 @@ player needs none of this - your own captures are read straight out of the folde
 limits: one floor a post, up to 2.5 MB a floor and 8 floors a map, one mesh a capture up to 12 MB,
 32 MB a map and 300 MB in all on the host, and at most 120 MB downloaded per session. A set whose
 capture built a mesh is not served until both the floors and the mesh have arrived, so a borrowed
-map never names geometry the host does not hold; the mesh is checked by its sha256 at every hop,
-and one that does not match is dropped rather than drawn - the map then draws flat, which is what
-every map did before this release. Two players who capture the same map in the same second share a
-slot on the host, and the second one is refused rather than merged - its own next capture goes up
-normally. The credit line under a captured map is ours and names the build and the raid rather than
+map never names geometry the host does not hold. A mesh problem costs the mesh and never the map:
+a mesh the host can never use - unreadable, not the same rectangle or the same floors as its
+pictures, or too big for the host's space - is refused once, the pictures are served without it,
+and the map draws flat everywhere, which is what every map did before this release; only a mesh the
+host could not *write* leaves the floors waiting, and those are dropped at the host's first start a
+day later. The mesh is checked by its sha256 at every hop, and one that arrives on your machine not
+matching is left out while the pictures are kept; one that does not arrive at all - a timeout, a
+dropped connection - leaves that map as it was for the session and is fetched again, whole, on the
+next start. Two players who capture the same map in the same second share a slot on the host, and
+the second one is refused rather than merged - its own next capture goes up normally. The credit line under a captured map is ours and names the build and the raid rather than
 a licence: `Map: captured in-game with Quest Tracker 1.19.0, 3 captures since 2026-09-19 (10:49)`.
 
 ## The tree

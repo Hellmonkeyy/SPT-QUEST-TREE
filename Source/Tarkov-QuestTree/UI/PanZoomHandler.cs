@@ -40,9 +40,23 @@ namespace QuestTree.UI
         ///
         /// The two hosts answer it in the only way each can: the 2D one scales (a pan moves everything
         /// together and so cannot change an overlap, which is why it is deliberately left out), the 3D one
-        /// projects through its camera, where an orbit changes every answer.</summary>
+        /// projects through its camera, where an orbit changes every answer.
+        ///
+        /// May be NOT FINITE for a point the view cannot place - one behind the 3D camera. Callers treat
+        /// such a point as not on screen: hidden, and claiming no space.</summary>
         /// <param name="mapXZ">The point, in map coordinates.</param>
         Vector2 Project(Vector2 mapXZ);
+
+        /// <summary>
+        /// A number that changes whenever the view moves in a way the SCALE does not show - what a
+        /// subscriber compares to decide whether an overlap decision taken earlier still holds.
+        ///
+        /// In 3D that is every orbit and every pan: the scale is the distance to the focus point and
+        /// does not move, while every label on screen does. In 2D it is nothing at all - a pan moves
+        /// every overlay together, and a zoom is already in the scale - so the 2D host answers a
+        /// constant, and every decision it makes is exactly the one it made before this existed.
+        /// </summary>
+        int ViewVersion { get; }
 
         /// <summary>Raised whenever the view moves, with the scale in SCREEN PIXELS PER MAP METRE and
         /// the content's pan (which means nothing in 3D and is passed as zero there - no subscriber
@@ -100,6 +114,11 @@ namespace QuestTree.UI
         /// whatever the view is panned to.</summary>
         /// <param name="mapXZ">The point, in map coordinates.</param>
         public Vector2 Project(Vector2 mapXZ) => mapXZ * Scale;
+
+        /// <summary>Always zero: nothing a flat view does changes an overlap without changing the scale.
+        /// See <see cref="IOverlayHost.ViewVersion"/> - this constant is what keeps the 2D cull's
+        /// quarter-zoom hysteresis exactly as it was.</summary>
+        public int ViewVersion => 0;
 
         public void Init(RectTransform content, float minZoom, float maxZoom, float zoomSpeed)
         {

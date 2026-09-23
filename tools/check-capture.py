@@ -27,8 +27,9 @@ What it checks, per capture folder <key>/:
      meta.mesh.version, its extent equals the meta's to the bit, its band levels are the meta's floor
      levels, every band is ceil(span / cellMetres) cells on each axis, the cell and triangle totals
      are meta.mesh.cells and meta.mesh.triangles, and every triangle index is inside its own
-     building's vertex count. A <key>-mesh.bin on disk that the meta does not name is a WARN - it is
-     what an older capture leaves when a later one builds no mesh, and nothing reads it.
+     building's vertex count. The file's y range - which every height in it is quantised over - is a
+     WARN over 500 m and an ERROR over 2000 m. A <key>-mesh.bin on disk that the meta does not name is
+     a WARN - it is what an older capture leaves when a later one builds no mesh, and nothing reads it.
 
 What it does NOT check, by design:
   - the pixels. Whether the PNG is the right map, drawn the right way up, or blank, is exactly what
@@ -91,6 +92,14 @@ MESH_MAX_TRIANGLES = 2_000_000
 # reason MapMeshFile checks every count before it allocates.
 MESH_MAX_INFLATED_BYTES = 192 * 1024 * 1024
 MESH_SUFFIX = "-mesh.bin"   # MapMeshFile.FileNameFor
+# The file's y range, which every height and vertex in it is quantised over. MapMeshBuilder takes it
+# from the ground's ray hits and lets buildings widen it by at most 100 m each way (YRangeMarginMetres),
+# so a real map spans a few hundred metres at most - Customs is -22..74 with the 5 m slack. A span of
+# 3.4e38 is what EFT's rain volumes did to the first build: every height the same code, a flat sheet
+# that passes every other check here. Over the warning figure is a map worth looking at; over the error
+# figure the heights are sixteen-bit steps of more than three centimetres and something is wrong.
+MESH_WARN_Y_SPAN = 500.0
+MESH_MAX_Y_SPAN = 2000.0
 
 
 class MeshError(Exception):
@@ -590,6 +599,16 @@ def check_mesh(meta, folder, key, extent, levels, errors, warnings):
     except MeshError as exc:
         errors.append(f"{key}: {rel} {exc}")
         return "mesh BROKEN"
+
+    y_span = mesh["yMax"] - mesh["yMin"]
+    if y_span > MESH_MAX_Y_SPAN:
+        errors.append(f"{key}: {rel}'s y range is {mesh['yMin']:.4g}..{mesh['yMax']:.4g} m ({y_span:.4g} m) - "
+                      f"over {MESH_MAX_Y_SPAN:g} m every height is quantised into steps too coarse to "
+                      f"draw, which is what a renderer with bounds of 3.4e38 made of the whole map")
+    elif y_span > MESH_WARN_Y_SPAN:
+        warnings.append(f"{key}: {rel}'s y range is {mesh['yMin']:.4g}..{mesh['yMax']:.4g} m "
+                        f"({y_span:.4g} m), over {MESH_WARN_Y_SPAN:g} m - no EFT map is that tall; "
+                        f"check the building log line for an oversized renderer")
 
     if mesh["version"] != claimed_version:
         errors.append(f"{key}: {rel} is version {mesh['version']} but mesh.version says "

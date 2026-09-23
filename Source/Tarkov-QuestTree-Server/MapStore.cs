@@ -121,6 +121,16 @@ namespace QuestTreeServer
 
         private const long MaxMeshVerticesTotal = 4_000_000L;
 
+        /// <summary>MapMeshFile.MaxVerticesPerBuilding - the per-building cap the client's reader
+        /// enforces as well as the total.</summary>
+        private const int MaxMeshVerticesPerBuilding = 2_000_000;
+
+        /// <summary>How far the mesh header's extent may sit from the meta's before the two are not the
+        /// same rectangle. The same 1e-6 m tools/check-maps-pack.py holds a shipped set to: both are the
+        /// capture's own doubles, written by one process, so any real difference is a different
+        /// capture.</summary>
+        private const double MeshExtentTolerance = 1e-6;
+
         private const long MaxMeshTriangles = 2_000_000L;
 
         /// <summary>The same ceiling ZoneStore puts on a map's floors, for the same reason: no Tarkov
@@ -217,6 +227,20 @@ namespace QuestTreeServer
         private readonly Dictionary<string, StoredSet> _sets = new(StringComparer.OrdinalIgnoreCase);
 
         private readonly HashSet<string> _rejectionsLogged = new(StringComparer.Ordinal);
+
+        /// <summary>
+        /// Staging folders whose set is being completed RIGHT NOW - prepared outside the lock (see
+        /// <see cref="CompleteSet"/>) and not yet committed. Guarded by <see cref="_lock"/>.
+        ///
+        /// Why it exists: the preparation reads the staged files with no lock held, and Windows will not
+        /// replace a file while any handle on it is open - with or without delete sharing, which was
+        /// tried and measured. So a floor of the same capture re-posted during that read, whose write
+        /// moves a new file over the old one, failed with "Access to the path is denied" and its client
+        /// was told the host could not store the picture: 3 to 4 rounds in 100 of the harness's
+        /// two-thread case. Nothing writes into a folder listed here; a post that would is answered
+        /// without writing, and the completion in flight is what stores the set.
+        /// </summary>
+        private readonly HashSet<string> _completing = new(StringComparer.OrdinalIgnoreCase);
 
         private readonly HashSet<string> _declinesLogged = new(StringComparer.OrdinalIgnoreCase);
 
@@ -371,6 +395,12 @@ namespace QuestTreeServer
             if (captured == DateTime.MinValue)
                 return Reject(key, "capturedAt is not a timestamp, so nothing could rank this set against the one held");
 
+            // Set under the lock, used after it: the folder this capture is staged in, and - only once
+            // every piece is here - the meta to promote. The promotion itself reads and hashes up to
+            // 32 MB, so it is PREPARED outside the lock and only committed under it (see CompleteSet).
+            string staging;
+            MapCaptureMetaDto ready;
+
             lock (_lock)
             {
                 if (!_loaded) Load();
@@ -383,7 +413,32 @@ namespace QuestTreeServer
                 if (_sets.TryGetValue(key, out var held) && ParseStamp(held.Meta.CapturedAt) >= captured)
                     return Reject(key, "older than the set on the host");
 
-                var staging = StagingFolder(key, meta.CapturedAt);
+                // CLIPPED, exactly as the mesh route clips its own capturedAt before hashing it: the two
+                // routes must name the same folder for the same capture, and a timestamp with a line
+                // break in it would otherwise hash one way here and another way there.
+                staging = StagingFolder(key, Clip(meta.CapturedAt, MaxFreeTextLength));
+
+                // Another post of this capture is completing it right now, outside the lock. Writing here
+                // would race its reads - see _completing - and nothing this post carries is needed: the
+                // set is being stored from the files already staged. "stored" rather than "complete",
+                // because the completion in flight has not succeeded yet.
+                if (_completing.Contains(staging))
+                    return new MapUploadResponse
+                    {
+                        Outcome = "stored",
+                        Reason = "this capture is being completed right now",
+                        FloorsHeld = FilesByLevel(staging).Count
+                    };
+
+                // A capture whose mesh this host has already REFUSED for good (see FlattenStaged) is
+                // served flat, so a floor of it still naming that mesh is brought into line with the
+                // staged meta here rather than refused as a clash below. Only for that exact sha, which
+                // only the genuine file could have produced.
+                var refused = RefusedMeshSha(staging);
+
+                if (meta.Mesh != null && refused != null &&
+                    string.Equals(meta.Mesh.Sha256, refused, StringComparison.OrdinalIgnoreCase))
+                    meta.Mesh = null;
 
                 // TWO CLIENTS, ONE CAPTURE INSTANT. The staging folder is keyed on the map and the
                 // capturedAt, so two clients that captured the same map in the same second share it - and
@@ -413,9 +468,16 @@ namespace QuestTreeServer
                 // which is what stops a set being walked past the budget one floor at a time.
                 var mine = staged.TryGetValue(request.Level, out var already) ? SizeOf(already) : 0;
 
-                // The mesh counts against the map's budget as soon as it is staged, exactly as a floor
-                // does: it is on the disk and it is part of this set.
-                var setBytes = staged.Sum(entry => SizeOf(entry.Value)) + SizeOf(MeshPath(staging)) - mine;
+                // The mesh counts against the map's budget from the FIRST floor: staged, at its size on
+                // disk; not yet staged, at the size the meta declares for it (bounded to MaxMeshBytes by
+                // DropUnusableMesh). Counting only what is on disk meant a capture that could never fit
+                // was refused on the mesh, after every floor had been staged - and a refusal there is one
+                // the floors then wait out for a day. Refused here, nothing is staged at all.
+                var meshBytes = System.IO.File.Exists(MeshPath(staging))
+                    ? SizeOf(MeshPath(staging))
+                    : Math.Max(meta.Mesh?.Bytes ?? 0L, 0L);
+
+                var setBytes = staged.Sum(entry => SizeOf(entry.Value)) + meshBytes - mine;
 
                 if (setBytes + bytes.Length > MaxBytesPerMap)
                     return Reject(key,
@@ -425,11 +487,18 @@ namespace QuestTreeServer
                 // The whole store, counting what is staged as well as what is served: during an upload
                 // the disk really does hold both - the set being replaced is still being served - and a
                 // peer that uploads and abandons sets would otherwise be bounded by nothing at all.
+                // The declared-but-not-staged mesh again, for the same reason: it is coming, and the
+                // store has to have room for it when it does.
+                var pendingMesh = System.IO.File.Exists(MeshPath(staging)) ? 0L : Math.Max(meta.Mesh?.Bytes ?? 0L, 0L);
                 var total = _sets.Values.Sum(s => s.Bytes) + IncomingBytes() - mine;
 
-                if (total + bytes.Length > MaxBytesTotal)
-                    return Reject(key,
-                        $"the host already holds {Mb(total)} MB of map pictures, at the {Mb(MaxBytesTotal)} MB limit");
+                // Two sentences, because "holds" has to stay true: what is on the disk, and - only when
+                // it is what tipped the balance - the mesh this capture says is still to come.
+                if (total + pendingMesh + bytes.Length > MaxBytesTotal)
+                    return Reject(key, pendingMesh > 0 && total + bytes.Length <= MaxBytesTotal
+                        ? $"the host holds {Mb(total)} MB of map pictures, and this capture's {Mb(pendingMesh)} MB mesh " +
+                          $"would take it past the {Mb(MaxBytesTotal)} MB limit"
+                        : $"the host already holds {Mb(total)} MB of map pictures, at the {Mb(MaxBytesTotal)} MB limit");
 
                 try
                 {
@@ -507,8 +576,13 @@ namespace QuestTreeServer
                     };
                 }
 
-                return Promote(key, meta, staged, staging, Clip(request.ClientVersion ?? "", MaxFreeTextLength));
+                // Claimed under the lock, released by CompleteSet under the lock: from here until the
+                // commit, nothing else writes into this folder.
+                _completing.Add(staging);
+                ready = meta;
             }
+
+            return CompleteSet(key, ready, staging, Clip(request.ClientVersion ?? "", MaxFreeTextLength));
         }
 
         /// <summary>What this host holds, answered from memory: a client asks for this on every Maps
@@ -570,7 +644,7 @@ namespace QuestTreeServer
 
                 try
                 {
-                    // The name was written by Promote or checked by Load, so it is a bare file name
+                    // The name was written by CommitSet or checked by Load, so it is a bare file name
                     // inside this map's folder. Nothing here comes from the request but the level.
                     var bytes = System.IO.File.ReadAllBytes(System.IO.Path.Combine(Folder, key, floor.File));
 
@@ -658,12 +732,15 @@ namespace QuestTreeServer
             // body from the network and must not hold a lock the index route needs on the game's main
             // thread. The gate is re-run under the lock before anything is written, because the staged
             // set can complete or expire while the walk runs.
+            MapCaptureMetaDto? wanted;
+
             lock (_lock)
             {
                 if (!_loaded) Load();
 
-                if (WantedMesh(key, capturedAt, captured, claimed, out var refusal) == null)
-                    return RejectMesh(key, refusal);
+                wanted = WantedMesh(key, capturedAt, captured, claimed, out var refusal, out var older);
+
+                if (wanted == null) return older ? AlreadyServed(key, refusal) : RejectMesh(key, refusal);
             }
 
             var encoded = request.DataBase64 ?? "";
@@ -702,9 +779,30 @@ namespace QuestTreeServer
             if (!string.Equals(actual, claimed, StringComparison.OrdinalIgnoreCase))
                 return RejectMesh(key, "the mesh's bytes do not hash to the sha256 it was sent with");
 
+            // FROM HERE ON, EVERY REFUSAL IS OF THE GENUINE FILE - the bytes hash to the sha the staged
+            // capture named - and that is what makes the next distinction safe to draw. A refusal that
+            // no retry could change (the file is unreadable, does not fit its own pictures, or does not
+            // fit the budget) serves the set FLAT instead of leaving its floors staged for a day: the
+            // rule everywhere else in the transport is that a mesh problem costs the mesh and never the
+            // map. None of these can be triggered by a stranger, because a stranger cannot produce bytes
+            // with that sha - which is also why the corrupt-transfer refusals ABOVE stay plain refusals:
+            // bytes that do not match their sha could be anybody's, and letting them flatten a capture
+            // would hand any peer a way to strip the geometry off somebody else's map.
+            //
+            // A transient failure - the host could not WRITE the file - is the other kind: the floors
+            // keep waiting, as they always have, because nothing about the capture is wrong.
+            string? permanent = null;
+
             // The header, before anything is written: a file whose magic, version or counts are wrong
             // is one no client could draw, and storing it would serve it to every client in the group.
-            if (!MeshHeaderIsUsable(bytes, out var problem)) return RejectMesh(key, problem);
+            if (!MeshHeaderIsUsable(bytes, out var problem, out var facts))
+                permanent = problem;
+            else if (!MeshFitsMeta(facts, wanted, out var misfit))
+                permanent = misfit;
+
+            string staging;
+            MapCaptureMetaDto ready;
+            var flattened = "";
 
             lock (_lock)
             {
@@ -713,68 +811,127 @@ namespace QuestTreeServer
                 // AGAIN, and not as ceremony: the gate above ran outside this lock and the header walk
                 // took milliseconds, during which another client's post could have completed this set or
                 // a boot could have swept it away. This is the check that decides what is written.
-                var staged = WantedMesh(key, capturedAt, captured, actual, out var refusal);
+                var staged = WantedMesh(key, capturedAt, captured, actual, out var refusal, out var older);
 
-                if (staged == null) return RejectMesh(key, refusal);
+                if (staged == null) return older ? AlreadyServed(key, refusal) : RejectMesh(key, refusal);
 
-                var staging = StagingFolder(key, capturedAt);
+                staging = StagingFolder(key, capturedAt);
+
+                // A completion of this capture is in flight. WantedMesh has just shown the capture wants
+                // THIS mesh, so the only way it can be completing is with this mesh already staged - in
+                // which case the set is being stored in 3D and there is nothing to write. The other branch
+                // is kept for honesty rather than expected.
+                if (_completing.Contains(staging))
+                    return MeshIsStaged(staging, actual)
+                        ? new MapMeshUploadResponse { Accepted = true, Served = true }
+                        : new MapMeshUploadResponse
+                        {
+                            Accepted = false,
+                            Reason = "this capture is being completed right now - offer the mesh again"
+                        };
+
                 var floors = FilesByLevel(staging);
                 var existing = SizeOf(MeshPath(staging));
-                var setBytes = floors.Sum(entry => SizeOf(entry.Value));
 
-                if (setBytes + bytes.Length > MaxBytesPerMap)
-                    return RejectMesh(key,
-                        $"this capture would be {Mb(setBytes + bytes.Length)} MB, past the " +
-                        $"{Mb(MaxBytesPerMap)} MB one map may hold");
-
-                var total = _sets.Values.Sum(s => s.Bytes) + IncomingBytes() - existing;
-
-                if (total + bytes.Length > MaxBytesTotal)
-                    return RejectMesh(key,
-                        $"the host already holds {Mb(total)} MB of map pictures, at the {Mb(MaxBytesTotal)} MB limit");
-
-                try
+                if (permanent == null)
                 {
-                    // The sidecar goes AFTER the mesh, and any older one goes first: between the two
-                    // writes there is no sidecar, so MeshIsStaged hashes the file instead of trusting a
-                    // sha that belongs to bytes that are no longer there. A crash in that gap costs one
-                    // hash, never a wrong answer.
-                    try { System.IO.File.Delete(MeshShaPath(staging)); } catch { /* there may be none */ }
+                    var setBytes = floors.Sum(entry => SizeOf(entry.Value));
 
-                    WriteAtomic(MeshPath(staging), bytes);
-                    WriteAtomic(MeshShaPath(staging), Encoding.UTF8.GetBytes(actual));
-                }
-                catch (Exception ex)
-                {
-                    return RejectMesh(key, $"the host could not store the mesh ({ex.Message})");
+                    if (setBytes + bytes.Length > MaxBytesPerMap)
+                        permanent = $"this capture would be {Mb(setBytes + bytes.Length)} MB with its mesh, past the " +
+                                    $"{Mb(MaxBytesPerMap)} MB one map may hold";
                 }
 
-                // ONE line per accepted mesh, at Information like the stored set's: a host wondering why
-                // a map draws flat wants to see this, and it is one line per capture rather than per
-                // floor.
-                _logger.Info(
-                    $"Quest Tracker: map mesh for '{key}' stored - {Mb(bytes.Length)} MB, sha {Short(actual)}, " +
-                    $"captured {capturedAt} by client " +
-                    $"{(string.IsNullOrEmpty(request.ClientVersion) ? "unknown" : Clip(request.ClientVersion, MaxFreeTextLength))}.");
+                if (permanent == null)
+                {
+                    var total = _sets.Values.Sum(s => s.Bytes) + IncomingBytes() - existing;
 
-                var missing = staged.Floors.Count(f => !floors.ContainsKey(f.Level));
+                    if (total + bytes.Length > MaxBytesTotal)
+                        permanent = $"the host already holds {Mb(total)} MB of map pictures, at the " +
+                                    $"{Mb(MaxBytesTotal)} MB limit";
+                }
 
-                if (missing > 0)
-                    return new MapMeshUploadResponse
+                if (permanent != null)
+                {
+                    // Served flat - or, if a floor is still to come, staged to be served flat when it
+                    // does. Either way the floors stop waiting for a mesh that is never coming.
+                    if (!FlattenStaged(key, staging, staged, actual, permanent))
+                        return RejectMesh(key, permanent);
+
+                    var stillMissing = staged.Floors.Count(f => !floors.ContainsKey(f.Level));
+
+                    if (stillMissing > 0)
+                        return new MapMeshUploadResponse
+                        {
+                            Accepted = false,
+                            Reason = $"{permanent} - the pictures will be served without it once the other " +
+                                     $"{stillMissing} floor(s) arrive"
+                        };
+
+                    flattened = permanent;
+                    _completing.Add(staging);
+                    ready = staged;
+                }
+                else
+                {
+                    try
                     {
-                        Accepted = true,
-                        Reason = $"waiting for {missing} more floor(s)"
-                    };
+                        // The sidecar goes AFTER the mesh, and any older one goes first: between the two
+                        // writes there is no sidecar, so MeshIsStaged hashes the file instead of trusting
+                        // a sha that belongs to bytes that are no longer there. A crash in that gap costs
+                        // one hash, never a wrong answer.
+                        try { System.IO.File.Delete(MeshShaPath(staging)); } catch { /* there may be none */ }
 
-                // The mesh was the last piece. Promoted from the STAGED meta rather than from anything
-                // in this request - this route is never told what a set looks like.
-                var promoted = Promote(
-                    key, staged, floors, staging, Clip(request.ClientVersion ?? "", MaxFreeTextLength));
+                        WriteAtomic(MeshPath(staging), bytes);
+                        WriteAtomic(MeshShaPath(staging), Encoding.UTF8.GetBytes(actual));
+                    }
+                    catch (Exception ex)
+                    {
+                        // TRANSIENT: nothing is wrong with the mesh, this host could not write it. The
+                        // floors keep waiting, and the refusal says why.
+                        return RejectMesh(key, $"the host could not store the mesh ({ex.Message})");
+                    }
 
-                return promoted.Outcome == "complete"
-                    ? new MapMeshUploadResponse { Accepted = true }
-                    : new MapMeshUploadResponse { Accepted = false, Reason = promoted.Reason };
+                    // ONE line per accepted mesh, at Information like the stored set's: a host wondering
+                    // why a map draws flat wants to see this, and it is one line per capture rather than
+                    // per floor.
+                    _logger.Info(
+                        $"Quest Tracker: map mesh for '{key}' stored - {Mb(bytes.Length)} MB, sha {Short(actual)}, " +
+                        $"captured {capturedAt} by client " +
+                        $"{(string.IsNullOrEmpty(request.ClientVersion) ? "unknown" : Clip(request.ClientVersion, MaxFreeTextLength))}.");
+
+                    var missing = staged.Floors.Count(f => !floors.ContainsKey(f.Level));
+
+                    if (missing > 0)
+                        return new MapMeshUploadResponse
+                        {
+                            Accepted = true,
+                            Reason = $"waiting for {missing} more floor(s)"
+                        };
+
+                    // The mesh was the last piece. Promoted from the STAGED meta rather than from
+                    // anything in this request - this route is never told what a set looks like.
+                    _completing.Add(staging);
+                    ready = staged;
+                }
             }
+
+            var promoted = CompleteSet(key, ready, staging, Clip(request.ClientVersion ?? "", MaxFreeTextLength));
+
+            if (promoted.Outcome != "complete")
+                return new MapMeshUploadResponse { Accepted = false, Reason = promoted.Reason };
+
+            // Complete. Flattened, the client is told the pictures are served WITHOUT its mesh - which
+            // is a different sentence from "refused": nothing of the capture is being held, so the
+            // player has nothing to wait for and nothing to redo but the geometry.
+            return flattened.Length == 0
+                ? new MapMeshUploadResponse { Accepted = true, Served = true }
+                : new MapMeshUploadResponse
+                {
+                    Accepted = false,
+                    Served = true,
+                    Reason = $"{flattened} - the pictures are served without it"
+                };
         }
 
         /// <summary>One map's mesh file, read from disk on every request and never cached, for
@@ -801,7 +958,7 @@ namespace QuestTreeServer
 
                 var mesh = set.Meta.Mesh;
 
-                // The name was written by Promote or checked by Load, so it is a bare file name inside
+                // The name was written by CommitSet or checked by Load, so it is a bare file name inside
                 // this map's folder. Nothing here comes from the request but the map.
                 if (string.IsNullOrEmpty(mesh.File) || !StoredMeshFileName.IsMatch(mesh.File)) return dto;
 
@@ -835,101 +992,301 @@ namespace QuestTreeServer
         // Completing a set
         // ---------------------------------------------------------------------------------------
 
-        /// <summary>Moves a complete staged set into place, and makes it the one this host serves.
+        /// <summary>
+        /// Completes a set whose every piece is staged: PREPARED outside the lock, COMMITTED under it.
         ///
-        /// Order matters: pictures first, each one written beside its name and moved over it, then the
-        /// MESH if the set has one, then the files the new set does not name, and the meta LAST. The
-        /// meta is what names the pictures and the mesh, so this order means a failure part-way through
-        /// never leaves a meta pointing at a file that was never written - the case that would serve a
-        /// client a map with a hole in it and a stamp claiming it was whole. The mesh goes before the
-        /// sweep for the same reason a picture does: the sweep deletes everything this method did not
-        /// write, so a mesh written after it would be deleted by the next promotion of the same map,
-        /// and a mesh written by the sweep's own loop would be a file nothing had checked.
+        /// Why two phases. A set is up to 32 MB - eight floors and a mesh - and completing it means
+        /// reading all of it, hashing the mesh again and hashing the whole of it for the stamp. Done under
+        /// <see cref="_lock"/>, as it used to be, that was ~44 MB of reading and hashing while the index
+        /// and image routes - which the game calls on its MAIN THREAD - waited for the same lock. So
+        /// <see cref="PrepareSet"/> does every read and every hash with no lock held, and
+        /// <see cref="CommitSet"/> takes the lock only to check nothing moved and to write.
         ///
-        /// WHAT IT DOES NOT PROMISE, said out loud because a folder is not a database: a crash in the
-        /// gap between the last picture and the meta leaves the new pictures beside the old meta. The
-        /// loader then skips the folder entirely if the old meta names a file the new set replaced
-        /// under a different name, and otherwise reads the OLD meta over the NEW pictures - which is
-        /// wrong if the extent changed between the two captures, and merely stale if it did not.
-        /// Closing that gap needs a directory swap, which Windows cannot do atomically either, so the
-        /// gap is accepted: it is microseconds wide, it needs a crash inside it, and the repair is one
-        /// more capture of that map.
-        ///
-        /// Caller holds the lock.</summary>
-        private MapUploadResponse Promote(
-            string key, MapCaptureMetaDto meta, Dictionary<int, string> staged, string staging, string clientVersion)
+        /// What stays under the lock, said plainly: writing the set into the map's folder (pictures,
+        /// mesh, the sweep of what the new meta does not name, the meta last), swapping it into
+        /// <see cref="_sets"/>, and dropping the staging. Those have to be one step as far as any other
+        /// request can see - an index answered between the meta landing and the swap would name a set the
+        /// image route does not yet serve - and a directory swap is not atomic on Windows either, so the
+        /// lock is what makes them one. It is disk writing, not hashing, and it is the same writing the
+        /// old single-phase version did.
+        /// </summary>
+        /// <param name="key">The canonical map name.</param>
+        /// <param name="meta">The meta to promote - the floor post's own, or the staged one.</param>
+        /// <param name="staging">The capture's staging folder.</param>
+        /// <param name="clientVersion">For the stored-set line.</param>
+        private MapUploadResponse CompleteSet(string key, MapCaptureMetaDto meta, string staging, string clientVersion)
         {
-            var ordered = meta.Floors.OrderBy(f => f.Level).ToList();
-            var target = System.IO.Path.Combine(Folder, key);
-            var payloads = new List<byte[]>(ordered.Count);
-            var written = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            long bytes = 0;
+            try
+            {
+                var prepared = PrepareSet(key, meta, staging);
+
+                lock (_lock)
+                {
+                    try
+                    {
+                        if (!_loaded) Load();
+
+                        return CommitSet(key, prepared, staging, clientVersion);
+                    }
+                    finally
+                    {
+                        // Released in the SAME lock as the commit, so no post can see the set committed and
+                        // the folder still claimed.
+                        _completing.Remove(staging);
+                    }
+                }
+            }
+            finally
+            {
+                // And again if anything above threw before reaching that lock: a folder left in
+                // _completing would turn every later post of that capture into "being completed right
+                // now" for the life of the process. Remove is idempotent.
+                lock (_lock) _completing.Remove(staging);
+            }
+        }
+
+        /// <summary>Everything a promotion reads and hashes, done before the lock is taken - see
+        /// <see cref="CompleteSet"/>. The sizes and write times are what <see cref="CommitSet"/> checks
+        /// again under the lock, so a file that changed between the two is noticed rather than
+        /// served.</summary>
+        private sealed class PreparedSet
+        {
+            public MapCaptureMetaDto Meta = new();
+            public string CapturedAt = "";
+            public readonly List<PreparedFile> Floors = new();
+            public PreparedFile? Mesh;
+            public byte[] MetaBytes = Array.Empty<byte>();
+            public string Stamp = "";
+            public long Bytes;
+
+            /// <summary>Why the staged files could not be prepared, or null. The set then stays staged,
+            /// exactly as a failed write left it before.</summary>
+            public string? Problem;
+        }
+
+        /// <summary>One staged file as it was read: where it was, what it weighed and when it was last
+        /// written, the name the SERVER gives it, and its bytes.</summary>
+        private sealed class PreparedFile
+        {
+            public string Source = "";
+            public long Size;
+            public DateTime Written;
+            public string Name = "";
+            public byte[] Data = Array.Empty<byte>();
+        }
+
+        /// <summary>
+        /// Reads a complete staged set, hashes it, and works out the meta and the stamp it will be served
+        /// under - all with NO lock held (see <see cref="CompleteSet"/>). Touches nothing but the
+        /// request's own meta object, which it rewrites as the stored set will name itself.
+        ///
+        /// Every name here is THE SERVER'S, never the client's: a name from a peer is a path, and these
+        /// are joined onto a folder every client then reads from. The mesh's bytes are hashed again
+        /// against the sha its meta names, so a staged file swapped since it was checked on the way in is
+        /// refused rather than served under a sha nobody could verify.
+        /// </summary>
+        private static PreparedSet PrepareSet(string key, MapCaptureMetaDto meta, string staging)
+        {
+            var prepared = new PreparedSet { Meta = meta, CapturedAt = meta.CapturedAt ?? "" };
 
             try
             {
-                System.IO.Directory.CreateDirectory(target);
+                var staged = FilesByLevel(staging);
 
                 // The CANONICAL name, so the stored file agrees with the folder it sits in and with the
                 // index entry that serves it: a Factory night capture is stored as factory4_day's
-                // picture, and a meta still claiming factory4_night would have package.ps1's gates and
-                // a reader of the file disagreeing about which map this is.
+                // picture, and a meta still claiming factory4_night would have package.ps1's gates and a
+                // reader of the file disagreeing about which map this is.
                 meta.Map = key;
 
-                foreach (var floor in ordered)
+                foreach (var floor in meta.Floors.OrderBy(f => f.Level))
                 {
-                    var source = staged[floor.Level];
+                    if (!staged.TryGetValue(floor.Level, out var source))
+                    {
+                        prepared.Problem = $"floor {floor.Level} is no longer staged";
+                        return prepared;
+                    }
+
+                    var file = Read(source);
                     var format = Format(System.IO.Path.GetExtension(source).TrimStart('.')) ?? "jpg";
-                    var data = System.IO.File.ReadAllBytes(source);
 
-                    // THE CLIENT'S FILE NAME IS DISCARDED HERE, always: a name from a peer is a path,
-                    // and this one is joined onto a folder every client then reads from.
-                    floor.File = $"{key}-{floor.Level.ToString(CultureInfo.InvariantCulture)}.{format}";
+                    file.Name = $"{key}-{floor.Level.ToString(CultureInfo.InvariantCulture)}.{format}";
+                    floor.File = file.Name;
 
-                    WriteAtomic(System.IO.Path.Combine(target, floor.File), data);
-
-                    written.Add(floor.File);
-                    payloads.Add(data);
-                    bytes += data.Length;
+                    prepared.Floors.Add(file);
+                    prepared.Bytes += file.Data.Length;
                 }
-
-                // The mesh, if this set has one: the same treatment a picture gets, in the same phase,
-                // for the reason in this method's summary. Its name is THIS SERVER'S, like a floor's -
-                // a name from a peer is a path - and its bytes are hashed again here, so a staged file
-                // swapped between the check on the way in and this write is refused rather than served
-                // under a sha nobody will be able to verify.
-                byte[]? meshBytes = null;
 
                 if (meta.Mesh != null)
                 {
                     var source = MeshPath(staging);
 
                     if (!System.IO.File.Exists(source))
-                        throw new System.IO.FileNotFoundException(
-                            "the staged mesh is gone, so the set cannot be completed", source);
+                    {
+                        prepared.Problem = "the staged mesh is gone";
+                        return prepared;
+                    }
 
-                    meshBytes = System.IO.File.ReadAllBytes(source);
-
-                    var hash = Convert.ToHexString(SHA256.HashData(meshBytes)).ToLowerInvariant();
+                    var mesh = Read(source);
+                    var hash = Convert.ToHexString(SHA256.HashData(mesh.Data)).ToLowerInvariant();
 
                     if (!string.Equals(hash, meta.Mesh.Sha256, StringComparison.OrdinalIgnoreCase))
-                        throw new System.IO.InvalidDataException(
-                            $"the staged mesh hashes to {Short(hash)}, not the {Short(meta.Mesh.Sha256)} its meta names");
+                    {
+                        prepared.Problem =
+                            $"the staged mesh hashes to {Short(hash)}, not the {Short(meta.Mesh.Sha256)} its meta names";
+                        return prepared;
+                    }
 
-                    meta.Mesh.File = MeshName(key);
+                    mesh.Name = MeshName(key);
+
+                    meta.Mesh.File = mesh.Name;
                     meta.Mesh.Sha256 = hash;
-                    meta.Mesh.Bytes = meshBytes.Length;
+                    meta.Mesh.Bytes = mesh.Data.Length;
 
-                    WriteAtomic(System.IO.Path.Combine(target, meta.Mesh.File), meshBytes);
+                    prepared.Mesh = mesh;
+                    prepared.Bytes += mesh.Data.Length;
+                }
 
-                    written.Add(meta.Mesh.File);
-                    bytes += meshBytes.Length;
+                prepared.MetaBytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(meta, FileOptions));
+
+                // Over the bytes as they WILL BE written, in level order and the mesh last, so the boot
+                // that reads this folder back computes the same value from the same files. That identity
+                // is what makes the stamp worth comparing at all: it is never persisted, because a stamp
+                // file could disagree with the pictures beside it.
+                prepared.Stamp = StampOf(
+                    prepared.MetaBytes, prepared.Floors.Select(f => f.Data), prepared.Mesh?.Data);
+
+                return prepared;
+            }
+            catch (Exception ex)
+            {
+                prepared.Problem = ex.Message;
+                return prepared;
+            }
+        }
+
+        /// <summary>A staged file, read with the size and write time <see cref="CommitSet"/> will compare
+        /// against. The time is taken BEFORE the read, so a write that lands during it changes the time
+        /// and is caught.
+        ///
+        /// Read with no lock held, and safe only because nothing writes into this folder meanwhile - see
+        /// <see cref="_completing"/>. Windows refuses to replace a file that has any open handle, and
+        /// opening this one with delete sharing does NOT change that (tried, and measured in the
+        /// two-thread harness case: the same 3-4 failures in 100 either way), so the guard is the
+        /// only thing that makes the read and a concurrent atomic replace unable to meet.</summary>
+        private static PreparedFile Read(string path)
+        {
+            var info = new System.IO.FileInfo(path);
+            var written = info.LastWriteTimeUtc;
+            var data = System.IO.File.ReadAllBytes(path);
+
+            return new PreparedFile { Source = path, Size = data.Length, Written = written, Data = data };
+        }
+
+        /// <summary>Whether a prepared file is still exactly what is staged: there, the same size, and not
+        /// written since it was read.</summary>
+        private static bool Unchanged(PreparedFile file)
+        {
+            try
+            {
+                var info = new System.IO.FileInfo(file.Source);
+
+                return info.Exists && info.Length == file.Size && info.LastWriteTimeUtc == file.Written;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Moves a prepared set into place and makes it the one this host serves. Caller holds the lock.
+        ///
+        /// First, whether it may: another request can have completed this capture while it was being
+        /// prepared (then it is simply complete), a newer set can have been promoted (then this one is
+        /// older, as the floor route would have said), and a staged file can have been re-posted or swept
+        /// (then this preparation is stale, and the post that changed it completes the set itself).
+        ///
+        /// Then the writes, in the order that matters: pictures first, each one written beside its name
+        /// and moved over it, then the MESH if the set has one, then the files the new set does not name,
+        /// and the meta LAST. The meta is what names the pictures and the mesh, so a failure part-way
+        /// through never leaves a meta pointing at a file that was never written - the case that would
+        /// serve a client a map with a hole in it and a stamp claiming it was whole. The mesh goes before
+        /// the sweep for the reason a picture does: the sweep deletes everything this method did not
+        /// write.
+        ///
+        /// WHAT IT DOES NOT PROMISE, said out loud because a folder is not a database: a crash in the gap
+        /// between the last picture and the meta leaves the new pictures beside the old meta. The loader
+        /// then skips the folder if the old meta names a file the new set replaced under a different
+        /// name, and otherwise reads the OLD meta over the NEW pictures - wrong if the extent changed,
+        /// merely stale if not. Closing that gap needs a directory swap, which Windows cannot do
+        /// atomically either, so the gap is accepted: it is microseconds wide, it needs a crash inside
+        /// it, and the repair is one more capture of that map.
+        /// </summary>
+        private MapUploadResponse CommitSet(string key, PreparedSet prepared, string staging, string clientVersion)
+        {
+            var captured = ParseStamp(prepared.CapturedAt);
+
+            if (_sets.TryGetValue(key, out var held))
+            {
+                var heldAt = ParseStamp(held.Meta.CapturedAt);
+
+                // Completed by a request that got here first - the last floor and the mesh can arrive
+                // together. Not a failure: the set this post was part of is served.
+                if (heldAt == captured)
+                    return new MapUploadResponse { Outcome = "complete", FloorsHeld = held.Meta.Floors.Count };
+
+                if (heldAt > captured) return Reject(key, "older than the set on the host");
+            }
+
+            if (prepared.Problem != null)
+            {
+                // The set stays staged. Nothing was promised to a client and the previous set is still
+                // being served; the next post of any part of this capture tries again.
+                WarnOnce(key, $"could not complete the picture set ({prepared.Problem})");
+
+                return new MapUploadResponse
+                {
+                    Outcome = "rejected",
+                    Reason = $"the host could not store the set ({prepared.Problem})",
+                    FloorsHeld = prepared.Floors.Count
+                };
+            }
+
+            if (!prepared.Floors.All(Unchanged) || (prepared.Mesh != null && !Unchanged(prepared.Mesh)))
+                return new MapUploadResponse
+                {
+                    Outcome = "stored",
+                    Reason = "the staged set changed while it was being completed - the post that changed it completes it",
+                    FloorsHeld = prepared.Floors.Count
+                };
+
+            var meta = prepared.Meta;
+            var target = System.IO.Path.Combine(Folder, key);
+            var written = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            try
+            {
+                System.IO.Directory.CreateDirectory(target);
+
+                foreach (var floor in prepared.Floors)
+                {
+                    WriteAtomic(System.IO.Path.Combine(target, floor.Name), floor.Data);
+                    written.Add(floor.Name);
+                }
+
+                if (prepared.Mesh != null)
+                {
+                    WriteAtomic(System.IO.Path.Combine(target, prepared.Mesh.Name), prepared.Mesh.Data);
+                    written.Add(prepared.Mesh.Name);
                 }
 
                 var metaName = MetaName(key);
 
                 // Whatever the previous set left that this one does not name - a fourth floor on a map
-                // that now measures three, a .png replaced by a .jpg - goes before the meta lands, so
-                // the folder never holds a picture nothing points at.
+                // that now measures three, a .png replaced by a .jpg, the mesh of a capture this one
+                // replaces without one - goes before the meta lands, so the folder never holds a file
+                // nothing points at.
                 foreach (var path in System.IO.Directory.EnumerateFiles(target))
                 {
                     var name = System.IO.Path.GetFileName(path);
@@ -940,49 +1297,110 @@ namespace QuestTreeServer
                     try { System.IO.File.Delete(path); } catch { /* a leftover file is not a failure */ }
                 }
 
-                var metaBytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(meta, FileOptions));
+                WriteAtomic(System.IO.Path.Combine(target, metaName), prepared.MetaBytes);
 
-                WriteAtomic(System.IO.Path.Combine(target, metaName), metaBytes);
-
-                // Over the bytes as they were WRITTEN, in level order, so the boot that reads this
-                // folder back computes the same value from the same files. That identity is what makes
-                // the stamp worth comparing at all: it is never persisted, because a stamp file could
-                // disagree with the pictures beside it.
-                var set = new StoredSet
+                _sets[key] = new StoredSet
                 {
                     Key = key,
-                    Stamp = StampOf(metaBytes, payloads, meshBytes),
-                    Bytes = bytes,
+                    Stamp = prepared.Stamp,
+                    Bytes = prepared.Bytes,
                     Meta = meta
                 };
-
-                _sets[key] = set;
 
                 // Every staging folder for this map, not only this one: an abandoned earlier attempt is
                 // exactly what the disk should not keep once a newer set is served.
                 DropStaging(key);
 
                 _logger.Info(
-                    $"Quest Tracker: map picture set for '{key}' stored - {ordered.Count} floor(s)" +
-                    $"{(meshBytes == null ? "" : $" and a {Mb(meshBytes.Length)} MB mesh")}, " +
-                    $"{Mb(bytes)} MB, captured {Clip(meta.CapturedAt, MaxFreeTextLength)} by client " +
+                    $"Quest Tracker: map picture set for '{key}' stored - {prepared.Floors.Count} floor(s)" +
+                    $"{(prepared.Mesh == null ? "" : $" and a {Mb(prepared.Mesh.Data.Length)} MB mesh")}, " +
+                    $"{Mb(prepared.Bytes)} MB, captured {Clip(meta.CapturedAt, MaxFreeTextLength)} by client " +
                     $"{(clientVersion.Length == 0 ? "unknown" : clientVersion)}.");
 
-                return new MapUploadResponse { Outcome = "complete", FloorsHeld = ordered.Count };
+                return new MapUploadResponse { Outcome = "complete", FloorsHeld = prepared.Floors.Count };
             }
             catch (Exception ex)
             {
-                // The set stays staged. Nothing was promised to a client, the previous set is still
-                // being served - the meta is written last precisely so that is true - and the next
-                // post of any floor of this capture tries the move again.
+                // The set stays staged. The previous set is still being served - the meta is written last
+                // precisely so that is true - and the next post of any part of this capture tries again.
                 WarnOnce(key, $"could not complete the picture set ({ex.Message})");
 
                 return new MapUploadResponse
                 {
                     Outcome = "rejected",
                     Reason = $"the host could not store the set ({ex.Message})",
-                    FloorsHeld = staged.Count
+                    FloorsHeld = prepared.Floors.Count
                 };
+            }
+        }
+
+        /// <summary>
+        /// Gives up on a capture's mesh for good and makes the capture's floors stop waiting for it - the
+        /// "a mesh problem costs the mesh, never the map" rule, for the refusals no retry could change.
+        /// Caller holds the lock. False when the staging could not be rewritten, and then the caller
+        /// refuses the post as before and the floors wait.
+        ///
+        /// Three writes: a MARKER naming the refused sha (so a later floor of this capture that still
+        /// names that mesh is brought into line rather than refused as a clash with the staged meta), the
+        /// staged meta WITHOUT its mesh block (so the completion check stops waiting and the set is
+        /// promoted flat), and the staged mesh and its sidecar deleted if an earlier attempt left them.
+        /// One Warning, naming the reason, because a host wondering why a map draws flat on every client
+        /// wants to see exactly this.
+        /// </summary>
+        private bool FlattenStaged(string key, string staging, MapCaptureMetaDto staged, string sha, string reason)
+        {
+            try
+            {
+                WriteAtomic(RefusedMarkerPath(staging), Encoding.UTF8.GetBytes(sha.ToLowerInvariant()));
+
+                staged.Mesh = null;
+
+                WriteAtomic(
+                    System.IO.Path.Combine(staging, StagedMetaName),
+                    Encoding.UTF8.GetBytes(JsonSerializer.Serialize(staged, FileOptions)));
+
+                try { System.IO.File.Delete(MeshPath(staging)); } catch { /* there may be none */ }
+                try { System.IO.File.Delete(MeshShaPath(staging)); } catch { /* there may be none */ }
+            }
+            catch (Exception ex)
+            {
+                WarnOnce(key, $"could not mark the refused mesh ({ex.Message})");
+                return false;
+            }
+
+            // Its own line rather than WarnOnce's "refused a map picture" - no picture was refused, and the
+            // sentence a host reads should say what happened. Deduped through the same capped set.
+            bool first;
+
+            lock (_rejectionsLogged)
+                first = _rejectionsLogged.Count < MaxRejectionsLogged && _rejectionsLogged.Add($"{key}|flat|{reason}");
+
+            if (first)
+                _logger.Warning(
+                    $"Quest Tracker: the map mesh for '{key}' was refused - {reason} - so its pictures are served " +
+                    "without it and that map draws flat on every client.");
+
+            return true;
+        }
+
+        /// <summary>The marker <see cref="FlattenStaged"/> writes: the sha of a mesh this host refused for
+        /// good, beside the capture's staged floors. Its extension is not a picture format, so
+        /// <see cref="FilesByLevel"/> skips it; it goes with the staging folder when the set is
+        /// promoted.</summary>
+        private static string RefusedMarkerPath(string staging) => System.IO.Path.Combine(staging, "mesh.refused");
+
+        /// <summary>The refused mesh's sha, or null when none was refused for this capture.</summary>
+        private static string? RefusedMeshSha(string staging)
+        {
+            try
+            {
+                var path = RefusedMarkerPath(staging);
+
+                return System.IO.File.Exists(path) ? System.IO.File.ReadAllText(path).Trim() : null;
+            }
+            catch
+            {
+                return null;
             }
         }
 
@@ -1067,7 +1485,7 @@ namespace QuestTreeServer
                 foreach (var floor in ordered)
                 {
                     // The name is about to be joined onto this folder's path. It was written by
-                    // Promote, so a name that fails this was hand-edited or copied in from elsewhere -
+                    // CommitSet, so a name that fails this was hand-edited or copied in from elsewhere -
                     // and "..\\..\\something" is what that check is for.
                     if (floor.File == null || !StoredFileName.IsMatch(floor.File))
                     {
@@ -1293,7 +1711,7 @@ namespace QuestTreeServer
                     return false;
                 }
 
-                // Bounded, then thrown away by Promote. Bounded anyway because it is logged on the way
+                // Bounded, then thrown away by PrepareSet. Bounded anyway because it is logged on the way
                 // back in from disk, and a field that is only ever safe because of what happens later
                 // is a field that stops being safe when that changes.
                 floor.File = Clip((floor.File ?? "").Trim(), MaxFreeTextLength);
@@ -1370,7 +1788,7 @@ namespace QuestTreeServer
         /// other half.
         ///
         /// <c>File</c> is the one field NOT validated as a name, and that is not an oversight: this
-        /// server never joins it to a path. <see cref="Promote"/> overwrites it with
+        /// server never joins it to a path. <see cref="PrepareSet"/> overwrites it with
         /// <see cref="MeshName"/> before the meta is written, exactly as it overwrites a floor's, so the
         /// only value that ever reaches the disk or a client is this server's own. It is CLIPPED here
         /// because it is printed into a log line if the block is dropped, and it is held to
@@ -1445,9 +1863,12 @@ namespace QuestTreeServer
         /// position the reader accepts.</summary>
         /// <param name="bytes">The file, exactly as it arrived.</param>
         /// <param name="problem">Why it was refused. Empty when it was not.</param>
-        private static bool MeshHeaderIsUsable(byte[] bytes, out string problem)
+        /// <param name="facts">What the walk found - the extent, the band levels and the totals - for
+        /// <see cref="MeshFitsMeta"/> to hold against the capture's meta. Partly filled on a refusal.</param>
+        private static bool MeshHeaderIsUsable(byte[] bytes, out string problem, out MeshFacts facts)
         {
             problem = "";
+            facts = new MeshFacts();
 
             try
             {
@@ -1502,6 +1923,11 @@ namespace QuestTreeServer
                     return false;
                 }
 
+                facts.MinX = minX;
+                facts.MinZ = minZ;
+                facts.MaxX = maxX;
+                facts.MaxZ = maxZ;
+
                 var bands = reader.ReadInt32();
 
                 if (bands < 0 || bands > MaxMeshBands)
@@ -1548,6 +1974,9 @@ namespace QuestTreeServer
                     // that ends inside a grid fails here rather than having its next field read out of
                     // the middle of one.
                     Skip(bounded, cells * 3, buffer);   // uint16 height + uint8 distance per cell
+
+                    facts.Levels.Add(level);
+                    facts.Cells += cells;
                 }
 
                 var buildings = reader.ReadInt32();
@@ -1574,9 +2003,20 @@ namespace QuestTreeServer
                         return false;
                     }
 
+                    // The PER-BUILDING cap as well as the running total below: MapMeshFile.Read refuses a
+                    // building past MaxVerticesPerBuilding however few the others have, so a file with one
+                    // 2.5 M-vertex building and nothing else passes the total and is still a file every
+                    // client throws away.
+                    if (vertexCount > MaxMeshVerticesPerBuilding)
+                    {
+                        problem = $"the mesh's building {i} claims {vertexCount:N0} vertices, past the " +
+                                  $"{MaxMeshVerticesPerBuilding:N0} one building may have";
+                        return false;
+                    }
+
                     vertices += vertexCount;
 
-                    // The RUNNING total, which is the cap the per-building one leaves a hole in:
+                    // The RUNNING total, which is the cap the per-building one above leaves a hole in:
                     // 20,000 buildings of 2 M vertices each breaks no per-building rule at all.
                     if (vertices > MaxMeshVerticesTotal)
                     {
@@ -1638,6 +2078,8 @@ namespace QuestTreeServer
                     return false;
                 }
 
+                facts.Triangles = indices / 3;
+
                 return true;
             }
             catch (System.IO.EndOfStreamException)
@@ -1658,6 +2100,71 @@ namespace QuestTreeServer
                 problem = $"the mesh could not be read ({ex.GetType().Name})";
                 return false;
             }
+        }
+
+        /// <summary>What the header walk found, for <see cref="MeshFitsMeta"/> to hold against the
+        /// capture's own meta: the extent, the band levels, and the two totals the meta states.</summary>
+        private sealed class MeshFacts
+        {
+            public double MinX;
+            public double MinZ;
+            public double MaxX;
+            public double MaxZ;
+            public readonly List<int> Levels = new();
+            public long Cells;
+            public long Triangles;
+        }
+
+        /// <summary>
+        /// Whether a mesh that is a VALID FILE is also THIS CAPTURE'S mesh, and if not, why.
+        ///
+        /// The header walk proves the file is one a client could read; this proves it belongs beside
+        /// these pictures - the same four things tools/check-maps-pack.py refuses a shipped set on, so a
+        /// host can no longer store a set that its own maintainer's -RefreshMaps then refuses to package:
+        /// the extent to the metre's millionth (a mesh over another rectangle drapes every picture in the
+        /// wrong place), the band levels exactly the floors' (a band with no picture has no texture, a
+        /// floor with no band no ground), and the cell and triangle counts the meta states (two numbers
+        /// the writer derived from the same file, so a difference is a different file).
+        ///
+        /// Reachable by an honest client, which is why it matters: a floor that fails to encode before
+        /// the last post is taken out of the meta, while the mesh built in the raid still has its band.
+        /// That mesh is refused here and the set is served flat - see <see cref="AcceptMesh"/>.</summary>
+        private static bool MeshFitsMeta(MeshFacts facts, MapCaptureMetaDto meta, out string problem)
+        {
+            problem = "";
+
+            var extent = meta.Extent;
+
+            if (extent == null ||
+                Math.Abs(facts.MinX - extent.MinX) > MeshExtentTolerance ||
+                Math.Abs(facts.MinZ - extent.MinZ) > MeshExtentTolerance ||
+                Math.Abs(facts.MaxX - extent.MaxX) > MeshExtentTolerance ||
+                Math.Abs(facts.MaxZ - extent.MaxZ) > MeshExtentTolerance)
+            {
+                problem = "the mesh covers a different rectangle from the capture's pictures";
+                return false;
+            }
+
+            var bands = facts.Levels.OrderBy(l => l).ToList();
+            var floors = meta.Floors.Select(f => f.Level).OrderBy(l => l).ToList();
+
+            if (!bands.SequenceEqual(floors))
+            {
+                problem = $"the mesh's bands are levels [{string.Join(", ", bands)}] but the capture's floors are " +
+                          $"[{string.Join(", ", floors)}]";
+                return false;
+            }
+
+            var mesh = meta.Mesh;
+
+            if (mesh != null && (mesh.Cells != facts.Cells || mesh.Triangles != facts.Triangles))
+            {
+                problem = $"the mesh holds {facts.Cells:N0} cells and {facts.Triangles:N0} triangles but the capture's " +
+                          $"meta says {mesh.Cells:N0} and {mesh.Triangles:N0}";
+                return false;
+            }
+
+            return true;
         }
 
         /// <summary>Reads and discards exactly <paramref name="count"/> bytes, insisting on all of them:
@@ -1899,7 +2406,7 @@ namespace QuestTreeServer
         /// otherwise re-hash 12 MB four times over, on the request thread, to answer a question the
         /// staging folder already knows the answer to. The sidecar is written after the mesh and deleted
         /// before it, so its absence means "hash it" rather than "no mesh"; and it is only ever a HINT -
-        /// <see cref="Promote"/> re-hashes the file itself before serving it, which is the check that
+        /// <see cref="PrepareSet"/> re-hashes the file itself before serving it, which is the check that
         /// decides.
         ///
         /// Hashed at all, rather than merely testing the file exists, because a mesh staged by an earlier
@@ -1947,14 +2454,18 @@ namespace QuestTreeServer
         /// <param name="sha256">The mesh's sha - the CLAIMED one on the first call, the bytes' own on the
         /// second. They are equal by then, which is what makes one method right for both.</param>
         /// <param name="problem">Why not. Empty when this returns a meta.</param>
+        /// <param name="older">True when the refusal is that the host already SERVES this capture or a
+        /// newer one - not a fault, and answered as such (see <see cref="AlreadyServed"/>).</param>
         private MapCaptureMetaDto? WantedMesh(
-            string key, string capturedAt, DateTime captured, string sha256, out string problem)
+            string key, string capturedAt, DateTime captured, string sha256, out string problem, out bool older)
         {
             problem = "";
+            older = false;
 
             if (_sets.TryGetValue(key, out var held) && ParseStamp(held.Meta.CapturedAt) >= captured)
             {
                 problem = "older than the set on the host";
+                older = true;
                 return null;
             }
 
@@ -2265,6 +2776,25 @@ namespace QuestTreeServer
             WarnOnce(map, reason);
 
             return new MapMeshUploadResponse { Accepted = false, Reason = reason };
+        }
+
+        /// <summary>
+        /// A mesh post for a capture this host already serves, or one older than what it serves. NOT a
+        /// fault: a retry after a reply that was lost, or a second machine offering the same set - so it
+        /// is noted once at Information rather than warned about, and the client is told the set is
+        /// SERVED, which is the fact it needs (nothing of this capture is waiting on it).
+        /// </summary>
+        private MapMeshUploadResponse AlreadyServed(string map, string reason)
+        {
+            bool first;
+
+            lock (_rejectionsLogged)
+                first = _rejectionsLogged.Count < MaxRejectionsLogged && _rejectionsLogged.Add($"{map}|served|{reason}");
+
+            if (first)
+                _logger.Info($"Quest Tracker: a map mesh for '{map}' was offered again - {reason}; nothing to do.");
+
+            return new MapMeshUploadResponse { Accepted = false, Served = true, Reason = reason };
         }
 
         private void WarnOnce(string map, string reason)

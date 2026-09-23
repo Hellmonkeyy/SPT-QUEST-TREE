@@ -74,8 +74,9 @@ have moved 15 m; it hitches every few seconds and is meant for a raid set aside 
 a session. The host decides: uploads are refused unless it runs with `QUESTTREE_ACCEPT_MAPS=1`
 (`tools/server-host.cmd` sets it), the refusal is one line and is not retried that session, and a
 set only ever moves into place whole. The release ships whatever map sets exist, gated on layout,
-1.5 MB per image, 40 MB in total, the meta schema and `tools/check-maps-pack.py`, with coverage of
-the eleven vanilla maps a warning naming the missing ones rather than a gate.
+1.5 MB per image, the meta schema and `tools/check-maps-pack.py`, with two things reported rather
+than gated: the payload's total size (printed on every run, a warning past 80 MB) and coverage of the
+eleven vanilla maps (a warning naming the missing ones).
 
 **DynamicMaps stays a selectable source.** "Map pictures come from" chooses DynamicMaps first (the
 default, so nothing changes for an install already using it), our captures first, or our captures
@@ -198,13 +199,20 @@ captured map carries our own credit line naming the build, the date and the raid
   player's raid gives the whole group a map that pans and tilts rather than a flat one. It rides
   the same single opt-in (`QUESTTREE_ACCEPT_MAPS=1`, `tools/server-host.cmd`) and the same
   all-or-nothing rule as the pictures: a set whose capture built a mesh is not served until both
-  have arrived, so a borrowed map never names geometry the host does not hold, and a half-finished
-  upload expires like half a picture set does. The file is identified by its sha256 at every hop -
-  the uploader will not offer a mesh its own meta no longer describes, the host refuses one whose
-  bytes do not hash to what was claimed and validates the file's header and geometry before storing
-  it, and a downloader checks what arrived against what the index promised. Every failure degrades
-  to the flat picture rather than to a lost map, and nothing about it bumps a schema version: an
-  older host stores the pictures and ignores the mesh, an older client never asks. The release
+  have arrived, so a borrowed map never names geometry the host does not hold. The file is
+  identified by its sha256 at every hop - the uploader will not offer a mesh its own meta no longer
+  describes, the host refuses one whose bytes do not hash to what was claimed, and a downloader
+  checks what arrived against what the index promised. The host also reads the whole file before
+  storing it: header, every building's heights and triangle indices, and that its rectangle, floors
+  and counts are the ones its pictures' meta states. A mesh problem costs the mesh and never the
+  map: a mesh the host can never use (unreadable, not fitting its own pictures, or too big for the
+  host's space) is refused once and the pictures are served without it, so the map draws flat; only
+  a mesh the host could not *write* leaves the floors waiting, dropped at the host's first start a
+  day later. On the way down, a mesh that does not match is left out and the pictures kept, while
+  one that does not arrive at all - a timeout, a dropped connection - leaves that map as it was for
+  the session and is fetched again, whole, on the next start, rather than installed flat for good.
+  Nothing about it bumps a schema version: an older host stores the pictures and ignores the mesh,
+  an older client never asks. The release
   payload gains the meshes (1-3 MB a map), so the packager's total-size gate is now a warning at
   80 MB that prints the payload's size on every run instead of a hard 40 MB stop, and a shipped
   mesh is checked against its meta's sha256, byte length, extent and floor levels before it can be

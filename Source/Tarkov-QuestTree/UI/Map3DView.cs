@@ -7,6 +7,7 @@ using System.Threading.Tasks;
 using QuestTree.QuestGraph;
 using UnityEngine;
 using UnityEngine.Rendering;
+using UnityEngine.SceneManagement;
 using UnityEngine.UI;
 
 namespace QuestTree.UI
@@ -173,15 +174,35 @@ namespace QuestTree.UI
         /// they are built once per (file, floor) and handed to each new view; the materials are not
         /// cached, because they are one allocation each and they carry per-view state.
         ///
-        /// Which means nothing here may be destroyed by a view's teardown. It is dropped instead by
-        /// <see cref="DropCaches"/>, which MapView calls when the map memory goes: a profile change, a
-        /// capture landing, and the menu teardown before a raid - the last of those being the one that
-        /// matters, since a Mesh is not a scene object and a scene change does not take it.
+        /// Which means nothing here may be destroyed by a view's teardown while it is still cached. It
+        /// is dropped by <see cref="DropCaches"/>, which MapView calls when the map memory goes: a
+        /// profile change, a capture landing, and the menu teardown before a raid - the last of those
+        /// being the one that matters, since a Mesh is not a scene object and a scene change does not
+        /// take it.
+        ///
+        /// REFERENCE-COUNTED, because a drop and a live view are not ordered. MapView.ForgetDrawnMap
+        /// destroys the viewport and then drops the caches in the same frame, and Destroy is deferred -
+        /// so the view is still drawing when its meshes are asked to go. A drop therefore takes each
+        /// entry OUT of the cache at once (no later view can reuse it) but only destroys the meshes of
+        /// an entry nobody is drawing; an entry still in use is marked <see cref="Orphaned"/>, and the
+        /// last view to let go of it destroys it (<see cref="Unuse"/>). Every order ends with the meshes
+        /// destroyed exactly once and never under a view that is using them.
         /// </summary>
         internal sealed class Built
         {
             public readonly List<Mesh> Ground = new List<Mesh>();
             public readonly List<Mesh> Buildings = new List<Mesh>();
+
+            /// <summary>How many live views are drawing this entry.</summary>
+            public int Users;
+
+            /// <summary>Taken out of the cache by a drop while still in use: the last user destroys it.</summary>
+            public bool Orphaned;
+
+            /// <summary>Set only when the ground AND the buildings were both built. An entry put in the
+            /// cache before its build (so a throw halfway cannot leak what was already made) and never
+            /// finished is not reused - it is destroyed and built again.</summary>
+            public bool Complete;
 
             public long GroundTriangles;
             public long BuildingTriangles;
@@ -238,6 +259,10 @@ namespace QuestTree.UI
         /// <summary>Why the mesh was refused, in a few words for the tooltip.</summary>
         private string _refusal = "";
 
+        /// <summary>Whether <see cref="_refusal"/> is about the scene, not the file. See
+        /// <see cref="LastRefusalIsScene"/>.</summary>
+        private bool _sceneRefusal;
+
         // --- what it made -------------------------------------------------------------------------
 
         private RawImage _image;
@@ -272,6 +297,11 @@ namespace QuestTree.UI
 
         public event Action<float, Vector2> OnViewChanged;
 
+        /// <summary>Bumped by every orbit, pan, dolly and fly-to, and by the mesh landing - whatever moves
+        /// the camera. See <see cref="IOverlayHost.ViewVersion"/>: it is how a subscriber knows the view
+        /// moved when the scale did not, which in 3D is every orbit and every pan.</summary>
+        public int ViewVersion { get; private set; }
+
         /// <summary>Screen pixels per map metre at the focus distance - what the label cull and the
         /// at-rest pin names measure their collisions in. The vertical field of view spans
         /// <c>2 d tan(fov/2)</c> metres at the focus depth, and the viewport is that many canvas units
@@ -291,14 +321,18 @@ namespace QuestTree.UI
         /// Where a map point is on screen, in the same canvas units an overlay's anchoredPosition is in -
         /// what the label cull and the at-rest pin names decide their overlaps with.
         ///
-        /// <see cref="Parked"/> for a point BEHIND the camera, where the projection flips and a point
-        /// past the horizon comes back mirrored on the far side of the viewport. Parked is a fixed value,
-        /// which also keeps it useful as a "has the view moved" probe: a reference point behind the
-        /// camera reads the same every frame instead of jittering.
+        /// NOT FINITE (NaN, NaN) for a point BEHIND the camera, where the projection flips and a point
+        /// past the horizon would come back mirrored on the far side of the viewport. Not a fixed
+        /// off-screen value: every point behind the camera would then project to the same spot, and the
+        /// overlap deciders would have them hide each other. Both deciders treat a non-finite point as
+        /// "not on screen" - hidden, and claiming no space.
         /// </summary>
         /// <param name="mapXZ">The point, in map coordinates.</param>
         public Vector2 Project(Vector2 mapXZ) =>
-            TryProject(mapXZ, out var local, out _) ? local : Parked;
+            TryProject(mapXZ, out var local, out _) ? local : NotOnScreen;
+
+        /// <summary>What <see cref="Project"/> answers for a point the view cannot place.</summary>
+        private static readonly Vector2 NotOnScreen = new Vector2(float.NaN, float.NaN);
 
         /// <summary>The projection both <see cref="Project"/> and <see cref="PlaceOverlays"/> use.</summary>
         /// <param name="mapXZ">The point, in map coordinates.</param>
@@ -354,6 +388,7 @@ namespace QuestTree.UI
             int selectedLevel, Color backdrop, ViewState? restore, Action<string, string> onRefused)
         {
             LastRefusal = "";
+            LastRefusalIsScene = false;
 
             if (viewport == null || entry == null || string.IsNullOrEmpty(meshPath)) return null;
 
@@ -388,6 +423,8 @@ namespace QuestTree.UI
                     ? "could not be opened in this scene"
                     : view._refusal;
 
+                LastRefusalIsScene = view._sceneRefusal;
+
                 view._onRefused = null;
                 view.Release();
                 Destroy(view);
@@ -402,6 +439,12 @@ namespace QuestTree.UI
         /// set it, on the one thread that builds UI.</summary>
         internal static string LastRefusal { get; private set; } = "";
 
+        /// <summary>Whether <see cref="LastRefusal"/> is about the SCENE rather than the file - there is
+        /// no spare layer to draw on right now. The caller must not hold that against the mesh file: the
+        /// next scene may well have a free layer, and a file refusal lasts until a capture or a profile
+        /// change.</summary>
+        internal static bool LastRefusalIsScene { get; private set; }
+
         private void Build(ViewState? restore)
         {
             _drawLayer = PrivateLayer();
@@ -410,7 +453,8 @@ namespace QuestTree.UI
             {
                 // Every layer has a renderer on it or is in a live camera's mask. Drawing on a shared
                 // layer would put our geometry in front of the player's menu, so we do not draw at all.
-                _refusal = "no spare layer to draw on";
+                _refusal = "no spare layer in this scene";
+                _sceneRefusal = true;
 
                 throw new InvalidOperationException(
                     "no layer of the loaded scene is free of renderers, so there is nowhere private to draw");
@@ -534,13 +578,22 @@ namespace QuestTree.UI
                     return new Loaded { File = _cachedFile, Stamp = stamp };
             }
 
+            int generation;
+            lock (CacheLock) generation = _cacheGeneration;
+
             var parsed = MapMeshFile.Read(File.ReadAllBytes(path));
 
             lock (CacheLock)
             {
-                _cachedFile = parsed;
-                _cachedPath = path;
-                _cachedStamp = stamp;
+                // Only if nothing dropped the cache while this read was in flight. A read started before
+                // a drop and finished after it would otherwise put the dropped file straight back - after
+                // the menu teardown, into the raid.
+                if (generation == _cacheGeneration)
+                {
+                    _cachedFile = parsed;
+                    _cachedPath = path;
+                    _cachedStamp = stamp;
+                }
             }
 
             return new Loaded { File = parsed, Stamp = stamp };
@@ -550,6 +603,10 @@ namespace QuestTree.UI
         private static MapMeshFile _cachedFile;
         private static string _cachedPath;
         private static long _cachedStamp;
+
+        /// <summary>Bumped by every <see cref="DropCaches"/>, under <see cref="CacheLock"/>. See
+        /// <see cref="ReadFile"/>.</summary>
+        private static int _cacheGeneration;
 
         /// <summary>The (file, write time) the built meshes in <see cref="_cachedFloors"/> belong to, or null.
         /// A file rewritten under the same name gets a new stamp and so a new key, which is what throws
@@ -561,10 +618,57 @@ namespace QuestTree.UI
         /// see <see cref="Built"/>.</summary>
         private static readonly Dictionary<int, Built> _cachedFloors = new Dictionary<int, Built>();
 
-        /// <summary>The private layer this session settled on, or -1 before the first scan and after any
-        /// failure. Once per session rather than once per view: the scan walks every Renderer in the
-        /// loaded scene, and a repaint happens on every click.</summary>
+        /// <summary>The private layer this session settled on, or -1 before the first scan, after any
+        /// failure and after any scene load. Once per SCENE rather than once per view: the scan walks
+        /// every Renderer in the loaded scene, and a repaint happens on every click - but a scene that
+        /// loads (the hideout, additively, into the menu) can put renderers on the very layer chosen, and
+        /// ours would then draw them into the map without a line in the log. See
+        /// <see cref="OnSceneLoaded"/>.</summary>
         private static int _sessionLayer = -1;
+
+        /// <summary>Whether <see cref="OnSceneLoaded"/> is subscribed. Static and subscribed at most once:
+        /// SceneManager.sceneLoaded is a static event, and a second subscription would be a second call
+        /// per load, and a leaked one a call into a class that has dropped everything.</summary>
+        private static bool _sceneHooked;
+
+        /// <summary>A scene has loaded: the layer scan describes a scene that has changed, so the next
+        /// view scans again. The live view keeps drawing on the layer it has until it is rebuilt - the
+        /// panel rebuilds on the way back from any scene change that matters (the hideout, a raid).</summary>
+        private static void OnSceneLoaded(Scene scene, LoadSceneMode mode)
+        {
+            _sessionLayer = -1;
+        }
+
+        private static void HookScenes()
+        {
+            if (_sceneHooked) return;
+
+            try
+            {
+                SceneManager.sceneLoaded += OnSceneLoaded;
+                _sceneHooked = true;
+            }
+            catch (Exception ex)
+            {
+                // Not fatal: the layer is then re-scanned only after failures and drops, as before.
+                Plugin.LogSource?.LogDebug($"QuestTree: the 3D map could not watch scene loads ({ex.Message}).");
+            }
+        }
+
+        private static void UnhookScenes()
+        {
+            if (!_sceneHooked) return;
+
+            try
+            {
+                SceneManager.sceneLoaded -= OnSceneLoaded;
+                _sceneHooked = false;
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug($"QuestTree: the 3D map could not stop watching scene loads ({ex.Message}).");
+            }
+        }
 
         /// <summary>
         /// Drops everything cached across views: the parsed file, the built meshes and the chosen layer.
@@ -583,41 +687,85 @@ namespace QuestTree.UI
                 _cachedFile = null;
                 _cachedPath = null;
                 _cachedStamp = 0L;
+                _cacheGeneration++;
             }
 
             // The layer goes only on THIS path, not on a map switch. All three callers of DropCaches are
             // points where the loaded scene may have changed under us - a raid has been and gone by the
             // time the menu builds another map - and that is the one thing that can invalidate the scan.
             _sessionLayer = -1;
+
+            // And the scene hook with it: nothing is cached any more for a scene load to invalidate, and
+            // the next view's scan subscribes again.
+            UnhookScenes();
         }
 
         /// <summary>
-        /// Destroys the built meshes and forgets which file they were built from. For a map switch, where
-        /// the parsed file replaces itself and the layer is still good.
+        /// Takes every built entry out of the cache and forgets which file they were built from. For a
+        /// map switch, where the parsed file replaces itself and the layer is still good, and as the
+        /// mesh half of <see cref="DropCaches"/>.
         ///
-        /// A view may still be LIVE when this runs: Destroy is deferred to the end of the frame, so the
-        /// Map3DView that MapView.DiscardViewport has just destroyed gets one more LateUpdate, and the
-        /// Built it is holding now has destroyed Meshes in it. That is what the <c>mesh != null</c> test
-        /// in <see cref="Draw"/> is for - Unity reports a destroyed object as null - and it is why that
-        /// test is not the belt-and-braces it looks like.
+        /// An entry no view is drawing is destroyed now. One a LIVE view is still drawing - the view
+        /// MapView.DiscardViewport has just destroyed gets one more LateUpdate, Destroy being deferred -
+        /// is only orphaned, and that view destroys it when it lets go. See <see cref="Built"/>.
         /// </summary>
         private static void DropBuiltMeshes()
         {
-            var meshes = 0;
+            var destroyed = 0;
+            var deferred = 0;
 
             foreach (var built in _cachedFloors.Values)
             {
                 if (built == null) continue;
 
-                for (var i = 0; i < built.Ground.Count; i++) { Discard(built.Ground[i]); meshes++; }
-                for (var i = 0; i < built.Buildings.Count; i++) { Discard(built.Buildings[i]); meshes++; }
+                if (built.Users > 0)
+                {
+                    built.Orphaned = true;
+                    deferred++;
+                    continue;
+                }
+
+                destroyed += DestroyBuilt(built);
             }
 
             _cachedFloors.Clear();
             _builtKey = null;
 
-            if (meshes > 0)
-                Plugin.LogSource?.LogDebug($"QuestTree: dropped {meshes} cached 3D map mesh(es).");
+            if (destroyed > 0 || deferred > 0)
+            {
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: dropped the cached 3D map - {destroyed} mesh(es) destroyed, {deferred} floor(s) " +
+                    $"left to the view still drawing them.");
+            }
+        }
+
+        /// <summary>Destroys one entry's meshes and empties it, so a second call is a no-op.</summary>
+        /// <param name="built">The entry.</param>
+        /// <returns>How many meshes were destroyed.</returns>
+        private static int DestroyBuilt(Built built)
+        {
+            var count = 0;
+
+            for (var i = 0; i < built.Ground.Count; i++) { Discard(built.Ground[i]); count++; }
+            for (var i = 0; i < built.Buildings.Count; i++) { Discard(built.Buildings[i]); count++; }
+
+            built.Ground.Clear();
+            built.Buildings.Clear();
+            built.Complete = false;
+
+            return count;
+        }
+
+        /// <summary>A view has stopped drawing an entry: the last one out destroys it if a drop has
+        /// already taken it out of the cache.</summary>
+        /// <param name="built">The entry.</param>
+        private static void Unuse(Built built)
+        {
+            if (built == null) return;
+
+            if (built.Users > 0) built.Users--;
+
+            if (built.Users == 0 && built.Orphaned) DestroyBuilt(built);
         }
 
         /// <summary>
@@ -635,6 +783,10 @@ namespace QuestTree.UI
         private static int PrivateLayer()
         {
             if (_sessionLayer >= 0) return _sessionLayer;
+
+            // Watching for scene loads from the first scan on, so the result is never older than the
+            // scene it describes.
+            HookScenes();
 
             _sessionLayer = ChoosePrivateLayer();
 
@@ -781,8 +933,29 @@ namespace QuestTree.UI
             // no triangles in it is a viewport with the markers of a map floating over a flat colour,
             // which looks like a bug in the markers rather than in the mesh.
             var drawable = 0L;
+            var pictured = 0;
 
-            foreach (var floor in _floors) drawable += floor.Meshes.GroundTriangles + floor.Meshes.BuildingTriangles;
+            foreach (var floor in _floors)
+            {
+                // Only a floor that CAN be drawn: Draw skips any floor whose material has no picture on
+                // it (a textured shader samples white without one), so a band with no picture layer is
+                // never drawn at all, and its triangles counting here would pass this check for a view
+                // that shows nothing. Flat colours need no picture, so there every floor counts.
+                var canDraw = _flatColours || (floor.Layer != null && floor.Layer.HasArtwork);
+                if (!canDraw) continue;
+
+                pictured++;
+                drawable += floor.Meshes.GroundTriangles + floor.Meshes.BuildingTriangles;
+            }
+
+            if (pictured == 0)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: the 3D relief of '{_mapKey}' has {levels.Count} band(s) but no picture for " +
+                    $"any of them - drawing the flat picture instead.");
+                Refuse("no band of it has a picture");
+                return;
+            }
 
             if (drawable == 0)
             {
@@ -838,6 +1011,12 @@ namespace QuestTree.UI
                     ? string.Format(CultureInfo.InvariantCulture,
                         ", dropped {0:#,##0} building triangle(s) with a vertex that is not a number", dropped)
                     : ""));
+
+            // ANNOUNCED, not just placed. The labels were culled when the viewport was built - against the
+            // camera as it stood before the mesh landed, with the ground at the fallback height - and
+            // Place() above moves the camera without telling anyone. Without this the cull and the pin
+            // names kept that placeholder's decisions until the player's first drag.
+            Moved();
         }
 
         private bool _restored;
@@ -956,16 +1135,28 @@ namespace QuestTree.UI
             var band = _file.Band(level);
             if (band == null) return;
 
-            if (!_cachedFloors.TryGetValue(level, out var meshes) || meshes == null)
+            if (!_cachedFloors.TryGetValue(level, out var meshes) || meshes == null || !meshes.Complete)
             {
+                // A half-built entry left by a build that threw: its meshes are ours to destroy (it was
+                // never handed to a view, so nobody is drawing it) and it is built again from scratch.
+                if (meshes != null && meshes.Users == 0) DestroyBuilt(meshes);
+
+                // INTO THE CACHE FIRST, then built. Everything BuildGround and BuildBuildings make goes
+                // straight into this entry, and Release never touches meshes - so an entry made outside
+                // the cache and lost to a throw in BuildBuildings or MakeMesh would have leaked the ground
+                // it had already built. In the cache, a drop finds it whatever state it is in.
                 meshes = new Built { Cells = band.CellCount };
+                _cachedFloors[level] = meshes;
 
                 BuildGround(band, meshes, flat);
                 BuildBuildings(level, meshes, flat);
 
-                _cachedFloors[level] = meshes;
+                meshes.Complete = true;
                 _reusedFloors = false;
             }
+
+            // Counted as in use from here until this view releases it - see Built.
+            meshes.Users++;
 
             _floors.Add(new Floor
             {
@@ -1662,7 +1853,7 @@ namespace QuestTree.UI
             var move = -right * (delta.x * metresPerPixel) -
                        forward * (delta.y * metresPerPixel / tilt);
 
-            _focus += new Vector2(move.x, move.z);
+            _focus = ClampFocus(_focus + new Vector2(move.x, move.z));
 
             Moved();
         }
@@ -1686,16 +1877,39 @@ namespace QuestTree.UI
         /// <param name="scale">Ignored. See above.</param>
         public void FocusOn(Vector2 contentPoint, float scale)
         {
-            _focus = contentPoint;
+            _focus = ClampFocus(contentPoint);
 
-            Place();
             Moved();
         }
+
+        /// <summary>
+        /// Keeps the focus point over the map: within the floor's rectangle plus a fifth of its size on
+        /// every side. Without a limit a long drag slides the whole map off the screen with nothing to
+        /// drag back, and a pan's speed scales with the distance, so at the far dolly limit one flick is
+        /// kilometres.
+        /// </summary>
+        /// <param name="focus">The focus wanted, in map coordinates.</param>
+        private Vector2 ClampFocus(Vector2 focus)
+        {
+            var layer = ResolveLayer();
+            if (layer == null || !layer.HasBounds) return focus;
+
+            var margin = layer.BoundsSize * FocusMargin;
+
+            return new Vector2(
+                Mathf.Clamp(focus.x, layer.BoundsMin.x - margin.x, layer.BoundsMax.x + margin.x),
+                Mathf.Clamp(focus.y, layer.BoundsMin.y - margin.y, layer.BoundsMax.y + margin.y));
+        }
+
+        /// <summary>How far past the floor's rectangle the focus may go, as a fraction of its size.</summary>
+        private const float FocusMargin = 0.2f;
 
         /// <summary>Re-places the camera and tells whoever is listening the view has moved.</summary>
         private void Moved()
         {
             Place();
+
+            unchecked { ViewVersion++; }
 
             // Zero for the pan: it means nothing here, and no subscriber reads it - MapView keeps the
             // 3D view's own State instead. See IOverlayHost.
@@ -1859,10 +2073,12 @@ namespace QuestTree.UI
             {
                 if (floor == null) continue;
 
-                // The MESHES are not touched. They belong to the static cache and outlive this view by
-                // design - see Built and DropCaches - and destroying them here is exactly the bug that
-                // would make the cache worse than no cache: the next view would find a dictionary full
-                // of destroyed Mesh references and draw nothing.
+                // The MESHES are let go, not destroyed. They belong to the static cache and outlive this
+                // view by design, and destroying them here is the bug that would make the cache worse
+                // than no cache - the next view would find a dictionary full of destroyed Mesh references
+                // and draw nothing. Unuse destroys them only when a drop has already taken them out of
+                // the cache and this was the last view drawing them. See Built.
+                Unuse(floor.Meshes);
                 floor.Meshes = null;
 
                 // The texture is NOT ours - it belongs to the picture cache, which hands the same

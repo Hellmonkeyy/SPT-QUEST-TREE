@@ -1078,6 +1078,15 @@ namespace QuestTree.QuestGraph
                 // condition as a short array read, so it gets the same exception type.
                 throw new InvalidDataException("the mesh file ends inside its header or a count", ex);
             }
+            catch (IOException ex)
+            {
+                // Mono's DeflateStream reports a corrupt or truncated deflate block as an IOException
+                // (EndOfStreamException above derives from it, so this arm must come second). The
+                // class's own refusals are InvalidDataException, which is not an IOException, so they
+                // pass through untouched - and the doc's promise that every broken file becomes one
+                // holds for the deflate layer too.
+                throw new InvalidDataException("the mesh file's deflate stream is broken or truncated", ex);
+            }
         }
 
         /// <summary>The body of <see cref="Read(Stream)"/>, once the deflate bracket is open.</summary>

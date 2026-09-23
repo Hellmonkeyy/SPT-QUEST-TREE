@@ -234,7 +234,7 @@ if ($RefreshMaps) {
         Fail "SPT.Server.exe is running (pid $(($serverRunning | ForEach-Object { $_.Id }) -join ', ')) - it writes map sets into $installMaps as clients upload them, so a copy taken now can hold one capture's meta beside another's pictures or mesh. Stop the server yourself and re-run; nothing has been copied."
     }
     New-Item -ItemType Directory -Force $mapsDir | Out-Null
-    # One key at a time, and only the two globs. The install's folder also holds what the transport
+    # One key at a time, and only the three globs below. The install's folder also holds what the transport
     # leaves there - a ".incoming" staging directory mid-upload, and on a client machine the raw .png
     # captures the JPEGs were converted from - and neither is something a release carries. A directory
     # whose name is not a plain map key is skipped for that reason: that is what ".incoming" looks

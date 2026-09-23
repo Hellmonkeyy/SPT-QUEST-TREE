@@ -368,6 +368,11 @@ namespace QuestTree.QuestGraph
     {
         [JsonProperty("accepted")] public bool Accepted { get; set; }
 
+        /// <summary>Whether the host now serves a set for this capture (or a newer one) with or without
+        /// the mesh - nothing of it is held waiting. See MapTransfer.JudgeMesh for the three sentences it
+        /// chooses between.</summary>
+        [JsonProperty("served")] public bool Served { get; set; }
+
         [JsonProperty("reason")] public string Reason { get; set; }
     }
 
