@@ -876,6 +876,18 @@ namespace QuestTree.QuestGraph
         private bool _running;
         private bool _warnedOnPoll;
 
+        /// <summary>Whether the capture now starting was asked for by the AUTOMATIC tick rather than by
+        /// a key press or a campaign stop. The one thing it decides is the 3D mesh's cost gate (see
+        /// <see cref="Plan.WantsMesh"/>); the pictures are taken the same way either way. Set before
+        /// the coroutine starts and read once, in <see cref="Prepare"/>.</summary>
+        private bool _automatic;
+
+        /// <summary>The 3D mesh build now running, so <see cref="Cleanup"/> can dispose it. An iterator
+        /// that is disposed runs its finally blocks, which is where the builder waits for a GPU readback
+        /// in flight before releasing its buffer - so a raid that ends in the middle of one is the
+        /// reason this field exists rather than a local.</summary>
+        private IEnumerator _meshBuild;
+
         private Camera _camera;
 
         /// <summary>The capture's own light - see <see cref="CaptureLightIntensity"/>. Enabled only
@@ -1009,6 +1021,9 @@ namespace QuestTree.QuestGraph
                 // Set here rather than only inside the coroutine: Update can run again before the
                 // coroutine's first statement, and two captures at once would fight over the camera.
                 _running = true;
+
+                // A key press is the player asking for this map, so it always builds the 3D mesh.
+                _automatic = false;
                 StartCoroutine(Run());
             }
             catch (Exception ex)
@@ -1174,6 +1189,57 @@ namespace QuestTree.QuestGraph
                     if (!ReferenceEquals(floor, plan.Floors[plan.Floors.Count - 1])) GC.Collect();
                 }
 
+                // The 3D geometry, after the last picture and before the meta that will name it.
+                //
+                // Inside a hold of its own: the relief's rays do not care what is switched on, but the
+                // building walk reads the renderers the game has streamed out and the culler has
+                // switched off, which is exactly what HoldScene puts back. A GC first, because the last
+                // floor's hundred megabytes have just been dropped and the mesh is about to ask for
+                // arrays of its own; the frame between the two is Unity's deferred Destroy of the
+                // floor's picture happening before the collect, as it is between floors.
+                //
+                // ReleaseScene is idempotent and Cleanup calls it too, so a raid that ends in the
+                // middle of the build leaves the scene as the game had it.
+                var mesh = plan.Refused || !plan.WantsMesh ? null : BeginMesh(plan);
+
+                if (mesh != null)
+                {
+                    yield return null;
+
+                    // Driven by hand rather than yielded as a nested coroutine, and each MoveNext in
+                    // its own try: the mesh is an UPGRADE to a capture and may never cost one its
+                    // pictures. Every step inside the builder is guarded already; this is the line that
+                    // holds even if one is not.
+                    while (true)
+                    {
+                        object current = null;
+                        var more = false;
+
+                        try
+                        {
+                            more = _meshBuild.MoveNext();
+                            if (more) current = _meshBuild.Current;
+                        }
+                        catch (Exception ex)
+                        {
+                            Plugin.LogSource?.LogWarning(
+                                $"QuestTree: the 3D mesh of {plan.Key} was abandoned ({ex.GetType().Name}: " +
+                                $"{ex.Message}) - the pictures are unaffected.");
+                            more = false;
+                        }
+
+                        if (!more) break;
+
+                        yield return current;
+                    }
+
+                    EndMesh(plan, mesh);
+
+                    yield return null;
+
+                    StageMesh(plan, mesh);
+                }
+
                 // Nothing is in place until this runs: it commits every staged picture and then
                 // writes the meta. A refused capture skips it, which is the whole of what makes the
                 // refusal cost nothing.
@@ -1268,6 +1334,7 @@ namespace QuestTree.QuestGraph
                     Ppm = ppm,
                     WidthPx = (int)Math.Ceiling(widthM * ppm),
                     HeightPx = (int)Math.Ceiling(heightM * ppm),
+                    MeshFile = MapMeshFile.FileNameFor(key),
                 };
 
                 if (plan.WidthPx < 1 || plan.HeightPx < 1)
@@ -1348,6 +1415,19 @@ namespace QuestTree.QuestGraph
                     ? null
                     : FirstOf(plan.Previous);
 
+                // The 3D mesh's cost gate, HERE and not in the plan above, because it depends on
+                // whether the previous meta was accepted: a key press and a campaign stop always build
+                // the geometry, and an AutoCapture tick - which comes round every few seconds - builds
+                // it only when this map has none that the new meta will be able to carry forward. Phase
+                // 3-0 measured why it is gated at all: the relief is 45 ms and DETERMINISTIC (colliders
+                // do not stream out, so every capture produces the same grid), but the building walk is
+                // a pass over 184,000 renderers and a handful of GPU readbacks.
+                //
+                // CarriedMesh, not File.Exists: a mesh file on disk that the new meta cannot name -
+                // because this capture's recipe or scale refused the previous meta - is a file nothing
+                // will read, and skipping the build for it would silently lose the map's geometry.
+                plan.WantsMesh = !_automatic || CarriedMesh(plan, null) == null;
+
                 if (_culling != null && _culling.Length > 0)
                 {
                     note = $"{note}, culling forced ({_cullingObjects} objects)";
@@ -1424,20 +1504,7 @@ namespace QuestTree.QuestGraph
                 // cut away, and the room's own walls and contents are not.
                 var top = !IsFinite(floor.NextMinY);
 
-                if (top)
-                {
-                    floor.CameraY = maxY + TopBandCameraHeight;
-                }
-                else
-                {
-                    var ceiling = floor.NextMinY - CeilingClearance;
-
-                    // Two bands can end up close enough together that the ceiling clearance would put
-                    // the camera below the surface it is photographing.
-                    if (ceiling < maxY + MinCameraAboveBand) ceiling = maxY + MinCameraAboveBand;
-
-                    floor.CameraY = ceiling;
-                }
+                floor.CameraY = BandCameraY(maxY, floor.NextMinY);
 
                 // Down to a metre below the band's floor - and, for the top band, fifty metres
                 // further, so the terrain that lies under the lowest walkable point is drawn instead
@@ -1490,6 +1557,38 @@ namespace QuestTree.QuestGraph
                     $"({ex.GetType().Name}: {ex.Message}).");
                 return false;
             }
+        }
+
+        /// <summary>
+        /// The height a band is photographed from: the ONE rule, so the picture's camera and the 3D
+        /// relief's rays start in the same place.
+        ///
+        /// The topmost band - which is every band of a single-band map, Customs included - is the
+        /// outside of the world, and its buildings are the map. Its camera goes
+        /// <see cref="TopBandCameraHeight"/> up so roofs, upper walls and their shadows are all in
+        /// front of it; nothing is above it to clip.
+        ///
+        /// An INTERIOR band has another floor over it, and that floor's slab would hide everything the
+        /// band is for. Its camera goes just under the band above - <see cref="CeilingClearance"/>
+        /// below the upper band's lower edge - so the slab is behind the near plane and cut away, and
+        /// the room's own walls and contents are not. Two bands can end up close enough together that
+        /// the clearance would put the camera below the surface it is photographing, which is what
+        /// <see cref="MinCameraAboveBand"/> holds it off.
+        ///
+        /// Extracted from <see cref="BeginFloor"/> when the 3D relief needed it: a second copy of this
+        /// arithmetic in MapMeshBuilder would be a relief sampled from a different height than the
+        /// picture drawn over it, and nothing downstream could tell.
+        /// </summary>
+        /// <param name="maxY">The band's own upper edge.</param>
+        /// <param name="nextMinY">The lower edge of the band directly above, or NaN for the topmost
+        /// band.</param>
+        private static float BandCameraY(float maxY, float nextMinY)
+        {
+            if (!IsFinite(nextMinY)) return maxY + TopBandCameraHeight;
+
+            var ceiling = nextMinY - CeilingClearance;
+
+            return ceiling < maxY + MinCameraAboveBand ? maxY + MinCameraAboveBand : ceiling;
         }
 
         /// <summary>Renders one tile and copies it into the floor's pixel buffer at that tile's
@@ -1976,6 +2075,10 @@ namespace QuestTree.QuestGraph
                 Forget(plan, floor.File);
                 Forget(plan, floor.DistFile);
             }
+
+            // The 3D mesh is staged the same way and has to be dropped the same way: a refused capture
+            // must not leave a <key>-mesh.bin.tmp behind for the next one to trip over.
+            Forget(plan, plan.MeshFile);
         }
 
         /// <summary>One staged file deleted, if it is there. Guarded on its own: a temporary nobody
@@ -4596,6 +4699,10 @@ namespace QuestTree.QuestGraph
             var mask = CaptureMask(copied);
             _camera.cullingMask = mask;
 
+            // Kept for the 3D mesh's building walk, which filters renderers by what the PICTURE draws -
+            // see Plan.RenderMask.
+            plan.RenderMask = mask;
+
             // Read HERE and not at the CopyFrom above, which is the whole point of the move: the path a
             // camera reports changes with its projection - an orthographic camera does not get deferred
             // shading in this pipeline - so a path read before the orthographic switch describes the
@@ -4979,7 +5086,13 @@ namespace QuestTree.QuestGraph
         {
             try
             {
-                // First, and before anything is freed: a raid that ended between a floor's first and
+                // FIRST of all, before the scene is let go: a raid that ended in the middle of the 3D
+                // mesh build may have left an AsyncGPUReadback writing into a GraphicsBuffer, and
+                // disposing the build's iterator is what runs the finally that waits for it and
+                // releases the buffer. A no-op once the build has finished.
+                DisposeMeshBuild();
+
+                // Then, and before anything is freed: a raid that ended between a floor's first and
                 // last tile left the scene's culling forced on and its water off, and this is the only
                 // thing that ever runs on that path. Idempotent, so the ordinary path - where the floor
                 // loop has already released - pays nothing.
@@ -5215,6 +5328,375 @@ namespace QuestTree.QuestGraph
             public readonly double Z;
         }
 
+        // --- the 3D mesh -------------------------------------------------------------------------
+
+        /// <summary>What <see cref="MapMeshBuilder"/> needs to build this capture's geometry, out of
+        /// the plan the pictures were taken from - so the mesh and the pictures are of the same
+        /// rectangle, the same bands and the same scene, with nothing having to agree twice.
+        ///
+        /// The bands' camera height is recomputed through <see cref="BandCameraY"/> rather than read
+        /// from <see cref="FloorPlan.CameraY"/>: it is the same number for every floor that was
+        /// captured, and it is the RIGHT number for a floor whose <see cref="BeginFloor"/> gave up
+        /// before setting it - a band with no picture can still have a relief.
+        ///
+        /// Only the floors the META WILL NAME get a band, which is why this is built after the floor
+        /// loop rather than in Prepare: a mesh whose bands are not the meta's floors is one
+        /// tools/check-capture.py refuses and <see cref="SameLevels"/> throws away, so a single floor
+        /// that failed with no earlier picture to carry would otherwise cost the whole map its
+        /// geometry - reachable on Interchange, where a dark basement is exactly the floor that
+        /// fails.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        private static MapMeshBuilder.Request MeshRequest(Plan plan)
+        {
+            var request = new MapMeshBuilder.Request
+            {
+                Map = plan.Key,
+                MinX = plan.Extent.MinX,
+                MinZ = plan.Extent.MinZ,
+                MaxX = plan.Extent.MaxX,
+                MaxZ = plan.Extent.MaxZ,
+                From = plan.From,
+                RenderMask = plan.RenderMask,
+            };
+
+            foreach (var floor in plan.Floors)
+            {
+                if (floor?.Dto == null || !WillBeNamed(plan, floor)) continue;
+
+                // The topmost band's rays reach as far below it as the picture's far plane does, and
+                // only the topmost band's: see MapMeshBuilder.Band.DepthBelow and BeginFloor's use of
+                // TopBandDepthBelow, which is the same constant for the same reason.
+                var top = !IsFinite(floor.NextMinY);
+
+                request.Bands.Add(new MapMeshBuilder.Band
+                {
+                    Level = floor.Dto.Level,
+                    Name = floor.Dto.Name,
+                    MinY = floor.Dto.MinY,
+                    MaxY = floor.Dto.MaxY,
+                    CameraY = BandCameraY(floor.Dto.MaxY, floor.NextMinY),
+                    DepthBelow = top ? TopBandDepthBelow : 0f,
+                });
+            }
+
+            return request;
+        }
+
+        /// <summary>Whether <see cref="WriteMeta"/> will name this floor: it was captured this time, or
+        /// an earlier capture's picture of it is still on disk to carry. The one predicate, so the
+        /// mesh's bands and the meta's floors are the same set by construction and
+        /// <see cref="SameLevels"/> is a check rather than a coin toss.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="floor">The floor in question.</param>
+        private static bool WillBeNamed(Plan plan, FloorPlan floor)
+        {
+            if (floor == null) return false;
+            if (!floor.Failed && floor.Bytes > 0) return true;
+
+            try
+            {
+                return Carried(plan, floor) != null;
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: whether {plan.Key} \"{floor.Dto?.Name}\" keeps an earlier picture could not be " +
+                    $"decided ({ex.Message}) - it is treated as not kept.");
+                return false;
+            }
+        }
+
+        /// <summary>Starts the mesh build: the request, the collect, the scene hold and the iterator the
+        /// run will drive. Null - having said why - means the mesh phase does not happen and the capture
+        /// goes straight on to its meta.
+        ///
+        /// All of the setup is in here, inside one try, because none of it can be inside the guarded
+        /// MoveNext loop that follows: a throw from MeshRequest or HoldScene out there would skip
+        /// WriteMeta entirely and Cleanup would then drop every staged picture - the capture lost to the
+        /// feature that was meant to add to it.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        private MapMeshBuilder.Result BeginMesh(Plan plan)
+        {
+            try
+            {
+                var request = MeshRequest(plan);
+
+                if (request.Bands.Count == 0)
+                {
+                    Plugin.LogSource?.LogDebug(
+                        $"QuestTree: no 3D mesh for {plan.Key} - this capture's meta will name no floor for a " +
+                        "relief band to belong to.");
+                    return null;
+                }
+
+                var result = new MapMeshBuilder.Result();
+                var build = MapMeshBuilder.Build(request, result);
+
+                // Said out loud, because the player is standing in the raid while it happens and the
+                // screen shows it: the hold forces every renderer and object EFT's distance culling
+                // switched off back on, so distant buildings appear for as long as the build runs.
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: building {plan.Key}'s 3D map - the scene is held for up to " +
+                    $"{MapMeshBuilder.SecondsCap.ToString("0", CultureInfo.InvariantCulture)} s, so distant " +
+                    "geometry stays drawn while it runs.");
+
+                // The collect and the hold LAST, so nothing above them can leave the scene held.
+                GC.Collect();
+                HoldScene();
+
+                _meshBuild = build;
+
+                return result;
+            }
+            catch (Exception ex)
+            {
+                _meshBuild = null;
+                ReleaseScene();
+
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: the 3D mesh of {plan.Key} could not be started ({ex.GetType().Name}: " +
+                    $"{ex.Message}) - the capture's pictures are unaffected.");
+
+                return null;
+            }
+        }
+
+        /// <summary>Ends the mesh build: the iterator disposed - which is what runs the finally that
+        /// waits for a readback still in flight and releases its GPU buffers - and the scene let go.
+        /// Both are idempotent and <see cref="Cleanup"/> does them again, for the raid that ends in the
+        /// middle of a build.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="mesh">The builder's result, for the debug line.</param>
+        private void EndMesh(Plan plan, MapMeshBuilder.Result mesh)
+        {
+            DisposeMeshBuild();
+            ReleaseScene();
+
+            // The line last and in its own try: the two statements above are what the raid needs, and a
+            // Describe that threw must not be the reason the scene stayed held.
+            try
+            {
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: {plan.Key}'s scene is released after the 3D mesh " +
+                    $"({(mesh?.File == null ? "nothing was built" : mesh.File.Describe())}).");
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug($"QuestTree: the 3D mesh could not describe itself ({ex.Message}).");
+            }
+        }
+
+        /// <summary>Disposes the mesh build's iterator, if one is running. Disposing an iterator runs
+        /// its finally blocks, and inside the builder those are what wait for an AsyncGPUReadback still
+        /// writing into a buffer before that buffer is released - so this is not tidiness, it is the
+        /// last line between a raid ending mid-readback and a GPU write into freed memory.</summary>
+        private void DisposeMeshBuild()
+        {
+            var build = _meshBuild;
+            _meshBuild = null;
+
+            if (build == null) return;
+
+            try
+            {
+                (build as IDisposable)?.Dispose();
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: the 3D mesh build would not be disposed ({ex.GetType().Name}: {ex.Message}).");
+            }
+        }
+
+        /// <summary>Writes the built mesh beside the pictures as a STAGED file and records what the
+        /// meta will say about it - the same Stage/Commit pair the pictures use, for the same reason:
+        /// nothing a capture writes is in place until <see cref="WriteMeta"/> puts it there, so a
+        /// refusal or a raid that ends mid-capture leaves the set on disk exactly as it was.
+        ///
+        /// A failure here loses the mesh and nothing else: the staged file is forgotten, the meta gets
+        /// no mesh block, and the capture's pictures are written as though this feature did not
+        /// exist.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="mesh">What the builder produced. A null file means nothing was built.</param>
+        private static void StageMesh(Plan plan, MapMeshBuilder.Result mesh)
+        {
+            if (plan == null || mesh == null || mesh.File == null) return;
+
+            try
+            {
+                var bytes = MapMeshFile.ToBytes(mesh.File);
+                var sha = Sha256(bytes);
+
+                Stage(Path.Combine(plan.Dir, plan.MeshFile), bytes);
+
+                // The bands that ended up in the file, for the one thing WriteMeta can check and this
+                // cannot: that they are exactly the floors the meta will name.
+                plan.MeshLevels = new HashSet<int>();
+
+                foreach (var band in mesh.File.Bands) plan.MeshLevels.Add(band.Level);
+
+                plan.Mesh = new CaptureMesh
+                {
+                    File = plan.MeshFile,
+                    Bytes = bytes.Length,
+                    Version = MapMeshFile.Version,
+                    Cells = mesh.Cells,
+                    Triangles = mesh.Triangles,
+                    Sha256 = sha,
+                };
+
+                // The two halves are the arrays' own sizes, BEFORE deflate: the file is one deflate
+                // block, so there is no relief section and building section on disk to measure
+                // separately. The third number is what is actually on the disk.
+                plan.MeshNote =
+                    $"{MB(mesh.ReliefBytes)} MB relief + {MB(mesh.BuildingBytes)} MB buildings, " +
+                    $"{MB(bytes.Length)} MB deflated, sha256 {ShortSha(sha)}";
+            }
+            catch (Exception ex)
+            {
+                plan.Mesh = null;
+                plan.MeshNote = null;
+                plan.MeshLevels = null;
+                Forget(plan, plan.MeshFile);
+
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: the 3D mesh of {plan.Key} could not be written ({ex.GetType().Name}: " +
+                    $"{ex.Message}) - the capture's pictures are unaffected and the meta names no mesh.");
+            }
+        }
+
+        /// <summary>The mesh block an EARLIER capture of this map wrote, when this capture built none
+        /// and that file is still on disk - and null when there is none to keep.
+        ///
+        /// Only reachable on a merge, which means <see cref="LoadPrevious"/> has already accepted the
+        /// previous meta: the same extent, the same scale and the same floors, which are exactly the
+        /// things a mesh has to agree with the pictures about. The file itself is untouched by this
+        /// capture, so its length and its hash are still the ones that meta recorded.
+        ///
+        /// The file name is checked rather than trusted - it comes out of a JSON file - so a meta
+        /// naming <c>..\\..\\something-mesh.bin</c> carries nothing forward.
+        ///
+        /// Says nothing itself: it is asked twice - once by the cost gate in <see cref="Prepare"/>,
+        /// before anything has happened, and once by <see cref="WriteMeta"/>, which is where a line
+        /// about keeping a mesh belongs.
+        ///
+        /// Its BANDS are checked as well, through the previous meta's floors: that mesh was written
+        /// against those floors and this capture's <see cref="SameLevels"/> gate is what proved it, so
+        /// if this meta names a different set of floors the old mesh is one the checker would refuse
+        /// and the viewer could not peel. It is then left on disk unnamed for
+        /// <see cref="DropStalePictures"/> to sweep.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="floors">The floors this meta will name, or null at the cost gate, where no meta
+        /// exists yet and the previous floors are the best statement of what a carried mesh covers.</param>
+        private static CaptureMesh CarriedMesh(Plan plan, List<CaptureFloor> floors)
+        {
+            var previous = plan.Previous?.Mesh;
+
+            if (previous == null || !MapMeshFile.IsMeshFileName(previous.File)) return null;
+
+            if (floors != null && !SameLevels(LevelsOf(plan.Previous.Floors), floors))
+            {
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: {plan.Key}'s earlier 3D mesh covers floor(s) " +
+                    $"[{Levels(LevelsOf(plan.Previous.Floors))}] while this meta names [{Levels(floors)}] - it " +
+                    "is not carried forward.");
+                return null;
+            }
+
+            try
+            {
+                return File.Exists(Path.Combine(plan.Dir, previous.File)) ? previous : null;
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: {plan.Key}'s earlier mesh could not be looked for ({ex.Message}) - the meta " +
+                    "names no mesh.");
+                return null;
+            }
+        }
+
+        /// <summary>Whether the staged mesh's bands are exactly the floors the meta is about to
+        /// name.</summary>
+        /// <param name="levels">The levels the mesh carries a band for, or null.</param>
+        /// <param name="floors">The floors the meta will name.</param>
+        private static bool SameLevels(HashSet<int> levels, List<CaptureFloor> floors)
+        {
+            if (levels == null || floors == null) return false;
+            if (levels.Count != floors.Count) return false;
+
+            foreach (var floor in floors)
+                if (floor == null || !levels.Contains(floor.Level)) return false;
+
+            return true;
+        }
+
+        /// <summary>The levels a list of meta floors carries, as a set.</summary>
+        /// <param name="floors">The floors, or null.</param>
+        private static HashSet<int> LevelsOf(List<CaptureFloor> floors)
+        {
+            var levels = new HashSet<int>();
+
+            if (floors == null) return levels;
+
+            foreach (var floor in floors)
+                if (floor != null) levels.Add(floor.Level);
+
+            return levels;
+        }
+
+        /// <summary>A set of floor levels for a log line, lowest first.</summary>
+        /// <param name="levels">The levels.</param>
+        private static string Levels(HashSet<int> levels)
+        {
+            if (levels == null) return "none";
+
+            var sorted = new List<int>(levels);
+            sorted.Sort();
+
+            return string.Join(", ", sorted.Select(l => l.ToString(CultureInfo.InvariantCulture)).ToArray());
+        }
+
+        /// <summary>The floor levels a meta names, for the line above.</summary>
+        /// <param name="floors">The floors.</param>
+        private static string Levels(List<CaptureFloor> floors)
+        {
+            if (floors == null) return "none";
+
+            var sorted = floors.Where(f => f != null).Select(f => f.Level).ToList();
+            sorted.Sort();
+
+            return string.Join(", ", sorted.Select(l => l.ToString(CultureInfo.InvariantCulture)).ToArray());
+        }
+
+        /// <summary>A byte array's SHA-256 as lower-case hex. The meta carries it so a reader - this
+        /// machine's Maps tab, or a client that downloaded the set from a host - can tell a mesh that
+        /// belongs to a meta from one that was replaced under it.</summary>
+        /// <param name="bytes">The bytes to hash.</param>
+        private static string Sha256(byte[] bytes)
+        {
+            using (var sha = System.Security.Cryptography.SHA256.Create())
+            {
+                var hash = sha.ComputeHash(bytes);
+                var text = new StringBuilder(hash.Length * 2);
+
+                foreach (var b in hash) text.Append(b.ToString("x2", CultureInfo.InvariantCulture));
+
+                return text.ToString();
+            }
+        }
+
+        /// <summary>The head of a hash, for a log line that has to be readable.</summary>
+        /// <param name="sha">The full hex hash.</param>
+        private static string ShortSha(string sha) =>
+            string.IsNullOrEmpty(sha) ? "?" : (sha.Length <= 8 ? sha : sha.Substring(0, 8) + "...");
+
+        /// <summary>Bytes as megabytes, two decimals - the way the mesh's log line reports its
+        /// sections.</summary>
+        /// <param name="bytes">The byte count.</param>
+        private static string MB(long bytes) =>
+            (bytes / (1024d * 1024d)).ToString("0.00", CultureInfo.InvariantCulture);
+
         // --- the meta --------------------------------------------------------------------------
 
         /// <summary>Writes the meta file, deletes the pictures of a previous capture that this one
@@ -5282,6 +5764,71 @@ namespace QuestTree.QuestGraph
                     if (!string.IsNullOrEmpty(floor.DistFile)) keep.Add(floor.DistFile);
                 }
 
+                // The mesh, before the meta that names it and after the pictures, for the same reason
+                // the sidecars go before it: the meta is the last thing a reader trusts, so a mesh it
+                // names is a mesh that is already there. A capture that built none leaves whatever an
+                // earlier capture wrote on disk and names no mesh at all - the mesh is REBUILT whole by
+                // every capture, never merged, so an unnamed one is simply not read.
+                // A capture that built none keeps the one an earlier capture of this map wrote - the
+                // same rule Carried follows for a floor's picture, and for the same reason: the meta is
+                // rewritten from scratch every time, so a block it does not carry is a file nothing
+                // reads. This is what makes the AutoCapture cost gate free (Plan.WantsMesh): a tick
+                // that skips the build does not cost the map its geometry.
+                // The check that can fail: a mesh whose bands are not the floors this meta names is a
+                // mesh the checker refuses and the viewer could not peel, so it is dropped here - with
+                // the numbers in the line - rather than shipped. Normally they are the same set by
+                // construction: both come from the same plan's floors.
+                if (plan.Mesh != null && !SameLevels(plan.MeshLevels, floors))
+                {
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: the 3D mesh of {plan.Key} was thrown away - its relief covers floor(s) " +
+                        $"[{Levels(plan.MeshLevels)}] while the meta names [{Levels(floors)}], and a mesh whose " +
+                        "bands are not the picture's floors cannot be drawn.");
+
+                    Forget(plan, plan.Mesh.File);
+                    plan.Mesh = null;
+                    plan.MeshNote = null;
+                }
+
+                var mesh = plan.Mesh ?? CarriedMesh(plan, floors);
+
+                if (plan.Mesh != null)
+                {
+                    // Its OWN try, unlike the pictures': by this line every picture is committed and the
+                    // meta is the only thing left to write, so a .bin that will not move - held open by
+                    // the Maps tab, an antivirus or a host sync - must not take the meta down with it.
+                    // The capture then has its pictures and no mesh, which is a state everything
+                    // downstream already handles.
+                    try
+                    {
+                        Commit(Path.Combine(plan.Dir, plan.Mesh.File));
+
+                        Plugin.LogSource?.LogInfo(
+                            $"QuestTree: mesh for {plan.Key} written - {plan.MeshNote}.");
+                    }
+                    catch (Exception ex)
+                    {
+                        Plugin.LogSource?.LogWarning(
+                            $"QuestTree: {plan.Key}'s 3D mesh could not be put in place ({ex.GetType().Name}: " +
+                            $"{ex.Message}) - the pictures and the meta are written without it.");
+
+                        Forget(plan, plan.Mesh.File);
+                        plan.Mesh = null;
+                        plan.MeshNote = null;
+                        mesh = CarriedMesh(plan, floors);
+                    }
+                }
+
+                if (mesh != null)
+                {
+                    keep.Add(mesh.File);
+
+                    if (plan.Mesh == null)
+                        Plugin.LogSource?.LogDebug(
+                            $"QuestTree: {plan.Key} built no 3D mesh this time, so the one an earlier capture " +
+                            $"wrote ({mesh.File}, {mesh.Bytes} bytes) is kept and the meta goes on naming it.");
+                }
+
                 var now = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
 
                 var meta = new CaptureMeta
@@ -5306,6 +5853,7 @@ namespace QuestTree.QuestGraph
                     TimeOfDay = TimeOfDay(),
                     Floors = floors,
                     Labels = plan.Labels,
+                    Mesh = mesh,
                 };
 
                 var json = JsonConvert.SerializeObject(meta, Formatting.Indented);
@@ -5421,12 +5969,18 @@ namespace QuestTree.QuestGraph
         }
 
         /// <summary>Removes pictures left by an earlier capture of this map that the new meta does not
-        /// name - a floor that has since merged into another, or a level that renumbered. Run only
-        /// after the new meta is safely down, so a failure above never deletes a working set.</summary>
+        /// name - a floor that has since merged into another, or a level that renumbered - AND a 3D mesh
+        /// the new meta has stopped naming. Run only after the new meta is safely down, so a failure
+        /// above never deletes a working set.
+        ///
+        /// The mesh belongs here and not in a sweep of its own because the rule is the same one: a file
+        /// the meta does not name is a file nothing reads, and leaving a megabyte of geometry from a
+        /// capture whose extent or floors have moved on is how a folder grows things that look current
+        /// and are not. The packaging gates call an unnamed mesh an orphan for the same reason.</summary>
         /// <param name="plan">The capture's plan.</param>
         /// <param name="keep">The file names the new meta accounts for - every named picture and its
         /// distance sidecar, which is NOT stale: it is what the next capture merges against, and the
-        /// glob below matches it as well as the pictures.</param>
+        /// glob below matches it as well as the pictures - plus the mesh, when one is named.</param>
         private static void DropStalePictures(Plan plan, HashSet<string> keep)
         {
             try
@@ -5438,6 +5992,16 @@ namespace QuestTree.QuestGraph
 
                     File.Delete(file);
                     Plugin.LogSource?.LogDebug($"QuestTree: removed {name}, which this capture of {plan.Key} has no floor for.");
+                }
+
+                foreach (var file in Directory.GetFiles(plan.Dir, MapMeshFile.FileNameFor("*")))
+                {
+                    var name = Path.GetFileName(file);
+                    if (!MapMeshFile.IsMeshFileName(name) || keep.Contains(name)) continue;
+
+                    File.Delete(file);
+                    Plugin.LogSource?.LogDebug(
+                        $"QuestTree: removed {name}, a 3D mesh this capture of {plan.Key} no longer names.");
                 }
             }
             catch (Exception ex)
@@ -6066,6 +6630,42 @@ namespace QuestTree.QuestGraph
 
             public readonly List<FloorPlan> Floors = new List<FloorPlan>();
             public List<CaptureLabel> Labels = new List<CaptureLabel>();
+
+            /// <summary>The culling mask the capture's camera was given (<see cref="BuildCamera"/>) -
+            /// the game's own mask minus <see cref="ExcludedLayerNames"/>. Kept on the plan so the 3D
+            /// mesh's building walk can filter renderers by exactly what the PICTURE drew, without a
+            /// second opinion of it: Big Red's shell is on HighPolyCollider, which a list of "building
+            /// layers" would never have guessed.</summary>
+            public int RenderMask = ~0;
+
+            /// <summary>The 3D mesh's file name in this capture's folder - <c>&lt;key&gt;-mesh.bin</c>,
+            /// always set, whether or not this capture builds one. It has to be: the abort path
+            /// (<see cref="DropStaged"/>) deletes the staged file by this name, and a capture that got
+            /// far enough to stage one and then refused is exactly the case where
+            /// <see cref="WantsMesh"/> says nothing useful.</summary>
+            public string MeshFile;
+
+            /// <summary>Whether this capture builds the 3D geometry at all. True for a key press and a
+            /// campaign stop; for an AutoCapture tick, only when the map has no mesh file yet. The
+            /// relief is 45 ms, but the building walk is a pass over 184,000 renderers and a handful of
+            /// GPU readbacks, which is not something to spend every five seconds on a map that already
+            /// has one.</summary>
+            public bool WantsMesh;
+
+            /// <summary>What the meta will say about the mesh, once it is staged - null when none was
+            /// built or the write failed. Its presence is also what tells <see cref="WriteMeta"/> to
+            /// commit the staged file.</summary>
+            public CaptureMesh Mesh;
+
+            /// <summary>The mesh's own log line, held from the staging to the commit so the line is
+            /// printed when the file is really in place.</summary>
+            public string MeshNote;
+
+            /// <summary>The floor levels the staged mesh carries a relief band for. Checked against the
+            /// floors the meta ends up naming: the mesh's bands and the meta's floors ARE the same set
+            /// by construction, and a capture where they are not is one whose mesh
+            /// tools/check-capture.py would refuse - so it is not written at all.</summary>
+            public HashSet<int> MeshLevels;
         }
 
         /// <summary>One floor's state while it is being captured.</summary>
@@ -6236,6 +6836,46 @@ namespace QuestTree.QuestGraph
 
             [JsonProperty("floors")] public List<CaptureFloor> Floors { get; set; } = new List<CaptureFloor>();
             [JsonProperty("labels")] public List<CaptureLabel> Labels { get; set; } = new List<CaptureLabel>();
+
+            /// <summary>The 3D geometry beside the pictures, or ABSENT when this capture built none -
+            /// a set captured before the feature existed, a set from DynamicMaps' art folder, a set
+            /// synced from an old host, or a capture whose mesh phase failed. Every reader carries on
+            /// drawing the flat picture without it, which is what makes "absent" cost nothing and is
+            /// why adding it is not a schema bump.
+            ///
+            /// Additive, not merged: the mesh is REBUILT whole by every capture (the relief is 45 ms
+            /// and deterministic), so this block always describes the file THIS capture wrote, and a
+            /// meta carried forward from an earlier capture of a floor says nothing about it.</summary>
+            [JsonProperty("mesh")] public CaptureMesh Mesh { get; set; }
+        }
+
+        /// <summary>The mesh file the capture wrote, as the meta describes it. The JSON names here are
+        /// a CONTRACT: the host mirrors this shape on the wire as MapCaptureMeshDto and
+        /// tools/check-capture.py reads it, so a rename is a change on three sides at once.</summary>
+        private sealed class CaptureMesh
+        {
+            /// <summary>The mesh's file name, beside this meta - <c>&lt;key&gt;-mesh.bin</c>.</summary>
+            [JsonProperty("file")] public string File { get; set; }
+
+            /// <summary>Its size on disk, deflated. Checked by the packaging gates and by the download,
+            /// which will not install a mesh whose length disagrees with this.</summary>
+            [JsonProperty("bytes")] public long Bytes { get; set; }
+
+            /// <summary>The format version inside the file (<see cref="MapMeshFile.Version"/>), so a
+            /// reader can tell a mesh it cannot read from one that is merely absent WITHOUT inflating
+            /// it.</summary>
+            [JsonProperty("version")] public int Version { get; set; }
+
+            /// <summary>Relief cells across every band, and triangles across every building: the two
+            /// numbers that say what is in the file, for a reader deciding whether it is worth loading
+            /// and for the checker proving the file matches its meta.</summary>
+            [JsonProperty("cells")] public long Cells { get; set; }
+
+            [JsonProperty("triangles")] public long Triangles { get; set; }
+
+            /// <summary>SHA-256 of the file's bytes, lower-case hex. What tells a mesh that belongs to
+            /// this meta from one left behind by an older capture or truncated in transit.</summary>
+            [JsonProperty("sha256")] public string Sha256 { get; set; }
         }
 
         private sealed class CaptureExtent
@@ -6338,7 +6978,11 @@ namespace QuestTree.QuestGraph
         /// nothing is being captured: there is no capture installed in this raid, one is already
         /// running, there is nobody alive to photograph from, or the capture refused this raid in its
         /// own first step. The caller knows what a refusal means for IT and says so itself.</summary>
-        public static bool TryStartCapture()
+        /// <param name="automatic">True for the AutoCapture tick, which comes round every few seconds:
+        /// it takes its pictures exactly as any other capture does, but it builds the 3D mesh only for
+        /// a map that has none yet - see <see cref="Plan.WantsMesh"/>. False, the default, for a
+        /// campaign stop, which is a place somebody chose.</param>
+        public static bool TryStartCapture(bool automatic = false)
         {
             try
             {
@@ -6350,6 +6994,7 @@ namespace QuestTree.QuestGraph
                 // Set before the coroutine is started, for the same reason the key press does it: a
                 // second caller in the same frame must be refused rather than fight for the camera.
                 runner._running = true;
+                runner._automatic = automatic;
                 runner.StartCoroutine(runner.Run());
 
                 // The flag, not a bare true: StartCoroutine runs the coroutine's body up to its first

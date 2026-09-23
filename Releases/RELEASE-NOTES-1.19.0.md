@@ -338,7 +338,12 @@ shoots a floor with another above it from just under that one, does what it was 
 the build that draws the HighPolyCollider layer (the probe run inside it found the building's
 walls-and-roof mesh there, excluded by name).
 
-**Not seen yet.** **A capture that MERGES.** Every capture before the ARGB32 fix replaced the whole
+**Not seen yet.** **Everything three-dimensional.** No capture has run the relief or the building
+readback for real, no 3D map has been drawn on a screen, no mesh has crossed to a host: the first
+Customs press on this build writes `bigmap-mesh.bin` and its three log lines, `tools/check-capture.py`
+is its gate, and the Maps tab is where the ground, the draped picture, the standing buildings, the
+cut-out edge (whether the Standard shader's cutout variant survived this game's shader stripping),
+the marker heights and the label culling are judged. **A capture that MERGES.** Every capture before the ARGB32 fix replaced the whole
 picture, so no set on disk has yet been made of more than one capture; the first capture after it
 should log the previous picture as read and keep the far side of the map while it improves the
 near one - the case to look at is a capture inside Big Red after a campaign, which used to erase

@@ -20,6 +20,15 @@ What it checks, per capture folder <key>/:
      capture's capturedAt. A v1 zone file (every shipped seed) or a missing one is a WARN, not a
      failure: it means this capture cannot be cross-checked yet, which is the normal state until the
      map has been raided with a v2 client.
+  4. the 3D mesh, when the meta carries a "mesh" block (it is OPTIONAL - a capture taken before the
+     feature existed, or one whose mesh phase failed, has none and is perfectly valid): the file
+     exists and is exactly meta.mesh.bytes long, its SHA-256 is meta.mesh.sha256, it inflates as one
+     raw-deflate block with nothing before or after it, its magic is QTM1 and its version is
+     meta.mesh.version, its extent equals the meta's to the bit, its band levels are the meta's floor
+     levels, every band is ceil(span / cellMetres) cells on each axis, the cell and triangle totals
+     are meta.mesh.cells and meta.mesh.triangles, and every triangle index is inside its own
+     building's vertex count. A <key>-mesh.bin on disk that the meta does not name is a WARN - it is
+     what an older capture leaves when a later one builds no mesh, and nothing reads it.
 
 What it does NOT check, by design:
   - the pixels. Whether the PNG is the right map, drawn the right way up, or blank, is exactly what
@@ -34,15 +43,24 @@ Proven able to fail before it shipped: against generated fakes it exits 1 naming
 field for a PNG one row short of its meta, for an extent 3 m from the zone file's, and for a
 schemaVersion 2 meta, and exits 0 on the valid one; see the report in the commit that added it.
 
+The mesh gate was proven the same way, against eleven synthetic captures written from Python to
+MapMeshFile's byte table: it exits 0 on the valid one and on a mesh file the meta does not name (with
+the WARN), and exits 1 naming the fault for a truncated deflate stream, a meta sha256 that is not the
+file's, a mesh extent 3 m from the meta's, a band level no floor has, a band that is not
+ceil(span / cell) cells, a triangle index past its building's vertices, a meta cell count that is not
+the file's, a meta byte count that is not the file's, and a meta naming a mesh that is not there.
+
 Usage:  python tools/check-capture.py [captures-root] [zones-folder]
         defaults: C:\\Games\\SPT\\BepInEx\\plugins\\QuestTree\\captures
                   C:\\Games\\SPT\\SPT_Runtime\\user\\mods\\QuestTree\\zones
 """
 
+import hashlib
 import json
 import math
 import struct
 import sys
+import zlib
 from pathlib import Path
 
 CAPTURES = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(
@@ -55,6 +73,29 @@ MAX_PNG_BYTES = 48 * 1024 * 1024  # MapCapture.MaxFloorPngBytes: 0.25 m/px floor
 PIXEL_TOLERANCE = 1     # px, on each axis, against ceil(span * pxPerMetre)
 EDGE_TOLERANCE = 0.5    # m, on each of the four edges, against the zone file's extent
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+
+# The mesh file's format, from Source\Tarkov-QuestTree\QuestGraph\MapMeshFile.cs - that class's
+# Write() doc comment is the byte table these constants and read_mesh() below follow. The caps are
+# ITS caps: a file this script accepts and the client refuses would be a check that cannot fail.
+MESH_MAGIC = b"QTM1"
+MESH_VERSION = 1            # MapMeshFile.Version
+MESH_NO_HIT = 0xFFFF        # MapMeshFile.NoHit
+MESH_MAX_BANDS = 8
+MESH_MAX_CELLS_PER_BAND = 4_000_000
+MESH_MAX_BUILDINGS = 20_000
+MESH_MAX_VERTICES_PER_BUILDING = 2_000_000
+MESH_MAX_VERTICES_TOTAL = 4_000_000
+MESH_MAX_TRIANGLES = 2_000_000
+# What the file may inflate to. 8 bands of 4 M cells is 96 MB by the caps above; the bound exists so
+# a corrupt or hostile deflate stream cannot be expanded until this process dies, which is the same
+# reason MapMeshFile checks every count before it allocates.
+MESH_MAX_INFLATED_BYTES = 192 * 1024 * 1024
+MESH_SUFFIX = "-mesh.bin"   # MapMeshFile.FileNameFor
+
+
+class MeshError(Exception):
+    """A mesh file that cannot be trusted, with the reason in its message. One exception type, like
+    the client's InvalidDataException, so every failure reads the same way."""
 
 
 def fail_hard(message):
@@ -296,6 +337,303 @@ def check_zone(key, extent, levels, errors, warnings):
     return column, number(zextent.get("rotation"))
 
 
+def inflate_mesh(data):
+    """The mesh file's bytes inflated, or a MeshError. The whole file is ONE raw-deflate block with
+    the magic inside it (MapMeshFile.Write), so there is no header to read without inflating and
+    zlib.decompressobj(-15) is the only way in.
+
+    A truncated file is the case this function exists for, and raw deflate carries no checksum for it
+    to fail: zlib simply hands back the bytes it managed and leaves eof False. So eof is checked, and
+    a stream that never ended is a truncation whatever its contents looked like."""
+    un = zlib.decompressobj(-15)
+    try:
+        out = un.decompress(data, MESH_MAX_INFLATED_BYTES + 1)
+    except zlib.error as exc:
+        raise MeshError(f"is not a deflate stream ({exc})")
+    if len(out) > MESH_MAX_INFLATED_BYTES:
+        raise MeshError(f"inflates to more than {MESH_MAX_INFLATED_BYTES // 1048576} MB")
+    if not un.eof:
+        raise MeshError(f"is a TRUNCATED deflate stream - it inflated {len(out)} byte(s) and then "
+                        f"ran out mid-block")
+    if un.unused_data:
+        raise MeshError(f"carries {len(un.unused_data)} byte(s) after the end of its deflate stream")
+    return out
+
+
+class MeshCursor:
+    """Reads fixed-size little-endian fields out of the inflated bytes, and refuses to run past the
+    end - so a file that stops inside a grid says where it stopped instead of handing back a short
+    array that would read as flat ground."""
+
+    def __init__(self, data):
+        self.data = data
+        self.at = 0
+
+    def take(self, count, what):
+        if self.at + count > len(self.data):
+            raise MeshError(f"ends inside {what}: {len(self.data) - self.at} of {count} byte(s) left")
+        chunk = self.data[self.at:self.at + count]
+        self.at += count
+        return chunk
+
+    def i32(self, what):
+        return struct.unpack("<i", self.take(4, what))[0]
+
+    def f32(self, what):
+        return struct.unpack("<f", self.take(4, what))[0]
+
+    def f64(self, what):
+        return struct.unpack("<d", self.take(8, what))[0]
+
+    def u16s(self, count, what):
+        return struct.unpack(f"<{count}H", self.take(2 * count, what)) if count else ()
+
+    def u32s(self, count, what):
+        return struct.unpack(f"<{count}I", self.take(4 * count, what)) if count else ()
+
+
+def read_mesh(data):
+    """The mesh file as a dict, or a MeshError naming the first thing that is wrong. Follows
+    MapMeshFile.Write's byte table exactly, and checks every count against the format's own cap
+    BEFORE it reads the array behind it."""
+    body = inflate_mesh(data)
+    cur = MeshCursor(body)
+
+    magic = cur.take(4, "the magic")
+    if magic != MESH_MAGIC:
+        raise MeshError(f"starts {magic!r}, not {MESH_MAGIC!r} - it is not a QuestTree mesh file")
+
+    version = cur.i32("the version")
+
+    mesh = {
+        "version": version,
+        "minX": cur.f64("the extent"),
+        "minZ": cur.f64("the extent"),
+        "maxX": cur.f64("the extent"),
+        "maxZ": cur.f64("the extent"),
+        "yMin": cur.f32("the y range"),
+        "yMax": cur.f32("the y range"),
+        "bands": [],
+        "buildings": 0,
+        "cells": 0,
+        "triangles": 0,
+    }
+
+    if version != MESH_VERSION:
+        raise MeshError(f"is version {version}; this script reads version {MESH_VERSION}")
+    if not mesh["maxX"] > mesh["minX"] or not mesh["maxZ"] > mesh["minZ"]:
+        raise MeshError(f"has an empty or inverted extent: x {mesh['minX']:g}..{mesh['maxX']:g}, "
+                        f"z {mesh['minZ']:g}..{mesh['maxZ']:g}")
+    if not mesh["yMax"] > mesh["yMin"]:
+        raise MeshError(f"has an empty y range: {mesh['yMin']:g}..{mesh['yMax']:g}")
+
+    bands = cur.i32("the band count")
+    if bands < 0 or bands > MESH_MAX_BANDS:
+        raise MeshError(f"claims {bands} bands; the cap is {MESH_MAX_BANDS}")
+
+    for index in range(bands):
+        where = f"band {index}"
+        level = cur.i32(f"{where}'s level")
+        cell = cur.f32(f"{where}'s cell size")
+        width = cur.i32(f"{where}'s width")
+        height = cur.i32(f"{where}'s height")
+
+        if width <= 0 or height <= 0:
+            raise MeshError(f"{where} (level {level}) claims {width}x{height} cells")
+        if not cell > 0:
+            raise MeshError(f"{where} (level {level}) claims a cell size of {cell:g} m")
+        if width * height > MESH_MAX_CELLS_PER_BAND:
+            raise MeshError(f"{where} (level {level}) claims {width * height} cells; the cap is "
+                            f"{MESH_MAX_CELLS_PER_BAND}")
+        if any(band["level"] == level for band in mesh["bands"]):
+            raise MeshError(f"has two level {level} bands - a level names a band")
+
+        cells = width * height
+        heights = cur.u16s(cells, f"{where}'s heights")
+        distance = cur.take(cells, f"{where}'s distances")
+
+        mesh["bands"].append({
+            "level": level,
+            "cell": cell,
+            "width": width,
+            "height": height,
+            "hit": sum(1 for code in heights if code != MESH_NO_HIT),
+            "distance": len(distance),
+        })
+        mesh["cells"] += cells
+
+    buildings = cur.i32("the building count")
+    if buildings < 0 or buildings > MESH_MAX_BUILDINGS:
+        raise MeshError(f"claims {buildings} buildings; the cap is {MESH_MAX_BUILDINGS}")
+    mesh["buildings"] = buildings
+
+    vertices_total = 0
+    levels = {band["level"] for band in mesh["bands"]}
+
+    for index in range(buildings):
+        where = f"building {index}"
+        key = cur.i32(f"{where}'s key")
+        level = cur.i32(f"{where}'s level")
+        count = cur.i32(f"{where}'s vertex count")
+
+        if count < 0 or count > MESH_MAX_VERTICES_PER_BUILDING:
+            raise MeshError(f"{where} (key {key}) claims {count} vertices; the cap is "
+                            f"{MESH_MAX_VERTICES_PER_BUILDING}")
+        vertices_total += count
+        if vertices_total > MESH_MAX_VERTICES_TOTAL:
+            raise MeshError(f"claims {vertices_total} vertices by {where}; the cap is "
+                            f"{MESH_MAX_VERTICES_TOTAL}")
+
+        cur.take(2 * count, f"{where}'s x")
+        ys = cur.u16s(count, f"{where}'s y")
+        cur.take(2 * count, f"{where}'s z")
+
+        indices = cur.i32(f"{where}'s index count")
+        if indices < 0 or indices % 3 != 0:
+            raise MeshError(f"{where} (key {key}) claims {indices} indices, which is not a "
+                            f"non-negative multiple of 3")
+        mesh["triangles"] += indices // 3
+        if mesh["triangles"] > MESH_MAX_TRIANGLES:
+            raise MeshError(f"claims {mesh['triangles']} triangles by {where}; the cap is "
+                            f"{MESH_MAX_TRIANGLES}")
+
+        # The index check, per building and against ITS vertex count: an index past it is what would
+        # throw from inside the viewer's SetTriangles, where nothing could say which building it was.
+        for position, value in enumerate(cur.u32s(indices, f"{where}'s indices")):
+            if value >= count:
+                raise MeshError(f"{where} (key {key}) index {position} is {value}, past its "
+                                f"{count} vertices")
+
+        # A vertex height of NoHit is a non-finite position the writer should have dropped, and it
+        # would be a NaN in the viewer's vertex buffer - which draws nothing and says nothing.
+        for position, value in enumerate(ys):
+            if value == MESH_NO_HIT:
+                raise MeshError(f"{where} (key {key}) vertex {position} has no height (NoHit), "
+                                f"which would be a NaN vertex")
+
+        if levels and level not in levels:
+            raise MeshError(f"{where} (key {key}) is on level {level}, which no band is")
+
+    if cur.at != len(body):
+        raise MeshError(f"carries {len(body) - cur.at} byte(s) after its last building")
+
+    return mesh
+
+
+def check_mesh(meta, folder, key, extent, levels, errors, warnings):
+    """The 3D mesh beside the pictures, when the meta names one. Returns the summary line's mesh
+    column."""
+    block = meta.get("mesh")
+    orphans = sorted(p.name for p in folder.iterdir()
+                     if p.is_file() and p.name.lower().endswith(MESH_SUFFIX))
+
+    if block is None:
+        if orphans:
+            warnings.append(f"{key}: {', '.join(orphans)} is on disk but the meta names no mesh - it "
+                            f"is what an older capture leaves behind, and nothing reads it")
+        return "no mesh"
+
+    if not isinstance(block, dict):
+        errors.append(f"{key}: mesh is not an object")
+        return "mesh UNREADABLE"
+
+    rel = block.get("file")
+    if not isinstance(rel, str) or not rel.strip():
+        errors.append(f"{key}: mesh.file is missing or empty")
+        return "mesh UNREADABLE"
+
+    parts = Path(rel.replace("\\", "/"))
+    if parts.is_absolute() or ".." in parts.parts:
+        errors.append(f"{key}: mesh.file {rel!r} is not a path inside the capture folder")
+        return "mesh UNREADABLE"
+
+    path = folder / parts
+    if not path.is_file():
+        errors.append(f"{key}: mesh.file {rel!r} does not exist in {folder} - the meta promises "
+                      f"geometry that is not there")
+        return "mesh MISSING"
+
+    for name in orphans:
+        if name.lower() != parts.name.lower():
+            warnings.append(f"{key}: {name} is on disk but the meta names {parts.name} - it is what "
+                            f"an older capture left behind, and nothing reads it")
+
+    claimed_bytes = block.get("bytes")
+    claimed_version = block.get("version")
+    claimed_cells = block.get("cells")
+    claimed_triangles = block.get("triangles")
+    sha = block.get("sha256")
+
+    for field, value in (("bytes", claimed_bytes), ("version", claimed_version),
+                         ("cells", claimed_cells), ("triangles", claimed_triangles)):
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            errors.append(f"{key}: mesh.{field} {value!r} is missing or not a non-negative integer")
+            return "mesh UNREADABLE"
+
+    if not isinstance(sha, str) or len(sha) != 64 or any(c not in "0123456789abcdef" for c in sha):
+        errors.append(f"{key}: mesh.sha256 {sha!r} is not 64 lower-case hex digits")
+        return "mesh UNREADABLE"
+
+    data = path.read_bytes()
+
+    if len(data) != claimed_bytes:
+        errors.append(f"{key}: {rel} is {len(data)} bytes but mesh.bytes says {claimed_bytes} - the "
+                      f"meta and the file on disk are from different captures")
+
+    actual_sha = hashlib.sha256(data).hexdigest()
+    if actual_sha != sha:
+        errors.append(f"{key}: {rel}'s sha256 is {actual_sha[:16]}... but mesh.sha256 says "
+                      f"{sha[:16]}... - this is not the mesh this meta describes")
+
+    try:
+        mesh = read_mesh(data)
+    except MeshError as exc:
+        errors.append(f"{key}: {rel} {exc}")
+        return "mesh BROKEN"
+
+    if mesh["version"] != claimed_version:
+        errors.append(f"{key}: {rel} is version {mesh['version']} but mesh.version says "
+                      f"{claimed_version}")
+
+    if extent is not None:
+        min_x, min_z, max_x, max_z = extent
+        # Exactly, not within a tolerance: both sides are the same doubles the harvest measured, and
+        # a mesh quantised over a different rectangle draws every building in the wrong place.
+        for field, mine, theirs in (("minX", mesh["minX"], min_x), ("minZ", mesh["minZ"], min_z),
+                                    ("maxX", mesh["maxX"], max_x), ("maxZ", mesh["maxZ"], max_z)):
+            if mine != theirs:
+                errors.append(f"{key}: {rel}'s extent.{field} {mine!r} is not the meta's {theirs!r} "
+                              f"- the mesh is quantised over a different rectangle")
+
+        for band in mesh["bands"]:
+            want_w = math.ceil((max_x - min_x) / band["cell"])
+            want_h = math.ceil((max_z - min_z) / band["cell"])
+            if band["width"] != want_w or band["height"] != want_h:
+                errors.append(f"{key}: {rel} band {band['level']} is {band['width']}x"
+                              f"{band['height']} cells but the extent's "
+                              f"{max_x - min_x:g}x{max_z - min_z:g} m at {band['cell']:g} m wants "
+                              f"{want_w}x{want_h}")
+
+    mesh_levels = {band["level"] for band in mesh["bands"]}
+    if mesh_levels != levels:
+        errors.append(f"{key}: {rel} has bands {sorted(mesh_levels)} but the meta's floors are "
+                      f"{sorted(levels)} - a band the picture has no floor for cannot be drawn, and "
+                      f"a floor with no band has no ground")
+
+    if mesh["cells"] != claimed_cells:
+        errors.append(f"{key}: {rel} holds {mesh['cells']} cells but mesh.cells says {claimed_cells}")
+    if mesh["triangles"] != claimed_triangles:
+        errors.append(f"{key}: {rel} holds {mesh['triangles']} triangles but mesh.triangles says "
+                      f"{claimed_triangles}")
+
+    hit = sum(band["hit"] for band in mesh["bands"])
+
+    return (f"mesh {len(data) / 1048576:.2f} MB, {len(mesh['bands'])} band(s), "
+            f"{mesh['cells']} cells ({(100 * hit / mesh['cells']) if mesh['cells'] else 0:.0f} % "
+            f"hit), {mesh['buildings']} building(s), "
+            f"{mesh['triangles']} triangles")
+
+
 def check_capture(folder, errors, warnings):
     """Validates one capture folder. Returns its summary line, or None if there was nothing to read."""
     key = folder.name
@@ -341,6 +679,8 @@ def check_capture(folder, errors, warnings):
     extent = check_extent(meta, errors, key)
     levels, pixels, total = check_floors(meta, folder, key, extent, px_per_metre, errors)
 
+    mesh = check_mesh(meta, folder, key, extent, levels, errors, warnings)
+
     zones, rotation = check_zone(key, extent, levels, errors, warnings)
     meta_rotation = number(meta.get("rotation"))
     if rotation is not None and meta_rotation is not None and abs(meta_rotation - rotation) > 0.01:
@@ -350,7 +690,8 @@ def check_capture(folder, errors, warnings):
     floor_count = len(meta["floors"]) if isinstance(meta.get("floors"), list) else 0
     scale = f"{1 / px_per_metre:.2f} m/px" if px_per_metre else "? m/px"
     captured = meta.get("capturedAt") or "?"
-    return (f"{key}: {floor_count} floor(s), {pixels} @ {scale}, {total / 1048576:.1f} MB, {zones}",
+    return (f"{key}: {floor_count} floor(s), {pixels} @ {scale}, {total / 1048576:.1f} MB, {zones}\n"
+            f"    {mesh}",
             captured)
 
 

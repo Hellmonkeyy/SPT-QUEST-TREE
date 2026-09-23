@@ -173,6 +173,42 @@ captured map carries our own credit line naming the build, the date and the raid
   rather than merged into, and the collider layers still excluded are the ones the game's camera never
   draws either. Seen on screen on 2026-09-23: Big Red is a warehouse with a roof in the Customs
   picture, two campaigns on this build.
+- **The capture now also measures the map's shape.** The picture is a photograph from above; the
+  mesh is the ground and the buildings as geometry, written beside it in one press. The ground
+  comes from a raycast grid at two metres a cell, cast from each floor band's own camera height -
+  the experiments measured the whole of Customs at 45 ms through `RaycastCommand`, against 290 ms
+  one ray at a time, and measured something better: colliders do NOT stream out with the player, so
+  the ground comes back complete from anywhere on the map and needs none of the merging the pixels
+  need. The buildings come from the renderers themselves, 184,000 of them on Customs filtered down
+  to a few hundred by size and by the layers the picture draws, with each LOD group's last real
+  geometry step taken rather than its impostor card, and with the meshes the graphics card holds
+  alone read back asynchronously off their own buffers - never by writing a mesh's buffer target,
+  which killed the process outright on 2026-09-22 and is now forbidden everywhere in this feature.
+  Everything is chunked over frames (20,000 rays, 20,000 renderers, one building), capped at
+  300,000 triangles and twenty seconds, and says in three log lines what it built and what it cut.
+- **Maps: 3D.** A captured map now opens as ground with its picture draped over it and its
+  buildings standing on it - drag to move, right-drag to turn and tilt, scroll to come closer, and
+  the floor picker peels the storeys. Markers, extracts and place names sit on the ground at their
+  real height. The new **3D relief** toggle on the map (and **Map view** in Settings) switches back
+  to the flat picture; maps with no relief captured for them are unchanged. "Mirror map artwork"
+  and "Extra map artwork rotation" do not apply in 3D. The geometry is built once per file and
+  cached across repaints, so clicking a quest row does not re-triangulate a map.
+- **The 3D map travels with the pictures.** A capture's mesh - the ground relief and the building
+  shells - goes up to the host on its own route after the floors and comes down with them, so one
+  player's raid gives the whole group a map that pans and tilts rather than a flat one. It rides
+  the same single opt-in (`QUESTTREE_ACCEPT_MAPS=1`, `tools/server-host.cmd`) and the same
+  all-or-nothing rule as the pictures: a set whose capture built a mesh is not served until both
+  have arrived, so a borrowed map never names geometry the host does not hold, and a half-finished
+  upload expires like half a picture set does. The file is identified by its sha256 at every hop -
+  the uploader will not offer a mesh its own meta no longer describes, the host refuses one whose
+  bytes do not hash to what was claimed and validates the file's header and geometry before storing
+  it, and a downloader checks what arrived against what the index promised. Every failure degrades
+  to the flat picture rather than to a lost map, and nothing about it bumps a schema version: an
+  older host stores the pictures and ignores the mesh, an older client never asks. The release
+  payload gains the meshes (1-3 MB a map), so the packager's total-size gate is now a warning at
+  80 MB that prints the payload's size on every run instead of a hard 40 MB stop, and a shipped
+  mesh is checked against its meta's sha256, byte length, extent and floor levels before it can be
+  zipped.
 - **A throwaway diagnostic key ships with this release**, which is worth saying out loud because it
   is not a feature: a bare **F10** is the mesh probe of the 3D map experiments, and it writes
   `BepInEx\plugins\QuestTree\captures\<map>.meshprobe.txt` in a raid - whether the game's own meshes

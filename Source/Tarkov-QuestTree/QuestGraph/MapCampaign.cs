@@ -870,7 +870,10 @@ namespace QuestTree.QuestGraph
                     return;
                 }
 
-                if (!MapCapture.TryStartCapture())
+                // automatic: this tick comes round every few seconds, so the capture builds the 3D mesh
+                // only for a map that has none yet - the pictures are taken exactly as ever. A campaign
+                // stop and a key press are places somebody chose and always build it.
+                if (!MapCapture.TryStartCapture(automatic: true))
                 {
                     Skip("the capture did not start");
                     return;

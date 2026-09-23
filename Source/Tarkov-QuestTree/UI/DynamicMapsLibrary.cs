@@ -430,6 +430,17 @@ namespace QuestTree.UI
 
             public int DefaultLevel;
 
+            /// <summary>The 3D relief file beside this map's pictures, or null when it has none.
+            ///
+            /// A PATH rather than the parsed file: this object is built by <see cref="MapCatalog"/>
+            /// during a folder scan, which touches no Unity object and reads no geometry, and the mesh
+            /// is only wanted when a viewport actually opens in 3D. Set only for a capture whose meta
+            /// carries a <c>mesh</c> block whose file is on disk at the declared length - see
+            /// MapCatalog.ReadMesh. Null for a DynamicMaps map and for a synthesised extent, neither of
+            /// which has geometry to show, so the Maps tab's 3D branch is off for them by construction.
+            /// </summary>
+            public string MeshPath;
+
             /// <summary>The map's declared coordinate rotation, applied to the artwork
             /// (MapView.PlaceArtwork) and to percentage-placed objective pins (MapView.PositionFor).
             /// The artwork-rotation setting adds to it for a map whose data is wrong.</summary>
@@ -463,6 +474,18 @@ namespace QuestTree.UI
         /// <summary>Floors whose sprite is built, oldest use first. Past the ceiling the least
         /// recently viewed is released; the one on screen was just used, so it is never the one.</summary>
         private const int MaxCachedSprites = 6;
+
+        /// <summary>How many floors' pictures can be resident at once, for a caller that has to hold
+        /// several at the same time and must not ask for more than fit.
+        ///
+        /// The 3D view is that caller: its floor peel drapes one band's picture over each band at or
+        /// below the chosen floor, so it holds N textures for as long as it is open, and asking for a
+        /// seventh here would evict the first - which it would then ask for again next frame, decoding a
+        /// 39 MiB PNG per frame forever. It caps the bands it draws at this number instead. Exposed
+        /// rather than duplicated as a second 6 for the obvious reason: two copies of a ceiling are two
+        /// ceilings that can disagree.</summary>
+        internal static int MaxResidentSprites => MaxCachedSprites;
+
         private static readonly List<MapLayer> _spriteUse = new();
 
         private static void NoteSpriteUse(MapLayer layer)

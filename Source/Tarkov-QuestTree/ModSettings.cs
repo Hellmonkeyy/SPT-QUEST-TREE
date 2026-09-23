@@ -221,6 +221,16 @@ namespace QuestTree
         /// is moved onto this one once - see <see cref="MigrateMapLabels"/>.</summary>
         public static ConfigEntry<LabelMode> MapLabels { get; private set; }
 
+        /// <summary>Whether a captured map opens in 3D where there is relief to draw, or stays the flat
+        /// picture it was before 1.19.0.
+        ///
+        /// 3D by default, and only where a capture actually carries a mesh: a DynamicMaps map, a
+        /// harvested rectangle and a capture taken before the relief existed have nothing to build, so
+        /// they draw flat whatever this says and the Maps tab's own toggle is disabled for them. The
+        /// setting is global rather than per map because it is a preference about how you like to read a
+        /// map, not a property of one.</summary>
+        public static ConfigEntry<MapViewMode> MapMode { get; private set; }
+
         /// <summary>Whether the one-time move of <see cref="MapLabels"/> off its pre-1.19 default has
         /// already run for this config file - see <see cref="MigrateMapLabels"/>. State rather than a
         /// preference, so it is kept out of <see cref="Entries"/> and shows no row in the Settings
@@ -275,6 +285,21 @@ namespace QuestTree
 
             /// <summary>Our captures only; a map with no capture shows its bounds and its pins.</summary>
             CapturesOnly
+        }
+
+        /// <summary>How a captured map is drawn. See <see cref="MapMode"/>.
+        ///
+        /// Named MapViewMode and not MapMode because the setting that holds it is MapMode: a nested type
+        /// and a property of the same name are a duplicate member, which is why PictureSource sits behind
+        /// MapPictureSource and LabelMode behind MapLabels.</summary>
+        public enum MapViewMode
+        {
+            /// <summary>The 3D relief, where the capture has one: the picture draped over the ground's
+            /// real heights, with the buildings standing on it.</summary>
+            Relief,
+
+            /// <summary>The flat picture, as every release before 1.19.0 drew it.</summary>
+            Flat
         }
 
         /// <summary>Which labels a captured picture carries. See <see cref="MapLabels"/>.</summary>
@@ -864,6 +889,17 @@ namespace QuestTree
                 "view stays clean), the extracts alone, or none. DynamicMaps' own artwork carries its " +
                 "author's labels whatever this says.");
 
+            MapMode = config.Bind(
+                "Map", "Map view", MapViewMode.Relief,
+                "How a captured map is drawn. '3D relief' drapes the captured picture over the ground's " +
+                "real heights and stands the buildings on it, and you drag to move, right-drag to turn " +
+                "and tilt, and scroll to come closer; 'Flat picture' is the view every earlier version " +
+                "had. A map with no relief captured for it draws flat whatever this says, and the Maps " +
+                "tab's own 3D toggle is greyed out for it. The two picture settings - 'Mirror map " +
+                "artwork' and 'Extra map artwork rotation' - DO NOT APPLY in 3D: the picture is laid onto " +
+                "the ground by the captured coordinates it was measured over, so there is nothing left " +
+                "for a rotation or a mirror to correct.");
+
             // Its own marker rather than the palette's version stamp, because the two migrations are
             // unrelated and a config that has had one may not have had the other. Advanced, and out of
             // Entries below, so the Settings tab shows no row for it: it is state, not a preference.
@@ -945,7 +981,7 @@ namespace QuestTree
                 PinLabels, ColorActive, ColorAvailable, ColorCompleted, ColorLocked, ColorGated, ColorFailed, ColorAccent, Tooltips,
                 HoverSounds, RememberLastView, OpenTracker, CaptureMapKey, CampaignKey,
                 AutoCapture, AutoCaptureSeconds, CaptureResolution,
-                UploadCaptures, MapPictureSource, MapLabels
+                UploadCaptures, MapPictureSource, MapLabels, MapMode
             });
 
             // One handler per entry rather than a single global hook, so this only fires for
@@ -995,9 +1031,13 @@ namespace QuestTree
             CaptureResolution.SettingChanged += Raise;
             UploadCaptures.SettingChanged += Raise;
 
-            // Both change what the map DRAWS, so both have to repaint it.
+            // All three change what the map DRAWS, so all three have to repaint it. MapMode also has to
+            // bump Generation, which it does through Raise: the map's kept viewport carries the
+            // generation in its key, and without the bump a flip from the F12 menu would leave the 2D
+            // picture on screen with the toggle beside it saying 3D.
             MapPictureSource.SettingChanged += Raise;
             MapLabels.SettingChanged += Raise;
+            MapMode.SettingChanged += Raise;
             ColorActive.SettingChanged += Raise;
             ColorAvailable.SettingChanged += Raise;
             ColorCompleted.SettingChanged += Raise;

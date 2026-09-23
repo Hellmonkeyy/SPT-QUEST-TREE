@@ -48,6 +48,15 @@ namespace QuestTree.QuestGraph
         private const string IndexRoute = "/questtree/maps";
         private const string ImageRoute = "/questtree/maps/image";
 
+        /// <summary>Where a capture's 3D mesh goes up, once, after its floors - see
+        /// <see cref="MapMeshUploadRequest"/> for why it is not a floor of the upload route.</summary>
+        private const string MeshRoute = "/questtree/maps/mesh";
+
+        /// <summary>Where a map's mesh comes down. Asked only when the index entry carries a mesh
+        /// block, so a host that has none is never asked and an OLD host is asked only by a client
+        /// whose index it could not have answered anyway.</summary>
+        private const string MeshFileRoute = "/questtree/maps/meshfile";
+
         /// <summary>The longest side, in pixels, a picture may have on the wire. A capture is taken
         /// at up to 4096 for this machine's own screen; what is shared is the smaller copy, because
         /// the difference between 2048 and 4096 is four times the bytes for detail that only shows at
@@ -89,14 +98,23 @@ namespace QuestTree.QuestGraph
         /// near it; it is a guard against a host - or something answering as one - filling the disk.</summary>
         private const int MaxFloorDownloadBytes = 8 * 1024 * 1024;
 
-        /// <summary>The most one map's pictures may weigh coming down, decoded. The plan's per-map
-        /// ceiling on the host side, checked again here.</summary>
-        private const long MaxMapDownloadBytes = 20L * 1024 * 1024;
+        /// <summary>The most one mesh may weigh, in either direction, decoded. The host's own ceiling
+        /// (MapStore.MaxMeshBytes), so a mesh this side would offer is never one the host refuses, and a
+        /// mesh a host offers is never one this side would refuse after downloading it. Four times the
+        /// largest thing phase 3C's triangle budget produces.</summary>
+        private const int MaxMeshBytes = 12 * 1024 * 1024;
+
+        /// <summary>The most one map's pictures AND mesh may weigh coming down, decoded. The plan's
+        /// per-map ceiling on the host side, checked again here; it rose from 20 MB with the mesh, by
+        /// exactly the mesh's own ceiling.</summary>
+        private const long MaxMapDownloadBytes = 32L * 1024 * 1024;
 
         /// <summary>The most a session will download in total. A player who joins a host holding
         /// thirty maps gets what fits and the rest on the next start, rather than a quarter of an hour
-        /// of a worker on the first Maps tab open.</summary>
-        private const long MaxSessionDownloadBytes = 60L * 1024 * 1024;
+        /// of a worker on the first Maps tab open. Doubled with the mesh, because a set that used to be
+        /// 1-4 MB of pictures can now be 4-15 MB with its geometry, and the old 60 MB would have taken
+        /// four maps and left the rest for a later session for ever.</summary>
+        private const long MaxSessionDownloadBytes = 120L * 1024 * 1024;
 
         /// <summary>The most floors of one map to take from a host, matching the harvested band
         /// ceiling the zone file enforces.</summary>
@@ -110,6 +128,17 @@ namespace QuestTree.QuestGraph
         /// The same number as <see cref="RequestTimeout"/> - both are the deadline on one post, one
         /// measured by the worker and one by the frames.</summary>
         private const float RequestSeconds = 30f;
+
+        /// <summary>The deadline on the MESH post, in seconds, and three times the others on purpose: a
+        /// 12 MB mesh is a 16 MB base64 body, and on a remote host - which is the whole point of the
+        /// transport - 30 s is a limit the body itself can lose to rather than one the host has any say
+        /// in. Timing out here also costs more than timing out on a floor: the host is holding the whole
+        /// set waiting for this, so a deadline that is too short means the capture is never shared.</summary>
+        private const float MeshRequestSeconds = 90f;
+
+        /// <summary>The worker's own deadline on the mesh post, matching
+        /// <see cref="MeshRequestSeconds"/>: one is measured in frames, the other in the request.</summary>
+        private static readonly TimeSpan MeshRequestTimeout = TimeSpan.FromSeconds(MeshRequestSeconds);
 
         /// <summary>How long the whole download may take before it gives up and leaves the rest for
         /// the next session. A worker that never returns is one the session can never retry.</summary>
@@ -210,8 +239,25 @@ namespace QuestTree.QuestGraph
                 // single projection and be refused outright.
                 if (!DescribeWire(key, meta, floors)) yield break;
 
+                // The MESH, read and checked BEFORE the first post. Before, because the meta travels
+                // with every floor and a host that sees a mesh block HOLDS THE WHOLE SET until the file
+                // arrives - so a block this machine cannot honour has to be out of the meta before the
+                // meta is sent, or the capture is lost to a wait that never ends. Null with the block
+                // already stripped when there is nothing to offer.
+                var mesh = PrepareMesh(key, meta);
+
                 var posted = 0;
                 long bytes = 0;
+
+                // Floors that failed to encode SINCE THE LAST SUCCESSFUL POST - not since the start.
+                // The meta travels with every post, and a drop takes the floor out of it, so the host's
+                // staged meta is the one the LAST post carried: it names exactly the floors known at that
+                // moment. A floor dropped before that post is a floor the host was never told about and
+                // is not waiting for; a floor dropped after it is one the host will wait for forever.
+                // Only the second kind can stop the set completing, and the first version of this counted
+                // both - which meant one unencodable interior floor cost the whole capture its mesh, and
+                // with it the whole set, where before this release the rest of the map was shared.
+                var droppedSincePost = 0;
 
                 foreach (var floor in floors)
                 {
@@ -227,6 +273,7 @@ namespace QuestTree.QuestGraph
                         // it, which no reader can be hurt by: a floor with no picture is dropped by
                         // the reader and by the download that writes a set out.
                         meta.Floors.Remove(floor.Entry);
+                        droppedSincePost++;
                         continue;
                     }
 
@@ -250,24 +297,78 @@ namespace QuestTree.QuestGraph
                     posted++;
                     bytes += floor.Bytes;
 
+                    // The host has just been handed a meta naming exactly the floors that are left, so
+                    // whatever was dropped before now is not something it is waiting for.
+                    droppedSincePost = 0;
+
                     if (verdict == Verdict.Complete)
                     {
-                        Done(key, Math.Max(posted, held), bytes, clock);
+                        // The host has the set and wants nothing more. Either this capture has no mesh,
+                        // or the host is an old one that dropped the block, or it already had the mesh
+                        // staged from an earlier attempt of the same capture - in all three, sending the
+                        // mesh now would be 16 MB the host has no place for.
+                        Done(key, Math.Max(posted, held), bytes, 0, clock);
                         yield break;
                     }
                 }
 
-                // The loop ran out with the host never calling the set complete, so it is still
-                // waiting for a floor. Since DescribeWire names exactly the floors that will be
-                // offered, the only way here is a floor that failed to ENCODE after an earlier post
-                // had already named it - the host then holds pieces it drops after a day. Said as
-                // what it is rather than as a success: the player's next question is why the map never
-                // appeared on the other machine, and "uploaded to the host" would answer it wrongly.
-                if (posted > 0)
+                // Past the loop, so the host never called the set complete. With a mesh to offer that is
+                // the EXPECTED state - a 1.19.0 host answers the last floor "waiting for the mesh" - so
+                // the mesh goes now, and it is the post that completes the set.
+                //
+                // Not when a floor was dropped SINCE THE LAST POST, though: the host is then waiting for
+                // a picture that will never arrive, so it would hold the mesh with the rest and discard
+                // the lot. A 16 MB post to a host that cannot use it is worth skipping.
+                if (posted > 0 && droppedSincePost == 0 && mesh != null)
+                {
+                    var task = StartMeshPost(key, meta, mesh);
+
+                    // Its own exit, so the line below cannot blame an unencodable floor for a thread pool
+                    // that would not take the work. StartMeshPost has already said what happened.
+                    if (task == null) yield break;
+
+                    var deadline = Time.realtimeSinceStartup + MeshRequestSeconds;
+                    while (!task.IsCompleted && Time.realtimeSinceStartup < deadline) yield return null;
+
+                    if (!task.IsCompleted)
+                    {
+                        Plugin.LogSource?.LogInfo(
+                            $"QuestTree: the host did not answer within {MeshRequestSeconds:0}s while {key}'s " +
+                            $"{Mb(mesh.Length)} MB mesh was being offered - the host holds the floors and drops " +
+                            "them at its next start a day later. Capture the map again.");
+                        yield break;
+                    }
+
+                    if (JudgeMesh(key, mesh, task)) Done(key, posted, bytes, mesh.Length, clock);
+
+                    // Every other outcome has had its own line from JudgeMesh, which is why nothing
+                    // follows this: two lines about one upload is how a log stops being read.
+                    yield break;
+                }
+
+                // Nothing reached the host at all. Encode or Judge has already said why, for the floor it
+                // happened on, so this adds nothing.
+                if (posted == 0) yield break;
+
+                if (droppedSincePost > 0)
+                    // The host holds a meta naming a floor that then failed to encode, so it can never
+                    // call the set complete. Said as what it is rather than as a success: the player's
+                    // next question is why the map never appeared on the other machine, and "uploaded to
+                    // the host" would answer it wrongly.
                     Plugin.LogSource?.LogInfo(
                         $"QuestTree: {posted} floor(s) of {key} reached the host but it never had the whole set - a " +
-                        "floor could not be encoded after the others had been sent, so the host discards them. " +
+                        "floor could not be encoded after the others had been sent, so the host drops them at its " +
+                        $"next start a day later{(mesh == null ? "" : ", and its 3D mesh was not offered")}. " +
                         "Capture the map again.");
+                else
+                    // Every floor the host was told about was sent, nothing was dropped, and there is no
+                    // mesh to finish with - so the host is waiting for something this client does not know
+                    // it wants. Nothing here can put that right, and a line that guessed at the cause
+                    // would be worse than one that says exactly this.
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: every floor of {key} was sent ({posted}) and the host has not called the set " +
+                        "complete - it is waiting for something this build did not offer. The capture is on this " +
+                        "machine either way; the host's own log says what it is holding.");
             }
             finally
             {
@@ -896,15 +997,222 @@ namespace QuestTree.QuestGraph
         /// <summary>The one line a finished upload writes.</summary>
         /// <param name="key">The map's internal id.</param>
         /// <param name="floors">How many floors the host has of it.</param>
-        /// <param name="bytes">What was sent.</param>
+        /// <param name="bytes">What the pictures weighed.</param>
+        /// <param name="meshBytes">What the mesh weighed, or 0 when none was sent.</param>
         /// <param name="clock">Running since the upload started.</param>
-        private static void Done(string key, int floors, long bytes, System.Diagnostics.Stopwatch clock)
+        private static void Done(
+            string key, int floors, long bytes, long meshBytes, System.Diagnostics.Stopwatch clock)
         {
             Plugin.LogSource?.LogInfo(
-                $"QuestTree: capture of {key} uploaded to the host - {floors} floor(s), {Mb(bytes)} MB.");
+                $"QuestTree: capture of {key} uploaded to the host - {floors} floor(s)" +
+                $"{(meshBytes > 0 ? $" and a {Mb(meshBytes)} MB mesh" : "")}, {Mb(bytes + meshBytes)} MB.");
 
             Plugin.LogSource?.LogDebug(
                 $"QuestTree: {key} was uploaded in {clock.ElapsedMilliseconds} ms.");
+        }
+
+        /// <summary>
+        /// The mesh file this capture's meta names, read off this disk and CHECKED against what the meta
+        /// says it is - or null, with the meta's mesh block stripped, when there is nothing to offer.
+        ///
+        /// Stripping is the load-bearing half. A host that sees a mesh block holds the whole set until
+        /// the file arrives (MapStore's mesh route), so offering a meta whose mesh cannot be sent does
+        /// not cost the mesh - it costs the CAPTURE, which sits staged on the host until it expires a
+        /// day later while every log line here says the floors went up. So every reason this can fail
+        /// ends the same way: the block comes out of the meta before the first post, and the set is
+        /// offered as the flat picture set it effectively is.
+        ///
+        /// The sha256 is the check that can fail, and it is not ceremony: the meta and the .bin are two
+        /// files written in sequence by a capture that can be interrupted, a merge can leave an older
+        /// mesh beside a newer meta, and a hand-copied folder can hold either half. Reading 12 MB and
+        /// hashing it is ~30 ms, paid once per upload, outside a raid.
+        /// </summary>
+        /// <param name="key">The map's internal id.</param>
+        /// <param name="meta">The meta about to be offered. Its mesh block is stripped on any failure.</param>
+        private static byte[] PrepareMesh(string key, MapCaptureMetaDto meta)
+        {
+            var mesh = meta?.Mesh;
+
+            if (meta == null || mesh == null) return null;
+
+            string why;
+
+            try
+            {
+                var dir = CaptureDir(key);
+
+                if (dir == null || string.IsNullOrEmpty(mesh.File))
+                {
+                    why = "its meta names no mesh file";
+                }
+                else if (!string.Equals(mesh.File, Path.GetFileName(mesh.File), StringComparison.Ordinal))
+                {
+                    // A name in a meta becomes a path. A bare name in the capture's own folder, exactly
+                    // as the floors are held to.
+                    why = $"its mesh file name '{mesh.File}' is not a plain name in the capture folder";
+                }
+                else if (!File.Exists(Path.Combine(dir, mesh.File)))
+                {
+                    why = $"{mesh.File} is not in the capture folder";
+                }
+                else
+                {
+                    var bytes = File.ReadAllBytes(Path.Combine(dir, mesh.File));
+
+                    if (bytes.Length == 0)
+                    {
+                        why = $"{mesh.File} is empty";
+                    }
+                    else if (bytes.Length > MaxMeshBytes)
+                    {
+                        // The host would refuse it, and a refusal after the floors have gone up leaves
+                        // the set staged there - so it is not offered at all.
+                        why = $"{mesh.File} is {Mb(bytes.Length)} MB, over the {Mb(MaxMeshBytes)} MB a host takes";
+                    }
+                    else if (!string.Equals(Sha256(bytes), (mesh.Sha256 ?? "").Trim(),
+                                 StringComparison.OrdinalIgnoreCase))
+                    {
+                        why = $"{mesh.File} does not hash to the sha256 its meta names, so the two are from " +
+                              "different captures";
+                    }
+                    else
+                    {
+                        Plugin.LogSource?.LogDebug(
+                            $"QuestTree: {key}'s mesh is offered as {Mb(bytes.Length)} MB, sha " +
+                            $"{Sha256(bytes).Substring(0, 12)}, {mesh.Cells:N0} cell(s) and {mesh.Triangles:N0} " +
+                            "triangle(s).");
+
+                        return bytes;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                why = $"its mesh could not be read ({ex.GetType().Name}: {ex.Message})";
+            }
+
+            meta.Mesh = null;
+
+            Plugin.LogSource?.LogInfo(
+                $"QuestTree: the capture of {key} is offered to the host WITHOUT its 3D mesh - {why}. The pictures " +
+                "still go up, and the map draws flat on the other machines until it is captured again.");
+
+            return null;
+        }
+
+        /// <summary>The mesh post, issued on a pool thread, or null when the pool would not take it. The
+        /// base64 and the serialisation go on the worker: a 12 MB mesh is a 16 MB string, and building it
+        /// on the main thread is a visible stall.</summary>
+        /// <param name="key">The map's internal id.</param>
+        /// <param name="meta">The meta whose mesh block this file belongs to.</param>
+        /// <param name="bytes">The mesh file's bytes, already checked by <see cref="PrepareMesh"/>.</param>
+        private static Task<string> StartMeshPost(string key, MapCaptureMetaDto meta, byte[] bytes)
+        {
+            try
+            {
+                // Everything the worker needs, captured now: nothing it reads may be touched by the
+                // main thread while it runs, which is the discipline every request here keeps.
+                var capturedAt = meta.CapturedAt;
+                var sha = meta.Mesh != null ? meta.Mesh.Sha256 : Sha256(bytes);
+
+                return Task.Run(async () =>
+                {
+                    var request = new MapMeshUploadRequest
+                    {
+                        SchemaVersion = MapMeshUploadRequest.CurrentSchemaVersion,
+                        Map = key,
+                        ClientVersion = ModInfo.Version,
+                        CapturedAt = capturedAt,
+                        Sha256 = sha,
+                        Bytes = bytes.Length,
+                        DataBase64 = Convert.ToBase64String(bytes)
+                    };
+
+                    return await RequestHandler.PostJsonAsync(MeshRoute, JsonConvert.SerializeObject(request));
+                });
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: the upload of {key}'s mesh could not be started ({ex.Message}).");
+                return null;
+            }
+        }
+
+        /// <summary>Whether the host took the mesh, with the line that says what happened. False covers
+        /// three different things and each one gets its own sentence: a host that is not the server half
+        /// (an old one - Debug, because that is the normal state of a host nobody has updated), a host
+        /// that refused it, and a host that took it but is still waiting for a floor.</summary>
+        /// <param name="key">The map's internal id.</param>
+        /// <param name="bytes">What was sent, for the line.</param>
+        /// <param name="task">The finished post.</param>
+        private static bool JudgeMesh(string key, byte[] bytes, Task<string> task)
+        {
+            string reply;
+
+            try
+            {
+                reply = task.Result;
+            }
+            catch (Exception ex)
+            {
+                var message = ex is AggregateException aggregate && aggregate.InnerException != null
+                    ? aggregate.InnerException.Message
+                    : ex.Message;
+
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: the host could not be offered {key}'s mesh ({message}) - it holds the floors and " +
+                    "drops them after a day, so capture the map again once the host is reachable.");
+                return false;
+            }
+
+            var response = NotOurs<MapMeshUploadResponse>(reply, out var excerpt);
+
+            if (response == null)
+            {
+                // An older host answers an unregistered route with SPT's own HTML. It has already stored
+                // the pictures (it never saw the mesh block), so nothing is lost but the geometry.
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: this host takes no 3D meshes, so {key}'s stays on this machine - {excerpt}");
+                return false;
+            }
+
+            if (!response.Accepted)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: the host refused {key}'s 3D mesh{Because(response.Reason)} - it holds the floors " +
+                    "and drops them after a day, so that map has no host picture until it is captured again.");
+                return false;
+            }
+
+            if (!string.IsNullOrEmpty(response.Reason))
+            {
+                // Taken, but the set is not complete: the host is missing a floor this client never
+                // managed to encode. The mesh is held with them and expires with them.
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: the host took {key}'s {Mb(bytes.Length)} MB mesh but has not got the whole set " +
+                    $"yet{Because(response.Reason)} - capture the map again.");
+                return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>A byte array's SHA-256 as lower-case hex - the same value MapCapture.Sha256 wrote
+        /// into the meta, computed here rather than shared because that one is private to the writer and
+        /// this one answers a different question: whether the file on disk is still the one described.</summary>
+        /// <param name="bytes">The bytes to hash.</param>
+        private static string Sha256(byte[] bytes)
+        {
+            using (var sha = System.Security.Cryptography.SHA256.Create())
+            {
+                var hash = sha.ComputeHash(bytes);
+                var text = new System.Text.StringBuilder(hash.Length * 2);
+
+                foreach (var b in hash) text.Append(b.ToString("x2", CultureInfo.InvariantCulture));
+
+                return text.ToString();
+            }
         }
 
         /// <summary>One floor on its way up.</summary>
@@ -1241,6 +1549,59 @@ namespace QuestTree.QuestGraph
                     return 0;
                 }
 
+                // The MESH, after the floors and only when the index said there is one - so an older
+                // host is never asked, and a newer one is asked exactly once per set. Everything about
+                // it degrades: a mesh that does not arrive, does not fit the budget or does not hash to
+                // what the index promised leaves the set installing WITHOUT it and with the meta's block
+                // removed, which is the state every reader already handles (it draws the flat picture).
+                string meshName = null;
+
+                if (entry.Mesh == null)
+                {
+                    // The host's own index is the authority on whether this set has a mesh: a meta that
+                    // claims one while the entry does not would leave the block in place with no file
+                    // beside it, and the 3D view would refuse the set on every open.
+                    meta.Mesh = null;
+                }
+                else
+                {
+                    var mesh = FetchMesh(key, entry, bytes, result, out var replacedDuringMesh);
+
+                    if (replacedDuringMesh) return 0;
+
+                    if (mesh == null)
+                    {
+                        meta.Mesh = null;
+                    }
+                    else
+                    {
+                        meshName = MeshFileName(key);
+
+                        File.WriteAllBytes(Path.Combine(staging, meshName), mesh);
+
+                        // A COPY of the index entry's block, not the block itself. From the entry because
+                        // that is what this download was decided on - and because a host whose entry
+                        // carries a mesh while its meta does not would otherwise be a null here. Copied
+                        // because the entry belongs to the index this worker is still walking: writing the
+                        // local file name into it would leave the NEXT map's decisions reading a block
+                        // that had been edited to describe a file on this disk.
+                        meta.Mesh = new MapCaptureMeshDto
+                        {
+                            // The two fields that describe what actually landed, exactly as a floor's file
+                            // and size are rewritten: the set on disk has to describe itself.
+                            File = meshName,
+                            Bytes = mesh.Length,
+
+                            Version = entry.Mesh.Version,
+                            Cells = entry.Mesh.Cells,
+                            Triangles = entry.Mesh.Triangles,
+                            Sha256 = entry.Mesh.Sha256
+                        };
+
+                        bytes += mesh.Length;
+                    }
+                }
+
                 // The meta written out names exactly the floors whose picture is in the staging
                 // folder. A floor the host could not send is dropped rather than named: the reader
                 // would drop it anyway, and a meta naming a file that is not there is how a set
@@ -1252,11 +1613,11 @@ namespace QuestTree.QuestGraph
                     Path.Combine(staging, key + MetaSuffix),
                     JsonConvert.SerializeObject(meta, Formatting.Indented));
 
-                if (!Swap(root, key, staging, floors, entry.Stamp, result)) return 0;
+                if (!Swap(root, key, staging, floors, meshName, entry.Stamp, result)) return 0;
 
                 result.Info.Add(
-                    $"QuestTree: map picture set for {key} received from the host - {floors.Count} floor(s), " +
-                    $"{Mb(bytes)} MB.");
+                    $"QuestTree: map picture set for {key} received from the host - {floors.Count} floor(s)" +
+                    $"{(meshName == null ? "" : " and a 3D mesh")}, {Mb(bytes)} MB.");
 
                 return bytes;
             }
@@ -1292,10 +1653,14 @@ namespace QuestTree.QuestGraph
         /// <param name="key">The map's internal id.</param>
         /// <param name="staging">The folder holding the downloaded set.</param>
         /// <param name="floors">The floors the new meta names.</param>
+        /// <param name="mesh">The mesh file's name in the staging folder, or null when this set has
+        /// none. Moved with the pictures and KEPT by step 4's sweep - a mesh deleted there would leave
+        /// the meta naming a file that is not beside it, which is exactly the half-written set this
+        /// method exists to prevent.</param>
         /// <param name="stamp">The host's name for this set, written last of all.</param>
         /// <param name="result">Where a failure's line goes.</param>
         private static bool Swap(
-            string root, string key, string staging, List<MapCaptureFloorDto> floors, string stamp,
+            string root, string key, string staging, List<MapCaptureFloorDto> floors, string mesh, string stamp,
             SyncResult result)
         {
             var folder = Path.Combine(root, key);
@@ -1324,6 +1689,20 @@ namespace QuestTree.QuestGraph
                     File.Move(from, to);
 
                     kept.Add(floor.File);
+                }
+
+                // (2b) The mesh, with the pictures and before the meta, for the same reason they are:
+                // the meta is what names it, so it has to be in place before anything can read that
+                // name. Added to `kept` so step 4 leaves it alone.
+                if (mesh != null)
+                {
+                    var from = Path.Combine(staging, mesh);
+                    var to = Path.Combine(folder, mesh);
+
+                    if (File.Exists(to)) File.Delete(to);
+                    File.Move(from, to);
+
+                    kept.Add(mesh);
                 }
 
                 // (3) The meta, last of the set. One rename inside one volume, so no reader can see
@@ -1475,6 +1854,148 @@ namespace QuestTree.QuestGraph
                 return null;
             }
         }
+
+        /// <summary>
+        /// One map's mesh from the host, decoded and verified, or null when there is none to have.
+        ///
+        /// EVERY failure here is "no mesh", not "no set": the caller installs the pictures with the
+        /// meta's mesh block removed, and the map draws flat - which is what it does on every client
+        /// that never had a mesh in the first place. The one exception is the host replacing the set
+        /// mid-download, which is the caller's business because the floors already fetched are the old
+        /// set's (see <see cref="Download"/>).
+        ///
+        /// The sha256 is checked against the INDEX ENTRY rather than against the answer's own field: the
+        /// answer's is what the host says about what it just sent, the entry's is what the client
+        /// decided to download on, and only the second one is evidence. This is the one payload in the
+        /// transport that no human ever looks at, so nothing downstream would notice it arriving wrong -
+        /// it would simply be geometry in the wrong places.
+        /// </summary>
+        /// <param name="key">The map's internal id.</param>
+        /// <param name="entry">The index entry being taken. Its <c>Mesh</c> is not null.</param>
+        /// <param name="soFar">What this map's pictures already weigh, for the per-map budget.</param>
+        /// <param name="result">Where the lines go.</param>
+        /// <param name="replaced">True when the host answered with a DIFFERENT set's stamp - the whole
+        /// map is abandoned, exactly as it is for a picture.</param>
+        private static byte[] FetchMesh(
+            string key, MapIndexEntryDto entry, long soFar, SyncResult result, out bool replaced)
+        {
+            replaced = false;
+
+            try
+            {
+                var promised = (entry.Mesh.Sha256 ?? "").Trim();
+
+                if (promised.Length != 64)
+                {
+                    result.Debug.Add(
+                        $"QuestTree: the host's index describes {key}'s mesh with no usable sha256, so it is not " +
+                        "taken - the pictures are.");
+                    return null;
+                }
+
+                // The version, BEFORE the download rather than after - which is the whole reason the
+                // index carries it. A host updated past this client holds a mesh in a format this build's
+                // reader refuses (MapMeshFile.Read), so fetching it would be megabytes spent to write a
+                // file the Maps tab then declines to draw.
+                if (entry.Mesh.Version != MapMeshFile.Version)
+                {
+                    result.Debug.Add(
+                        $"QuestTree: the host's mesh for {key} is format version {entry.Mesh.Version} and this " +
+                        $"build reads {MapMeshFile.Version} - the pictures are taken without it. Update Quest " +
+                        "Tracker to use the host's 3D maps.");
+                    return null;
+                }
+
+                if (entry.Mesh.Bytes > MaxMeshBytes)
+                {
+                    result.Debug.Add(
+                        $"QuestTree: the host's mesh for {key} is {Mb(entry.Mesh.Bytes)} MB, over the " +
+                        $"{Mb(MaxMeshBytes)} MB this build takes - the pictures are taken without it.");
+                    return null;
+                }
+
+                if (soFar + Math.Max(entry.Mesh.Bytes, 0L) > MaxMapDownloadBytes)
+                {
+                    result.Debug.Add(
+                        $"QuestTree: {key}'s pictures and mesh together are over the {Mb(MaxMapDownloadBytes)} MB a " +
+                        "map may take - the mesh is left.");
+                    return null;
+                }
+
+                var body = JsonConvert.SerializeObject(new MapMeshRequest { Map = key });
+
+                // The longer deadline: a 12 MB mesh is a 16 MB base64 body, and this is a blocking wait
+                // on a worker, so 30 s would be a limit the body loses to rather than the host.
+                var reply = Post(MeshFileRoute, body, MeshRequestTimeout);
+                var dto = NotOurs<MapMeshDto>(reply, out var excerpt);
+
+                if (dto == null)
+                {
+                    // An older host answers this route with SPT's own HTML. Silent, at Debug: it is the
+                    // normal state of a host that has not been updated, and the pictures still land.
+                    result.Debug.Add($"QuestTree: this host serves no 3D mesh for {key} - {excerpt}");
+                    return null;
+                }
+
+                if (string.IsNullOrEmpty(dto.DataBase64))
+                {
+                    result.Debug.Add($"QuestTree: the host has no 3D mesh for {key} after all.");
+                    return null;
+                }
+
+                // A host re-captured between the index and this request holds a different set now, and
+                // half of each is worse than either - the same rule the pictures follow.
+                if (!string.IsNullOrEmpty(dto.Stamp) &&
+                    !string.Equals(dto.Stamp, entry.Stamp, StringComparison.Ordinal))
+                {
+                    replaced = true;
+
+                    result.Debug.Add(
+                        $"QuestTree: the host's set for {key} changed while its mesh was being fetched - the whole " +
+                        "set is taken again next session rather than half of each.");
+                    return null;
+                }
+
+                var bytes = Convert.FromBase64String(dto.DataBase64);
+
+                if (bytes.Length == 0 || bytes.Length > MaxMeshBytes)
+                {
+                    result.Debug.Add(
+                        $"QuestTree: the host's mesh for {key} is {bytes.Length:N0} bytes, which is not a mesh this " +
+                        "build will write - the pictures are taken without it.");
+                    return null;
+                }
+
+                var hash = Sha256(bytes);
+
+                if (!string.Equals(hash, promised, StringComparison.OrdinalIgnoreCase))
+                {
+                    // Warning, not Debug: the pictures of this set are fine and are installed, but the
+                    // host is serving a mesh that is not the one it describes, and that is worth seeing.
+                    result.Warnings.Add(
+                        $"QuestTree: the host's 3D mesh for {key} hashes to {hash.Substring(0, 12)} where its index " +
+                        $"promised {promised.Substring(0, 12)} - it is NOT installed and the map draws flat. The " +
+                        "pictures are unaffected.");
+                    return null;
+                }
+
+                return bytes;
+            }
+            catch (Exception ex)
+            {
+                result.Debug.Add(
+                    $"QuestTree: the host's 3D mesh for {key} could not be taken ({ex.GetType().Name}: " +
+                    $"{ex.Message}) - the pictures are.");
+                return null;
+            }
+        }
+
+        /// <summary>The mesh's file name in a map's folder - MapMeshFile's own, so the downloaded set is
+        /// named by the same method the capture writer and the format's recogniser use rather than by a
+        /// literal that could drift from them. Built from the KEY rather than from anything the host sent:
+        /// a name on the wire is a path.</summary>
+        /// <param name="key">The map's internal id.</param>
+        private static string MeshFileName(string key) => MapMeshFile.FileNameFor(key);
 
         /// <summary>".jpg", ".png", or null when these bytes are neither. Read from the bytes
         /// themselves - the two magics - because the file name is what the reader will trust.</summary>
@@ -1721,12 +2242,15 @@ namespace QuestTree.QuestGraph
         /// <summary>A POST on this thread, with a deadline. For the worker only - it blocks.</summary>
         /// <param name="route">The route to ask.</param>
         /// <param name="body">The JSON body.</param>
-        private static string Post(string route, string body)
+        /// <param name="timeout">How long to wait. <see cref="RequestTimeout"/> unless the answer is
+        /// megabytes, as a mesh's is.</param>
+        private static string Post(string route, string body, TimeSpan? timeout = null)
         {
+            var deadline = timeout ?? RequestTimeout;
             var request = RequestHandler.PostJsonAsync(route, body);
 
-            if (!request.Wait(RequestTimeout))
-                throw new TimeoutException($"no answer from {route} within {RequestTimeout.TotalSeconds:0}s");
+            if (!request.Wait(deadline))
+                throw new TimeoutException($"no answer from {route} within {deadline.TotalSeconds:0}s");
 
             return request.Result;
         }

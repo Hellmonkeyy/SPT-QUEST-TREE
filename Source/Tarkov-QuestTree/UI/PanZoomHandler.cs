@@ -5,6 +5,59 @@ using UnityEngine.EventSystems;
 namespace QuestTree.UI
 {
     /// <summary>
+    /// What a map overlay - a place name, an extract diamond, a quest pin - needs from the thing that
+    /// moves the view under it, and nothing else.
+    ///
+    /// Two implementations, and they work in different spaces: <see cref="PanZoomHandler"/> scales and
+    /// offsets a content rect whose local units ARE map metres, so an overlay is placed once at its map
+    /// coordinates and never touched again; <see cref="Map3DView"/> has no such rect - the map is
+    /// geometry inside a camera - so it re-places every registered overlay from the camera each frame.
+    /// The marker builders cannot tell the difference, which is the point: they create a rect at
+    /// <c>anchoredPosition = (x, z)</c>, register it, and let the host decide what that means.
+    ///
+    /// <see cref="OnViewChanged"/> is an event rather than a settable field so both sides can raise it
+    /// and neither can have its subscribers replaced by the next caller - MapView subscribes twice
+    /// (the label cull, and the at-rest pin names).
+    /// </summary>
+    internal interface IOverlayHost
+    {
+        /// <summary>Registers a child to be held at a constant on-screen size, whatever the view does.
+        /// See <see cref="PanZoomHandler.KeepConstantScale"/>.</summary>
+        /// <param name="child">The overlay's rect, already placed at its map coordinates.</param>
+        void KeepConstantScale(RectTransform child);
+
+        /// <summary>The view's scale RIGHT NOW, in screen pixels per map metre. What decides which place
+        /// names fit and which at-rest pin names collide - see MapView.LabelCull, which is handed this at
+        /// build time and again on every change. In 2D it is the container's own scale; in 3D it is the
+        /// pixels a metre subtends at the focus distance, which is the same quantity measured a different
+        /// way.</summary>
+        float Scale { get; }
+
+        /// <summary>Where a map point is on screen, in the canvas units an overlay's anchoredPosition is
+        /// in. What decides whether two plated names overlap - a question that cannot be asked in map
+        /// metres, because the names are a constant size on screen while the distance between their places
+        /// is not.
+        ///
+        /// The two hosts answer it in the only way each can: the 2D one scales (a pan moves everything
+        /// together and so cannot change an overlap, which is why it is deliberately left out), the 3D one
+        /// projects through its camera, where an orbit changes every answer.</summary>
+        /// <param name="mapXZ">The point, in map coordinates.</param>
+        Vector2 Project(Vector2 mapXZ);
+
+        /// <summary>Raised whenever the view moves, with the scale in SCREEN PIXELS PER MAP METRE and
+        /// the content's pan (which means nothing in 3D and is passed as zero there - no subscriber
+        /// reads it).</summary>
+        event System.Action<float, Vector2> OnViewChanged;
+
+        /// <summary>Centres a map point in the viewport. The scale is a request: the 2D host zooms to
+        /// it, the 3D host keeps its own distance and only moves the focus.</summary>
+        /// <param name="contentPoint">The point, in map coordinates.</param>
+        /// <param name="scale">The scale to show it at, in the same units as
+        /// <see cref="OnViewChanged"/>.</param>
+        void FocusOn(Vector2 contentPoint, float scale);
+    }
+
+    /// <summary>
     /// Drag-to-pan and scroll-to-zoom-about-the-cursor for any content rect.
     ///
     /// A MonoBehaviour by necessity: it is added to a viewport GameObject so Unity's event system
@@ -16,7 +69,7 @@ namespace QuestTree.UI
     /// delivers to the first handler it finds walking up, so a viewport that handles them consumes
     /// them.
     /// </summary>
-    internal sealed class PanZoomHandler : MonoBehaviour, IDragHandler, IScrollHandler
+    internal sealed class PanZoomHandler : MonoBehaviour, IOverlayHost, IDragHandler, IScrollHandler
     {
         private RectTransform _content;
         private float _minZoom;
@@ -24,13 +77,29 @@ namespace QuestTree.UI
         private float _zoomSpeed;
 
         /// <summary>Raised whenever the view moves, with the content's scale and pan. Lets a caller
-        /// that rebuilds its UI put the view back where the user left it.</summary>
-        public System.Action<float, Vector2> OnViewChanged;
+        /// that rebuilds its UI put the view back where the user left it.
+        ///
+        /// An EVENT rather than a public field, so <see cref="IOverlayHost"/> can declare it and so a
+        /// second subscriber cannot silently replace the first: MapView attaches the label cull here
+        /// and then the at-rest pin names, and with a field the second <c>=</c> would have dropped the
+        /// first - which is exactly the bug the 3D host's own subscribers would have hit.</summary>
+        public event System.Action<float, Vector2> OnViewChanged;
 
         /// <summary>Children to hold at a constant on-screen size, whatever the content is zoomed
         /// to. Map markers and place names use it: magnifying a pin along with the map defeats the
         /// point of zooming in, which is to separate pins that overlap when zoomed out.</summary>
         private readonly List<RectTransform> _constantScale = new();
+
+        /// <summary>Screen pixels per map metre: the content's own scale, since its local units ARE map
+        /// metres. See <see cref="IOverlayHost.Scale"/>.</summary>
+        public float Scale => _content != null ? _content.localScale.x : 1f;
+
+        /// <summary>The map point in screen units: scaled, and NOT panned. See
+        /// <see cref="IOverlayHost.Project"/> - the pan is a constant offset on every overlay at once, so
+        /// it cancels in every comparison this is used for, and leaving it out keeps the answer the same
+        /// whatever the view is panned to.</summary>
+        /// <param name="mapXZ">The point, in map coordinates.</param>
+        public Vector2 Project(Vector2 mapXZ) => mapXZ * Scale;
 
         public void Init(RectTransform content, float minZoom, float maxZoom, float zoomSpeed)
         {

@@ -1063,6 +1063,48 @@ namespace QuestTreeServer
         [JsonPropertyName("z")] public double Z { get; set; }
     }
 
+    /// <summary>The 3D mesh beside a set's pictures - the map's ground relief and building shells, in
+    /// the client's own MapMeshFile format (<c>&lt;key&gt;-mesh.bin</c>), described rather than
+    /// carried: the bytes travel on their own route (POST /questtree/maps/mesh) because they are
+    /// megabytes of deflated binary and every other reader of this meta parses it in full.
+    ///
+    /// OPTIONAL, and that is the whole design: a set captured before meshes existed, a set from
+    /// DynamicMaps' artwork and a set synced from an older host all have none, and nothing about the
+    /// 2D picture depends on it. So this is null on those sets, an older server drops it silently
+    /// (which is why no schema version is bumped for it), and an older client ignores it.
+    ///
+    /// The server does not parse the geometry - it validates the file's HEADER on the way in (see
+    /// MapStore's mesh route) and stores the bytes - but it does check the three numbers here that a
+    /// reader would otherwise have to trust: <see cref="Sha256"/> against the bytes it was sent,
+    /// <see cref="Bytes"/> against their length, and <see cref="File"/> is REWRITTEN to the name the
+    /// server itself gave the file, like a floor's.</summary>
+    public sealed class MapCaptureMeshDto
+    {
+        /// <summary>The mesh file's name beside the pictures, <c>&lt;key&gt;-mesh.bin</c>. Rewritten by
+        /// the server when a set is stored - a file name from a Fika peer is a path.</summary>
+        [JsonPropertyName("file")] public string File { get; set; } = "";
+
+        /// <summary>The file's size in bytes, as stored. What a client uses to say what a download
+        /// costs before starting it.</summary>
+        [JsonPropertyName("bytes")] public long Bytes { get; set; }
+
+        /// <summary>The mesh format's version (MapMeshFile.Version). Carried so a client can tell
+        /// "this host has a mesh I cannot read" from "this host has no mesh" without downloading
+        /// megabytes to find out.</summary>
+        [JsonPropertyName("version")] public int Version { get; set; }
+
+        /// <summary>Relief cells across every band, and triangles across every building: the two
+        /// numbers a log line and a settings row quote. Informational on this half.</summary>
+        [JsonPropertyName("cells")] public long Cells { get; set; }
+
+        [JsonPropertyName("triangles")] public long Triangles { get; set; }
+
+        /// <summary>sha256 of the file's bytes, hex, lower case. The one field that makes the mesh
+        /// route safe to serve from: the uploader's bytes must hash to this, and a downloader checks
+        /// what it received against it before writing it beside a set it will then draw.</summary>
+        [JsonPropertyName("sha256")] public string Sha256 { get; set; } = "";
+    }
+
     /// <summary>Everything about one map's captured picture set except the pictures: exactly the
     /// client's <c>&lt;key&gt;.map.json</c>, field for field.
     ///
@@ -1126,6 +1168,14 @@ namespace QuestTreeServer
         [JsonPropertyName("floors")] public List<MapCaptureFloorDto> Floors { get; set; } = new();
 
         [JsonPropertyName("labels")] public List<MapLabelDto> Labels { get; set; } = new();
+
+        /// <summary>The 3D mesh this set carries, or null when it has none - see
+        /// <see cref="MapCaptureMeshDto"/>. NULL IS THE ORDINARY CASE, not a fault: nothing about the
+        /// pictures depends on it, which is what lets it be added without a schema bump.
+        ///
+        /// When it is set, the set is not served until the mesh named here has arrived as well (the
+        /// mesh route), so the meta a client reads never names a file the host does not hold.</summary>
+        [JsonPropertyName("mesh")] public MapCaptureMeshDto? Mesh { get; set; }
     }
 
     /// <summary>The body of POST /questtree/maps/upload: ONE floor's picture, with the whole set's
@@ -1204,11 +1254,18 @@ namespace QuestTreeServer
 
         [JsonPropertyName("capturedAt")] public string CapturedAt { get; set; } = "";
 
-        /// <summary>The pictures' total size on disk, so a client can say what a download will cost
-        /// before starting it.</summary>
+        /// <summary>The pictures' total size on disk, plus the mesh when there is one, so a client can
+        /// say what a download will cost before starting it.</summary>
         [JsonPropertyName("bytes")] public long Bytes { get; set; }
 
         [JsonPropertyName("meta")] public MapCaptureMetaDto? Meta { get; set; }
+
+        /// <summary>The 3D mesh this set carries, or null. The SAME block as
+        /// <see cref="MapCaptureMetaDto.Mesh"/>, repeated here for one reason: this is the level a
+        /// client decides at. It walks the index, compares stamps and then decides per map whether to
+        /// ask for a mesh at all, and a field it has to reach into the meta for is a field a later
+        /// index shape could drop while the meta kept it.</summary>
+        [JsonPropertyName("mesh")] public MapCaptureMeshDto? Mesh { get; set; }
     }
 
     /// <summary>What GET /questtree/maps answers: everything a client needs to decide what to
@@ -1255,5 +1312,90 @@ namespace QuestTreeServer
         [JsonPropertyName("format")] public string Format { get; set; } = "";
 
         [JsonPropertyName("imageBase64")] public string ImageBase64 { get; set; } = "";
+    }
+
+    /// <summary>The body of POST /questtree/maps/mesh: one capture's whole mesh file.
+    ///
+    /// A ROUTE OF ITS OWN rather than a "floor" of the picture upload, and not because the bytes are
+    /// bigger: the picture route checks image magic, caps a body at 2.5 MB and completes a set when
+    /// every LEVEL the meta names has arrived. A mesh is none of those things - it has no level, it is
+    /// deflated binary, and it is up to 12 MB - so riding it on that route would mean loosening every
+    /// one of those checks for every picture as well.
+    ///
+    /// No meta here, unlike the picture route: the mesh belongs to the capture identified by
+    /// <see cref="CapturedAt"/>, whose meta arrived with its floors and is what says a mesh is
+    /// expected at all. So this route can neither start a set nor change one - it can only complete
+    /// the set the floors already staged, which is the smallest thing it could be allowed to do.</summary>
+    public sealed class MapMeshUploadRequest : IRequestData
+    {
+        /// <summary>The newest mesh upload shape this server understands. Deliberately its own number
+        /// and deliberately still 1: the mesh is an OPTIONAL addition, so nothing about it may refuse
+        /// an older client's pictures or an older host's sets.</summary>
+        public const int SupportedSchemaVersion = 1;
+
+        [JsonPropertyName("schemaVersion")] public int SchemaVersion { get; set; }
+
+        [JsonPropertyName("map")] public string Map { get; set; } = "";
+
+        [JsonPropertyName("clientVersion")] public string ClientVersion { get; set; } = "";
+
+        /// <summary>The capture this mesh belongs to - the same capturedAt its floors carried, which is
+        /// what pairs the two on a host answering several clients at once.</summary>
+        [JsonPropertyName("capturedAt")] public string CapturedAt { get; set; } = "";
+
+        /// <summary>sha256 of the bytes, hex. Checked against the bytes themselves AND against what the
+        /// staged capture's meta said its mesh would be: a mesh whose hash matches neither is not this
+        /// capture's mesh.</summary>
+        [JsonPropertyName("sha256")] public string Sha256 { get; set; } = "";
+
+        /// <summary>The decoded length the sender claims. Checked against what actually decodes - two
+        /// numbers from one machine that disagree mean the file was not read whole.</summary>
+        [JsonPropertyName("bytes")] public long Bytes { get; set; }
+
+        [JsonPropertyName("dataBase64")] public string DataBase64 { get; set; } = "";
+    }
+
+    /// <summary>What POST /questtree/maps/mesh answers.
+    ///
+    /// A bool and a reason rather than the picture route's four outcomes: a mesh is one post, so there
+    /// is no "send the next one", and a host that declines uploads or refuses this file says so in the
+    /// reason. <see cref="Accepted"/> true with the set still waiting on floors is a normal answer -
+    /// the mesh is held, exactly as a floor is.</summary>
+    public sealed class MapMeshUploadResponse
+    {
+        [JsonPropertyName("accepted")] public bool Accepted { get; set; }
+
+        /// <summary>Why not, or what is still missing. Printed by the client as given.</summary>
+        [JsonPropertyName("reason")] public string Reason { get; set; } = "";
+    }
+
+    /// <summary>Which map's mesh to send down. The body of POST /questtree/maps/meshfile - a POST for
+    /// the reason <see cref="MapImageRequest"/> gives.</summary>
+    public sealed class MapMeshRequest : IRequestData
+    {
+        [JsonPropertyName("map")] public string Map { get; set; } = "";
+    }
+
+    /// <summary>One map's mesh file, base64-encoded.
+    ///
+    /// EMPTY - no data, no sha, no stamp - when this host has no mesh for that map, which is the
+    /// ordinary answer rather than an error: asking is how a client finds out, and every caller draws
+    /// the 2D picture when there is no mesh to drape it on.</summary>
+    public sealed class MapMeshDto
+    {
+        [JsonPropertyName("map")] public string Map { get; set; } = "";
+
+        /// <summary>The whole SET's stamp, as <see cref="MapImageDto.Stamp"/> - so a client that
+        /// fetched the pictures of one set and the mesh of another can tell.</summary>
+        [JsonPropertyName("stamp")] public string Stamp { get; set; } = "";
+
+        /// <summary>sha256 of the bytes below, hex. The client checks it against the index entry's
+        /// before writing the file: this is the one payload here that is never looked at by a human,
+        /// so nothing else would notice it arriving corrupt.</summary>
+        [JsonPropertyName("sha256")] public string Sha256 { get; set; } = "";
+
+        [JsonPropertyName("bytes")] public long Bytes { get; set; }
+
+        [JsonPropertyName("dataBase64")] public string DataBase64 { get; set; } = "";
     }
 }

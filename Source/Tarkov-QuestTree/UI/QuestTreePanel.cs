@@ -641,6 +641,12 @@ namespace QuestTree.UI
             // menu after every raid, and nothing else would drop it until the next tracker open.
             DoNextView.Forget();
             QuestBody.Forget();
+
+            // And the map's 3D geometry, for a harder reason than tidiness: a Mesh is not a scene object,
+            // so the menu being torn down for a raid frees none of it, and the whole map's relief would
+            // sit in the raid's memory until the next menu built a different one. See
+            // MapView.DropMapMemory.
+            MapView.DropMapMemory();
         }
 
         private void Unsubscribe()

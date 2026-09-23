@@ -58,8 +58,9 @@ SAME_NAME = """
     MapMarkerPayloadDto MapMarkerSetDto MapMarkerDto
     ZoneHarvestRequest HarvestedTrigger HarvestedQuestItem ZoneHarvestResponse
     MapExtentDto MapFloorDto
-    MapRectDto MapCaptureFloorDto MapLabelDto MapCaptureMetaDto
+    MapRectDto MapCaptureFloorDto MapLabelDto MapCaptureMetaDto MapCaptureMeshDto
     MapUploadRequest MapUploadResponse MapIndexEntryDto MapIndexDto MapImageRequest MapImageDto
+    MapMeshUploadRequest MapMeshUploadResponse MapMeshRequest MapMeshDto
 """.split()
 
 # The ones whose client copy carries a different name. server type -> client type.

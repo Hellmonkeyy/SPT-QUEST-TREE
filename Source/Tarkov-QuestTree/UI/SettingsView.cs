@@ -336,6 +336,11 @@ namespace QuestTree.UI
                 (int)ModSettings.MapPictureSource.Value,
                 index => ModSettings.MapPictureSource.Value = (ModSettings.PictureSource)index);
 
+            Dropdown(column, ref y, width, deferred, "Map view",
+                new[] { "3D relief where a map has it", "Flat picture" },
+                (int)ModSettings.MapMode.Value,
+                index => ModSettings.MapMode.Value = (ModSettings.MapViewMode)index);
+
             Dropdown(column, ref y, width, deferred, "Map labels",
                 new[] { "Extracts only", "All", "None" },
                 (int)ModSettings.MapLabels.Value,
@@ -364,7 +369,7 @@ namespace QuestTree.UI
                 ModSettings.MapArtworkRotation, ModSettings.PinLabels, ModSettings.SidebarWidth,
                 ModSettings.CaptureMapKey, ModSettings.CampaignKey, ModSettings.AutoCapture,
                 ModSettings.AutoCaptureSeconds, ModSettings.CaptureResolution, ModSettings.UploadCaptures,
-                ModSettings.MapPictureSource, ModSettings.MapLabels);
+                ModSettings.MapPictureSource, ModSettings.MapLabels, ModSettings.MapMode);
         }
 
         /// <summary>The Map section's one paragraph about capturing a picture: which key does it, and

@@ -265,18 +265,60 @@ thing you look for. The legend under the map names the diamond, and the facts li
 counts them, which is also how you tell a capture that found no extracts at all and wants taking
 again.
 
+**The same press also builds the map in three dimensions.** After the last picture and before the
+meta, the capture casts a ray straight down through the centre of every two-metre cell of the map's
+rectangle - 151,000 of them on Customs, in 45 ms, batched through the physics jobs - from the same
+height the picture's camera stood at, and records what it hit as a height grid per floor band. Then
+it walks the scene's renderers for the buildings: anything at least six metres long and two and a
+half tall inside the rectangle, on the layers the picture draws, taking the last level-of-detail
+step that is real geometry rather than an impostor card, and reading the triangles either from the
+mesh directly or - for the fifth or so that live only on the graphics card - off the card itself,
+up to three hundred thousand triangles a map, biggest building first. One line in the log says when
+the scene is being held for it, because the map's hidden geometry is switched on for as long as the
+build runs and the player can see that happen. The result is quantised to sixteen bits and deflated
+into `captures\<key>\<key>-mesh.bin` beside the pictures, 0.3 MB of ground plus a couple of
+megabytes of buildings, and the meta gains a `mesh` block naming it with its SHA-256. It is an
+addition, never a condition: a mesh phase that fails loses the mesh and nothing else, a relief with
+no buildings in it is a complete file, and every map captured before this release carries on
+drawing flat. Automatic capture, which comes round every few seconds, builds it only for a map that
+has none yet - the ground grid is the same every time, and the renderer walk is the part that costs.
+
+**In 3D.** Where a map has been captured with relief - the ground's real heights, measured by
+raycast in the same raid that took the picture - the Maps tab opens it as geometry: the captured
+picture laid over the ground, with the buildings standing on it. **Drag** to slide the map,
+**right-drag** to turn and tilt it, **scroll** to come closer. The floor picker peels the storeys:
+choosing the second floor draws it standing on the first and on the ground, so a multi-storey map
+reads as a building rather than as a stack of slabs. Pins, extract diamonds and place names sit on
+the ground at their real height and keep their size on screen, exactly as they do on the flat map.
+The **3D relief** toggle beside the floor picker switches back to the flat picture at any time, and
+the same choice lives in Settings and the F12 menu as **Map view**; it is greyed out for a map with
+no relief captured yet, and its tooltip says why. A map from DynamicMaps, and a map that is only a
+harvested rectangle, has no relief and always draws flat. Two settings do not apply in 3D and are
+ignored there: **Mirror map artwork** and **Extra map artwork rotation** - the picture is laid onto
+the ground by the coordinates it was measured over, so there is nothing left for them to correct. A
+relief file is about 0.3 MB for a map of Customs' size and is read in the background; if one cannot
+be read, or does not describe the same rectangle as the picture, the map draws flat and the log
+says why.
+
 **Sharing is through the host.** A server started with `tools/server-host.cmd` - which sets
 `QUESTTREE_ACCEPT_MAPS=1` and nothing else - accepts uploaded pictures, and **Share captured maps**
-(on by default) offers each finished capture to it one floor at a time as a JPEG. Every client of
-that host then picks up the maps it does not have itself, once per session, the first time the Maps
-tab reaches a map nothing on that machine can already draw a picture of. A host without the variable
-refuses, says so in one line, and is not asked again that session; captures stay on the machine that
-took them. A solo player needs none of this - your own
-captures are read straight out of the folder above. The limits: one floor a post, up to 2.5 MB a
-floor and 8 floors a map, 20 MB a map and 300 MB in all on the host, and at most 60 MB downloaded
-per session. The credit line under a captured map is ours and names the build and the raid rather
-than a licence: `Map: captured in-game with Quest Tracker 1.19.0, 3 captures since 2026-09-19
-(10:49)`.
+(on by default) offers each finished capture to it one floor at a time as a JPEG, followed by the
+capture's 3D mesh if it built one. Every client of that host then picks up the maps it does not
+have itself, once per session, the first time the Maps tab reaches a map nothing on that machine
+can already draw a picture of - mesh included, so a map somebody else raided opens in 3D on your
+machine too. A host without the variable refuses, says so in one line, and is not asked again that
+session; captures stay on the machine that took them. An older host that has never heard of meshes
+stores the pictures and ignores the rest, which costs one line in the log and nothing else. A solo
+player needs none of this - your own captures are read straight out of the folder above. The
+limits: one floor a post, up to 2.5 MB a floor and 8 floors a map, one mesh a capture up to 12 MB,
+32 MB a map and 300 MB in all on the host, and at most 120 MB downloaded per session. A set whose
+capture built a mesh is not served until both the floors and the mesh have arrived, so a borrowed
+map never names geometry the host does not hold; the mesh is checked by its sha256 at every hop,
+and one that does not match is dropped rather than drawn - the map then draws flat, which is what
+every map did before this release. Two players who capture the same map in the same second share a
+slot on the host, and the second one is refused rather than merged - its own next capture goes up
+normally. The credit line under a captured map is ours and names the build and the raid rather than
+a licence: `Map: captured in-game with Quest Tracker 1.19.0, 3 captures since 2026-09-19 (10:49)`.
 
 ## The tree
 

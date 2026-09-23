@@ -163,7 +163,31 @@ namespace QuestTreeServer
                     "/questtree/maps/image",
                     (url, request, sessionId, output, cancellationToken) =>
                         Guarded(logger, url, () => JsonSerializer.Serialize(mapStore.Image(request), WireJson.Options),
-                            () => new MapImageDto()))
+                            () => new MapImageDto())),
+
+                // The two MESH routes (1.19.0), separate from the picture routes above because a mesh
+                // is not a floor: it has no level, it is deflated binary rather than a picture, and it
+                // is up to 12 MB. The same IsRealLocation gate for the same reason - on Fika any peer
+                // can post here - and the same store, which is what keeps a mesh and the pictures it
+                // belongs to in one set that completes or does not.
+                new RouteAction<MapMeshUploadRequest>(
+                    "/questtree/maps/mesh",
+                    (url, request, sessionId, output, cancellationToken) =>
+                        Guarded(logger, url,
+                            () => JsonSerializer.Serialize(mapStore.AcceptMesh(request, facts.IsRealLocation), WireJson.Options),
+                            () => new MapMeshUploadResponse
+                            {
+                                Accepted = false,
+                                Reason = "the server could not store the mesh"
+                            })),
+
+                // Read from disk per request and never cached, like the image route: a mesh is
+                // megabytes and a client takes it once per stamp.
+                new RouteAction<MapMeshRequest>(
+                    "/questtree/maps/meshfile",
+                    (url, request, sessionId, output, cancellationToken) =>
+                        Guarded(logger, url, () => JsonSerializer.Serialize(mapStore.MeshFile(request), WireJson.Options),
+                            () => new MapMeshDto()))
             };
 
         /// <summary>Rejections already logged this boot, by map and reason, so a client that

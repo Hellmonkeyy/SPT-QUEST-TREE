@@ -545,6 +545,15 @@ namespace QuestTree.UI
             public string Attribution = "";
             public float MinX, MinZ, MaxX, MaxZ;
             public int Rotation;
+
+            /// <summary>The 3D relief file's full path, or null when this capture has no usable one.
+            /// See <see cref="ReadMesh"/>.</summary>
+            public string MeshPath;
+
+            /// <summary>The mesh file's length on disk, for the entry's stamp - a re-capture writes a
+            /// new mesh into the same name, and without this the carried-over entry would keep pointing
+            /// a 3D view at geometry it has already replaced.</summary>
+            public long MeshBytes;
             public readonly List<(int Level, string Name, string File, float MinY, float MaxY)> Floors = new();
             public readonly List<(string Text, float X, float Z, DynamicMapsLibrary.MapLabelKind Kind)> Labels = new();
         }
@@ -645,6 +654,7 @@ namespace QuestTree.UI
                 }
 
                 ReadLabels(root, parsed);
+                ReadMesh(root, folder, name, parsed);
 
                 parsed.Attribution = Attribution(
                     (string)Field(root, "modVersion"), firstCapturedAt,
@@ -655,10 +665,11 @@ namespace QuestTree.UI
                 // and a hand edit that keeps the timestamp.
                 parsed.Stamp = string.Format(
                     CultureInfo.InvariantCulture,
-                    "{0}|{1}|{2}|{3:0.##},{4:0.##},{5:0.##},{6:0.##}|{7}|{8}",
+                    "{0}|{1}|{2}|{3:0.##},{4:0.##},{5:0.##},{6:0.##}|{7}|{8}|{9}:{10}",
                     metaPath, capturedAt, File.GetLastWriteTimeUtc(metaPath).Ticks,
                     parsed.MinX, parsed.MinZ, parsed.MaxX, parsed.MaxZ,
-                    parsed.Rotation, parsed.Floors.Count);
+                    parsed.Rotation, parsed.Floors.Count,
+                    parsed.MeshPath ?? "", parsed.MeshBytes);
 
                 return parsed;
             }
@@ -689,19 +700,37 @@ namespace QuestTree.UI
                 var declared = ((string)Field(node, "file") ?? "").Trim();
                 if (declared.Length == 0) continue;
 
+                string file;
+
                 // The meta is a file on the player's disk and the name in it becomes a path we
                 // read, so it has to be a bare file name in the capture's own folder. Compared
                 // against GetFileName rather than searched for "..": that rejects every separator,
                 // every drive letter and every traversal in one test.
-                if (!string.Equals(declared, Path.GetFileName(declared), StringComparison.Ordinal))
+                //
+                // In its own try because both calls THROW on an invalid path character (ArgumentException
+                // under Mono), and out here that would have escaped to ReadMeta and dropped the whole
+                // capture - so one mistyped floor name would have cost a map every floor it has, rather
+                // than the one floor that was mistyped.
+                try
+                {
+                    if (!string.Equals(declared, Path.GetFileName(declared), StringComparison.Ordinal))
+                    {
+                        Plugin.LogSource?.LogWarning(
+                            $"QuestTree: capture '{metaName}' names the floor picture '{declared}', which " +
+                            $"is not a plain file name in the capture's own folder - that floor is skipped.");
+                        continue;
+                    }
+
+                    file = Path.Combine(folder, declared);
+                }
+                catch (Exception ex)
                 {
                     Plugin.LogSource?.LogWarning(
-                        $"QuestTree: capture '{metaName}' names the floor picture '{declared}', which " +
-                        $"is not a plain file name in the capture's own folder - that floor is skipped.");
+                        $"QuestTree: capture '{metaName}' names the floor picture '{declared}', which is " +
+                        $"not a usable file name ({ex.GetType().Name}) - that floor is skipped.");
                     continue;
                 }
 
-                var file = Path.Combine(folder, declared);
                 if (!File.Exists(file)) continue;
 
                 var level = (int?)Field(node, "level") ?? 0;
@@ -794,6 +823,121 @@ namespace QuestTree.UI
             }
         }
 
+        /// <summary>
+        /// The capture's optional 3D relief file: <c>"mesh": {"file","bytes","version","cells",
+        /// "triangles","sha256"}</c>, written beside the pictures by MapMeshBuilder.
+        ///
+        /// OPTIONAL in both directions. A meta without the block is a 2D capture and says nothing about
+        /// it; a block that does not check out costs the map its 3D view and nothing else - the pictures,
+        /// the extent and every pin are unaffected, so a bad mesh is never allowed to fail a capture that
+        /// is otherwise good. That is why every failure here is a debug line and a null rather than a
+        /// <see cref="Warn"/> and a dropped capture.
+        ///
+        /// Three things are checked, and they are the three a viewport cannot check for itself without
+        /// having already committed to 3D: the name is a bare file name in the capture's own folder (the
+        /// same traversal test <see cref="ReadFloors"/> applies, and for the same reason - this name
+        /// becomes a path we read); the file is on disk; and its length is the length the meta declares,
+        /// which catches a truncated download and a half-written capture. The sha256 is deliberately NOT
+        /// verified here: hashing up to 12 MB happens on the main thread during a panel open, and the
+        /// packaging gates and check-capture.py already do it where there is time. The mesh's EXTENT is
+        /// checked against the picture's by <see cref="Map3DView"/> once the file is parsed, which is the
+        /// first moment anyone knows it.
+        /// </summary>
+        /// <param name="root">The meta document.</param>
+        /// <param name="folder">The capture's folder, which the file must be in.</param>
+        /// <param name="metaName">The meta's file name, for the log line.</param>
+        /// <param name="parsed">The capture being filled in.</param>
+        private static void ReadMesh(JObject root, string folder, string metaName, ParsedCapture parsed)
+        {
+            var mesh = Field(root, "mesh") as JObject;
+            if (mesh == null) return;
+
+            var declared = ((string)Field(mesh, "file") ?? "").Trim();
+            if (declared.Length == 0) return;
+
+            string path;
+
+            // Path.GetFileName and Path.Combine THROW on a name with an invalid path character in it -
+            // ArgumentException under Mono - and this string came out of a file on the player's disk. Left
+            // to ReadMeta's catch, one bad character in an optional mesh block would have cost the capture
+            // its pictures, its extent and every pin. Guarded here, it costs the mesh and nothing else.
+            try
+            {
+                if (!string.Equals(declared, Path.GetFileName(declared), StringComparison.Ordinal))
+                {
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: capture '{metaName}' names the 3D relief file '{declared}', which is " +
+                        $"not a plain file name in the capture's own folder - this map draws in 2D only.");
+                    return;
+                }
+
+                path = Path.Combine(folder, declared);
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: capture '{metaName}' names the 3D relief file '{declared}', which is not " +
+                    $"a usable file name ({ex.GetType().Name}) - this map draws in 2D only.");
+                return;
+            }
+
+            long length;
+
+            try
+            {
+                var info = new FileInfo(path);
+                if (!info.Exists)
+                {
+                    // Ordinary: an old host strips the block's file and keeps the meta, and a set being
+                    // downloaded has the meta before the mesh.
+                    Plugin.LogSource?.LogDebug(
+                        $"QuestTree: capture '{metaName}' names the 3D relief '{declared}', which is not " +
+                        $"on disk - this map draws in 2D only.");
+                    return;
+                }
+
+                length = info.Length;
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: could not look at the 3D relief of '{metaName}' ({ex.Message}) - this map " +
+                    $"draws in 2D only.");
+                return;
+            }
+
+            // A long, not the float Number() returns: 12 MB is 12,000,000, which a float cannot hold
+            // exactly, so a comparison through one would reject a perfectly good file. Guarded on its
+            // own rather than left to ReadMeta's catch: a "bytes" field of the wrong type would
+            // otherwise throw out of here and cost the map its PICTURES as well, and a mesh block is
+            // never allowed to fail a capture that is otherwise good.
+            var bytes = -1L;
+
+            try
+            {
+                var token = Field(mesh, "bytes");
+                if (token != null && token.Type != JTokenType.Null) bytes = (long)token;
+            }
+            catch (Exception)
+            {
+                // Unreadable declared length: treated as absent, and the length on disk stands. One
+                // fewer check, not a refusal.
+                bytes = -1L;
+            }
+
+            if (bytes >= 0 && bytes != length)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: the 3D relief '{declared}' of capture '{metaName}' is {length:#,##0} bytes " +
+                    $"on disk but the meta declares {bytes:#,##0} - it is not the file that was captured, " +
+                    $"so this map draws in 2D only.");
+                return;
+            }
+
+            parsed.MeshPath = path;
+            parsed.MeshBytes = length;
+        }
+
         /// <summary>The entry a read capture describes. No file access and no Unity objects: the
         /// picture is a path until the view asks a layer for its sprite.</summary>
         private static DynamicMapsLibrary.MapEntry BuildEntry(ParsedCapture parsed)
@@ -803,6 +947,11 @@ namespace QuestTree.UI
                 DisplayName = parsed.Key,
                 Attribution = parsed.Attribution,
                 CoordinateRotation = parsed.Rotation,
+
+                // Null unless the capture carries a relief file that checked out - see ReadMesh. The
+                // Maps tab's 3D branch is gated on this being non-null, so a 2D-only capture needs no
+                // other flag.
+                MeshPath = parsed.MeshPath,
 
                 // The ground band, which the harvester numbers 0 and the capture copies. Not the
                 // lowest floor: a map with a basement should not open in it.

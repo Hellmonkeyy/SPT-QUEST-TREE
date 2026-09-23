@@ -19,6 +19,14 @@ What it checks, per <key>\\ folder under the maps root:
      width/height equal the meta's - which in turn equal ceil(extent span * pxPerMetre) within 1 px.
   4. no orphan .jpg: an image in the folder that no floor names is dead weight in a payload measured
      in megabytes, and it is what a re-capture with fewer floors leaves behind.
+  5. the MESH, when the meta names one (the block is optional and absent on every set captured before
+     1.19.0, on DynamicMaps sets, and wherever the relief could not be built): the file exists, its
+     byte length and sha256 are the ones the meta states, its deflated header parses, its version is
+     the one the client reads, its extent is the meta's to 1e-6, its band levels are exactly the
+     floors' levels, and its cell and triangle counts are the ones the meta claims. Plus no orphan
+     *-mesh.bin that no meta names - a stale mesh beside a fresh meta is a mesh of a DIFFERENT extent,
+     which is the one kind of wrongness in this payload that no eye can catch: it is binary, so the
+     hash IS the inspection.
 
 Every folder it finds is checked the same way, whether it is a vanilla map or a modded one the
 maintainer chose to ship.
@@ -29,7 +37,10 @@ What it does NOT check, by design:
     does not decode the image at all - the SOF header is read out of the file's own bytes.
   - the extent against the harvested zone file (that is check-capture.py's job, and it needs an
     install), rotation, tileSize, labels, timeOfDay, modVersion, or file sizes (package.ps1 owns the
-    1.5 MB per image and 40 MB total gates, because it is the one building the zip).
+    1.5 MB per image gate and the total-payload warning, because it is the one building the zip).
+  - the mesh's GEOMETRY. That the relief is the right shape, that the buildings are where the map's
+    buildings are, and that a height is not a hundred metres out are what the screen is for. This
+    proves the file is the one the meta describes and that its frame agrees with the pictures'.
   - WHICH maps are here. Coverage of the 11 vanilla maps is package.ps1's warning, not an error:
     DynamicMaps stays a selectable picture source, so a map with no set falls back rather than
     breaking, and the release ships whatever sets exist. This script only says whether the sets that
@@ -40,18 +51,41 @@ field for a schemaVersion 2 meta, for a floor whose file is absent, for an orpha
 names, for a PNG under a .jpg name, and for a meta width 3 px from the extent's arithmetic, and
 exits 0 on an intact set - of 11 keys or of 4.
 
+The mesh gate was proven the same way, 14 cases one fault at a time (the harness is in the session's
+scratchpad, meshpack-harness/harness.py): a truncated .bin, a wrong sha256, a wrong byte length, a
+mesh whose extent is 10 m wider than the meta's, bands at levels the floors do not have, a wrong cell
+count, a wrong triangle count, a wrong version, four bytes of trailing data, an orphan *-mesh.bin, a
+mesh the meta names but that is absent, and bytes that are not a deflate stream at all - each exits 1
+naming the map and what was wrong; an intact set with a mesh and a set with NO mesh both exit 0.
+
 Usage:  python tools/check-maps-pack.py <maps-root> --schema N
 """
 
 import argparse
+import hashlib
 import json
 import math
 import struct
 import sys
+import zlib
 from pathlib import Path
 
 PIXEL_TOLERANCE = 1     # px, on each axis, against ceil(span * pxPerMetre)
 META_SUFFIX = ".map.json"
+
+# The mesh file, from the client's MapMeshFile: the WHOLE file is one raw deflate block (no zlib
+# wrapper - hence wbits -15), magic included, and everything in it is little-endian. The caps are that
+# class's own, repeated here because this script runs with no access to it.
+MESH_SUFFIX = "-mesh.bin"
+MESH_MAGIC = b"QTM1"
+MESH_VERSION = 1                    # MapMeshFile.Version
+MESH_MAX_BANDS = 8                  # MaxFloors
+MESH_MAX_CELLS_PER_BAND = 4_000_000
+MESH_MAX_BUILDINGS = 20_000
+MESH_MAX_VERTICES_TOTAL = 4_000_000
+MESH_MAX_TRIANGLES = 2_000_000
+MESH_MAX_INFLATED = 64 * 1024 * 1024    # what this script will inflate before giving up
+EXTENT_TOLERANCE = 1e-6                 # m, mesh header against the meta's extent
 
 # SOFn: C0-CF except C4 (DHT), C8 (JPG extension) and CC (DAC), which are not frame headers.
 SOF_MARKERS = {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7,
@@ -106,6 +140,233 @@ def jpeg_size(path):
     return None, "has no frame header (SOF) in it at all"
 
 
+def mesh_header(path):
+    """(header dict, None) or (None, reason) for a mesh file - MapMeshFile's layout, read whole.
+
+    Inflated in chunks with a ceiling, because this file arrives from a capture, from a host, or from a
+    hand-copy: a corrupt length must cost a bounded read rather than the machine. Every count is checked
+    against its cap BEFORE the bytes behind it are skipped, exactly as both C# readers do, and a file
+    that ends inside a grid is a failure rather than a short read nobody notices.
+
+    The returned dict holds what the gates compare: version, extent, y range, bands (level, cell size,
+    width, height), and the total cell, vertex and triangle counts."""
+    try:
+        raw = path.read_bytes()
+    except OSError as exc:
+        return None, f"cannot be read ({exc.strerror or exc})"
+    if not raw:
+        return None, "is empty"
+
+    try:
+        engine = zlib.decompressobj(-15)
+        out = bytearray()
+        for at in range(0, len(raw), 1 << 16):
+            out += engine.decompress(raw[at:at + (1 << 16)], MESH_MAX_INFLATED - len(out) + 1)
+            if len(out) > MESH_MAX_INFLATED:
+                return None, (f"inflates to more than the {MESH_MAX_INFLATED:,} bytes this check will "
+                              f"read - it is not a mesh this build wrote")
+        out += engine.flush()
+    except zlib.error as exc:
+        return None, f"is not a deflate stream, or its data is corrupt ({exc})"
+    if len(out) > MESH_MAX_INFLATED:
+        return None, f"inflates to more than the {MESH_MAX_INFLATED:,} bytes this check will read"
+
+    at = 0
+
+    def take(count, what):
+        """`count` bytes, or a raise-free signal that the file ends inside `what`."""
+        nonlocal at
+        if at + count > len(out):
+            raise EOFError(what)
+        chunk = out[at:at + count]
+        at += count
+        return chunk
+
+    def i32(what):
+        return struct.unpack("<i", take(4, what))[0]
+
+    try:
+        if bytes(take(4, "its magic")) != MESH_MAGIC:
+            got = bytes(out[:4])
+            return None, (f"does not start with {MESH_MAGIC.decode()} but with "
+                          f"{' '.join(f'{b:02x}' for b in got)} - it is not a Quest Tracker mesh file")
+
+        version = i32("its version")
+        if version != MESH_VERSION:
+            return None, (f"is mesh format version {version}, not the v{MESH_VERSION} the shipped client "
+                          f"reads - that client would refuse it")
+
+        min_x, min_z, max_x, max_z = struct.unpack("<4d", take(32, "its extent"))
+        y_min, y_max = struct.unpack("<2f", take(8, "its height range"))
+        if not (max_x > min_x and max_z > min_z):
+            return None, f"has an empty extent: x {min_x:g}..{max_x:g}, z {min_z:g}..{max_z:g}"
+        if not (y_max > y_min):
+            return None, f"has an empty height range: {y_min:g}..{y_max:g}"
+
+        band_count = i32("its band count")
+        if band_count < 0 or band_count > MESH_MAX_BANDS:
+            return None, f"claims {band_count:,} bands, past the {MESH_MAX_BANDS} a map may have"
+
+        bands, cells_total = [], 0
+        for index in range(band_count):
+            level = i32(f"band {index}'s level")
+            cell_metres = struct.unpack("<f", take(4, f"band {index}'s cell size"))[0]
+            width = i32(f"band {index}'s width")
+            height = i32(f"band {index}'s height")
+            if width <= 0 or height <= 0 or not (cell_metres > 0):
+                return None, (f"has a level {level} band of {width}x{height} cells at {cell_metres:g} m, "
+                              f"which is not a grid")
+            cells = width * height
+            # Before the skip, not after: this is the line between a corrupt width and a read that
+            # runs to the ceiling.
+            if cells > MESH_MAX_CELLS_PER_BAND:
+                return None, (f"has a level {level} band of {cells:,} cells, past the "
+                              f"{MESH_MAX_CELLS_PER_BAND:,} a band may have")
+            if any(b["level"] == level for b in bands):
+                return None, f"has two level {level} bands"
+            take(cells * 3, f"band {index}'s grids")   # uint16 height + uint8 distance per cell
+            bands.append({"level": level, "cell": cell_metres, "width": width, "height": height})
+            cells_total += cells
+
+        building_count = i32("its building count")
+        if building_count < 0 or building_count > MESH_MAX_BUILDINGS:
+            return None, (f"claims {building_count:,} buildings, past the {MESH_MAX_BUILDINGS:,} a map "
+                          f"may have")
+
+        vertices, indices = 0, 0
+        for index in range(building_count):
+            i32(f"building {index}'s key")
+            i32(f"building {index}'s level")
+            vertex_count = i32(f"building {index}'s vertex count")
+            if vertex_count < 0:
+                return None, f"has a building claiming {vertex_count:,} vertices"
+            vertices += vertex_count
+            if vertices > MESH_MAX_VERTICES_TOTAL:
+                return None, (f"claims {vertices:,} vertices by building {index}, past the "
+                              f"{MESH_MAX_VERTICES_TOTAL:,} a map may have")
+            take(vertex_count * 6, f"building {index}'s vertices")
+            index_count = i32(f"building {index}'s index count")
+            if index_count < 0 or index_count % 3 != 0:
+                return None, f"has a building claiming {index_count:,} triangle indices"
+            indices += index_count
+            if indices // 3 > MESH_MAX_TRIANGLES:
+                return None, (f"claims {indices // 3:,} triangles by building {index}, past the "
+                              f"{MESH_MAX_TRIANGLES:,} a map may have")
+            take(index_count * 4, f"building {index}'s indices")
+    except EOFError as exc:
+        return None, f"ends inside {exc.args[0]} - the file is truncated"
+
+    if at != len(out):
+        return None, f"carries {len(out) - at:,} byte(s) after its last building"
+
+    return {
+        "version": version,
+        "extent": (min_x, min_z, max_x, max_z),
+        "yMin": y_min, "yMax": y_max,
+        "bands": bands,
+        "cells": cells_total,
+        "vertices": vertices,
+        "triangles": indices // 3,
+    }, None
+
+
+def check_mesh(meta, folder, key, extent, levels, errors):
+    """The mesh block against the file it names. Returns (its file name lower-cased or None, bytes).
+
+    A meta with NO mesh block is the ordinary case and passes with nothing checked - the mesh is
+    optional end to end, and a set without one draws flat on every client. A block that IS there is
+    held to every number in it, because the file is binary: unlike a JPEG, nobody will ever notice by
+    looking that it is the wrong one."""
+    mesh = meta.get("mesh")
+    if mesh is None:
+        return None, 0
+    if not isinstance(mesh, dict):
+        errors.append(f"{key}: mesh is present but not an object ({mesh!r})")
+        return None, 0
+
+    where = f"{key}: mesh"
+
+    rel = mesh.get("file")
+    if not isinstance(rel, str) or not rel.strip():
+        errors.append(f"{where}.file is missing or empty, so nothing says which file the mesh is")
+        return None, 0
+    parts = Path(rel.replace("\\", "/"))
+    if parts.is_absolute() or len(parts.parts) != 1:
+        errors.append(f"{where}.file {rel!r} is not a plain file name inside {folder.name}")
+        return None, 0
+    # The EXACT name, not merely the suffix: the host stores the file as <key>-mesh.bin and reads it back
+    # through a regex that admits nothing else (MapStore.StoredMeshFileName), which a bare "-mesh.bin"
+    # also fails. A set naming anything else ships and is then refused by the host it shipped to - and a
+    # mesh borrowed from another map's folder is the case that matters, because it parses, its extent is
+    # somebody else's, and nothing but the name says so.
+    wanted = f"{key.lower()}{MESH_SUFFIX}"
+    if parts.name.lower() != wanted:
+        errors.append(f"{where}.file {rel!r} is not {wanted} - that exact name is what the layout gate, "
+                      f"the host's store and the client all spell, and nothing else is read back")
+    named = parts.name.lower()
+
+    path = folder / parts
+    if not path.is_file():
+        errors.append(f"{where}.file {rel!r} does not exist in {folder} - the meta names a mesh the set "
+                      f"does not carry, and the client refuses a set whose mesh is missing rather than "
+                      f"drawing it flat. Re-run -RefreshMaps.")
+        return named, 0
+
+    size = path.stat().st_size
+    claimed_bytes = mesh.get("bytes")
+    if isinstance(claimed_bytes, bool) or not isinstance(claimed_bytes, int) or claimed_bytes <= 0:
+        errors.append(f"{where}.bytes {claimed_bytes!r} is not a positive integer")
+    elif claimed_bytes != size:
+        errors.append(f"{where}.bytes says {claimed_bytes:,} but {rel} is {size:,} bytes on disk - the "
+                      f"meta and the mesh are from different captures, or the file was truncated")
+
+    claimed_sha = mesh.get("sha256")
+    if not isinstance(claimed_sha, str) or len(claimed_sha) != 64 or \
+            any(c not in "0123456789abcdefABCDEF" for c in claimed_sha):
+        errors.append(f"{where}.sha256 {claimed_sha!r} is not 64 hex digits")
+        claimed_sha = None
+    else:
+        actual = hashlib.sha256(path.read_bytes()).hexdigest()
+        if actual.lower() != claimed_sha.lower():
+            errors.append(f"{where}: {rel} hashes to {actual[:16]} but the meta says "
+                          f"{claimed_sha.lower()[:16]} - THIS IS THE STALE-MESH CASE: the file beside "
+                          f"the meta is not the one that capture wrote, so it is a mesh of some other "
+                          f"extent. Delete it and re-run -RefreshMaps.")
+
+    header, why = mesh_header(path)
+    if header is None:
+        errors.append(f"{where}: {rel} {why}")
+        return named, size
+
+    claimed_version = mesh.get("version")
+    if claimed_version != header["version"]:
+        errors.append(f"{where}.version {claimed_version!r} is not the {header['version']} inside {rel}")
+
+    # The extent is the whole reason a mesh can be checked at all without looking at it: the file's own
+    # rectangle has to be the rectangle the pictures cover, to the double, or the relief is draped over
+    # the wrong stretch of world and every building sits at an offset nothing else would reveal.
+    if extent is not None:
+        for name, mine, theirs in zip(("minX", "minZ", "maxX", "maxZ"), header["extent"], extent):
+            if abs(mine - theirs) > EXTENT_TOLERANCE:
+                errors.append(f"{where}: its {name} is {mine:.6f} but the meta's extent says "
+                              f"{theirs:.6f} - the mesh and the pictures cover different rectangles")
+
+    mesh_levels = sorted(b["level"] for b in header["bands"])
+    if levels is not None and mesh_levels != sorted(levels):
+        errors.append(f"{where}: its bands are levels {mesh_levels} but the meta's floors are "
+                      f"{sorted(levels)} - a band with no picture cannot be textured, and a floor with "
+                      f"no band has no ground to stand on")
+
+    for field, inside in (("cells", header["cells"]), ("triangles", header["triangles"])):
+        claimed = mesh.get(field)
+        if isinstance(claimed, bool) or not isinstance(claimed, int):
+            errors.append(f"{where}.{field} {claimed!r} is not an integer")
+        elif claimed != inside:
+            errors.append(f"{where}.{field} says {claimed:,} but {rel} holds {inside:,}")
+
+    return named, size
+
+
 def load_json(path):
     """(object, None) or (None, reason). utf-8-sig: the client writes these files on Windows."""
     try:
@@ -149,13 +410,14 @@ def check_extent(meta, key, errors):
 
 
 def check_floors(meta, folder, key, extent, px_per_metre, errors):
-    """Validates every floor against its JPEG and the extent. Returns (named files, pixels, bytes):
-    the set of file names the meta claims, the first floor's "WxH" for the summary, total bytes."""
+    """Validates every floor against its JPEG and the extent. Returns (named files, pixels, bytes,
+    levels): the set of file names the meta claims, the first floor's "WxH" for the summary, total
+    bytes, and the floor levels - which the mesh's bands are then held to."""
     floors = meta.get("floors")
     if not isinstance(floors, list) or not floors:
         errors.append(f"{key}: floors is missing, not a list, or empty - a set with no floor has no "
                       f"picture, so the Maps tab would fall back to the bare rectangle")
-        return set(), "-", 0
+        return set(), "-", 0, []
 
     named, seen_levels, pixels, total = set(), [], None, 0
     for index, floor in enumerate(floors):
@@ -238,7 +500,7 @@ def check_floors(meta, folder, key, extent, px_per_metre, errors):
                 errors.append(f"{where}: height {meta_h} px but the extent's {max_z - min_z:g} m at "
                               f"{px_per_metre:g} px/m wants {want_h}")
 
-    return named, pixels or "-", total
+    return named, pixels or "-", total, seen_levels
 
 
 def check_set(folder, schema, errors):
@@ -290,7 +552,8 @@ def check_set(folder, schema, errors):
         px_per_metre = None
 
     extent = check_extent(meta, key, errors)
-    named, pixels, total = check_floors(meta, folder, key, extent, px_per_metre, errors)
+    named, pixels, total, levels = check_floors(meta, folder, key, extent, px_per_metre, errors)
+    mesh_named, mesh_bytes = check_mesh(meta, folder, key, extent, levels, errors)
 
     orphans = sorted(p.name for p in folder.iterdir()
                      if p.is_file() and p.name.lower().endswith(".jpg")
@@ -300,9 +563,23 @@ def check_set(folder, schema, errors):
                       f"would ship as megabytes nothing loads; a re-capture with fewer floors "
                       f"leaves exactly this behind. Delete them or re-run -RefreshMaps.")
 
+    # The same rule for the mesh, and it bites harder: a *-mesh.bin the meta does not name is either a
+    # mesh from an older capture of this map (wrong extent, and the sha256 above never sees it because
+    # the meta points elsewhere) or a mesh of another map entirely. Either way it ships as megabytes
+    # nothing loads.
+    stray_meshes = sorted(p.name for p in folder.iterdir()
+                          if p.is_file() and p.name.lower().endswith(MESH_SUFFIX)
+                          and p.name.lower() != mesh_named)
+    if stray_meshes:
+        errors.append(f"{key}: {', '.join(stray_meshes)} - mesh file(s) the meta does not name"
+                      f"{' (its meta names no mesh at all)' if mesh_named is None else ''}. A mesh from "
+                      f"an earlier capture is a mesh of a different extent and nothing would draw it. "
+                      f"Delete them or re-run -RefreshMaps.")
+
     floor_count = len(meta["floors"]) if isinstance(meta.get("floors"), list) else 0
     scale = f"{1 / px_per_metre:.2f} m/px" if px_per_metre else "? m/px"
-    return (f"{key}: {floor_count} floor(s), {pixels} @ {scale}, {total / 1048576:.1f} MB, "
+    mesh_note = f", mesh {mesh_bytes / 1048576:.1f} MB" if mesh_named is not None else ", no mesh"
+    return (f"{key}: {floor_count} floor(s), {pixels} @ {scale}, {total / 1048576:.1f} MB{mesh_note}, "
             f"captured {meta.get('capturedAt') or '?'}")
 
 

@@ -5,10 +5,14 @@
 # files with no licence to redistribute. Seventeen zips were clean because one person
 # remembered. This script does not read the install at all except under the three -Refresh switches,
 # and each of those reads ONE named thing and nothing else: -RefreshZones copies zones\*.json,
-# -RefreshMaps copies maps\<key>\*.jpg|*.map.json, and -RefreshBuilds copies the single file
+# -RefreshMaps copies maps\<key>\*.jpg|*.map.json|*-mesh.bin, and -RefreshBuilds copies the single file
 # cache\weapon-builds.json. None of the three globs can recurse or reach the parent directory, which
-# is where objective-gps.json and tarkovdev-quests.json live. It
-# assembles exactly the files named below, and then checks the
+# is where objective-gps.json and tarkovdev-quests.json live. -RefreshMaps and -RefreshBuilds both
+# REFUSE while SPT.Server.exe is up, because the server writes both of those things as it runs - a map
+# set is promoted file by file and the build cache is rewritten as it trains - so a copy taken then can
+# be half a set or half a file.
+#
+# It assembles exactly the files named below, and then checks the
 # staging folder and the zip against that list: an extra file, a missing file, or any name matching
 # objective-gps / tarkovdev / .bak is a non-zero exit. It also refuses when the four version strings
 # (two ModInfo.cs, two csproj) disagree, or when the built DLLs do not carry that version.
@@ -27,30 +31,37 @@
 #
 # From 1.19.0 it also gates the MAP SETS - the captured JPEG floors and their metas under
 # Source\Tarkov-QuestTree-Server\maps\ - because they are the first thing this mod ships that is
-# measured in megabytes: a zip with no map sets is ~190 KB, one carrying all 11 vanilla maps is 15-30
-# MB (JPEG does not compress further, so the archive is roughly the sum of the images), and the
-# release ships WHATEVER SETS EXIST - anything from none to all 11. That payload is machine-written and
-# copied twice, and every way it goes wrong looks like a working release from here: see the five gates
-# under "the map pictures" below. How many maps are covered is a WARNING there, not a gate, because
+# measured in megabytes: a zip with no map sets is ~190 KB, one carrying all 11 vanilla maps is 20-60
+# MB (JPEG and the deflated meshes do not compress further, so the archive is roughly the sum of the
+# files), and the release ships WHATEVER SETS EXIST - anything from none to all 11. That payload is
+# machine-written and copied twice, and every way it goes wrong looks like a working release from here:
+# see the six gates under "the map pictures" below. How many maps are covered is a WARNING there, and
+# from 1.19.0 so is the payload's total size, not a gate, because
 # DynamicMaps stays a selectable picture source and a map with no set falls back instead of breaking.
 #
 # Proven able to fail before it shipped: a planted objective-gps.json in the staging folder, a
 # mismatched version constant, and (for the DTO check) a bogus property added to the client's
 # RewardDto, each made it exit non-zero. The two paperwork gates were proven the same way: a
 # CHANGELOG.md whose first line named 1.18.0 while the constants said 1.18.1, and a release-notes
-# file cut to 120 bytes, each made it exit non-zero and name what it wanted. The five map gates were
+# file cut to 120 bytes, each made it exit non-zero and name what it wanted. The map gates were
 # proven against a planted fake set of 11 keys, one fault at a time: a raw .png left in a key folder
-# and a .incoming\ folder inside one (layout gate), a 2 MB floor image (per-image gate), a set inflated
-# past 40 MB (total gate), a meta stamped schemaVersion 2 (schema gate), a floor's image deleted, an
-# orphan image no floor names, and a meta width moved 3 px off the extent's arithmetic (all the pack
-# check), each made it exit non-zero and name the map and the field; the intact set passed all five.
+# and a .incoming\ folder inside one (layout gate), a 2 MB floor image (per-image gate), a meta stamped
+# schemaVersion 2 (schema gate), a floor's image deleted, an orphan image no floor names, and a meta
+# width moved 3 px off the extent's arithmetic (all the pack check), each made it exit non-zero and name
+# the map and the field; the intact set passed. The MESH gate was proven the same way in 14 cases - a
+# truncated .bin, a wrong sha256 or byte length, a mesh 10 m wider than the meta's extent, bands at
+# levels the floors do not have, wrong cell/triangle/version numbers, trailing bytes, an orphan
+# *-mesh.bin, a named mesh that is absent, and bytes that are not a deflate stream - while an intact set
+# WITH a mesh and a set with NO mesh both passed; and the total-size gate is deliberately no longer able
+# to fail (see GATE 3).
 # The two things that are NOT gates were proven to warn and carry on instead: a four-key set named the
 # seven missing maps and still zipped, and with maps\ absent the run zipped 17 files with no map
 # entries on the allowlist.
 #
 # Usage:  .\package.ps1                 build, stage, zip, verify
 #         .\package.ps1 -RefreshZones   first copy zones\*.json from the install into the repo
-#         .\package.ps1 -RefreshMaps    first copy maps\<key>\*.jpg and *.map.json from the install
+#         .\package.ps1 -RefreshMaps    first copy maps\<key>\*.jpg, *.map.json and *-mesh.bin from
+#                                       the install (refuses while SPT.Server.exe is up)
 #         .\package.ps1 -RefreshBuilds  first copy the trained cache\weapon-builds.json over the seed
 #                                       (refuses while SPT.Server.exe is up, and prints the seed's
 #                                       stamp, build count and trader/flea/unpriced split either side
@@ -201,13 +212,27 @@ if ($zoneFiles.Count -eq 0) { Fail "no zone files in $zonesDir - run with -Refre
 # only then copied in here - and every way it goes wrong looks exactly like a working release from the
 # packager's chair: a raw .png the converter never reached (ships, draws nothing), a floor left at q95
 # (ships, doubles the download), a meta whose width no longer matches its picture (ships, and every pin
-# on that map sits a constant fraction off). So: five gates, and none of them is about the code. What
+# on that map sits a constant fraction off), and a mesh is worse - it is binary nobody can even open to
+# look at, so a stale one beside a fresh meta is invisible without a hash. So: six gates, and none of
+# them is about the code. What
 # is NOT gated is how many maps are covered - see the warning further down.
 $mapsDir = Join-Path $server "maps"
 
 if ($RefreshMaps) {
     $installMaps = Join-Path $SptPath "SPT_Runtime\user\mods\QuestTree\maps"
     if (-not (Test-Path $installMaps)) { Fail "no maps folder at $installMaps" }
+
+    # NOT while the server is up, the same refusal -RefreshBuilds makes and for a sharper reason. A
+    # running host writes into this very folder: it promotes a staged set by writing each picture, then
+    # the mesh, then the meta, and it sweeps the files the new meta does not name. A copy taken in the
+    # middle of that carries an old meta beside new pictures, or a meta naming a mesh whose bytes are
+    # still arriving - and the sha256 in the meta is what would then fail the pack check, if the copy
+    # happened to be caught at all. The user may also be in a raid on that server, which this script
+    # never interrupts. It refuses; stopping the server is the user's call.
+    $serverRunning = @(Get-Process -Name "SPT.Server" -ErrorAction SilentlyContinue)
+    if ($serverRunning.Count -gt 0) {
+        Fail "SPT.Server.exe is running (pid $(($serverRunning | ForEach-Object { $_.Id }) -join ', ')) - it writes map sets into $installMaps as clients upload them, so a copy taken now can hold one capture's meta beside another's pictures or mesh. Stop the server yourself and re-run; nothing has been copied."
+    }
     New-Item -ItemType Directory -Force $mapsDir | Out-Null
     # One key at a time, and only the two globs. The install's folder also holds what the transport
     # leaves there - a ".incoming" staging directory mid-upload, and on a client machine the raw .png
@@ -221,20 +246,26 @@ if ($RefreshMaps) {
             Write-Host "  skipped $($src.Name)\ - not a map key" -ForegroundColor DarkGray
             continue
         }
+        # Three globs, not two: `*-mesh.bin` is the 3D mesh the same capture wrote beside its pictures
+        # (MapMeshFile), and a set refreshed without it would ship a meta naming a mesh the zip does not
+        # carry - which the mesh gate below then fails, loudly, rather than shipping.
         $picked = @(Get-ChildItem $src.FullName -File |
-            Where-Object { $_.Name -like "*.jpg" -or $_.Name -like "*.map.json" })
+            Where-Object { $_.Name -like "*.jpg" -or $_.Name -like "*.map.json" -or $_.Name -like "*-mesh.bin" })
         if ($picked.Count -eq 0) {
-            Write-Host "  skipped $($src.Name)\ - no .jpg or .map.json in it" -ForegroundColor DarkGray
+            Write-Host "  skipped $($src.Name)\ - no .jpg, .map.json or -mesh.bin in it" -ForegroundColor DarkGray
             continue
         }
         $dst = Join-Path $mapsDir $src.Name
         New-Item -ItemType Directory -Force $dst | Out-Null
         # REPLACED per key, not merged: a re-capture with fewer floors would otherwise leave the old
         # floor's picture in the repo, and it would ship - which is what the pack check's orphan rule
-        # catches when it happens anyway. Only the two globs are deleted, so anything else in there
-        # survives to be named by the layout gate below rather than silently thrown away.
+        # catches when it happens anyway. The mesh is deleted with them for the same reason and a
+        # sharper one: a stale .bin beside a fresh meta is a mesh of a DIFFERENT extent, and the gate
+        # that catches it is a sha256, not an eye. Only these globs are deleted, so anything else in
+        # there survives to be named by the layout gate below rather than silently thrown away.
         Get-ChildItem $dst -File |
-            Where-Object { $_.Name -like "*.jpg" -or $_.Name -like "*.map.json" } | Remove-Item -Force
+            Where-Object { $_.Name -like "*.jpg" -or $_.Name -like "*.map.json" -or $_.Name -like "*-mesh.bin" } |
+            Remove-Item -Force
         foreach ($file in $picked) { Copy-Item $file.FullName (Join-Path $dst $file.Name) -Force }
         $refreshed++
         Write-Host ("  {0,-16} {1} file(s)" -f $src.Name, $picked.Count) -ForegroundColor Yellow
@@ -268,17 +299,33 @@ if ($mapsPresent) {
 # With no map sets the three gates below have nothing to iterate and pass on an empty list, which is
 # the point: they are about sets that exist, not about whether any do.
 
-# GATE 1 - LAYOUT. maps\ holds nothing but <key>\*.jpg and <key>\*.map.json. The allowlist below is
-# BUILT from this folder, so anything else in here is a file the zip carries: a raw .png capture, a
-# ".incoming" directory a refresh skipped but a hand-copy did not, an editor's .bak, a stray .svg from
-# the DynamicMaps era. The depth test is what catches the directories - a file two levels down is not
-# in a key folder, it is in something nested inside one.
+# GATE 1 - LAYOUT. maps\ holds nothing but <key>\*.jpg, <key>\*.map.json and the one file
+# <key>\<key>-mesh.bin. The allowlist below is BUILT from this folder, so anything else in here is a
+# file the zip carries: a raw .png capture, a ".incoming" directory a refresh skipped but a hand-copy
+# did not, an editor's .bak, a stray .svg from the DynamicMaps era. The depth test is what catches the
+# directories - a file two levels down is not in a key folder, it is in something nested inside one -
+# and it is also the whole of what confines a .bin to maps\<key>\: nothing else in the release ships
+# one, and the forbidden regex further down is deliberately unchanged because a .bin outside this
+# folder is caught by the allowlist rather than by a name.
+#
+# The mesh is matched by its EXACT name and not by *-mesh.bin, which is the difference between a gate
+# that agrees with the code and one that merely looks like it: the server stores the file as
+# <key>-mesh.bin and reads it back through a regex that admits nothing else (MapStore's
+# StoredMeshFileName), so "bigmap\weird-mesh.bin" would pass a glob here, ship, and then be refused by
+# the very host it was shipped to - and a bare "-mesh.bin" fails that regex too. A mesh from another
+# map's folder is the case that matters: it parses, its extent is somebody else's, and nothing but the
+# name says so.
 $strayMapFiles = @($mapFiles | ForEach-Object {
     $rel = $_.FullName.Substring($mapsDir.Length + 1)
-    if (@($rel -split "\\").Count -ne 2 -or -not ($_.Name -like "*.jpg" -or $_.Name -like "*.map.json")) { $rel }
+    $parts = @($rel -split "\\")
+    $named = $false
+    if ($parts.Count -eq 2) {
+        $named = $_.Name -like "*.jpg" -or $_.Name -like "*.map.json" -or $_.Name -eq "$($parts[0])-mesh.bin"
+    }
+    if (-not $named) { $rel }
 })
 if ($strayMapFiles.Count -gt 0) {
-    Fail "maps\ holds $($strayMapFiles.Count) file(s) that are not <key>\*.jpg or <key>\*.map.json, and the allowlist is built from this folder: $($strayMapFiles -join ', ')"
+    Fail "maps\ holds $($strayMapFiles.Count) file(s) that are not <key>\*.jpg, <key>\*.map.json or <key>\<key>-mesh.bin, and the allowlist is built from this folder: $($strayMapFiles -join ', ')"
 }
 
 # GATE 2 - PER IMAGE. A floor over 1.5 MB is a capture that came out at a resolution or a quality the
@@ -291,16 +338,24 @@ if ($fatImages.Count -gt 0) {
     Fail "map image(s) over $($maxImageBytes / 1MB) MB - re-capture at a lower resolution or quality: $($fatImages -join ', ')"
 }
 
-# GATE 3 - TOTAL. 40 MB is the download budget for the whole mod. 11 maps of 1-4 floors at ~1 MB is
-# 15-30 MB, so this has room for a re-capture campaign but not for a second one stacked on top, and it
-# fails before the zip is built rather than after it is uploaded.
-$maxMapsBytes = 40MB
+# GATE 3 - TOTAL, and it is a WARNING rather than a failure, which is the user's own decision on the
+# 3D maps: the meshes are the payload nobody can trade away at packaging time (a mesh is the map's
+# geometry - there is no "lower quality" setting that keeps it usable), so a hard cap here would mean a
+# release that cannot be built at all rather than one that is large. 11 maps of 1-4 floors at ~1 MB
+# plus 0.3-3 MB of mesh each is 20-60 MB. The size is PRINTED either way, every run, because the one
+# thing that must not happen is the payload growing unnoticed; 80 MB is where it is worth stopping to
+# look at what grew.
+$warnMapsBytes = 80MB
 $mapsBytes = ($mapFiles | Measure-Object -Property Length -Sum).Sum
-if ($mapsBytes -gt $maxMapsBytes) {
-    Fail "the map sets are $("{0:N1}" -f ($mapsBytes / 1MB)) MB, over the $($maxMapsBytes / 1MB) MB budget for the whole payload - drop the quality to q70 or the interior floors to 1536 px"
+$mapsMeshBytes = (@($mapFiles | Where-Object { $_.Name -like "*-mesh.bin" }) | Measure-Object -Property Length -Sum).Sum
+$mapsSizeLine = "Map payload: $("{0:N1}" -f ($mapsBytes / 1MB)) MB in maps\ ($("{0:N1}" -f ($mapsMeshBytes / 1MB)) MB of it 3D meshes)"
+if ($mapsBytes -gt $warnMapsBytes) {
+    Write-Host "$mapsSizeLine - over the $($warnMapsBytes / 1MB) MB the download budget was written for. NOT a failure (the user's call: a mesh cannot be shrunk without losing the map), but look at what grew before publishing." -ForegroundColor Yellow
+} else {
+    Write-Host $mapsSizeLine -ForegroundColor Green
 }
 
-# GATES 4 and 5 - the METAS, in tools/check-maps-pack.py, for the same reason check-dtos.py is not
+# GATES 4, 5 and 6 - the METAS and the MESHES, in tools/check-maps-pack.py, for the same reason check-dtos.py is not
 # written in PowerShell: it reads JSON, walks JPEG marker chains for each floor's real pixel size and
 # does ceil() arithmetic per axis, and the readable version of that is 80 lines of Python rather than
 # 80 lines of Join-Path. It is handed the one fact only this script knows - what schema the CLIENT
@@ -308,7 +363,11 @@ if ($mapsBytes -gt $maxMapsBytes) {
 # folder, and every floor file it names exists, with no orphan image no floor names; (5) each meta's
 # schemaVersion equals the client's SupportedCaptureSchema, so a set the shipped client would skip
 # cannot ship, and each floor's image is a real JPEG whose frame size equals its meta's width/height,
-# which equal ceil(extent span * pxPerMetre) within 1 px. It does NOT look at zones\ - a shipped set is
+# which equal ceil(extent span * pxPerMetre) within 1 px; (6) a set whose meta names a mesh carries that
+# file, at the byte length and the sha256 the meta states, and its deflated header parses with the
+# meta's own extent and the floors' own band levels in it - plus no orphan *-mesh.bin that no meta
+# names. A set with NO mesh passes (6) untouched: the mesh is optional end to end. It does NOT look at
+# zones\ - a shipped set is
 # checked against its own meta, so packaging works on a machine that never harvested the map - and it
 # has no opinion about WHICH maps are present, which is the warning below.
 if ($mapsPresent) {
@@ -362,7 +421,7 @@ foreach ($zone in $zoneFiles) {
 }
 # The map sets, into the same folder the server stores uploads in, so a fresh install already has the
 # maintainer's pictures and a host that later captures its own overwrites them in place. Every file
-# here has been through the five gates above, and the relative path is <key>\<file> by GATE 1. With no
+# here has been through the six gates above, and the relative path is <key>\<file> by GATE 1. With no
 # maps\ folder $mapFiles is empty and the loop adds nothing, so the zip simply carries no pictures.
 foreach ($mapFile in $mapFiles) {
     Allow $mapFile.FullName ("SPT_Runtime\user\mods\QuestTree\maps\" + $mapFile.FullName.Substring($mapsDir.Length + 1))

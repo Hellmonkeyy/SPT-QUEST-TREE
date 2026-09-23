@@ -42,6 +42,11 @@ namespace QuestTree.UI
         private static bool MirrorArtwork => ModSettings.Ready && ModSettings.MirrorMapArtwork.Value;
         private static int ArtworkRotation => ModSettings.Ready ? ModSettings.MapArtworkRotation.Value : 0;
 
+        /// <summary>Whether a captured map should be drawn as geometry rather than as a flat picture.
+        /// The setting alone - whether THIS map has any relief to draw is <see cref="MeshFor"/>.</summary>
+        private static bool ReliefMode =>
+            ModSettings.Ready && ModSettings.MapMode.Value == ModSettings.MapViewMode.Relief;
+
         private const string AnyLocation = "any";
         private const float PickerWidth = 300f;
         private const float FloorPickerWidth = 190f;
@@ -64,10 +69,101 @@ namespace QuestTree.UI
         /// the caller repaints, which is where TryGetSprite finishes the job on the main thread.</summary>
         public static bool PollPendingSprite()
         {
+            // The 3D view's refusal rides this same poll rather than calling the repaint itself. It is
+            // discovered inside a LateUpdate - the frame the mesh file lands - and re-entering the
+            // panel's whole build from a component's LateUpdate would destroy the viewport the component
+            // is standing on, mid-frame. The panel asks this once a frame while the map is up, which is
+            // exactly the seam a deferred repaint wants.
+            if (_meshRepaint)
+            {
+                _meshRepaint = false;
+                return true;
+            }
+
             if (_awaitingLayer == null || !_awaitingLayer.IsReadyToBuild) return false;
 
             _awaitingLayer = null;
             return true;
+        }
+
+        /// <summary>
+        /// Mesh files this run has given up on, and why: a relief that will not read, whose extent
+        /// disagrees with its picture's, or that throws while being turned into meshes. Dropped here so
+        /// the map draws flat and the next repaint does not try it again - a per-frame retry of a file
+        /// that cannot be read would be a warning a second, forever - and the reason is kept because it
+        /// is what the greyed-out 3D toggle has to say for itself.
+        ///
+        /// NOT for the whole session: <see cref="DropMapMemory"/> clears it, and one of the three things
+        /// that calls that is a capture landing (MapCatalog.InvalidateCaptures). So re-capturing a map
+        /// whose relief was bad gives the new file a fresh chance in the same session - the path is
+        /// unchanged, which is exactly why keying on the path alone would otherwise have refused the new
+        /// file for the old one's fault until the game was restarted.
+        /// </summary>
+        private static readonly Dictionary<string, string> _refusedMeshes =
+            new(StringComparer.OrdinalIgnoreCase);
+
+        private static bool _meshRepaint;
+
+        /// <summary>This map's usable relief file, or null: no capture, no mesh, the setting says flat, or
+        /// this run has already given up on it.</summary>
+        /// <param name="entry">The map being drawn.</param>
+        private static string MeshFor(DynamicMapsLibrary.MapEntry entry)
+        {
+            var path = entry?.MeshPath;
+            if (string.IsNullOrEmpty(path)) return null;
+
+            return _refusedMeshes.ContainsKey(path) ? null : path;
+        }
+
+        /// <summary>Why this map has no 3D view, for the toggle's tooltip: null when it simply has no
+        /// relief file, else the short reason the one it has was refused.</summary>
+        /// <param name="entry">The map being drawn.</param>
+        private static string MeshRefusal(DynamicMapsLibrary.MapEntry entry)
+        {
+            var path = entry?.MeshPath;
+            if (string.IsNullOrEmpty(path)) return null;
+
+            return _refusedMeshes.TryGetValue(path, out var reason) ? reason : null;
+        }
+
+        /// <summary>Gives up on a mesh file for the rest of the run. No repaint: for the caller that
+        /// is inside its own build and falls through to the flat picture by itself.</summary>
+        /// <param name="path">The mesh file.</param>
+        /// <param name="reason">A few words for the tooltip, written to follow "it was not used: ".</param>
+        private static void NoteMeshRefused(string path, string reason)
+        {
+            if (string.IsNullOrEmpty(path)) return;
+
+            _refusedMeshes[path] = string.IsNullOrEmpty(reason) ? "could not be read" : reason;
+        }
+
+        /// <summary>Gives up on a mesh file and asks for one repaint, which draws the map flat. What
+        /// <see cref="Map3DView"/> is handed, and the only way in from a running view.</summary>
+        /// <param name="path">The mesh file.</param>
+        /// <param name="reason">A few words for the tooltip.</param>
+        private static void RefuseMesh(string path, string reason)
+        {
+            NoteMeshRefused(path, reason);
+            _meshRepaint = true;
+        }
+
+        /// <summary>
+        /// Lets go of everything the map view keeps between builds that is expensive or stale-able: the
+        /// built 3D geometry and the parsed relief file (<see cref="Map3DView.DropCaches"/>), the refused
+        /// mesh list and the pending repaint.
+        ///
+        /// Called from three places, and each one is a different reason. A profile change
+        /// (<see cref="ResetSession"/>): another character, another map memory. A capture landing
+        /// (<see cref="ForgetDrawnMap"/>): the file on disk has been replaced, so both the geometry and any
+        /// grudge against it are about the file before it. And the menu teardown before a raid
+        /// (QuestTreePanel.OnDestroy): a Mesh is not a scene object and nothing else would ever free it,
+        /// so without that call the whole map's geometry would sit in the raid's memory.
+        /// </summary>
+        internal static void DropMapMemory()
+        {
+            Map3DView.DropCaches();
+            _refusedMeshes.Clear();
+            _meshRepaint = false;
         }
 
         /// <summary>The capture key's default, for the case where the settings never bound - the
@@ -185,6 +281,11 @@ namespace QuestTree.UI
         private static float _savedScale;
         private static Vector2 _savedPan;
 
+        /// <summary>The 3D view's orbit for the same map, kept for the same reason and under the same key.
+        /// Null when the last view of this map was flat or there has not been one - then the 3D view
+        /// opens fitted to the floor.</summary>
+        private static Map3DView.ViewState? _saved3D;
+
         /// <summary>The viewport of the last build, kept so the next one can reuse it.
         ///
         /// Opening a dropdown, closing it again and re-picking the entry already shown are the three
@@ -203,7 +304,7 @@ namespace QuestTree.UI
         private static (string Map, int Level, int Version, MapMarkerSetDto Markers, int Art,
             bool Started, bool Guides, bool Mirror, int Rotation,
             ModSettings.PinLabelMode Labels, string Selected, int Width, int Height,
-            int Settings)? _keptFrom;
+            int Settings, string Mesh)? _keptFrom;
 
         /// <summary>How many pins the kept viewport actually drew - see <see cref="BuildMarkers"/>,
         /// which is the only thing that knows, and the sidebar's pin count, which is the only thing
@@ -252,6 +353,10 @@ namespace QuestTree.UI
         {
             DiscardViewport();
             _awaitingLayer = null;
+
+            // The capture that triggered this has rewritten the map's files, so the geometry built from
+            // the old ones - and any refusal earned by them - is about a file that no longer exists.
+            DropMapMemory();
         }
 
         /// <summary>Destroys the kept viewport, if it still exists, and forgets what it was built
@@ -456,6 +561,11 @@ namespace QuestTree.UI
             _setPayload = null;
             _setEntry = null;
             _set = null;
+
+            // Another character: the 3D geometry, the parsed relief and the refusals go with the rest of
+            // the map memory. _meshRepaint with them - a latched repaint belonging to the view that has
+            // just been reset would fire one pointless rebuild on the new profile's first frame.
+            DropMapMemory();
         }
 
         /// <summary>Forgets the saved pan and zoom, so the next build fits the floor the way it
@@ -464,6 +574,7 @@ namespace QuestTree.UI
         public static void ResetView()
         {
             _viewStateKey = null;
+            _saved3D = null;
             _pendingFocusQuestId = null;
         }
 
@@ -591,12 +702,21 @@ namespace QuestTree.UI
                 StartedOnly,
                 value => { if (ModSettings.Ready) ModSettings.MarkStartedOnly.Value = value; });
 
+            // The 2D/3D switch, at the right-hand end of the control row rather than in QuestToolbar -
+            // that bar is hidden on the aux tabs, and this belongs beside the map it changes. Never on
+            // top of the accepted-quests toggle: the Max is what holds it clear of it on a narrow panel,
+            // where it runs off the right edge instead, exactly as the coverage line already does.
+            var modeX = Mathf.Max(toggleX + 190f, panelSize.x - AuxLayout.Padding - MapModeToggleWidth);
+            AddMapModeToggle(
+                parent, modeX, AuxLayout.Padding, MeshFor(entry) != null, MeshRefusal(entry));
+
             // How much of this map is located, beside the toggle - said out loud because the
             // alternative is pins silently missing, and the fix (one raid here) is not guessable.
             // Dropped rather than clipped when the row is too narrow for it: half a sentence
-            // about zones says less than nothing.
+            // about zones says less than nothing. Measured against the MODE toggle's x now rather than
+            // the panel's width, since that toggle is what it would land on.
             var coverageY = AuxLayout.Padding + 5f;
-            if (toggleX + 210f + 180f <= panelSize.x)
+            if (toggleX + 210f + 180f <= modeX)
             {
                 AddAt(parent, $"<color=#FFFFFF60>{CoverageLine(MarkerSetFor(entry))}</color>",
                     toggleX + 210f, ref coverageY, 18f, 11);
@@ -678,6 +798,113 @@ namespace QuestTree.UI
             // An open list is an overlay and so contributes no layout height of its own - but the
             // panel still has to be tall enough to scroll to the bottom of it.
             return Mathf.Max(contentHeight, popupBottom);
+        }
+
+        /// <summary>How wide the 3D toggle's row is. Enough for "3D relief" and its box, and no more:
+        /// this is the last thing in the control row and everything to its left has a claim first.</summary>
+        private const float MapModeToggleWidth = 150f;
+
+        /// <summary>
+        /// The map's own 2D/3D switch.
+        ///
+        /// Two shapes, because AuxLayout's toggle has no disabled state and a toggle that flips its box
+        /// and does nothing is worse than no toggle at all. With relief to draw it is the ordinary
+        /// AddToggleAt, whose click sets the setting - and setting it repaints by itself, through
+        /// ModSettings.Changed, so there is no onRepaint here (calling it as well would build the map
+        /// twice). Without relief it is the same row drawn dimmed, with no Button on it and a tooltip
+        /// that says why: the alternative - hiding it - leaves a player who has read about the 3D map
+        /// with nothing to look at and no explanation.
+        ///
+        /// The wrapper exists for the tooltip. GameStyle.AddTooltip needs a GameObject, AddToggleAt
+        /// returns a height, and Unity's event system delivers pointer enter and exit to every ANCESTOR
+        /// of the object under the cursor - so a HoverTooltipArea on the row above the control gets the
+        /// hover the control receives.
+        /// </summary>
+        /// <param name="parent">The control row's parent.</param>
+        /// <param name="x">Where the row starts.</param>
+        /// <param name="top">The row's y, measured down from the top as the rest of the row is.</param>
+        /// <param name="hasMesh">Whether this map has relief that can be drawn.</param>
+        /// <param name="refusal">Why the relief it has was refused, or null - either because it has none
+        /// at all, or because the one it has is fine. Only read when <paramref name="hasMesh"/> is
+        /// false, where it is the difference between "nobody has captured this yet" and "the file is
+        /// there and this is what is wrong with it".</param>
+        private static void AddMapModeToggle(
+            RectTransform parent, float x, float top, bool hasMesh, string refusal)
+        {
+            var wrapperGo = new GameObject("MapModeToggle", typeof(RectTransform));
+            var wrapper = (RectTransform)wrapperGo.transform;
+            wrapper.SetParent(parent, worldPositionStays: false);
+            wrapper.anchorMin = wrapper.anchorMax = new Vector2(0f, 1f);
+            wrapper.pivot = new Vector2(0f, 1f);
+            wrapper.anchoredPosition = new Vector2(x, -top);
+            wrapper.sizeDelta = new Vector2(MapModeToggleWidth, AuxLayout.DropdownHeight);
+
+            if (hasMesh)
+            {
+                AuxLayout.AddToggleAt(
+                    wrapper, 0f, 0f, "3D relief", ReliefMode,
+                    value =>
+                    {
+                        if (ModSettings.Ready)
+                        {
+                            ModSettings.MapMode.Value = value
+                                ? ModSettings.MapViewMode.Relief
+                                : ModSettings.MapViewMode.Flat;
+                        }
+                    },
+                    width: MapModeToggleWidth);
+
+                GameStyle.AddTooltip(
+                    wrapperGo,
+                    "Draw this map as ground with the picture laid over it. Drag to move, right-drag to " +
+                    "turn and tilt, scroll to come closer. The floor picker peels the storeys.");
+
+                return;
+            }
+
+            // Dimmed and dead. The box is drawn unfilled whatever the setting says, because this map is
+            // being drawn flat whatever the setting says.
+            var boxGo = new GameObject("Box", typeof(RectTransform), typeof(Image));
+            var box = (RectTransform)boxGo.transform;
+            box.SetParent(wrapper, worldPositionStays: false);
+            box.anchorMin = box.anchorMax = new Vector2(0f, 1f);
+            box.pivot = new Vector2(0f, 1f);
+            box.anchoredPosition = new Vector2(0f, -6f);
+            box.sizeDelta = new Vector2(AuxLayout.ToggleSize, AuxLayout.ToggleSize);
+
+            var plate = boxGo.GetComponent<Image>();
+            plate.color = new Color(1f, 1f, 1f, 0.07f);
+            GameStyle.ApplyPanel(plate);
+
+            var textGo = new GameObject("Label", typeof(RectTransform));
+            var text = (RectTransform)textGo.transform;
+            text.SetParent(wrapper, worldPositionStays: false);
+            text.anchorMin = Vector2.zero;
+            text.anchorMax = Vector2.one;
+            text.offsetMin = new Vector2(AuxLayout.ToggleSize + 10f, 0f);
+            text.offsetMax = Vector2.zero;
+
+            var label = textGo.AddComponent<TextMeshProUGUI>();
+            label.text = "<color=#FFFFFF50>3D relief</color>";
+            label.fontSize = 13;
+            label.alignment = TextAlignmentOptions.TopLeft;
+
+            // ON, and it is the only raycast target in this row: without it the pointer falls through to
+            // the viewport and the tooltip explaining the grey never appears.
+            label.raycastTarget = true;
+            GameStyle.Apply(label);
+
+            // Three different sentences, because they ask for three different things of the player: wait
+            // for someone to capture it, look at the log, or nothing at all. One sentence covering all
+            // three would have told a player whose file is CORRUPT to go and capture the map they just
+            // captured.
+            GameStyle.AddTooltip(
+                wrapperGo,
+                refusal == null
+                    ? "No 3D relief has been captured for this map yet. Capture it in raid - the same key " +
+                      "that takes the picture measures the ground - and this map opens in 3D."
+                    : $"This map's 3D relief was not used: {refusal}. The flat picture is unaffected; the " +
+                      "log line says more, and re-capturing the map in raid replaces the file.");
         }
 
         /// <summary>The floor to show: the one last chosen if this map has it, else the map's own
@@ -1024,7 +1251,14 @@ namespace QuestTree.UI
                 // changing one of those from the F12 menu raises Changed and re-renders the view with
                 // this key otherwise unmoved. The kept viewport then held every pin in the old palette
                 // beside a legend rebuilt in the new one.
-                Settings: ModSettings.Ready ? ModSettings.Generation : 0);
+                Settings: ModSettings.Ready ? ModSettings.Generation : 0,
+
+                // Which relief file the viewport was built from, or null for a flat one. The generation
+                // above catches the SETTING being flipped; this catches the FILE changing under a setting
+                // that has not moved - a fresh capture writes a new mesh, MapCatalog's stamp rebuilds the
+                // entry, and without this the viewport would be kept and go on drawing the geometry of
+                // the capture before last.
+                Mesh: MeshFor(entry));
 
             // Two things outside the key also have to reach the build. A fly-to is consumed in
             // there, so keeping the viewport past one would leave the request to fire on whichever
@@ -1467,8 +1701,11 @@ namespace QuestTree.UI
         /// what it cannot.
         ///
         /// The viewport carries <see cref="PanZoomHandler"/>, the same component the quest graph
-        /// uses. Handling drag and scroll there is also what stops the surrounding aux ScrollRect
-        /// stealing the gesture: Unity delivers to the first handler it finds walking up.
+        /// uses - or, where the map is drawn as geometry, <see cref="OrbitHandler"/> and
+        /// <see cref="Map3DView"/> in its place. Handling drag and scroll there is also what stops the
+        /// surrounding aux ScrollRect stealing the gesture: Unity delivers to the first handler it finds
+        /// walking up. Everything drawn ON the map registers with whichever of the two is present
+        /// (<see cref="IOverlayHost"/>) and cannot tell them apart.
         ///
         /// Returns how many pins were drawn, which only <see cref="BuildMarkers"/> knows and only
         /// the sidebar's pin count asks for.
@@ -1505,6 +1742,14 @@ namespace QuestTree.UI
 
             var bounds = layer.BoundsSize;
 
+            // Whether this build draws the map as geometry, and which file it reads. A capture only: the
+            // mesh comes from the same raid the PICTURE did, so a DynamicMaps map and a harvested
+            // rectangle have none and draw flat by construction. While the picture is still decoding
+            // `raster` is false and the flat path runs, exactly as it does for any floor whose sprite has
+            // not landed - the repaint that brings the picture is the one that opens the 3D view.
+            var raster = sprite != null && layer.IsRaster;
+            var meshPath = raster && ReliefMode ? MeshFor(entry) : null;
+
             // Map space: pivoted and anchored at the viewport's centre, so a child at map (0,0) is
             // at the middle and the picture's own offset from the origin is preserved.
             var spaceGo = new GameObject("MapSpace", typeof(RectTransform));
@@ -1520,97 +1765,164 @@ namespace QuestTree.UI
             // Restore the previous view when this is the same map as last time - a floor change
             // rebuilds everything, and losing pan and zoom there defeats the purpose of the switch.
             var stateKey = entry != null ? string.Join(",", entry.InternalNames) : "";
-            var sameMap = stateKey == _viewStateKey && _savedScale > 0f;
+            var sameMap = stateKey == _viewStateKey;
 
-            space.localScale = sameMap
-                ? new Vector3(_savedScale, _savedScale, 1f)
-                : new Vector3(fit, fit, 1f);
-
-            space.anchoredPosition = sameMap ? _savedPan : -layer.BoundsCentre * fit;
+            // A different map - or ResetView, which clears the key - means the orbit kept from the last
+            // one describes a rectangle that no longer exists. Dropped here rather than only ignored, so
+            // the build AFTER this one cannot pick a stale one back up.
+            if (!sameMap) _saved3D = null;
 
             _viewStateKey = stateKey;
 
-            // Three cases, one object: a captured bitmap through Image, a tessellated SVG through
-            // SVGImage, and no picture at all through an Image with no sprite - which is exactly
-            // what a flat colour is, and what SVGImage with no sprite would refuse to draw.
-            var raster = sprite != null && layer.IsRaster;
+            // The 3D view is attached before anything is laid out under MapSpace, because whether it
+            // COULD be attached decides what MapSpace holds. Null when this map draws flat, and also when
+            // the mesh could not even be opened - which is dropped for the session on the spot, so this
+            // same build falls through to the picture instead of repainting into it.
+            Map3DView solid = null;
 
-            var imageGo = sprite == null
-                ? new GameObject("MapBackdrop", typeof(RectTransform), typeof(Image))
-                : raster
-                    ? new GameObject("MapImage", typeof(RectTransform), typeof(Image))
-                    : new GameObject("MapImage", typeof(RectTransform), typeof(SVGImage));
-
-            var image = (RectTransform)imageGo.transform;
-            image.SetParent(space, worldPositionStays: false);
-            image.anchorMin = image.anchorMax = new Vector2(0.5f, 0.5f);
-            image.pivot = new Vector2(0.5f, 0.5f);
-
-            if (sprite != null)
+            if (meshPath != null)
             {
-                // The same placement for both kinds of picture, and it has to be: rotation and the
-                // mirror setting are the player's, not the format's.
-                PlaceArtwork(image, entry, layer, bounds);
+                solid = Map3DView.Attach(
+                    viewport, entry, meshPath, _selectedLocationKey, layer.Level, BackdropColor,
+                    sameMap ? _saved3D : null, RefuseMesh);
 
-                if (raster)
-                {
-                    var picture = imageGo.GetComponent<Image>();
-                    picture.sprite = sprite;
+                // The reason is already logged by Attach; what is kept here is the one line the toggle
+                // can show - which Attach leaves in LastRefusal, since it cannot use the callback
+                // without asking for a repaint this build does not need.
+                if (solid == null) NoteMeshRefused(meshPath, Map3DView.LastRefusal);
+            }
 
-                    // Simple and preserveAspect off: the rect PlaceArtwork just set IS the world
-                    // rectangle the capture covers, so the picture is stretched onto it exactly.
-                    // Preserving the aspect would letterbox it inside that rect and shift every
-                    // metre of the map by half the difference.
-                    picture.type = Image.Type.Simple;
-                    picture.preserveAspect = false;
-
-                    // White at full alpha, explicitly: a UI Image MULTIPLIES its sprite by this, so
-                    // any other colour would tint the map and any other alpha would fade it. Our
-                    // captures are transparent outside the walkable area on purpose, and what shows
-                    // through there is the viewport's own plate above - a dark panel, never white -
-                    // with the aux panel behind it. The default UI material blends, so the alpha
-                    // needs nothing else turned on.
-                    picture.color = Color.white;
-                    picture.raycastTarget = false;
-                }
-                else
-                {
-                    var svg = imageGo.GetComponent<SVGImage>();
-                    svg.sprite = sprite;
-                    svg.preserveAspect = false;
-                    svg.raycastTarget = false;
-                }
+            if (solid != null)
+            {
+                // MapSpace carries the overlays and nothing else in 3D: no picture, no guides, and no
+                // scale or pan of its own. Map3DView re-places every overlay from the camera, in canvas
+                // units measured from this rect's CENTRE - which is the viewport's centre only while the
+                // rect sits unscaled and unmoved. Scaling it would move every pin by the scale and
+                // panning it would move them all together, both silently.
+                space.localScale = Vector3.one;
+                space.anchoredPosition = Vector2.zero;
             }
             else
             {
-                // Straight onto the bounds, and NOT through PlaceArtwork: that turns and mirrors the
-                // picture into the map's frame, and a featureless rectangle has no orientation to
-                // correct - a quarter turn from the artwork-rotation setting would only stretch it
-                // into the wrong shape and leave it no longer over the bounds it stands for.
-                image.sizeDelta = bounds;
-                image.anchoredPosition = layer.BoundsCentre;
+                var restore = sameMap && _savedScale > 0f;
 
-                var plate = imageGo.GetComponent<Image>();
-                plate.color = BackdropColor;
-                plate.raycastTarget = false;
+                space.localScale = restore
+                    ? new Vector3(_savedScale, _savedScale, 1f)
+                    : new Vector3(fit, fit, 1f);
+
+                space.anchoredPosition = restore ? _savedPan : -layer.BoundsCentre * fit;
             }
 
-            // Forced on for a backdrop, whatever the setting says. The rectangle IS the map here, so
-            // its edges and the origin cross are the only things that say where the world is and how
-            // big it is; without them the pins float on an unmarked slab.
-            if (ShowGuides || sprite == null) BuildGuides(space, layer);
-
-            // The handler is created before the overlays because they register with it to be held
-            // at a constant on-screen size. Zoom limits and step are scaled by the fit, since the
-            // container already sits at that scale.
-            var panZoom = viewportGo.AddComponent<PanZoomHandler>();
-            panZoom.Init(space, MinZoom * fit, MaxZoom * fit, ZoomSpeed * fit);
-
-            // Recorded as it moves, so the next rebuild can pick it back up.
-            panZoom.OnViewChanged = (scale, pan) =>
+            // Three cases, one object: a captured bitmap through Image, a tessellated SVG through
+            // SVGImage, and no picture at all through an Image with no sprite - which is exactly
+            // what a flat colour is, and what SVGImage with no sprite would refuse to draw. None of
+            // them in 3D: there the picture is on the ground, drawn by the camera.
+            if (solid == null)
             {
-                _savedScale = scale;
-                _savedPan = pan;
+                var imageGo = sprite == null
+                    ? new GameObject("MapBackdrop", typeof(RectTransform), typeof(Image))
+                    : raster
+                        ? new GameObject("MapImage", typeof(RectTransform), typeof(Image))
+                        : new GameObject("MapImage", typeof(RectTransform), typeof(SVGImage));
+
+                var image = (RectTransform)imageGo.transform;
+                image.SetParent(space, worldPositionStays: false);
+                image.anchorMin = image.anchorMax = new Vector2(0.5f, 0.5f);
+                image.pivot = new Vector2(0.5f, 0.5f);
+
+                if (sprite != null)
+                {
+                    // The same placement for both kinds of picture, and it has to be: rotation and the
+                    // mirror setting are the player's, not the format's.
+                    PlaceArtwork(image, entry, layer, bounds);
+
+                    if (raster)
+                    {
+                        var picture = imageGo.GetComponent<Image>();
+                        picture.sprite = sprite;
+
+                        // Simple and preserveAspect off: the rect PlaceArtwork just set IS the world
+                        // rectangle the capture covers, so the picture is stretched onto it exactly.
+                        // Preserving the aspect would letterbox it inside that rect and shift every
+                        // metre of the map by half the difference.
+                        picture.type = Image.Type.Simple;
+                        picture.preserveAspect = false;
+
+                        // White at full alpha, explicitly: a UI Image MULTIPLIES its sprite by this, so
+                        // any other colour would tint the map and any other alpha would fade it. Our
+                        // captures are transparent outside the walkable area on purpose, and what shows
+                        // through there is the viewport's own plate above - a dark panel, never white -
+                        // with the aux panel behind it. The default UI material blends, so the alpha
+                        // needs nothing else turned on.
+                        picture.color = Color.white;
+                        picture.raycastTarget = false;
+                    }
+                    else
+                    {
+                        var svg = imageGo.GetComponent<SVGImage>();
+                        svg.sprite = sprite;
+                        svg.preserveAspect = false;
+                        svg.raycastTarget = false;
+                    }
+                }
+                else
+                {
+                    // Straight onto the bounds, and NOT through PlaceArtwork: that turns and mirrors the
+                    // picture into the map's frame, and a featureless rectangle has no orientation to
+                    // correct - a quarter turn from the artwork-rotation setting would only stretch it
+                    // into the wrong shape and leave it no longer over the bounds it stands for.
+                    image.sizeDelta = bounds;
+                    image.anchoredPosition = layer.BoundsCentre;
+
+                    var plate = imageGo.GetComponent<Image>();
+                    plate.color = BackdropColor;
+                    plate.raycastTarget = false;
+                }
+
+                // Forced on for a backdrop, whatever the setting says. The rectangle IS the map here, so
+                // its edges and the origin cross are the only things that say where the world is and how
+                // big it is; without them the pins float on an unmarked slab.
+                //
+                // Never in 3D: the guides are flat bars laid out in map metres under a container that no
+                // longer works in them, so they would be four hairlines a few pixels long beside the middle
+                // of the viewport - a diagnostic that lies. The shape of the ground says where the world is
+                // there anyway.
+                if (ShowGuides || sprite == null) BuildGuides(space, layer);
+            }
+
+            // One of the two gesture handlers, never both, and the overlays cannot tell which they got -
+            // see IOverlayHost. Created before them because they register with it to be held at a
+            // constant on-screen size. The 2D zoom limits and step are scaled by the fit, since the
+            // container already sits at that scale; the 3D view's own limits are distances in metres and
+            // need no such correction.
+            IOverlayHost host;
+
+            if (solid != null)
+            {
+                viewportGo.AddComponent<OrbitHandler>().Init(solid);
+                host = solid;
+            }
+            else
+            {
+                var panZoom = viewportGo.AddComponent<PanZoomHandler>();
+                panZoom.Init(space, MinZoom * fit, MaxZoom * fit, ZoomSpeed * fit);
+                host = panZoom;
+            }
+
+            // Recorded as it moves, so the next rebuild can pick it back up. The 3D orbit is five numbers
+            // rather than a scale and a pan, so it is read off the view itself; the scale the callback
+            // carries is what the labels need in either case.
+            host.OnViewChanged += (scale, pan) =>
+            {
+                if (solid != null)
+                {
+                    _saved3D = solid.State;
+                }
+                else
+                {
+                    _savedScale = scale;
+                    _savedPan = pan;
+                }
 
                 // Zooming changes which of our own names fit and whether the zone names are worth
                 // drawing at all, and neither can be settled at build time - see LabelCull, which
@@ -1618,21 +1930,28 @@ namespace QuestTree.UI
                 _labelCull?.OnViewChanged(scale);
             };
 
-            _savedScale = space.localScale.x;
-            _savedPan = space.anchoredPosition;
+            if (solid != null)
+            {
+                _saved3D = solid.State;
+            }
+            else
+            {
+                _savedScale = space.localScale.x;
+                _savedPan = space.anchoredPosition;
+            }
 
             // Names, then extracts, then pins, and the order is the whole of what decides which of
             // them wins where they land on each other: Unity draws UI siblings in hierarchy order,
             // so the later child is on top. A quest pin half hidden under a place name cannot be
             // clicked with any confidence, and between an extract and a pin the pin is the one the
             // player came to the map for.
-            BuildPlaceLabels(space, entry, layer, panZoom);
-            BuildExtractMarkers(space, entry, panZoom);
-            var drawn = BuildMarkers(space, entry, layer, panZoom, graph, shownIds, onRepaint);
+            BuildPlaceLabels(space, entry, layer, host);
+            BuildExtractMarkers(space, entry, host);
+            var drawn = BuildMarkers(space, entry, layer, host, graph, shownIds, onRepaint);
 
             // Last, so it overrides the restored pan and zoom above - and after the markers, since
             // FocusOn re-applies their counter-scale for the zoom it lands on.
-            FocusPendingQuest(entry, layer, panZoom, fit);
+            FocusPendingQuest(entry, layer, host, fit);
 
             return drawn;
         }
@@ -1647,7 +1966,7 @@ namespace QuestTree.UI
         /// </summary>
         private static void FocusPendingQuest(
             DynamicMapsLibrary.MapEntry entry, DynamicMapsLibrary.MapLayer layer,
-            PanZoomHandler panZoom, float fit)
+            IOverlayHost host, float fit)
         {
             if (string.IsNullOrEmpty(_pendingFocusQuestId)) return;
 
@@ -1662,7 +1981,7 @@ namespace QuestTree.UI
                 return;
             }
 
-            panZoom.FocusOn(PositionFor(marker, layer, entry), fit * FocusZoom);
+            host.FocusOn(PositionFor(marker, layer, entry), fit * FocusZoom);
         }
 
         /// <summary>
@@ -1771,7 +2090,7 @@ namespace QuestTree.UI
         /// </summary>
         private static void BuildPlaceLabels(
             RectTransform space, DynamicMapsLibrary.MapEntry entry,
-            DynamicMapsLibrary.MapLayer layer, PanZoomHandler panZoom)
+            DynamicMapsLibrary.MapLayer layer, IOverlayHost host)
         {
             if (entry == null) return;
 
@@ -1798,7 +2117,7 @@ namespace QuestTree.UI
                     if (mode == ModSettings.LabelMode.ExtractsOnly &&
                         label.Kind != DynamicMapsLibrary.MapLabelKind.Exfil) continue;
 
-                    BuildCompactLabel(space, panZoom, label, cull);
+                    BuildCompactLabel(space, host, label, cull);
                     continue;
                 }
 
@@ -1825,7 +2144,7 @@ namespace QuestTree.UI
                 if (Mathf.Abs(label.Rotation) > 0.01f)
                     rect.localRotation = Quaternion.Euler(0f, 0f, -label.Rotation);
 
-                panZoom.KeepConstantScale(rect);
+                host.KeepConstantScale(rect);
 
                 var text = go.AddComponent<TextMeshProUGUI>();
                 text.text = label.Text;
@@ -1849,8 +2168,18 @@ namespace QuestTree.UI
 
             // Which of the plated names actually fit, decided once here and again whenever the zoom
             // changes enough to matter - see LabelCull.
+            cull.Bind(host);
             _labelCull = cull.Any ? cull : null;
-            cull.Apply(space.localScale.x, force: true);
+
+            // The HOST's scale, not the container's. In 3D the container sits at scale ONE whatever the
+            // view is doing, and 1 px/m is below ZoneLabelMinPxPerMetre (1.25) - so reading localScale
+            // here would have dropped every zone name on every 3D map at every distance, including the
+            // close ones where they fit. What the host answers instead is the pixels a metre subtends at
+            // the focus distance, which on a fitted big map is about 0.6 px/m: also below the threshold,
+            // and correctly so, since that is the wide view the threshold exists to keep clean. Dollying
+            // in raises it past 1.25 and the names appear, which is the same behaviour as zooming a flat
+            // map.
+            cull.Apply(host.Scale, force: true);
         }
 
         /// <summary>
@@ -1863,12 +2192,13 @@ namespace QuestTree.UI
         /// or the accent (an extract) so the two kinds can be told apart without reading them.
         ///
         /// Every size here is in SCREEN pixels, because the container is registered with
-        /// PanZoomHandler.KeepConstantScale: that counter-scales it by 1/zoom on every scroll and on
-        /// every fly-to, so a name is the same size at any zoom and the plate never swallows the
-        /// map. The offsets inside the container are therefore constant on screen too.
+        /// IOverlayHost.KeepConstantScale: the 2D host counter-scales it by 1/zoom on every scroll and on
+        /// every fly-to, and the 3D host leaves it at scale one and re-places it from the camera, so
+        /// either way a name is the same size at any zoom and the plate never swallows the map. The
+        /// offsets inside the container are therefore constant on screen too.
         /// </summary>
         private static void BuildCompactLabel(
-            RectTransform space, PanZoomHandler panZoom, DynamicMapsLibrary.MapLabel label,
+            RectTransform space, IOverlayHost host, DynamicMapsLibrary.MapLabel label,
             LabelCull cull)
         {
             var extract = label.Kind == DynamicMapsLibrary.MapLabelKind.Exfil;
@@ -1896,7 +2226,7 @@ namespace QuestTree.UI
             rect.anchoredPosition = label.Position;
             rect.sizeDelta = Vector2.zero;
 
-            panZoom.KeepConstantScale(rect);
+            host.KeepConstantScale(rect);
 
             // The dot IS the position. Without it the tag above would be the only mark and the eye
             // would read the place as being wherever the words are.
@@ -1982,9 +2312,16 @@ namespace QuestTree.UI
 
         /// <summary>How far the zoom has to move before the cull is worth running again: a quarter
         /// either way. Every drag raises OnViewChanged as well, and re-culling fifty labels on each
-        /// mouse-move delta would be work for nothing, since panning cannot change which names
-        /// overlap.</summary>
+        /// mouse-move delta would be work for nothing, since panning a FLAT map cannot change which
+        /// names overlap - see LabelCull.OnViewChanged for why a 3D one is different.</summary>
         private const float LabelReCullRatio = 1.25f;
+
+        /// <summary>How far a label has to move on screen before the overlap decision is taken again, in
+        /// canvas units. Four, which is under half the gap between a name's plate and its dot: below that
+        /// no pair of plates can cross from clear to overlapping. The rule exists for 3D, where an orbit
+        /// moves every label without moving the scale, and it is a distance rather than a frame count so
+        /// that a slow drag re-culls as often as a fast one covering the same ground.</summary>
+        private const float LabelMoveTolerance = 4f;
 
         /// <summary>The cull belonging to the viewport on screen, or null when it has no plated
         /// names. Static because the zoom callback and the next build both have to reach it; dropped
@@ -2019,10 +2356,11 @@ namespace QuestTree.UI
         /// </summary>
         /// <param name="space">The map container: its local units are map coordinates.</param>
         /// <param name="entry">The map being drawn.</param>
-        /// <param name="panZoom">The viewport's handler, to hold the diamonds at a constant
-        /// on-screen size the way the names and the pins are held.</param>
+        /// <param name="host">The viewport's view host, to hold the diamonds at a constant on-screen
+        /// size the way the names and the pins are held - and, in 3D, to re-place them from the camera
+        /// every frame. See IOverlayHost.</param>
         private static void BuildExtractMarkers(
-            RectTransform space, DynamicMapsLibrary.MapEntry entry, PanZoomHandler panZoom)
+            RectTransform space, DynamicMapsLibrary.MapEntry entry, IOverlayHost host)
         {
             if (entry == null) return;
 
@@ -2054,7 +2392,7 @@ namespace QuestTree.UI
                 // a rect's rotation and scale, and KeepConstantScale only ever writes the scale.
                 // Sizes here are therefore in screen pixels, like the labels' - see
                 // BuildCompactLabel.
-                panZoom.KeepConstantScale(rect);
+                host.KeepConstantScale(rect);
 
                 var fillGo = new GameObject("Fill", typeof(RectTransform), typeof(Image));
                 var fill = (RectTransform)fillGo.transform;
@@ -2106,10 +2444,27 @@ namespace QuestTree.UI
             /// <summary>The scene objects, in step with <see cref="_boxes"/>.</summary>
             private readonly List<RectTransform> _rects = new();
 
+            /// <summary>Where each box is on screen, refilled per pass and in step with
+            /// <see cref="_boxes"/>. A field rather than a local so a pass allocates nothing.</summary>
+            private readonly List<Vector2> _projected = new();
+
             /// <summary>The zoom the current visibility was decided at, or 0 before the first pass.</summary>
             private float _culledAt;
 
+            /// <summary>Where <see cref="Reference"/> projected when the current visibility was decided.
+            /// The pan half of the "has the view moved" test - see <see cref="OnViewChanged"/>.</summary>
+            private Vector2 _culledFrom;
+
+            /// <summary>The view under the labels, for projecting them. Held rather than passed because
+            /// this object outlives one build only through MapView._labelCull, which is dropped with the
+            /// viewport it belongs to.</summary>
+            private IOverlayHost _host;
+
             internal bool Any => _boxes.Count > 0;
+
+            /// <summary>Points the cull at the view the labels are drawn in.</summary>
+            /// <param name="host">The viewport's host.</param>
+            internal void Bind(IOverlayHost host) => _host = host;
 
             internal void Note(RectTransform rect, Vector2 position, Vector2 size, bool isZone)
             {
@@ -2117,27 +2472,45 @@ namespace QuestTree.UI
                 _boxes.Add(new LabelBox(position, size, isZone));
             }
 
-            /// <summary>Called on every view change. Cheap on a pan, which cannot change the
-            /// answer, and on a zoom too small to change it.</summary>
-            /// <param name="scale">The map container's new scale.</param>
+            /// <summary>A map point whose projection stands for the whole view's, for deciding whether
+            /// anything has moved. The first label, because it is a real place on this map and so is
+            /// always somewhere the projection is meaningful.</summary>
+            private Vector2 Reference => _boxes.Count > 0 ? _boxes[0].Position : Vector2.zero;
+
+            /// <summary>
+            /// Called on every view change, and decides whether the answer can have moved.
+            ///
+            /// Two tests, not one. The zoom, as before: below a quarter either way nothing can have
+            /// changed enough to matter. And, since 1.19.0, whether the PROJECTION has moved - because in
+            /// 3D an orbit or a pan changes where every label lands on screen while the scale, which is
+            /// the distance to the focus point, does not move at all. Without the second test a turned 3D
+            /// map kept the visibility decided for the angle before it, and names that had come apart
+            /// stayed hidden.
+            /// </summary>
+            /// <param name="scale">The view's new scale, in screen pixels per metre.</param>
             internal void OnViewChanged(float scale)
             {
                 if (scale <= 0f) return;
 
-                if (_culledAt > 0f &&
-                    scale < _culledAt * LabelReCullRatio &&
-                    scale > _culledAt / LabelReCullRatio)
-                {
-                    return;
-                }
+                var zoomHeld = _culledAt > 0f &&
+                               scale < _culledAt * LabelReCullRatio &&
+                               scale > _culledAt / LabelReCullRatio;
 
-                Apply(scale, force: false);
+                var moved = _host != null &&
+                            (_host.Project(Reference) - _culledFrom).sqrMagnitude >
+                            LabelMoveTolerance * LabelMoveTolerance;
+
+                if (zoomHeld && !moved) return;
+
+                // Forced when it is the MOVE that triggered this: the scale is then unchanged, and Apply
+                // returns at its first line for a scale it has already culled at.
+                Apply(scale, force: moved);
             }
 
-            /// <summary>Switches every tag on or off for this zoom.</summary>
-            /// <param name="scale">The map container's scale, which is screen pixels per metre.</param>
+            /// <summary>Switches every tag on or off for this view.</summary>
+            /// <param name="scale">The view's scale, in screen pixels per metre.</param>
             /// <param name="force">Run even when the zoom has not moved - the first pass of a
-            /// build, where nothing has been decided yet.</param>
+            /// build, where nothing has been decided yet, and any pass driven by a pan or an orbit.</param>
             internal void Apply(float scale, bool force)
             {
                 if (scale <= 0f) return;
@@ -2145,7 +2518,18 @@ namespace QuestTree.UI
 
                 _culledAt = scale;
 
-                var visible = Decide(_boxes, scale);
+                // Where the labels ARE, rather than where a flat map would put them. In 2D the host
+                // answers position * scale and this is the arithmetic the cull always did; in 3D it is
+                // the perspective projection, which is the only thing that can answer "do these two
+                // plates overlap" for a map drawn at an angle.
+                _projected.Clear();
+
+                for (var i = 0; i < _boxes.Count; i++)
+                    _projected.Add(_host != null ? _host.Project(_boxes[i].Position) : _boxes[i].Position * scale);
+
+                _culledFrom = _host != null ? _host.Project(Reference) : Vector2.zero;
+
+                var visible = Decide(_boxes, scale, _projected);
 
                 for (var i = 0; i < _rects.Count; i++)
                 {
@@ -2173,9 +2557,13 @@ namespace QuestTree.UI
             /// so the same pair collides at one zoom and not at the next.
             /// </summary>
             /// <param name="boxes">The tags, extracts first.</param>
-            /// <param name="scale">Screen pixels per metre - the map container's scale.</param>
+            /// <param name="scale">Screen pixels per metre - what the zone-name threshold is in.</param>
+            /// <param name="projected">Where each box is on screen, in step with
+            /// <paramref name="boxes"/>: <c>position * scale</c> from a flat view, the perspective
+            /// projection from a 3D one. Shorter than <paramref name="boxes"/> is treated as the rest
+            /// being off screen, which is what a caller that could not project them means.</param>
             /// <returns>One flag per box, in the same order.</returns>
-            internal static bool[] Decide(IList<LabelBox> boxes, float scale)
+            internal static bool[] Decide(IList<LabelBox> boxes, float scale, IList<Vector2> projected)
             {
                 var visible = new bool[boxes.Count];
                 var taken = new List<Rect>();
@@ -2189,12 +2577,14 @@ namespace QuestTree.UI
                     // visible next to.
                     if (box.IsZone && scale < ZoneLabelMinPxPerMetre) continue;
 
-                    // The plate's own rectangle on screen: the place, scaled, plus the constant
+                    if (projected == null || i >= projected.Count) continue;
+
+                    // The plate's own rectangle on screen: where the place projects, plus the constant
                     // offset the plate sits at inside its container. Two pixels of gutter, so two
                     // plates cannot end up edge to edge.
                     var centre = new Vector2(
-                        box.Position.x * scale,
-                        box.Position.y * scale + CompactLabelPlateGap + box.Size.y * 0.5f);
+                        projected[i].x,
+                        projected[i].y + CompactLabelPlateGap + box.Size.y * 0.5f);
 
                     var footprint = new Rect(
                         centre.x - box.Size.x * 0.5f - 1f,
@@ -2436,7 +2826,7 @@ namespace QuestTree.UI
         /// sidebar used to print the payload's total beside a map showing a fraction of it.</summary>
         private static int BuildMarkers(
             RectTransform space, DynamicMapsLibrary.MapEntry entry,
-            DynamicMapsLibrary.MapLayer layer, PanZoomHandler panZoom, QuestGraphBuilder graph,
+            DynamicMapsLibrary.MapLayer layer, IOverlayHost host, QuestGraphBuilder graph,
             HashSet<string> shownIds, Action onRepaint)
         {
             if (entry == null) return 0;
@@ -2543,7 +2933,7 @@ namespace QuestTree.UI
                 // Held at a constant on-screen size however far the map is zoomed - otherwise
                 // zooming in magnifies the pile instead of separating it.
                 rect.sizeDelta = new Vector2(MarkerSize, MarkerSize);
-                panZoom.KeepConstantScale(rect);
+                host.KeepConstantScale(rect);
 
                 if (isSelected) selectedRect = rect;
 
@@ -2687,16 +3077,30 @@ namespace QuestTree.UI
 
             selectedRect?.SetAsLastSibling();
 
-            PlaceRestLabels(restLabels, space.localScale.x);
+            PlaceRestLabels(restLabels, host);
 
-            // Re-placed on every zoom: the pins and names keep their screen size, so the footprint
-            // each name claims in map units changes with the scale.
-            var placedAt = space.localScale.x;
-            panZoom.OnViewChanged += (scale, _) =>
+            // Re-placed whenever the view has moved enough to change the answer: the pins and names keep
+            // their screen size, so the footprint each name claims grows and shrinks against the distance
+            // between them. The same two tests LabelCull.OnViewChanged makes, and for the same reason -
+            // in 3D an orbit moves every name on screen without the scale moving at all.
+            var reference = restLabels.Count > 0 ? restLabels[0].Position : Vector2.zero;
+            var placedAt = host.Scale;
+            var placedFrom = host.Project(reference);
+
+            host.OnViewChanged += (scale, _) =>
             {
-                if (Mathf.Approximately(scale, placedAt)) return;
+                var at = host.Project(reference);
+
+                if (Mathf.Approximately(scale, placedAt) &&
+                    (at - placedFrom).sqrMagnitude <= LabelMoveTolerance * LabelMoveTolerance)
+                {
+                    return;
+                }
+
                 placedAt = scale;
-                PlaceRestLabels(restLabels, scale);
+                placedFrom = at;
+
+                PlaceRestLabels(restLabels, host);
             };
 
             // The loop above makes one pin per entry and skips none, so this is the count drawn.
@@ -2714,19 +3118,30 @@ namespace QuestTree.UI
             public bool Hovered;
         }
 
-        /// <summary>Decides which at-rest names are drawn at this zoom: the selected quest's
-        /// always, then each of the rest unless it would land on a name already placed. Names
-        /// are held at a constant screen size, so their span in map units is the screen span
-        /// divided by the scale.</summary>
-        private static void PlaceRestLabels(List<RestLabel> labels, float scale)
+        /// <summary>
+        /// Decides which at-rest names are drawn: the selected quest's always, then each of the rest
+        /// unless it would land on a name already placed.
+        ///
+        /// In SCREEN units, through the host's projection, for the same reason LabelCull.Decide is: the
+        /// names are a constant size on screen while the distance between their pins is not, and in 3D
+        /// that distance is a perspective projection rather than a multiplication. The flat case is
+        /// unchanged arithmetic - the old version divided the screen span by the scale to compare in map
+        /// units, this multiplies the positions by it to compare in screen units, and a common factor on
+        /// both sides of an overlap test changes nothing.
+        /// </summary>
+        /// <param name="labels">The names that may be shown at rest.</param>
+        /// <param name="host">The view they are drawn in.</param>
+        private static void PlaceRestLabels(List<RestLabel> labels, IOverlayHost host)
         {
-            var span = new Vector2(LabelWidth, LabelHeight) / Mathf.Max(0.0001f, scale);
+            var span = new Vector2(LabelWidth, LabelHeight);
             var claimed = new List<Rect>();
 
             foreach (var label in labels.OrderBy(l => l.Selected ? 0 : 1))
             {
+                var at = host != null ? host.Project(label.Position) : label.Position;
+
                 var footprint = new Rect(
-                    label.Position.x + span.x * 0.1f, label.Position.y - span.y * 0.5f, span.x, span.y);
+                    at.x + span.x * 0.1f, at.y - span.y * 0.5f, span.x, span.y);
 
                 var visible = label.Selected || !claimed.Any(other => other.Overlaps(footprint));
                 if (visible) claimed.Add(footprint);
