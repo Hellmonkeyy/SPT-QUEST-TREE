@@ -39,6 +39,11 @@ namespace QuestTree.UI
 
         private void Update()
         {
+            // THROWAWAY (the 3D map experiments' probe key): polled from here too, because this Update
+            // is proven to run in the menu and the probe's own object's was not seen to. Delete with
+            // QuestGraph/MeshProbe.cs.
+            QuestGraph.MenuMeshProbe.PollFromHotkey(this);
+
             if (!ModSettings.Ready) return;
 
             var shortcut = ModSettings.OpenTracker.Value;

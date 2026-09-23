@@ -1970,12 +1970,37 @@ namespace QuestTree.QuestGraph
         private static MenuMeshProbe _instance;
 
         private bool _warned;
+        private bool _alive;
         private bool _busy;
         private int _press;
         private MeshProbeView _view;
 
-        private void Update()
+        private void Update() => Poll("its own Update", this);
+
+        /// <summary>THROWAWAY DIAGNOSTIC (2026-09-23): the same poll from TrackerHotkey.Update, which is
+        /// proven to run in the menu (it is what opens the tracker on Ctrl+Q), because two sessions of
+        /// F9 presses reached this object's own Update not at all - no press line, no "ignored" line.
+        /// Whichever caller sees the key first handles it; the other is refused for that frame.</summary>
+        internal static void PollFromHotkey(MonoBehaviour host)
         {
+            try { if (host != null) _instance?.Poll("TrackerHotkey", host); }
+            catch (Exception) { }
+        }
+
+        /// <summary>The MonoBehaviour the menu coroutine and the test view are hosted on. The watcher's
+        /// own DontDestroyOnLoad object turned out never to tick in this game's menu (its Update was
+        /// never seen, and StartCoroutine on it threw), so whatever polled the key - TrackerHotkey in
+        /// practice, a child of the tracker's root canvas - is what runs the work. Recorded once so a
+        /// press knows where its view lives.</summary>
+        private MonoBehaviour _host;
+
+        private int _handledFrame = -1;
+
+        private void Poll(string via, MonoBehaviour host)
+        {
+            if (_handledFrame == Time.frameCount) return;
+            if (host == null) return;
+
             try
             {
                 // The test view lives on a DontDestroyOnLoad object, so a raid started while it is up
@@ -1990,6 +2015,30 @@ namespace QuestTree.QuestGraph
                     _press++;
                     StartCoroutine(Run(_press));
                     return;
+                }
+
+                // THROWAWAY DIAGNOSTIC (2026-09-23): a bound F9 in the menu produced no press and no
+                // "ignored" line, so the raw key is logged the frame it goes down, before the shortcut
+                // rules, and the first Update proves the watcher runs at all. Removed with the file.
+                if (!_alive)
+                {
+                    _alive = true;
+                    Plugin.LogSource?.LogInfo($"QuestTree: mesh probe (menu) polling from {via}.");
+                }
+
+                var bound = ModSettings.Ready && ModSettings.ProbeKey != null
+                    ? ModSettings.ProbeKey.Value.MainKey
+                    : KeyCode.None;
+                if (bound != KeyCode.None && Input.GetKeyDown(bound))
+                {
+                    var blockers = "";
+                    foreach (var key in new[] { KeyCode.LeftControl, KeyCode.RightControl, KeyCode.LeftShift,
+                                                KeyCode.RightShift, KeyCode.LeftAlt, KeyCode.RightAlt })
+                        if (Input.GetKey(key)) blockers += (blockers.Length == 0 ? "" : ", ") + key;
+                    _handledFrame = Time.frameCount;
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: mesh probe (menu) saw {bound} go down via {via}; shortcut test {(MeshProbe.Pressed() ? "passes" : "fails")}" +
+                        (blockers.Length == 0 ? ", no modifier held." : $", held: {blockers}."));
                 }
 
                 if (!MeshProbe.Pressed()) return;
@@ -2013,15 +2062,28 @@ namespace QuestTree.QuestGraph
                     return;
                 }
 
-                _busy = true;
                 _press++;
-                StartCoroutine(Run(_press));
+                _host = host;
+
+                // The coroutine runs on the CALLER, never on this object: on 2026-09-23 this object's own
+                // Update was never called in the menu and StartCoroutine on it threw (an exception with
+                // an empty message), which left _busy set for the session because it was set first.
+                // _busy is set only once the coroutine has actually started.
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: mesh probe (menu) press {_press} via {via} - own object " +
+                    $"{(this == null ? "destroyed" : gameObject.activeInHierarchy ? "active" : "inactive")}, " +
+                    $"running on {host.GetType().Name} '{host.gameObject.name}'.");
+
+                host.StartCoroutine(Run(_press));
+                _busy = true;
             }
             catch (Exception ex)
             {
                 if (_warned) return;
                 _warned = true;
-                Plugin.LogSource?.LogWarning($"QuestTree: the menu mesh probe key failed ({ex.Message}).");
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: the menu mesh probe key failed ({ex.GetType().Name}: {ex.Message}) at " +
+                    $"{(ex.StackTrace ?? "").Split('\n')[0].Trim()}");
             }
         }
 
@@ -2153,7 +2215,7 @@ namespace QuestTree.QuestGraph
 
                 var four = new StringBuilder();
                 var chosen = layer;
-                MeshProbe.Guard(four, 4, () => _view = MeshProbeView.Create(four, chosen));
+                MeshProbe.Guard(four, 4, () => _view = MeshProbeView.Create(four, chosen, _host));
                 four.AppendLine();
                 MeshProbe.Append("menu", four.ToString());
 
@@ -2263,12 +2325,17 @@ namespace QuestTree.QuestGraph
         /// recorded in <see cref="_created"/>, which is what the leak check counts.</summary>
         /// <param name="text">The block being built.</param>
         /// <param name="privateLayer">The layer experiment 3 found nothing on, or -1.</param>
-        internal static MeshProbeView Create(StringBuilder text, int privateLayer)
+        /// <param name="host">The MonoBehaviour that polled the key; the view is parented beside it so it ticks.</param>
+        internal static MeshProbeView Create(StringBuilder text, int privateLayer, MonoBehaviour host)
         {
             text.AppendLine("--- EXPERIMENT 4 - viewer plumbing ---");
 
+            // A plain object of the menu scene, NOT DontDestroyOnLoad: the watcher's own DDOL object never
+            // ticked in this menu (2026-09-23), and a view whose LateUpdate never runs draws nothing and
+            // reports "NOT RUN" for both paths. Parented beside the MonoBehaviour that polled the key,
+            // which is proven to tick; it dies with the menu scene, which for a throwaway is fine.
             var go = new GameObject("QuestTreeMeshProbeView");
-            DontDestroyOnLoad(go);
+            if (host != null && host.transform.parent != null) go.transform.SetParent(host.transform.parent, false);
 
             var view = go.AddComponent<MeshProbeView>();
             view._created.Add(go);
@@ -2297,7 +2364,6 @@ namespace QuestTree.QuestGraph
             // The canvas. Its own, at a sorting order nothing competes with, and with a raycaster so
             // the RawImage can take a drag.
             var canvasGo = new GameObject("QuestTreeMeshProbeCanvas", typeof(Canvas), typeof(GraphicRaycaster));
-            DontDestroyOnLoad(canvasGo);
             _created.Add(canvasGo);
 
             _canvas = canvasGo.GetComponent<Canvas>();
@@ -2335,7 +2401,6 @@ namespace QuestTree.QuestGraph
             // The camera. Unparented, disabled, and drawing ONLY the private layer, so nothing the
             // menu or the hideout shows can reach it and it can reach nothing of theirs.
             var cameraGo = new GameObject("QuestTreeMeshProbeCamera", typeof(Camera));
-            DontDestroyOnLoad(cameraGo);
             _created.Add(cameraGo);
 
             _camera = cameraGo.GetComponent<Camera>();
@@ -2353,7 +2418,6 @@ namespace QuestTree.QuestGraph
             _camera.allowMSAA = false;
 
             var lightGo = new GameObject("QuestTreeMeshProbeLight", typeof(Light));
-            DontDestroyOnLoad(lightGo);
             lightGo.layer = _drawLayer;
             _created.Add(lightGo);
 
@@ -2441,10 +2505,18 @@ namespace QuestTree.QuestGraph
 
         // --- the two paths ------------------------------------------------------------------------
 
+        private bool _ticked;
+
         private void LateUpdate()
         {
             try
             {
+                if (!_ticked)
+                {
+                    _ticked = true;
+                    Plugin.LogSource?.LogInfo("QuestTree: mesh probe (menu) test view LateUpdate is running.");
+                }
+
                 if (_camera == null || _material == null) return;
 
                 Place();

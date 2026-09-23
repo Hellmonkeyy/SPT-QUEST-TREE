@@ -663,6 +663,10 @@ namespace QuestTree.QuestGraph
         /// to the building-less ones taken before the LOD bias. A capture written before this field
         /// existed records nothing and is replaced for the same reason. See
         /// <see cref="LoadPrevious"/>.</summary>
+        /// <summary>Whether this capture's walkable mask was actually built; see the note beside
+        /// BuildReach in Prepare. Part of <see cref="RenderTag"/> as the outcome, not the intent.</summary>
+        private bool _reachBuilt;
+
         private string RenderTag =>
             "own-" + CaptureLightIntensity.ToString("0.###", CultureInfo.InvariantCulture) +
             ";lod" + CaptureLodBias.ToString("0.###", CultureInfo.InvariantCulture) +
@@ -674,7 +678,7 @@ namespace QuestTree.QuestGraph
             (_waterFlat != null ? "p" : "n") +
             ";smooth" + (SmoothingEnabled ? (SmoothingRadius * 2 + 1).ToString(CultureInfo.InvariantCulture) : "0") +
             ";despeckle" + (DespeckleEnabled ? "1" : "0") +
-            ";reach" + (ReachEnabled ? (ReachIsAlpha ? "2" : "1") : "0") +
+            ";reach" + (ReachEnabled && _reachBuilt ? (ReachIsAlpha ? "2" : "1") : "0") +
             ";ss" + SupersampleFactor.ToString(CultureInfo.InvariantCulture) +
             ";msaa" + _msaa.ToString(CultureInfo.InvariantCulture) +
             ";layers" + LayerListVersion.ToString(CultureInfo.InvariantCulture);
@@ -1320,6 +1324,14 @@ namespace QuestTree.QuestGraph
                 CollectCulling();
                 CollectWater();
                 plan.Reach = BuildReach(plan);
+
+                // The OUTCOME, for the render tag: BuildReach returns null when the NavMesh has no
+                // triangulation, none of it lies in the extent, or it threw, and such a capture writes
+                // alpha 255 everywhere. Before the merge worked that was self-consistent (every capture
+                // rewrote the whole picture); merged, a masked set and an unmasked capture would leave a
+                // hard seam, so a capture without the mask must not merge into one with it - the same
+                // rule the water pass records with its p/n letter.
+                _reachBuilt = plan.Reach != null;
 
                 if (!BuildCamera(plan, out var note))
                 {
@@ -2304,10 +2316,24 @@ namespace QuestTree.QuestGraph
         }
 
         /// <summary>Copies a decoded picture into a Color32 array through the texture's own memory,
-        /// handling the two formats a PNG decode actually produces here: RGBA32 for a picture with an
-        /// alpha channel, which is what this build writes, and RGB24 for one without, which is what
-        /// every capture before the walkable mask wrote. Anything else is refused rather than
-        /// misread.</summary>
+        /// handling the formats a PNG decode actually produces here: ARGB32 for a picture with an alpha
+        /// channel - which is what LoadImage hands back for every capture written since the walkable
+        /// mask went into the alpha, and what this method REFUSED until 2026-09-23 - RGBA32 in case a
+        /// decode ever comes back that way, and RGB24 for a picture without alpha, which every capture
+        /// before the mask wrote. Anything else is refused rather than misread.
+        ///
+        /// The refusal was the whole merge for two weeks of captures. A refused previous picture leaves
+        /// PreviousColour null, DevelopBand then sees no old pixel anywhere and takes every pixel of
+        /// the new capture, and the distance sidecar written afterwards records that one capture's
+        /// distances over the whole map - which is exactly what the sidecar of a two-campaign Customs
+        /// set showed: every pixel measured from one south-east stop, 90 m there, 980 m in the far
+        /// north-west, not a single empty pixel. A campaign looked merged only because the streamer
+        /// keeps most of Customs loaded from any one stop; a capture taken inside Big Red replaced the
+        /// far side with the ground its unloaded chunks drew.
+        ///
+        /// The ARGB32 byte order is not taken on trust: <see cref="ChannelOrder"/> reads sixteen sample
+        /// pixels both ways and keeps the order that agrees with GetPixel, which decodes correctly
+        /// whatever the format is, and refuses the picture when neither does.</summary>
         /// <param name="texture">The decoded picture.</param>
         /// <param name="into">The array to fill, one entry a pixel.</param>
         /// <param name="plan">The capture's plan.</param>
@@ -2319,6 +2345,35 @@ namespace QuestTree.QuestGraph
             {
                 var data = texture.GetPixelData<Color32>(0);
                 for (var i = 0; i < into.Length; i++) into[i] = data[i];
+                return true;
+            }
+
+            if (texture.format == TextureFormat.ARGB32)
+            {
+                var order = ChannelOrder(texture, plan, floor, what);
+                if (order == 0) return false;
+
+                var data = texture.GetPixelData<Color32>(0);
+
+                if (order == 1)
+                {
+                    // Bytes A,R,G,B: the Color32 fields read r=A, g=R, b=G, a=B.
+                    for (var i = 0; i < into.Length; i++)
+                    {
+                        var raw = data[i];
+                        into[i] = new Color32(raw.g, raw.b, raw.a, raw.r);
+                    }
+                }
+                else
+                {
+                    // Bytes B,G,R,A: the Color32 fields read r=B, g=G, b=R, a=A.
+                    for (var i = 0; i < into.Length; i++)
+                    {
+                        var raw = data[i];
+                        into[i] = new Color32(raw.b, raw.g, raw.r, raw.a);
+                    }
+                }
+
                 return true;
             }
 
@@ -2357,6 +2412,17 @@ namespace QuestTree.QuestGraph
                 return true;
             }
 
+            if (texture.format == TextureFormat.ARGB32)
+            {
+                var order = ChannelOrder(texture, plan, floor, "distance sidecar");
+                if (order == 0) return false;
+
+                var data = texture.GetPixelData<Color32>(0);
+                if (order == 1) for (var i = 0; i < into.Length; i++) into[i] = data[i].g;
+                else for (var i = 0; i < into.Length; i++) into[i] = data[i].b;
+                return true;
+            }
+
             if (texture.format == TextureFormat.RGB24)
             {
                 var data = texture.GetPixelData<Rgb24>(0);
@@ -2370,6 +2436,105 @@ namespace QuestTree.QuestGraph
 
             return false;
         }
+
+        /// <summary>Which byte order an ARGB32 texture's memory actually holds: 1 for A,R,G,B, 2 for
+        /// B,G,R,A, 0 for neither (the picture is then refused, exactly as an unknown format is).
+        /// Decided by evidence rather than by the format's name: sixteen pixels spread over the picture
+        /// are read raw and both ways, and compared with GetPixel, which decodes correctly for every
+        /// format and is only too slow to use for the whole picture. An order counts only when every
+        /// sample agrees within one count per channel. Logged once per picture, at Debug.</summary>
+        /// <param name="texture">The decoded ARGB32 texture.</param>
+        /// <param name="plan">The capture's plan, for the log line.</param>
+        /// <param name="floor">The floor, for the log line.</param>
+        /// <param name="what">What this file is, for the log line.</param>
+        private static int ChannelOrder(Texture2D texture, Plan plan, FloorPlan floor, string what)
+        {
+            var data = texture.GetPixelData<Color32>(0);
+            var width = texture.width;
+            var height = texture.height;
+            var argb = true;
+            var bgra = true;
+
+            // The two readings of one pixel differ only when its bytes do: (m0,m1,m2,m3) reads the same
+            // either way exactly when m1 == m2 and m0 == m3, which an empty (0,0,0,0) pixel satisfies -
+            // and an outer floor of Interchange is 85 % empty pixels, so sixteen fixed samples can all
+            // land on pixels that cannot tell the orders apart and "agree" with both. The first pixel
+            // that CAN tell them apart is found by one linear scan (a dense picture ends it within a few
+            // pixels) and is the one whose verdict counts; the sixteen fixed samples stay as a cross-check
+            // that can only take an order away. When no pixel in the whole picture discriminates, the two
+            // loops produce byte-identical output and the choice cannot matter, which is said in the log.
+            var decisive = -1;
+
+            for (var i = 0; i < data.Length; i++)
+            {
+                var raw = data[i];
+                if (Math.Abs(raw.g - raw.b) > 1 || Math.Abs(raw.r - raw.a) > 1)
+                {
+                    decisive = i;
+                    break;
+                }
+            }
+
+            if (decisive >= 0)
+            {
+                var truth = (Color32)texture.GetPixel(decisive % width, decisive / width);
+                var raw = data[decisive];
+
+                if (!Near(new Color32(raw.g, raw.b, raw.a, raw.r), truth)) argb = false;
+                if (!Near(new Color32(raw.b, raw.g, raw.r, raw.a), truth)) bgra = false;
+            }
+
+            for (var sample = 0; sample < 16 && (argb || bgra); sample++)
+            {
+                var x = (int)((sample % 4 + 0.5f) * width / 4f);
+                var y = (int)((sample / 4 + 0.5f) * height / 4f);
+                var truth = (Color32)texture.GetPixel(x, y);
+                var raw = data[y * width + x];
+
+                var asArgb = new Color32(raw.g, raw.b, raw.a, raw.r);
+                var asBgra = new Color32(raw.b, raw.g, raw.r, raw.a);
+
+                if (!Near(asArgb, truth)) argb = false;
+                if (!Near(asBgra, truth)) bgra = false;
+            }
+
+            int order;
+
+            if (decisive < 0)
+            {
+                // Every pixel reads the same both ways, so either loop writes the same bytes.
+                order = 1;
+            }
+            else
+            {
+                order = argb && !bgra ? 1 : bgra && !argb ? 2 : 0;
+            }
+
+            if (order == 0)
+            {
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: {plan.Key} \"{floor.Dto?.Name}\" has a {what} decoded as ARGB32 whose bytes match " +
+                    (argb && bgra
+                        ? "both A,R,G,B and B,G,R,A on a pixel that should tell them apart"
+                        : "neither A,R,G,B nor B,G,R,A against GetPixel") +
+                    ", so it is refused - this capture draws over it.");
+            }
+            else
+            {
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: {plan.Key} \"{floor.Dto?.Name}\" - its {what} decoded as ARGB32 with bytes in " +
+                    $"{(order == 1 ? "A,R,G,B" : "B,G,R,A")} order" +
+                    (decisive < 0
+                        ? " (no pixel distinguishes the two orders, so either reads the same bytes)."
+                        : $" (decided by pixel {decisive}, cross-checked on 16 samples)."));
+            }
+
+            return order;
+        }
+
+        /// <summary>Whether two colours agree within one count per channel.</summary>
+        private static bool Near(Color32 a, Color32 b) =>
+            Math.Abs(a.r - b.r) <= 1 && Math.Abs(a.g - b.g) <= 1 && Math.Abs(a.b - b.b) <= 1 && Math.Abs(a.a - b.a) <= 1;
 
         /// <summary>One RGB24 pixel as it sits in a decoded texture's memory. Never assigned in C# for
         /// the same reason <see cref="Half4"/> is not.</summary>

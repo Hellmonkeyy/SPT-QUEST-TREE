@@ -152,6 +152,18 @@ captured map carries our own credit line naming the build, the date and the raid
   again once on the next start and the shipped seed is refreshed before packaging. A host now
   strips line breaks from floor names before they reach its log, and item places on the map keep the
   same identity from raid to raid instead of being re-keyed every time.
+- **Captures merge now. They never did.** Every capture since the walkable mask went into the
+  alpha channel has REPLACED the whole picture instead of adding to it: Unity decodes a PNG with
+  alpha as ARGB32, the merge's loader accepted only RGBA32 and RGB24, so the previous picture was
+  refused every time (one Info line per capture said so, in words that read like a format quirk),
+  the merge saw no old pixel anywhere and took every new one. A campaign still looked merged
+  because the game keeps most of Customs loaded from any one stop; a capture taken inside Big Red
+  lost the far side, and the distance sidecar of a two-campaign set measured every pixel from one
+  stop. ARGB32 is read now, with its byte order decided from a pixel that can tell the two possible
+  orders apart and cross-checked against Unity's own reader, and refused when the evidence is
+  missing. The render recipe's `reach` term now records whether the walkable mask was actually
+  built rather than merely asked for, since a merge of a masked and an unmasked capture would
+  leave a hard seam.
 - **Big Red is a building again.** The throwaway probe key below, run inside it, found that the warehouse's
   own walls-and-roof mesh - the one with real materials that the player's camera draws - sits on the
   game layer named HighPolyCollider, and that name had put the layer on the capture's list of

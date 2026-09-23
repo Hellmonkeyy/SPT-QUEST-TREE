@@ -1133,9 +1133,11 @@ namespace QuestTree.UI
                 layer.RasterBytes = TextureBytes(texture);
 
                 // The FORMAT is in the line because it is the one fact that decides both the cost
-                // and whether the picture can be transparent at all: RGBA32 is our own capture with
-                // its alpha intact, RGB24 is an opaque one (a host's JPEG, or a PNG saved without an
-                // alpha channel), and anything else is a Unity version doing something unexpected.
+                // and whether the picture can be transparent at all: ARGB32 is what this Unity hands
+                // back for our own capture with its alpha intact (this very line proved it on
+                // 2026-09-23, while MapCapture's merge was still refusing that format), RGB24 is an
+                // opaque one (a host's JPEG, or a PNG saved without an alpha channel), and anything
+                // else is a Unity version doing something unexpected.
                 Plugin.LogSource?.LogDebug(
                     $"QuestTree: map picture '{name}' {texture.width}x{texture.height} {texture.format} " +
                     $"decoded in {clock.ElapsedMilliseconds} ms " +
@@ -1169,7 +1171,8 @@ namespace QuestTree.UI
         {
             var bytesPerPixel = texture.format switch
             {
-                // The two LoadImage actually produces for our files.
+                // What LoadImage actually produces for our files: ARGB32 for a PNG with alpha (our
+                // captures), RGB24 for one without (a host's JPEG); RGBA32 in case a build ever differs.
                 TextureFormat.RGBA32 => 4,
                 TextureFormat.RGB24 => 3,
 
