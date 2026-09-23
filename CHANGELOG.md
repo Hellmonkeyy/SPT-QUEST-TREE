@@ -166,11 +166,14 @@ captured map carries our own credit line naming the build, the date and the raid
   can be read back off the graphics card, and how much of the map its colliders cover from where you
   stand - and `captures\menu.meshprobe.txt` in the menu, where it lists the loaded shaders, cameras
   and layers and puts a small test view in the bottom-left corner until it is pressed again. Nothing
-  in the mod depends on it. What it does touch: in a raid it adds a readable buffer target to up to
-  twenty scene meshes for a frame each and puts every one back, and writes down whether the restore
-  took; in the menu the test view lives until the second press and swallows clicks inside its own
-  512 px square. It is meant to be removed again. It lives in the F12 menu under **Advanced > Mesh
-  probe key (throwaway)** and is deliberately kept out of the in-game Settings tab.
+  in the mod depends on it. What it does touch: it reads up to twenty scene meshes and asks the
+  graphics card for a copy of one, modifying none of them - the first version of it did modify a
+  mesh's buffer targets and put them back, and the restoring write killed the game natively
+  (`Mesh.set_vertexBufferTarget` into d3d11), so nothing in this mod writes those any more and the
+  readback test now has to complete once in the menu before a raid will run it; in the menu the test
+  view lives until the second press and swallows clicks inside its own 512 px square. It is meant to
+  be removed again. It lives in the F12 menu under **Advanced > Mesh probe key (throwaway)** and is
+  deliberately kept out of the in-game Settings tab.
 ---
 
 # Quest Tracker 1.18.5

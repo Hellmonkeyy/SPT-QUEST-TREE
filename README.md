@@ -583,12 +583,15 @@ its colliders actually cover, and pressed in the menu it lists the loaded shader
 and puts a small test view in the corner of the screen (press again to close it). It writes
 `BepInEx\plugins\QuestTree\captures\<map>.meshprobe.txt` and `captures\menu.meshprobe.txt`, and
 nothing in the mod depends on it. What it does touch, said plainly rather than as "it changes
-nothing": in a raid it adds a readable buffer target to up to twenty of the scene's meshes for a
-frame each and puts every one back, recording in the file whether the restore took; in the menu the
-test view is a 512x512 panel in the bottom-left corner that stays until you press the key again and
-swallows any click inside it while it is there. It is meant to be removed again. Rebind it, or clear
-it, in the F12 menu under **Advanced > Mesh probe key (throwaway)**; the in-game Settings tab
-deliberately does not list it.
+nothing": it reads up to twenty of the scene's meshes and asks the graphics card for a copy of one,
+without modifying any of them - an earlier version of it modified a mesh's buffer targets and put
+them back, and the restoring write crashed the game outright, so nothing in this mod writes those any
+more; in the menu the test view is a 512x512 panel in the bottom-left corner that stays until you
+press the key again and swallows any click inside it while it is there. Press it once in the **menu**
+before you press it in a raid: the readback test only runs in a raid once it has completed in the
+menu, where a crash costs nothing. It is meant to be removed again. Rebind it, or clear it, in the
+F12 menu under **Advanced > Mesh probe key (throwaway)**; the in-game Settings tab deliberately does
+not list it.
 
 **The keys are split by view.** `F`, `M`, `X`, `C` and `/` are the tree's, and only fire there: on
 **Maps** the only keys are `F` and `[` `]`, and on **Do next**, **Items**, **Kappa** and **Settings**

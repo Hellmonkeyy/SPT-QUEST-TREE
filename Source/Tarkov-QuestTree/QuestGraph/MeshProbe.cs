@@ -25,11 +25,21 @@ namespace QuestTree.QuestGraph
     /// on it: it writes one text file per press and, apart from the menu's own test view which it
     /// destroys again, changes nothing that outlives the frame.
     ///
+    /// BUFFER TARGETS ARE NEVER WRITTEN - doing so crashed the engine on 2026-09-22
+    /// (Mesh.set_vertexBufferTarget -> UnityPlayer -> d3d11). The first version of experiment 1 set
+    /// `vertexBufferTarget |= Raw` on a scene mesh, read it, and assigned the original value back; the
+    /// RESTORING assignment took the process down on the first mesh it reached inside Big Red on Customs,
+    /// natively, with no managed exception anywhere in the stack. Nothing in this file - and nothing in the
+    /// 3D feature that follows it - may assign vertexBufferTarget or indexBufferTarget on a mesh the mod
+    /// does not own, and nothing may call a synchronous GetData on such a mesh's buffer either, because
+    /// mapping a GPU-only buffer is plausibly the same native path. The targets are read and printed.
+    ///
     /// It exists because four questions about a 3D map cannot be answered by reading code:
     ///
     ///   1. Can a scene mesh the game uploaded with isReadable = false still be read back from the
-    ///      GPU (vertexBufferTarget |= Raw, GetVertexBuffer().GetData, AsyncGPUReadback)? The
-    ///      buildings half of the plan depends on it and has a relief-only fallback if not.
+    ///      GPU? Asked now only of the buffer Unity is willing to hand over as the mesh already stands
+    ///      (GetVertexBuffer, then AsyncGPUReadback on it). The buildings half of the plan depends on it
+    ///      and has a relief-only fallback if not.
     ///   2. Do colliders stream out around the player the way renderers do? A 2 m raycast grid over
     ///      the whole map is the ground relief; if its coverage falls off with distance the relief
     ///      has to merge across captures the way the pictures do. Pressed once at spawn and once at
@@ -200,12 +210,20 @@ namespace QuestTree.QuestGraph
 
                 if (_running)
                 {
-                    Plugin.LogSource?.LogInfo("QuestTree: the mesh probe is still running the last press.");
+                    Plugin.LogSource?.LogInfo(
+                        "QuestTree: the mesh probe ignored a press: busy with the last one.");
                     return;
                 }
 
                 _running = true;
                 _press++;
+
+                // Before any work, at Info, naming the file: a press whose experiment kills the process
+                // must still have left a line saying it started and where its answers were going.
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: mesh probe press {_press} starting - experiment 2, then 3, then 1" +
+                    $"{(MenuRunProved() ? "" : " (1 will be SKIPPED: no proven menu run yet)")}.");
+
                 StartCoroutine(RunRaid(_press));
             }
             catch (Exception ex)
@@ -216,8 +234,9 @@ namespace QuestTree.QuestGraph
             }
         }
 
-        /// <summary>One press in a raid: the header, then experiments 1, 2 and 3, each flushed to the
-        /// file as it finishes so a crash in a later one cannot lose an earlier one's answers.</summary>
+        /// <summary>One press in a raid: the header, then experiments 2, 3 and 1 - in that order, with each
+        /// block appended to the file as it finishes, so a crash in the risky one cannot lose the answers
+        /// the safe ones already produced.</summary>
         /// <param name="press">Which press of this raid this is, for the header.</param>
         private IEnumerator RunRaid(int press)
         {
@@ -244,18 +263,19 @@ namespace QuestTree.QuestGraph
                     header.AppendLine(
                         $"mod {ModInfo.Stamp}, unity {Application.unityVersion}, map {map}, player at " +
                         $"{F(at.x)},{F(at.y)},{F(at.z)}, time in raid {F(Time.realtimeSinceStartup)} s");
+                    header.AppendLine(
+                        "buffer targets are never written - doing so crashed the engine on 2026-09-22 " +
+                        "(Mesh.set_vertexBufferTarget -> d3d11).");
                 });
 
                 Append(stem, header.ToString());
 
                 yield return null;
 
-                var one = new StringBuilder();
-                yield return Experiment1(one, at);
-                Append(stem, one.ToString());
-
-                yield return null;
-
+                // ORDER: 2, then 3, then 1 LAST, and every block appended as it finishes. Experiment 1 is
+                // the one that has already killed the process once, and the raycast coverage and the layer
+                // dump are the answers this raid is most likely to be repeated for - so they are on disk
+                // before the risky one starts, not after.
                 var two = new StringBuilder();
                 yield return Experiment2(two, at);
                 Append(stem, two.ToString());
@@ -266,9 +286,33 @@ namespace QuestTree.QuestGraph
                 Guard(three, 3, () => Experiment3(three));
                 Append(stem, three.ToString());
 
+                yield return null;
+
+                var one = new StringBuilder();
+
+                // The gate: experiment 1 runs in a raid only once it has run to completion in the MENU,
+                // proven by the marker line in that file. The crash it guards against is native, so no
+                // in-memory flag could have survived to record it - only what was already written.
+                if (MenuRunProved())
+                {
+                    yield return Experiment1(one, at);
+                }
+                else
+                {
+                    one.AppendLine("--- EXPERIMENT 1 - readback ---");
+                    one.AppendLine(
+                        "EXPERIMENT 1 SKIPPED: run the menu probe first (it proves the readback path cannot " +
+                        "crash the engine). Press the key once in the menu, check that " +
+                        $"menu.meshprobe.txt contains a \"{Experiment1Marker}\" line, then press it here again.");
+                    one.AppendLine();
+                }
+
+                Append(stem, one.ToString());
+
                 Plugin.LogSource?.LogInfo(
                     $"QuestTree: mesh probe press {press} wrote {stem}.meshprobe.txt in " +
-                    $"{clock.ElapsedMilliseconds} ms.");
+                    $"{clock.ElapsedMilliseconds} ms (experiment 1 " +
+                    $"{(MenuRunProved() ? "ran - the menu run proved it safe" : "SKIPPED - run the menu probe first")}).");
             }
             finally
             {
@@ -290,17 +334,73 @@ namespace QuestTree.QuestGraph
             public int Stride;
             public int Dimension;
             public VertexAttributeFormat Format;
-            public bool RanA, RanB, RanC;
-            public bool OkA, OkB, OkC;
+            /// <summary>Whether (c) was attempted, which is not the same as whether it worked: (c) is
+            /// skipped when (b) got no buffer to read from.</summary>
+            public bool RanC;
+
+            /// <summary>Whether (a) and (c) produced positions that passed <see cref="Verdict"/>. There is
+            /// no OkB any more - (b) no longer decodes anything, so <see cref="HandleB"/> is all it can
+            /// report.</summary>
+            public bool OkA, OkC;
+
+            /// <summary>Whether <c>GetVertexBuffer</c> handed back a buffer in (b). (c) has nothing to
+            /// ask the GPU for when it did not, and says NOT RUN rather than failing.</summary>
+            public bool HandleB;
         }
 
-        /// <summary>Experiment 1: whether the twenty largest meshes around the player can be read,
-        /// and by which of the three paths. One mesh per frame.</summary>
+        /// <summary>The exact line the gate below looks for. Written at the end of experiment 1's summary
+        /// and nowhere else, so its presence in menu.meshprobe.txt is proof that the whole of experiment 1
+        /// ran to completion in the menu without taking the process down.</summary>
+        internal const string Experiment1Marker = "EXPERIMENT 1 SUMMARY";
+
+        /// <summary>Whether experiment 1 has ALREADY completed once in the menu, which is what earns it
+        /// the right to run in a raid.
+        ///
+        /// The evidence is a file on disk rather than a static or a setting, and it has to be: the failure
+        /// this gate exists for is a NATIVE crash, which takes the whole process down. A static would be
+        /// gone, no finally would run, no setting would be saved - the only thing that survives is what was
+        /// already written, so the only honest proof is the marker line in the menu's own file. A menu run
+        /// that crashed leaves a file WITHOUT the marker, and this stays false for ever after.</summary>
+        private static bool MenuRunProved()
+        {
+            try
+            {
+                var dir = MapCapture.ProbeCapturesRoot();
+                if (dir == null) return false;
+
+                var path = Path.Combine(dir, "menu.meshprobe.txt");
+                if (!File.Exists(path)) return false;
+
+                return File.ReadAllText(path).IndexOf(Experiment1Marker, StringComparison.Ordinal) >= 0;
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug($"QuestTree: the mesh probe could not read its menu file ({ex.Message}).");
+                return false;
+            }
+        }
+
+        /// <summary>Experiment 1: whether the twenty largest meshes can be read off the GPU, and by which
+        /// path. One mesh spread over several frames.
+        ///
+        /// NOTHING HERE WRITES vertexBufferTarget OR indexBufferTarget. The first version of this
+        /// experiment did - `|= Raw` before reading, the original value back afterwards - and on
+        /// 2026-09-22 the restoring setter killed the engine outright on the first mesh it reached next to
+        /// Big Red on Customs: Mesh.set_vertexBufferTarget -> UnityPlayer -> d3d11, a native crash with no
+        /// managed exception anywhere in it. Guard catches exceptions; nothing in managed code catches that.
+        /// So the targets are READ and printed and never assigned, here or anywhere else in the 3D feature,
+        /// and the question "can a non-readable mesh be read back" is asked only of the buffer Unity is
+        /// willing to hand over as the mesh already stands.</summary>
         /// <param name="text">The block being built for the file.</param>
-        /// <param name="at">The player's position.</param>
-        private IEnumerator Experiment1(StringBuilder text, Vector3 at)
+        /// <param name="at">The player's position, for the 60 m filter, or null in the menu, where there is
+        /// no player and every mesh in the loaded scene is a candidate.</param>
+        internal static IEnumerator Experiment1(StringBuilder text, Vector3? at)
         {
             text.AppendLine("--- EXPERIMENT 1 - readback ---");
+            text.AppendLine(
+                "buffer targets are never written - doing so crashed the engine on 2026-09-22 " +
+                "(Mesh.set_vertexBufferTarget -> d3d11). They are read and printed only, and no synchronous " +
+                "GetData is called on a scene mesh's buffer either.");
 
             var mask = 0;
             List<Candidate> picked = null;
@@ -309,7 +409,10 @@ namespace QuestTree.QuestGraph
 
             if (!Guard(text, 1, () =>
                 {
-                    mask = MapCapture.ProbeCaptureMask();
+                    // In a raid, the layers a capture draws, so the set is the set the 3D feature cares
+                    // about. In the menu there is no capture camera to copy and no reason to narrow: the
+                    // question there is only whether the readback path is survivable at all.
+                    mask = at.HasValue ? MapCapture.ProbeCaptureMask() : ~0;
 
                     var all = FindObjectsOfType<MeshRenderer>();
                     scanned = all == null ? 0 : all.Length;
@@ -325,7 +428,7 @@ namespace QuestTree.QuestGraph
                         if ((mask & (1 << go.layer)) == 0) continue;
 
                         var bounds = renderer.bounds;
-                        if (!InColumn(bounds, go.transform.position, at)) continue;
+                        if (at.HasValue && !InColumn(bounds, go.transform.position, at.Value)) continue;
 
                         considered++;
 
@@ -347,14 +450,20 @@ namespace QuestTree.QuestGraph
                     picked = found;
 
                     text.AppendLine(
-                        $"scanned {scanned} MeshRenderer(s), {considered} within {F(ColumnRadius)} m (XZ) of the " +
-                        $"player on the capture's layers, {picked.Count} read (cap {ReadbackCount})");
-                    text.AppendLine($"capture mask 0x{mask:X8} = [{MaskNames(mask)}]");
+                        $"scanned {scanned} MeshRenderer(s), {considered} " +
+                        $"{(at.HasValue ? $"within {F(ColumnRadius)} m (XZ) of the player on the capture's layers" : "in the loaded scene (no distance filter, every layer)")}" +
+                        $", {picked.Count} read (cap {ReadbackCount})");
+                    text.AppendLine($"layer mask 0x{mask:X8} = [{MaskNames(mask)}]");
                 })) yield break;
 
             if (picked == null || picked.Count == 0)
             {
-                text.AppendLine("0 candidate(s) - nothing to read.");
+                // Deliberately NOT the marker line. A run that attempted nothing has proved nothing, and
+                // writing the marker here would unlock the raid side on the strength of an empty scene -
+                // exactly the kind of check that cannot fail.
+                text.AppendLine(
+                    "EXPERIMENT 1 INCONCLUSIVE: 0 candidate(s) - nothing was attempted, so this run proves " +
+                    "nothing and the raid side stays locked.");
                 yield break;
             }
 
@@ -369,7 +478,6 @@ namespace QuestTree.QuestGraph
                 // (a) the managed arrays, only where Unity says they exist.
                 if (c.Readable)
                 {
-                    c.RanA = true;
                     Guard(text, 1, () => c.OkA = MethodA(text, index, c));
                 }
                 else
@@ -384,22 +492,29 @@ namespace QuestTree.QuestGraph
 
                 yield return null;
 
-                // (b) the raw GPU buffers. Run when (a) did not produce plausible positions, and
-                // always on the first few meshes so the file records whether this path works at all
-                // rather than only whether it was needed.
-                if (forceAll || !c.OkA)
-                {
-                    c.RanB = true;
-                    Guard(text, 1, () => c.OkB = MethodB(text, index, c));
-                }
+                // (b) does Unity hand over the buffers at all, as the mesh stands? Always asked, because it
+                // is now the cheap half of the question and it is what tells (c) whether to bother.
+                Guard(text, 1, () => MethodB(text, index, c));
 
                 yield return null;
 
-                // (c) the async readback, same rule.
-                if (forceAll || (!c.OkA && !c.OkB))
+                // (c) the async readback of that same unmodified buffer - the only path left that can
+                // produce actual positions from a non-readable mesh. Every mesh gets a (c) line, including
+                // the ones it was not run on: a missing line reads as a crash.
+                if (!c.HandleB)
+                {
+                    text.AppendLine(
+                        $"  [{index:00}] (c) AsyncGPUReadback: NOT RUN - (b) got no vertex buffer to read from");
+                }
+                else if (forceAll || !c.OkA)
                 {
                     c.RanC = true;
                     yield return MethodC(text, index, c);
+                }
+                else
+                {
+                    text.AppendLine(
+                        $"  [{index:00}] (c) AsyncGPUReadback: NOT RUN - (a) already read this mesh plausibly");
                 }
 
                 yield return null;
@@ -407,23 +522,29 @@ namespace QuestTree.QuestGraph
 
             Guard(text, 1, () =>
             {
-                int readable = 0, a = 0, b = 0, cc = 0, none = 0, all = 0;
+                int readable = 0, a = 0, handles = 0, cc = 0, none = 0, ranC = 0;
 
                 foreach (var c in picked)
                 {
                     if (c.Readable) readable++;
                     if (c.OkA) a++;
-                    if (c.OkB) b++;
+                    if (c.HandleB) handles++;
                     if (c.OkC) cc++;
-                    if (!c.OkA && !c.OkB && !c.OkC) none++;
-                    if (c.RanA && c.RanB && c.RanC) all++;
+                    if (!c.OkA && !c.OkC) none++;
+                    if (c.RanC) ranC++;
                 }
 
                 var n = picked.Count;
+
+                // (b) is counted as HANDLES, not as "worked": it no longer decodes anything, because the
+                // only way it could - a synchronous GetData on a mapped buffer - is the same native path
+                // that crashed the engine. So the two columns that mean "positions came back" are (a) and
+                // (c), and "failed" means neither of those produced any.
                 text.AppendLine(
-                    $"summary: {n} mesh(es); readable {readable} ({Pct(readable, n)}); (a) worked {a} " +
-                    $"({Pct(a, n)}); (b) worked {b} ({Pct(b, n)}); (c) worked {cc} ({Pct(cc, n)}); " +
-                    $"failed all three {none} ({Pct(none, n)}); tried all three on {all}");
+                    $"{Experiment1Marker}: {n} mesh(es); readable {readable} ({Pct(readable, n)}); " +
+                    $"(a) mesh.vertices plausible {a} ({Pct(a, n)}); (b) GetVertexBuffer handed back a buffer " +
+                    $"{handles} ({Pct(handles, n)}); (c) AsyncGPUReadback attempted {ranC}, plausible {cc} " +
+                    $"({Pct(cc, n)}); no positions from any path {none} ({Pct(none, n)})");
             });
 
             text.AppendLine();
@@ -517,163 +638,131 @@ namespace QuestTree.QuestGraph
             return worked;
         }
 
-        /// <summary>(b) Raw targets, GetVertexBuffer / GetIndexBuffer and a synchronous GetData.
+        /// <summary>(b) Does Unity hand over the mesh's GPU buffers AT ALL, as the mesh already stands?
         ///
-        /// The one question a raid can answer that no amount of reading can: whether a mesh the game
-        /// uploaded with isReadable = false can have Raw added to its buffer targets AFTER the upload
-        /// and be read back anyway. The targets are put back in the finally - this probe must not
-        /// leave the scene's meshes in a state the game did not choose.</summary>
+        /// That is the whole of (b) now, and the reason it is so little is worth writing down. It used to
+        /// add GraphicsBuffer.Target.Raw to the mesh's vertexBufferTarget and indexBufferTarget, read the
+        /// head of the buffer with a synchronous GetData, and put the targets back. On 2026-09-22 that
+        /// killed the game: the SECOND assignment - the one restoring the original value - went
+        /// Mesh.set_vertexBufferTarget -> UnityPlayer -> d3d11 and the process died, with no managed
+        /// exception for Guard to catch and nothing in the probe's file past the header. The first mesh it
+        /// reached was inside Big Red on Customs.
+        ///
+        /// So two things are gone for good, here and everywhere else in the 3D feature:
+        ///   - NO WRITE to vertexBufferTarget or indexBufferTarget on a mesh we do not own. The targets are
+        ///     read and printed; they are never assigned. A mesh the game uploaded as Vertex-only stays
+        ///     Vertex-only.
+        ///   - NO synchronous GetData on a scene mesh's buffer. Mapping a buffer that was never created for
+        ///     CPU access is plausibly the same native path, and a second crash would cost another raid to
+        ///     learn nothing new. AsyncGPUReadback in (c) is the one remaining way to ask, and it is at
+        ///     least an API whose failure mode is documented as a flag rather than a map.
+        ///
+        /// What is left still answers something: whether GetVertexBuffer/GetIndexBuffer return a handle or
+        /// throw on a non-readable mesh, and what that handle says about itself (count, stride, target).
+        /// A buffer that cannot even be obtained cannot be read by any means, so a "no" here settles the
+        /// question for that mesh without touching the GPU at all.</summary>
         /// <param name="text">The block being built.</param>
         /// <param name="index">The candidate's number.</param>
-        /// <param name="c">The candidate.</param>
-        private static bool MethodB(StringBuilder text, int index, Candidate c)
+        /// <param name="c">The candidate, whose <see cref="Candidate.HandleB"/> this sets.</param>
+        private static void MethodB(StringBuilder text, int index, Candidate c)
         {
             var mesh = c.Mesh;
-            var vertexTarget = mesh.vertexBufferTarget;
-            var indexTarget = mesh.indexBufferTarget;
+            var stream = Math.Max(0, c.Stream);
 
             GraphicsBuffer vb = null;
             GraphicsBuffer ib = null;
+
+            var vertexNote = "";
+            var indexNote = "";
             var clock = Stopwatch.StartNew();
 
             try
             {
-                mesh.vertexBufferTarget |= GraphicsBuffer.Target.Raw;
-                mesh.indexBufferTarget |= GraphicsBuffer.Target.Raw;
-
-                var stream = Math.Max(0, c.Stream);
-                vb = mesh.GetVertexBuffer(stream);
-                ib = mesh.GetIndexBuffer();
-
-                if (vb == null)
+                // Each call in its own try: a mesh can refuse one and hand over the other, and one refusal
+                // must not hide the other's answer.
+                try
                 {
-                    clock.Stop();
-                    text.AppendLine(
-                        $"  [{index:00}] (b) raw buffers: GetVertexBuffer({stream}) returned null, {Ms(clock)} ms -> FAILED");
-                    return false;
+                    vb = mesh.GetVertexBuffer(stream);
+                    vertexNote = vb == null
+                        ? "returned null"
+                        : $"ok, count {vb.count} stride {vb.stride} target {vb.target}";
+                }
+                catch (Exception ex)
+                {
+                    vertexNote = $"threw {ex.GetType().Name}: {ex.Message}";
                 }
 
-                var read = ReadHead(vb, c.Offset + 2 * Math.Max(1, c.Stride) + 12, out var how);
-                var indices = ib == null ? "no index buffer" : DescribeIndices(ib, mesh.indexFormat);
+                try
+                {
+                    ib = mesh.GetIndexBuffer();
+                    indexNote = ib == null
+                        ? "returned null"
+                        : $"ok, count {ib.count} stride {ib.stride} target {ib.target}";
+                }
+                catch (Exception ex)
+                {
+                    indexNote = $"threw {ex.GetType().Name}: {ex.Message}";
+                }
 
                 clock.Stop();
 
-                if (read == null)
-                {
-                    text.AppendLine(
-                        $"  [{index:00}] (b) raw buffers: vb count {vb.count} stride {vb.stride} target {vb.target}; " +
-                        $"GetData failed ({how}); {indices}; {Ms(clock)} ms -> FAILED");
-                    return false;
-                }
+                c.HandleB = vb != null;
 
-                var worked = Decode(text, index, "(b) raw buffers", c, read, how, indices, vb, clock);
-                return worked;
+                text.AppendLine(
+                    $"  [{index:00}] (b) buffer handles (targets NOT modified): GetVertexBuffer({stream}) " +
+                    $"{vertexNote}; GetIndexBuffer() {indexNote}; {Ms(clock)} ms -> " +
+                    $"{(c.HandleB ? "HANDLE" : "NO HANDLE")}");
             }
             finally
             {
-                Restore(text, index, "(b)", c, vertexTarget, indexTarget, vb, ib);
+                if (clock.IsRunning) clock.Stop();
+
+                // Released, each on its own, and a refusal only logged: there is no restore step any more,
+                // because there is nothing to restore.
+                ReleaseBuffer(text, index, "(b)", "vertex", vb);
+                ReleaseBuffer(text, index, "(b)", "index", ib);
             }
         }
 
-        /// <summary>Puts a mesh's buffer targets back, releases the buffers, and writes down what the
-        /// mesh looks like afterwards.
-        ///
-        /// The ORDER is the point, and it is not the obvious one: the targets go back FIRST, before any
-        /// Release is attempted. A Release that throws costs this probe one leaked GraphicsBuffer for the
-        /// raid; a restore that never runs because a Release threw first leaves a mesh of the GAME'S
-        /// SCENE carrying a Raw buffer target it was never uploaded with, for the rest of the session,
-        /// and the exception escapes past the caller's Guard on the way out. Each of the three steps has
-        /// its own try for the same reason: none of them may stop the next.
-        ///
-        /// The last line is the evidence. "The targets are put back in the finally" is a claim, and this
-        /// probe's whole job is to replace claims with numbers, so the file records the vertex count, both
-        /// buffer targets, the stride and whether the renderer is still visible AFTER the restore, and
-        /// says UNCHANGED or CHANGED.</summary>
+        /// <summary>Releases one GraphicsBuffer, and says so if it will not go. Guarded on its own so that
+        /// one buffer refusing cannot stop the next from being released - the leak this probe can still
+        /// cause is a buffer handle, which costs memory for the raid and nothing else.</summary>
         /// <param name="text">The block being built.</param>
         /// <param name="index">The candidate's number.</param>
-        /// <param name="method">Which method is cleaning up, for the line.</param>
-        /// <param name="c">The candidate.</param>
-        /// <param name="vertexTarget">The vertex buffer target the mesh had before the probe touched it.</param>
-        /// <param name="indexTarget">The index buffer target it had.</param>
-        /// <param name="vb">The vertex buffer to release, or null.</param>
-        /// <param name="ib">The index buffer to release, or null.</param>
-        private static void Restore(
-            StringBuilder text, int index, string method, Candidate c,
-            GraphicsBuffer.Target vertexTarget, GraphicsBuffer.Target indexTarget,
-            GraphicsBuffer vb, GraphicsBuffer ib)
+        /// <param name="method">Which method is releasing, for the line.</param>
+        /// <param name="which">"vertex" or "index", for the line.</param>
+        /// <param name="buffer">The buffer, or null.</param>
+        private static void ReleaseBuffer(
+            StringBuilder text, int index, string method, string which, GraphicsBuffer buffer)
         {
-            var mesh = c.Mesh;
+            if (buffer == null) return;
 
             try
             {
-                if (mesh != null)
-                {
-                    mesh.vertexBufferTarget = vertexTarget;
-                    mesh.indexBufferTarget = indexTarget;
-                }
+                buffer.Release();
             }
             catch (Exception ex)
             {
                 text.AppendLine(
-                    $"  [{index:00}] {method} NOTE: the buffer targets could not be put back " +
-                    $"({ex.GetType().Name}: {ex.Message}) - they are left as Raw for this raid.");
-            }
-
-            try
-            {
-                if (vb != null) vb.Release();
-            }
-            catch (Exception ex)
-            {
-                text.AppendLine(
-                    $"  [{index:00}] {method} NOTE: the vertex buffer would not release " +
+                    $"  [{index:00}] {method} NOTE: the {which} buffer would not release " +
                     $"({ex.GetType().Name}: {ex.Message}).");
-            }
-
-            try
-            {
-                if (ib != null) ib.Release();
-            }
-            catch (Exception ex)
-            {
-                text.AppendLine(
-                    $"  [{index:00}] {method} NOTE: the index buffer would not release " +
-                    $"({ex.GetType().Name}: {ex.Message}).");
-            }
-
-            try
-            {
-                if (mesh == null)
-                {
-                    text.AppendLine($"  [{index:00}] {method} after restore: the mesh is gone.");
-                    return;
-                }
-
-                var back = mesh.vertexBufferTarget == vertexTarget && mesh.indexBufferTarget == indexTarget;
-
-                text.AppendLine(
-                    $"  [{index:00}] {method} after restore: verts {mesh.vertexCount} vertexBufferTarget " +
-                    $"{mesh.vertexBufferTarget} indexBufferTarget {mesh.indexBufferTarget} stride " +
-                    $"{mesh.GetVertexBufferStride(Math.Max(0, c.Stream))} rendererVisible " +
-                    $"{YesNo(c.Renderer != null && c.Renderer.isVisible)} -> {(back ? "UNCHANGED" : "CHANGED")}");
-            }
-            catch (Exception ex)
-            {
-                text.AppendLine(
-                    $"  [{index:00}] {method} after restore: unreadable ({ex.GetType().Name}: {ex.Message}).");
             }
         }
 
-        /// <summary>(c) The same buffer through AsyncGPUReadback, yielding until it is done. A
-        /// coroutine because that is the whole point of the method.</summary>
+        /// <summary>(c) The mesh's own vertex buffer through AsyncGPUReadback, yielding until it is done.
+        /// A coroutine because that is the whole point of the method.
+        ///
+        /// The buffer is taken AS IT IS. No target is added to the mesh first - that is what crashed the
+        /// engine on 2026-09-22 - so this asks the honest question: will Unity read back a buffer the game
+        /// created for the GPU alone? If the answer is no, AsyncGPUReadback is documented to say so through
+        /// hasError, which is a verdict this file can record. That is exactly why (b) no longer calls
+        /// GetData: this is the only one of the two whose failure is a flag rather than a memory map.</summary>
         /// <param name="text">The block being built.</param>
         /// <param name="index">The candidate's number.</param>
         /// <param name="c">The candidate.</param>
         private static IEnumerator MethodC(StringBuilder text, int index, Candidate c)
         {
             var mesh = c.Mesh;
-            var vertexTarget = mesh.vertexBufferTarget;
-            var indexTarget = mesh.indexBufferTarget;
 
             GraphicsBuffer vb = null;
             var request = default(AsyncGPUReadbackRequest);
@@ -688,9 +777,8 @@ namespace QuestTree.QuestGraph
             {
                 Guard(text, 1, () =>
                 {
-                    mesh.vertexBufferTarget |= GraphicsBuffer.Target.Raw;
-                    mesh.indexBufferTarget |= GraphicsBuffer.Target.Raw;
-
+                    // Its own handle, because (b) released its one in a finally. Same call, same mesh, no
+                    // modification of either.
                     vb = mesh.GetVertexBuffer(Math.Max(0, c.Stream));
                     if (vb == null)
                     {
@@ -743,7 +831,7 @@ namespace QuestTree.QuestGraph
 
                     c.OkC = Decode(
                         text, index, $"(c) AsyncGPUReadback after {frames} frame(s)", c, bytes,
-                        $"{data.Length} byte(s) returned, {take} read", "n/a", vb, clock);
+                        $"{data.Length} byte(s) returned, {take} read", vb, clock);
                 });
             }
             finally
@@ -769,7 +857,7 @@ namespace QuestTree.QuestGraph
                     }
                 }
 
-                Restore(text, index, "(c)", c, vertexTarget, indexTarget, vb, null);
+                ReleaseBuffer(text, index, "(c)", "vertex", vb);
             }
         }
 
@@ -782,12 +870,11 @@ namespace QuestTree.QuestGraph
         /// <param name="c">The candidate.</param>
         /// <param name="bytes">The head of the vertex buffer.</param>
         /// <param name="how">How the bytes were read, for the line.</param>
-        /// <param name="indices">What the index buffer said, for the line.</param>
         /// <param name="vb">The buffer, for its count and stride.</param>
         /// <param name="clock">The method's clock, already stopped.</param>
         private static bool Decode(
             StringBuilder text, int index, string method, Candidate c, byte[] bytes, string how,
-            string indices, GraphicsBuffer vb, Stopwatch clock)
+            GraphicsBuffer vb, Stopwatch clock)
         {
             var matrix = c.Renderer.localToWorldMatrix;
             var stride = Math.Max(1, c.Stride);
@@ -816,81 +903,11 @@ namespace QuestTree.QuestGraph
             text.AppendLine(
                 $"  [{index:00}] {method}: count {(vb == null ? 0 : vb.count)} stride " +
                 $"{(vb == null ? 0 : vb.stride)} target {(vb == null ? GraphicsBuffer.Target.Raw : vb.target)}; " +
-                $"{how}; {indices}; decoded {points.Count} of 3 as {c.Format}x{c.Dimension}" +
+                $"{how}; decoded {points.Count} of 3 as {c.Format}x{c.Dimension}" +
                 $"{(note.Length == 0 ? "" : " (" + note + ")")}; world {string.Join(" ", shown.ToArray())}; " +
                 $"{Ms(clock)} ms -> {(worked ? "PLAUSIBLE" : "IMPLAUSIBLE")} ({verdict})");
 
             return worked;
-        }
-
-        /// <summary>The first <paramref name="needBytes"/> bytes of a GraphicsBuffer, or null with the
-        /// reason in <paramref name="how"/>.
-        ///
-        /// Two tries, because a Raw-target buffer reports a stride of 4 on some drivers and the mesh's
-        /// own stride on others, and GraphicsBuffer.GetData refuses an array whose element size does not
-        /// divide the stride. byte[] first because it is what the plan assumes; uint[] second because a
-        /// raw buffer is by definition a buffer of 32-bit words.</summary>
-        /// <param name="buffer">The buffer to read.</param>
-        /// <param name="needBytes">How many bytes the decode needs.</param>
-        /// <param name="how">What happened, for the line.</param>
-        private static byte[] ReadHead(GraphicsBuffer buffer, int needBytes, out string how)
-        {
-            var stride = Math.Max(1, buffer.stride);
-            var elements = Math.Min(buffer.count, Math.Max(1, (needBytes + stride - 1) / stride));
-            var bytes = elements * stride;
-
-            var byteError = "";
-
-            try
-            {
-                var raw = new byte[bytes];
-                buffer.GetData(raw, 0, 0, elements);
-                how = $"GetData(byte[{bytes}], {elements} element(s) of {stride}) ok";
-                return raw;
-            }
-            catch (Exception ex)
-            {
-                byteError = $"{ex.GetType().Name}: {ex.Message}";
-            }
-
-            try
-            {
-                var words = new uint[Math.Max(1, bytes / 4)];
-                buffer.GetData(words, 0, 0, elements);
-
-                var raw = new byte[words.Length * 4];
-                for (var i = 0; i < words.Length; i++) Array.Copy(BitConverter.GetBytes(words[i]), 0, raw, i * 4, 4);
-
-                how = $"GetData(byte[]) refused ({byteError}); GetData(uint[{words.Length}]) ok";
-                return raw;
-            }
-            catch (Exception ex)
-            {
-                how = $"GetData(byte[]) {byteError}; GetData(uint[]) {ex.GetType().Name}: {ex.Message}";
-                return null;
-            }
-        }
-
-        /// <summary>The first three indices and the buffer's shape, for the line.</summary>
-        /// <param name="ib">The index buffer.</param>
-        /// <param name="format">The mesh's index format.</param>
-        private static string DescribeIndices(GraphicsBuffer ib, IndexFormat format)
-        {
-            var size = format == IndexFormat.UInt16 ? 2 : 4;
-            var bytes = ReadHead(ib, 3 * size, out var how);
-
-            if (bytes == null) return $"ib count {ib.count} stride {ib.stride}, unread ({how})";
-
-            var shown = new List<string>();
-
-            for (var i = 0; i < 3 && (i + 1) * size <= bytes.Length; i++)
-            {
-                shown.Add(size == 2
-                    ? BitConverter.ToUInt16(bytes, i * size).ToString(CultureInfo.InvariantCulture)
-                    : BitConverter.ToUInt32(bytes, i * size).ToString(CultureInfo.InvariantCulture));
-            }
-
-            return $"ib count {ib.count} stride {ib.stride} first 3 indices [{string.Join(",", shown.ToArray())}]";
         }
 
         /// <summary>One position out of a vertex buffer's bytes. False with a reason for a format this
@@ -1918,8 +1935,13 @@ namespace QuestTree.QuestGraph
     /// <summary>
     /// THROWAWAY, with <see cref="MeshProbe"/>: the menu half of the same key. Installed from
     /// <see cref="Plugin"/> on a DontDestroyOnLoad object, it polls the probe key and does nothing
-    /// else until it is pressed. A press while a raid's GameWorld exists is ignored, because the raid
-    /// watcher owns the key there and two probes on one press would write two files.
+    /// else until it is pressed. A press in a RAID is ignored, because the raid watcher owns the key
+    /// there and two probes on one press would write two files - but "in a raid" is a narrower question
+    /// than "is there a GameWorld", because the HIDEOUT has one too; see <see cref="InRaid"/>, which the
+    /// first menu press of this key was silently swallowed by.
+    ///
+    /// Every press this class declines is logged at INFO with its reason. It used to be Debug, and the
+    /// result was a key that produced no file, no view and no visible line at all.
     /// </summary>
     internal sealed class MenuMeshProbe : MonoBehaviour
     {
@@ -1961,6 +1983,9 @@ namespace QuestTree.QuestGraph
                 // check per frame, and it takes the view down through the same path the key does.
                 if (_view != null && !_busy && InRaid())
                 {
+                    Plugin.LogSource?.LogInfo(
+                        "QuestTree: a raid started with the mesh probe's test view open - tearing it down.");
+
                     _busy = true;
                     _press++;
                     StartCoroutine(Run(_press));
@@ -1970,14 +1995,23 @@ namespace QuestTree.QuestGraph
                 if (!MeshProbe.Pressed()) return;
 
                 // The raid watcher owns the key in a raid. Checked only on a press, so it costs
-                // nothing per frame.
+                // nothing per frame. At INFO, not Debug: the first menu press of this key did nothing at
+                // all and left one Debug line nobody sees, so the session could not tell "the key never
+                // reached us" from "we dropped it on purpose".
                 if (InRaid())
                 {
-                    Plugin.LogSource?.LogDebug("QuestTree: the menu mesh probe ignored a press inside a raid.");
+                    Plugin.LogSource?.LogInfo(
+                        "QuestTree: the menu mesh probe ignored a press: in a raid (the raid watcher owns " +
+                        "the key there).");
                     return;
                 }
 
-                if (_busy) return;
+                if (_busy)
+                {
+                    Plugin.LogSource?.LogInfo(
+                        "QuestTree: the menu mesh probe ignored a press: busy with the last one.");
+                    return;
+                }
 
                 _busy = true;
                 _press++;
@@ -1991,26 +2025,63 @@ namespace QuestTree.QuestGraph
             }
         }
 
-        /// <summary>Whether a raid's world exists, asked two independent ways: Comfort's Singleton - the
-        /// same registry GameStyle reads Handbook and GUISounds out of - and the raid watcher's own
-        /// count, which does not depend on the game registering anything. Either one saying yes is
-        /// enough, because the cost of a wrong "no" is a panel over the player's screen.</summary>
+        /// <summary>Whether this is a RAID, which is not the same question as whether a GameWorld exists.
+        ///
+        /// It used to be: "Singleton&lt;GameWorld&gt;.Instantiated" alone, and the first menu press of this
+        /// key was silently dropped because of it. THE HIDEOUT HAS A GameWorld TOO. Its player is an
+        /// EFT.HideoutPlayer, the tracker's own menu is opened from a screen that has one, and the raid
+        /// watcher's count was 0 the whole time - so the one test that mattered said "raid", the press was
+        /// discarded, and no file and no visible log line were written.
+        ///
+        /// Asked two independent ways now, and the Singleton half has to identify what KIND of world it is:
+        ///   - the raid watcher's own count, which is exact (it is created by GameWorld.OnGameStarted and
+        ///     dies with the world) and depends on the game registering nothing;
+        ///   - or a GameWorld whose MainPlayer exists and is not a HideoutPlayer. A null MainPlayer counts
+        ///     as NOT a raid: it means a world part way through loading, and a menu press there is a press
+        ///     in the menu.
+        /// </summary>
         private static bool InRaid()
         {
             if (MeshProbe.RaidWatchers > 0) return true;
 
             try
             {
-                return Singleton<GameWorld>.Instantiated && Singleton<GameWorld>.Instance != null;
+                if (!Singleton<GameWorld>.Instantiated) return false;
+
+                var world = Singleton<GameWorld>.Instance;
+                if (world == null) return false;
+
+                var player = world.MainPlayer;
+                if (player == null) return false;
+
+                return !(player is HideoutPlayer);
             }
-            catch (Exception)
+            catch (Exception ex)
             {
+                // A test that cannot be made is a test that says "menu": the alternative is dropping every
+                // press for the rest of the session with no way to tell why.
+                Plugin.LogSource?.LogDebug($"QuestTree: the mesh probe could not tell raid from menu ({ex.Message}).");
                 return false;
             }
         }
 
-        /// <summary>A press in the menu: show the test view and write experiments 3 and 4, or, if it is
-        /// already up, tear it down and write the leak check.</summary>
+        /// <summary>Where this half writes, for the log lines - so a press that dies can still be traced to
+        /// a file. "unknown" when the plugin has no file location.</summary>
+        private static string MenuFilePath()
+        {
+            try
+            {
+                var dir = MapCapture.ProbeCapturesRoot();
+                return dir == null ? "unknown (the plugin has no file location)" : Path.Combine(dir, "menu.meshprobe.txt");
+            }
+            catch (Exception)
+            {
+                return "unknown";
+            }
+        }
+
+        /// <summary>A press in the menu: run experiment 3, then 1, then 4 and show the test view - or, if it
+        /// is already up, tear it down and write the leak check.</summary>
         /// <param name="press">Which press this is.</param>
         private IEnumerator Run(int press)
         {
@@ -2046,25 +2117,50 @@ namespace QuestTree.QuestGraph
                     yield break;
                 }
 
-                var text = new StringBuilder();
-                text.AppendLine($"=== QuestTree mesh probe (THROWAWAY) - menu press {press} - {MeshProbe.Now()} ===");
-                text.AppendLine($"mod {ModInfo.Stamp}, unity {Application.unityVersion}, in the menu (no GameWorld)");
+                // Said BEFORE any work, and at Info: a press whose experiment kills the process must still
+                // have left a line saying it started and where its answers were going.
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: mesh probe (menu) press {press} starting - experiment 3, then 1, then 4, " +
+                    $"writing to {MenuFilePath()}");
 
+                var header = new StringBuilder();
+                header.AppendLine($"=== QuestTree mesh probe (THROWAWAY) - menu press {press} - {MeshProbe.Now()} ===");
+                header.AppendLine($"mod {ModInfo.Stamp}, unity {Application.unityVersion}, in the menu (not a raid)");
+                header.AppendLine(
+                    "buffer targets are never written - doing so crashed the engine on 2026-09-22 " +
+                    "(Mesh.set_vertexBufferTarget -> d3d11).");
+                MeshProbe.Append("menu", header.ToString());
+
+                // Each experiment appended as it finishes, never all at the end. Experiment 1 can take the
+                // process down natively - it has once - and a crash must cost only the experiment that
+                // crashed.
+                var three = new StringBuilder();
                 var layer = -1;
-                MeshProbe.Guard(text, 3, () => layer = MeshProbe.Experiment3(text));
+                MeshProbe.Guard(three, 3, () => layer = MeshProbe.Experiment3(three));
+                MeshProbe.Append("menu", three.ToString());
 
                 yield return null;
 
-                var chosen = layer;
-                MeshProbe.Guard(text, 4, () => _view = MeshProbeView.Create(text, chosen));
+                // Experiment 1 HERE, in the menu, before it is ever allowed to run in a raid: the hideout
+                // has non-readable meshes of its own, so the question can be asked where the cost of a
+                // crash is a menu rather than somebody's raid. The marker line its summary writes is what
+                // unlocks the raid side.
+                var one = new StringBuilder();
+                yield return MeshProbe.Experiment1(one, null);
+                MeshProbe.Append("menu", one.ToString());
 
-                text.AppendLine();
-                MeshProbe.Append("menu", text.ToString());
+                yield return null;
+
+                var four = new StringBuilder();
+                var chosen = layer;
+                MeshProbe.Guard(four, 4, () => _view = MeshProbeView.Create(four, chosen));
+                four.AppendLine();
+                MeshProbe.Append("menu", four.ToString());
 
                 Plugin.LogSource?.LogInfo(
-                    "QuestTree: mesh probe (menu) wrote menu.meshprobe.txt. The 512x512 test view sits in the " +
-                    "BOTTOM LEFT corner and consumes every click inside it while it is open - press the key " +
-                    "again to tear it down.");
+                    $"QuestTree: mesh probe (menu) press {press} wrote {MenuFilePath()}. The 512x512 test view " +
+                    "sits in the BOTTOM LEFT corner and consumes every click inside it while it is open - " +
+                    "press the key again to tear it down.");
             }
             finally
             {
