@@ -58,7 +58,7 @@ SAME_NAME = """
     MapMarkerPayloadDto MapMarkerSetDto MapMarkerDto
     ZoneHarvestRequest HarvestedTrigger HarvestedQuestItem ZoneHarvestResponse
     MapExtentDto MapFloorDto
-    MapRectDto MapCaptureFloorDto MapLabelDto MapCaptureMetaDto MapCaptureMeshDto
+    MapRectDto MapCaptureFloorDto MapLabelDto MapCaptureMetaDto MapCaptureMeshDto MapCaptureSideDto
     MapUploadRequest MapUploadResponse MapIndexEntryDto MapIndexDto MapImageRequest MapImageDto
     MapMeshUploadRequest MapMeshUploadResponse MapMeshRequest MapMeshDto
 """.split()

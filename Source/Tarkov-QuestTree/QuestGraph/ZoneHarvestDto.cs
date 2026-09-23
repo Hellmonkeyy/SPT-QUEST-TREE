@@ -59,12 +59,16 @@ namespace QuestTree.QuestGraph
         [JsonProperty("maxX")] public double MaxX { get; set; }
         [JsonProperty("maxZ")] public double MaxZ { get; set; }
 
-        /// <summary>Where the rectangle came from, best first: "borderzone" (the invisible walls
-        /// that stop a player leaving the map - the playable area as the game itself defines it),
-        /// "terrain" (the heightmaps' union) or "navmesh" (the AI walkable area's bounding box,
-        /// which underestimates roofs and water). The server ranks a stored extent against an
-        /// incoming one by this string, so it is one of exactly those three words - lowercase, which
-        /// is the casing the server normalises to and hands back on the marker set.</summary>
+        /// <summary>Where the rectangle came from, best first: "navmesh" (the AI walkable area's
+        /// bounding box - the rectangle the capture's pictures and 3D relief are drawn over),
+        /// "terrain" (the heightmaps' union, which reaches ground the player never does) or
+        /// "borderzone" (the invisible walls at the map's edge, absent on some maps). The same order
+        /// MapExtentProbe measures in and the server ranks by (ZoneStore.ExtentSources) - until
+        /// 2026-09-23 the server ranked BorderZone first, and on Interchange it kept an older
+        /// 1073x1033 m terrain rectangle over the 965x925 m NavMesh one. The server ranks a stored
+        /// extent against an incoming one by this string, so it is one of exactly those three words -
+        /// lowercase, which is the casing the server normalises to and hands back on the marker
+        /// set.</summary>
         [JsonProperty("source")]
         public string Source { get; set; }
 

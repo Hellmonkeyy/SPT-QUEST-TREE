@@ -177,9 +177,9 @@ Maps-tab open of a session.
 The host decides. Uploads are refused unless it runs with `QUESTTREE_ACCEPT_MAPS=1`, because a
 picture is the one thing a peer can post that everybody else then looks at; `tools/server-host.cmd`
 in the source repo sets it and starts the server. A host that has not opted in says so once, nothing
-is sent, and it is not asked again that session. The limits: one floor a post, up to 2.5 MB a floor
-and eight floors a map, one 3D mesh a capture up to 12 MB, 32 MB a map and 300 MB in all on the
-host, 120 MB downloaded per session. A solo player needs none of it - their own captures are read
+is sent, and it is not asked again that session. The limits: one picture a post, up to 2.5 MB a
+picture, eight floors and four side pictures a map, one 3D mesh a capture up to 12 MB, 42 MB a map
+and 300 MB in all on the host, 120 MB downloaded per session. A solo player needs none of it - their own captures are read
 straight out of their own folder.
 
 ## DynamicMaps is now a choice rather than a dependency
@@ -234,6 +234,18 @@ arrive at all - a timeout, a dropped connection - leaves that map as it was for 
 fetched again, whole, on the next start. Nothing about it bumps a schema version: an older host stores
 the pictures and ignores the mesh, and an older client never asks.
 
+**The side pictures travel the same way.** The four oblique views a capture takes for the walls go up
+through the floors' own route, one post each, after the floors and before the mesh, encoded as a floor
+is (on the map backdrop, 2048 px on the long side, JPEG at q80, up to 2.5 MB), and come down through
+the same image route. A set that names sides waits for every one of them as it waits for its floors -
+but a side is never worth the map: one the host cannot use (not a JPEG, over the cap, not a view of
+the capture box its meta describes, or posted empty because the client could not encode it) is
+dropped from the set with one line in the host's log and the rest is served, never refused and never
+flattened. On the way down, a side whose JPEG is not the size its meta states is left out; its walls
+are tinted. A host from before sides refuses a side post as a floor it has no record of, rather than
+storing it over floor 0, and the client goes on to the mesh. The per-map budget is 42 MB: eight floors
+and four sides at 2.5 MB and a 12 MB mesh.
+
 **A throwaway diagnostic key ships in this build**, said out loud because it is not a feature: a bare
 **F10** is the mesh probe of the 3D experiments. In a raid it writes
 `BepInEx\plugins\QuestTree\captures\<map>.meshprobe.txt` - whether the game's own meshes can be read
@@ -269,11 +281,13 @@ probe key (throwaway)**, is kept out of the in-game Settings tab, and is meant t
   `Source\Tarkov-QuestTree-Server\maps\` - none to all eleven - and `package.ps1 -RefreshMaps` copies
   them from the install, refusing while the server is running (a host writes into that folder as
   sets arrive). There are six gates, and five of them fail the run: the folder layout (nothing but
-  `<key>\*.jpg`, `<key>\*.map.json` and the map's own `<key>\<key>-mesh.bin`), 1.5 MB per image, the
-  meta's schema against the constant the shipped client reads, and `tools/check-maps-pack.py`, which
-  checks every floor's JPEG dimensions against its meta and its meta against the extent's own
-  arithmetic, and holds a set's 3D mesh to the sha256, byte length, extent, floor levels and counts
-  its meta states. The sixth is the payload's total size: printed on every run and a **warning**
+  the floors `<key>\<key>-<level>.jpg`, the side pictures `<key>\<key>-side-<N|S|E|W>.jpg`,
+  `<key>\*.map.json` and the map's own `<key>\<key>-mesh.bin`), 1.5 MB per image - side pictures
+  included - the meta's schema against the constant the shipped client reads, and
+  `tools/check-maps-pack.py`, which checks every floor's JPEG dimensions against its meta and its meta
+  against the extent's own arithmetic, every side's JPEG size against its meta and its basis for unit
+  length, that no floor or side file goes unnamed, and holds a set's 3D mesh to the sha256, byte
+  length, extent, floor levels and counts its meta states. The sixth is the payload's total size: printed on every run and a **warning**
   past 80 MB rather than a failure, because a mesh cannot be made smaller without losing the map.
   Each gate was proven able to fail against a planted fake set, one fault at a time. How many maps
   are covered is also a warning naming the missing ones, not a gate, because a map with no set falls

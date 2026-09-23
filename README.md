@@ -302,7 +302,8 @@ picture, the map draws flat and the log says why.
 
 **Sharing is through the host.** A server started with `tools/server-host.cmd` - which sets
 `QUESTTREE_ACCEPT_MAPS=1` and nothing else - accepts uploaded pictures, and **Share captured maps**
-(on by default) offers each finished capture to it one floor at a time as a JPEG, followed by the
+(on by default) offers each finished capture to it one floor at a time as a JPEG, then its side
+pictures (the four oblique views the 3D map textures building walls with) the same way, then the
 capture's 3D mesh if it built one. Every client of that host then picks up the maps it does not
 have itself, once per session, the first time the Maps tab reaches a map nothing on that machine
 can already draw a picture of - mesh included, so a map somebody else raided opens in 3D on your
@@ -310,8 +311,12 @@ machine too. A host without the variable refuses, says so in one line, and is no
 session; captures stay on the machine that took them. An older host that has never heard of meshes
 stores the pictures and ignores the rest, which costs one line in the log and nothing else. A solo
 player needs none of this - your own captures are read straight out of the folder above. The
-limits: one floor a post, up to 2.5 MB a floor and 8 floors a map, one mesh a capture up to 12 MB,
-32 MB a map and 300 MB in all on the host, and at most 120 MB downloaded per session. A set whose
+limits: one picture a post, up to 2.5 MB a picture, 8 floors and 4 side pictures a map, one mesh a
+capture up to 12 MB, 42 MB a map and 300 MB in all on the host, and at most 120 MB downloaded per
+session. A side picture is never worth the map either: one the host cannot use - not a JPEG, too
+big, or not a view of the capture it came with - is dropped and the set is served without it, and on
+your machine a side that does not arrive at the size its meta states is left out; those walls are
+tinted instead. A set whose
 capture built a mesh is not served until both the floors and the mesh have arrived, so a borrowed
 map never names geometry the host does not hold. A mesh problem costs the mesh and never the map:
 a mesh the host can never use - unreadable, not the same rectangle or the same floors as its

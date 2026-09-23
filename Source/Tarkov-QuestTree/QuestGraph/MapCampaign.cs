@@ -595,7 +595,12 @@ namespace QuestTree.QuestGraph
                     stopped = WhyStop();
                     if (stopped != null) break;
 
-                    if (!MapCapture.TryStartCapture())
+                    // The side views at the LAST stop only: each capture's sides replace the previous
+                    // capture's whole, so taking them at every stop renders four floor-sized pictures a
+                    // stop and keeps one stop's. The earlier stops' captures carry whatever sides the set
+                    // already had. If the last stop does not start, this campaign adds no sides - the
+                    // set keeps the ones it had.
+                    if (!MapCapture.TryStartCapture(sides: i == stops.Count - 1))
                     {
                         skipped++;
                         failures++;

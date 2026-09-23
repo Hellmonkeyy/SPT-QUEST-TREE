@@ -147,14 +147,38 @@ namespace QuestTreeServer
         private const int PixelTolerance = 2;
 
         /// <summary>One map's ceiling - and, said plainly because a guard that cannot fire must not look
-        /// like one: MaxFloors x MaxImageBytes PLUS <see cref="MaxMeshBytes"/> is EXACTLY this figure
-        /// (8 x 2.5 MB + 12 MB = 32 MB), so as the constants stand today nothing can reach it. It is
-        /// kept because the three numbers are set independently, and it is the one that would bite
-        /// first if a later release raised the floor cap, the picture size or the mesh size. It rose
-        /// from 20 MB with the mesh, by exactly the mesh's ceiling. The store's own total below is
-        /// reachable - ten maps at a full 32 MB pass it - but only by writing 300 MB, so neither is
-        /// exercised by the harness. Said here rather than discovered later.</summary>
-        private const long MaxBytesPerMap = 32L * 1024 * 1024;
+        /// like one: MaxFloors x MaxImageBytes PLUS four sides at MaxImageBytes PLUS
+        /// <see cref="MaxMeshBytes"/> is EXACTLY this figure (8 x 2.5 + 4 x 2.5 + 12 = 42 MB), so as the
+        /// constants stand today nothing can reach it. It is kept because the numbers are set
+        /// independently, and it is the one that would bite first if a later release raised the floor cap,
+        /// the picture size, the side count or the mesh size. It rose from 20 MB with the mesh and from
+        /// 32 MB with the sides, each time by exactly the new part's ceiling. The store's own total below
+        /// is reachable - eight maps at a full 42 MB pass it (seven are 294 MB) - but only by writing 300 MB.
+        /// Said here rather than discovered later.</summary>
+        private const long MaxBytesPerMap = 42L * 1024 * 1024;
+
+        /// <summary>The four sides a set may carry an oblique picture from, in the one order every
+        /// reader uses - the staging, the promotion, the stamp and the boot read all walk them in this
+        /// order, so the stamp is the same on every path.</summary>
+        private static readonly string[] SideDirs = { "N", "S", "E", "W" };
+
+        /// <summary>How far a side's origin may sit from the projection of the capture box's corners
+        /// before the side is not describing that box. A few centimetres: both are the same arithmetic
+        /// over the same doubles, and the only difference is float rounding in the writer.</summary>
+        private const double SideOriginTolerance = 0.05;
+
+        /// <summary>How far a side's pixel size may sit from the capture box's projected span at its scale.
+        /// Four, where a floor gets two (PixelTolerance): a side is rescaled for the wire from its OWN
+        /// rendered size, which is itself a ceil of a span in a basis with irrational components, so the
+        /// two roundings stack where a floor's do not - the stage U sweep measured up to 2 px with the
+        /// short side ceiled (MapTransfer.ScaleTo), which is exactly the floor tolerance and leaves no
+        /// headroom at all. Four is still a small fraction of any real side and catches a side described
+        /// at one scale and sent at another, which is off by hundreds.</summary>
+        private const int SidePixelTolerance = 4;
+
+        /// <summary>How far a side's basis vector may be from unit length. The same 1e-3 the pack gate
+        /// holds a shipped set to.</summary>
+        private const double SideUnitTolerance = 1e-3;
 
         /// <summary>The whole store's ceiling. ~26 floors of the 11 vanilla maps is 15-30 MB, so this
         /// is ten times a full set and still small enough that a peer cannot fill a host's disk.</summary>
@@ -204,6 +228,12 @@ namespace QuestTreeServer
         /// both halves and package.ps1's layout gate spell.</summary>
         private static readonly Regex StoredMeshFileName =
             new(@"^[A-Za-z0-9_\-]{1,60}-mesh\.bin$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+        /// <summary>What a stored SIDE picture's file name may be - <c>&lt;key&gt;-side-&lt;dir&gt;.jpg</c>, the
+        /// name <see cref="SideName"/> writes and package.ps1's gates admit - checked on the way back in
+        /// from disk like the others. JPEG only: a side is always uploaded as one.</summary>
+        private static readonly Regex StoredSideFileName =
+            new(@"^[A-Za-z0-9_\-]{1,60}-side-[NSEW]\.jpg$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
         /// <summary>A sha256 as this store will store one: 64 hex digits, lower case on the way out.
         /// Checked on the way in because it is printed into log lines and written into a served
@@ -350,45 +380,69 @@ namespace QuestTreeServer
 
             if (!MetaIsUsable(key, meta, out var problem)) return Reject(key, problem);
 
-            // The mesh block, separately and NOT as a refusal - see the method.
+            // The mesh block, separately and NOT as a refusal - see the method. The sides likewise.
             DropUnusableMesh(key, meta);
+            DropUnusableSides(key, meta);
 
-            var floor = meta.Floors.FirstOrDefault(f => f.Level == request.Level);
+            // A FLOOR post or a SIDE post. The two are the same picture checks with one difference in
+            // what a failure costs: a floor that fails refuses the post, as it always has, while a side
+            // that fails is DROPPED - taken out of the set's sides - and the post carries on, because a
+            // side picture only textures some walls and is never worth the map. So a side's problem is
+            // collected here rather than returned, and acted on under the lock.
+            var isSide = !string.IsNullOrWhiteSpace(request.Side);
+            var sideDir = isSide ? NormaliseSide(request.Side) : null;
+            string? sideRefusal = null;
+            var format = "jpg";
+            var bytes = Array.Empty<byte>();
 
-            if (floor == null)
-                return Reject(key, $"level {request.Level} is not one of the {meta.Floors.Count} floors the meta names");
-
-            var format = Format(request.Format);
-
-            if (format == null)
-                return Reject(key, $"format '{Clip(request.Format ?? "", 16)}' is not jpg or png");
-
-            var encoded = request.ImageBase64 ?? "";
-
-            if (encoded.Length == 0) return Reject(key, "the post carries no picture");
-
-            if (encoded.Length > MaxEncodedChars)
-                return Reject(key, $"the picture is larger than the {Mb(MaxImageBytes)} MB a floor may be");
-
-            byte[] bytes;
-
-            try
+            if (isSide)
             {
-                bytes = Convert.FromBase64String(encoded);
+                if (sideDir == null)
+                    sideRefusal = $"'{Clip(request.Side ?? "", 8)}' is not a side (N, S, E or W)";
+                else if (meta.Sides == null || !meta.Sides.Any(s => s.Dir == sideDir))
+                    sideRefusal = $"the capture's meta names no {sideDir} side";
+                else
+                    sideRefusal = DecodeSide(request, out bytes);
             }
-            catch (FormatException)
+            else
             {
-                return Reject(key, "the picture is not base64");
+                var floor = meta.Floors.FirstOrDefault(f => f.Level == request.Level);
+
+                if (floor == null)
+                    return Reject(key, $"level {request.Level} is not one of the {meta.Floors.Count} floors the meta names");
+
+                var claimedFormat = Format(request.Format);
+
+                if (claimedFormat == null)
+                    return Reject(key, $"format '{Clip(request.Format ?? "", 16)}' is not jpg or png");
+
+                format = claimedFormat;
+
+                var encoded = request.ImageBase64 ?? "";
+
+                if (encoded.Length == 0) return Reject(key, "the post carries no picture");
+
+                if (encoded.Length > MaxEncodedChars)
+                    return Reject(key, $"the picture is larger than the {Mb(MaxImageBytes)} MB a floor may be");
+
+                try
+                {
+                    bytes = Convert.FromBase64String(encoded);
+                }
+                catch (FormatException)
+                {
+                    return Reject(key, "the picture is not base64");
+                }
+
+                if (bytes.Length > MaxImageBytes)
+                    return Reject(key,
+                        $"the picture is {bytes.Length:N0} bytes, past the {MaxImageBytes:N0} a floor may be");
+
+                // The magic bytes, not the extension: "format" is a string a peer chose, and a host that
+                // trusts it writes whatever it was sent under a name every client will try to decode.
+                if (!MagicMatches(format, bytes))
+                    return Reject(key, $"the bytes do not start as a {format} picture does");
             }
-
-            if (bytes.Length > MaxImageBytes)
-                return Reject(key,
-                    $"the picture is {bytes.Length:N0} bytes, past the {MaxImageBytes:N0} a floor may be");
-
-            // The magic bytes, not the extension: "format" is a string a peer chose, and a host that
-            // trusts it writes whatever it was sent under a name every client will try to decode.
-            if (!MagicMatches(format, bytes))
-                return Reject(key, $"the bytes do not start as a {format} picture does");
 
             var captured = ParseStamp(meta.CapturedAt);
 
@@ -397,7 +451,7 @@ namespace QuestTreeServer
 
             // Set under the lock, used after it: the folder this capture is staged in, and - only once
             // every piece is here - the meta to promote. The promotion itself reads and hashes up to
-            // 32 MB, so it is PREPARED outside the lock and only committed under it (see CompleteSet).
+            // 42 MB, so it is PREPARED outside the lock and only committed under it (see CompleteSet).
             string staging;
             MapCaptureMetaDto ready;
 
@@ -411,7 +465,20 @@ namespace QuestTreeServer
                 // has - the client compares stamps before uploading, so an equal CapturedAt here means
                 // the set is already served.
                 if (_sets.TryGetValue(key, out var held) && ParseStamp(held.Meta.CapturedAt) >= captured)
+                {
+                    // A SIDE of a capture the host already serves (or has superseded) is not a fault and
+                    // not a reason to stop: answered as a drop, so the client goes on to its mesh and hears
+                    // "already served" there. No marker: the capture's staging went when its set was
+                    // promoted, and writing one would only make a folder for a capture that is finished.
+                    if (isSide)
+                        return new MapUploadResponse
+                        {
+                            Outcome = "stored",
+                            Reason = SideNote(sideDir ?? SideLabel(request.Side), "older than the set on the host", "")
+                        };
+
                     return Reject(key, "older than the set on the host");
+                }
 
                 // CLIPPED, exactly as the mesh route clips its own capturedAt before hashing it: the two
                 // routes must name the same folder for the same capture, and a timestamp with a line
@@ -440,6 +507,23 @@ namespace QuestTreeServer
                     string.Equals(meta.Mesh.Sha256, refused, StringComparison.OrdinalIgnoreCase))
                     meta.Mesh = null;
 
+                // The same for SIDES this host has already dropped for this capture: every floor post
+                // re-stages the meta, and one that still named a dropped side would put it back on the
+                // list the completion waits for - which it would then wait for until the staging expired.
+                StripDroppedSides(staging, meta);
+
+                // A side this capture has ALREADY dropped, posted again - a retry, or a second machine's
+                // copy - is dropped again rather than staged: StripDroppedSides has just taken it out of
+                // the meta, so its picture would sit in the staging as a file nothing names.
+                if (isSide && sideRefusal == null && sideDir != null &&
+                    (meta.Sides == null || !meta.Sides.Any(sd => sd.Dir == sideDir)))
+                    sideRefusal = "it was already dropped for this capture";
+
+                // And this post's own side, when it is being dropped: out of the meta BEFORE the meta is
+                // staged or the completion counts what is missing.
+                if (sideRefusal != null && sideDir != null)
+                    meta.Sides?.RemoveAll(s => s.Dir == sideDir);
+
                 // TWO CLIENTS, ONE CAPTURE INSTANT. The staging folder is keyed on the map and the
                 // capturedAt, so two clients that captured the same map in the same second share it - and
                 // the staged meta is what the mesh route matches an arriving mesh against. Without this
@@ -461,12 +545,22 @@ namespace QuestTreeServer
                         "two clients captured it in the same second, so the later one is refused rather than mixed");
 
                 var staged = FilesByLevel(staging);
+                var stagedSides = SidesByDir(staging);
 
                 // What this post REPLACES, which is the only thing either budget may discount: a floor
-                // posted twice overwrites its own staged copy, so counting the old one as well would
-                // refuse a client that simply retried. Everything else already staged still counts,
-                // which is what stops a set being walked past the budget one floor at a time.
-                var mine = staged.TryGetValue(request.Level, out var already) ? SizeOf(already) : 0;
+                // or side posted twice overwrites its own staged copy, so counting the old one as well
+                // would refuse a client that simply retried. Everything else already staged still counts,
+                // which is what stops a set being walked past the budget one picture at a time.
+                var mine = isSide
+                    ? (sideDir != null && stagedSides.TryGetValue(sideDir, out var mySide) ? SizeOf(mySide) : 0)
+                    : (staged.TryGetValue(request.Level, out var already) ? SizeOf(already) : 0);
+
+                // The sides the meta names that are not staged yet, other than this post's own: each is
+                // reserved at the most a picture may weigh, because a side carries no declared size and
+                // the point - as for the mesh below - is that a capture that cannot fit is refused on its
+                // FIRST post, before anything is staged, rather than after its floors are all in.
+                var pendingSides = (meta.Sides ?? new List<MapCaptureSideDto>())
+                    .Count(sd => sd.Dir != sideDir && !stagedSides.ContainsKey(sd.Dir)) * (long)MaxImageBytes;
 
                 // The mesh counts against the map's budget from the FIRST floor: staged, at its size on
                 // disk; not yet staged, at the size the meta declares for it (bounded to MaxMeshBytes by
@@ -477,12 +571,18 @@ namespace QuestTreeServer
                     ? SizeOf(MeshPath(staging))
                     : Math.Max(meta.Mesh?.Bytes ?? 0L, 0L);
 
-                var setBytes = staged.Sum(entry => SizeOf(entry.Value)) + meshBytes - mine;
+                var setBytes = staged.Sum(entry => SizeOf(entry.Value)) +
+                               stagedSides.Sum(entry => SizeOf(entry.Value)) + pendingSides + meshBytes - mine;
+
+                // A SIDE that does not fit is DROPPED rather than refusing the post, for the reason every
+                // other side problem is: a refusal would leave the side named in the staged meta, and the
+                // set would then wait for it until the staging expired - with the client having gone on to
+                // post the whole mesh into a set that can never complete. A floor still refuses.
+                string? overBudget = null;
 
                 if (setBytes + bytes.Length > MaxBytesPerMap)
-                    return Reject(key,
-                        $"this capture would be {Mb(setBytes + bytes.Length)} MB, past the " +
-                        $"{Mb(MaxBytesPerMap)} MB one map may hold");
+                    overBudget = $"this capture would be {Mb(setBytes + bytes.Length)} MB, past the " +
+                                 $"{Mb(MaxBytesPerMap)} MB one map may hold";
 
                 // The whole store, counting what is staged as well as what is served: during an upload
                 // the disk really does hold both - the set being replaced is still being served - and a
@@ -490,32 +590,70 @@ namespace QuestTreeServer
                 // The declared-but-not-staged mesh again, for the same reason: it is coming, and the
                 // store has to have room for it when it does.
                 var pendingMesh = System.IO.File.Exists(MeshPath(staging)) ? 0L : Math.Max(meta.Mesh?.Bytes ?? 0L, 0L);
+                var pending = pendingMesh + pendingSides;
                 var total = _sets.Values.Sum(s => s.Bytes) + IncomingBytes() - mine;
 
                 // Two sentences, because "holds" has to stay true: what is on the disk, and - only when
-                // it is what tipped the balance - the mesh this capture says is still to come.
-                if (total + pendingMesh + bytes.Length > MaxBytesTotal)
-                    return Reject(key, pendingMesh > 0 && total + bytes.Length <= MaxBytesTotal
-                        ? $"the host holds {Mb(total)} MB of map pictures, and this capture's {Mb(pendingMesh)} MB mesh " +
-                          $"would take it past the {Mb(MaxBytesTotal)} MB limit"
-                        : $"the host already holds {Mb(total)} MB of map pictures, at the {Mb(MaxBytesTotal)} MB limit");
+                // it is what tipped the balance - the mesh and sides this capture says are still to come.
+                // Named for what is actually pending, so the sentence is true of this capture.
+                var pendingWhat = pendingMesh > 0 && pendingSides > 0 ? "mesh and sides"
+                    : pendingMesh > 0 ? "mesh" : "sides";
+
+                if (overBudget == null && total + pending + bytes.Length > MaxBytesTotal)
+                    overBudget = pending > 0 && total + bytes.Length <= MaxBytesTotal
+                        ? $"the host holds {Mb(total)} MB of map pictures, and the {Mb(pending)} MB this capture's " +
+                          $"{pendingWhat} may still need would take it past the {Mb(MaxBytesTotal)} MB limit"
+                        : $"the host already holds {Mb(total)} MB of map pictures, at the {Mb(MaxBytesTotal)} MB limit";
+
+                if (overBudget != null)
+                {
+                    if (!isSide || sideDir == null || sideRefusal != null)
+                    {
+                        // A side already being dropped writes nothing but a marker, so a budget cannot be
+                        // what stops it; everything else refuses, as a floor always has.
+                        if (!isSide) return Reject(key, overBudget);
+                    }
+                    else
+                    {
+                        sideRefusal = overBudget;
+                        bytes = Array.Empty<byte>();
+                        meta.Sides?.RemoveAll(sd => sd.Dir == sideDir);
+                    }
+                }
 
                 try
                 {
                     System.IO.Directory.CreateDirectory(staging);
 
-                    var wanted = System.IO.Path.Combine(staging, StagedName(request.Level, format));
+                    if (!isSide)
+                    {
+                        var wanted = System.IO.Path.Combine(staging, StagedName(request.Level, format));
 
-                    // ONE file per level, whatever format it arrives in. A floor first posted as a JPEG
-                    // and then re-posted as a PNG would otherwise leave both on disk under one level, and
-                    // the completion below picks by level - so half the time it would promote the stale
-                    // bytes, with every log line saying the set was stored.
-                    foreach (var other in System.IO.Directory.EnumerateFiles(
-                                 staging, request.Level.ToString(CultureInfo.InvariantCulture) + ".*"))
-                        if (!string.Equals(other, wanted, StringComparison.OrdinalIgnoreCase))
-                            System.IO.File.Delete(other);
+                        // ONE file per level, whatever format it arrives in. A floor first posted as a
+                        // JPEG and then re-posted as a PNG would otherwise leave both on disk under one
+                        // level, and the completion below picks by level - so half the time it would
+                        // promote the stale bytes, with every log line saying the set was stored.
+                        foreach (var other in System.IO.Directory.EnumerateFiles(
+                                     staging, request.Level.ToString(CultureInfo.InvariantCulture) + ".*"))
+                            if (!string.Equals(other, wanted, StringComparison.OrdinalIgnoreCase))
+                                System.IO.File.Delete(other);
 
-                    WriteAtomic(wanted, bytes);
+                        WriteAtomic(wanted, bytes);
+                    }
+                    else if (sideRefusal == null)
+                    {
+                        WriteAtomic(System.IO.Path.Combine(staging, StagedSideName(sideDir!)), bytes);
+                    }
+                    else if (sideDir != null)
+                    {
+                        // Dropped for good for this capture - a marker, so the later posts' metas (which
+                        // still name it) are brought into line by StripDroppedSides - and any copy an
+                        // earlier attempt staged goes too, so it cannot be promoted.
+                        WriteAtomic(System.IO.Path.Combine(staging, DroppedSideName(sideDir)), Encoding.UTF8.GetBytes(sideRefusal));
+
+                        try { System.IO.File.Delete(System.IO.Path.Combine(staging, StagedSideName(sideDir))); }
+                        catch { /* there may be none */ }
+                    }
 
                     // The meta, staged beside the floors on EVERY post. Two things need it there and
                     // neither can be had any other way: the mesh route (which carries no meta of its
@@ -536,23 +674,30 @@ namespace QuestTreeServer
                     return Reject(key, $"the host could not store the picture ({ex.Message})");
                 }
 
+                // Said once, at Warning - a side dropped is a picture the host will never serve - but it is
+                // not a refusal of the POST: the answer below is the ordinary one, with the drop in its
+                // reason.
+                if (sideRefusal != null)
+                    NoteSideDropped(key, sideDir ?? SideLabel(request.Side), meta.CapturedAt, sideRefusal);
+
                 // Re-read from disk rather than adding one to a count: the staged set is the authority
                 // on what has arrived, which is what makes a server restarted mid-upload resume
                 // instead of starting over.
                 staged = FilesByLevel(staging);
 
-                var missing = meta.Floors.Count(f => !staged.ContainsKey(f.Level));
+                var missing = Missing(meta, staging, out var waitingFor);
 
                 if (missing > 0)
                 {
                     _logger.Detail(
                         $"Quest Tracker: holding {staged.Count} of {meta.Floors.Count} floor(s) of the map " +
-                        $"picture set for '{key}' captured {Clip(meta.CapturedAt, MaxFreeTextLength)}.");
+                        $"picture set for '{key}' captured {Clip(meta.CapturedAt, MaxFreeTextLength)} - waiting for " +
+                        $"{waitingFor}.");
 
                     return new MapUploadResponse
                     {
                         Outcome = "stored",
-                        Reason = $"waiting for {missing} more floor(s)",
+                        Reason = SideNote(sideDir, sideRefusal, $"waiting for {waitingFor}"),
                         FloorsHeld = staged.Count
                     };
                 }
@@ -571,7 +716,7 @@ namespace QuestTreeServer
                     return new MapUploadResponse
                     {
                         Outcome = "stored",
-                        Reason = "waiting for the mesh",
+                        Reason = SideNote(sideDir, sideRefusal, "waiting for the mesh"),
                         FloorsHeld = staged.Count
                     };
                 }
@@ -582,7 +727,13 @@ namespace QuestTreeServer
                 ready = meta;
             }
 
-            return CompleteSet(key, ready, staging, Clip(request.ClientVersion ?? "", MaxFreeTextLength));
+            var completed = CompleteSet(key, ready, staging, Clip(request.ClientVersion ?? "", MaxFreeTextLength));
+
+            // A dropped side that happened to be the last piece still says it was dropped.
+            if (sideRefusal != null && completed.Outcome == "complete")
+                completed.Reason = SideNote(sideDir, sideRefusal, "");
+
+            return completed;
         }
 
         /// <summary>What this host holds, answered from memory: a client asks for this on every Maps
@@ -638,18 +789,31 @@ namespace QuestTreeServer
 
                 if (!_sets.TryGetValue(key, out var set)) return dto;
 
-                var floor = set.Meta.Floors.FirstOrDefault(f => f.Level == request.Level);
+                // A SIDE picture when the request names one, the floor at its level otherwise. Either
+                // way the file name comes from the stored meta - written by CommitSet or checked by Load
+                // - and nothing from the request but the level or the direction reaches a path.
+                string? file;
 
-                if (floor == null) return dto;
+                if (!string.IsNullOrWhiteSpace(request.Side))
+                {
+                    var dir = NormaliseSide(request.Side);
+                    var side = dir == null ? null : set.Meta.Sides?.FirstOrDefault(s => s.Dir == dir);
+
+                    file = side != null && StoredSideFileName.IsMatch(side.File ?? "") ? side.File : null;
+                }
+                else
+                {
+                    file = set.Meta.Floors.FirstOrDefault(f => f.Level == request.Level)?.File;
+                }
+
+                if (string.IsNullOrEmpty(file)) return dto;
 
                 try
                 {
-                    // The name was written by CommitSet or checked by Load, so it is a bare file name
-                    // inside this map's folder. Nothing here comes from the request but the level.
-                    var bytes = System.IO.File.ReadAllBytes(System.IO.Path.Combine(Folder, key, floor.File));
+                    var bytes = System.IO.File.ReadAllBytes(System.IO.Path.Combine(Folder, key, file));
 
                     dto.Stamp = set.Stamp;
-                    dto.Format = Format(System.IO.Path.GetExtension(floor.File).TrimStart('.')) ?? "";
+                    dto.Format = Format(System.IO.Path.GetExtension(file).TrimStart('.')) ?? "";
                     dto.ImageBase64 = Convert.ToBase64String(bytes);
                 }
                 catch (Exception ex)
@@ -835,7 +999,15 @@ namespace QuestTreeServer
 
                 if (permanent == null)
                 {
-                    var setBytes = floors.Sum(entry => SizeOf(entry.Value));
+                    // Everything STAGED counts, the sides with the floors - they are on the disk and part of
+                    // this set, which counting the floors alone forgot. Sides NOT yet staged are deliberately
+                    // not reserved here, unlike on the floor route: the mesh is the 3D map and a side is one
+                    // wall texture, so a budget squeeze is settled in the mesh's favour - a side that then
+                    // does not fit is dropped when it arrives (Accept), and the set completes without it.
+                    var stagedSides = SidesByDir(staging);
+
+                    var setBytes = floors.Sum(entry => SizeOf(entry.Value)) +
+                                   stagedSides.Sum(entry => SizeOf(entry.Value));
 
                     if (setBytes + bytes.Length > MaxBytesPerMap)
                         permanent = $"this capture would be {Mb(setBytes + bytes.Length)} MB with its mesh, past the " +
@@ -844,6 +1016,8 @@ namespace QuestTreeServer
 
                 if (permanent == null)
                 {
+                    // IncomingBytes already holds every staged side; sides still to come are not reserved,
+                    // for the reason above.
                     var total = _sets.Values.Sum(s => s.Bytes) + IncomingBytes() - existing;
 
                     if (total + bytes.Length > MaxBytesTotal)
@@ -858,14 +1032,14 @@ namespace QuestTreeServer
                     if (!FlattenStaged(key, staging, staged, actual, permanent))
                         return RejectMesh(key, permanent);
 
-                    var stillMissing = staged.Floors.Count(f => !floors.ContainsKey(f.Level));
+                    var stillMissing = Missing(staged, staging, out var stillWaiting);
 
                     if (stillMissing > 0)
                         return new MapMeshUploadResponse
                         {
                             Accepted = false,
-                            Reason = $"{permanent} - the pictures will be served without it once the other " +
-                                     $"{stillMissing} floor(s) arrive"
+                            Reason = $"{permanent} - the pictures will be served without it, and are waiting for " +
+                                     $"{stillWaiting}"
                         };
 
                     flattened = permanent;
@@ -900,13 +1074,13 @@ namespace QuestTreeServer
                         $"captured {capturedAt} by client " +
                         $"{(string.IsNullOrEmpty(request.ClientVersion) ? "unknown" : Clip(request.ClientVersion, MaxFreeTextLength))}.");
 
-                    var missing = staged.Floors.Count(f => !floors.ContainsKey(f.Level));
+                    var missing = Missing(staged, staging, out var waitingFor);
 
                     if (missing > 0)
                         return new MapMeshUploadResponse
                         {
                             Accepted = true,
-                            Reason = $"waiting for {missing} more floor(s)"
+                            Reason = $"waiting for {waitingFor}"
                         };
 
                     // The mesh was the last piece. Promoted from the STAGED meta rather than from
@@ -1054,6 +1228,9 @@ namespace QuestTreeServer
             public MapCaptureMetaDto Meta = new();
             public string CapturedAt = "";
             public readonly List<PreparedFile> Floors = new();
+
+            /// <summary>The side pictures, in <see cref="SideDirs"/> order.</summary>
+            public readonly List<PreparedFile> Sides = new();
             public PreparedFile? Mesh;
             public byte[] MetaBytes = Array.Empty<byte>();
             public string Stamp = "";
@@ -1117,6 +1294,42 @@ namespace QuestTreeServer
                     prepared.Bytes += file.Data.Length;
                 }
 
+                // The sides the meta still names - a dropped one was taken out of it on the way in - in
+                // the fixed order, each under the SERVER'S name for it, exactly as a floor.
+                if (meta.Sides != null && meta.Sides.Count > 0)
+                {
+                    var stagedSides = SidesByDir(staging);
+
+                    foreach (var dir in SideDirs)
+                    {
+                        var side = meta.Sides.FirstOrDefault(sd => sd.Dir == dir);
+
+                        if (side == null) continue;
+
+                        if (!stagedSides.TryGetValue(dir, out var source))
+                        {
+                            prepared.Problem = $"the {dir} side is no longer staged";
+                            return prepared;
+                        }
+
+                        var file = Read(source);
+
+                        file.Name = SideName(key, dir);
+                        side.File = file.Name;
+
+                        prepared.Sides.Add(file);
+                        prepared.Bytes += file.Data.Length;
+                    }
+
+                    // Stored in the fixed order too, so the meta written reads the same on every path.
+                    meta.Sides = SideDirs.Select(d => meta.Sides.FirstOrDefault(sd => sd.Dir == d))
+                        .Where(sd => sd != null).Select(sd => sd!).ToList();
+                }
+                else
+                {
+                    meta.Sides = null;
+                }
+
                 if (meta.Mesh != null)
                 {
                     var source = MeshPath(staging);
@@ -1149,12 +1362,15 @@ namespace QuestTreeServer
 
                 prepared.MetaBytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(meta, FileOptions));
 
-                // Over the bytes as they WILL BE written, in level order and the mesh last, so the boot
-                // that reads this folder back computes the same value from the same files. That identity
-                // is what makes the stamp worth comparing at all: it is never persisted, because a stamp
-                // file could disagree with the pictures beside it.
+                // Over the bytes as they WILL BE written - the floors in level order, then the sides in
+                // SideDirs order, then the mesh - so the boot that reads this folder back computes the
+                // same value from the same files. That identity is what makes the stamp worth comparing
+                // at all: it is never persisted, because a stamp file could disagree with the pictures
+                // beside it.
                 prepared.Stamp = StampOf(
-                    prepared.MetaBytes, prepared.Floors.Select(f => f.Data), prepared.Mesh?.Data);
+                    prepared.MetaBytes,
+                    prepared.Floors.Select(f => f.Data).Concat(prepared.Sides.Select(sd => sd.Data)),
+                    prepared.Mesh?.Data);
 
                 return prepared;
             }
@@ -1253,7 +1469,8 @@ namespace QuestTreeServer
                 };
             }
 
-            if (!prepared.Floors.All(Unchanged) || (prepared.Mesh != null && !Unchanged(prepared.Mesh)))
+            if (!prepared.Floors.All(Unchanged) || !prepared.Sides.All(Unchanged) ||
+                (prepared.Mesh != null && !Unchanged(prepared.Mesh)))
                 return new MapUploadResponse
                 {
                     Outcome = "stored",
@@ -1273,6 +1490,14 @@ namespace QuestTreeServer
                 {
                     WriteAtomic(System.IO.Path.Combine(target, floor.Name), floor.Data);
                     written.Add(floor.Name);
+                }
+
+                // The sides with the pictures, before the sweep - so a side this set carries is kept, and
+                // a side the PREVIOUS set carried and this one does not is swept like a stale floor.
+                foreach (var side in prepared.Sides)
+                {
+                    WriteAtomic(System.IO.Path.Combine(target, side.Name), side.Data);
+                    written.Add(side.Name);
                 }
 
                 if (prepared.Mesh != null)
@@ -1313,6 +1538,7 @@ namespace QuestTreeServer
 
                 _logger.Info(
                     $"Quest Tracker: map picture set for '{key}' stored - {prepared.Floors.Count} floor(s)" +
+                    $"{(prepared.Sides.Count == 0 ? "" : $", {prepared.Sides.Count} side(s)")}" +
                     $"{(prepared.Mesh == null ? "" : $" and a {Mb(prepared.Mesh.Data.Length)} MB mesh")}, " +
                     $"{Mb(prepared.Bytes)} MB, captured {Clip(meta.CapturedAt, MaxFreeTextLength)} by client " +
                     $"{(clientVersion.Length == 0 ? "unknown" : clientVersion)}.");
@@ -1508,6 +1734,42 @@ namespace QuestTreeServer
                     var data = System.IO.File.ReadAllBytes(path);
                     payloads.Add(data);
                     bytes += data.Length;
+                }
+
+                // The sides, in the fixed order, each held to the stored-name rule and required to be on
+                // disk. DROPPED one by one rather than fatal, for the mesh's reason below: a side textures
+                // some walls, the set is whole without it, and refusing the folder would lose a map over
+                // it. What is dropped leaves the meta, so no client asks for a side this host cannot send.
+                if (meta.Sides != null && meta.Sides.Count > 0)
+                {
+                    var kept = new List<MapCaptureSideDto>();
+
+                    foreach (var sideDir in SideDirs)
+                    {
+                        var side = meta.Sides.FirstOrDefault(sd => sd != null && sd.Dir == sideDir);
+
+                        if (side == null) continue;
+
+                        var sideFile = side.File ?? "";
+
+                        // The name is joined onto this folder, so it is held to the stored-name rule first -
+                        // exactly as a floor's is above.
+                        if (!StoredSideFileName.IsMatch(sideFile) ||
+                            !System.IO.File.Exists(System.IO.Path.Combine(dir, sideFile)))
+                        {
+                            NoteSideDropped(key, sideDir, meta.CapturedAt,
+                                $"maps/{key} does not hold '{Clip(sideFile, MaxFreeTextLength)}'");
+                            continue;
+                        }
+
+                        var sideBytes = System.IO.File.ReadAllBytes(System.IO.Path.Combine(dir, sideFile));
+
+                        payloads.Add(sideBytes);
+                        bytes += sideBytes.Length;
+                        kept.Add(side);
+                    }
+
+                    meta.Sides = kept.Count == 0 ? null : kept;
                 }
 
                 // The mesh, read back the same way and held to its own sha256 - the one field in the
@@ -1826,6 +2088,253 @@ namespace QuestTreeServer
             WarnOnce(key, $"its capture meta describes a mesh this host will not take - it {why}. The " +
                           "pictures are stored without it, so that map draws flat");
         }
+
+        // ---------------------------------------------------------------------------------------
+        // Sides
+        // ---------------------------------------------------------------------------------------
+
+        /// <summary>"N", "S", "E" or "W" for anything a client could reasonably send for one, or null.
+        /// One place, so the upload, the staging names, the image route and the meta all agree on the
+        /// spelling of a direction.</summary>
+        private static string? NormaliseSide(string? claimed)
+        {
+            var dir = (claimed ?? "").Trim().ToUpperInvariant();
+
+            return SideDirs.Contains(dir) ? dir : null;
+        }
+
+        /// <summary>A side post's picture, decoded and checked, or the reason it is DROPPED. The same
+        /// checks a floor gets - JPEG only, the size cap before and after decoding, the magic - with an
+        /// empty picture meaning "the client could not encode this side after naming it", which is how an
+        /// upload tells the host not to wait for it.</summary>
+        private static string? DecodeSide(MapUploadRequest request, out byte[] bytes)
+        {
+            bytes = Array.Empty<byte>();
+
+            if (Format(request.Format) != "jpg") return "a side picture must be a JPEG";
+
+            var encoded = request.ImageBase64 ?? "";
+
+            if (encoded.Length == 0) return "the client could not encode it";
+
+            if (encoded.Length > MaxEncodedChars)
+                return $"it is larger than the {Mb(MaxImageBytes)} MB a picture may be";
+
+            try
+            {
+                bytes = Convert.FromBase64String(encoded);
+            }
+            catch (FormatException)
+            {
+                bytes = Array.Empty<byte>();
+                return "it is not base64";
+            }
+
+            if (bytes.Length > MaxImageBytes)
+                return $"it is {bytes.Length:N0} bytes, past the {MaxImageBytes:N0} a picture may be";
+
+            if (!MagicMatches("jpg", bytes)) return "its bytes do not start as a JPEG does";
+
+            return null;
+        }
+
+        /// <summary>
+        /// Drops every side in a meta this host could not serve, each with one line - never refusing the
+        /// capture over one, which is the whole rule for sides.
+        ///
+        /// A side's numbers are held to the capture box they claim to be a view of: the three basis
+        /// vectors unit length, the origins equal to the lowest projections of the box's eight corners
+        /// (the meta's extent by the side's own y range), and the pixel size equal to the projected span
+        /// at the side's scale within the same two pixels a floor gets. That last one is the check that
+        /// compares two numbers worked out separately - the upload rescales a side for the wire, and a
+        /// side described at one scale and rendered at another would texture every wall a constant
+        /// fraction off, with no other symptom. Caller holds nothing; this touches only the given meta.
+        /// </summary>
+        private void DropUnusableSides(string key, MapCaptureMetaDto meta)
+        {
+            if (meta.Sides == null) return;
+
+            var seen = new HashSet<string>();
+            var kept = new List<MapCaptureSideDto>();
+
+            foreach (var side in meta.Sides)
+            {
+                if (side == null) continue;
+
+                var dir = NormaliseSide(side.Dir);
+                var why = dir == null ? $"'{Clip(side.Dir ?? "", 8)}' is not a side" : SideProblem(meta, side);
+
+                if (why == null && !seen.Add(dir!)) why = $"there are two {dir} sides";
+
+                if (why != null)
+                {
+                    NoteSideDropped(key, dir ?? SideLabel(side.Dir), meta.CapturedAt, why);
+                    continue;
+                }
+
+                side.Dir = dir!;
+                side.File = Clip((side.File ?? "").Trim(), MaxFreeTextLength);
+                kept.Add(side);
+            }
+
+            meta.Sides = kept.Count == 0 ? null : kept;
+        }
+
+        /// <summary>Why a side does not describe a view of this meta's capture box, or null when it
+        /// does. See <see cref="DropUnusableSides"/>.</summary>
+        private static string? SideProblem(MapCaptureMetaDto meta, MapCaptureSideDto side)
+        {
+            var extent = meta.Extent;
+
+            if (extent == null) return "the capture has no extent";
+
+            if (side.Width < 1 || side.Height < 1 || side.Width > MaxFloorPixels || side.Height > MaxFloorPixels)
+                return $"it is {side.Width}x{side.Height} px, which is not a picture up to {MaxFloorPixels} px a side";
+
+            if (!Finite(side.PxPerMetre) || side.PxPerMetre <= 0f) return $"its pxPerMetre is {side.PxPerMetre}";
+
+            if (!InWorld(side.YMin) || !InWorld(side.YMax) || side.YMin >= side.YMax)
+                return $"its height range {side.YMin:0.#}..{side.YMax:0.#} m is not one";
+
+            if (!Finite(side.OriginR) || !Finite(side.OriginU)) return "its origins are not numbers";
+
+            if (!UnitVector(side.Forward) || !UnitVector(side.Right) || !UnitVector(side.Up))
+                return "its forward, right and up are not three unit vectors";
+
+            // The eight corners of the capture box, projected on the side's own axes.
+            double minR = double.MaxValue, maxR = double.MinValue, minU = double.MaxValue, maxU = double.MinValue;
+
+            foreach (var x in new[] { extent.MinX, extent.MaxX })
+            foreach (var y in new[] { (double)side.YMin, side.YMax })
+            foreach (var z in new[] { extent.MinZ, extent.MaxZ })
+            {
+                var r = x * side.Right![0] + y * side.Right[1] + z * side.Right[2];
+                var u = x * side.Up![0] + y * side.Up[1] + z * side.Up[2];
+
+                minR = Math.Min(minR, r);
+                maxR = Math.Max(maxR, r);
+                minU = Math.Min(minU, u);
+                maxU = Math.Max(maxU, u);
+            }
+
+            if (Math.Abs(side.OriginR - minR) > SideOriginTolerance || Math.Abs(side.OriginU - minU) > SideOriginTolerance)
+                return $"its origins ({side.OriginR:0.##}, {side.OriginU:0.##}) are not the capture box's " +
+                       $"({minR:0.##}, {minU:0.##})";
+
+            var wantW = (int)Math.Ceiling((maxR - minR) * side.PxPerMetre);
+            var wantH = (int)Math.Ceiling((maxU - minU) * side.PxPerMetre);
+
+            if (Math.Abs(side.Width - wantW) > SidePixelTolerance || Math.Abs(side.Height - wantH) > SidePixelTolerance)
+                return $"it is {side.Width}x{side.Height} px, but the capture box at {side.PxPerMetre:0.###} px/m is " +
+                       $"{wantW}x{wantH} px";
+
+            return null;
+        }
+
+        /// <summary>Three finite numbers of length one, to <see cref="SideUnitTolerance"/>.</summary>
+        private static bool UnitVector(float[]? v)
+        {
+            if (v == null || v.Length != 3 || !Finite(v[0]) || !Finite(v[1]) || !Finite(v[2])) return false;
+
+            var length = Math.Sqrt((double)v[0] * v[0] + (double)v[1] * v[1] + (double)v[2] * v[2]);
+
+            return Math.Abs(length - 1d) <= SideUnitTolerance;
+        }
+
+        /// <summary>Takes out of a meta every side this host has already dropped for this capture - the
+        /// markers a dropped side post leaves in the staging (see Accept). Without it the next floor
+        /// post, whose meta still names the side, would put it back on the list the set waits for.</summary>
+        private static void StripDroppedSides(string staging, MapCaptureMetaDto meta)
+        {
+            if (meta.Sides == null) return;
+
+            meta.Sides.RemoveAll(side => System.IO.File.Exists(System.IO.Path.Combine(staging, DroppedSideName(side.Dir))));
+
+            if (meta.Sides.Count == 0) meta.Sides = null;
+        }
+
+        /// <summary>The staged side pictures of one capture, by direction.</summary>
+        private static Dictionary<string, string> SidesByDir(string staging)
+        {
+            var found = new Dictionary<string, string>();
+
+            if (!System.IO.Directory.Exists(staging)) return found;
+
+            foreach (var dir in SideDirs)
+            {
+                var path = System.IO.Path.Combine(staging, StagedSideName(dir));
+
+                if (System.IO.File.Exists(path)) found[dir] = path;
+            }
+
+            return found;
+        }
+
+        /// <summary>How many pieces a staged capture still lacks - floors, then sides, then (asked
+        /// separately by the callers) the mesh - with the words for it. "1 more floor(s)" stays exactly
+        /// what it always said when there are no sides, because a client of an older build reads it.</summary>
+        private static int Missing(MapCaptureMetaDto meta, string staging, out string words)
+        {
+            var floors = FilesByLevel(staging);
+            var sides = SidesByDir(staging);
+
+            var floorsMissing = meta.Floors.Count(f => !floors.ContainsKey(f.Level));
+            var sidesMissing = (meta.Sides ?? new List<MapCaptureSideDto>()).Count(sd => !sides.ContainsKey(sd.Dir));
+
+            words = floorsMissing > 0 && sidesMissing > 0
+                ? $"{floorsMissing} more floor(s) and {sidesMissing} side(s)"
+                : floorsMissing > 0
+                    ? $"{floorsMissing} more floor(s)"
+                    : $"{sidesMissing} more side(s)";
+
+            return floorsMissing + sidesMissing;
+        }
+
+        /// <summary>A side post's answer, with the drop in front when its side was dropped - so the
+        /// client can say so without a field of its own for it.</summary>
+        private static string SideNote(string? dir, string? refusal, string rest)
+        {
+            if (refusal == null) return rest;
+
+            var note = $"the {dir ?? "unnamed"} side was dropped ({refusal})";
+
+            return rest.Length == 0 ? note : $"{note} - {rest}";
+        }
+
+        /// <summary>
+        /// The ONE line a dropped side gets: "the E side picture of 'bigmap' was dropped - why". Deduped on
+        /// the map, the side and the capture rather than on the reason, because one side can be turned
+        /// away on more than one ground in one upload - the meta check drops it, and then the post of it
+        /// finds it no longer named - and a host reading its log wants to hear about a side once, not once
+        /// per ground. Capped with the other refusals, for their reason.
+        /// </summary>
+        private void NoteSideDropped(string key, string dir, string? capturedAt, string why)
+        {
+            bool first;
+
+            lock (_rejectionsLogged)
+                first = _rejectionsLogged.Count < MaxRejectionsLogged &&
+                        _rejectionsLogged.Add($"{key}|side|{dir}|{Clip(capturedAt ?? "", MaxFreeTextLength)}");
+
+            if (first)
+                _logger.Warning(
+                    $"Quest Tracker: the {dir} side picture of '{key}' was dropped - {why} - and the set is served " +
+                    "without that side.");
+        }
+
+        /// <summary>A direction a client sent that is not one of the four, fit to print: quoted and
+        /// clipped, since it is a peer's text on its way into a log line.</summary>
+        private static string SideLabel(string? claimed) => $"'{Clip(claimed ?? "", 8)}'";
+
+        /// <summary>A side's name in the staging folder.</summary>
+        private static string StagedSideName(string dir) => $"side-{dir}.jpg";
+
+        /// <summary>The marker a dropped side leaves in the staging folder. Not a picture extension, so
+        /// nothing reads it as one; it goes with the staging when the set is promoted.</summary>
+        private static string DroppedSideName(string dir) => $"side-{dir}.dropped";
+
+        /// <summary>A side's name in the map's folder - this server's own, never the client's.</summary>
+        private static string SideName(string key, string dir) => $"{key}-side-{dir}.jpg";
 
         /// <summary>
         /// Whether a mesh file's HEADER is one this build would read, and if not, the reason to refuse
@@ -2527,6 +3036,8 @@ namespace QuestTreeServer
                 if (!MetaIsUsable(key, meta, out _)) return null;
 
                 DropUnusableMesh(key, meta);
+                DropUnusableSides(key, meta);
+                StripDroppedSides(staging, meta);
 
                 return meta;
             }

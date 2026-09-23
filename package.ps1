@@ -246,6 +246,8 @@ if ($RefreshMaps) {
             Write-Host "  skipped $($src.Name)\ - not a map key" -ForegroundColor DarkGray
             continue
         }
+        # `*.jpg` takes the side pictures (<key>-side-<dir>.jpg) with the floors - they are the same kind of
+        # file, and GATE 1 below holds both to their exact names.
         # Three globs, not two: `*-mesh.bin` is the 3D mesh the same capture wrote beside its pictures
         # (MapMeshFile), and a set refreshed without it would ship a meta naming a mesh the zip does not
         # carry - which the mesh gate below then fails, loudly, rather than shipping.
@@ -299,8 +301,8 @@ if ($mapsPresent) {
 # With no map sets the three gates below have nothing to iterate and pass on an empty list, which is
 # the point: they are about sets that exist, not about whether any do.
 
-# GATE 1 - LAYOUT. maps\ holds nothing but <key>\*.jpg, <key>\*.map.json and the one file
-# <key>\<key>-mesh.bin. The allowlist below is BUILT from this folder, so anything else in here is a
+# GATE 1 - LAYOUT. maps\ holds nothing but the floors <key>\<key>-<level>.jpg, the oblique side
+# pictures <key>\<key>-side-<N|S|E|W>.jpg, <key>\*.map.json and the one file <key>\<key>-mesh.bin. The allowlist below is BUILT from this folder, so anything else in here is a
 # file the zip carries: a raw .png capture, a ".incoming" directory a refresh skipped but a hand-copy
 # did not, an editor's .bak, a stray .svg from the DynamicMaps era. The depth test is what catches the
 # directories - a file two levels down is not in a key folder, it is in something nested inside one -
@@ -315,20 +317,28 @@ if ($mapsPresent) {
 # the very host it was shipped to - and a bare "-mesh.bin" fails that regex too. A mesh from another
 # map's folder is the case that matters: it parses, its extent is somebody else's, and nothing but the
 # name says so.
+#
+# The JPEGs are matched by the two names the host writes and nothing looser, for the mesh's reason: a
+# floor is <key>-<level>.jpg (the level can be negative, hence "Interchange--1.jpg") and a side is
+# <key>-side-<dir>.jpg for one of the four directions. Any other .jpg is a file the host would never
+# have written and the client never reads by that name - a side of a direction that does not exist, or
+# a picture from another map's folder - and it would ship as megabytes nothing loads.
 $strayMapFiles = @($mapFiles | ForEach-Object {
     $rel = $_.FullName.Substring($mapsDir.Length + 1)
     $parts = @($rel -split "\\")
     $named = $false
     if ($parts.Count -eq 2) {
-        $named = $_.Name -like "*.jpg" -or $_.Name -like "*.map.json" -or $_.Name -eq "$($parts[0])-mesh.bin"
+        $keyPattern = [regex]::Escape($parts[0])
+        $named = $_.Name -match "^$keyPattern-(-?[0-9]+|side-[NSEW])\.jpg$" -or
+                 $_.Name -like "*.map.json" -or $_.Name -eq "$($parts[0])-mesh.bin"
     }
     if (-not $named) { $rel }
 })
 if ($strayMapFiles.Count -gt 0) {
-    Fail "maps\ holds $($strayMapFiles.Count) file(s) that are not <key>\*.jpg, <key>\*.map.json or <key>\<key>-mesh.bin, and the allowlist is built from this folder: $($strayMapFiles -join ', ')"
+    Fail "maps\ holds $($strayMapFiles.Count) file(s) that are not <key>\<key>-<level>.jpg, <key>\<key>-side-<N|S|E|W>.jpg, <key>\*.map.json or <key>\<key>-mesh.bin, and the allowlist is built from this folder: $($strayMapFiles -join ', ')"
 }
 
-# GATE 2 - PER IMAGE. A floor over 1.5 MB is a capture that came out at a resolution or a quality the
+# GATE 2 - PER IMAGE, floors and side pictures alike (both are *.jpg). A floor over 1.5 MB is a capture that came out at a resolution or a quality the
 # release cannot afford: the budget is the whole set, and one 4 MB floor is three normal ones. The cap
 # is a ceiling on the capture settings, not a guess about content.
 $maxImageBytes = 1.5MB

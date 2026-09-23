@@ -115,6 +115,43 @@ namespace QuestTree.QuestGraph
         [JsonProperty("sha256")] public string Sha256 { get; set; }
     }
 
+    /// <summary>One oblique side picture of a capture: an orthographic render from the N, S, E or W side
+    /// of the map, pitched 45 degrees down, which the 3D view uses to texture building walls. A world
+    /// point p lands at px = (dot(right, p) - originR) x pxPerMetre, py = height - (dot(up, p) - originU)
+    /// x pxPerMetre, row 0 at the top. Optional: absent on older sets, and a side a host cannot use is
+    /// dropped by it while the rest of the set is served.
+    ///
+    /// <see cref="Width"/>, <see cref="Height"/> and <see cref="PxPerMetre"/> are rewritten by an upload
+    /// for the size the JPEG goes up at, exactly as a floor's are (MapTransfer.DescribeWire); the basis
+    /// and the origins are sizes in the world and do not change.</summary>
+    internal sealed class MapCaptureSideDto
+    {
+        [JsonProperty("dir")] public string Dir { get; set; }
+
+        /// <summary>The picture's file name beside the meta. A bare name, never a path.
+        ///
+        /// On an UPLOAD it may still be the capture's own <c>&lt;key&gt;-side-&lt;dir&gt;.png</c>: unlike a floor's,
+        /// the upload does not rewrite it, because the host throws a client's name away and writes
+        /// <c>&lt;key&gt;-side-&lt;dir&gt;.jpg</c> itself (MapStore.PrepareSet) - which is the name every
+        /// downloaded set and every shipped one carries.</summary>
+        [JsonProperty("file")] public string File { get; set; }
+
+        [JsonProperty("width")] public int Width { get; set; }
+        [JsonProperty("height")] public int Height { get; set; }
+
+        [JsonProperty("pxPerMetre")] public float PxPerMetre { get; set; }
+
+        [JsonProperty("forward")] public float[] Forward { get; set; }
+        [JsonProperty("right")] public float[] Right { get; set; }
+        [JsonProperty("up")] public float[] Up { get; set; }
+
+        [JsonProperty("originR")] public double OriginR { get; set; }
+        [JsonProperty("originU")] public double OriginU { get; set; }
+
+        [JsonProperty("yMin")] public float YMin { get; set; }
+        [JsonProperty("yMax")] public float YMax { get; set; }
+    }
+
     /// <summary>
     /// A capture's meta, field for field the same shape as the <c>&lt;key&gt;.map.json</c> that
     /// MapCapture.WriteMeta writes and MapCatalog.ReadMeta reads, but for the two fields named below.
@@ -193,6 +230,11 @@ namespace QuestTree.QuestGraph
         /// host told to expect a mesh waits for one before it serves the set, so a block that cannot be
         /// honoured would cost the whole capture rather than the mesh.</summary>
         [JsonProperty("mesh")] public MapCaptureMeshDto Mesh { get; set; }
+
+        /// <summary>The oblique side pictures, or null for none (every set captured before sides
+        /// existed). An upload names only the sides whose picture is on this disk; a side that then
+        /// fails to encode is posted EMPTY, which tells the host to drop it rather than wait.</summary>
+        [JsonProperty("sides")] public List<MapCaptureSideDto> Sides { get; set; }
     }
 
     /// <summary>
@@ -223,8 +265,14 @@ namespace QuestTree.QuestGraph
         /// upload sends it - see <see cref="MapCaptureFloorDto"/>.</summary>
         [JsonProperty("meta")] public MapCaptureMetaDto Meta { get; set; }
 
-        /// <summary>Which floor of <see cref="Meta"/> this request carries the picture for.</summary>
+        /// <summary>Which floor of <see cref="Meta"/> this request carries the picture for. For a side,
+        /// int.MinValue - a level no floor has, so a host too old to know <see cref="Side"/> refuses the
+        /// post instead of filing the side picture as a floor.</summary>
         [JsonProperty("level")] public int Level { get; set; }
+
+        /// <summary>"N"/"S"/"E"/"W" for a side picture; null for a floor. Omitted from the JSON when
+        /// null, so a floor post is byte-for-byte what it was before sides existed.</summary>
+        [JsonProperty("side", NullValueHandling = NullValueHandling.Ignore)] public string Side { get; set; }
 
         /// <summary>"jpg". The one format an upload sends; the host checks the bytes' magic against
         /// it rather than trusting this.</summary>
@@ -302,6 +350,10 @@ namespace QuestTree.QuestGraph
     {
         [JsonProperty("map")] public string Map { get; set; }
         [JsonProperty("level")] public int Level { get; set; }
+
+        /// <summary>A side's direction to fetch that side picture instead of a floor; null for a floor,
+        /// and then left out of the JSON entirely.</summary>
+        [JsonProperty("side", NullValueHandling = NullValueHandling.Ignore)] public string Side { get; set; }
     }
 
     /// <summary>One floor's picture from the host. An empty <see cref="ImageBase64"/> with an empty

@@ -144,8 +144,11 @@ namespace QuestTreeServer
 
         /// <summary>The best rectangle any harvest of this map has produced, or null on a v1 file and
         /// on a map nobody has raided with a v2 client. Not simply the newest: ZoneStore.Save keeps
-        /// the better-ranked source, so one raid that found BorderZones is not undone by a later one
-        /// that could only read the NavMesh.</summary>
+        /// the better-ranked source - NavMesh first, then terrain, then BorderZone, the client's own
+        /// order - so one raid that measured the NavMesh is not undone by a later one that could only
+        /// read the terrain. The ranking was BorderZone-first until 2026-09-23, which on Interchange kept
+        /// an older 1073x1033 m terrain rectangle over the 965x925 m NavMesh one the pictures are drawn
+        /// over; see ZoneStore.ExtentSources.</summary>
         [JsonPropertyName("extent")]
         public MapExtentDto? Extent { get; set; }
     }

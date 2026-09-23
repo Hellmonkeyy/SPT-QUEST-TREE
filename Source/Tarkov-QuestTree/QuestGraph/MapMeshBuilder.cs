@@ -72,6 +72,33 @@ namespace QuestTree.QuestGraph
         /// them, so a chunk is single-digit milliseconds.</summary>
         private const int RaysPerFrame = 20_000;
 
+        /// <summary>Hits asked for per ray on an INTERIOR band: enough to go through a shelf's top, a
+        /// shelf's middle board, a counter and a pallet and still reach the floor. When all of them are
+        /// used and the lowest is still well above the floor the cell is counted as SATURATED in the
+        /// relief line, which is the evidence that says whether this number is enough. Eight rather than
+        /// six after review: the cost is per interior band only (the results array is count x 8 for one
+        /// 20k-ray chunk at a time), and a shelving aisle is a shelf top, two boards, a crate and a
+        /// counter lip before the floor. The topmost band asks for one - its first hit is the answer,
+        /// and one is eight times cheaper.</summary>
+        internal const int InteriorMaxHits = 8;
+
+        /// <summary>Metres above a band's minY a cell's chosen height may be and still count as the
+        /// floor, for the saturation test. ONE metre, not three: Goshan's and IDEA's shelving - the case
+        /// this exists for - is 1.8 to 2.5 m tall, so a three-metre test would neither have fixed those
+        /// cells nor counted them. A floor is within half a metre of minY by the band's own margin, so a
+        /// metre above it is already not the floor.</summary>
+        internal const float SaturatedAboveMetres = 1f;
+
+        /// <summary>Metres BELOW an interior band's minY a picked height may sit before it counts as
+        /// suspicious - see <see cref="BelowShareToNote"/>.</summary>
+        internal const float BelowFloorMetres = 0.2f;
+
+        /// <summary>The share of an interior band's hit cells picked under its floor by more than
+        /// <see cref="BelowFloorMetres"/> that earns a note in the relief line. Taking the LOWEST hit can
+        /// reach through a raised floor to the terrain under it; five percent of a band doing that is
+        /// worth a raid's look, and nothing is changed because of it.</summary>
+        internal const float BelowShareToNote = 0.05f;
+
         /// <summary>Commands per job for <c>RaycastCommand.ScheduleBatch</c> - the probe's
         /// value, which is what the 45 ms was measured with.</summary>
         private const int RaysPerJob = 256;
@@ -255,6 +282,15 @@ namespace QuestTree.QuestGraph
             /// 3D ground would have a hole wherever the picture has terrain, which is the one
             /// disagreement between the two that a viewer cannot explain.</summary>
             internal float DepthBelow;
+
+            /// <summary>Whether another band lies above this one. An interior band's relief is its
+            /// FLOOR, and its rays start just under the band above - so the first thing a ray meets on
+            /// the way down is the top of a shelf, a rack or a counter, and Interchange's Goshan and IDEA
+            /// came back as a field of bumps with dark aisles between them. An interior band therefore
+            /// asks for up to <see cref="InteriorMaxHits"/> hits a ray and keeps the LOWEST one that is
+            /// still this band's (see <see cref="PickHit"/>); the topmost band keeps the first hit,
+            /// because there the first thing met is a roof and a roof is what its relief is for.</summary>
+            internal bool Interior;
         }
 
         /// <summary>Everything one build works from. Filled by MapCapture out of its own plan, so this
@@ -591,6 +627,9 @@ namespace QuestTree.QuestGraph
             /// entries are ever read, so a reset is that many writes rather than an allocation.</summary>
             internal int[] Remap;
 
+            /// <summary>One ray's hit heights, reused for every ray - see PickHit.</summary>
+            internal float[] HitYs;
+
             /// <summary>The renderers of the chosen LOD level per group - null when no level of the group
             /// is geometry - so a group with forty renderers under it is decided once and each of them is
             /// answered by a set lookup, not by another GetLODs() allocation.</summary>
@@ -631,6 +670,16 @@ namespace QuestTree.QuestGraph
             internal int Done;
             internal int Quantised;
             internal int Hits;
+
+            /// <summary>Interior cells whose every hit slot was used with the lowest still more than
+            /// SaturatedAboveMetres over the band's floor - see PickHit. Counted, not fixed: it is the
+            /// number that says whether InteriorMaxHits is enough.</summary>
+            internal int Saturated;
+
+            /// <summary>Hit cells whose picked height is more than BelowFloorMetres under the band's
+            /// minY - on an interior band, terrain reached through a raised floor. Reported, not
+            /// corrected.</summary>
+            internal int BelowFloor;
 
             /// <summary>The measured height of each cell in METRES, NaN where no ray hit. Dropped by
             /// <see cref="FinishBand"/> as soon as the cells are quantised.</summary>
@@ -838,6 +887,15 @@ namespace QuestTree.QuestGraph
             var distance = RayDistanceFor(source);
             var from = job.Request.From;
 
+            // One hit a ray on the topmost band, several on an interior one - see Band.Interior. The
+            // results array is count * maxHits: command i's hits are i*maxHits .. i*maxHits+maxHits-1,
+            // and the first with no collider ends its list.
+            var maxHits = source.Interior ? InteriorMaxHits : 1;
+
+            if (job.HitYs == null || job.HitYs.Length < maxHits) job.HitYs = new float[maxHits];
+
+            var ys = job.HitYs;
+
             var commands = new NativeArray<RaycastCommand>(count, Allocator.TempJob);
             var results = default(NativeArray<RaycastHit>);
 
@@ -849,15 +907,18 @@ namespace QuestTree.QuestGraph
 
             try
             {
-                results = new NativeArray<RaycastHit>(count, Allocator.TempJob);
+                results = new NativeArray<RaycastHit>(count * maxHits, Allocator.TempJob);
 
                 job.ReliefClock.Start();
 
-                // hitMultipleFaces false and one result per command: the nearest hit going down is the
-                // answer, and asking for more would cost a wider results array for nothing. Triggers
-                // ignored (a trigger volume is not ground) and backfaces not hit (the underside of a
-                // roof is not its top).
-                var parameters = new QueryParameters(job.RayMask, false, QueryTriggerInteraction.Ignore, false);
+                // Triggers ignored (a trigger volume is not ground) and backfaces not hit (the underside
+                // of a roof is not its top). hitMultipleFaces only on an INTERIOR band, and deliberately:
+                // EFT bakes a building's interior into large merged LowPolyCollider meshes, so a shelf
+                // and the floor under it can be faces of ONE collider - and with hitMultipleFaces off a
+                // collider answers once, with its nearest face, which is the shelf top this change exists
+                // to see past. The saturation count in the relief line is what says whether six slots
+                // then fill up with a single collider's faces before the floor is reached.
+                var parameters = new QueryParameters(job.RayMask, source.Interior, QueryTriggerInteraction.Ignore, false);
 
                 for (var i = 0; i < count; i++)
                 {
@@ -870,22 +931,42 @@ namespace QuestTree.QuestGraph
                     commands[i] = new RaycastCommand(origin, Vector3.down, parameters, distance);
                 }
 
-                RaycastCommand.ScheduleBatch(commands, results, RaysPerJob, default(JobHandle)).Complete();
+                RaycastCommand.ScheduleBatch(commands, results, RaysPerJob, maxHits, default(JobHandle)).Complete();
 
                 for (var i = 0; i < count; i++)
                 {
                     var n = band.Done + i;
-                    var hit = results[i];
+                    var first = i * maxHits;
 
-                    // collider, not distance: a RaycastCommand that hit nothing leaves a default
-                    // RaycastHit, whose distance is zero - which reads as a hit at the ray's origin.
-                    if (hit.collider == null || !IsFinite(hit.point.y) || hit.point.y < floor)
+                    // This command's hits, up to the first empty slot: collider, not distance - a slot
+                    // nothing hit is a default RaycastHit, whose distance is zero and reads as a hit at
+                    // the ray's origin.
+                    var used = 0;
+
+                    for (var k = 0; k < maxHits; k++)
+                    {
+                        var candidate = results[first + k];
+                        if (candidate.collider == null) break;
+
+                        ys[k] = candidate.point.y;
+                        used = k + 1;
+                    }
+
+                    var chosen = PickHit(ys, used, maxHits, floor, source.MinY, source.Interior, out var saturated);
+
+                    if (saturated) band.Saturated++;
+
+                    if (chosen < 0)
                     {
                         band.Metres[n] = float.NaN;
                         band.Distance[n] = MapMeshFile.DistanceEmpty;
                         written++;
                         continue;
                     }
+
+                    var hit = results[first + chosen];
+
+                    if (source.Interior && hit.point.y < source.MinY - BelowFloorMetres) band.BelowFloor++;
 
                     band.Metres[n] = hit.point.y;
                     band.Hits++;
@@ -912,6 +993,62 @@ namespace QuestTree.QuestGraph
                 band.Done += written;
                 job.Rays += written;
             }
+        }
+
+        /// <summary>
+        /// Which of a ray's hits is the cell's height: its index in <paramref name="ys"/>, or -1 for
+        /// none.
+        ///
+        /// The topmost band takes the FIRST hit when it is this band's (at or above
+        /// <paramref name="floorY"/>): the ray comes down from over the roofs and the first thing it
+        /// meets is the roof. An interior band takes the LOWEST hit that is still this band's: its ray
+        /// starts just under the floor above, meets the tops of shelves and counters on the way down,
+        /// and the floor is the last of them - which is Interchange's Goshan drawn as a floor instead of
+        /// as a field of bumps. Order in <paramref name="ys"/> is not relied on for the interior case,
+        /// only the values.
+        ///
+        /// <paramref name="saturated"/> says an interior ray used every slot and its lowest qualifying
+        /// hit is still more than <see cref="SaturatedAboveMetres"/> over the band's minY: the floor may
+        /// be further down than <see cref="InteriorMaxHits"/> hits could reach, and the relief line
+        /// counts such cells per band.
+        ///
+        /// Floats in, an int out and no Unity type, so the harness calls it on the shipped assembly
+        /// with a synthetic column - a shelf top at floor + 1.8 m over the floor at 0.
+        /// </summary>
+        /// <param name="ys">The hits' world y, in the order the query returned them.</param>
+        /// <param name="used">How many of <paramref name="ys"/> are hits.</param>
+        /// <param name="maxHits">How many the query was allowed.</param>
+        /// <param name="floorY">The lowest y that is still this band's - RayFloorFor.</param>
+        /// <param name="minY">The band's minY, for the saturation test.</param>
+        /// <param name="interior">Whether the band is an interior one.</param>
+        /// <param name="saturated">See above.</param>
+        internal static int PickHit(float[] ys, int used, int maxHits, float floorY, float minY, bool interior,
+            out bool saturated)
+        {
+            saturated = false;
+
+            if (ys == null || used <= 0) return -1;
+
+            if (!interior)
+            {
+                var y = ys[0];
+
+                return IsFinite(y) && y >= floorY ? 0 : -1;
+            }
+
+            var best = -1;
+
+            for (var k = 0; k < used && k < ys.Length; k++)
+            {
+                var y = ys[k];
+                if (!IsFinite(y) || y < floorY) continue;
+
+                if (best < 0 || y < ys[best]) best = k;
+            }
+
+            saturated = best >= 0 && used >= maxHits && ys[best] > minY + SaturatedAboveMetres;
+
+            return best;
         }
 
         /// <summary>The lowest world y a hit still counts as this band's ground: half a metre under the
@@ -968,7 +1105,16 @@ namespace QuestTree.QuestGraph
                 $"QuestTree: relief for {job.Request.Map} - {job.Bands.Count} band(s), " +
                 $"{(first == null ? 0 : first.Width)}x{(first == null ? 0 : first.Height)} cells at " +
                 $"{N(ReliefCellMetres)} m, {N(job.Rays)} rays in {N(job.ReliefClock.Elapsed.TotalMilliseconds)} ms, " +
-                $"{Pct(job.Hits, job.Rays)} hit.");
+                $"{Pct(job.Hits, job.Rays)} hit; bands: {BandShares(job)}{BelowNotes(job)}.");
+
+            // Said only when it happened, and per band: the evidence for whether InteriorMaxHits is
+            // enough, which only an interior band full of shelving can produce.
+            foreach (var band in job.Bands)
+                if (band.Saturated > 0)
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: {job.Request.Map} \"{band.Source.Name}\" - {N(band.Saturated)} cell(s) used all " +
+                        $"{InteriorMaxHits} hits and still stopped more than {N(SaturatedAboveMetres)} m above the " +
+                        "floor; the relief there may be a shelf top, not the floor.");
 
             // A true statement only because the grids are NaN/DistanceEmpty from the moment they are
             // allocated (see Prepare) and FinishBand checks it: an unmeasured cell is empty in the file,
@@ -978,6 +1124,43 @@ namespace QuestTree.QuestGraph
                     $"QuestTree: {job.Request.Map}'s relief cast {N(job.Rays)} of {N(cells)} cell(s) - a chunk " +
                     $"failed (the warning above says why), and the {N(cells - job.Rays)} cell(s) it never " +
                     "reached are written as empty, so a later capture can fill them.");
+        }
+
+        /// <summary>The relief line's note on interior bands whose picked heights lie under the band's
+        /// floor in more than <see cref="BelowShareToNote"/> of their hit cells - the lowest-hit rule
+        /// reaching terrain under a raised floor. Empty when no band does; nothing is changed either way,
+        /// the note is for a raid to verify.</summary>
+        /// <param name="job">The build.</param>
+        private static string BelowNotes(Job job)
+        {
+            var notes = new List<string>();
+
+            foreach (var band in job.Bands)
+            {
+                if (!band.Source.Interior || band.Hits <= 0) continue;
+                if (band.BelowFloor <= band.Hits * BelowShareToNote) continue;
+
+                notes.Add($"band {band.Source.Level.ToString(CultureInfo.InvariantCulture)} picked " +
+                          $"{Pct(band.BelowFloor, band.Hits)} of its heights more than " +
+                          $"{BelowFloorMetres.ToString("0.0", CultureInfo.InvariantCulture)} m under its floor " +
+                          "(terrain under a raised floor?)");
+            }
+
+            return notes.Count == 0 ? "" : "; " + string.Join("; ", notes.ToArray());
+        }
+
+        /// <summary>"-1 12 %, 0 100 %, 1 31 %": each band's level and the share of ITS rays that hit,
+        /// lowest band first - one grey basement cannot hide behind a map-wide 97 %.</summary>
+        /// <param name="job">The build.</param>
+        private static string BandShares(Job job)
+        {
+            var parts = new List<string>();
+
+            foreach (var band in job.Bands)
+                parts.Add($"{band.Source.Level.ToString(CultureInfo.InvariantCulture)} {Pct(band.Hits, band.Done)}" +
+                          (band.Source.Interior ? "" : " (top)"));
+
+            return string.Join(", ", parts.ToArray());
         }
 
         // --- the y range and the quantisation -----------------------------------------------------------
@@ -2317,5 +2500,174 @@ namespace QuestTree.QuestGraph
 
         private static string F(float v) =>
             IsFinite(v) ? v.ToString("0.0", CultureInfo.InvariantCulture) : "n/a";
+    }
+    /// <summary>
+    /// The arithmetic of the four oblique side views (plan, stage U - the contract is frozen): which
+    /// way each camera looks, and where a world point lands in each picture. MapCapture renders by it,
+    /// the viewer and tools/check-capture.py recompute it, and the harness holds it to real numbers.
+    ///
+    /// Why it lives HERE rather than in MapCapture: MapCapture is a MonoBehaviour, so its type cannot
+    /// even be loaded without UnityEngine, and a check that has to run the game to run is a check that
+    /// is not run. This class is doubles and arrays and nothing else - the harness calls it on the
+    /// shipped assembly by reflection, exactly as it does <see cref="MapMeshBuilder.SizeVerdict"/>.
+    ///
+    /// THE CONTRACT, restated so the code can be read against it:
+    ///   - dir in N, S, E, W; the camera stands on that side of the map looking toward the centre,
+    ///     pitched 45 degrees down: forward f = normalize(toCentreXZ + (0,-1,0)) with |toCentreXZ| = 1,
+    ///     so N: (0,-.7071,-.7071), S: (0,-.7071,+.7071), E: (-.7071,-.7071,0), W: (+.7071,-.7071,0);
+    ///   - right r = normalize(cross(f, (0,1,0))); up u = cross(r, f);
+    ///   - px = (dot(r,p) - originR) * ppm, py = height - (dot(u,p) - originU) * ppm, row 0 at the top;
+    ///   - originR/originU = the minimum of dot(r,.)/dot(u,.) over the 8 corners of
+    ///     extent x [yMin, yMax]; width/height = ceil(span * ppm).
+    ///
+    /// ONE CONSEQUENCE THE CONTRACT DOES NOT SAY, and MapCapture has to act on: a Unity camera rotated
+    /// by LookRotation(f, u) has its screen-right along cross(u, f), which is exactly -r for any f
+    /// (cross(cross(r, f), f) = -r when f is a unit vector perpendicular to r). So the camera's picture
+    /// is the contract's picture MIRRORED left to right - the contract's frame (r, u, f) is
+    /// left-handed where Unity's (right, up, forward) is not. <see cref="CameraRight"/> computes it and
+    /// the harness checks the identity; MapCapture renders in the camera's order and flips the columns
+    /// once before developing. Its self-check fails if the camera is not the contract's mirror; that
+    /// the flip is actually called is asserted by the harness from the source.
+    /// </summary>
+    internal static class MapSideView
+    {
+        /// <summary>The four sides, in the order they are rendered and listed in the meta.</summary>
+        internal static readonly string[] Directions = { "N", "S", "E", "W" };
+
+        /// <summary>
+        /// The side's basis, each vector ROUNDED TO FLOAT - the precision the meta stores them at - so
+        /// every number derived here (the origins, the spans, the self-check's expectation) is derived
+        /// from exactly the vectors a reader of the meta will have. False for a dir that is not one of
+        /// the four.
+        /// </summary>
+        /// <param name="dir">"N", "S", "E" or "W".</param>
+        /// <param name="forward">f, the way the camera looks.</param>
+        /// <param name="right">r, the picture's +x.</param>
+        /// <param name="up">u, the picture's +y (towards row 0).</param>
+        internal static bool Basis(string dir, out double[] forward, out double[] right, out double[] up)
+        {
+            forward = right = up = null;
+
+            double tx, tz;
+
+            switch (dir)
+            {
+                case "N": tx = 0; tz = -1; break;
+                case "S": tx = 0; tz = 1; break;
+                case "E": tx = -1; tz = 0; break;
+                case "W": tx = 1; tz = 0; break;
+                default: return false;
+            }
+
+            var f = Normalise(new[] { tx, -1d, tz });
+
+            // cross(f, (0,1,0)) = (-f.z, 0, f.x)
+            var r = Normalise(new[] { -f[2], 0d, f[0] });
+
+            // u = cross(r, f)
+            var u = Cross(r, f);
+
+            forward = ToFloat(f);
+            right = ToFloat(r);
+            up = ToFloat(u);
+
+            return true;
+        }
+
+        /// <summary>The camera's screen-right under Quaternion.LookRotation(f, u): Unity's
+        /// right = cross(up, forward). Always -r - see the class summary for why that matters.</summary>
+        /// <param name="forward">f.</param>
+        /// <param name="up">u.</param>
+        internal static double[] CameraRight(double[] forward, double[] up) => Cross(up, forward);
+
+        /// <summary>The picture's frame: the minimum and the span of dot(r,.) and dot(u,.) over the 8
+        /// corners of the box, and the min and max of dot(f,.) - the depth the camera's near and far
+        /// planes have to cover.</summary>
+        /// <param name="forward">f.</param>
+        /// <param name="right">r.</param>
+        /// <param name="up">u.</param>
+        /// <param name="minX">The extent's low x.</param>
+        /// <param name="minZ">The extent's low z.</param>
+        /// <param name="maxX">The extent's high x.</param>
+        /// <param name="maxZ">The extent's high z.</param>
+        /// <param name="yMin">The box's low y.</param>
+        /// <param name="yMax">The box's high y.</param>
+        /// <param name="frame">originR, spanR, originU, spanU, minF, maxF, in that order.</param>
+        internal static void Frame(double[] forward, double[] right, double[] up,
+            double minX, double minZ, double maxX, double maxZ, double yMin, double yMax, out double[] frame)
+        {
+            double loR = double.PositiveInfinity, hiR = double.NegativeInfinity;
+            double loU = double.PositiveInfinity, hiU = double.NegativeInfinity;
+            double loF = double.PositiveInfinity, hiF = double.NegativeInfinity;
+
+            for (var corner = 0; corner < 8; corner++)
+            {
+                var x = (corner & 1) == 0 ? minX : maxX;
+                var y = (corner & 2) == 0 ? yMin : yMax;
+                var z = (corner & 4) == 0 ? minZ : maxZ;
+
+                var dr = Dot(right, x, y, z);
+                var du = Dot(up, x, y, z);
+                var df = Dot(forward, x, y, z);
+
+                if (dr < loR) loR = dr;
+                if (dr > hiR) hiR = dr;
+                if (du < loU) loU = du;
+                if (du > hiU) hiU = du;
+                if (df < loF) loF = df;
+                if (df > hiF) hiF = df;
+            }
+
+            frame = new[] { loR, hiR - loR, loU, hiU - loU, loF, hiF };
+        }
+
+        /// <summary>A span in metres as the picture's size in pixels: ceil(span * ppm), at least 1.</summary>
+        /// <param name="span">The span in metres.</param>
+        /// <param name="ppm">Pixels per metre.</param>
+        internal static int Size(double span, float ppm) => Math.Max(1, (int)Math.Ceiling(span * ppm));
+
+        /// <summary>Where a world point lands in the contract's picture, in (fractional) pixels: px from
+        /// the left, py from the TOP.</summary>
+        /// <param name="right">r.</param>
+        /// <param name="up">u.</param>
+        /// <param name="originR">The picture's originR.</param>
+        /// <param name="originU">The picture's originU.</param>
+        /// <param name="ppm">Its pixels per metre.</param>
+        /// <param name="height">Its height in pixels.</param>
+        /// <param name="x">World x.</param>
+        /// <param name="y">World y.</param>
+        /// <param name="z">World z.</param>
+        /// <param name="pixel">px, py.</param>
+        internal static void Pixel(double[] right, double[] up, double originR, double originU, float ppm,
+            int height, double x, double y, double z, out double[] pixel)
+        {
+            var px = (Dot(right, x, y, z) - originR) * ppm;
+            var py = height - (Dot(up, x, y, z) - originU) * ppm;
+
+            pixel = new[] { px, py };
+        }
+
+        /// <summary>dot(v, (x, y, z)).</summary>
+        /// <param name="v">The vector.</param>
+        /// <param name="x">x.</param>
+        /// <param name="y">y.</param>
+        /// <param name="z">z.</param>
+        internal static double Dot(double[] v, double x, double y, double z) => v[0] * x + v[1] * y + v[2] * z;
+
+        private static double[] Cross(double[] a, double[] b) => new[]
+        {
+            a[1] * b[2] - a[2] * b[1],
+            a[2] * b[0] - a[0] * b[2],
+            a[0] * b[1] - a[1] * b[0]
+        };
+
+        private static double[] Normalise(double[] v)
+        {
+            var length = Math.Sqrt(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+
+            return new[] { v[0] / length, v[1] / length, v[2] / length };
+        }
+
+        private static double[] ToFloat(double[] v) => new double[] { (float)v[0], (float)v[1], (float)v[2] };
     }
 }

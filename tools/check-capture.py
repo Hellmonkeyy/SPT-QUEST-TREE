@@ -30,6 +30,14 @@ What it checks, per capture folder <key>/:
      building's vertex count. The file's y range - which every height in it is quantised over - is a
      WARN over 500 m and an ERROR over 2000 m. A <key>-mesh.bin on disk that the meta does not name is
      a WARN - it is what an older capture leaves when a later one builds no mesh, and nothing reads it.
+  5. the side views (plan, stage U), when the meta lists "sides" (OPTIONAL like the mesh): each dir is
+     N/S/E/W and appears once, its file is <key>-side-<dir>.png and exists with the IHDR size the
+     meta gives, pxPerMetre is in (0, 2], forward/right/up are unit length and orthogonal (1e-3),
+     forward is the contract's vector for that dir, right is normalize(cross(forward, world up)) and
+     up is cross(right, forward),
+     originR/originU are the minima of dot(right,.)/dot(up,.) over the 8 corners of
+     extent x [yMin, yMax] (1e-3), and width/height are ceil(span * pxPerMetre) within 1 px. A
+     <key>-side-*.png the meta does not list is a WARN.
 
 What it does NOT check, by design:
   - the pixels. Whether the PNG is the right map, drawn the right way up, or blank, is exactly what
@@ -50,6 +58,10 @@ the WARN), and exits 1 naming the fault for a truncated deflate stream, a meta s
 file's, a mesh extent 3 m from the meta's, a band level no floor has, a band that is not
 ceil(span / cell) cells, a triangle index past its building's vertices, a meta cell count that is not
 the file's, a meta byte count that is not the file's, and a meta naming a mesh that is not there.
+The side-view gate likewise, against side entries computed by the shipped C# MapSideView: exit 0 on
+those, exit 1 for an originR 0.5 m off, a non-orthogonal basis, a PNG one row taller than its meta, a
+missing side file, N carrying S's forward vector, an up vector negated (unit and orthogonal, but
+upside down), and a size that is not ceil(span * ppm).
 
 Usage:  python tools/check-capture.py [captures-root] [zones-folder]
         defaults: C:\\Games\\SPT\\BepInEx\\plugins\\QuestTree\\captures
@@ -653,6 +665,183 @@ def check_mesh(meta, folder, key, extent, levels, errors, warnings):
             f"{mesh['triangles']} triangles")
 
 
+SIDE_DIRS = ("N", "S", "E", "W")
+SIDE_MAX_PPM = 2.0          # the contract's pxPerMetre ceiling (MapCapture.SidePixelsPerMetre)
+SIDE_VECTOR_TOLERANCE = 1e-3
+SIDE_ORIGIN_TOLERANCE = 1e-3
+
+
+def side_forward(direction):
+    """The contract's forward vector for a side: normalize(toCentreXZ + (0,-1,0))."""
+    to_centre = {"N": (0.0, -1.0), "S": (0.0, 1.0), "E": (-1.0, 0.0), "W": (1.0, 0.0)}[direction]
+    s = 1.0 / math.sqrt(2.0)
+    return (to_centre[0] * s, -s, to_centre[1] * s)
+
+
+def vector3(value):
+    """A [x, y, z] list of three finite numbers, or None."""
+    if not isinstance(value, list) or len(value) != 3:
+        return None
+    out = []
+    for item in value:
+        n = number(item)
+        if n is None or not math.isfinite(n):
+            return None
+        out.append(n)
+    return tuple(out)
+
+
+def dot3(a, b):
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+
+
+def check_sides(meta, folder, key, extent, errors, warnings):
+    """The four oblique side views (plan, stage U - a frozen contract) when the meta lists them.
+    Returns the summary line's sides column.
+
+    Per entry: dir is one of N/S/E/W and appears once; the file is <key>-side-<dir>.png and exists;
+    its IHDR size is the entry's width x height; pxPerMetre is in (0, 2]; forward/right/up are unit
+    length and mutually orthogonal (1e-3), forward is the contract's vector for that dir and right is
+    normalize(cross(forward, up-world)); originR/originU are the minima of dot(right,.)/dot(up,.) over
+    the 8 corners of extent x [yMin, yMax] (1e-3); width/height are ceil(span * pxPerMetre) within
+    1 px. A <key>-side-*.png the meta does not name is a WARN."""
+    sides = meta.get("sides")
+    on_disk = sorted(p.name for p in folder.iterdir()
+                     if p.is_file() and p.name.lower().startswith(f"{key.lower()}-side-")
+                     and p.name.lower().endswith(".png"))
+
+    if sides is None or sides == []:
+        for name in on_disk:
+            warnings.append(f"{key}: {name} is on disk but the meta lists no side views - it is what an "
+                            f"older capture leaves behind, and nothing reads it")
+        return "no sides"
+
+    if not isinstance(sides, list):
+        errors.append(f"{key}: sides is not a list")
+        return "sides UNREADABLE"
+
+    named, seen, sizes = set(), set(), []
+
+    for index, side in enumerate(sides):
+        where = f"{key}: sides[{index}]"
+        if not isinstance(side, dict):
+            errors.append(f"{where} is not an object")
+            continue
+
+        direction = side.get("dir")
+        if direction not in SIDE_DIRS:
+            errors.append(f"{where}.dir {direction!r} is not one of {', '.join(SIDE_DIRS)}")
+            continue
+        where = f"{key}: side {direction}"
+        if direction in seen:
+            errors.append(f"{where} is listed twice")
+        seen.add(direction)
+
+        rel = side.get("file")
+        want_name = f"{key}-side-{direction}.png"
+        if not isinstance(rel, str) or rel.lower() != want_name.lower():
+            errors.append(f"{where}.file {rel!r} is not {want_name!r}")
+            continue
+        named.add(rel.lower())
+
+        path = folder / rel
+        if not path.is_file():
+            errors.append(f"{where}.file {rel!r} does not exist in {folder}")
+            continue
+
+        width, height = side.get("width"), side.get("height")
+        if (isinstance(width, bool) or not isinstance(width, int) or width <= 0 or
+                isinstance(height, bool) or not isinstance(height, int) or height <= 0):
+            errors.append(f"{where}: width/height {width!r}x{height!r} are not positive integers")
+            continue
+
+        actual, why = png_size(path)
+        if actual is None:
+            errors.append(f"{where}: {rel} {why}")
+        elif actual != (width, height):
+            errors.append(f"{where}: {rel} is {actual[0]}x{actual[1]} but the meta says {width}x{height}")
+
+        ppm = number(side.get("pxPerMetre"))
+        if ppm is None or not (0 < ppm <= SIDE_MAX_PPM + 1e-6):
+            errors.append(f"{where}.pxPerMetre {side.get('pxPerMetre')!r} is not in (0, {SIDE_MAX_PPM:g}]")
+            continue
+
+        f, r, u = vector3(side.get("forward")), vector3(side.get("right")), vector3(side.get("up"))
+        if f is None or r is None or u is None:
+            errors.append(f"{where}: forward/right/up are not three finite numbers each")
+            continue
+
+        basis_ok = True
+        for label, v in (("forward", f), ("right", r), ("up", u)):
+            length = math.sqrt(dot3(v, v))
+            if abs(length - 1.0) > SIDE_VECTOR_TOLERANCE:
+                errors.append(f"{where}.{label} has length {length:.6f}, not 1")
+                basis_ok = False
+        for label, a, b in (("forward.right", f, r), ("forward.up", f, u), ("right.up", r, u)):
+            d = dot3(a, b)
+            if abs(d) > SIDE_VECTOR_TOLERANCE:
+                errors.append(f"{where}: {label} = {d:.6f} - the basis is not orthogonal")
+                basis_ok = False
+
+        want_f = side_forward(direction)
+        if max(abs(a - b) for a, b in zip(f, want_f)) > SIDE_VECTOR_TOLERANCE:
+            errors.append(f"{where}.forward {f} is not the contract's {tuple(round(c, 4) for c in want_f)} "
+                          f"for {direction}")
+            basis_ok = False
+
+        # right = normalize(cross(forward, (0,1,0))) = normalize((-f.z, 0, f.x))
+        rr = (-f[2], 0.0, f[0])
+        rl = math.sqrt(dot3(rr, rr)) or 1.0
+        want_r = (rr[0] / rl, rr[1] / rl, rr[2] / rl)
+        if max(abs(a - b) for a, b in zip(r, want_r)) > SIDE_VECTOR_TOLERANCE:
+            errors.append(f"{where}.right {r} is not normalize(cross(forward, up)) = "
+                          f"{tuple(round(c, 4) for c in want_r)}")
+            basis_ok = False
+
+        # up = cross(right, forward). Unit length and orthogonality both hold for -up as well, so this
+        # is the one test that tells an upside-down picture from a right one.
+        want_u = (r[1] * f[2] - r[2] * f[1], r[2] * f[0] - r[0] * f[2], r[0] * f[1] - r[1] * f[0])
+        if max(abs(a - b) for a, b in zip(u, want_u)) > SIDE_VECTOR_TOLERANCE:
+            errors.append(f"{where}.up {u} is not cross(right, forward) = "
+                          f"{tuple(round(c, 4) for c in want_u)} - the picture would be upside down")
+            basis_ok = False
+
+        y_min, y_max = number(side.get("yMin")), number(side.get("yMax"))
+        origin_r, origin_u = number(side.get("originR")), number(side.get("originU"))
+        if None in (y_min, y_max, origin_r, origin_u) or not y_max > y_min:
+            errors.append(f"{where}: yMin/yMax/originR/originU are missing, not numbers, or yMax <= yMin")
+            continue
+
+        if extent is None or not basis_ok:
+            continue
+
+        min_x, min_z, max_x, max_z = extent
+        corners = [(x, y, z) for x in (min_x, max_x) for y in (y_min, y_max) for z in (min_z, max_z)]
+        along_r = [dot3(r, c) for c in corners]
+        along_u = [dot3(u, c) for c in corners]
+
+        if abs(min(along_r) - origin_r) > SIDE_ORIGIN_TOLERANCE:
+            errors.append(f"{where}.originR {origin_r!r} is not the box's minimum along right, "
+                          f"{min(along_r)!r} - every wall textured from this side would be shifted")
+        if abs(min(along_u) - origin_u) > SIDE_ORIGIN_TOLERANCE:
+            errors.append(f"{where}.originU {origin_u!r} is not the box's minimum along up, "
+                          f"{min(along_u)!r}")
+
+        want_w = math.ceil((max(along_r) - min(along_r)) * ppm)
+        want_h = math.ceil((max(along_u) - min(along_u)) * ppm)
+        if abs(width - want_w) > PIXEL_TOLERANCE or abs(height - want_h) > PIXEL_TOLERANCE:
+            errors.append(f"{where} is {width}x{height} but the box at {ppm:g} px/m wants {want_w}x{want_h}")
+
+        sizes.append(f"{direction} {width}x{height}")
+
+    for name in on_disk:
+        if name.lower() not in named:
+            warnings.append(f"{key}: {name} is on disk but the meta does not list it - it is what an older "
+                            f"capture leaves behind, and nothing reads it")
+
+    return f"sides {', '.join(sizes) if sizes else 'none valid'}"
+
+
 def check_capture(folder, errors, warnings):
     """Validates one capture folder. Returns its summary line, or None if there was nothing to read."""
     key = folder.name
@@ -699,6 +888,7 @@ def check_capture(folder, errors, warnings):
     levels, pixels, total = check_floors(meta, folder, key, extent, px_per_metre, errors)
 
     mesh = check_mesh(meta, folder, key, extent, levels, errors, warnings)
+    sides = check_sides(meta, folder, key, extent, errors, warnings)
 
     zones, rotation = check_zone(key, extent, levels, errors, warnings)
     meta_rotation = number(meta.get("rotation"))
@@ -710,7 +900,7 @@ def check_capture(folder, errors, warnings):
     scale = f"{1 / px_per_metre:.2f} m/px" if px_per_metre else "? m/px"
     captured = meta.get("capturedAt") or "?"
     return (f"{key}: {floor_count} floor(s), {pixels} @ {scale}, {total / 1048576:.1f} MB, {zones}\n"
-            f"    {mesh}",
+            f"    {mesh}; {sides}",
             captured)
 
 

@@ -217,6 +217,23 @@ captured map carries our own credit line naming the build, the date and the raid
   80 MB that prints the payload's size on every run instead of a hard 40 MB stop, and a shipped
   mesh is checked against its meta's sha256, byte length, extent and floor levels before it can be
   zipped.
+- **The side pictures travel with the rest.** The four oblique views a capture takes for the 3D map's
+  walls go up to the host through the same route as the floors - one post each, after the floors and
+  before the mesh, encoded exactly as a floor is (flattened on the map backdrop, 2048 px on the long
+  side, JPEG at q80, up to 2.5 MB) - and come down through the same image route. A set that names
+  sides is not served until every floor, every named side and the mesh have arrived; but a side is
+  never worth the map, so a side the host cannot use (not a JPEG, over the cap, not a view of the
+  capture box its meta describes, or one the client could not encode and posts empty to say so) is
+  DROPPED from the set with one line in the host's log, and the rest is served - never refused, never
+  flattened. Each side is held to the capture box on the way in: its basis unit length, its origins
+  the box's own projections, and its pixel size the projected span at its scale within two pixels,
+  which is what catches a side described at one size and sent at another. A host from before sides
+  refuses a side post as a floor it does not know rather than filing it as floor 0, and the client
+  then goes on to the mesh. The per-map budget rises from 32 to 42 MB - eight floors and four sides
+  at 2.5 MB and a 12 MB mesh - with every side a meta names reserved against the store's total from
+  the first floor. Packaging admits `<key>\<key>-side-<N|S|E|W>.jpg` by that exact name, holds sides
+  to the 1.5 MB per-image gate, and `tools/check-maps-pack.py` checks each side's JPEG size against
+  its meta, its basis for unit length, and that no side file goes unnamed.
 - **A throwaway diagnostic key ships with this release**, which is worth saying out loud because it
   is not a feature: a bare **F10** is the mesh probe of the 3D map experiments, and it writes
   `BepInEx\plugins\QuestTree\captures\<map>.meshprobe.txt` in a raid - whether the game's own meshes

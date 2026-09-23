@@ -1105,6 +1105,58 @@ namespace QuestTreeServer
         [JsonPropertyName("sha256")] public string Sha256 { get; set; } = "";
     }
 
+    /// <summary>One OBLIQUE picture of a map: an orthographic render from one side, pitched 45 degrees
+    /// down, which the 3D view uses to texture the building walls that face that way. Up to four per
+    /// set, one per compass side.
+    ///
+    /// Everything a reader needs to put a world point on the picture is here, so nothing has to agree
+    /// twice: a point p lands at px = (dot(right, p) - originR) x pxPerMetre and
+    /// py = height - (dot(up, p) - originU) x pxPerMetre, row 0 at the top. The basis is three unit
+    /// vectors in world x/y/z; originR/originU are the lowest projections of the capture box's eight
+    /// corners, whose height range is yMin..yMax.
+    ///
+    /// OPTIONAL, like the mesh and for the same reasons: absent on every set captured before sides
+    /// existed, dropped by an older host, ignored by an older client - so no schema version moves for
+    /// it. And a side is never worth a map: a side this host cannot use is dropped from the set's
+    /// sides and the rest of the set is served (MapStore.DropSide).</summary>
+    public sealed class MapCaptureSideDto
+    {
+        /// <summary>"N", "S", "E" or "W" - the side of the map the camera stood on.</summary>
+        [JsonPropertyName("dir")] public string Dir { get; set; } = "";
+
+        /// <summary>The picture's file name. REWRITTEN by the server to <c>&lt;key&gt;-side-&lt;dir&gt;.jpg</c>,
+        /// as a floor's is - a name from a peer is a path. On the way in it may still be the capture's own
+        /// <c>&lt;key&gt;-side-&lt;dir&gt;.png</c>: the client does not rewrite it, since this server discards
+        /// it anyway.</summary>
+        [JsonPropertyName("file")] public string File { get; set; } = "";
+
+        [JsonPropertyName("width")] public int Width { get; set; }
+        [JsonPropertyName("height")] public int Height { get; set; }
+
+        [JsonPropertyName("pxPerMetre")] public float PxPerMetre { get; set; }
+
+        /// <summary>Where the camera looked, as a world-space unit vector.</summary>
+        [JsonPropertyName("forward")] public float[]? Forward { get; set; }
+
+        /// <summary>The picture's rightward axis in world space, a unit vector.</summary>
+        [JsonPropertyName("right")] public float[]? Right { get; set; }
+
+        /// <summary>The picture's upward axis in world space, a unit vector.</summary>
+        [JsonPropertyName("up")] public float[]? Up { get; set; }
+
+        /// <summary>The smallest dot(right, corner) over the capture box's corners, in metres - the
+        /// world position of the picture's left edge along <see cref="Right"/>.</summary>
+        [JsonPropertyName("originR")] public double OriginR { get; set; }
+
+        /// <summary>The smallest dot(up, corner), in metres - the picture's bottom edge along
+        /// <see cref="Up"/>.</summary>
+        [JsonPropertyName("originU")] public double OriginU { get; set; }
+
+        /// <summary>The height range of the capture box the origins were taken over.</summary>
+        [JsonPropertyName("yMin")] public float YMin { get; set; }
+        [JsonPropertyName("yMax")] public float YMax { get; set; }
+    }
+
     /// <summary>Everything about one map's captured picture set except the pictures: exactly the
     /// client's <c>&lt;key&gt;.map.json</c>, field for field.
     ///
@@ -1176,6 +1228,11 @@ namespace QuestTreeServer
         /// When it is set, the set is not served until the mesh named here has arrived as well (the
         /// mesh route), so the meta a client reads never names a file the host does not hold.</summary>
         [JsonPropertyName("mesh")] public MapCaptureMeshDto? Mesh { get; set; }
+
+        /// <summary>The oblique side pictures this set carries, or null/empty for none - see
+        /// <see cref="MapCaptureSideDto"/>. When set, the set is not served until every side named here
+        /// has arrived or been dropped, so a meta never names a side picture the host does not hold.</summary>
+        [JsonPropertyName("sides")] public List<MapCaptureSideDto>? Sides { get; set; }
     }
 
     /// <summary>The body of POST /questtree/maps/upload: ONE floor's picture, with the whole set's
@@ -1208,13 +1265,27 @@ namespace QuestTreeServer
         [JsonPropertyName("meta")] public MapCaptureMetaDto? Meta { get; set; }
 
         /// <summary>Which of the meta's floors this post carries. Must be one of them; nothing else
-        /// says which picture these bytes are.</summary>
+        /// says which picture these bytes are. IGNORED when <see cref="Side"/> is set.</summary>
         [JsonPropertyName("level")] public int Level { get; set; }
 
+        /// <summary>"N", "S", "E" or "W" when this post carries one of the capture's oblique SIDE
+        /// pictures rather than a floor; null or empty for a floor. A side rides this route rather than
+        /// one of its own because it IS a picture - the same format, the same magic, the same size cap
+        /// and the same staging - and differs from a floor only in what it is completed against: the
+        /// meta's <c>sides</c> instead of its levels. See MapStore.Accept.
+        ///
+        /// A client sends a side with a level no floor can have (int.MinValue), so a host that
+        /// predates this field reads the post as a floor it does not know and refuses it, rather than
+        /// storing a side picture over floor 0.</summary>
+        [JsonPropertyName("side")] public string? Side { get; set; }
+
         /// <summary>"jpg" or "png", and the bytes must actually start with that format's magic
-        /// numbers - the extension a client claims decides nothing.</summary>
+        /// numbers - the extension a client claims decides nothing. A side must be "jpg".</summary>
         [JsonPropertyName("format")] public string Format { get; set; } = "";
 
+        /// <summary>The picture. For a side, EMPTY is meaningful: it is how a client that could not
+        /// encode a side it had already named tells the host to drop it, so the set does not wait for
+        /// a picture that will never come.</summary>
         [JsonPropertyName("imageBase64")] public string ImageBase64 { get; set; } = "";
     }
 
@@ -1292,6 +1363,11 @@ namespace QuestTreeServer
     {
         [JsonPropertyName("map")] public string Map { get; set; } = "";
         [JsonPropertyName("level")] public int Level { get; set; }
+
+        /// <summary>"N", "S", "E" or "W" to ask for that side picture instead of a floor; null or empty
+        /// for the floor at <see cref="Level"/>. An older host ignores it and answers with a floor, which
+        /// is why the client only ever asks for a side the index said the set has.</summary>
+        [JsonPropertyName("side")] public string? Side { get; set; }
     }
 
     /// <summary>One floor's picture, base64-encoded.

@@ -104,10 +104,22 @@ namespace QuestTree.QuestGraph
         /// largest thing phase 3C's triangle budget produces.</summary>
         private const int MaxMeshBytes = 12 * 1024 * 1024;
 
-        /// <summary>The most one map's pictures AND mesh may weigh coming down, decoded. The plan's
-        /// per-map ceiling on the host side, checked again here; it rose from 20 MB with the mesh, by
-        /// exactly the mesh's own ceiling.</summary>
-        private const long MaxMapDownloadBytes = 32L * 1024 * 1024;
+        /// <summary>The most one map's pictures, sides AND mesh may weigh coming down, decoded. The host's
+        /// per-map ceiling (MapStore.MaxBytesPerMap), checked again here: 8 floors and 4 sides at 2.5 MB
+        /// and a 12 MB mesh. It rose from 20 MB with the mesh and from 32 MB with the sides, each time by
+        /// exactly the new part's ceiling.</summary>
+        private const long MaxMapDownloadBytes = 42L * 1024 * 1024;
+
+        /// <summary>The four sides a capture may carry an oblique picture from, in the order they are
+        /// posted and fetched - the host's own order (MapStore.SideDirs), so both halves walk them
+        /// alike.</summary>
+        private static readonly string[] SideDirs = { "N", "S", "E", "W" };
+
+        /// <summary>The level a SIDE post carries. No floor has it, which is the point: a host that
+        /// predates <see cref="MapUploadRequest.Side"/> ignores that field and reads the post as a floor
+        /// of this level - and refuses it as one its meta does not name, instead of storing a side
+        /// picture over a real floor. A host that knows sides ignores the level.</summary>
+        private const int SideLevel = int.MinValue;
 
         /// <summary>The most a session will download in total. A player who joins a host holding
         /// thirty maps gets what fits and the rest on the next start, rather than a quarter of an hour
@@ -239,6 +251,14 @@ namespace QuestTree.QuestGraph
                 // single projection and be refused outright.
                 if (!DescribeWire(key, meta, floors)) yield break;
 
+                // The SIDES, read and described for the wire before the first post for the reason the
+                // floors are: every post carries the meta, and the host checks each side in it against
+                // its own scale. A side whose picture is not on this disk is taken out of the meta here,
+                // so the host is never told to wait for it.
+                var sides = ReadSides(key, meta);
+
+                DescribeSidesForWire(key, meta, sides);
+
                 // The MESH, read and checked BEFORE the first post. Before, because the meta travels
                 // with every floor and a host that sees a mesh block HOLDS THE WHOLE SET until the file
                 // arrives - so a block this machine cannot honour has to be out of the meta before the
@@ -321,6 +341,78 @@ namespace QuestTree.QuestGraph
                     }
                 }
 
+                // The SIDES, after the floors and before the mesh - and only when the host still holds a
+                // meta it can complete (nothing dropped since the last post): otherwise it is waiting for a
+                // floor that will never arrive, and nothing more is worth sending.
+                var sidesPosted = 0;
+
+                if (posted > 0 && droppedSincePost == 0 && sides.Count > 0)
+                {
+                    foreach (var side in sides)
+                    {
+                        yield return null;
+
+                        // A side that cannot be encoded is still POSTED - empty. The host has already been
+                        // told to expect it (every floor's meta named it), and an empty side post is how it
+                        // is told to stop expecting it; leaving it unsent would hold the whole set until the
+                        // host's next start a day later.
+                        var encoded = Encode(key, side);
+
+                        if (!encoded)
+                        {
+                            side.Base64 = "";
+                            side.Bytes = 0;
+
+                            Plugin.LogSource?.LogInfo(
+                                $"QuestTree: {key}'s {side.Side} side picture could not be prepared, so the host is told " +
+                                "to go on without it.");
+                        }
+
+                        var task = StartPost(key, meta, side);
+                        if (task == null) yield break;
+
+                        var deadline = Time.realtimeSinceStartup + RequestSeconds;
+                        while (!task.IsCompleted && Time.realtimeSinceStartup < deadline) yield return null;
+
+                        if (!task.IsCompleted)
+                        {
+                            Plugin.LogSource?.LogInfo(
+                                $"QuestTree: the host did not answer within {RequestSeconds:0}s while {key}'s " +
+                                $"{side.Side} side was being offered - the rest of the capture is not sent.");
+
+                            // Waited out before letting go of _uploading - see the floor loop.
+                            while (!task.IsCompleted) yield return null;
+
+                            yield break;
+                        }
+
+                        // Out of the meta the later posts carry once it is dealt with either way: the host
+                        // now has it or has dropped it, and nothing after this needs to name it again.
+                        if (!encoded) meta.Sides?.Remove(side.SideEntry);
+
+                        var verdict = JudgeSide(key, side, task);
+
+                        if (verdict == SideVerdict.Stop) yield break;
+
+                        // A host that takes no sides - one from before they existed - has already been
+                        // shown every floor, and may still be waiting for the mesh. Sides stop; the mesh
+                        // goes.
+                        if (verdict == SideVerdict.NoSides) break;
+
+                        if (encoded)
+                        {
+                            sidesPosted++;
+                            bytes += side.Bytes;
+                        }
+
+                        if (verdict == SideVerdict.Complete)
+                        {
+                            Done(key, posted, bytes, 0, clock, sidesPosted);
+                            yield break;
+                        }
+                    }
+                }
+
                 // Past the loop, so the host never called the set complete. With a mesh to offer that is
                 // the EXPECTED state - a 1.19.0 host answers the last floor "waiting for the mesh" - so
                 // the mesh goes now, and it is the post that completes the set.
@@ -357,13 +449,13 @@ namespace QuestTree.QuestGraph
                     switch (JudgeMesh(key, mesh, task))
                     {
                         case MeshVerdict.Stored:
-                            Done(key, posted, bytes, mesh.Length, clock);
+                            Done(key, posted, bytes, mesh.Length, clock, sidesPosted);
                             break;
 
                         case MeshVerdict.ServedFlat:
                             // The pictures ARE on the host - the warning above said the mesh is not - so
                             // the upload's own line is still true, without the mesh in it.
-                            Done(key, posted, bytes, 0, clock);
+                            Done(key, posted, bytes, 0, clock, sidesPosted);
                             break;
                     }
 
@@ -591,6 +683,277 @@ namespace QuestTree.QuestGraph
             return true;
         }
 
+        /// <summary>
+        /// The capture's side pictures that are actually on this disk, ready to post, in
+        /// <see cref="SideDirs"/> order. A side the meta names whose picture is missing, whose name is
+        /// not a bare file name, or whose direction is not one of the four is taken OUT of the meta
+        /// here, before the first post - a host told about a side waits for it, and this machine cannot
+        /// send one it does not have. Never throws; on any failure the capture goes up without sides.
+        /// </summary>
+        /// <param name="key">The map's internal id.</param>
+        /// <param name="meta">The meta being offered; its <c>Sides</c> is trimmed to what will be sent.</param>
+        private static List<FloorUpload> ReadSides(string key, MapCaptureMetaDto meta)
+        {
+            var sides = new List<FloorUpload>();
+
+            try
+            {
+                if (meta?.Sides == null || meta.Sides.Count == 0)
+                {
+                    if (meta != null) meta.Sides = null;
+                    return sides;
+                }
+
+                var dir = CaptureDir(key);
+                var kept = new List<MapCaptureSideDto>();
+
+                foreach (var dirName in SideDirs)
+                {
+                    var side = meta.Sides.Find(sd => sd != null &&
+                                                     string.Equals(sd.Dir, dirName, StringComparison.OrdinalIgnoreCase));
+
+                    if (side == null || dir == null || string.IsNullOrEmpty(side.File)) continue;
+                    if (!string.Equals(side.File, Path.GetFileName(side.File), StringComparison.Ordinal)) continue;
+
+                    var picture = Path.Combine(dir, side.File);
+                    if (!File.Exists(picture)) continue;
+
+                    side.Dir = dirName;
+                    kept.Add(side);
+
+                    sides.Add(new FloorUpload
+                    {
+                        Level = SideLevel,
+                        Name = $"{dirName} side",
+                        Path = picture,
+                        Side = dirName,
+                        SideEntry = side
+                    });
+                }
+
+                meta.Sides = kept.Count == 0 ? null : kept;
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: the side pictures of {key} could not be read back for upload ({ex.Message}) - " +
+                    "the capture goes up without them.");
+
+                meta.Sides = null;
+                sides.Clear();
+            }
+
+            return sides;
+        }
+
+        /// <summary>
+        /// Rewrites each side's entry for the size it goes up at - width, height and pxPerMetre - as
+        /// <see cref="DescribeWire"/> does for the floors, and for the same reason: the host checks the
+        /// three against each other (MapStore.SideProblem), and a side described at the capture's size
+        /// but sent at 2048 would be dropped there.
+        ///
+        /// Per side rather than once for all of them, because the four are not the same shape: the N and
+        /// S views span the map's width, the E and W views its depth. The scale comes off the side
+        /// ScaleTo PINS, as for the floors, and the span it is divided by is the capture box projected on
+        /// the side's own axes - the box's eight corners, the meta's extent by the side's height range -
+        /// which is the same arithmetic the host checks with, so the two cannot disagree by more than the
+        /// rounding of the short side. The basis and the origins are distances in the world and do not
+        /// change with the picture's size.
+        /// </summary>
+        /// <param name="key">The map's internal id.</param>
+        /// <param name="meta">The meta being offered, for its extent.</param>
+        /// <param name="sides">The sides to be posted.</param>
+        private static void DescribeSidesForWire(string key, MapCaptureMetaDto meta, List<FloorUpload> sides)
+        {
+            if (meta?.Extent == null) return;
+
+            foreach (var upload in sides)
+            {
+                var side = upload.SideEntry;
+
+                if (side == null || side.Width <= 0 || side.Height <= 0) continue;
+
+                // The short side CEILED, as the encoder will produce it - see ScaleTo.
+                ScaleTo(side.Width, side.Height, MaxLongSide, out var width, out var height, ceilShort: true);
+
+                if (width == side.Width && height == side.Height) continue;
+
+                if (!SideSpans(meta.Extent, side, out var spanR, out var spanU)) continue;
+
+                side.PxPerMetre = height >= width
+                    ? (float)(height / spanU)
+                    : (float)(width / spanR);
+
+                side.Width = width;
+                side.Height = height;
+
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: {key}'s {upload.Side} side is offered as {width}x{height} px at " +
+                    $"{side.PxPerMetre:0.###} px/m.");
+            }
+        }
+
+        /// <summary>The capture box - the extent by the side's height range - projected on a side's right
+        /// and up axes: how many metres the picture spans each way. False when the basis is unusable, and
+        /// then the side is left as it is for the host to judge.</summary>
+        private static bool SideSpans(MapRectDto extent, MapCaptureSideDto side, out double spanR, out double spanU)
+        {
+            spanR = spanU = 0d;
+
+            if (side.Right == null || side.Right.Length != 3 || side.Up == null || side.Up.Length != 3) return false;
+
+            double minR = double.MaxValue, maxR = double.MinValue, minU = double.MaxValue, maxU = double.MinValue;
+
+            foreach (var x in new[] { extent.MinX, extent.MaxX })
+            foreach (var y in new[] { (double)side.YMin, side.YMax })
+            foreach (var z in new[] { extent.MinZ, extent.MaxZ })
+            {
+                var r = x * side.Right[0] + y * side.Right[1] + z * side.Right[2];
+                var u = x * side.Up[0] + y * side.Up[1] + z * side.Up[2];
+
+                minR = Math.Min(minR, r);
+                maxR = Math.Max(maxR, r);
+                minU = Math.Min(minU, u);
+                maxU = Math.Max(maxU, u);
+            }
+
+            spanR = maxR - minR;
+            spanU = maxU - minU;
+
+            return spanR > 0d && spanU > 0d;
+        }
+
+        /// <summary>What the host's answer to one side post means for the rest of the upload.</summary>
+        internal enum SideVerdict
+        {
+            /// <summary>Taken or dropped; send the next side.</summary>
+            Continue,
+
+            /// <summary>The side was the last piece and the host has the whole set.</summary>
+            Complete,
+
+            /// <summary>This host does not take sides at all. Stop sending them; the mesh still goes.</summary>
+            NoSides,
+
+            /// <summary>Send nothing more. The reason has been logged.</summary>
+            Stop,
+
+            /// <summary>This host does not take uploads at all - <see cref="JudgeSide"/> turns it into
+            /// <see cref="Stop"/> after saying so and remembering it for the session.</summary>
+            Declined
+        }
+
+        /// <summary>
+        /// The host's answer to one side post, and at most one line about it.
+        ///
+        /// A host that knows sides never refuses a post over its SIDE - it drops the side, says so in the
+        /// reason (logged here at Info), and answers as usual. So a refusal of a side post means one of two
+        /// different things, and <see cref="ClassifySide"/> tells them apart by the host's own words:
+        ///
+        /// - the level refusal ("level -2147483648 is not one of the N floors the meta names") is a host
+        ///   from before sides, reading the post as a floor of a level no floor has (see SideLevel). Debug,
+        ///   and the sides stop but the mesh still goes - such a host may be waiting for one;
+        /// - ANY other refusal is a real one - the capture, not the side - and it stops the upload exactly
+        ///   as it would have stopped at a floor, with one Warning. Treating it as "an old host" was the
+        ///   first version's mistake: the client then posted the whole mesh into a set the host would never
+        ///   complete.
+        /// </summary>
+        private static SideVerdict JudgeSide(string key, FloorUpload side, Task<string> task)
+        {
+            string reply;
+
+            try
+            {
+                reply = task.Result;
+            }
+            catch (Exception ex)
+            {
+                var message = ex is AggregateException aggregate && aggregate.InnerException != null
+                    ? aggregate.InnerException.Message
+                    : ex.Message;
+
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: the host could not be offered {key}'s {side.Side} side ({message}) - the rest of the " +
+                    "capture is not sent.");
+                return SideVerdict.Stop;
+            }
+
+            var response = NotOurs<MapUploadResponse>(reply, out var excerpt);
+            var verdict = ClassifySide(response);
+
+            switch (verdict)
+            {
+                case SideVerdict.NoSides:
+                    Plugin.LogSource?.LogDebug(
+                        response == null || string.IsNullOrEmpty(response.Outcome)
+                            ? $"QuestTree: the reply to {key}'s {side.Side} side was not the server half's - {excerpt}"
+                            : $"QuestTree: the host did not take {key}'s {side.Side} side{Because(response.Reason)} - it " +
+                              "predates side pictures, so the rest of the capture goes up without them.");
+                    return verdict;
+
+                case SideVerdict.Declined:
+                    _uploadsDeclined = true;
+
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: this host does not accept map pictures{Because(response.Reason)} - captures " +
+                        "stay on this machine, and nothing more is offered this session.");
+                    return SideVerdict.Stop;
+
+                case SideVerdict.Stop:
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: the host refused the capture of {key} at its {side.Side} side" +
+                        $"{Because(response.Reason)} - the rest of it is not sent.");
+                    return verdict;
+
+                default:
+                    // The host dropped this side and went on - the one thing about a side worth a line.
+                    if (response.Reason != null &&
+                        response.Reason.IndexOf("side was dropped", StringComparison.OrdinalIgnoreCase) >= 0)
+                        Plugin.LogSource?.LogInfo(
+                            $"QuestTree: the host went on without {key}'s {side.Side} side picture{Because(response.Reason)}.");
+
+                    return verdict;
+            }
+        }
+
+        /// <summary>The host's refusal of a floor whose level its meta does not name - the sentence a host
+        /// from before sides answers a side post with, because it reads the post as a floor of SideLevel.
+        /// MapStore.Accept's own words; the one refusal of a side post that is not about the capture.</summary>
+        private const string LevelRefusal = "is not one of";
+
+        /// <summary>
+        /// What one side post's answer means, with no logging and no Unity - the decision JudgeSide acts
+        /// on, kept pure so it can be checked from outside the game (the Stage U client harness loads this
+        /// assembly and calls it). Null or outcome-less is not the server half's reply: an older host with
+        /// no map routes at all.
+        /// </summary>
+        internal static SideVerdict ClassifySide(MapUploadResponse response)
+        {
+            if (response == null || string.IsNullOrEmpty(response.Outcome)) return SideVerdict.NoSides;
+
+            switch (response.Outcome.Trim().ToLowerInvariant())
+            {
+                case "stored":
+                    return SideVerdict.Continue;
+
+                case "complete":
+                    return SideVerdict.Complete;
+
+                case "declined":
+                    return SideVerdict.Declined;
+
+                case "rejected":
+                    return (response.Reason ?? "").IndexOf(LevelRefusal, StringComparison.OrdinalIgnoreCase) >= 0
+                        ? SideVerdict.NoSides
+                        : SideVerdict.Stop;
+
+                default:
+                    // An outcome this build does not know is not evidence of an OLD host - an old one has
+                    // the four outcomes - so it stops, as an unknown answer to a floor does.
+                    return SideVerdict.Stop;
+            }
+        }
+
         /// <summary>Flattens a picture's transparency onto <see cref="BackdropFill"/>, in place, so what
         /// a host receives looks like what the capturing player sees. Straight source-over: the colour is
         /// already premultiplied by nothing, so it is c*a + fill*(1-a), and every pixel comes out opaque.
@@ -687,7 +1050,11 @@ namespace QuestTree.QuestGraph
                     return false;
                 }
 
-                ScaleTo(source.width, source.height, MaxLongSide, out var width, out var height);
+                // A side is scaled with its short side ceiled, exactly as DescribeSidesForWire described
+                // it; a floor with the rounding it has always had. The two MUST match, or the size check
+                // below drops every rescaled side.
+                ScaleTo(source.width, source.height, MaxLongSide, out var width, out var height,
+                    ceilShort: floor.Side != null);
 
                 // The alpha flattened onto the tab's own backdrop BEFORE the downscale, because a JPEG
                 // has none - see BackdropFill.
@@ -734,12 +1101,14 @@ namespace QuestTree.QuestGraph
                 // The check that can fail, and the one that keeps the shared meta honest: every post
                 // carries the same meta, whose floors DescribeWire has already measured, so a picture
                 // that came out a different size cannot be described - it can only be left out.
-                if (encodeFrom.width != floor.Entry.Width || encodeFrom.height != floor.Entry.Height)
+                if (encodeFrom.width != floor.WantWidth || encodeFrom.height != floor.WantHeight)
                 {
                     Plugin.LogSource?.LogWarning(
                         $"QuestTree: {key} \"{floor.Name}\" came out {encodeFrom.width}x{encodeFrom.height} px " +
-                        $"where its meta says {floor.Entry.Width}x{floor.Entry.Height} - the capture's meta does " +
-                        "not describe its own pictures, so this floor is not offered. Capture the map again.");
+                        $"where its meta says {floor.WantWidth}x{floor.WantHeight} - the capture's meta does " +
+                        (floor.Side != null
+                            ? "not describe its own side picture, so the host is told to go on without this side."
+                            : "not describe its own pictures, so this floor is not offered. Capture the map again."));
                     return false;
                 }
 
@@ -888,8 +1257,15 @@ namespace QuestTree.QuestGraph
         /// <param name="maxLongSide">The most either side may be.</param>
         /// <param name="scaledWidth">The width to scale to.</param>
         /// <param name="scaledHeight">The height to scale to.</param>
+        /// <param name="ceilShort">True for a SIDE picture: the short side is rounded UP rather than to the
+        /// nearest pixel. The host checks a side's size against ceil(span x pxPerMetre) - a ceil, as the
+        /// capture itself sizes the picture - and a side's span is in a basis with irrational components,
+        /// so its rendered size is already a ceil of a non-integer; rounding the scaled short side to the
+        /// nearest pixel then lands on the wrong side of the host's ceil half the time. Floors keep the
+        /// rounding they have always had (their sweep is in DescribeWire), so no floor that uploads today
+        /// is described differently tomorrow.</param>
         internal static void ScaleTo(
-            int width, int height, int maxLongSide, out int scaledWidth, out int scaledHeight)
+            int width, int height, int maxLongSide, out int scaledWidth, out int scaledHeight, bool ceilShort = false)
         {
             scaledWidth = width;
             scaledHeight = height;
@@ -897,15 +1273,19 @@ namespace QuestTree.QuestGraph
             if (width <= 0 || height <= 0 || maxLongSide <= 0) return;
             if (width <= maxLongSide && height <= maxLongSide) return;
 
+            double Short(double value) => ceilShort
+                ? Math.Ceiling(value - 1e-9)
+                : Math.Round(value, MidpointRounding.AwayFromZero);
+
             if (width >= height)
             {
                 scaledWidth = maxLongSide;
-                scaledHeight = Math.Max(1, (int)Math.Round(height * (double)maxLongSide / width, MidpointRounding.AwayFromZero));
+                scaledHeight = Math.Max(1, (int)Short(height * (double)maxLongSide / width));
             }
             else
             {
                 scaledHeight = maxLongSide;
-                scaledWidth = Math.Max(1, (int)Math.Round(width * (double)maxLongSide / height, MidpointRounding.AwayFromZero));
+                scaledWidth = Math.Max(1, (int)Short(width * (double)maxLongSide / height));
             }
         }
 
@@ -923,9 +1303,12 @@ namespace QuestTree.QuestGraph
                 Map = key,
                 ClientVersion = ModInfo.Version,
                 Meta = meta,
-                Level = floor.Level,
+
+                // A side carries a level no floor has - see SideLevel - and its direction.
+                Level = floor.Side != null ? SideLevel : floor.Level,
+                Side = floor.Side,
                 Format = "jpg",
-                ImageBase64 = floor.Base64
+                ImageBase64 = floor.Base64 ?? ""
             };
 
             try
@@ -1026,11 +1409,13 @@ namespace QuestTree.QuestGraph
         /// <param name="bytes">What the pictures weighed.</param>
         /// <param name="meshBytes">What the mesh weighed, or 0 when none was sent.</param>
         /// <param name="clock">Running since the upload started.</param>
+        /// <param name="sides">How many side pictures went up with it.</param>
         private static void Done(
-            string key, int floors, long bytes, long meshBytes, System.Diagnostics.Stopwatch clock)
+            string key, int floors, long bytes, long meshBytes, System.Diagnostics.Stopwatch clock, int sides = 0)
         {
             Plugin.LogSource?.LogInfo(
                 $"QuestTree: capture of {key} uploaded to the host - {floors} floor(s)" +
+                $"{(sides > 0 ? $", {sides} side(s)" : "")}" +
                 $"{(meshBytes > 0 ? $" and a {Mb(meshBytes)} MB mesh" : "")}, {Mb(bytes + meshBytes)} MB.");
 
             Plugin.LogSource?.LogDebug(
@@ -1297,8 +1682,22 @@ namespace QuestTree.QuestGraph
             public string Path = "";
 
             /// <summary>This floor's entry in the meta being sent, rewritten by <see cref="Encode"/>
-            /// to describe the picture actually going up rather than the one on disk.</summary>
+            /// to describe the picture actually going up rather than the one on disk. Null for a side.</summary>
             public MapCaptureFloorDto Entry;
+
+            /// <summary>"N"/"S"/"E"/"W" when this is a SIDE picture going up through the floor route,
+            /// with its entry in the meta; null for a floor. A side is encoded exactly as a floor is -
+            /// composited on the backdrop, scaled to fit the long side, a JPEG at the same quality and
+            /// under the same cap - which is why it is the same type rather than a second one.</summary>
+            public string Side;
+
+            public MapCaptureSideDto SideEntry;
+
+            /// <summary>The size the meta promises this picture goes up at - the check
+            /// <see cref="Encode"/> holds what it produced to.</summary>
+            public int WantWidth => SideEntry != null ? SideEntry.Width : Entry.Width;
+
+            public int WantHeight => SideEntry != null ? SideEntry.Height : Entry.Height;
 
             public string Base64;
             public long Bytes;
@@ -1623,6 +2022,54 @@ namespace QuestTree.QuestGraph
                     return 0;
                 }
 
+                // The SIDES, after the floors, through the same image route with the side's direction.
+                // Only those the host's meta names, and each held to the size that meta states before it
+                // is written: a side the host cannot send, that is not a JPEG of that size, or that does
+                // not fit the map's budget is left out of the meta rather than named beside a file that
+                // is not there - the 3D view then textures those walls with a flat tint, as it does for
+                // every set captured before sides existed.
+                var sideNames = new List<string>();
+                var keptSides = new List<MapCaptureSideDto>();
+
+                if (meta.Sides != null)
+                {
+                    foreach (var dirName in SideDirs)
+                    {
+                        var side = meta.Sides.Find(sd => sd != null &&
+                                                         string.Equals(sd.Dir, dirName, StringComparison.OrdinalIgnoreCase));
+
+                        if (side == null) continue;
+
+                        var picture = FetchSide(key, dirName, side, entry.Stamp, result, out var sideReplaced);
+
+                        // As for a floor: the host now holds a different set, and half of each is worse
+                        // than either - nothing has left the staging, so the map stays as it was.
+                        if (sideReplaced) return 0;
+
+                        if (picture == null) continue;
+
+                        if (bytes + picture.Length > MaxMapDownloadBytes)
+                        {
+                            result.Debug.Add(
+                                $"QuestTree: {key}'s {dirName} side would take the map past the " +
+                                $"{Mb(MaxMapDownloadBytes)} MB it may weigh - it is left out.");
+                            continue;
+                        }
+
+                        var sideName = SideFileName(key, dirName);
+
+                        File.WriteAllBytes(Path.Combine(staging, sideName), picture);
+
+                        side.Dir = dirName;
+                        side.File = sideName;
+                        keptSides.Add(side);
+                        sideNames.Add(sideName);
+                        bytes += picture.Length;
+                    }
+                }
+
+                meta.Sides = keptSides.Count == 0 ? null : keptSides;
+
                 // The MESH, after the floors and only when the index said there is one - so an older
                 // host is never asked, and a newer one is asked exactly once per set. A PERMANENT failure
                 // (a sha that does not match, a format or size this build refuses) installs the set
@@ -1691,10 +2138,11 @@ namespace QuestTree.QuestGraph
                     Path.Combine(staging, key + MetaSuffix),
                     JsonConvert.SerializeObject(meta, Formatting.Indented));
 
-                if (!Swap(root, key, staging, floors, meshName, entry.Stamp, result)) return 0;
+                if (!Swap(root, key, staging, floors, sideNames, meshName, entry.Stamp, result)) return 0;
 
                 result.Info.Add(
                     $"QuestTree: map picture set for {key} received from the host - {floors.Count} floor(s)" +
+                    $"{(sideNames.Count == 0 ? "" : $", {sideNames.Count} side(s)")}" +
                     $"{(meshName == null ? "" : " and a 3D mesh")}, {Mb(bytes)} MB.");
 
                 return bytes;
@@ -1737,9 +2185,11 @@ namespace QuestTree.QuestGraph
         /// method exists to prevent.</param>
         /// <param name="stamp">The host's name for this set, written last of all.</param>
         /// <param name="result">Where a failure's line goes.</param>
+        /// <param name="sides">The side pictures' names in the staging folder - moved with the floors and
+        /// kept by step 4, which sweeps any side an older set of this map had and this one does not.</param>
         private static bool Swap(
-            string root, string key, string staging, List<MapCaptureFloorDto> floors, string mesh, string stamp,
-            SyncResult result)
+            string root, string key, string staging, List<MapCaptureFloorDto> floors, List<string> sides,
+            string mesh, string stamp, SyncResult result)
         {
             var folder = Path.Combine(root, key);
 
@@ -1767,6 +2217,18 @@ namespace QuestTree.QuestGraph
                     File.Move(from, to);
 
                     kept.Add(floor.File);
+                }
+
+                // (2a) The side pictures, with the floors and for the same reason: the meta names them.
+                foreach (var side in sides ?? new List<string>())
+                {
+                    var from = Path.Combine(staging, side);
+                    var to = Path.Combine(folder, side);
+
+                    if (File.Exists(to)) File.Delete(to);
+                    File.Move(from, to);
+
+                    kept.Add(side);
                 }
 
                 // (2b) The mesh, with the pictures and before the meta, for the same reason they are:
@@ -2136,6 +2598,124 @@ namespace QuestTree.QuestGraph
         /// a name on the wire is a path.</summary>
         /// <param name="key">The map's internal id.</param>
         private static string MeshFileName(string key) => MapMeshFile.FileNameFor(key);
+
+        /// <summary>
+        /// One side picture from the host, checked, or null when there is none to have. The same route a
+        /// floor comes down (the image route, with the side's direction), the same caps and the same
+        /// stamp check - and one more check than a floor gets: the JPEG's own frame size must be the
+        /// width and height the meta states. A side's pixels are mapped onto walls by those two numbers
+        /// and nothing else, so a picture of any other size would texture every wall a constant fraction
+        /// off with no other symptom.
+        /// </summary>
+        /// <param name="key">The map's internal id.</param>
+        /// <param name="dir">The side's direction.</param>
+        /// <param name="side">Its entry in the host's meta.</param>
+        /// <param name="stamp">The set this download belongs to.</param>
+        /// <param name="result">Where the lines go.</param>
+        /// <param name="replaced">True when the host answered with a DIFFERENT set's stamp.</param>
+        private static byte[] FetchSide(
+            string key, string dir, MapCaptureSideDto side, string stamp, SyncResult result, out bool replaced)
+        {
+            replaced = false;
+
+            try
+            {
+                var body = JsonConvert.SerializeObject(new MapImageRequest { Map = key, Side = dir });
+                var image = NotOurs<MapImageDto>(Post(ImageRoute, body), out var excerpt);
+
+                if (image == null)
+                {
+                    result.Debug.Add($"QuestTree: the reply for {key}'s {dir} side was not the server half's - {excerpt}");
+                    return null;
+                }
+
+                if (string.IsNullOrEmpty(image.ImageBase64))
+                {
+                    result.Debug.Add($"QuestTree: the host has no {dir} side picture of {key}.");
+                    return null;
+                }
+
+                if (!string.IsNullOrEmpty(image.Stamp) && !string.Equals(image.Stamp, stamp, StringComparison.Ordinal))
+                {
+                    replaced = true;
+
+                    result.Debug.Add(
+                        $"QuestTree: the host's pictures of {key} changed while they were being fetched - the whole " +
+                        "set is taken again next session rather than half of each.");
+                    return null;
+                }
+
+                var bytes = Convert.FromBase64String(image.ImageBase64);
+
+                if (bytes.Length == 0 || bytes.Length > MaxFloorDownloadBytes || Extension(bytes) != ".jpg")
+                {
+                    result.Debug.Add(
+                        $"QuestTree: the host's {dir} side picture of {key} is not a JPEG this build will write - " +
+                        "it is left out.");
+                    return null;
+                }
+
+                if (!JpegSize(bytes, out var width, out var height) || width != side.Width || height != side.Height)
+                {
+                    result.Debug.Add(
+                        $"QuestTree: the host's {dir} side picture of {key} is {width}x{height} px where its meta says " +
+                        $"{side.Width}x{side.Height} - it is left out rather than drawn misplaced.");
+                    return null;
+                }
+
+                return bytes;
+            }
+            catch (Exception ex)
+            {
+                result.Debug.Add($"QuestTree: the host's {dir} side picture of {key} could not be taken ({ex.Message}).");
+                return null;
+            }
+        }
+
+        /// <summary>A side picture's file name in a map's folder - the host's own name for it. Built from
+        /// the key and the direction, never from anything the host sent.</summary>
+        private static string SideFileName(string key, string dir) => $"{key}-side-{dir}.jpg";
+
+        /// <summary>A JPEG's width and height from its frame header, or false. Walks the marker chain
+        /// rather than trusting an offset - the frame header comes after however many other segments the
+        /// encoder wrote - and decodes nothing: the same walk tools/check-maps-pack.py makes.</summary>
+        internal static bool JpegSize(byte[] data, out int width, out int height)
+        {
+            width = height = 0;
+
+            if (data == null || data.Length < 4 || data[0] != 0xFF || data[1] != 0xD8) return false;
+
+            var at = 2;
+
+            while (at + 3 < data.Length)
+            {
+                if (data[at] != 0xFF) return false;
+
+                var marker = data[at + 1];
+
+                if (marker == 0xFF) { at++; continue; }
+                if (marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7)) { at += 2; continue; }
+                if (marker == 0xD9 || marker == 0xDA) return false;
+
+                var length = (data[at + 2] << 8) | data[at + 3];
+                if (length < 2) return false;
+
+                // SOF0-15 except DHT (C4), JPG (C8) and DAC (CC), which are not frame headers.
+                if (marker >= 0xC0 && marker <= 0xCF && marker != 0xC4 && marker != 0xC8 && marker != 0xCC)
+                {
+                    if (at + 9 > data.Length) return false;
+
+                    height = (data[at + 5] << 8) | data[at + 6];
+                    width = (data[at + 7] << 8) | data[at + 8];
+
+                    return width > 0 && height > 0;
+                }
+
+                at += 2 + length;
+            }
+
+            return false;
+        }
 
         /// <summary>".jpg", ".png", or null when these bytes are neither. Read from the bytes
         /// themselves - the two magics - because the file name is what the reader will trust.</summary>

@@ -413,6 +413,41 @@ namespace QuestTree.UI
             public float Rotation;
         }
 
+        /// <summary>
+        /// One oblique side picture: a render of the map from one side, pitched 45 degrees down, and
+        /// the projection that maps a world point onto it. The contract is frozen in the plan (Stage U):
+        /// <c>px = (dot(r,p) - OriginR) * PxPerMetre</c>, <c>py = Height - (dot(u,p) - OriginU) * PxPerMetre</c>,
+        /// image row 0 at the top.
+        ///
+        /// The picture itself loads through a <see cref="MapLayer"/> used only as a raster slot - no
+        /// bounds, no floor - which is the point: it is decoded by the same loader as the floors, sits in
+        /// the same picture cache, and is evicted and released by the same rules. Nothing about a side
+        /// picture needs a second cache that could disagree with the first about how much memory the
+        /// pictures hold.
+        /// </summary>
+        internal sealed class SidePicture
+        {
+            /// <summary>"N", "S", "E" or "W": the side the camera stood on.</summary>
+            public string Dir = "";
+
+            public int Width;
+            public int Height;
+            public float PxPerMetre;
+
+            /// <summary>The camera's basis, unit and orthogonal (checked on read to 1e-3).</summary>
+            public Vector3 Forward;
+            public Vector3 Right;
+            public Vector3 Up;
+
+            public float OriginR;
+            public float OriginU;
+            public float YMin;
+            public float YMax;
+
+            /// <summary>The picture's raster slot. See the class comment.</summary>
+            public MapLayer Picture;
+        }
+
         /// <summary>One map DynamicMaps ships: which game maps it covers, and its floors.</summary>
         internal sealed class MapEntry
         {
@@ -440,6 +475,12 @@ namespace QuestTree.UI
             /// which has geometry to show, so the Maps tab's 3D branch is off for them by construction.
             /// </summary>
             public string MeshPath;
+
+            /// <summary>The oblique side pictures of this capture - up to four, one per compass side -
+            /// that texture the 3D map's walls. Empty for a capture taken before they existed, for a
+            /// DynamicMaps map and for a synthesised extent. Filled by MapCatalog.ReadSides from the meta's
+            /// <c>sides</c> array; a side that does not check out is left out, never the capture.</summary>
+            public readonly List<SidePicture> Sides = new();
 
             /// <summary>The map's declared coordinate rotation, applied to the artwork
             /// (MapView.PlaceArtwork) and to percentage-placed objective pins (MapView.PositionFor).
@@ -486,6 +527,44 @@ namespace QuestTree.UI
         /// ceilings that can disagree.</summary>
         internal static int MaxResidentSprites => MaxCachedSprites;
 
+        /// <summary>
+        /// Extra room in the picture cache that a live 3D view has asked for, for its side pictures.
+        ///
+        /// A 3D view holds its peeled floors (up to <see cref="MaxResidentSprites"/> - 1) AND up to four
+        /// side pictures, and every one of them is in this cache, counted and evictable like any floor.
+        /// Four sides on top of a full peel would overflow the ceiling and evict a floor the view asks for
+        /// again next frame - the thrash the peel's own cap exists to prevent. So the view reserves one slot
+        /// per side for as long as it lives and gives them back when it goes: the flat map, which never
+        /// holds a side, keeps exactly the ceiling it always had.
+        /// </summary>
+        private static int _reservedSprites;
+
+        /// <summary>The ceiling in force: the fixed one plus whatever live 3D views have reserved.</summary>
+        private static int Ceiling => MaxCachedSprites + _reservedSprites;
+
+        /// <summary>Adds (positive) or returns (negative) cache room for side pictures. Every reservation a
+        /// view makes it returns in its teardown - Map3DView keeps the count it reserved and hands back
+        /// exactly that.</summary>
+        /// <param name="delta">Slots to add, or to give back.</param>
+        internal static void ReserveSprites(int delta)
+        {
+            var next = _reservedSprites + delta;
+
+            // An imbalance is a bug in a view's teardown - room returned twice, or never taken - and it is
+            // said out loud rather than clamped away: a silent clamp would hide exactly the double return a
+            // reservation scheme exists to get right. Still clamped AFTER saying so, since a negative
+            // ceiling adjustment would starve the flat map's own cache.
+            if (next < 0)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: picture-cache reservation went negative ({_reservedSprites} {delta:+#;-#;0} = {next}) - " +
+                    $"a 3D view returned side room it did not hold. Clamped to 0.");
+                next = 0;
+            }
+
+            _reservedSprites = next;
+        }
+
         private static readonly List<MapLayer> _spriteUse = new();
 
         private static void NoteSpriteUse(MapLayer layer)
@@ -493,7 +572,7 @@ namespace QuestTree.UI
             _spriteUse.Remove(layer);
             _spriteUse.Add(layer);
 
-            while (_spriteUse.Count > MaxCachedSprites)
+            while (_spriteUse.Count > Ceiling)
             {
                 var oldest = _spriteUse[0];
                 _spriteUse.RemoveAt(0);
@@ -1166,7 +1245,7 @@ namespace QuestTree.UI
                     $"decoded in {clock.ElapsedMilliseconds} ms " +
                     $"({layer.RasterBytes / (1024f * 1024f):F1} MB); " +
                     $"{(ResidentRasterBytes + layer.RasterBytes) / (1024f * 1024f):F1} MB of pictures " +
-                    $"resident, ceiling {MaxCachedSprites} floors.");
+                    $"resident, ceiling {Ceiling} pictures.");
 
                 LogArtworkGeometry(layer, sprite);
                 return sprite;

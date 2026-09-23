@@ -522,6 +522,11 @@ namespace QuestTree.UI
                 if (current.Values.Any(c => ReferenceEquals(c.Entry, capture.Entry))) continue;
 
                 foreach (var layer in capture.Entry.Layers) DynamicMapsLibrary.ReleaseLayer(layer);
+
+                // The side pictures sit in the same cache as the floors and are let go the same way: a
+                // replaced capture's sides would otherwise stay resident with no view that could ever
+                // draw them again.
+                foreach (var side in capture.Entry.Sides) DynamicMapsLibrary.ReleaseLayer(side?.Picture);
             }
         }
 
@@ -554,6 +559,9 @@ namespace QuestTree.UI
             /// new mesh into the same name, and without this the carried-over entry would keep pointing
             /// a 3D view at geometry it has already replaced.</summary>
             public long MeshBytes;
+
+            /// <summary>The side pictures that checked out. See <see cref="ReadSides"/>.</summary>
+            public readonly List<DynamicMapsLibrary.SidePicture> Sides = new();
             public readonly List<(int Level, string Name, string File, float MinY, float MaxY)> Floors = new();
             public readonly List<(string Text, float X, float Z, DynamicMapsLibrary.MapLabelKind Kind)> Labels = new();
         }
@@ -655,6 +663,7 @@ namespace QuestTree.UI
 
                 ReadLabels(root, parsed);
                 ReadMesh(root, folder, name, parsed);
+                ReadSides(root, folder, name, parsed);
 
                 parsed.Attribution = Attribution(
                     (string)Field(root, "modVersion"), firstCapturedAt,
@@ -665,11 +674,12 @@ namespace QuestTree.UI
                 // and a hand edit that keeps the timestamp.
                 parsed.Stamp = string.Format(
                     CultureInfo.InvariantCulture,
-                    "{0}|{1}|{2}|{3:0.##},{4:0.##},{5:0.##},{6:0.##}|{7}|{8}|{9}:{10}",
+                    "{0}|{1}|{2}|{3:0.##},{4:0.##},{5:0.##},{6:0.##}|{7}|{8}|{9}:{10}|{11}",
                     metaPath, capturedAt, File.GetLastWriteTimeUtc(metaPath).Ticks,
                     parsed.MinX, parsed.MinZ, parsed.MaxX, parsed.MaxZ,
                     parsed.Rotation, parsed.Floors.Count,
-                    parsed.MeshPath ?? "", parsed.MeshBytes);
+                    parsed.MeshPath ?? "", parsed.MeshBytes,
+                    string.Join("", parsed.Sides.Select(side => side.Dir)));
 
                 return parsed;
             }
@@ -824,6 +834,198 @@ namespace QuestTree.UI
         }
 
         /// <summary>
+        /// The capture's optional oblique side pictures: <c>"sides": [{"dir","file","width","height",
+        /// "pxPerMetre","forward":[x,y,z],"right":[x,y,z],"up":[x,y,z],"originR","originU","yMin","yMax"}]</c>
+        /// - the frozen Stage U contract.
+        ///
+        /// Optional, and checked ONE SIDE AT A TIME: a side that does not check out is left out with one
+        /// line naming it and why, and the rest of the capture - its floors, its mesh, the other sides - is
+        /// untouched. The 3D view texturing three walls of four from pictures and the fourth in a flat
+        /// colour is a fine map; a capture refused over one bad side picture would be a much worse one.
+        ///
+        /// What is checked is what the viewer's UV arithmetic depends on and cannot check for itself: the
+        /// direction is one of the four and not repeated; the file is a bare name in this folder and on
+        /// disk (the same traversal guard the floors get, in its own try for the same Mono reason); the
+        /// sizes and the scale are positive; the three basis vectors are unit length and at right angles
+        /// to each other within 1e-3 - a basis that is not orthonormal projects every wall to the wrong
+        /// place on its picture, and nothing about the result would look like an error; and the origins
+        /// and y range are numbers.
+        /// </summary>
+        /// <param name="root">The meta document.</param>
+        /// <param name="folder">The capture's folder.</param>
+        /// <param name="metaName">The meta's file name, for the log lines.</param>
+        /// <param name="parsed">The capture being filled in.</param>
+        private static void ReadSides(JObject root, string folder, string metaName, ParsedCapture parsed)
+        {
+            if (!(Field(root, "sides") is JArray sides)) return;
+
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var token in sides)
+            {
+                if (!(token is JObject node)) continue;
+
+                var dir = "?";
+                string refusal;
+                DynamicMapsLibrary.SidePicture side = null;
+
+                try
+                {
+                    dir = ((string)Field(node, "dir") ?? "").Trim().ToUpperInvariant();
+                    refusal = ReadSide(node, dir, folder, seen, out side);
+                }
+                catch (Exception ex)
+                {
+                    // A field of the wrong type (a string where a number goes, an object where an array
+                    // does). This side only.
+                    refusal = $"a field is not readable ({ex.GetType().Name})";
+                }
+
+                if (refusal != null)
+                {
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: capture '{metaName}' side picture '{dir}' is left out - {refusal}. The rest " +
+                        $"of the capture is unaffected.");
+                    continue;
+                }
+
+                seen.Add(side.Dir);
+                parsed.Sides.Add(side);
+            }
+        }
+
+        /// <summary>The tolerance the side basis is checked to: unit length and pairwise dot product.</summary>
+        private const float SideBasisTolerance = 1e-3f;
+
+        /// <summary>One side, read and checked. Null on success, else the reason it is left out.</summary>
+        private static string ReadSide(
+            JObject node, string dir, string folder, HashSet<string> seen, out DynamicMapsLibrary.SidePicture side)
+        {
+            side = null;
+
+            if (dir != "N" && dir != "S" && dir != "E" && dir != "W")
+                return $"its direction '{dir}' is not one of N, S, E, W";
+
+            if (seen.Contains(dir)) return "that side is listed twice";
+
+            var declared = ((string)Field(node, "file") ?? "").Trim();
+            if (declared.Length == 0) return "it names no file";
+
+            string file;
+
+            try
+            {
+                if (!string.Equals(declared, Path.GetFileName(declared), StringComparison.Ordinal))
+                    return $"'{declared}' is not a plain file name in the capture's own folder";
+
+                file = Path.Combine(folder, declared);
+            }
+            catch (Exception ex)
+            {
+                return $"'{declared}' is not a usable file name ({ex.GetType().Name})";
+            }
+
+            if (!File.Exists(file)) return $"'{declared}' is not on disk";
+
+            var width = (int?)Field(node, "width") ?? 0;
+            var height = (int?)Field(node, "height") ?? 0;
+            var pxPerMetre = Number(node, "pxPerMetre");
+
+            if (width <= 0 || height <= 0) return "its size is not positive";
+            if (!IsFinite(pxPerMetre) || pxPerMetre <= 0f) return "its scale is not a positive number";
+
+            if (!TryVector(node, "forward", out var forward) ||
+                !TryVector(node, "right", out var right) ||
+                !TryVector(node, "up", out var up))
+            {
+                return "its basis is not three vectors of three numbers";
+            }
+
+            if (Mathf.Abs(forward.magnitude - 1f) > SideBasisTolerance ||
+                Mathf.Abs(right.magnitude - 1f) > SideBasisTolerance ||
+                Mathf.Abs(up.magnitude - 1f) > SideBasisTolerance)
+            {
+                return "its basis vectors are not unit length";
+            }
+
+            if (Mathf.Abs(Vector3.Dot(forward, right)) > SideBasisTolerance ||
+                Mathf.Abs(Vector3.Dot(forward, up)) > SideBasisTolerance ||
+                Mathf.Abs(Vector3.Dot(right, up)) > SideBasisTolerance)
+            {
+                return "its basis vectors are not at right angles";
+            }
+
+            var originR = Number(node, "originR");
+            var originU = Number(node, "originU");
+            var yMin = Number(node, "yMin");
+            var yMax = Number(node, "yMax");
+
+            if (!IsFinite(originR) || !IsFinite(originU) || !IsFinite(yMin) || !IsFinite(yMax))
+                return "its origin or height range is not a set of numbers";
+
+            side = new DynamicMapsLibrary.SidePicture
+            {
+                Dir = dir,
+                Width = width,
+                Height = height,
+                PxPerMetre = pxPerMetre,
+                Forward = forward,
+                Right = right,
+                Up = up,
+                OriginR = originR,
+                OriginU = originU,
+                YMin = yMin,
+                YMax = yMax,
+
+                // A raster slot and nothing more: the floor loader decodes it and the floor cache holds it.
+                Picture = new DynamicMapsLibrary.MapLayer
+                {
+                    Name = $"side {dir}",
+                    ImagePath = file,
+                    IsRaster = true
+                }
+            };
+
+            return null;
+        }
+
+        /// <summary>A three-number array field as a vector, or false.</summary>
+        private static bool TryVector(JObject node, string name, out Vector3 vector)
+        {
+            vector = Vector3.zero;
+
+            if (!(Field(node, name) is JArray array) || array.Count != 3) return false;
+
+            var x = TokenNumber(array[0]);
+            var y = TokenNumber(array[1]);
+            var z = TokenNumber(array[2]);
+
+            if (!IsFinite(x) || !IsFinite(y) || !IsFinite(z)) return false;
+
+            vector = new Vector3(x, y, z);
+            return true;
+        }
+
+        /// <summary>One array element as a float, or NaN - the element-sized <see cref="Number"/>.</summary>
+        private static float TokenNumber(JToken token)
+        {
+            if (token == null || token.Type == JTokenType.Null) return float.NaN;
+
+            try
+            {
+                return token.Type == JTokenType.Integer || token.Type == JTokenType.Float
+                    ? (float)token
+                    : float.TryParse((string)token, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed)
+                        ? parsed
+                        : float.NaN;
+            }
+            catch
+            {
+                return float.NaN;
+            }
+        }
+
+        /// <summary>
         /// The capture's optional 3D relief file: <c>"mesh": {"file","bytes","version","cells",
         /// "triangles","sha256"}</c>, written beside the pictures by MapMeshBuilder.
         ///
@@ -961,6 +1163,9 @@ namespace QuestTree.UI
             // One key, for the reason Synthesise gives: a capture is of one location, and claiming
             // Factory's other id would hand this map the other location's markers.
             entry.InternalNames.Add(parsed.Key);
+
+            // The side pictures, as read. Paths until a 3D view asks for their textures, like the floors.
+            entry.Sides.AddRange(parsed.Sides);
 
             var boundsMin = new Vector2(parsed.MinX, parsed.MinZ);
             var boundsMax = new Vector2(parsed.MaxX, parsed.MaxZ);

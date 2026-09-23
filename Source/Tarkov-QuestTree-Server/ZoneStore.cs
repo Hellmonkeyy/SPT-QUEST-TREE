@@ -88,11 +88,17 @@ namespace QuestTreeServer
         private const double MinTriggerCoverage = 0.9d;
 
         /// <summary>The extent sources, BEST FIRST, which is what makes this array the ranking: its
-        /// index is the rank, so nothing else has to agree about which source wins. BorderZones are
-        /// the scene's own declaration of the play area; terrains cover the ground but not the
-        /// buildings; the NavMesh box reaches wherever a bot could walk, which on an indoor map is
-        /// every catwalk a player never sees.</summary>
-        private static readonly string[] ExtentSources = { "borderzone", "terrain", "navmesh" };
+        /// index is the rank, so nothing else has to agree about which source wins - and it MUST be
+        /// the order the client measures in (MapExtentProbe.TryProbe: NavMesh, then Terrain, then
+        /// BorderZone), or the two halves fight. Until 2026-09-23 this array held the plan's original
+        /// order (BorderZone first) while the client had long since been changed to NavMesh first
+        /// because a measured Customs raid said so: every Interchange harvest then sent a 965x925 m
+        /// NavMesh rectangle, the store kept a 1073x1033 m terrain one from an older build as
+        /// "better ranked", and the shipped pictures disagreed with the zone file by 54 m on every
+        /// edge. The NavMesh box is the rectangle the pictures and the 3D relief are actually drawn
+        /// over; terrain covers ground the player never reaches; BorderZones are absent on some
+        /// maps. A stored terrain extent now loses to any incoming NavMesh one.</summary>
+        private static readonly string[] ExtentSources = { "navmesh", "terrain", "borderzone" };
 
         /// <summary>A ceiling on one map's file. Real maps hold a few hundred entries; the union
         /// never shrinks, and a client that varies positions by a metre could otherwise grow it
@@ -388,11 +394,17 @@ namespace QuestTreeServer
 
         /// <summary>Which of two extents to keep, the stored one or the one that just arrived.
         ///
-        /// Better SOURCE first, then newer sample. Source outranks recency because the sources are not
-        /// equally good measurements of the same thing: a BorderZone rectangle is the scene declaring
-        /// its own play area, a NavMesh box is wherever a bot could walk. Ranking by time instead would
-        /// mean one raid on a map whose BorderZones failed to load permanently coarsened a map every
-        /// earlier raid had measured properly - and on Fika, whichever peer posted last would decide.
+        /// Better SOURCE first, then newer sample - and better means NAVMESH first, then terrain, then
+        /// BorderZone (see ExtentSources), the order the client measures in. The NavMesh box is the
+        /// rectangle the capture's pictures and 3D relief are actually drawn over; terrain covers ground
+        /// the player never reaches; BorderZones are absent on some maps. The ranking used to be the
+        /// other way round, BorderZone first, while the client had long since been changed to NavMesh
+        /// first - and on Interchange that let an older build's 1073x1033 m terrain rectangle beat every
+        /// new 965x925 m NavMesh one, so the shipped pictures disagreed with the zone file by 54 m on
+        /// every edge. Source outranks recency because the sources are not equally good measurements of
+        /// the same thing: ranking by time instead would let one raid whose NavMesh failed to load
+        /// coarsen a map every earlier raid had measured properly - and on Fika, whichever peer posted
+        /// last would decide.
         ///
         /// An incoming null returns the stored extent: a v1 client, a headless peer, or a v2 client
         /// whose own containment check failed all send no extent, and none of them is evidence that

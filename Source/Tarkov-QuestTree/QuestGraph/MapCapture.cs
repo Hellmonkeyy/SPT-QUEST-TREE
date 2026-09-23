@@ -883,6 +883,11 @@ namespace QuestTree.QuestGraph
         /// the coroutine starts and read once, in <see cref="Prepare"/>.</summary>
         private bool _automatic;
 
+        /// <summary>Whether the capture now starting may take the side views, when it is not an
+        /// AutoCapture tick: true for a key press and for a campaign's last stop, false for every other
+        /// campaign stop. Set with <see cref="_automatic"/> and read once, in Prepare.</summary>
+        private bool _sidesAllowed = true;
+
         /// <summary>The 3D mesh build now running, so <see cref="Cleanup"/> can dispose it. An iterator
         /// that is disposed runs its finally blocks, which is where the builder waits for a GPU readback
         /// in flight before releasing its buffer - so a raid that ends in the middle of one is the
@@ -1025,6 +1030,7 @@ namespace QuestTree.QuestGraph
 
                 // A key press is the player asking for this map, so it always builds the 3D mesh.
                 _automatic = false;
+                _sidesAllowed = true;
                 StartCoroutine(Run());
             }
             catch (Exception ex)
@@ -1078,6 +1084,10 @@ namespace QuestTree.QuestGraph
 
                 yield return null;
 
+                // The floors' own wall time and pixels, which is what the side views' hold is estimated
+                // from - see CaptureSides.
+                var floorsClock = Stopwatch.StartNew();
+
                 foreach (var floor in plan.Floors)
                 {
                     if (!BeginFloor(plan, floor))
@@ -1117,6 +1127,8 @@ namespace QuestTree.QuestGraph
                     }
 
                     ReleaseScene();
+
+                    if (floor.Tiles > 0) plan.FloorPixels += (long)plan.WidthPx * plan.HeightPx;
 
                     // The water quads go before the exposure is measured, not just before the merge:
                     // a flat cyan pool is one of the brightest things in a capture, and the rain
@@ -1190,6 +1202,8 @@ namespace QuestTree.QuestGraph
                     if (!ReferenceEquals(floor, plan.Floors[plan.Floors.Count - 1])) GC.Collect();
                 }
 
+                plan.FloorSeconds = floorsClock.Elapsed.TotalSeconds;
+
                 // The 3D geometry, after the last picture and before the meta that will name it.
                 //
                 // Inside a hold of its own: the relief's rays do not care what is switched on, but the
@@ -1254,6 +1268,48 @@ namespace QuestTree.QuestGraph
                     while (serialised != null && !serialised.IsCompleted) yield return null;
 
                     StageMesh(plan, mesh, serialised);
+                }
+
+                // The four side views, after the mesh because the box they frame is the mesh's y range.
+                // Behind the same "wrote a picture" test BeginMesh asks: WriteMeta writes nothing
+                // without one, so sides staged for it would only be dropped. Driven through a guarded
+                // MoveNext for the same reason the mesh is - a side view may never cost a capture its
+                // floors.
+                if (!plan.Refused && plan.WantsSides && plan.Floors.Any(f => !f.Failed && f.Bytes > 0))
+                {
+                    plan.SidesTaken = true;
+
+                    var sides = CaptureSides(plan, mesh?.File);
+
+                    while (true)
+                    {
+                        object current = null;
+                        var more = false;
+
+                        try
+                        {
+                            more = sides.MoveNext();
+                            if (more) current = sides.Current;
+                        }
+                        catch (Exception ex)
+                        {
+                            Plugin.LogSource?.LogWarning(
+                                $"QuestTree: the side views of {plan.Key} were abandoned ({ex.GetType().Name}: " +
+                                $"{ex.Message}) - the pictures and the mesh are unaffected.");
+                            more = false;
+                        }
+
+                        if (!more) break;
+
+                        yield return current;
+                    }
+
+                    // Whatever the side loop was doing when it stopped: the scene let go, its buffers
+                    // freed and the camera looking down again. All three idempotent.
+                    ReleaseScene();
+                    ReleaseTexture(plan.SideFloor);
+                    plan.SideFloor = null;
+                    RestoreTopCamera();
                 }
 
                 // Nothing is in place until this runs: it commits every staged picture and then
@@ -1443,6 +1499,13 @@ namespace QuestTree.QuestGraph
                 // because this capture's recipe or scale refused the previous meta - is a file nothing
                 // will read, and skipping the build for it would silently lose the map's geometry.
                 plan.WantsMesh = !_automatic || CarriedMesh(plan, null) == null;
+
+                // The side views' gate. An AutoCapture tick: by the mesh's rule and for the same reason -
+                // four floor-sized renders are not something to spend every few seconds on a map that
+                // already has them. Anything else: what the caller said - a key press yes, a campaign
+                // only at its last stop, because each stop's sides would replace the last stop's whole.
+                // A capture that takes none carries the earlier ones forward (CommitSides).
+                plan.WantsSides = _automatic ? CarriedSides(plan).Count == 0 : _sidesAllowed;
 
                 if (_culling != null && _culling.Length > 0)
                 {
@@ -2095,6 +2158,10 @@ namespace QuestTree.QuestGraph
             // The 3D mesh is staged the same way and has to be dropped the same way: a refused capture
             // must not leave a <key>-mesh.bin.tmp behind for the next one to trip over.
             Forget(plan, plan.MeshFile);
+
+            // And the side views, all four by name whether or not this capture got to them - forgetting
+            // a .tmp that is not there costs one File.Exists.
+            foreach (var dir in MapSideView.Directions) Forget(plan, SideFileName(plan.Key, dir));
         }
 
         /// <summary>One staged file deleted, if it is there. Guarded on its own: a temporary nobody
@@ -4881,6 +4948,15 @@ namespace QuestTree.QuestGraph
         /// <param name="py0">The tile's top edge, in image pixels from the top.</param>
         private void PositionCamera(Plan plan, FloorPlan floor, int px0, int py0)
         {
+            // A side view's plan carries its side, and the camera stands somewhere else entirely - see
+            // PositionSideCamera. The branch is HERE so RenderTile and every other caller stay the one
+            // tile loop for floors and sides alike.
+            if (plan.Side != null)
+            {
+                PositionSideCamera(plan.Side, px0, py0);
+                return;
+            }
+
             // px0 and py0 are SAMPLE offsets, and the divisor is samples per metre - see
             // Plan.SamplePpm. Everything else about the framing is unchanged by supersampling.
             var centreX = plan.Extent.MinX + (px0 + TileSize * 0.5d) / plan.SamplePpm;
@@ -5129,6 +5205,10 @@ namespace QuestTree.QuestGraph
                 {
                     foreach (var floor in _plan.Floors) ReleaseTexture(floor);
 
+                    // A side view in the middle of being taken when the raid ended.
+                    ReleaseTexture(_plan.SideFloor);
+                    _plan.SideFloor = null;
+
                     // Anything this capture staged and did not commit - a refused capture's floors, a
                     // raid that ended mid-capture. Each deletion is guarded on its own, so this
                     // cannot keep the camera below from being destroyed.
@@ -5344,6 +5424,755 @@ namespace QuestTree.QuestGraph
             public readonly double Z;
         }
 
+        // --- the side views ---------------------------------------------------------------------
+        //
+        // Four oblique renders a capture, one from each side of the map looking in at 45 degrees -
+        // the texture source for the 3D map's walls (plan, stage U; the geometry is a FROZEN contract
+        // that the viewer and the host code against, and MapSideView is its arithmetic). They go
+        // through the SAME tile machinery as the floors - RenderTile, Inpaint, Develop - by giving each
+        // side a Plan of its own (its size, its tiles, its pixels per metre) and a FloorPlan of its own
+        // (its buffers). The only things that differ are where the camera stands (PositionCamera's side
+        // branch), the columns being flipped once after the tiles (see MapSideView: the camera's right
+        // is the contract's -r), no merge, no walkable mask, and the exposure, which is the top band's
+        // and is never re-measured.
+
+        /// <summary>The most pixels per metre a side view is taken at - the contract's number. Brought
+        /// down by the same memory budget as a floor when a side's span needs it.</summary>
+        private const float SidePixelsPerMetre = 2f;
+
+        /// <summary>How far in front of the box's nearest corner the side camera stands, in metres;
+        /// one metre less of it is the near plane. What that clips is only what lies CLOSER to the camera
+        /// than the box's nearest corner along f - it is a plane, not the box's walls. Geometry outside
+        /// the extent on the camera's side (the hillside past the map's edge, a building across the
+        /// boundary road) whose depth along f falls inside the box's range still projects, and draws over
+        /// the map's edge in the picture. The viewer only samples a side where a wall's projection lands,
+        /// so this costs the outermost walls some texture, not the map its geometry.</summary>
+        private const float SideStandOffMetres = 50f;
+
+        /// <summary>The capture light's intensity multiplier during a side's tiles: 1 / cos 45, so a wall
+        /// facing the camera with the light along f gets the irradiance a roof gets from the floors'
+        /// down-light. See BeginSide.</summary>
+        private const float SideLightGain = 1.41421356f;
+
+        /// <summary>The side views' y range when no mesh was built this capture: the bands' lowest
+        /// minY less this, to their highest maxY plus <see cref="SideBandsAbove"/> - roofs stand well
+        /// above the walkable band they belong to.</summary>
+        private const float SideBandsBelow = 5f;
+
+        /// <summary>See <see cref="SideBandsBelow"/>.</summary>
+        private const float SideBandsAbove = 50f;
+
+        /// <summary>One side view while it is being taken: its basis and frame (MapSideView's
+        /// numbers), and the Plan and FloorPlan it borrows the floor pipeline through.</summary>
+        private sealed class SideView
+        {
+            public string Dir;
+            public double[] Forward;
+            public double[] Right;
+            public double[] Up;
+
+            /// <summary>originR, spanR, originU, spanU, minF, maxF - see MapSideView.Frame.</summary>
+            public double[] Frame;
+
+            public float YMin;
+            public float YMax;
+            public Plan Plan;
+            public FloorPlan Floor;
+        }
+
+        /// <summary>A side view's file name: <c>&lt;key&gt;-side-&lt;dir&gt;.png</c>.</summary>
+        /// <param name="key">The map's key.</param>
+        /// <param name="dir">"N", "S", "E" or "W".</param>
+        private static string SideFileName(string key, string dir) => $"{key}-side-{dir}.png";
+
+        /// <summary>
+        /// Takes the four side views, one at a time and a step to a frame: for each, the frame and the
+        /// camera (<see cref="BeginSide"/>, which runs the self-check), the scene held and the tiles
+        /// rendered exactly as a floor's are, the columns flipped into the contract's order, the water
+        /// painted out, the development with the top band's exposure, and the encode and the stage
+        /// (<see cref="FinishSide"/>). Each side's buffers are released before the next is allocated -
+        /// one side's float buffer at a time is the memory rule - and a collect runs between them, as it
+        /// does between floors.
+        ///
+        /// Nothing here can cost the capture its floors: every step is guarded, a side that fails is
+        /// left out of the meta with one line, and Run drives this through the same guarded MoveNext it
+        /// drives the mesh with.
+        /// </summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="mesh">The mesh built this capture, whose y range the box uses; null for the
+        /// bands' own range.</param>
+        private IEnumerator CaptureSides(Plan plan, MapMeshFile mesh)
+        {
+            var clock = Stopwatch.StartNew();
+
+            if (!SidesSetup(plan, mesh, out var exposure, out var yMin, out var yMax, out var yFrom)) yield break;
+
+            // Said on EVERY capture that renders sides, automatic ticks included, with a ceiling measured
+            // from this capture's own floors: the sides go through the same tiles, so their time scales
+            // with their pixels - about a third of the floors' on Interchange, about the same again on a
+            // one-floor map like Customs. A quarter on top for the per-side set-up and development.
+            Plugin.LogSource?.LogInfo(
+                $"QuestTree: rendering {plan.Key}'s four side views for the 3D map's walls - the scene is held " +
+                $"for each as it is for a floor, up to about {SideSecondsEstimate(plan, yMin, yMax)} s; " +
+                $"y {F(yMin)}..{F(yMax)} m from {yFrom}.");
+
+            var sizes = new List<string>();
+            var scales = new HashSet<float>();
+            var rendered = 0;
+
+            for (var i = 0; i < MapSideView.Directions.Length; i++)
+            {
+                var dir = MapSideView.Directions[i];
+                var view = BeginSide(plan, dir, yMin, yMax, exposure);
+
+                if (view == null) continue;
+
+                plan.SideFloor = view.Floor;
+
+                // As for a floor: the scene's culling forced and its water flat for the whole side,
+                // released after its last tile however the tiles went.
+                HoldScene();
+
+                yield return null;
+
+                for (var tile = 0; tile < view.Plan.TileCount; tile++)
+                {
+                    RenderTile(view.Plan, view.Floor, tile);
+                    if (view.Floor.Failed) break;
+
+                    yield return null;
+                }
+
+                ReleaseScene();
+
+                if (!view.Floor.Failed)
+                {
+                    yield return null;
+                    MirrorSide(plan, view);
+                }
+
+                if (!view.Floor.Failed)
+                {
+                    var inpaint = Inpaint(view.Plan, view.Floor);
+                    while (inpaint.MoveNext()) yield return inpaint.Current;
+                }
+
+                if (!view.Floor.Failed)
+                {
+                    // No merge: the side Plan has no Previous, so Develop takes every pixel this render
+                    // drew and leaves every other one transparent - alpha 255 where drawn, 0 where not,
+                    // which is the contract. No walkable mask: the side Plan has no Reach, so Grade's
+                    // alpha is the drawn test alone.
+                    var develop = Develop(view.Plan, view.Floor);
+                    while (develop.MoveNext()) yield return develop.Current;
+                }
+
+                if (!view.Floor.Failed)
+                {
+                    yield return null;
+
+                    if (FinishSide(plan, view))
+                    {
+                        rendered++;
+                        sizes.Add($"{view.Plan.WidthPx}x{view.Plan.HeightPx}");
+                        scales.Add(view.Plan.Ppm);
+                    }
+                }
+
+                ReleaseTexture(view.Floor);
+                plan.SideFloor = null;
+
+                yield return null;
+
+                // Between sides, as between floors, and after the yield so Unity's deferred Destroy of
+                // the side's texture has happened; not after the last, where nothing is coming.
+                if (i < MapSideView.Directions.Length - 1) GC.Collect();
+            }
+
+            RestoreTopCamera();
+
+            var scale = scales.Count == 0
+                ? "at no scale"
+                : $"at {string.Join("/", scales.Select(Ppm).ToArray())} px/m";
+
+            Plugin.LogSource?.LogInfo(
+                $"QuestTree: side views for {plan.Key} - {rendered} of {MapSideView.Directions.Length} rendered " +
+                $"{scale} ({string.Join(", ", sizes.ToArray())}), " +
+                $"{(clock.Elapsed.TotalSeconds).ToString("0.0", CultureInfo.InvariantCulture)} s.");
+        }
+
+        /// <summary>The side views' expected wall time, whole seconds rounded up: the floors' measured
+        /// seconds per pixel times the four sides' pixels (each framed and budgeted exactly as BeginSide
+        /// will), plus a quarter. "?" when the floors rendered nothing to measure from.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="yMin">The box's low y.</param>
+        /// <param name="yMax">The box's high y.</param>
+        private static string SideSecondsEstimate(Plan plan, float yMin, float yMax)
+        {
+            try
+            {
+                if (plan.FloorPixels <= 0 || !(plan.FloorSeconds > 0d)) return "?";
+
+                var e = plan.Extent;
+                var pixels = 0L;
+
+                foreach (var dir in MapSideView.Directions)
+                {
+                    if (!MapSideView.Basis(dir, out var f, out var r, out var u)) continue;
+
+                    MapSideView.Frame(f, r, u, e.MinX, e.MinZ, e.MaxX, e.MaxZ, yMin, yMax, out var frame);
+
+                    var ppm = Budget(SidePixelsPerMetre, frame[1], frame[3], out _);
+                    pixels += (long)MapSideView.Size(frame[1], ppm) * MapSideView.Size(frame[3], ppm);
+                }
+
+                var seconds = plan.FloorSeconds * pixels / plan.FloorPixels * 1.25d;
+
+                return Math.Ceiling(seconds).ToString("0", CultureInfo.InvariantCulture);
+            }
+            catch
+            {
+                return "?";
+            }
+        }
+
+        /// <summary>The two things every side needs before any of them is framed: the exposure to
+        /// develop with and the box's y range. False, having said why, when there is no exposure.
+        ///
+        /// The exposure is the TOP band's, as the capture developed it - its stored "kept from the first
+        /// capture" value on a merge, or this capture's own measurement on a fresh set - and never a
+        /// measurement of the side itself. A side view is mostly walls in shadow and a strip of sky-lit
+        /// roof; measured on its own it would be stretched to a different tone from the picture draped
+        /// over the same buildings' roofs, and the walls would not match their tops. When the top band
+        /// failed this time its stored exposure is used; when there is neither, no side is taken.
+        ///
+        /// The y range is the mesh's (the contract's yMin/yMax), and the bands' own range widened by
+        /// <see cref="SideBandsBelow"/> and <see cref="SideBandsAbove"/> when no mesh was built.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="mesh">The mesh built this capture, or null.</param>
+        /// <param name="exposure">The exposure to develop every side with.</param>
+        /// <param name="yMin">The box's low y.</param>
+        /// <param name="yMax">The box's high y.</param>
+        /// <param name="yFrom">Where the y range came from, for the log line.</param>
+        private static bool SidesSetup(Plan plan, MapMeshFile mesh, out ExposureResult exposure, out float yMin,
+            out float yMax, out string yFrom)
+        {
+            exposure = null;
+            yMin = yMax = 0f;
+            yFrom = null;
+
+            try
+            {
+                var top = plan.Floors[plan.Floors.Count - 1];
+
+                exposure = top.Exposure ?? Stored(plan, top);
+
+                if (exposure == null || !(exposure.High > exposure.Low))
+                {
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: no side views for {plan.Key} - its top floor has no exposure to develop them " +
+                        "with, this capture's or a stored one.");
+                    return false;
+                }
+
+                if (mesh != null && IsFinite(mesh.YMin) && IsFinite(mesh.YMax) && mesh.YMax > mesh.YMin)
+                {
+                    yMin = mesh.YMin;
+                    yMax = mesh.YMax;
+                    yFrom = "the mesh";
+                    return true;
+                }
+
+                yMin = float.PositiveInfinity;
+                yMax = float.NegativeInfinity;
+
+                foreach (var floor in plan.Floors)
+                {
+                    if (floor?.Dto == null) continue;
+                    if (floor.Dto.MinY < yMin) yMin = floor.Dto.MinY;
+                    if (floor.Dto.MaxY > yMax) yMax = floor.Dto.MaxY;
+                }
+
+                yMin -= SideBandsBelow;
+                yMax += SideBandsAbove;
+                yFrom = "the bands (no mesh this capture)";
+
+                return IsFinite(yMin) && IsFinite(yMax) && yMax > yMin;
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: no side views for {plan.Key} ({ex.GetType().Name}: {ex.Message}).");
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// Frames one side: its basis and frame from the contract, its pixels per metre from the memory
+        /// budget, its own Plan and FloorPlan, the camera turned and clipped to the box - and then the
+        /// self-check, BEFORE a byte of the side's buffers is allocated. Null, having said why, when the
+        /// side is abandoned.
+        /// </summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="dir">"N", "S", "E" or "W".</param>
+        /// <param name="yMin">The box's low y.</param>
+        /// <param name="yMax">The box's high y.</param>
+        /// <param name="exposure">The exposure every side is developed with.</param>
+        private SideView BeginSide(Plan plan, string dir, float yMin, float yMax, ExposureResult exposure)
+        {
+            try
+            {
+                if (!MapSideView.Basis(dir, out var f, out var r, out var u)) return null;
+
+                var e = plan.Extent;
+                MapSideView.Frame(f, r, u, e.MinX, e.MinZ, e.MaxX, e.MaxZ, yMin, yMax, out var frame);
+
+                var ppm = Budget(SidePixelsPerMetre, frame[1], frame[3], out var budgetNote);
+
+                var side = new Plan
+                {
+                    Key = plan.Key,
+                    Dir = plan.Dir,
+                    Extent = plan.Extent,
+                    Cap = plan.Cap,
+                    Ppm = ppm,
+                    WidthPx = MapSideView.Size(frame[1], ppm),
+                    HeightPx = MapSideView.Size(frame[3], ppm),
+                    From = plan.From,
+                };
+
+                side.TilesX = (side.SampleWidth + TileSize - 1) / TileSize;
+                side.TilesY = (side.SampleHeight + TileSize - 1) / TileSize;
+
+                var top = plan.Floors[plan.Floors.Count - 1];
+
+                var view = new SideView
+                {
+                    Dir = dir,
+                    Forward = f,
+                    Right = r,
+                    Up = u,
+                    Frame = frame,
+                    YMin = yMin,
+                    YMax = yMax,
+                    Plan = side,
+                    Floor = new FloorPlan
+                    {
+                        Dto = new MapFloorDto
+                        {
+                            Level = top.Dto.Level,
+                            Name = $"side {dir}",
+                            MinY = yMin,
+                            MaxY = yMax,
+                        },
+                        File = SideFileName(plan.Key, dir),
+                        Exposure = exposure,
+                        ReusedExposure = true,
+                        Clock = Stopwatch.StartNew(),
+                    },
+                };
+
+                side.Side = view;
+
+                // The camera, for this side: looking along f with u up, framed to one tile's worth of
+                // samples exactly as a floor is, and clipped to the box along f - near a metre short of
+                // the box's nearest corner, far a metre past its farthest.
+                _camera.transform.rotation = Quaternion.LookRotation(V(f), V(u));
+
+                // The capture's own light along f too: for a floor it points straight down, which lights
+                // roofs head-on and every wall at grazing incidence - exactly the faces a side view is
+                // for. Along f, which is 45 degrees down, a vertical wall facing the camera is NOT lit
+                // head-on: its normal is horizontal, so n.L = cos 45 = 0.707 against a roof's 1 under the
+                // floors' down-light, and under the top band's reused exposure the walls came out about
+                // 30 % darker than the roofs they sit under. So the light is also raised by 1/0.707 for
+                // the side's tiles, which gives a camera-facing wall the irradiance a roof had. (A roof
+                // seen from the side now gets 0.707 x 1.414 = 1 too; nothing it lights is brighter than
+                // what the floors developed.) RestoreTopCamera turns it back down and puts the intensity
+                // back.
+                if (_light != null)
+                {
+                    _light.transform.rotation = Quaternion.LookRotation(V(f));
+                    _light.intensity = CaptureLightIntensity * SideLightGain;
+                }
+
+                _camera.orthographicSize = TileSize / (2f * side.SamplePpm);
+                _camera.aspect = 1f;
+                _camera.nearClipPlane = SideStandOffMetres - 1f;
+                _camera.farClipPlane = SideStandOffMetres + (float)(frame[5] - frame[4]) + FarClipSlack;
+
+                if (!SideSelfCheck(view, out var why))
+                {
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: {plan.Key} side view {dir} was not taken - the camera does not agree with the " +
+                        $"side's own geometry: {why}.");
+                    return null;
+                }
+
+                if (budgetNote != null)
+                    Plugin.LogSource?.LogInfo($"QuestTree: {plan.Key} side view {dir} - {budgetNote}.");
+
+                // Only now, after the check: a side that fails it costs nothing.
+                view.Floor.Pixels = new float[side.WidthPx * side.HeightPx * 3];
+                view.Floor.Drawn = new bool[side.WidthPx * side.HeightPx];
+                view.Floor.Dist = new byte[side.WidthPx * side.HeightPx];
+
+                return view;
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: {plan.Key} side view {dir} was not taken ({ex.GetType().Name}: {ex.Message}).");
+                return null;
+            }
+        }
+
+        /// <summary>Points the side camera at one tile. The tiles are laid out over the CAMERA's picture,
+        /// which is the contract's picture mirrored (see MapSideView): tile column 0 is at the image's
+        /// high-r edge, rMax = originR + width / ppm, and a tile's centre is TileSize/2 samples further
+        /// along -r; rows count down from uMax = originU + height / ppm exactly as a floor's count down
+        /// from maxZ. The camera then stands at that centre on the (r, u) plane, backed off along -f to
+        /// <see cref="SideStandOffMetres"/> in front of the box's nearest corner.</summary>
+        /// <param name="view">The side.</param>
+        /// <param name="px0">The tile's left edge, in SAMPLES from the camera picture's left.</param>
+        /// <param name="py0">The tile's top edge, in samples from the top.</param>
+        private void PositionSideCamera(SideView view, int px0, int py0)
+        {
+            var side = view.Plan;
+            var sp = (double)side.SamplePpm;
+
+            var rMax = view.Frame[0] + side.WidthPx / (double)side.Ppm;
+            var uMax = view.Frame[2] + side.HeightPx / (double)side.Ppm;
+
+            var rc = rMax - (px0 + TileSize * 0.5d) / sp;
+            var uc = uMax - (py0 + TileSize * 0.5d) / sp;
+            var d = view.Frame[4] - SideStandOffMetres;
+
+            var r = view.Right;
+            var u = view.Up;
+            var f = view.Forward;
+
+            _camera.transform.position = new Vector3(
+                (float)(rc * r[0] + uc * u[0] + d * f[0]),
+                (float)(rc * r[1] + uc * u[1] + d * f[1]),
+                (float)(rc * r[2] + uc * u[2] + d * f[2]));
+        }
+
+        /// <summary>
+        /// The side's check that can fail, before anything is rendered: three world points projected
+        /// by Unity through the camera positioned for tile 0, and by the contract's arithmetic
+        /// (MapSideView.Pixel) - the extent's centre at yMin, and the same point ten metres along r and
+        /// ten metres along u. They must agree within one output pixel, after the one column flip the
+        /// capture applies.
+        ///
+        /// It fails for exactly the mistakes that would texture every wall wrongly and still look like a
+        /// picture: a camera whose right is not the contract's -r (a basis or LookRotation that differs
+        /// from MapSideView's - the +r probe then moves the wrong way by 2 x 10 m of pixels), a picture
+        /// upside down (the +u probe), a tile origin laid out from the wrong edge, an orthographic size
+        /// that does not match the pixels per metre, or a point that falls outside the near and far
+        /// planes.
+        ///
+        /// What it can NOT see, said plainly: whether <see cref="MirrorSide"/> actually runs. It checks
+        /// the camera against the contract's picture with the flip APPLIED IN THE ARITHMETIC, so a capture
+        /// that forgot to call the flip would pass it and write a mirrored picture. Proving the call from
+        /// here would mean rendering a probe and reading a pixel back, a tile's cost per side; instead the
+        /// harness asserts from the source that MirrorSide is called exactly once, between the tiles and
+        /// the development.
+        /// </summary>
+        /// <param name="view">The side, framed and with the camera turned.</param>
+        /// <param name="why">What disagreed, or null.</param>
+        private bool SideSelfCheck(SideView view, out string why)
+        {
+            var side = view.Plan;
+            var e = side.Extent;
+
+            PositionCamera(side, view.Floor, 0, 0);
+
+            var cx = (e.MinX + e.MaxX) * 0.5d;
+            var cz = (e.MinZ + e.MaxZ) * 0.5d;
+            double cy = view.YMin;
+
+            var probes = new[]
+            {
+                new[] { cx, cy, cz },
+                new[] { cx + 10d * view.Right[0], cy + 10d * view.Right[1], cz + 10d * view.Right[2] },
+                new[] { cx + 10d * view.Up[0], cy + 10d * view.Up[1], cz + 10d * view.Up[2] },
+            };
+
+            var names = new[] { "the extent's centre at yMin", "10 m along r from it", "10 m along u from it" };
+
+            for (var i = 0; i < probes.Length; i++)
+            {
+                var p = probes[i];
+                var screen = _camera.WorldToScreenPoint(new Vector3((float)p[0], (float)p[1], (float)p[2]));
+
+                if (!(screen.z > _camera.nearClipPlane) || !(screen.z < _camera.farClipPlane))
+                {
+                    why = $"{names[i]} is {F(screen.z)} m in front of the camera, outside its " +
+                          $"{F(_camera.nearClipPlane)}..{F(_camera.farClipPlane)} m clip range";
+                    return false;
+                }
+
+                MapSideView.Pixel(view.Right, view.Up, view.Frame[0], view.Frame[2], side.Ppm, side.HeightPx,
+                    p[0], p[1], p[2], out var expected);
+
+                // Unity's pixel in the CAMERA's picture, in output pixels: tile 0 is that picture's
+                // top-left corner, screen y counts up from the tile's bottom. The contract's pixel after the
+                // capture's column flip is (width - px, py).
+                var cameraX = screen.x / SupersampleFactor;
+                var cameraRow = (TileSize - screen.y) / SupersampleFactor;
+                var flippedX = side.WidthPx - expected[0];
+
+                if (Math.Abs(cameraX - flippedX) > 1d || Math.Abs(cameraRow - expected[1]) > 1d)
+                {
+                    why = $"{names[i]} renders at picture pixel ({F((float)(side.WidthPx - cameraX))}, " +
+                          $"{F((float)cameraRow)}) where the contract puts it at ({F((float)expected[0])}, " +
+                          $"{F((float)expected[1])}), over the 1 px allowed";
+                    return false;
+                }
+            }
+
+            why = null;
+            return true;
+        }
+
+        /// <summary>Turns the camera's picture into the contract's: every row's columns reversed, in
+        /// the float buffer and the drawn mask together. See MapSideView for why the two differ - and
+        /// <see cref="SideSelfCheck"/> for the check that proves this flip is the one the camera needs
+        /// (not that it runs - the harness checks that from the source).</summary>
+        /// <param name="plan">The capture's plan, for the log line.</param>
+        /// <param name="view">The side.</param>
+        private static void MirrorSide(Plan plan, SideView view)
+        {
+            try
+            {
+                var width = view.Plan.WidthPx;
+                var height = view.Plan.HeightPx;
+                var pixels = view.Floor.Pixels;
+                var drawn = view.Floor.Drawn;
+
+                for (var row = 0; row < height; row++)
+                {
+                    var first = row * width;
+
+                    for (int a = first, b = first + width - 1; a < b; a++, b--)
+                    {
+                        var drawnA = drawn[a];
+                        drawn[a] = drawn[b];
+                        drawn[b] = drawnA;
+
+                        for (var c = 0; c < 3; c++)
+                        {
+                            var value = pixels[a * 3 + c];
+                            pixels[a * 3 + c] = pixels[b * 3 + c];
+                            pixels[b * 3 + c] = value;
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                view.Floor.Failed = true;
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: {plan.Key} side view {view.Dir} could not be turned round ({ex.GetType().Name}: " +
+                    $"{ex.Message}).");
+            }
+        }
+
+        /// <summary>Encodes a developed side, stages it beside the pictures, records its meta entry and
+        /// says what it was. False, having said why, when it is not written.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="view">The side, developed.</param>
+        private static bool FinishSide(Plan plan, SideView view)
+        {
+            try
+            {
+                var floor = view.Floor;
+                var side = view.Plan;
+
+                if (floor.Texture == null)
+                {
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: {plan.Key} side view {view.Dir} has no developed picture to write.");
+                    return false;
+                }
+
+                var png = floor.Texture.EncodeToPNG();
+
+                if (png == null || png.Length == 0 || png.Length > MaxFloorPngBytes)
+                {
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: {plan.Key} side view {view.Dir} encoded to {(png == null ? 0 : png.Length)} " +
+                        "bytes and was not written.");
+                    return false;
+                }
+
+                Stage(Path.Combine(plan.Dir, floor.File), png);
+
+                var drawn = 0;
+                foreach (var d in floor.Drawn) if (d) drawn++;
+
+                plan.SideBytes += png.Length;
+                plan.Sides.Add(new CaptureSide
+                {
+                    Dir = view.Dir,
+                    File = floor.File,
+                    Width = side.WidthPx,
+                    Height = side.HeightPx,
+                    PxPerMetre = side.Ppm,
+                    Forward = Floats(view.Forward),
+                    Right = Floats(view.Right),
+                    Up = Floats(view.Up),
+                    OriginR = view.Frame[0],
+                    OriginU = view.Frame[2],
+                    YMin = view.YMin,
+                    YMax = view.YMax,
+                });
+
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: side view {view.Dir} of {plan.Key} - {side.WidthPx}x{side.HeightPx} px at " +
+                    $"{Ppm(side.Ppm)} px/m, {floor.Tiles} tiles, {Share(drawn, floor.Drawn.Length)} % drawn, " +
+                    $"{png.Length} bytes, {Ms(floor.Clock?.Elapsed.TotalMilliseconds ?? 0d)} ms, " +
+                    $"lit along f ({F((float)view.Forward[0])}, {F((float)view.Forward[1])}, " +
+                    $"{F((float)view.Forward[2])}) at x{SideLightGain.ToString("0.00", CultureInfo.InvariantCulture)}" +
+                    (floor.CyanFilled > 0 ? $", {floor.CyanFilled} cyan water pixels filled" : "") +
+                    (floor.Despeckled > 0 ? $", {floor.Despeckled} speckles medianed" : "") + ".");
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: {plan.Key} side view {view.Dir} could not be written ({ex.GetType().Name}: " +
+                    $"{ex.Message}).");
+                return false;
+            }
+        }
+
+        /// <summary>Puts the capture camera AND its light back to pointing straight down, as every floor
+        /// is taken - nothing renders after the sides today, but a camera or a light left turned is a
+        /// trap for whatever does.</summary>
+        private void RestoreTopCamera()
+        {
+            try
+            {
+                if (_camera != null) _camera.transform.rotation = Quaternion.Euler(90f, 0f, 0f);
+                if (_light != null)
+                {
+                    _light.transform.rotation = Quaternion.Euler(90f, 0f, 0f);
+                    _light.intensity = CaptureLightIntensity;
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug($"QuestTree: the capture camera could not be turned back ({ex.Message}).");
+            }
+        }
+
+        /// <summary>The side entries an EARLIER capture wrote, when this capture takes none and their
+        /// files are still on disk - the same carry-forward the mesh gets (CarriedMesh), and only
+        /// reachable on a merge, i.e. with the same extent. Each file name is checked, not trusted.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        private static List<CaptureSide> CarriedSides(Plan plan)
+        {
+            var kept = new List<CaptureSide>();
+            var previous = plan.Previous?.Sides;
+
+            if (previous == null) return kept;
+
+            foreach (var side in previous)
+            {
+                if (side == null || string.IsNullOrEmpty(side.Dir) || side.File != SideFileName(plan.Key, side.Dir))
+                    continue;
+
+                try
+                {
+                    if (File.Exists(Path.Combine(plan.Dir, side.File))) kept.Add(side);
+                }
+                catch (Exception ex)
+                {
+                    Plugin.LogSource?.LogDebug(
+                        $"QuestTree: {plan.Key}'s earlier side view {side.Dir} could not be looked for ({ex.Message}).");
+                }
+            }
+
+            return kept;
+        }
+
+        /// <summary>
+        /// The side entries the meta will name, PER DIRECTION: the side this capture wrote when it wrote
+        /// one and its file moved into place, otherwise the entry an earlier capture wrote for that
+        /// direction when its file is still on disk (<see cref="CarriedSides"/>), otherwise nothing. Every
+        /// named file joins <paramref name="keep"/>, so DropStalePictures - whose <c>{key}-*.png</c> glob
+        /// matches <c>{key}-side-*.png</c> - removes exactly the side files the new meta no longer names.
+        ///
+        /// Per direction, not all-or-nothing, after review: the side phase can end with three of four
+        /// written (a self-check refusal, a too-large encode), with none (no exposure, an exception), or
+        /// not run at all (an AutoCapture tick, a campaign stop that is not the last). Taking "the phase
+        /// ran" to mean "only this capture's sides" handed every one of those cases to the stale sweep,
+        /// which then deleted the EARLIER good pictures of the directions this capture failed. Carried
+        /// entries are sound for the same reason a carried mesh is: they are only reachable on a merge,
+        /// i.e. the same extent, and each entry carries its own basis, origins and y range.
+        /// </summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="keep">The file names the meta accounts for.</param>
+        private static List<CaptureSide> CommitSides(Plan plan, HashSet<string> keep)
+        {
+            var named = new List<CaptureSide>();
+            var carried = CarriedSides(plan);
+            var carriedCount = 0;
+
+            foreach (var dir in MapSideView.Directions)
+            {
+                CaptureSide chosen = null;
+
+                var written = plan.Sides.FirstOrDefault(s => s.Dir == dir);
+
+                if (written != null)
+                {
+                    try
+                    {
+                        Commit(Path.Combine(plan.Dir, written.File));
+                        chosen = written;
+                    }
+                    catch (Exception ex)
+                    {
+                        Forget(plan, written.File);
+                        Plugin.LogSource?.LogWarning(
+                            $"QuestTree: {plan.Key} side view {dir} could not be put in place " +
+                            $"({ex.GetType().Name}: {ex.Message}) - the earlier one is kept if there is one.");
+                    }
+                }
+
+                // Looked for AFTER a failed commit as well as when nothing was written: Commit deletes
+                // the target before it moves the new file in, so a commit that died between the two has
+                // taken the old file with it - and CarriedSides' File.Exists is asked again here, which
+                // is what keeps the meta from naming a file that is gone.
+                if (chosen == null)
+                {
+                    chosen = carried.FirstOrDefault(s => s.Dir == dir &&
+                                                         File.Exists(Path.Combine(plan.Dir, s.File)));
+                    if (chosen != null) carriedCount++;
+                }
+
+                if (chosen != null) named.Add(chosen);
+            }
+
+            if (carriedCount > 0)
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: {plan.Key} keeps {carriedCount} side view(s) an earlier capture wrote, for the " +
+                    $"direction(s) this capture {(plan.SidesTaken ? "could not write" : "did not take")}.");
+
+            foreach (var side in named) keep.Add(side.File);
+
+            plan.SidesCarried = carriedCount;
+
+            return named.Count == 0 ? null : named;
+        }
+
+        private static Vector3 V(double[] v) => new Vector3((float)v[0], (float)v[1], (float)v[2]);
+
+        private static float[] Floats(double[] v) => new[] { (float)v[0], (float)v[1], (float)v[2] };
+
         // --- the 3D mesh -------------------------------------------------------------------------
 
         /// <summary>What <see cref="MapMeshBuilder"/> needs to build this capture's geometry, out of
@@ -5392,6 +6221,10 @@ namespace QuestTree.QuestGraph
                     MaxY = floor.Dto.MaxY,
                     CameraY = BandCameraY(floor.Dto.MaxY, floor.NextMinY),
                     DepthBelow = top ? TopBandDepthBelow : 0f,
+
+                    // An interior band's relief is its floor, not the tops of its shelves - see
+                    // MapMeshBuilder.Band.Interior.
+                    Interior = !top,
                 });
             }
 
@@ -5466,7 +6299,7 @@ namespace QuestTree.QuestGraph
                 Plugin.LogSource?.LogInfo(
                     $"QuestTree: building {plan.Key}'s 3D map - the scene is held for up to " +
                     $"{MapMeshBuilder.SecondsCap.ToString("0", CultureInfo.InvariantCulture)} s, so distant " +
-                    "geometry stays drawn while it runs.");
+                    "geometry stays drawn while it runs; the side views after it announce their own.");
 
                 // The collect LAST, so nothing above it can have thrown after it. The hold is NOT here:
                 // Run takes it a frame later, so the collect and the pass over the culled components
@@ -5913,6 +6746,11 @@ namespace QuestTree.QuestGraph
                             $"wrote ({mesh.File}, {mesh.Bytes} bytes) is kept and the meta goes on naming it.");
                 }
 
+                // The side views, after the mesh and before the meta, by the same rule: each committed in
+                // its own try, and the files named added to keep so the stale sweep below removes exactly
+                // the side files this meta no longer names.
+                var sides = CommitSides(plan, keep);
+
                 var now = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
 
                 var meta = new CaptureMeta
@@ -5938,6 +6776,7 @@ namespace QuestTree.QuestGraph
                     Floors = floors,
                     Labels = plan.Labels,
                     Mesh = mesh,
+                    Sides = sides,
                 };
 
                 var json = JsonConvert.SerializeObject(meta, Formatting.Indented);
@@ -5953,6 +6792,11 @@ namespace QuestTree.QuestGraph
                 Plugin.LogSource?.LogInfo(
                     $"QuestTree: capture of {plan.Key} written - {written.Count} floor(s), {plan.Bytes} bytes, " +
                     (carried > 0 ? $"{carried} floor(s) kept from an earlier capture, " : "") +
+                    (sides != null
+                        ? $"{sides.Count} side view(s)" +
+                          (plan.SidesCarried > 0 ? $" ({plan.SidesCarried} kept from an earlier capture)" : "") +
+                          (plan.SideBytes > 0 ? $", {plan.SideBytes} bytes new" : "") + ", "
+                        : "") +
                     $"{Ms(clock.Elapsed.TotalMilliseconds)} ms total.");
 
                 Plugin.LogSource?.LogDebug($"QuestTree: {plan.Key} capture is in {plan.Dir}.");
@@ -6746,6 +7590,40 @@ namespace QuestTree.QuestGraph
             /// printed when the file is really in place.</summary>
             public string MeshNote;
 
+            /// <summary>Set on a SIDE VIEW's own plan only: which side it is and how it is framed, which is
+            /// what sends PositionCamera down the side branch. Null on the capture's plan.</summary>
+            public SideView Side;
+
+            /// <summary>Whether this capture takes the four side views. True for a key press and a
+            /// campaign stop; for an AutoCapture tick only when there are no earlier side views the meta
+            /// could carry forward (CarriedSides) - they are four floor-sized renders, the same cost
+            /// argument as the mesh's (see WantsMesh).</summary>
+            public bool WantsSides;
+
+            /// <summary>Whether the side phase actually RAN this capture - which decides between the
+            /// sides it staged and the ones an earlier capture wrote (CommitSides).</summary>
+            public bool SidesTaken;
+
+            /// <summary>The side views staged this capture, as the meta will list them once they are
+            /// committed.</summary>
+            public readonly List<CaptureSide> Sides = new List<CaptureSide>();
+
+            /// <summary>The side being taken right now, so Cleanup can release its buffers when a raid
+            /// ends in the middle of one.</summary>
+            public FloorPlan SideFloor;
+
+            /// <summary>Bytes the staged side views take, for the capture's line.</summary>
+            public long SideBytes;
+
+            /// <summary>How many of the named side views came from an earlier capture - CommitSides.</summary>
+            public int SidesCarried;
+
+            /// <summary>Wall time the floor loop took, and the pixels it rendered - what the side views'
+            /// hold is estimated from, since a side renders through the same tiles.</summary>
+            public double FloorSeconds;
+
+            public long FloorPixels;
+
             /// <summary>The floor levels the staged mesh carries a relief band for. Checked against the
             /// floors the meta ends up naming: the mesh's bands and the meta's floors ARE the same set
             /// by construction, and a capture where they are not is one whose mesh
@@ -6934,6 +7812,55 @@ namespace QuestTree.QuestGraph
             /// unchanged, file, length and hash, when that file is still on disk and was built for the
             /// same floors (see CarriedMesh). Either way the block describes the file beside it.</summary>
             [JsonProperty("mesh")] public CaptureMesh Mesh { get; set; }
+
+            /// <summary>The oblique side views the 3D map textures its walls from (plan, stage U - a
+            /// frozen contract). ABSENT, not null and not empty, when there are none: the contract says
+            /// "absent or empty = no sides", and absent is the one of the two every older reader
+            /// already handles. Rebuilt whole by a capture that takes them, carried forward unchanged
+            /// by one that does not (CarriedSides).</summary>
+            [JsonProperty("sides", NullValueHandling = NullValueHandling.Ignore)]
+            public List<CaptureSide> Sides { get; set; }
+        }
+
+        /// <summary>One side view as the meta describes it. The JSON names are the CONTRACT (plan,
+        /// stage U): the viewer projects building walls into the picture by exactly these numbers, the
+        /// host mirrors the shape as MapCaptureSideDto, and tools/check-capture.py recomputes the
+        /// origins from them - a rename breaks three readers at once.
+        ///
+        /// The mapping they define: px = (dot(right, p) - originR) * pxPerMetre, py = height -
+        /// (dot(up, p) - originU) * pxPerMetre, row 0 at the top; the vectors are unit, world x/y/z,
+        /// stored at float precision - and every number here was derived from those float values, so a
+        /// reader recomputing from them gets these origins to within float rounding.</summary>
+        private sealed class CaptureSide
+        {
+            /// <summary>"N", "S", "E" or "W": the side of the map the camera stood on.</summary>
+            [JsonProperty("dir")] public string Dir { get; set; }
+
+            /// <summary><c>&lt;key&gt;-side-&lt;dir&gt;.png</c>, beside this meta.</summary>
+            [JsonProperty("file")] public string File { get; set; }
+
+            [JsonProperty("width")] public int Width { get; set; }
+            [JsonProperty("height")] public int Height { get; set; }
+            [JsonProperty("pxPerMetre")] public float PxPerMetre { get; set; }
+
+            /// <summary>f, the way the camera looked.</summary>
+            [JsonProperty("forward")] public float[] Forward { get; set; }
+
+            /// <summary>r, the picture's +x.</summary>
+            [JsonProperty("right")] public float[] Right { get; set; }
+
+            /// <summary>u, the picture's +y, towards row 0.</summary>
+            [JsonProperty("up")] public float[] Up { get; set; }
+
+            /// <summary>The minimum of dot(right, corner) over the box's 8 corners.</summary>
+            [JsonProperty("originR")] public double OriginR { get; set; }
+
+            /// <summary>The minimum of dot(up, corner) over the box's 8 corners.</summary>
+            [JsonProperty("originU")] public double OriginU { get; set; }
+
+            /// <summary>The box's y range: the mesh's, or the bands' widened when no mesh was built.</summary>
+            [JsonProperty("yMin")] public float YMin { get; set; }
+            [JsonProperty("yMax")] public float YMax { get; set; }
         }
 
         /// <summary>The mesh file the capture wrote, as the meta describes it. The JSON names here are
@@ -7069,7 +7996,12 @@ namespace QuestTree.QuestGraph
         /// it takes its pictures exactly as any other capture does, but it builds the 3D mesh only for
         /// a map that has none yet - see <see cref="Plan.WantsMesh"/>. False, the default, for a
         /// campaign stop, which is a place somebody chose.</param>
-        public static bool TryStartCapture(bool automatic = false)
+        /// <param name="sides">Whether this capture takes the four side views, for a caller that is not
+        /// the AutoCapture tick (whose rule is its own - see <see cref="Plan.WantsSides"/>). A campaign
+        /// passes true for its LAST stop only: every stop's sides replace the previous stop's whole, so
+        /// rendering them at every stop is eighteen sets of four floor-sized renders of which the set
+        /// keeps one. The default, true, is the key press's.</param>
+        public static bool TryStartCapture(bool automatic = false, bool sides = true)
         {
             try
             {
@@ -7082,6 +8014,7 @@ namespace QuestTree.QuestGraph
                 // second caller in the same frame must be refused rather than fight for the camera.
                 runner._running = true;
                 runner._automatic = automatic;
+                runner._sidesAllowed = sides;
                 runner.StartCoroutine(runner.Run());
 
                 // The flag, not a bare true: StartCoroutine runs the coroutine's body up to its first

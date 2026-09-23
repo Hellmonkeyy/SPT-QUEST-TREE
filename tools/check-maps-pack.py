@@ -27,6 +27,13 @@ What it checks, per <key>\\ folder under the maps root:
      *-mesh.bin that no meta names - a stale mesh beside a fresh meta is a mesh of a DIFFERENT extent,
      which is the one kind of wrongness in this payload that no eye can catch: it is binary, so the
      hash IS the inspection.
+  6. the SIDES, when the meta names any (the oblique N/S/E/W pictures the 3D view textures walls
+     with; absent on every older set): each is a distinct direction, its file is exactly
+     <key>-side-<dir>.jpg and exists, it is a real JPEG whose frame size equals the entry's
+     width/height, its pxPerMetre is a positive number, its forward/right/up are three unit vectors (to
+     1e-3) and its origins and height range are numbers. A side's pixels are placed on walls by those
+     numbers alone, so a picture of another size or a skewed basis textures every wall wrong with
+     nothing else to show it. Side files the meta does not name are orphans like any other image.
 
 Every folder it finds is checked the same way, whether it is a vanilla map or a modded one the
 maintainer chose to ship.
@@ -367,6 +374,95 @@ def check_mesh(meta, folder, key, extent, levels, errors):
     return named, size
 
 
+SIDE_DIRS = ("N", "S", "E", "W")
+SIDE_UNIT_TOLERANCE = 1e-3
+
+
+def unit_vector(value):
+    """Whether a JSON value is three numbers of length one, to SIDE_UNIT_TOLERANCE."""
+    if not isinstance(value, list) or len(value) != 3:
+        return False
+    parts = [number(v) for v in value]
+    if any(v is None for v in parts):
+        return False
+    return abs(math.sqrt(sum(v * v for v in parts)) - 1.0) <= SIDE_UNIT_TOLERANCE
+
+
+def check_sides(meta, folder, key, errors):
+    """The side pictures against their meta entries. Returns (named files lower-cased, count, bytes).
+
+    A meta with no sides - absent, null or empty - is the ordinary case and passes with nothing
+    checked: every set captured before sides existed has none, and the 3D view tints those walls."""
+    sides = meta.get("sides")
+    if sides is None:
+        return set(), 0, 0
+    if not isinstance(sides, list):
+        errors.append(f"{key}: sides is present but not a list ({sides!r})")
+        return set(), 0, 0
+
+    named, seen, total = set(), set(), 0
+    for index, side in enumerate(sides):
+        where = f"{key}: sides[{index}]"
+        if not isinstance(side, dict):
+            errors.append(f"{where} is not an object")
+            continue
+
+        direction = side.get("dir")
+        if direction not in SIDE_DIRS:
+            errors.append(f"{where}.dir {direction!r} is not one of N, S, E, W")
+            continue
+        if direction in seen:
+            errors.append(f"{key}: two {direction} sides - which picture textures those walls?")
+            continue
+        seen.add(direction)
+        where = f"{key}: side {direction}"
+
+        wanted = f"{key}-side-{direction}.jpg"
+        rel = side.get("file")
+        if not isinstance(rel, str) or rel != wanted:
+            errors.append(f"{where}.file {rel!r} is not {wanted} - that exact name is what the host stores "
+                          f"and reads back, and nothing else is")
+            continue
+        named.add(rel.lower())
+        path = folder / rel
+        if not path.is_file():
+            errors.append(f"{where}.file {rel!r} does not exist in {folder} - the meta names a side the set "
+                          f"does not carry. Re-run -RefreshMaps.")
+            continue
+        total += path.stat().st_size
+
+        meta_w, meta_h = side.get("width"), side.get("height")
+        if any(isinstance(v, bool) or not isinstance(v, int) or v <= 0 for v in (meta_w, meta_h)):
+            errors.append(f"{where}: width/height {meta_w!r}x{meta_h!r} are not positive integers")
+        else:
+            actual, why = jpeg_size(path)
+            if actual is None:
+                errors.append(f"{where}: {rel} {why}")
+            elif actual != (meta_w, meta_h):
+                errors.append(f"{where}: {rel} is {actual[0]}x{actual[1]} px but its meta says "
+                              f"{meta_w}x{meta_h} - every wall it textures would be placed a constant "
+                              f"fraction off")
+
+        px = number(side.get("pxPerMetre"))
+        if px is None or px <= 0:
+            errors.append(f"{where}.pxPerMetre {side.get('pxPerMetre')!r} is not a positive number")
+
+        for axis in ("forward", "right", "up"):
+            if not unit_vector(side.get(axis)):
+                errors.append(f"{where}.{axis} {side.get(axis)!r} is not three numbers of length 1 "
+                              f"(to {SIDE_UNIT_TOLERANCE:g}) - a skewed basis maps every wall wrong")
+
+        for field in ("originR", "originU"):
+            if number(side.get(field)) is None:
+                errors.append(f"{where}.{field} is missing or not a number")
+
+        y_min, y_max = number(side.get("yMin")), number(side.get("yMax"))
+        if y_min is None or y_max is None or y_max <= y_min:
+            errors.append(f"{where}: yMin/yMax {side.get('yMin')!r}..{side.get('yMax')!r} are not a height range")
+
+    return named, len(seen), total
+
+
 def load_json(path):
     """(object, None) or (None, reason). utf-8-sig: the client writes these files on Windows."""
     try:
@@ -555,11 +651,16 @@ def check_set(folder, schema, errors):
     named, pixels, total, levels = check_floors(meta, folder, key, extent, px_per_metre, errors)
     mesh_named, mesh_bytes = check_mesh(meta, folder, key, extent, levels, errors)
 
+    # The sides' names join the floors' for the orphan rule below: a side JPEG the meta does not name is
+    # dead weight exactly as an unnamed floor is, and it is what a re-capture that drew fewer sides leaves.
+    side_named, side_count, side_bytes = check_sides(meta, folder, key, errors)
+    named |= side_named
+
     orphans = sorted(p.name for p in folder.iterdir()
                      if p.is_file() and p.name.lower().endswith(".jpg")
                      and p.name.lower() not in named)
     if orphans:
-        errors.append(f"{key}: {', '.join(orphans)} - image(s) no floor in the meta names. They "
+        errors.append(f"{key}: {', '.join(orphans)} - image(s) no floor or side in the meta names. They "
                       f"would ship as megabytes nothing loads; a re-capture with fewer floors "
                       f"leaves exactly this behind. Delete them or re-run -RefreshMaps.")
 
@@ -579,6 +680,7 @@ def check_set(folder, schema, errors):
     floor_count = len(meta["floors"]) if isinstance(meta.get("floors"), list) else 0
     scale = f"{1 / px_per_metre:.2f} m/px" if px_per_metre else "? m/px"
     mesh_note = f", mesh {mesh_bytes / 1048576:.1f} MB" if mesh_named is not None else ", no mesh"
+    mesh_note += f", {side_count} side(s) {side_bytes / 1048576:.1f} MB" if side_count else ", no sides"
     return (f"{key}: {floor_count} floor(s), {pixels} @ {scale}, {total / 1048576:.1f} MB{mesh_note}, "
             f"captured {meta.get('capturedAt') or '?'}")
 
