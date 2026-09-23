@@ -334,10 +334,15 @@ that fix showed them gone.
 interior floors rendered rather than coming back as empty bands - so the multi-floor camera, which
 shoots a floor with another above it from just under that one, does what it was written to do.
 
-**Not seen yet.** **Big Red with its roof.** The probe run inside it found the cause (its
-walls-and-roof mesh lives on the HighPolyCollider layer, which the capture left out by name) and
-the layer is drawn now, but no Customs capture has been taken on the build that draws it; the first
-one replaces the set on disk (the recipe changed) and is the one to look at. **The garage band on Interchange** - the three-floor capture above ran the older
+**Seen on 2026-09-23:** **Big Red with its roof**, in the Customs picture after two campaigns on
+the build that draws the HighPolyCollider layer (the probe run inside it found the building's
+walls-and-roof mesh there, excluded by name).
+
+**Not seen yet.** **A capture that MERGES.** Every capture before the ARGB32 fix replaced the whole
+picture, so no set on disk has yet been made of more than one capture; the first capture after it
+should log the previous picture as read and keep the far side of the map while it improves the
+near one - the case to look at is a capture inside Big Red after a campaign, which used to erase
+the factory side. **The garage band on Interchange** - the three-floor capture above ran the older
 floor-banding threshold, and the current one should find a fourth band for the garage, which no
 capture has produced. **The memory budget lowering a scale inside a raid**: the arithmetic is
 checked by hand and printed, but no raid has yet logged the header line that says it stepped a map

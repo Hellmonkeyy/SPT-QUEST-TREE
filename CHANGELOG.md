@@ -171,7 +171,8 @@ captured map carries our own credit line naming the build, the date and the raid
   drawn with a flat vertex-paint shader: the translucent teal slab three campaigns showed. The layer
   is drawn now, the recipe carries a `layers` term so every Customs set taken before this is replaced
   rather than merged into, and the collider layers still excluded are the ones the game's camera never
-  draws either. Not yet seen on screen; the first Customs capture on this build is the proof.
+  draws either. Seen on screen on 2026-09-23: Big Red is a warehouse with a roof in the Customs
+  picture, two campaigns on this build.
 - **A throwaway diagnostic key ships with this release**, which is worth saying out loud because it
   is not a feature: a bare **F10** is the mesh probe of the 3D map experiments, and it writes
   `BepInEx\plugins\QuestTree\captures\<map>.meshprobe.txt` in a raid - whether the game's own meshes
