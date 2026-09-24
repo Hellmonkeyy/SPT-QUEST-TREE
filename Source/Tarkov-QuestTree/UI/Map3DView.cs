@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
+using System.Threading;
 using System.Threading.Tasks;
 using QuestTree.QuestGraph;
 using UnityEngine;
@@ -98,7 +99,7 @@ namespace QuestTree.UI
         /// <summary>Vertices per mesh chunk. Unity takes more than this in one mesh with
         /// <see cref="IndexFormat.UInt32"/>, but a chunked mesh is a mesh that can be freed and drawn in
         /// pieces, and the relief of a 4-million-cell band would otherwise be one 96 MB buffer.</summary>
-        private const int MaxVerticesPerMesh = 1_000_000;
+        private const int MaxVerticesPerMesh = 250_000;
 
         /// <summary>
         /// How far the mesh file's extent may differ from the picture's before the mesh is refused, in
@@ -238,7 +239,7 @@ namespace QuestTree.UI
 
             /// <summary>
             /// Top faces that stand ON ANOTHER FLOOR than the band their building is filed under, with the
-            /// level whose picture textures them. See <see cref="FloorForFace"/>.
+            /// level whose picture textures them. See <see cref="Prep.FloorForFace"/>.
             ///
             /// Seen on Interchange: the mall's ground-floor slab (184,000 m2 of floor at y = 21 m) belongs to
             /// a building the builder filed under the BASEMENT band, because the same object reaches down to
@@ -261,6 +262,31 @@ namespace QuestTree.UI
             /// Destroyed with everything else by <see cref="DestroyBuilt"/>.
             /// </summary>
             public readonly Dictionary<float, Dictionary<Mesh, Mesh>> Cuts = new Dictionary<float, Dictionary<Mesh, Mesh>>();
+
+            /// <summary>The one cut height whose clipped copies this entry keeps and makes (NaN: none). Every
+            /// other height is dropped when a view chooses a new floor - see Map3DView.EnqueuePrecut - since at
+            /// three million triangles a clipped copy is most of a second copy of the buildings.</summary>
+            public float CurrentCut = float.NaN;
+
+            /// <summary>The floor level each kept cut height was made for, for the "cut dropped" line.</summary>
+            public readonly Dictionary<float, int> CutLevels = new Dictionary<float, int>();
+
+            /// <summary>Levels whose cut was dropped to keep one copy resident - stepping back to one of them
+            /// re-cuts it, and the log says so once.</summary>
+            public readonly HashSet<int> DroppedCutLevels = new HashSet<int>();
+
+            /// <summary>
+            /// The worker's arrays each uploaded mesh was made from - what the cut clips. Kept INSTEAD of the
+            /// mesh's own CPU copy: every mesh here is uploaded non-readable (UploadMeshData(true)), so the
+            /// geometry is resident once on the CPU (these arrays) and once on the GPU, exactly as before, and
+            /// the cut no longer reads a mesh back into fresh managed arrays for every chunk it clips - which was
+            /// around 15 MB of garbage per 250k-vertex chunk. Main thread only; cleared with the entry.
+            /// </summary>
+            public readonly Dictionary<Mesh, MeshData> Sources = new Dictionary<Mesh, MeshData>();
+
+            /// <summary>A wall build for this entry is in flight - a worker, or its meshes being uploaded - by
+            /// the view that started it. Abandoned with that view, which puts the entry back to waiting.</summary>
+            public bool WallsRunning;
 
             /// <summary>What a side's faces are drawn with while that side's picture is not there - still
             /// decoding, evicted, or failed. Untextured, matte, in <see cref="WallAverage"/>. Made on first
@@ -468,7 +494,7 @@ namespace QuestTree.UI
 
         private Task<Loaded> _loading;
 
-        /// <summary>The read that <see cref="BuildMeshes"/> last built from, kept for a rebuild.</summary>
+        /// <summary>The read that <see cref="BeginBuild"/> last built from, kept for a rebuild.</summary>
         private Loaded _loaded;
         private bool _built;
         private bool _broke;
@@ -864,6 +890,7 @@ namespace QuestTree.UI
         internal static void DropCaches()
         {
             DropBuiltMeshes();
+            CancelAllPreps();
 
             lock (CacheLock)
             {
@@ -951,6 +978,7 @@ namespace QuestTree.UI
             }
 
             built.Cuts.Clear();
+            built.Sources.Clear();
 
             Discard(built.SideFallback);
             built.SideFallback = null;
@@ -987,7 +1015,19 @@ namespace QuestTree.UI
             {
                 if (tint == null) continue;
 
-                for (var i = 0; i < tint.Meshes.Count; i++) { Discard(tint.Meshes[i]); count++; }
+                for (var i = 0; i < tint.Meshes.Count; i++)
+                {
+                    var mesh = tint.Meshes[i];
+
+                    // Its clipped copies go with it. Left in Cuts they would outlive the mesh they were cut
+                    // from - held until the whole entry went, one set per abandoned wall build, which is one
+                    // per repaint while walls upload (a ten-click model kept thirty).
+                    count += ForgetCuts(built, mesh);
+                    built.Sources.Remove(mesh);
+
+                    Discard(mesh);
+                    count++;
+                }
 
                 tint.Meshes.Clear();
                 Discard(tint.Material);
@@ -996,6 +1036,27 @@ namespace QuestTree.UI
 
             built.Walls.Clear();
             built.Tints = 0;
+
+            return count;
+        }
+
+        /// <summary>Removes a source mesh from every cut height of its entry, destroying its clipped copies (not
+        /// a "self" entry, which is the mesh itself). Returns how many copies were destroyed.</summary>
+        private static int ForgetCuts(Built built, Mesh source)
+        {
+            var count = 0;
+
+            foreach (var cut in built.Cuts.Values)
+            {
+                if (!cut.TryGetValue(source, out var clipped)) continue;
+
+                cut.Remove(source);
+
+                if (clipped == null || ReferenceEquals(clipped, source)) continue;
+
+                Discard(clipped);
+                count++;
+            }
 
             return count;
         }
@@ -1107,13 +1168,24 @@ namespace QuestTree.UI
 
         // --- building the meshes -------------------------------------------------------------------
 
-        /// <summary>Turns the parsed file into meshes, or refuses it. Runs once, on the main thread, in
-        /// the first LateUpdate after the read lands.</summary>
-        private void BuildMeshes()
+        /// <summary>
+        /// Starts turning the parsed file into meshes, or refuses it. Runs on the main thread in the first
+        /// LateUpdate after the read lands (and again for a rebuild that drops a failed side).
+        ///
+        /// ONLY THE CHEAP HALF runs here: the checks, the shader, the cache key, one Floor (and one registered
+        /// cache entry) per drawn band. The geometry of every band not already cached is prepared on a worker
+        /// (<see cref="PrepareFloor"/> - plain arrays, no Unity object) and uploaded afterwards one mesh per
+        /// unit under a per-frame budget (<see cref="Pump"/>), so a map of three million building triangles
+        /// never freezes the panel for longer than a frame's budget. Until the last unit is done the view
+        /// draws nothing: the RawImage keeps the backdrop it was cleared to, and the overlays stay parked.
+        /// </summary>
+        private void BeginBuild()
         {
             _built = true;
+            ResetPipeline();
 
-            var clock = Stopwatch.StartNew();
+            _buildClock.Reset();
+            _buildClock.Start();
 
             // From the worker the first time; from the kept result on a rebuild (a side dropped).
             var loaded = _loading != null ? _loading.Result : _loaded;
@@ -1143,7 +1215,7 @@ namespace QuestTree.UI
                 return;
             }
 
-            var levels = DrawnLevels();
+            _levels = DrawnLevels();
 
             var shader = ResolveShader(out var shaderName);
 
@@ -1160,9 +1232,10 @@ namespace QuestTree.UI
             // colours or nothing at all.
             var flat = shaderName == "Hidden/Internal-Colored";
 
-            // Kept for the walls, which can be built on a later frame than the rest - see TryBuildWalls.
+            // Kept for the walls, which can be built on a later frame than the rest - see StartWalls.
             _buildingShader = shader;
             _flatColours = flat;
+            _shaderName = shaderName;
 
             // Which heights are which floor's surfaces - the roof routing reads it while the floors build.
             MeasureFloorRanges();
@@ -1184,13 +1257,123 @@ namespace QuestTree.UI
                 _builtKey = key;
             }
 
-            _groundShader = ResolveGroundShader(shader, shaderName, out _groundCutout, out var cutoutNote);
+            _groundShader = ResolveGroundShader(shader, shaderName, out _groundCutout, out _cutoutNote);
 
-            for (var i = 0; i < levels.Count; i++) BuildFloor(levels[i], shader, flat);
+            // One Floor per drawn band, each with a cache entry - reused when complete, registered empty
+            // when not, and then filled by the worker's data.
+            var toPrepare = new List<(int Level, Built Into)>();
+
+            for (var i = 0; i < _levels.Count; i++) RegisterFloor(_levels[i], shader, toPrepare);
+
+            _groundBand = _file.Band(_levels[_levels.Count - 1]);
+            _groundFallbackY = FallbackGroundY();
+            _cutY = CutHeight();
+
+            if (!_restored) _distance = FitDistance();
+
+            Place();
+
+            // The side pictures first, then the floors lowest to highest: the floor SHOWING ends up the most
+            // recently used of everything this view holds. Asked now, so they decode while the geometry is
+            // being prepared rather than after.
+            if (SidesActive)
+            {
+                for (var slot = 0; slot < _sides.Length; slot++) _sides[slot]?.Picture?.TryGetSprite(out _);
+            }
+
+            foreach (var floor in _floors)
+                if (!_flatColours) floor.Layer?.TryGetSprite(out _);
+
+            _preparing = toPrepare;
+
+            if (toPrepare.Count == 0)
+            {
+                // Everything came out of the cache: nothing to prepare, straight to the walls and the cut.
+                AfterPrepare(new List<FloorData>());
+                return;
+            }
+
+            // One worker job per (build, level), SHARED: a repaint during a build makes a new view with the same
+            // key, and it attaches to the job already running instead of starting another - so clicking quests
+            // while a big map builds does not stack up workers (each one is the whole floor's geometry in
+            // memory). A level with no job, or only a cancelled one, gets a new job with its own snapshot.
+            foreach (var item in toPrepare)
+                _held.Add((item.Level, AcquirePrep(PrepKey(item.Level), item.Level, SnapshotPrep())));
+        }
+
+        /// <summary>
+        /// One floor of the peel: its two materials, and its cache entry - taken from the cache when a
+        /// previous view of this same file and floor completed it, else registered EMPTY here and listed in
+        /// <paramref name="toPrepare"/> for the worker. Registered before it is built, as ever, so a view that
+        /// goes away mid-build leaves every mesh it made where a drop will find it.
+        /// </summary>
+        private void RegisterFloor(int level, Shader shader, List<(int Level, Built Into)> toPrepare)
+        {
+            var band = _file.Band(level);
+            if (band == null) return;
+
+            if (!_cachedFloors.TryGetValue(level, out var meshes) || meshes == null || !meshes.Complete)
+            {
+                if (meshes != null)
+                {
+                    // A half-built entry: destroyed now when nobody holds it; ORPHANED when a view still
+                    // does (one whose build was abandoned in the frame this view was made), so that view's
+                    // release destroys it. Replacing it in the cache without either would lose it for good -
+                    // a view-held entry that is no longer in the cache is found by nothing.
+                    if (meshes.Users == 0) DestroyBuilt(meshes);
+                    else meshes.Orphaned = true;
+                }
+
+                meshes = new Built { Cells = band.CellCount };
+                _cachedFloors[level] = meshes;
+
+                toPrepare.Add((level, meshes));
+                _reusedFloors = false;
+            }
+
+            // Counted as in use from here until this view releases it - see Built.
+            meshes.Users++;
+
+            _floors.Add(new Floor
+            {
+                Level = level,
+                Layer = LayerOf(level),
+                GroundMaterial = MakeGroundMaterial(level),
+                BuildingMaterial = Matte(new Material(shader) { name = $"QuestTreeMap3D-buildings-{level}" }),
+                Meshes = meshes
+            });
+        }
+
+        /// <summary>
+        /// The worker's result has landed: the counts go onto their entries, the checks that need them are
+        /// made, and every mesh is queued as one unit of upload work. Then the walls of every floor whose
+        /// picture is already here are started, and the pump takes it from there.
+        /// </summary>
+        private void AfterPrepare(List<FloorData> prepared)
+        {
+            _prepDone = true;
+
+            foreach (var data in prepared)
+            {
+                var into = IntoFor(data.Level);
+                if (into == null) continue;
+
+                into.Cells = data.Cells;
+                into.GroundTriangles = data.GroundTriangles;
+                into.BuildingTriangles = data.BuildingTriangles;
+                into.BuildingCount = data.BuildingCount;
+                into.Dropped = data.Dropped;
+                into.TopTriangles = data.TopTriangles;
+                into.SideTriangles = data.SideTriangles;
+                into.WallTriangles = data.WallTriangles;
+                into.MovedRoofTriangles = data.MovedRoofTriangles;
+                into.WallsPending = data.WallTriangles > 0;
+            }
 
             // The check that can fail, and the one an empty or garbage file gets caught by: a view with
             // no triangles in it is a viewport with the markers of a map floating over a flat colour,
-            // which looks like a bug in the markers rather than in the mesh.
+            // which looks like a bug in the markers rather than in the mesh. On the COUNTS, before a single
+            // mesh is uploaded, so a file that would show nothing costs nothing to refuse.
             var drawable = 0L;
             var pictured = 0;
 
@@ -1210,7 +1393,7 @@ namespace QuestTree.UI
             if (pictured == 0)
             {
                 Plugin.LogSource?.LogWarning(
-                    $"QuestTree: the 3D relief of '{_mapKey}' has {levels.Count} band(s) but no picture for " +
+                    $"QuestTree: the 3D relief of '{_mapKey}' has {_levels.Count} band(s) but no picture for " +
                     $"any of them - drawing the flat picture instead.");
                 Refuse("no band of it has a picture");
                 return;
@@ -1219,30 +1402,172 @@ namespace QuestTree.UI
             if (drawable == 0)
             {
                 Plugin.LogSource?.LogWarning(
-                    $"QuestTree: the 3D relief of '{_mapKey}' has {levels.Count} band(s) but not one " +
+                    $"QuestTree: the 3D relief of '{_mapKey}' has {_levels.Count} band(s) but not one " +
                     $"triangle in them - drawing the flat picture instead.");
                 Refuse("there is no ground in the bands it has");
                 return;
             }
 
-            // The buildings of a level the peel does not draw are simply not built - see BuildFloor,
-            // which takes the buildings whose Level is this one. A building naming a level no band has
-            // is moved to the nearest band by BandLevelFor, so none is lost to a file from a future
-            // builder.
-            _groundBand = _file.Band(levels[levels.Count - 1]);
-            _groundFallbackY = FallbackGroundY();
+            // One unit per mesh. The side materials are made with the first mesh of their side, on this
+            // thread, where a Material can be made at all.
+            foreach (var data in prepared)
+            {
+                var into = IntoFor(data.Level);
+                if (into == null) continue;
 
-            _cutY = CutHeight();
+                var level = data.Level;
 
-            // The cut is MADE here, with the rest of the build, rather than on the first frame that draws
-            // it: clipping a mall is tens of milliseconds, and a hitch that is part of opening the map is a
-            // hitch the player already expects. Walls or sides built on a later frame are cut when first
-            // drawn. The time is in the build line.
-            _cutMillis = PrecutFloors();
+                foreach (var mesh in data.Ground) _work.Enqueue(() => into.Ground.Add(Upload(into, mesh)));
+                foreach (var mesh in data.Roofs) _work.Enqueue(() => into.Buildings.Add(Upload(into, mesh)));
 
-            if (!_restored) _distance = FitDistance();
+                foreach (var roof in data.RoofsElsewhere)
+                {
+                    var item = roof;
+                    _work.Enqueue(() => into.RoofsOnOtherFloors.Add((item.Level, Upload(into, item.Data))));
+                }
 
-            Place();
+                for (var slot = 0; slot < data.Sides.Length; slot++)
+                {
+                    if (data.Sides[slot] == null) continue;
+
+                    var s = slot;
+
+                    foreach (var mesh in data.Sides[slot])
+                    {
+                        _work.Enqueue(() =>
+                        {
+                            if (into.Sides[s] == null)
+                            {
+                                into.Sides[s] = new SideTexture
+                                {
+                                    Material = Matte(new Material(_buildingShader)
+                                        { name = $"QuestTreeMap3D-side{SideOrder[s]}-{level}" })
+                                };
+                            }
+
+                            into.Sides[s].Meshes.Add(Upload(into, mesh));
+                        });
+                    }
+                }
+
+                // Complete only once every mesh of it is in: a view that goes away before this unit leaves
+                // an incomplete entry, which the next view throws away and builds again.
+                _work.Enqueue(() => into.Complete = true);
+            }
+
+            // The walls' colours come from each floor's picture. The floor SHOWING always has its picture by
+            // now (the 3D branch only runs once the flat path has it), so its walls start with the rest; a
+            // peeled lower floor may still be decoding, and its walls are started by the first frame that
+            // has the picture (Draw). An entry reused from the cache with its walls still waiting gets the
+            // same chance here.
+            _work.Enqueue(StartInitialWalls);
+        }
+
+        /// <summary>The cache entry this build prepared a level into.</summary>
+        private Built IntoFor(int level)
+        {
+            if (_preparing == null) return null;
+
+            foreach (var item in _preparing)
+                if (item.Level == level) return item.Into;
+
+            return null;
+        }
+
+        /// <summary>Starts the walls of every floor whose picture is here - the "initial" walls, which the
+        /// build line waits for, so its tint count is the map's and not whatever finished first.</summary>
+        private void StartInitialWalls()
+        {
+            foreach (var floor in _floors)
+            {
+                var built = floor.Meshes;
+                if (built == null || !built.WallsPending || built.WallsRunning) continue;
+
+                Texture picture = null;
+
+                if (!_flatColours && floor.Layer != null && floor.Layer.TryGetSprite(out var sprite) && sprite != null)
+                    picture = sprite.texture;
+
+                StartWalls(built, floor.Level, picture, late: false);
+            }
+        }
+
+        /// <summary>
+        /// Advances the build by at most a frame's budget: runs queued units until the budget is spent (one
+        /// at least), collects wall workers that have finished, and - once nothing of the first build is
+        /// left - queues the cut, then finishes. Called every frame while anything is outstanding.
+        /// </summary>
+        private void Pump()
+        {
+            var frame = Stopwatch.StartNew();
+
+            PollWallJobs();
+
+            while (_work.Count > 0 && !_broke)
+            {
+                var unit = _work.Dequeue();
+
+                try
+                {
+                    unit();
+                }
+                catch (Exception ex)
+                {
+                    // A unit of the first build that throws leaves a map half made - the flat picture is the
+                    // better answer. (Wall units catch their own; see EnqueueWallUpload.)
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: the 3D relief of '{_mapKey}' could not be turned into meshes " +
+                        $"({ex.GetType().Name}: {ex.Message}) - drawing the flat picture instead.");
+                    Refuse("could not be turned into meshes");
+                    return;
+                }
+
+                if (frame.ElapsedMilliseconds >= (_ready ? BackgroundBudgetMs : FrameBudgetMs)) break;
+            }
+
+            if (!_ready && _prepDone && _work.Count == 0 && !InitialWallsRunning())
+            {
+                if (!_precutQueued)
+                {
+                    _precutQueued = true;
+                    EnqueuePrecut();
+                }
+                else
+                {
+                    Finish();
+                }
+            }
+
+            if (!_ready)
+            {
+                _buildFrames++;
+                _longestFrameMs = Math.Max(_longestFrameMs, frame.ElapsedMilliseconds);
+            }
+        }
+
+        /// <summary>
+        /// Main-thread work per frame while a build is uploading, in milliseconds. One unit is at most one
+        /// mesh of <see cref="MaxVerticesPerMesh"/> vertices uploaded (normals recalculated) or clipped, which
+        /// measures tens of milliseconds - so a frame is at most this plus one unit, inside the 200 ms the
+        /// panel may stall for.
+        /// </summary>
+        private const long FrameBudgetMs = 100;
+
+        /// <summary>The same budget once the map is on screen, for work that arrives later (a lower floor's
+        /// walls): one frame's worth, so the view stays interactive while it finishes. Still one unit at least.</summary>
+        private const long BackgroundBudgetMs = 16;
+
+        /// <summary>The first build is done: log what it came to, announce the view, and draw from the next
+        /// frame on.</summary>
+        private void Finish()
+        {
+            _ready = true;
+            _measureFirstFrame = true;
+            _buildClock.Stop();
+
+            // The jobs this build used are no longer needed by it. See the collection in LateUpdate.
+            foreach (var held in _held) ReleasePrep(held.Prep);
+            _held.Clear();
 
             var cells = 0L;
             var groundTriangles = 0L;
@@ -1252,14 +1577,6 @@ namespace QuestTree.UI
             var wallTriangles = 0L;
             var tints = 0;
             var wallsWaiting = 0;
-
-            // The side pictures first, then the floors lowest to highest: the floor SHOWING ends up the most
-            // recently used of everything this view holds.
-            if (SidesActive)
-            {
-                for (var slot = 0; slot < _sides.Length; slot++) _sides[slot]?.Picture?.TryGetSprite(out _);
-            }
-
             var topTriangles = 0L;
             var sideTriangles = 0L;
             var movedRoofs = 0L;
@@ -1277,12 +1594,6 @@ namespace QuestTree.UI
                 wallTriangles += floor.Meshes.WallTriangles;
                 tints += floor.Meshes.Tints;
                 if (floor.Meshes.WallsPending) wallsWaiting++;
-
-                // Asks the picture cache for every floor the peel holds, lowest first, so the floor
-                // SHOWING ends up the most recently used and is the last thing the cache would ever
-                // evict. Without this only the floors whose first frame has been drawn count as used,
-                // and the 2D layer's own sprite could push a lower storey out from under us.
-                if (!_flatColours) floor.Layer?.TryGetSprite(out _);
             }
 
             // What the walls came to. "in N tints" is summed over the floors whose walls are built; a floor
@@ -1318,12 +1629,13 @@ namespace QuestTree.UI
             Plugin.LogSource?.LogInfo(string.Format(
                 CultureInfo.InvariantCulture,
                 "QuestTree: 3D map for {0} - {1} band(s) {2:#,##0} cells -> {3:#,##0} triangles, " +
-                "{4:#,##0} buildings {5:#,##0} triangles ({11}), built in {6:#,##0} ms, layer {7}, shader {8}, " +
+                "{4:#,##0} buildings {5:#,##0} triangles ({11}), built in {6:#,##0} ms over {14} frame(s) " +
+                "(longest {15:#,##0} ms), meshes ~{16:#,##0} MB, layer {7}, shader {8}, " +
                 "ground cutout: {9}{10}{12}{13}.",
-                _mapKey, levels.Count, cells, groundTriangles, buildings, buildingTriangles,
-                clock.ElapsedMilliseconds, _drawLayer,
-                flat ? shaderName + " (flat colours, no picture)" : shaderName,
-                cutoutNote + (_reusedFloors ? ", meshes reused" : ""),
+                _mapKey, _levels.Count, cells, groundTriangles, buildings, buildingTriangles,
+                _buildClock.ElapsedMilliseconds, _drawLayer,
+                _flatColours ? _shaderName + " (flat colours, no picture)" : _shaderName,
+                _cutoutNote + (_reusedFloors ? ", meshes reused" : ""),
                 dropped > 0
                     ? string.Format(CultureInfo.InvariantCulture,
                         ", dropped {0:#,##0} building triangle(s) with a vertex that is not a number", dropped)
@@ -1333,14 +1645,175 @@ namespace QuestTree.UI
                 float.IsNaN(_cutY)
                     ? ""
                     : string.Format(CultureInfo.InvariantCulture, ", cut at {0:0.0} m (level {1}) built in {2:#,##0} ms",
-                        _cutY, _selectedLevel, _cutMillis)));
+                        _cutY, _selectedLevel, _cutMillis),
+                _buildFrames,
+                _longestFrameMs,
+                ResidentMeshBytes() / (1024d * 1024d)));
 
             // ANNOUNCED, not just placed. The labels were culled when the viewport was built - against the
             // camera as it stood before the mesh landed, with the ground at the fallback height - and
-            // Place() above moves the camera without telling anyone. Without this the cull and the pin
-            // names kept that placeholder's decisions until the player's first drag.
+            // Place() moved the camera without telling anyone. Without this the cull and the pin names
+            // kept that placeholder's decisions until the player's first drag.
             Moved();
         }
+
+        /// <summary>Forgets everything of a build in progress: queued units, a worker's pending result, wall
+        /// jobs. A wall job abandoned mid-flight leaves its entry's walls to be built again by whichever view
+        /// draws it next - never half made (see <see cref="AbandonWalls"/>).</summary>
+        private void ResetPipeline()
+        {
+            _work.Clear();
+
+            // Let go of every job this build waited on. Not cancelled here: another view of the same build may
+            // attach within the grace - see SharedPrep.
+            foreach (var held in _held) ReleasePrep(held.Prep);
+            _held.Clear();
+
+            _preparing = null;
+            _prepDone = false;
+            _precutQueued = false;
+            _ready = false;
+            _measureFirstFrame = false;
+            _buildFrames = 0;
+            _longestFrameMs = 0;
+            _cutMillis = 0;
+            _reusedFloors = true;
+
+            AbandonWalls();
+        }
+
+        /// <summary>The shared jobs this build is waiting on, one per level it prepares. See
+        /// <see cref="SharedPrep"/>.</summary>
+        private readonly List<(int Level, SharedPrep Prep)> _held = new List<(int Level, SharedPrep Prep)>();
+
+        /// <summary>
+        /// One floor's preparation, shared by every view of the same build that needs it. A view HOLDS it while
+        /// it waits and lets go once it has the result (or goes away); a job nobody holds is cancelled after
+        /// <see cref="PrepIdleGraceMs"/> - a grace, not at once, because a repaint destroys the old view at the
+        /// end of its frame and the new view attaches a frame or so later, and cancelling in between would
+        /// throw away exactly the work the new view wants. The registry is touched by the main thread and by
+        /// the grace timers, so every access is under <see cref="PrepLock"/>.
+        /// </summary>
+        private sealed class SharedPrep
+        {
+            public string Key = "";
+            public Task<FloorData> Task;
+            public CancellationTokenSource Cancel;
+            public int Holders;
+            public int IdleStamp;
+        }
+
+        private static readonly object PrepLock = new object();
+        private static readonly Dictionary<string, SharedPrep> _preps = new Dictionary<string, SharedPrep>();
+
+        /// <summary>A job's identity: the build's cache key (file, write time, sides, floor ranges), the level,
+        /// and whether the flat-colour shader is in use - the one input the cache key leaves out that changes
+        /// the arrays (vertex colours). Two views with the same key would prepare the same floor to the byte.</summary>
+        private string PrepKey(int level) =>
+            _builtKey + "|" + level.ToString(CultureInfo.InvariantCulture) + (_flatColours ? "|flat" : "");
+
+        /// <summary>How long a job nobody holds is kept for a view that may still attach, in milliseconds.</summary>
+        private const int PrepIdleGraceMs = 2000;
+
+        /// <summary>The running (or finished, not yet collected) job for this key - attached to - or a new one.</summary>
+        private static SharedPrep AcquirePrep(string key, int level, Prep prep)
+        {
+            lock (PrepLock)
+            {
+                if (_preps.TryGetValue(key, out var existing) && !existing.Cancel.IsCancellationRequested &&
+                    !existing.Task.IsCanceled && !existing.Task.IsFaulted)
+                {
+                    existing.Holders++;
+                    existing.IdleStamp++;
+                    return existing;
+                }
+
+                var cancel = new CancellationTokenSource();
+                var token = cancel.Token;
+
+                var shared = new SharedPrep
+                {
+                    Key = key,
+                    Cancel = cancel,
+                    Holders = 1,
+                    Task = System.Threading.Tasks.Task.Run(() => PrepareFloor(prep, level, token), token)
+                };
+
+                _preps[key] = shared;
+                return shared;
+            }
+        }
+
+        /// <summary>A view lets go of a job. The last one out starts the grace; if nobody has attached when it
+        /// runs out, the job is cancelled and forgotten, and its output - if it had any - is garbage.</summary>
+        private static void ReleasePrep(SharedPrep shared)
+        {
+            int stamp;
+
+            lock (PrepLock)
+            {
+                if (shared.Holders > 0) shared.Holders--;
+                if (shared.Holders > 0) return;
+
+                stamp = ++shared.IdleStamp;
+            }
+
+            System.Threading.Tasks.Task.Delay(PrepIdleGraceMs).ContinueWith(_ =>
+            {
+                lock (PrepLock)
+                {
+                    // Attached to again (the stamp moved), or held again: nothing to do.
+                    if (shared.Holders > 0 || shared.IdleStamp != stamp) return;
+
+                    shared.Cancel.Cancel();
+
+                    if (_preps.TryGetValue(shared.Key, out var current) && ReferenceEquals(current, shared))
+                        _preps.Remove(shared.Key);
+                }
+            });
+        }
+
+        /// <summary>Cancels every job and forgets them all - for <see cref="DropCaches"/>, where the map memory
+        /// goes: a worker that finished after it would hand its floor to nobody.</summary>
+        private static void CancelAllPreps()
+        {
+            lock (PrepLock)
+            {
+                foreach (var shared in _preps.Values) shared.Cancel.Cancel();
+                _preps.Clear();
+            }
+        }
+
+        /// <summary>Whether a finished job was cancelled rather than failed - its level is simply asked for again.</summary>
+        private static bool WasCancelled(Task task) =>
+            task.IsCanceled || task.Exception?.GetBaseException() is OperationCanceledException;
+
+        /// <summary>The levels this build is preparing, and the entries they go into.</summary>
+        private List<(int Level, Built Into)> _preparing;
+
+        /// <summary>The drawn band levels of this build, lowest first.</summary>
+        private List<int> _levels = new List<int>();
+
+        /// <summary>Units of main-thread work - a mesh uploaded, a mesh clipped - run by <see cref="Pump"/>.</summary>
+        private readonly Queue<Action> _work = new Queue<Action>();
+
+        private readonly Stopwatch _buildClock = new Stopwatch();
+        private int _buildFrames;
+        private long _longestFrameMs;
+        private bool _prepDone;
+        private bool _precutQueued;
+
+        /// <summary>The first build is finished and the view draws. Until then the backdrop shows.</summary>
+        private bool _ready;
+
+        /// <summary>The next drawn frame is the first: time it and say so, once.</summary>
+        private bool _measureFirstFrame;
+
+        /// <summary>Draw calls submitted this frame - see <see cref="Submit"/>.</summary>
+        private int _drawCalls;
+
+        private string _shaderName = "";
+        private string _cutoutNote = "";
 
         private bool _restored;
 
@@ -1350,33 +1823,156 @@ namespace QuestTree.UI
         /// <summary>How long the build spent cutting, for the log line.</summary>
         private long _cutMillis;
 
-        /// <summary>Cuts every building mesh this view has, now. Cached in each entry, so a floor seen before
-        /// costs nothing here. Returns the milliseconds spent.</summary>
-        private long PrecutFloors()
+        /// <summary>
+        /// Queues the cut of every building mesh this view draws - one mesh per unit, like the upload - and
+        /// first DROPS every other cut its entries hold. Only the chosen floor's clipped copy is kept: at three
+        /// million building triangles a clipped copy is a second copy of most of the geometry, and one per floor
+        /// a player has visited would be several. Stepping back to a floor costs its clipping again, paced like
+        /// the rest. With no cut (the top floor chosen) every cut is dropped.
+        /// </summary>
+        private void EnqueuePrecut()
         {
-            if (float.IsNaN(_cutY)) return 0L;
-
-            var clock = Stopwatch.StartNew();
+            var seen = new HashSet<Built>();
+            var recut = false;
 
             foreach (var floor in _floors)
             {
                 var built = floor?.Meshes;
-                if (built == null) continue;
+                if (built == null || !seen.Add(built)) continue;
 
-                for (var i = 0; i < built.Buildings.Count; i++) Under(built, built.Buildings[i], _cutY);
-                for (var i = 0; i < built.RoofsOnOtherFloors.Count; i++) Under(built, built.RoofsOnOtherFloors[i].Mesh, _cutY);
+                DropOtherCuts(built, _cutY);
 
-                foreach (var tint in built.Walls)
-                    for (var i = 0; i < tint.Meshes.Count; i++) Under(built, tint.Meshes[i], _cutY);
+                built.CurrentCut = _cutY;
+                if (float.IsNaN(_cutY)) continue;
 
-                foreach (var side in built.Sides)
+                built.CutLevels[_cutY] = _selectedLevel;
+                recut |= built.DroppedCutLevels.Remove(_selectedLevel);
+
+                foreach (var mesh in BuildingMeshesOf(built))
                 {
-                    if (side == null) continue;
-                    for (var i = 0; i < side.Meshes.Count; i++) Under(built, side.Meshes[i], _cutY);
+                    var source = mesh;
+                    _work.Enqueue(() =>
+                    {
+                        var clock = Stopwatch.StartNew();
+                        Under(built, source, _cutY);
+                        _cutMillis += clock.ElapsedMilliseconds;
+                    });
                 }
             }
 
-            return clock.ElapsedMilliseconds;
+            NoteRecut(recut);
+        }
+
+        /// <summary>Whether this view's precut is doing a level again whose cut was dropped earlier - said once,
+        /// because the blank view while it re-cuts is the one visible cost of keeping one cut resident.</summary>
+        private void NoteRecut(bool recut)
+        {
+            if (!recut || float.IsNaN(_cutY)) return;
+
+            Plugin.LogSource?.LogInfo(string.Format(
+                CultureInfo.InvariantCulture,
+                "QuestTree: 3D map re-cutting level {0} ({1:0.0} m) - its earlier cut was dropped to keep one resident.",
+                _selectedLevel, _cutY));
+        }
+
+        /// <summary>Every building mesh of an entry - roofs, roofs on other floors, wall tints, sides: what
+        /// the cut applies to. Not the ground.</summary>
+        private static IEnumerable<Mesh> BuildingMeshesOf(Built built)
+        {
+            foreach (var mesh in built.Buildings) yield return mesh;
+            foreach (var roof in built.RoofsOnOtherFloors) yield return roof.Mesh;
+
+            foreach (var tint in built.Walls)
+                foreach (var mesh in tint.Meshes)
+                    yield return mesh;
+
+            foreach (var side in built.Sides)
+            {
+                if (side == null) continue;
+                foreach (var mesh in side.Meshes) yield return mesh;
+            }
+        }
+
+        /// <summary>Destroys every clipped copy an entry holds for a cut height other than
+        /// <paramref name="keep"/> (every one, when that is NaN), and says so once per height dropped.</summary>
+        private void DropOtherCuts(Built built, float keep)
+        {
+            if (built.Cuts.Count == 0) return;
+
+            var heights = new List<float>(built.Cuts.Keys);
+
+            foreach (var height in heights)
+            {
+                if (!float.IsNaN(keep) && height == keep) continue;
+
+                var meshes = 0;
+                var bytes = 0L;
+
+                foreach (var pair in built.Cuts[height])
+                {
+                    // Self entries are the source mesh itself (see Under) and stay; null is "nothing below".
+                    if (pair.Value == null || ReferenceEquals(pair.Key, pair.Value)) continue;
+
+                    bytes += MeshBytes(pair.Value, 1);
+                    Discard(pair.Value);
+                    meshes++;
+                }
+
+                built.Cuts.Remove(height);
+
+                built.CutLevels.TryGetValue(height, out var level);
+                built.CutLevels.Remove(height);
+                built.DroppedCutLevels.Add(level);
+
+                if (meshes > 0)
+                {
+                    Plugin.LogSource?.LogInfo(string.Format(
+                        CultureInfo.InvariantCulture,
+                        "QuestTree: 3D map cut dropped for level {0} ({1:0.0} m) - {2} mesh(es), ~{3:0.0} MB freed.",
+                        level, height, meshes, bytes / (1024d * 1024d)));
+                }
+            }
+        }
+
+        /// <summary>
+        /// Roughly what a mesh of ours costs in memory, in bytes: position, normal and UV per vertex (and a
+        /// colour under the flat shader), four bytes per index, times the copies held - TWO for a source mesh
+        /// (the GPU copy, and the worker's arrays the entry keeps for the cut), ONE for a clipped copy (GPU
+        /// only; nothing clips it again). An estimate for the log line, not an accounting.
+        /// </summary>
+        private static long MeshBytes(Mesh mesh, int copies)
+        {
+            if (mesh == null) return 0L;
+
+            var stride = 12 + 12 + 8 + (mesh.HasVertexAttribute(VertexAttribute.Color) ? 4 : 0);
+            var indices = 0L;
+
+            for (var sub = 0; sub < mesh.subMeshCount; sub++) indices += (long)mesh.GetIndexCount(sub);
+
+            return ((long)mesh.vertexCount * stride + indices * 4L) * copies;
+        }
+
+        /// <summary>What this view's geometry holds resident: every mesh of every entry it draws, and the
+        /// clipped copies of the current cut. For the build line.</summary>
+        private long ResidentMeshBytes()
+        {
+            var total = 0L;
+            var seen = new HashSet<Built>();
+
+            foreach (var floor in _floors)
+            {
+                var built = floor?.Meshes;
+                if (built == null || !seen.Add(built)) continue;
+
+                foreach (var mesh in built.Ground) total += MeshBytes(mesh, 2);
+                foreach (var mesh in BuildingMeshesOf(built)) total += MeshBytes(mesh, 2);
+
+                foreach (var cut in built.Cuts.Values)
+                    foreach (var pair in cut)
+                        if (pair.Value != null && !ReferenceEquals(pair.Key, pair.Value)) total += MeshBytes(pair.Value, 1);
+            }
+
+            return total;
         }
 
         /// <summary>How far above the chosen floor's top the cut is made, in metres: enough to keep that
@@ -1430,19 +2026,30 @@ namespace QuestTree.UI
         {
             if (mesh == null || float.IsNaN(cutY)) return mesh;
 
-            if (!built.Cuts.TryGetValue(cutY, out var cut))
+            built.Cuts.TryGetValue(cutY, out var cut);
+
+            if (cut != null && cut.TryGetValue(mesh, out var clipped)) return clipped;
+
+            // Only the entry's CURRENT cut is ever made. A view asking for another height is a view on its
+            // way out (the one DiscardViewport destroyed, which gets one more LateUpdate) - it gets nothing
+            // for that frame rather than re-clip, and so resurrect, the copy the new view just dropped.
+            if (!(cutY == built.CurrentCut)) return null;
+
+            if (cut == null)
             {
                 cut = new Dictionary<Mesh, Mesh>();
                 built.Cuts[cutY] = cut;
             }
 
-            if (cut.TryGetValue(mesh, out var clipped)) return clipped;
-
             // Stored even when null - "nothing below the cut" is an answer, and without it a mesh entirely
             // above would be clipped again every frame. A mesh wholly BELOW the cut is stored as ITSELF (a
             // "self" entry): its cut is the mesh, and copying it would double its memory for nothing.
             // DestroyBuilt skips self entries so the mesh is destroyed once, with the list it lives in.
-            clipped = ClipBelow(mesh, cutY);
+            // From the arrays the mesh was made from - the mesh itself is non-readable. An entry without them
+            // (none should exist) draws the mesh uncut rather than nothing.
+            if (!built.Sources.TryGetValue(mesh, out var data)) return mesh;
+
+            clipped = ClipBelow(mesh, data, cutY);
             cut[mesh] = clipped;
 
             return clipped;
@@ -1474,24 +2081,28 @@ namespace QuestTree.UI
         /// </summary>
         /// <returns>The clipped mesh; the SOURCE itself when no vertex is above the plane; null when
         /// nothing of the source is below it.</returns>
-        private static Mesh ClipBelow(Mesh source, float cutY)
+        private static Mesh ClipBelow(Mesh source, MeshData data, float cutY)
         {
-            // Wholly below: the bounds say so without reading a vertex back. The bounds are exact for these
+            // Wholly below: the bounds say so without touching a vertex. The bounds are exact for these
             // meshes (SetTriangles computed them from the vertices), and "not above" is all that is asked.
             if (source.bounds.max.y <= cutY) return source;
 
-            var vertices = source.vertices;
-            var triangles = source.triangles;
+            // The worker's arrays, read in place: no copy of the mesh is made to clip it.
+            var vertices = data.Vertices;
+            var triangles = data.Indices;
 
             if (vertices == null || triangles == null || vertices.Length == 0) return null;
 
-            var normals = source.normals;
-            var uvs = source.uv;
-            var colours = source.colors32;
+            var normals = data.Normals;
+            var uvs = data.Uvs;
+            var colours = data.Colours;
 
             var hasNormals = normals != null && normals.Length == vertices.Length;
             var hasUvs = uvs != null && uvs.Length == vertices.Length;
             var hasColours = colours != null && colours.Length == vertices.Length;
+
+            // One remap scratch for every clip, grown, never shrunk - the clip runs on the main thread only.
+            if (_clipRemap.Length < vertices.Length) _clipRemap = new int[vertices.Length];
 
             var clip = new Clipper
             {
@@ -1500,10 +2111,10 @@ namespace QuestTree.UI
                 Uvs = hasUvs ? uvs : null,
                 Colours = hasColours ? colours : null,
                 CutY = cutY,
-                Remap = new int[vertices.Length]
+                Remap = _clipRemap
             };
 
-            for (var i = 0; i < clip.Remap.Length; i++) clip.Remap[i] = -1;
+            for (var i = 0; i < vertices.Length; i++) clip.Remap[i] = -1;
 
             for (var t = 0; t + 2 < triangles.Length; t += 3)
                 clip.Triangle(triangles[t], triangles[t + 1], triangles[t + 2]);
@@ -1520,8 +2131,14 @@ namespace QuestTree.UI
 
             if (!hasNormals) mesh.RecalculateNormals();
 
+            // A clipped copy is never clipped again, so it keeps no CPU copy at all.
+            mesh.UploadMeshData(true);
+
             return mesh;
         }
+
+        /// <summary>The clipper's remap scratch. See <see cref="ClipBelow"/>.</summary>
+        private static int[] _clipRemap = new int[0];
 
         /// <summary>The working state of one <see cref="ClipBelow"/>.</summary>
         private sealed class Clipper
@@ -1785,65 +2402,6 @@ namespace QuestTree.UI
             return null;
         }
 
-        /// <summary>One floor of the peel: its two materials, and its geometry - built now, or taken
-        /// from the cache when a previous view of this same file and floor already built it.</summary>
-        /// <param name="level">The band level.</param>
-        /// <param name="shader">The shader every floor shares.</param>
-        /// <param name="flat">Whether the shader draws vertex colours instead of a texture.</param>
-        private void BuildFloor(int level, Shader shader, bool flat)
-        {
-            var band = _file.Band(level);
-            if (band == null) return;
-
-            if (!_cachedFloors.TryGetValue(level, out var meshes) || meshes == null || !meshes.Complete)
-            {
-                // A half-built entry left by a build that threw: its meshes are ours to destroy (it was
-                // never handed to a view, so nobody is drawing it) and it is built again from scratch.
-                if (meshes != null && meshes.Users == 0) DestroyBuilt(meshes);
-
-                // INTO THE CACHE FIRST, then built. Everything BuildGround and BuildBuildings make goes
-                // straight into this entry, and Release never touches meshes - so an entry made outside
-                // the cache and lost to a throw in BuildBuildings or MakeMesh would have leaked the ground
-                // it had already built. In the cache, a drop finds it whatever state it is in.
-                meshes = new Built { Cells = band.CellCount };
-                _cachedFloors[level] = meshes;
-
-                BuildGround(band, meshes, flat);
-                BuildBuildings(level, meshes, flat);
-
-                meshes.Complete = true;
-                _reusedFloors = false;
-            }
-
-            // The walls' colours come from this floor's picture. The floor SHOWING always has its picture
-            // by now (the 3D branch only runs once the flat path has it), so its walls are built here with
-            // the rest; a peeled lower floor may still be decoding, and its walls are then built by the
-            // first frame that has the picture (Draw). An entry reused from the cache with its walls still
-            // waiting gets the same chance here.
-            if (meshes.WallsPending)
-            {
-                Texture picture = null;
-                var layer = LayerOf(level);
-
-                if (!flat && layer != null && layer.TryGetSprite(out var sprite) && sprite != null)
-                    picture = sprite.texture;
-
-                TryBuildWalls(meshes, level, picture, late: false);
-            }
-
-            // Counted as in use from here until this view releases it - see Built.
-            meshes.Users++;
-
-            _floors.Add(new Floor
-            {
-                Level = level,
-                Layer = LayerOf(level),
-                GroundMaterial = MakeGroundMaterial(level),
-                BuildingMaterial = Matte(new Material(shader) { name = $"QuestTreeMap3D-buildings-{level}" }),
-                Meshes = meshes
-            });
-        }
-
         /// <summary>Whether every floor of this view came out of the cache, for the build log line -
         /// "reused" is the difference between a click that hitches and one that does not, and it is worth
         /// being able to read that off the log rather than infer it from the milliseconds.</summary>
@@ -1965,305 +2523,6 @@ namespace QuestTree.UI
             return material;
         }
 
-        /// <summary>
-        /// One band's ground: a quad per cell whose four CORNERS - the four neighbouring cell centres -
-        /// were all measured. A cell with no hit is a hole, and a hole is left as one rather than filled
-        /// at some invented height: the relief has holes where the rays found nothing, and inventing
-        /// ground there is how a map grows a floor over a pit.
-        ///
-        /// The vertices are the cell CENTRES, in world metres, because that is where the ray that
-        /// measured them was cast. Row 0 is the extent's MinZ edge and column 0 its MinX - world order,
-        /// NOT the picture's image order - so the UV rule below is the straightforward one and the
-        /// picture lands the right way up. (The pictures put +z at image TOP, and a sprite's v = 0 is its
-        /// bottom row, which is MinZ. The two conventions meet exactly here.)
-        /// </summary>
-        /// <param name="band">The band to triangulate.</param>
-        /// <param name="into">The cache entry being filled in.</param>
-        /// <param name="flat">Whether to write vertex colours.</param>
-        private void BuildGround(MapMeshFile.ReliefBand band, Built into, bool flat)
-        {
-            if (band.Width < 2 || band.Height < 2) return;
-
-            var spanX = (float)(_file.MaxX - _file.MinX);
-            var spanZ = (float)(_file.MaxZ - _file.MinZ);
-            if (!(spanX > 0f) || !(spanZ > 0f)) return;
-
-            // Rows per chunk, sharing one row with the next chunk so the quads that straddle the seam
-            // are still drawn. Two rows is the least that makes a quad.
-            var rowsPerChunk = Mathf.Clamp(MaxVerticesPerMesh / Mathf.Max(1, band.Width), 2, band.Height);
-
-            var map = new int[band.Width * rowsPerChunk];
-
-            var vertices = new List<Vector3>();
-            var uvs = new List<Vector2>();
-            var indices = new List<int>();
-            var colours = flat ? new List<Color32>() : null;
-
-            for (var first = 0; first < band.Height - 1; first += rowsPerChunk - 1)
-            {
-                var last = Mathf.Min(band.Height - 1, first + rowsPerChunk - 1);
-
-                for (var i = 0; i < map.Length; i++) map[i] = -1;
-
-                vertices.Clear();
-                uvs.Clear();
-                indices.Clear();
-                colours?.Clear();
-
-                for (var row = first; row < last; row++)
-                {
-                    for (var col = 0; col < band.Width - 1; col++)
-                    {
-                        // All four or none. Three corners would be one triangle and a notch, and a
-                        // relief made of notches reads as damage rather than as a hole.
-                        if (band.CodeAt(col, row) == MapMeshFile.NoHit) continue;
-                        if (band.CodeAt(col + 1, row) == MapMeshFile.NoHit) continue;
-                        if (band.CodeAt(col, row + 1) == MapMeshFile.NoHit) continue;
-                        if (band.CodeAt(col + 1, row + 1) == MapMeshFile.NoHit) continue;
-
-                        var a = Corner(band, col, row, first, map, vertices, uvs, colours, spanX, spanZ);
-                        var b = Corner(band, col + 1, row, first, map, vertices, uvs, colours, spanX, spanZ);
-                        var c = Corner(band, col, row + 1, first, map, vertices, uvs, colours, spanX, spanZ);
-                        var d = Corner(band, col + 1, row + 1, first, map, vertices, uvs, colours, spanX, spanZ);
-
-                        // Wound so the face points UP: with +x to the right and +z away, (a, c, b) has
-                        // its cross product along +y. The same winding the phase 3-0 heightfield used,
-                        // which rendered lit rather than black.
-                        indices.Add(a);
-                        indices.Add(c);
-                        indices.Add(b);
-
-                        indices.Add(b);
-                        indices.Add(c);
-                        indices.Add(d);
-                    }
-                }
-
-                if (indices.Count == 0) continue;
-
-                into.Ground.Add(MakeMesh($"{_mapKey}-relief-{band.Level}-{first}", vertices, uvs, indices, colours));
-                into.GroundTriangles += indices.Count / 3;
-
-                if (last >= band.Height - 1) break;
-            }
-        }
-
-        /// <summary>One cell centre as a vertex, added on first use. The map is per CHUNK - indices are
-        /// relative to the mesh being filled - which is why its row is offset by the chunk's first
-        /// row.</summary>
-        private int Corner(
-            MapMeshFile.ReliefBand band, int col, int row, int firstRow, int[] map,
-            List<Vector3> vertices, List<Vector2> uvs, List<Color32> colours, float spanX, float spanZ)
-        {
-            var slot = (row - firstRow) * band.Width + col;
-            var known = map[slot];
-            if (known >= 0) return known;
-
-            var x = band.CellCentreX(col);
-            var z = band.CellCentreZ(row);
-            var y = _file.HeightOf(band.CodeAt(col, row));
-
-            map[slot] = vertices.Count;
-
-            vertices.Add(new Vector3(x, y, z));
-            uvs.Add(PlanarUv(x, z, spanX, spanZ));
-            colours?.Add(FlatGroundColour);
-
-            return map[slot];
-        }
-
-        /// <summary>
-        /// The buildings that belong to this floor, merged into as few meshes as the vertex cap allows.
-        ///
-        /// Merged rather than one mesh each because a draw call per building is 212 of them a frame on
-        /// Customs for geometry that never moves relative to the rest, and a merged mesh is also a
-        /// merged bounds - one frustum test instead of two hundred.
-        ///
-        /// ROOFS ONLY. A face whose normal is within 60 degrees of vertical (<c>|n.y| &gt;= 0.5</c>,
-        /// <see cref="IsRoof"/>) takes the top-down picture on planar UVs, as every face used to. A
-        /// steeper one - a wall - is only COUNTED here and built by <see cref="BuildWalls"/> in a flat
-        /// colour: planar UVs on a vertical face sample one column of roof-edge pixels and stretch it
-        /// down the whole height, which on screen was a building striped from eaves to ground. The two
-        /// passes classify with the same function, so a triangle is in exactly one of them.
-        /// </summary>
-        /// <param name="level">The floor's band level.</param>
-        /// <param name="into">The cache entry being filled in.</param>
-        /// <param name="flat">Whether to write vertex colours.</param>
-        private void BuildBuildings(int level, Built into, bool flat)
-        {
-            if (_file.Buildings == null || _file.Buildings.Count == 0) return;
-
-            var spanX = (float)(_file.MaxX - _file.MinX);
-            var spanZ = (float)(_file.MaxZ - _file.MinZ);
-            if (!(spanX > 0f) || !(spanZ > 0f)) return;
-
-            var vertices = new List<Vector3>();
-            var uvs = new List<Vector2>();
-            var indices = new List<int>();
-            var colours = flat ? new List<Color32>() : null;
-
-            // One per side slot, made on the first face that side takes.
-            var sideAccumulators = new WallAccumulator[SideOrder.Length];
-
-            // Top faces standing on ANOTHER floor, by that floor's level: indices into the same chunk of
-            // vertices as the building's own roofs. See Built.RoofsOnOtherFloors.
-            var elsewhere = new Dictionary<int, List<int>>();
-
-            var part = 0;
-
-            foreach (var building in _file.Buildings)
-            {
-                if (building == null || building.VertexCount == 0 || building.Indices == null) continue;
-                if (BandLevelFor(building.Level) != level) continue;
-
-                into.BuildingCount++;
-
-                if (vertices.Count + building.VertexCount > MaxVerticesPerMesh && vertices.Count > 0)
-                {
-                    FlushRoofs(into, level, part++, vertices, uvs, indices, colours, elsewhere);
-
-                    vertices.Clear();
-                    uvs.Clear();
-                    indices.Clear();
-                    colours?.Clear();
-                }
-
-                var offset = vertices.Count;
-
-                // Which of this building's vertices are usable at all. A y stored as NoHit dequantises
-                // to NaN (MapMeshFile.HeightOf answers NaN on purpose, so a caller that forgets fails
-                // visibly), and ONE NaN vertex in a merged bucket makes the whole bucket's bounds NaN -
-                // which fails the frustum test and takes two hundred buildings off the screen together.
-                // So the vertex goes in, to keep the file's own indices valid, and every triangle that
-                // touches it is dropped.
-                if (_finite.Length < building.VertexCount) _finite = new bool[building.VertexCount];
-
-                for (var i = 0; i < building.VertexCount; i++)
-                {
-                    var vertex = building.VertexAt(i);
-
-                    _finite[i] = !float.IsNaN(vertex.x) && !float.IsInfinity(vertex.x) &&
-                                 !float.IsNaN(vertex.y) && !float.IsInfinity(vertex.y) &&
-                                 !float.IsNaN(vertex.z) && !float.IsInfinity(vertex.z);
-
-                    // Zero rather than the NaN: an unreferenced vertex still goes through
-                    // RecalculateNormals and RecalculateBounds.
-                    vertices.Add(_finite[i] ? vertex : Vector3.zero);
-                    uvs.Add(_finite[i] ? PlanarUv(vertex.x, vertex.z, spanX, spanZ) : Vector2.zero);
-                    colours?.Add(FlatBuildingColour);
-                }
-
-                // Three at a time, and a triangle with an index past the building's own vertices is
-                // dropped: the format's reader validates this, and a caller that trusts a file it did
-                // not write is a caller that throws inside a mesh build.
-                var count = building.Indices.Length - building.Indices.Length % 3;
-
-                for (var i = 0; i < count; i += 3)
-                {
-                    var a = building.Indices[i];
-                    var b = building.Indices[i + 1];
-                    var c = building.Indices[i + 2];
-
-                    if (a >= building.VertexCount || b >= building.VertexCount || c >= building.VertexCount)
-                        continue;
-
-                    if (!_finite[a] || !_finite[b] || !_finite[c])
-                    {
-                        into.Dropped++;
-                        continue;
-                    }
-
-                    var pa = vertices[offset + (int)a];
-                    var pb = vertices[offset + (int)b];
-                    var pc = vertices[offset + (int)c];
-
-                    var view = ViewFor(pa, pb, pc);
-
-                    if (view == TintView)
-                    {
-                        into.WallTriangles++;
-                        continue;
-                    }
-
-                    if (view != TopView)
-                    {
-                        // A side picture: unshared vertices (crisp per-face light, as for the tints) with
-                        // UVs from that side's projection.
-                        var slot = view - 1;
-                        var target = sideAccumulators[slot] ??= NewSideAccumulator(into, level, slot);
-                        var picture = _sides[slot];
-
-                        if (target.Vertices.Count + 3 > MaxVerticesPerMesh) target.Flush($"{_mapKey}-side{SideOrder[slot]}-{level}");
-
-                        target.Add(pa, SideUv(picture, pa));
-                        target.Add(pb, SideUv(picture, pb));
-                        target.Add(pc, SideUv(picture, pc));
-
-                        into.SideTriangles++;
-                        continue;
-                    }
-
-                    into.TopTriangles++;
-
-                    // Which floor's picture: the floor this face STANDS ON, where it stands on one, else the
-                    // band its building is filed under - see FloorForFace.
-                    var floorLevel = FloorForFace((pa.y + pb.y + pc.y) / 3f, level);
-
-                    var roofIndices = indices;
-
-                    if (floorLevel != level)
-                    {
-                        if (!elsewhere.TryGetValue(floorLevel, out roofIndices))
-                        {
-                            roofIndices = new List<int>();
-                            elsewhere[floorLevel] = roofIndices;
-                        }
-
-                        into.MovedRoofTriangles++;
-                    }
-
-                    roofIndices.Add(offset + (int)a);
-                    roofIndices.Add(offset + (int)b);
-                    roofIndices.Add(offset + (int)c);
-                }
-            }
-
-            for (var slot = 0; slot < sideAccumulators.Length; slot++)
-                sideAccumulators[slot]?.Flush($"{_mapKey}-side{SideOrder[slot]}-{level}");
-
-            // Counted into the building total whether or not they are built yet, so the log line's
-            // totals are the file's and do not move when a floor's walls arrive a frame later.
-            into.BuildingTriangles += into.WallTriangles + into.SideTriangles;
-            into.WallsPending = into.WallTriangles > 0;
-
-            FlushRoofs(into, level, part, vertices, uvs, indices, colours, elsewhere);
-        }
-
-        /// <summary>One chunk of roofs into meshes: the building band's own, and one per other floor its faces
-        /// stand on. Each mesh shares the chunk's vertex lists (an unreferenced vertex costs memory, not
-        /// correctness); the index lists are emptied for the next chunk.</summary>
-        private void FlushRoofs(
-            Built into, int level, int part, List<Vector3> vertices, List<Vector2> uvs, List<int> indices,
-            List<Color32> colours, Dictionary<int, List<int>> elsewhere)
-        {
-            if (indices.Count > 0)
-            {
-                into.Buildings.Add(MakeMesh($"{_mapKey}-buildings-{level}-{part}", vertices, uvs, indices, colours));
-                into.BuildingTriangles += indices.Count / 3;
-            }
-
-            foreach (var pair in elsewhere)
-            {
-                if (pair.Value.Count == 0) continue;
-
-                into.RoofsOnOtherFloors.Add((pair.Key, MakeMesh(
-                    $"{_mapKey}-buildings-{level}-on{pair.Key}-{part}", vertices, uvs, pair.Value, colours)));
-                into.BuildingTriangles += pair.Value.Count / 3;
-
-                pair.Value.Clear();
-            }
-        }
-
         /// <summary>The floor ranges as text, for the cache key: the roof routing depends on them, and they
         /// come from the meta, which a rescan can change while the mesh file stays the same.</summary>
         private string FloorRangesKey()
@@ -2280,7 +2539,7 @@ namespace QuestTree.UI
         }
 
         /// <summary>The height range each floor's own surfaces are found in, from the meta: [minY - slack,
-        /// maxY + slack] per band the mesh file has. Set by <see cref="BuildMeshes"/> before any floor is
+        /// maxY + slack] per band the mesh file has. Set by <see cref="BeginBuild"/> before any floor is
         /// built; the same for every selection, so the routing it drives is safe to cache.</summary>
         private readonly List<(int Level, float Low, float High)> _floorRanges = new List<(int Level, float Low, float High)>();
 
@@ -2311,41 +2570,6 @@ namespace QuestTree.UI
             }
         }
 
-        /// <summary>
-        /// The floor whose picture textures a top face at height <paramref name="y"/>: the floor it STANDS
-        /// ON when its height is inside one floor's band (plus <see cref="FloorFaceSlack"/>), else
-        /// <paramref name="filed"/> - its building's band, which is what every face used before.
-        ///
-        /// Only a face ON a floor moves. A floor slab is exactly the surface that floor's picture
-        /// photographed (and that floor's relief measured): the camera for that band stood just above it.
-        /// A face between floors - a roof at 32 m on a map whose floors are at 27 and 36 m - is left where
-        /// it was, because the floor above's picture is cut out to that floor's walkable area and the one
-        /// below's camera was under it; neither is a better answer than the old one, so the old one stands.
-        /// When two ranges overlap after the slack, the nearer floor wins (distance outside its unslacked
-        /// band), ties to the higher floor.
-        /// </summary>
-        private int FloorForFace(float y, int filed)
-        {
-            var best = filed;
-            var bestDistance = float.MaxValue;
-
-            for (var i = 0; i < _floorRanges.Count; i++)
-            {
-                var range = _floorRanges[i];
-                if (y < range.Low || y > range.High) continue;
-
-                var distance = Mathf.Max(0f, Mathf.Max(range.Low + FloorFaceSlack - y, y - (range.High - FloorFaceSlack)));
-
-                if (distance < bestDistance || (Mathf.Approximately(distance, bestDistance) && range.Level > best))
-                {
-                    best = range.Level;
-                    bestDistance = distance;
-                }
-            }
-
-            return best;
-        }
-
         /// <summary>This view's floor with the given level, or null. At most six floors, so a loop.</summary>
         private Floor FloorAt(int level)
         {
@@ -2353,122 +2577,6 @@ namespace QuestTree.UI
                 if (_floors[i] != null && _floors[i].Level == level) return _floors[i];
 
             return null;
-        }
-
-        /// <summary>One side's submesh on the entry, registered BEFORE anything is built into it (so a
-        /// throw halfway leaves every mesh where DestroyBuilt finds it), and its accumulator.</summary>
-        private WallAccumulator NewSideAccumulator(Built into, int level, int slot)
-        {
-            var side = new SideTexture
-            {
-                Material = Matte(new Material(_buildingShader) { name = $"QuestTreeMap3D-side{SideOrder[slot]}-{level}" })
-            };
-
-            into.Sides[slot] = side;
-
-            return new WallAccumulator { Target = side.Meshes, Flat = false };
-        }
-
-        // --- which picture a face takes ------------------------------------------------------------
-
-        /// <summary>What <see cref="ViewFor"/> answers for a face textured by the top-down picture.</summary>
-        private const int TopView = 0;
-
-        /// <summary>What <see cref="ViewFor"/> answers for a face drawn in a flat tint.</summary>
-        private const int TintView = -1;
-
-        /// <summary>The least score a face needs to be textured by the picture that sees it best: below
-        /// this every picture sees it too obliquely, and a stretched texture is worse than a tint.</summary>
-        private const float MinViewScore = 0.35f;
-
-        /// <summary>
-        /// Which picture textures a building face: <see cref="TopView"/>, a side (slot + 1), or
-        /// <see cref="TintView"/>.
-        ///
-        /// WITHOUT side pictures this is exactly the tint build's rule - top when <c>|n.y| &gt;= 0.5</c>
-        /// (<see cref="IsRoof"/>), else tint - so a capture taken before the sides existed draws exactly
-        /// as it did.
-        ///
-        /// WITH them it is the Stage U contract: the picture whose camera looks most squarely at the face,
-        /// scored <c>-dot(n, f)</c> with the top-down camera's f = (0,-1,0) among them; the best score under
-        /// <see cref="MinViewScore"/> is a tint. The normal is the triangle's own (the file carries none),
-        /// and SIGNED - which side a wall faces is the whole question here - so it relies on the builder's
-        /// winding, which stage T fixed for mirrored transforms. Ties go to the earlier view (top, then N,
-        /// S, E, W), so a 45-degree face is classified the same way on every build.
-        /// </summary>
-        private int ViewFor(Vector3 a, Vector3 b, Vector3 c)
-        {
-            if (!SidesActive) return IsRoof(a, b, c) ? TopView : TintView;
-
-            var n = Vector3.Cross(b - a, c - a);
-            var length = n.magnitude;
-
-            // No facing: with the roofs, where it draws nothing either way - the tint build's rule too.
-            if (!(length > 1e-6f)) return TopView;
-
-            n /= length;
-
-            // The top camera looks straight down: -dot(n, (0,-1,0)) = n.y.
-            var best = TopView;
-            var bestScore = n.y;
-
-            for (var slot = 0; slot < _sides.Length; slot++)
-            {
-                var side = _sides[slot];
-                if (side == null) continue;
-
-                var score = -Vector3.Dot(n, side.Forward);
-                if (score <= bestScore) continue;
-
-                bestScore = score;
-                best = slot + 1;
-            }
-
-            return bestScore < MinViewScore ? TintView : best;
-        }
-
-        /// <summary>
-        /// A world point's UV on a side picture - the Stage U contract's image mapping, turned into
-        /// texture coordinates.
-        ///
-        /// The contract gives pixels with row 0 at the image TOP: <c>px = (dot(r,p) - originR) * ppm</c>,
-        /// <c>py = height - (dot(u,p) - originU) * ppm</c>. A decoded texture has v = 0 at its BOTTOM row
-        /// (LoadImage puts the file's first row at the top of the texture), so <c>v = 1 - py / height =
-        /// (dot(u,p) - originU) * ppm / height</c> - the "height minus" and the "one minus" cancel. That is
-        /// the same convention the floors are sampled in: a floor picture's top row is MaxZ and its v = 0
-        /// is MinZ, and here the top row is the highest dot(u, p) and v = 0 the lowest. Clamped, like every
-        /// UV here.
-        /// </summary>
-        private static Vector2 SideUv(DynamicMapsLibrary.SidePicture side, Vector3 p)
-        {
-            var u = (Vector3.Dot(side.Right, p) - side.OriginR) * side.PxPerMetre / side.Width;
-            var v = (Vector3.Dot(side.Up, p) - side.OriginU) * side.PxPerMetre / side.Height;
-
-            return new Vector2(Mathf.Clamp01(u), Mathf.Clamp01(v));
-        }
-
-        /// <summary>How close to vertical a face's normal has to be to count as a roof: the cosine of 60
-        /// degrees. Above it the top-down picture is a fair texture; below it the face is seen edge-on
-        /// from above and the picture has nothing to give it.</summary>
-        private const float RoofNormalY = 0.5f;
-
-        /// <summary>
-        /// Whether a triangle faces up or down enough to take the top-down picture - from its own cross
-        /// product, because the file carries no normals.
-        ///
-        /// |n.y| and not n.y: an overhang's underside faces straight down and is as flat as a roof, and
-        /// the winding of a building read off the GPU is only as reliable as the builder's mirror test.
-        /// A degenerate triangle has no facing at all and goes with the roofs, where it draws nothing
-        /// either way.
-        /// </summary>
-        private static bool IsRoof(Vector3 a, Vector3 b, Vector3 c)
-        {
-            var n = Vector3.Cross(b - a, c - a);
-            var length = n.magnitude;
-
-            if (!(length > 1e-6f)) return true;
-
-            return Mathf.Abs(n.y) / length >= RoofNormalY;
         }
 
         // --- the walls -------------------------------------------------------------------------------
@@ -2489,312 +2597,6 @@ namespace QuestTree.UI
         /// metres of roof, so 256 columns across a kilometre - 4 m to the pixel - is all the detail the
         /// question needs, and it reads back in well under a millisecond.</summary>
         private const int PaletteWidth = 256;
-
-        /// <summary>
-        /// Builds one floor's walls, if they are waiting and there is now a way to colour them: in flat
-        /// colours straight away, else once the floor's picture is resident. Never throws - a wall build
-        /// that fails costs the walls of one floor (the roofs and the ground still draw) and says so once.
-        /// </summary>
-        /// <param name="into">The floor's cache entry.</param>
-        /// <param name="level">The floor's band level.</param>
-        /// <param name="picture">The floor's picture, or null when it is not decoded yet.</param>
-        /// <param name="late">True when called from a frame after the view was built, which is the case
-        /// that gets its own log line (the build line has already been written).</param>
-        private void TryBuildWalls(Built into, int level, Texture picture, bool late)
-        {
-            if (into == null || !into.WallsPending) return;
-            if (!_flatColours && picture == null) return;
-
-            var clock = Stopwatch.StartNew();
-
-            try
-            {
-                BuildWalls(into, level, picture);
-
-                if (late)
-                {
-                    Plugin.LogSource?.LogInfo(string.Format(
-                        CultureInfo.InvariantCulture,
-                        "QuestTree: 3D map walls for {0} floor {1} - {2:#,##0} triangles in {3} tint(s), built in " +
-                        "{4:#,##0} ms (the floor's picture had just arrived).",
-                        _mapKey, level, into.WallTriangles, into.Tints, clock.ElapsedMilliseconds));
-                }
-            }
-            catch (Exception ex)
-            {
-                // What was made before the throw is already in the entry (each mesh is registered as it
-                // is made) and goes here, rather than being left half-drawn.
-                DestroyWalls(into);
-
-                Plugin.LogSource?.LogWarning(
-                    $"QuestTree: the walls of floor {level} of the 3D map for '{_mapKey}' could not be built " +
-                    $"({ex.GetType().Name}: {ex.Message}) - that floor draws its roofs and ground only.");
-            }
-            finally
-            {
-                // Once, success or not: a failure retried every frame is a warning every frame.
-                into.WallsPending = false;
-            }
-        }
-
-        /// <summary>
-        /// One floor's walls: coloured from the picture under each building, grouped into at most
-        /// <see cref="MaxWallTints"/> colours, one mesh-and-material per colour.
-        ///
-        /// Two walks over the floor's buildings. The first finds each building that has walls and its
-        /// colour, so the colours can be bucketed knowing all of them; the second builds the geometry into
-        /// the buckets. Dequantising twice costs a few milliseconds and saves holding every wall triangle
-        /// of the floor in memory between the two.
-        ///
-        /// Wall vertices are NOT shared between triangles, unlike the roofs': each triangle gets its own
-        /// three. RecalculateNormals averages the normals of the faces a vertex belongs to, and a corner
-        /// vertex shared by two walls at right angles would light both of them as if they faced the
-        /// corner - a box would shade like a cylinder. Unshared, every wall takes the light at its own
-        /// angle, and the sunny side of a building is visibly not its shady side.
-        /// </summary>
-        /// <param name="into">The floor's cache entry; the walls are added to it as they are made.</param>
-        /// <param name="level">The floor's band level.</param>
-        /// <param name="picture">The floor's picture, or null under flat colours.</param>
-        private void BuildWalls(Built into, int level, Texture picture)
-        {
-            var spanX = (float)(_file.MaxX - _file.MinX);
-            var spanZ = (float)(_file.MaxZ - _file.MinZ);
-            if (!(spanX > 0f) || !(spanZ > 0f)) return;
-
-            Color32[] palette = null;
-            var paletteWidth = 0;
-            var paletteHeight = 0;
-
-            if (!_flatColours && picture != null)
-            {
-                try
-                {
-                    palette = ReadPalette(picture, out paletteWidth, out paletteHeight);
-                }
-                catch (Exception ex)
-                {
-                    // Not fatal: every building then gets the fallback grey, and the walls still stand.
-                    Plugin.LogSource?.LogWarning(
-                        $"QuestTree: could not read the colours of floor {level} of '{_mapKey}' back from the " +
-                        $"GPU ({ex.GetType().Name}: {ex.Message}) - its walls are drawn in one grey.");
-                    palette = null;
-                }
-            }
-
-            // --- walk 1: which buildings have walls, and in what colour
-            var walled = new List<int>();
-            var colours = new List<Color>();
-
-            for (var index = 0; index < _file.Buildings.Count; index++)
-            {
-                var building = _file.Buildings[index];
-                if (!Usable(building) || BandLevelFor(building.Level) != level) continue;
-
-                if (!LoadBuilding(building)) continue;
-
-                var hasWall = false;
-                var count = building.Indices.Length - building.Indices.Length % 3;
-
-                for (var i = 0; i < count && !hasWall; i += 3)
-                {
-                    if (WallTriangle(building, i, out _, out _, out _)) hasWall = true;
-                }
-
-                if (!hasWall) continue;
-
-                walled.Add(index);
-                colours.Add(_flatColours ? (Color)FlatWallColour : WallColour(palette, paletteWidth, paletteHeight, spanX, spanZ));
-            }
-
-            if (walled.Count == 0) return;
-
-            // The floor's wall average, for the faces of a side whose picture is missing - see
-            // Built.SideFallback. Recoloured in place if that material already exists.
-            if (!_flatColours)
-            {
-                var sum = Color.black;
-                for (var i = 0; i < colours.Count; i++) sum += colours[i];
-
-                var average = sum / colours.Count;
-                average.a = 1f;
-
-                into.WallAverage = average;
-                if (into.SideFallback != null) into.SideFallback.color = average;
-            }
-
-            // --- the buckets
-            var centres = new List<Color>();
-            var bucketOf = BucketColours(colours, _flatColours ? 1 : MaxWallTints, centres);
-
-            // Registered BEFORE anything is built into them, so a throw anywhere below leaves every mesh
-            // and material already made where DestroyWalls will find it.
-            var accumulators = new WallAccumulator[centres.Count];
-
-            for (var k = 0; k < centres.Count; k++)
-            {
-                var tint = new WallTint { Colour = centres[k], Material = MakeWallMaterial(level, k, centres[k]) };
-                into.Walls.Add(tint);
-
-                accumulators[k] = new WallAccumulator { Target = tint.Meshes, Flat = _flatColours };
-            }
-
-            into.Tints = _flatColours ? 0 : centres.Count;
-
-            // --- walk 2: the geometry
-            for (var w = 0; w < walled.Count; w++)
-            {
-                var building = _file.Buildings[walled[w]];
-                if (!LoadBuilding(building)) continue;
-
-                var target = accumulators[bucketOf[w]];
-                var count = building.Indices.Length - building.Indices.Length % 3;
-
-                for (var i = 0; i < count; i += 3)
-                {
-                    if (!WallTriangle(building, i, out var a, out var b, out var c)) continue;
-
-                    if (target.Vertices.Count + 3 > MaxVerticesPerMesh) target.Flush($"{_mapKey}-walls-{level}");
-
-                    target.Add(a, PlanarUv(a.x, a.z, spanX, spanZ));
-                    target.Add(b, PlanarUv(b.x, b.z, spanX, spanZ));
-                    target.Add(c, PlanarUv(c.x, c.z, spanX, spanZ));
-                }
-            }
-
-            for (var k = 0; k < accumulators.Length; k++) accumulators[k].Flush($"{_mapKey}-walls-{level}");
-        }
-
-        /// <summary>Whether a building has anything to build from at all.</summary>
-        private static bool Usable(MapMeshFile.Building building) =>
-            building != null && building.VertexCount > 0 && building.Indices != null;
-
-        /// <summary>Dequantises one building's vertices into <see cref="_positions"/> and flags the finite
-        /// ones in <see cref="_finite"/>, the same test the roof pass makes. False for a building with
-        /// nothing usable.</summary>
-        private bool LoadBuilding(MapMeshFile.Building building)
-        {
-            if (_finite.Length < building.VertexCount) _finite = new bool[building.VertexCount];
-            if (_positions.Length < building.VertexCount) _positions = new Vector3[building.VertexCount];
-
-            var any = false;
-            _lastVertexCount = building.VertexCount;
-
-            for (var i = 0; i < building.VertexCount; i++)
-            {
-                var vertex = building.VertexAt(i);
-
-                _finite[i] = !float.IsNaN(vertex.x) && !float.IsInfinity(vertex.x) &&
-                             !float.IsNaN(vertex.y) && !float.IsInfinity(vertex.y) &&
-                             !float.IsNaN(vertex.z) && !float.IsInfinity(vertex.z);
-
-                _positions[i] = vertex;
-                any |= _finite[i];
-            }
-
-            return any;
-        }
-
-        /// <summary>Scratch for <see cref="LoadBuilding"/>, grown as needed.</summary>
-        private Vector3[] _positions = new Vector3[0];
-
-        /// <summary>How many of <see cref="_positions"/> belong to the building last loaded - the arrays
-        /// are grown, never shrunk, so their length says nothing.</summary>
-        private int _lastVertexCount;
-
-        /// <summary>The triangle at <paramref name="i"/> of the building <see cref="LoadBuilding"/> last
-        /// loaded, if it is a usable WALL - in range, finite, and not a roof by <see cref="IsRoof"/>. The
-        /// exact complement of what the roof pass keeps.</summary>
-        private bool WallTriangle(MapMeshFile.Building building, int i, out Vector3 a, out Vector3 b, out Vector3 c)
-        {
-            a = b = c = Vector3.zero;
-
-            var ia = building.Indices[i];
-            var ib = building.Indices[i + 1];
-            var ic = building.Indices[i + 2];
-
-            if (ia >= building.VertexCount || ib >= building.VertexCount || ic >= building.VertexCount) return false;
-            if (!_finite[ia] || !_finite[ib] || !_finite[ic]) return false;
-
-            a = _positions[ia];
-            b = _positions[ib];
-            c = _positions[ic];
-
-            return ViewFor(a, b, c) == TintView;
-        }
-
-        /// <summary>
-        /// The colour of the building <see cref="LoadBuilding"/> last loaded: the picture under the middle
-        /// of its footprint, a quarter darker and a little greyer.
-        ///
-        /// Darker because a wall is lit from the side while the roof in the picture was lit from above, and
-        /// the same material at a glancing light reads darker; greyer because a roof's colour is its
-        /// covering - red iron, green felt - and the walls under it are usually plainer than that. So a
-        /// red-roofed warehouse gets dark reddish-grey walls and a concrete block gets grey ones.
-        ///
-        /// A 3x3 average around the centroid, ignoring transparent pixels (the picture's walkable cut-out),
-        /// so one odd pixel - a vent, an aerial - does not colour a whole building.
-        /// </summary>
-        private Color WallColour(Color32[] palette, int width, int height, float spanX, float spanZ)
-        {
-            if (palette == null || width <= 0 || height <= 0) return FallbackWallColour;
-
-            var sumX = 0d;
-            var sumZ = 0d;
-            var n = 0;
-
-            // The building LoadBuilding loaded last - walk 1 calls this straight after loading it.
-            for (var i = 0; i < _lastVertexCount; i++)
-            {
-                if (!_finite[i]) continue;
-                sumX += _positions[i].x;
-                sumZ += _positions[i].z;
-                n++;
-            }
-
-            if (n == 0) return FallbackWallColour;
-
-            var uv = PlanarUv((float)(sumX / n), (float)(sumZ / n), spanX, spanZ);
-
-            var cx = Mathf.Clamp(Mathf.RoundToInt(uv.x * (width - 1)), 0, width - 1);
-            var cy = Mathf.Clamp(Mathf.RoundToInt(uv.y * (height - 1)), 0, height - 1);
-
-            float r = 0f, g = 0f, bl = 0f;
-            var taken = 0;
-
-            for (var dy = -1; dy <= 1; dy++)
-            {
-                var y = cy + dy;
-                if (y < 0 || y >= height) continue;
-
-                for (var dx = -1; dx <= 1; dx++)
-                {
-                    var x = cx + dx;
-                    if (x < 0 || x >= width) continue;
-
-                    // Row 0 of a texture read back with ReadPixels is its BOTTOM row, which for these
-                    // pictures is MinZ - the same convention the planar UV is in, so uv.y indexes it
-                    // directly with no flip.
-                    var pixel = palette[y * width + x];
-                    if (pixel.a < 128) continue;
-
-                    r += pixel.r;
-                    g += pixel.g;
-                    bl += pixel.b;
-                    taken++;
-                }
-            }
-
-            if (taken == 0) return FallbackWallColour;
-
-            var average = new Color(r / (255f * taken), g / (255f * taken), bl / (255f * taken), 1f);
-
-            Color.RGBToHSV(average, out var hue, out var saturation, out var value);
-
-            var tinted = Color.HSVToRGB(hue, saturation * WallSaturation, value * WallValue);
-            tinted.a = 1f;
-
-            return tinted;
-        }
 
         /// <summary>How much of the roof's brightness a wall keeps: three quarters.</summary>
         private const float WallValue = 0.75f;
@@ -2971,103 +2773,1102 @@ namespace QuestTree.UI
         /// on a later frame than the rest (when the floor's picture arrives).</summary>
         private Shader _buildingShader;
 
-        /// <summary>One wall colour's geometry while it is built: unshared vertices, flushed into a mesh
-        /// on the tint whenever the vertex cap is reached.</summary>
-        private sealed class WallAccumulator
+        // --- the geometry, prepared off the main thread ------------------------------------------------
+
+        /// <summary>
+        /// One mesh's worth of arrays, prepared by a worker and uploaded by <see cref="MakeMesh(MeshData)"/>.
+        /// Copies, not the worker's lists: the accumulators reuse their lists for the next chunk.
+        /// </summary>
+        internal sealed class MeshData
         {
-            /// <summary>Where the finished meshes go: a tint's list or a side's.</summary>
-            public List<Mesh> Target;
+            public string Name = "";
+            public Vector3[] Vertices;
+            public Vector3[] Normals;
+            public Vector2[] Uvs;
+            public int[] Indices;
+            public Color32[] Colours;
+
+            public static MeshData From(
+                string name, List<Vector3> vertices, List<Vector2> uvs, List<int> indices, List<Color32> colours)
+            {
+                var data = new MeshData
+                {
+                    Name = name,
+                    Vertices = vertices.ToArray(),
+                    Uvs = uvs.ToArray(),
+                    Indices = indices.ToArray(),
+                    Colours = colours?.ToArray()
+                };
+
+                data.Normals = NormalsOf(data.Vertices, data.Indices);
+                return data;
+            }
+
+            /// <summary>
+            /// WORKER. Per-vertex normals: the sum of the (area-weighted) face normals of every triangle using the
+            /// vertex, normalised - cross(v1 - v0, v2 - v0) for a triangle (v0, v1, v2), which is up for the
+            /// ground's (a, c, b) winding, the winding that rendered lit. Computed HERE rather than by
+            /// Mesh.RecalculateNormals on the main thread, so the upload is cheaper and - the reason it matters -
+            /// the mesh and the cut clipped from these same arrays carry the same normals to the bit. A vertex no
+            /// triangle uses, or whose faces cancel, gets straight up.
+            /// </summary>
+            private static Vector3[] NormalsOf(Vector3[] vertices, int[] indices)
+            {
+                var normals = new Vector3[vertices.Length];
+
+                for (var t = 0; t + 2 < indices.Length; t += 3)
+                {
+                    var a = indices[t];
+                    var b = indices[t + 1];
+                    var c = indices[t + 2];
+
+                    var n = Vector3.Cross(vertices[b] - vertices[a], vertices[c] - vertices[a]);
+
+                    normals[a] += n;
+                    normals[b] += n;
+                    normals[c] += n;
+                }
+
+                for (var i = 0; i < normals.Length; i++)
+                {
+                    var n = normals[i];
+                    var length = n.magnitude;
+                    normals[i] = length > 1e-12f ? n / length : Vector3.up;
+                }
+
+                return normals;
+            }
+        }
+
+        /// <summary>One floor's geometry and counts, as a worker prepared it. The counts go onto the entry in
+        /// <see cref="AfterPrepare"/>; every <see cref="MeshData"/> becomes one unit of upload.</summary>
+        private sealed class FloorData
+        {
+            public int Level;
+            public long Cells;
+            public long GroundTriangles;
+            public long BuildingTriangles;
+            public long TopTriangles;
+            public long SideTriangles;
+            public long WallTriangles;
+            public long MovedRoofTriangles;
+            public int BuildingCount;
+            public int Dropped;
+
+            public readonly List<MeshData> Ground = new List<MeshData>();
+            public readonly List<MeshData> Roofs = new List<MeshData>();
+            public readonly List<(int Level, MeshData Data)> RoofsElsewhere = new List<(int Level, MeshData Data)>();
+            public readonly List<MeshData>[] Sides = new List<MeshData>[4];
+        }
+
+        /// <summary>One floor's walls as a worker prepared them: a colour and its meshes per tint.</summary>
+        private sealed class WallData
+        {
+            public readonly List<(Color Colour, List<MeshData> Meshes)> Tints = new List<(Color Colour, List<MeshData> Meshes)>();
+            public Color Average = FallbackWallColour;
+            public bool HasAverage;
+            public int TintCount;
+            public long Triangles;
+        }
+
+        /// <summary>
+        /// What a worker builds from: a SNAPSHOT of everything the classification and the UVs read, taken on
+        /// the main thread, plus scratch arrays of its own. No Unity object is in it (a SidePicture is read for
+        /// its numbers only - its picture slot is never touched), and nothing in it changes after the snapshot,
+        /// so a worker cannot see the view rebuilt or a side dropped under it halfway through a floor.
+        ///
+        /// Everything that decides a triangle's fate - <see cref="ViewFor"/>, <see cref="FloorForFace"/>, the
+        /// finite test - lives here, so the roof pass and the wall pass, even on two workers, classify with the
+        /// SAME code and the same inputs: a triangle is in exactly one of them, as it was on one thread.
+        /// </summary>
+        private sealed class Prep
+        {
+            public MapMeshFile File;
+            public string MapKey = "";
+            public bool Flat;
+            public bool SidesActive;
+            public readonly DynamicMapsLibrary.SidePicture[] Sides = new DynamicMapsLibrary.SidePicture[4];
+            public (int Level, float Low, float High)[] FloorRanges = new (int, float, float)[0];
+            public float SpanX;
+            public float SpanZ;
+
+            // Scratch, per worker. Grown, never shrunk.
+            private bool[] _finite = new bool[0];
+            private Vector3[] _positions = new Vector3[0];
+            private int[] _remap = new int[0];
+            private int _count;
+
+            public bool Finite(int i) => _finite[i];
+            public Vector3 Position(int i) => _positions[i];
+
+            /// <summary>The planar UV of a world point: where it falls across the extent, which is where it
+            /// falls across the picture. CLAMPED, because the grid overhangs by up to half a cell and a
+            /// building's triangles are kept up to a metre outside the extent.</summary>
+            public Vector2 PlanarUv(float x, float z) =>
+                new Vector2(
+                    Mathf.Clamp01((x - (float)File.MinX) / SpanX),
+                    Mathf.Clamp01((z - (float)File.MinZ) / SpanZ));
+
+            /// <summary>The band a building's declared level belongs to: its own where the file has that
+            /// band, else the nearest.</summary>
+            public int BandLevelFor(int level)
+            {
+                var best = int.MinValue;
+                var distance = int.MaxValue;
+
+                foreach (var band in File.Bands)
+                {
+                    if (band == null) continue;
+                    if (band.Level == level) return level;
+
+                    var gap = Math.Abs(band.Level - level);
+                    if (gap >= distance) continue;
+
+                    distance = gap;
+                    best = band.Level;
+                }
+
+                return best;
+            }
+
+            /// <summary>Dequantises a building into the scratch and flags its finite vertices. A y stored as
+            /// NoHit dequantises to NaN, and one NaN vertex in a merged bucket makes the whole bucket's bounds
+            /// NaN - so every triangle touching one is dropped. False when no vertex is finite.</summary>
+            public bool LoadBuilding(MapMeshFile.Building building)
+            {
+                var n = building.VertexCount;
+
+                if (_finite.Length < n) _finite = new bool[n];
+                if (_positions.Length < n) _positions = new Vector3[n];
+                if (_remap.Length < n) _remap = new int[n];
+
+                _count = n;
+                var any = false;
+
+                for (var i = 0; i < n; i++)
+                {
+                    var vertex = building.VertexAt(i);
+
+                    _finite[i] = !float.IsNaN(vertex.x) && !float.IsInfinity(vertex.x) &&
+                                 !float.IsNaN(vertex.y) && !float.IsInfinity(vertex.y) &&
+                                 !float.IsNaN(vertex.z) && !float.IsInfinity(vertex.z);
+
+                    _positions[i] = vertex;
+                    any |= _finite[i];
+                }
+
+                return any;
+            }
+
+            /// <summary>Forgets every roof vertex placed from the building last loaded - at the start of each
+            /// building, and after a chunk is flushed mid-building (its indices restart at zero).</summary>
+            public void ResetRemap()
+            {
+                for (var i = 0; i < _count; i++) _remap[i] = -1;
+            }
+
+            /// <summary>The roof chunk's vertex for building vertex <paramref name="i"/>, added on first use.</summary>
+            public int RoofVertex(int i, List<Vector3> vertices, List<Vector2> uvs, List<Color32> colours)
+            {
+                if (_remap[i] >= 0) return _remap[i];
+
+                var p = _positions[i];
+
+                _remap[i] = vertices.Count;
+                vertices.Add(p);
+                uvs.Add(PlanarUv(p.x, p.z));
+                colours?.Add(FlatBuildingColour);
+
+                return _remap[i];
+            }
+
+            /// <summary>
+            /// Which picture textures a building face: <see cref="TopView"/>, a side (slot + 1), or
+            /// <see cref="TintView"/>. WITHOUT side pictures, exactly the tint build's rule - top when
+            /// <c>|n.y| &gt;= 0.5</c> (<see cref="IsRoof"/>), else tint. WITH them, the Stage U contract: the
+            /// picture whose camera looks most squarely at the face, scored <c>-dot(n, f)</c> with the top
+            /// camera's f = (0,-1,0) among them; below <see cref="MinViewScore"/> a tint. Signed normal, ties to
+            /// the earlier view (top, then N, S, E, W).
+            /// </summary>
+            public int ViewFor(Vector3 a, Vector3 b, Vector3 c)
+            {
+                if (!SidesActive) return IsRoof(a, b, c) ? TopView : TintView;
+
+                var n = Vector3.Cross(b - a, c - a);
+                var length = n.magnitude;
+
+                if (!(length > 1e-6f)) return TopView;
+
+                n /= length;
+
+                var best = TopView;
+                var bestScore = n.y;
+
+                for (var slot = 0; slot < Sides.Length; slot++)
+                {
+                    var side = Sides[slot];
+                    if (side == null) continue;
+
+                    var score = -Vector3.Dot(n, side.Forward);
+                    if (score <= bestScore) continue;
+
+                    bestScore = score;
+                    best = slot + 1;
+                }
+
+                return bestScore < MinViewScore ? TintView : best;
+            }
+
+            /// <summary>The floor whose picture textures a top face at height <paramref name="y"/>: the floor
+            /// it STANDS ON when its height is inside one floor's band (plus the slack), else
+            /// <paramref name="filed"/>. Nearer floor wins an overlap; ties to the higher floor. See
+            /// Built.RoofsOnOtherFloors for why.</summary>
+            public int FloorForFace(float y, int filed)
+            {
+                var best = filed;
+                var bestDistance = float.MaxValue;
+
+                for (var i = 0; i < FloorRanges.Length; i++)
+                {
+                    var range = FloorRanges[i];
+                    if (y < range.Low || y > range.High) continue;
+
+                    var distance = Mathf.Max(0f, Mathf.Max(range.Low + FloorFaceSlack - y, y - (range.High - FloorFaceSlack)));
+
+                    if (distance < bestDistance || (Mathf.Approximately(distance, bestDistance) && range.Level > best))
+                    {
+                        best = range.Level;
+                        bestDistance = distance;
+                    }
+                }
+
+                return best;
+            }
+
+            /// <summary>The triangle at <paramref name="i"/> of the building last loaded, if it is a usable
+            /// WALL (a tint): in range, finite, and <see cref="ViewFor"/> says tint. The exact complement of
+            /// what the roof pass keeps as top or side.</summary>
+            public bool WallTriangle(MapMeshFile.Building building, int i, out Vector3 a, out Vector3 b, out Vector3 c)
+            {
+                a = b = c = Vector3.zero;
+
+                var ia = building.Indices[i];
+                var ib = building.Indices[i + 1];
+                var ic = building.Indices[i + 2];
+
+                if (ia >= building.VertexCount || ib >= building.VertexCount || ic >= building.VertexCount) return false;
+                if (!_finite[ia] || !_finite[ib] || !_finite[ic]) return false;
+
+                a = _positions[ia];
+                b = _positions[ib];
+                c = _positions[ic];
+
+                return ViewFor(a, b, c) == TintView;
+            }
+
+            /// <summary>
+            /// The colour of the building last loaded: the picture under the middle of its footprint, a
+            /// quarter darker and a little greyer - a 3x3 average around the centroid, ignoring transparent
+            /// pixels. Row 0 of the readback is the picture's BOTTOM (MinZ), the planar UV's convention.
+            /// </summary>
+            public Color WallColour(Color32[] palette, int width, int height)
+            {
+                if (palette == null || width <= 0 || height <= 0) return FallbackWallColour;
+
+                var sumX = 0d;
+                var sumZ = 0d;
+                var n = 0;
+
+                for (var i = 0; i < _count; i++)
+                {
+                    if (!_finite[i]) continue;
+                    sumX += _positions[i].x;
+                    sumZ += _positions[i].z;
+                    n++;
+                }
+
+                if (n == 0) return FallbackWallColour;
+
+                var uv = PlanarUv((float)(sumX / n), (float)(sumZ / n));
+
+                var cx = Mathf.Clamp(Mathf.RoundToInt(uv.x * (width - 1)), 0, width - 1);
+                var cy = Mathf.Clamp(Mathf.RoundToInt(uv.y * (height - 1)), 0, height - 1);
+
+                float r = 0f, g = 0f, bl = 0f;
+                var taken = 0;
+
+                for (var dy = -1; dy <= 1; dy++)
+                {
+                    var y = cy + dy;
+                    if (y < 0 || y >= height) continue;
+
+                    for (var dx = -1; dx <= 1; dx++)
+                    {
+                        var x = cx + dx;
+                        if (x < 0 || x >= width) continue;
+
+                        var pixel = palette[y * width + x];
+                        if (pixel.a < 128) continue;
+
+                        r += pixel.r;
+                        g += pixel.g;
+                        bl += pixel.b;
+                        taken++;
+                    }
+                }
+
+                if (taken == 0) return FallbackWallColour;
+
+                var average = new Color(r / (255f * taken), g / (255f * taken), bl / (255f * taken), 1f);
+
+                Color.RGBToHSV(average, out var hue, out var saturation, out var value);
+
+                var tinted = Color.HSVToRGB(hue, saturation * WallSaturation, value * WallValue);
+                tinted.a = 1f;
+
+                return tinted;
+            }
+        }
+
+        /// <summary>The worker's snapshot of this view, with fresh scratch. Main thread only.</summary>
+        private Prep SnapshotPrep()
+        {
+            var prep = new Prep
+            {
+                File = _file,
+                MapKey = _mapKey,
+                Flat = _flatColours,
+                SidesActive = SidesActive,
+                FloorRanges = _floorRanges.ToArray(),
+                SpanX = (float)(_file.MaxX - _file.MinX),
+                SpanZ = (float)(_file.MaxZ - _file.MinZ)
+            };
+
+            for (var slot = 0; slot < _sides.Length; slot++) prep.Sides[slot] = _sides[slot];
+
+            return prep;
+        }
+
+        /// <summary>WORKER: one floor, prepared. Cancellable between chunks and buildings - a cancelled job
+        /// throws OperationCanceledException and its output is never made.</summary>
+        private static FloorData PrepareFloor(Prep p, int level, CancellationToken cancel)
+        {
+            var band = p.File.Band(level);
+            var data = new FloorData { Level = level, Cells = band?.CellCount ?? 0L };
+
+            if (band != null && p.SpanX > 0f && p.SpanZ > 0f)
+            {
+                PrepareGround(p, band, data, cancel);
+                PrepareBuildings(p, level, data, cancel);
+            }
+
+            return data;
+        }
+
+        /// <summary>
+        /// WORKER. One band's ground: a quad per cell whose four CORNERS - the four neighbouring cell centres -
+        /// were all measured; a cell with no hit is a hole and stays one. Vertices are the cell centres in world
+        /// metres, row 0 at MinZ (world order, not the picture's), so the planar UV lands the picture the right
+        /// way up. Chunked in rows sharing one row with the next chunk, each chunk under
+        /// <see cref="MaxVerticesPerMesh"/> vertices. Wound (a, c, b) / (b, c, d) so faces point up - the phase
+        /// 3-0 winding that rendered lit.
+        /// </summary>
+        private static void PrepareGround(Prep p, MapMeshFile.ReliefBand band, FloorData data, CancellationToken cancel)
+        {
+            if (band.Width < 2 || band.Height < 2) return;
+
+            var rowsPerChunk = Mathf.Clamp(MaxVerticesPerMesh / Mathf.Max(1, band.Width), 2, band.Height);
+
+            var map = new int[band.Width * rowsPerChunk];
+
+            var vertices = new List<Vector3>();
+            var uvs = new List<Vector2>();
+            var indices = new List<int>();
+            var colours = p.Flat ? new List<Color32>() : null;
+
+            for (var first = 0; first < band.Height - 1; first += rowsPerChunk - 1)
+            {
+                var last = Mathf.Min(band.Height - 1, first + rowsPerChunk - 1);
+
+                cancel.ThrowIfCancellationRequested();
+
+                for (var i = 0; i < map.Length; i++) map[i] = -1;
+
+                vertices.Clear();
+                uvs.Clear();
+                indices.Clear();
+                colours?.Clear();
+
+                for (var row = first; row < last; row++)
+                {
+                    for (var col = 0; col < band.Width - 1; col++)
+                    {
+                        // All four or none: three corners would be a notch, which reads as damage.
+                        if (band.CodeAt(col, row) == MapMeshFile.NoHit) continue;
+                        if (band.CodeAt(col + 1, row) == MapMeshFile.NoHit) continue;
+                        if (band.CodeAt(col, row + 1) == MapMeshFile.NoHit) continue;
+                        if (band.CodeAt(col + 1, row + 1) == MapMeshFile.NoHit) continue;
+
+                        var a = Corner(p, band, col, row, first, map, vertices, uvs, colours);
+                        var b = Corner(p, band, col + 1, row, first, map, vertices, uvs, colours);
+                        var c = Corner(p, band, col, row + 1, first, map, vertices, uvs, colours);
+                        var d = Corner(p, band, col + 1, row + 1, first, map, vertices, uvs, colours);
+
+                        indices.Add(a);
+                        indices.Add(c);
+                        indices.Add(b);
+
+                        indices.Add(b);
+                        indices.Add(c);
+                        indices.Add(d);
+                    }
+                }
+
+                if (indices.Count > 0)
+                {
+                    data.Ground.Add(MeshData.From($"{p.MapKey}-relief-{band.Level}-{first}", vertices, uvs, indices, colours));
+                    data.GroundTriangles += indices.Count / 3;
+                }
+
+                if (last >= band.Height - 1) break;
+            }
+        }
+
+        /// <summary>One cell centre as a vertex, added on first use; the map is per CHUNK.</summary>
+        private static int Corner(
+            Prep p, MapMeshFile.ReliefBand band, int col, int row, int firstRow, int[] map,
+            List<Vector3> vertices, List<Vector2> uvs, List<Color32> colours)
+        {
+            var slot = (row - firstRow) * band.Width + col;
+            var known = map[slot];
+            if (known >= 0) return known;
+
+            var x = band.CellCentreX(col);
+            var z = band.CellCentreZ(row);
+            var y = p.File.HeightOf(band.CodeAt(col, row));
+
+            map[slot] = vertices.Count;
+
+            vertices.Add(new Vector3(x, y, z));
+            uvs.Add(p.PlanarUv(x, z));
+            colours?.Add(FlatGroundColour);
+
+            return map[slot];
+        }
+
+        /// <summary>
+        /// WORKER. The buildings filed under this floor: every usable triangle to the top picture (a roof), a
+        /// side picture, or a tint (only COUNTED here; the walls are built by <see cref="PrepareWalls"/>). Roof
+        /// faces on another floor's height go to that floor's picture (<see cref="Prep.FloorForFace"/>).
+        ///
+        /// Roof vertices are placed LAZILY through a per-building remap, and the chunk is flushed whenever the
+        /// next triangle would take it past <see cref="MaxVerticesPerMesh"/> - so a single building of two
+        /// million vertices still lands in meshes under the cap, where appending a whole building at once
+        /// could not. Side faces use unshared vertices (per-face light), like the tints.
+        /// </summary>
+        private static void PrepareBuildings(Prep p, int level, FloorData data, CancellationToken cancel)
+        {
+            if (p.File.Buildings == null || p.File.Buildings.Count == 0) return;
+
+            var vertices = new List<Vector3>();
+            var uvs = new List<Vector2>();
+            var indices = new List<int>();
+            var colours = p.Flat ? new List<Color32>() : null;
+
+            // Top faces standing on ANOTHER floor, by that floor's level: indices into the same chunk.
+            var elsewhere = new Dictionary<int, List<int>>();
+
+            // One per side slot, made on the first face that side takes.
+            var sideSinks = new MeshSink[SideOrder.Length];
+
+            var part = 0;
+
+            foreach (var building in p.File.Buildings)
+            {
+                cancel.ThrowIfCancellationRequested();
+
+                if (building == null || building.VertexCount == 0 || building.Indices == null) continue;
+                if (p.BandLevelFor(building.Level) != level) continue;
+
+                data.BuildingCount++;
+
+                p.LoadBuilding(building);
+                p.ResetRemap();
+
+                // Three at a time; a triangle with an index past the building's own vertices is dropped - a
+                // caller that trusts a file it did not write is a caller that throws inside a mesh build.
+                var count = building.Indices.Length - building.Indices.Length % 3;
+
+                for (var i = 0; i < count; i += 3)
+                {
+                    var ua = building.Indices[i];
+                    var ub = building.Indices[i + 1];
+                    var uc = building.Indices[i + 2];
+
+                    // Range-checked as uint BEFORE the cast: an index past int.MaxValue must be refused, not
+                    // wrapped negative into a valid-looking one.
+                    if (ua >= building.VertexCount || ub >= building.VertexCount || uc >= building.VertexCount) continue;
+
+                    var a = (int)ua;
+                    var b = (int)ub;
+                    var c = (int)uc;
+
+                    if (!p.Finite(a) || !p.Finite(b) || !p.Finite(c))
+                    {
+                        data.Dropped++;
+                        continue;
+                    }
+
+                    var pa = p.Position(a);
+                    var pb = p.Position(b);
+                    var pc = p.Position(c);
+
+                    var view = p.ViewFor(pa, pb, pc);
+
+                    if (view == TintView)
+                    {
+                        data.WallTriangles++;
+                        continue;
+                    }
+
+                    if (view != TopView)
+                    {
+                        var slot = view - 1;
+                        var sink = sideSinks[slot] ??= new MeshSink { Flat = false };
+                        var side = p.Sides[slot];
+
+                        if (sink.Count + 3 > MaxVerticesPerMesh)
+                            sink.Flush($"{p.MapKey}-side{SideOrder[slot]}-{level}", data.Sides[slot] ??= new List<MeshData>());
+
+                        sink.Add(pa, SideUv(side, pa));
+                        sink.Add(pb, SideUv(side, pb));
+                        sink.Add(pc, SideUv(side, pc));
+
+                        data.SideTriangles++;
+                        continue;
+                    }
+
+                    data.TopTriangles++;
+
+                    // Room for up to three new vertices, or the chunk goes now and this building's vertices are
+                    // placed afresh in the next one.
+                    if (vertices.Count + 3 > MaxVerticesPerMesh)
+                    {
+                        FlushRoofs(p, data, level, part++, vertices, uvs, indices, colours, elsewhere);
+
+                        vertices.Clear();
+                        uvs.Clear();
+                        indices.Clear();
+                        colours?.Clear();
+                        p.ResetRemap();
+                    }
+
+                    var floorLevel = p.FloorForFace((pa.y + pb.y + pc.y) / 3f, level);
+                    var roofIndices = indices;
+
+                    if (floorLevel != level)
+                    {
+                        if (!elsewhere.TryGetValue(floorLevel, out roofIndices))
+                        {
+                            roofIndices = new List<int>();
+                            elsewhere[floorLevel] = roofIndices;
+                        }
+
+                        data.MovedRoofTriangles++;
+                    }
+
+                    roofIndices.Add(p.RoofVertex(a, vertices, uvs, colours));
+                    roofIndices.Add(p.RoofVertex(b, vertices, uvs, colours));
+                    roofIndices.Add(p.RoofVertex(c, vertices, uvs, colours));
+                }
+            }
+
+            for (var slot = 0; slot < sideSinks.Length; slot++)
+            {
+                if (sideSinks[slot] == null) continue;
+                sideSinks[slot].Flush($"{p.MapKey}-side{SideOrder[slot]}-{level}", data.Sides[slot] ??= new List<MeshData>());
+            }
+
+            // Counted into the building total whether or not they are built yet, so the log line's totals are
+            // the file's and do not move when a floor's walls arrive a frame later.
+            data.BuildingTriangles += data.WallTriangles + data.SideTriangles;
+
+            FlushRoofs(p, data, level, part, vertices, uvs, indices, colours, elsewhere);
+        }
+
+        /// <summary>One chunk of roofs into mesh data: the building band's own, and one per other floor its
+        /// faces stand on, all sharing the chunk's vertices. The index lists are emptied for the next chunk.</summary>
+        private static void FlushRoofs(
+            Prep p, FloorData data, int level, int part, List<Vector3> vertices, List<Vector2> uvs, List<int> indices,
+            List<Color32> colours, Dictionary<int, List<int>> elsewhere)
+        {
+            if (indices.Count > 0)
+            {
+                data.Roofs.Add(MeshData.From($"{p.MapKey}-buildings-{level}-{part}", vertices, uvs, indices, colours));
+                data.BuildingTriangles += indices.Count / 3;
+            }
+
+            foreach (var pair in elsewhere)
+            {
+                if (pair.Value.Count == 0) continue;
+
+                data.RoofsElsewhere.Add((pair.Key, MeshData.From(
+                    $"{p.MapKey}-buildings-{level}-on{pair.Key}-{part}", vertices, uvs, pair.Value, colours)));
+                data.BuildingTriangles += pair.Value.Count / 3;
+
+                pair.Value.Clear();
+            }
+        }
+
+        /// <summary>
+        /// WORKER. One floor's walls: each walled building's colour from the palette (read back on the main
+        /// thread before this started), the colours grouped into at most <see cref="MaxWallTints"/> buckets,
+        /// and the geometry into each bucket with UNSHARED vertices - a corner shared by two walls at right
+        /// angles would light both as if they faced the corner. Two walks, as before: colours first so they can
+        /// be bucketed knowing all of them, then geometry. Null when the floor has no walls.
+        /// </summary>
+        private static WallData PrepareWalls(Prep p, int level, Color32[] palette, int width, int height, CancellationToken cancel)
+        {
+            if (!(p.SpanX > 0f) || !(p.SpanZ > 0f)) return null;
+
+            // --- walk 1: which buildings have walls, and in what colour
+            var walled = new List<int>();
+            var colours = new List<Color>();
+
+            for (var index = 0; index < p.File.Buildings.Count; index++)
+            {
+                cancel.ThrowIfCancellationRequested();
+
+                var building = p.File.Buildings[index];
+                if (building == null || building.VertexCount == 0 || building.Indices == null) continue;
+                if (p.BandLevelFor(building.Level) != level) continue;
+
+                if (!p.LoadBuilding(building)) continue;
+
+                var hasWall = false;
+                var count = building.Indices.Length - building.Indices.Length % 3;
+
+                for (var i = 0; i < count && !hasWall; i += 3)
+                    if (p.WallTriangle(building, i, out _, out _, out _)) hasWall = true;
+
+                if (!hasWall) continue;
+
+                walled.Add(index);
+                colours.Add(p.Flat ? (Color)FlatWallColour : p.WallColour(palette, width, height));
+            }
+
+            if (walled.Count == 0) return null;
+
+            var data = new WallData();
+
+            if (!p.Flat)
+            {
+                var sum = Color.black;
+                for (var i = 0; i < colours.Count; i++) sum += colours[i];
+
+                var average = sum / colours.Count;
+                average.a = 1f;
+
+                data.Average = average;
+                data.HasAverage = true;
+            }
+
+            // --- the buckets
+            var centres = new List<Color>();
+            var bucketOf = BucketColours(colours, p.Flat ? 1 : MaxWallTints, centres);
+
+            var sinks = new MeshSink[centres.Count];
+
+            for (var k = 0; k < centres.Count; k++)
+            {
+                sinks[k] = new MeshSink { Flat = p.Flat };
+                data.Tints.Add((centres[k], new List<MeshData>()));
+            }
+
+            data.TintCount = p.Flat ? 0 : centres.Count;
+
+            // --- walk 2: the geometry
+            for (var w = 0; w < walled.Count; w++)
+            {
+                cancel.ThrowIfCancellationRequested();
+
+                var building = p.File.Buildings[walled[w]];
+                if (!p.LoadBuilding(building)) continue;
+
+                var k = bucketOf[w];
+                var sink = sinks[k];
+                var target = data.Tints[k].Meshes;
+                var count = building.Indices.Length - building.Indices.Length % 3;
+
+                for (var i = 0; i < count; i += 3)
+                {
+                    if (!p.WallTriangle(building, i, out var a, out var b, out var c)) continue;
+
+                    if (sink.Count + 3 > MaxVerticesPerMesh) sink.Flush($"{p.MapKey}-walls-{level}-{k}", target);
+
+                    sink.Add(a, p.PlanarUv(a.x, a.z));
+                    sink.Add(b, p.PlanarUv(b.x, b.z));
+                    sink.Add(c, p.PlanarUv(c.x, c.z));
+
+                    data.Triangles++;
+                }
+            }
+
+            for (var k = 0; k < sinks.Length; k++) sinks[k].Flush($"{p.MapKey}-walls-{level}-{k}", data.Tints[k].Meshes);
+
+            return data;
+        }
+
+        /// <summary>Unshared-vertex geometry while it is prepared, flushed into mesh data under the vertex cap:
+        /// a tint's walls, or a side's faces.</summary>
+        private sealed class MeshSink
+        {
             public bool Flat;
 
-            public readonly List<Vector3> Vertices = new List<Vector3>();
+            private readonly List<Vector3> _vertices = new List<Vector3>();
             private readonly List<Vector2> _uvs = new List<Vector2>();
             private readonly List<int> _indices = new List<int>();
             private readonly List<Color32> _colours = new List<Color32>();
             private int _part;
 
+            public int Count => _vertices.Count;
+
             public void Add(Vector3 position, Vector2 uv)
             {
-                _indices.Add(Vertices.Count);
-                Vertices.Add(position);
+                _indices.Add(_vertices.Count);
+                _vertices.Add(position);
                 _uvs.Add(uv);
                 if (Flat) _colours.Add(FlatWallColour);
             }
 
-            public void Flush(string name)
+            public void Flush(string name, List<MeshData> target)
             {
                 if (_indices.Count == 0) return;
 
-                Target.Add(MakeMesh($"{name}-{_part++}", Vertices, _uvs, _indices, Flat ? _colours : null));
+                target.Add(MeshData.From($"{name}-{_part++}", _vertices, _uvs, _indices, Flat ? _colours : null));
 
-                Vertices.Clear();
+                _vertices.Clear();
                 _uvs.Clear();
                 _indices.Clear();
                 _colours.Clear();
             }
         }
 
-        /// <summary>Scratch for <see cref="BuildBuildings"/>'s finite test, grown as needed rather than
-        /// allocated per building - twenty thousand buildings is twenty thousand arrays otherwise.</summary>
-        private bool[] _finite = new bool[0];
+        /// <summary>What <see cref="Prep.ViewFor"/> answers for a face textured by the top-down picture.</summary>
+        private const int TopView = 0;
 
-        /// <summary>
-        /// The planar UV of a world point: where it falls across the extent, which is where it falls
-        /// across the picture.
-        ///
-        /// CLAMPED, because the grid can overhang. A band is <c>ceil(span / cell)</c> cells wide, so the
-        /// last column's centre can sit up to half a cell past MaxX, and a building's triangles are kept
-        /// up to a metre outside the extent - both give a u or v a little over 1. The texture's wrap mode
-        /// is Clamp, so today those sample the edge pixel anyway; clamping here means that stays true if
-        /// anything ever hands this view a texture that repeats.
-        /// </summary>
-        /// <param name="x">World x in metres.</param>
-        /// <param name="z">World z in metres.</param>
-        /// <param name="spanX">The extent's x span.</param>
-        /// <param name="spanZ">The extent's z span.</param>
-        private Vector2 PlanarUv(float x, float z, float spanX, float spanZ) =>
-            new Vector2(
-                Mathf.Clamp01((x - (float)_file.MinX) / spanX),
-                Mathf.Clamp01((z - (float)_file.MinZ) / spanZ));
+        /// <summary>What <see cref="Prep.ViewFor"/> answers for a face drawn in a flat tint.</summary>
+        private const int TintView = -1;
 
-        /// <summary>The band a building's declared level belongs to: its own where the file has that
-        /// band, else the nearest. The writer never produces a building without a band, but a file from
-        /// a future builder might, and dropping the geometry would be the worse answer.</summary>
-        /// <param name="level">The building's declared level.</param>
-        private int BandLevelFor(int level)
+        /// <summary>The least score a face needs to be textured by the picture that sees it best.</summary>
+        private const float MinViewScore = 0.35f;
+
+        /// <summary>How close to vertical a face's normal has to be to count as a roof: cos 60 degrees.</summary>
+        private const float RoofNormalY = 0.5f;
+
+        /// <summary>Whether a triangle faces up or down enough to take the top-down picture, from its own
+        /// cross product. |n.y|, not n.y: an overhang's underside is as flat as a roof. Degenerate goes with the
+        /// roofs, where it draws nothing either way.</summary>
+        private static bool IsRoof(Vector3 a, Vector3 b, Vector3 c)
         {
-            var best = int.MinValue;
-            var distance = int.MaxValue;
+            var n = Vector3.Cross(b - a, c - a);
+            var length = n.magnitude;
 
-            foreach (var band in _file.Bands)
-            {
-                if (band == null) continue;
-                if (band.Level == level) return level;
+            if (!(length > 1e-6f)) return true;
 
-                var gap = Math.Abs(band.Level - level);
-                if (gap >= distance) continue;
-
-                distance = gap;
-                best = band.Level;
-            }
-
-            return best;
+            return Mathf.Abs(n.y) / length >= RoofNormalY;
         }
 
-        /// <summary>One mesh from the lists just filled. <see cref="IndexFormat.UInt32"/> is set BEFORE
-        /// the vertices, which is not a style choice: a mesh left on the default sixteen-bit format
-        /// silently wraps its indices past 65,535 vertices, and Customs' relief is 150,000.</summary>
-        private static Mesh MakeMesh(
-            string name, List<Vector3> vertices, List<Vector2> uvs, List<int> indices, List<Color32> colours)
+        /// <summary>A world point's UV on a side picture: the Stage U contract's pixel mapping (row 0 at the
+        /// image TOP) turned into a texture's bottom-origin v - <c>v = (dot(u,p) - originU) * ppm / height</c>,
+        /// the "height minus" and the "one minus" cancelling. Clamped.</summary>
+        private static Vector2 SideUv(DynamicMapsLibrary.SidePicture side, Vector3 p)
         {
-            var mesh = new Mesh { name = name, indexFormat = IndexFormat.UInt32 };
+            var u = (Vector3.Dot(side.Right, p) - side.OriginR) * side.PxPerMetre / side.Width;
+            var v = (Vector3.Dot(side.Up, p) - side.OriginU) * side.PxPerMetre / side.Height;
 
-            mesh.SetVertices(vertices);
-            mesh.SetUVs(0, uvs);
-            if (colours != null) mesh.SetColors(colours);
-            mesh.SetTriangles(indices, 0, calculateBounds: true);
-            mesh.RecalculateNormals();
+            return new Vector2(Mathf.Clamp01(u), Mathf.Clamp01(v));
+        }
+
+        /// <summary>
+        /// MAIN THREAD. One mesh from prepared arrays. <see cref="IndexFormat.UInt32"/> is set BEFORE the
+        /// vertices: a mesh left on sixteen-bit indices wraps them past 65,535 vertices. Normals recalculated
+        /// here - the one Unity call that costs, and the reason a mesh is one unit of paced work.
+        /// </summary>
+        private static Mesh MakeMesh(MeshData data)
+        {
+            var mesh = new Mesh { name = data.Name, indexFormat = IndexFormat.UInt32 };
+
+            mesh.SetVertices(data.Vertices);
+            mesh.SetNormals(data.Normals);
+            mesh.SetUVs(0, data.Uvs);
+            if (data.Colours != null) mesh.SetColors(data.Colours);
+            mesh.SetTriangles(data.Indices, 0, calculateBounds: true);
+
+            // Non-readable from here on: the CPU copy is the MeshData the entry keeps (Built.Sources), which
+            // the cut clips from. The bounds, which the cut's quick test reads, survive this.
+            mesh.UploadMeshData(true);
 
             return mesh;
+        }
+
+        /// <summary>MAIN THREAD. One prepared mesh uploaded into an entry, with its arrays kept for the cut.</summary>
+        private static Mesh Upload(Built into, MeshData data)
+        {
+            var mesh = MakeMesh(data);
+            into.Sources[mesh] = data;
+            return mesh;
+        }
+
+        // --- the walls, started on the main thread, prepared on a worker, uploaded paced ----------------
+
+        /// <summary>One floor's wall build in flight: its worker, then its upload units.</summary>
+        private sealed class WallJob
+        {
+            public Built Built;
+            public int Level;
+            public bool Late;
+            public Stopwatch Clock;
+            public Task<WallData> Task;
+
+            /// <summary>Finished - uploaded, failed or abandoned. The build line waits for the initial ones.</summary>
+            public bool Done;
+        }
+
+        /// <summary>Wall builds this view started, in flight or uploading.</summary>
+        private readonly List<WallJob> _wallJobs = new List<WallJob>();
+
+        /// <summary>Cancels this view's wall workers; replaced after each <see cref="AbandonWalls"/>.</summary>
+        private CancellationTokenSource _wallCancel;
+
+        /// <summary>
+        /// Starts one floor's walls, if they are waiting and there is a way to colour them: in flat colours at
+        /// once, else once the floor's picture is resident. The palette is read back HERE (a GPU readback, main
+        /// thread only, well under a millisecond at 256 columns); the rest goes to a worker.
+        /// </summary>
+        private void StartWalls(Built built, int level, Texture picture, bool late)
+        {
+            if (built == null || !built.WallsPending || built.WallsRunning) return;
+            if (!_flatColours && picture == null) return;
+
+            Color32[] palette = null;
+            var width = 0;
+            var height = 0;
+
+            if (!_flatColours)
+            {
+                try
+                {
+                    palette = ReadPalette(picture, out width, out height);
+                }
+                catch (Exception ex)
+                {
+                    // Not fatal: every building then gets the fallback grey, and the walls still stand.
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: could not read the colours of floor {level} of '{_mapKey}' back from the " +
+                        $"GPU ({ex.GetType().Name}: {ex.Message}) - its walls are drawn in one grey.");
+                    palette = null;
+                }
+            }
+
+            var prep = SnapshotPrep();
+            built.WallsRunning = true;
+
+            // The view's wall token: AbandonWalls cancels it, so a repaint stops the walls it abandons rather
+            // than leaving the worker to finish into nothing.
+            _wallCancel ??= new CancellationTokenSource();
+            var token = _wallCancel.Token;
+
+            _wallJobs.Add(new WallJob
+            {
+                Built = built,
+                Level = level,
+                Late = late,
+                Clock = Stopwatch.StartNew(),
+                Task = Task.Run(() => PrepareWalls(prep, level, palette, width, height, token), token)
+            });
+        }
+
+        /// <summary>Wall workers that have finished: their meshes queued, or their failure handled.</summary>
+        private void PollWallJobs()
+        {
+            for (var i = 0; i < _wallJobs.Count; i++)
+            {
+                var job = _wallJobs[i];
+                if (job.Done || job.Task == null || !job.Task.IsCompleted) continue;
+
+                var task = job.Task;
+                job.Task = null;
+
+                if (WasCancelled(task)) continue;   // abandoned: AbandonWalls already put the entry back to waiting
+
+                if (task.IsFaulted)
+                {
+                    WallsFailed(job, task.Exception?.GetBaseException());
+                    continue;
+                }
+
+                EnqueueWallUpload(job, task.Result);
+            }
+
+            // Finished jobs leave the list, so an idle view stops pumping. Backwards, to remove in place.
+            for (var i = _wallJobs.Count - 1; i >= 0; i--)
+                if (_wallJobs[i].Done) _wallJobs.RemoveAt(i);
+        }
+
+        /// <summary>
+        /// A floor's prepared walls into the entry, paced: the tints (and their materials) are registered in
+        /// the first unit, so a failure later finds every one; each mesh is a unit; the last unit finishes the
+        /// job. Each unit catches its own failure, which costs this floor its walls and nothing else.
+        /// </summary>
+        private void EnqueueWallUpload(WallJob job, WallData data)
+        {
+            var built = job.Built;
+
+            if (data == null)
+            {
+                _work.Enqueue(() => FinishWalls(job));
+                return;
+            }
+
+            var tints = new WallTint[data.Tints.Count];
+
+            _work.Enqueue(() => WallUnit(job, () =>
+            {
+                if (data.HasAverage)
+                {
+                    built.WallAverage = data.Average;
+                    if (built.SideFallback != null) built.SideFallback.color = data.Average;
+                }
+
+                for (var k = 0; k < data.Tints.Count; k++)
+                {
+                    tints[k] = new WallTint
+                    {
+                        Colour = data.Tints[k].Colour,
+                        Material = MakeWallMaterial(job.Level, k, data.Tints[k].Colour)
+                    };
+
+                    built.Walls.Add(tints[k]);
+                }
+
+                built.Tints = data.TintCount;
+            }));
+
+            for (var k = 0; k < data.Tints.Count; k++)
+            {
+                var bucket = k;
+
+                foreach (var mesh in data.Tints[k].Meshes)
+                {
+                    var source = mesh;
+
+                    _work.Enqueue(() => WallUnit(job, () =>
+                    {
+                        var made = Upload(built, source);
+                        tints[bucket].Meshes.Add(made);
+
+                        // Cut as it arrives, when a cut is on: this view draws it next frame.
+                        if (!float.IsNaN(_cutY) && built.CurrentCut == _cutY)
+                        {
+                            var clock = Stopwatch.StartNew();
+                            Under(built, made, _cutY);
+                            _cutMillis += clock.ElapsedMilliseconds;
+                        }
+                    }));
+                }
+            }
+
+            _work.Enqueue(() => FinishWalls(job));
+        }
+
+        /// <summary>One wall unit, skipped once its job has failed or been abandoned, failing its job (not the
+        /// map) when it throws.</summary>
+        private void WallUnit(WallJob job, Action work)
+        {
+            if (job.Done) return;
+
+            try
+            {
+                work();
+            }
+            catch (Exception ex)
+            {
+                WallsFailed(job, ex);
+            }
+        }
+
+        /// <summary>The job's walls are all in: the entry stops waiting, and a floor whose picture came late
+        /// says so in its own line (the build line has been written).</summary>
+        private void FinishWalls(WallJob job)
+        {
+            if (job.Done) return;
+
+            job.Done = true;
+            job.Built.WallsRunning = false;
+            job.Built.WallsPending = false;
+
+            if (job.Late)
+            {
+                Plugin.LogSource?.LogInfo(string.Format(
+                    CultureInfo.InvariantCulture,
+                    "QuestTree: 3D map walls for {0} floor {1} - {2:#,##0} triangles in {3} tint(s), built in " +
+                    "{4:#,##0} ms (the floor's picture had just arrived).",
+                    _mapKey, job.Level, job.Built.WallTriangles, job.Built.Tints, job.Clock.ElapsedMilliseconds));
+            }
+        }
+
+        /// <summary>A wall build that failed: what it made goes, the entry stops waiting (once - a failure
+        /// retried every frame is a warning every frame), and the floor keeps its roofs and ground.</summary>
+        private void WallsFailed(WallJob job, Exception ex)
+        {
+            if (job.Done) return;
+
+            job.Done = true;
+            DestroyWalls(job.Built);
+            job.Built.WallsRunning = false;
+            job.Built.WallsPending = false;
+
+            Plugin.LogSource?.LogWarning(
+                $"QuestTree: the walls of floor {job.Level} of the 3D map for '{_mapKey}' could not be built " +
+                $"({ex?.GetType().Name}: {ex?.Message}) - that floor draws its roofs and ground only.");
+        }
+
+        /// <summary>Whether a wall build started with the first build is still going - the build line waits
+        /// for those, so its tint count is the map's.</summary>
+        private bool InitialWallsRunning()
+        {
+            foreach (var job in _wallJobs)
+                if (!job.Late && !job.Done) return true;
+
+            return false;
+        }
+
+        /// <summary>
+        /// Forgets every wall build of this view that has not finished. What an abandoned build had already
+        /// registered is destroyed, and its entry goes back to WAITING - so the next view to draw it starts the
+        /// walls again, and never inherits half of them. A worker still running is left to finish into
+        /// nothing: its result is never collected.
+        /// </summary>
+        private void AbandonWalls()
+        {
+            foreach (var job in _wallJobs)
+            {
+                if (job.Done) continue;
+
+                job.Done = true;
+                DestroyWalls(job.Built);
+                job.Built.WallsRunning = false;
+                job.Built.WallsPending = true;
+            }
+
+            _wallJobs.Clear();
+
+            if (_wallCancel != null)
+            {
+                _wallCancel.Cancel();
+                _wallCancel = null;
+            }
         }
 
         // --- the frame ------------------------------------------------------------------------------
@@ -3111,12 +3912,16 @@ namespace QuestTree.UI
 
                     try
                     {
-                        BuildMeshes();
+                        // Its own time counts toward the build's longest frame: the checks, one material pair
+                        // per floor and the registration all run in this frame, before any pacing starts.
+                        var start = Stopwatch.StartNew();
+                        BeginBuild();
+                        _longestFrameMs = Math.Max(_longestFrameMs, start.ElapsedMilliseconds);
                     }
                     catch (Exception ex)
                     {
-                        // A throw in the mesh build leaves an empty viewport, which is the one outcome
-                        // worse than 2D - so this one refuses the mesh rather than just going quiet.
+                        // A throw in the build leaves an empty viewport, which is the one outcome worse
+                        // than 2D - so this one refuses the mesh rather than just going quiet.
                         Plugin.LogSource?.LogWarning(
                             $"QuestTree: the 3D relief of '{_mapKey}' could not be turned into meshes " +
                             $"({ex.GetType().Name}: {ex.Message}) - drawing the flat picture instead.");
@@ -3127,11 +3932,61 @@ namespace QuestTree.UI
                     return;
                 }
 
+                // The workers preparing the floors: nothing to do until every one has landed - the backdrop shows.
+                if (_held.Count > 0 && !_prepDone)
+                {
+                    for (var i = 0; i < _held.Count; i++)
+                    {
+                        var task = _held[i].Prep.Task;
+                        if (!task.IsCompleted) return;
+
+                        // Cancelled under us (a drop while this view waited): that level is asked for again.
+                        if (WasCancelled(task))
+                        {
+                            var level = _held[i].Level;
+                            ReleasePrep(_held[i].Prep);
+                            _held[i] = (level, AcquirePrep(PrepKey(level), level, SnapshotPrep()));
+                            return;
+                        }
+
+                        if (task.IsFaulted)
+                        {
+                            var reason = task.Exception?.GetBaseException();
+
+                            Plugin.LogSource?.LogWarning(
+                                $"QuestTree: the 3D relief of '{_mapKey}' could not be turned into meshes " +
+                                $"({reason?.GetType().Name}: {reason?.Message}) - drawing the flat picture instead.");
+
+                            Refuse("could not be turned into meshes");
+                            return;
+                        }
+                    }
+
+                    var prepared = new List<FloorData>();
+                    foreach (var held in _held) prepared.Add(held.Prep.Task.Result);
+
+                    // Collected, but STILL HELD until the build finishes: a repaint during the paced upload (which
+                    // on a big map takes a second or two) then finds the finished job and only re-uploads from its
+                    // arrays, instead of starting the worker again. Let go in Finish, or in ResetPipeline.
+                    AfterPrepare(prepared);
+                    if (_broke) return;
+                }
+
                 // Before anything is drawn this frame, so no mesh queued below belongs to the build being thrown
                 // away. See RebuildWithoutFailedSides.
                 if (_sideFailed) RebuildWithoutFailedSides();
+                if (_broke) return;
 
+                // Uploads, cuts and wall builds, paced - while the first build is on, and after it for walls
+                // that arrive late.
+                if (!_ready || _work.Count > 0 || _wallJobs.Count > 0) Pump();
+
+                if (_broke || !_ready) return;
                 if (_camera == null || _floors.Count == 0) return;
+
+                var first = _measureFirstFrame;
+                var clock = first ? Stopwatch.StartNew() : null;
+                _drawCalls = 0;
 
                 EnsureRenderTexture();
                 Place();
@@ -3140,6 +3995,18 @@ namespace QuestTree.UI
 
                 RenderNow();
                 PlaceOverlays();
+
+                if (first)
+                {
+                    // The CPU side of one frame: the DrawMesh submissions and the manual Render. What a map of
+                    // this size costs to look at, frame after frame - the number that says whether it holds 60.
+                    _measureFirstFrame = false;
+
+                    Plugin.LogSource?.LogInfo(string.Format(
+                        CultureInfo.InvariantCulture,
+                        "QuestTree: 3D map for {0} - first frame drawn in {1:0.0} ms, {2} draw call(s).",
+                        _mapKey, clock.Elapsed.TotalMilliseconds, _drawCalls));
+                }
             }
             catch (Exception ex)
             {
@@ -3150,6 +4017,14 @@ namespace QuestTree.UI
                     $"QuestTree: the 3D map view for '{_mapKey}' stopped drawing " +
                     $"({ex.GetType().Name}: {ex.Message}).");
             }
+        }
+
+        /// <summary>One DrawMesh for our camera, counted. Every mesh this view draws goes through here, so the
+        /// first-frame line's draw-call count is the real one.</summary>
+        private void Submit(Mesh mesh, Material material)
+        {
+            Graphics.DrawMesh(mesh, Matrix4x4.identity, material, _drawLayer, _camera);
+            _drawCalls++;
         }
 
         /// <summary>Queues one floor's meshes for our camera, with the floor's picture on them - the
@@ -3183,14 +4058,14 @@ namespace QuestTree.UI
             var meshes = floor.Meshes;
             if (meshes == null) return;
 
-            // The first frame this floor's picture is here: its walls can be coloured now. Once per entry
-            // (TryBuildWalls clears the flag whatever happens), so this is not a per-frame cost.
-            if (meshes.WallsPending) TryBuildWalls(meshes, floor.Level, ground.mainTexture, late: true);
+            // The first frame this floor's picture is here: its walls can be coloured now - started here,
+            // prepared on a worker and uploaded paced (StartWalls), so not a per-frame cost either.
+            if (meshes.WallsPending && !meshes.WallsRunning) StartWalls(meshes, floor.Level, ground.mainTexture, late: true);
 
             for (var i = 0; i < meshes.Ground.Count; i++)
             {
                 var mesh = meshes.Ground[i];
-                if (mesh != null) Graphics.DrawMesh(mesh, Matrix4x4.identity, ground, _drawLayer, _camera);
+                if (mesh != null) Submit(mesh, ground);
             }
 
             // Every BUILDING mesh goes through Under(): itself with no cut, its clipped twin with one. The
@@ -3198,7 +4073,7 @@ namespace QuestTree.UI
             for (var i = 0; i < meshes.Buildings.Count; i++)
             {
                 var mesh = Under(meshes, meshes.Buildings[i], _cutY);
-                if (mesh != null) Graphics.DrawMesh(mesh, Matrix4x4.identity, walls, _drawLayer, _camera);
+                if (mesh != null) Submit(mesh, walls);
             }
 
             // Roofs standing on another floor, with THAT floor's building material - its picture. A floor
@@ -3214,7 +4089,7 @@ namespace QuestTree.UI
                 if (material == null || (!_flatColours && material.mainTexture == null)) continue;
 
                 var mesh = Under(meshes, roof.Mesh, _cutY);
-                if (mesh != null) Graphics.DrawMesh(mesh, Matrix4x4.identity, material, _drawLayer, _camera);
+                if (mesh != null) Submit(mesh, material);
             }
 
             // The walls, one colour at a time: at most sixteen more DrawMesh calls per floor. A tint with
@@ -3229,7 +4104,7 @@ namespace QuestTree.UI
                 for (var i = 0; i < tint.Meshes.Count; i++)
                 {
                     var mesh = Under(meshes, tint.Meshes[i], _cutY);
-                    if (mesh != null) Graphics.DrawMesh(mesh, Matrix4x4.identity, material, _drawLayer, _camera);
+                    if (mesh != null) Submit(mesh, material);
                 }
             }
 
@@ -3265,7 +4140,7 @@ namespace QuestTree.UI
                 for (var i = 0; i < side.Meshes.Count; i++)
                 {
                     var mesh = Under(meshes, side.Meshes[i], _cutY);
-                    if (mesh != null) Graphics.DrawMesh(mesh, Matrix4x4.identity, draw, _drawLayer, _camera);
+                    if (mesh != null) Submit(mesh, draw);
                 }
             }
         }
@@ -3314,7 +4189,7 @@ namespace QuestTree.UI
 
             CountSides();
 
-            // The room for the dropped sides goes back; BuildMeshes takes what the rest need.
+            // The room for the dropped sides goes back; BeginBuild takes what the rest need.
             ReturnSideRoom();
 
             Plugin.LogSource?.LogWarning(
@@ -3322,7 +4197,7 @@ namespace QuestTree.UI
                 $"'{_mapKey}' could not be decoded - the walls are rebuilt without them.");
 
             ReleaseFloors();
-            BuildMeshes();
+            BeginBuild();
         }
 
         /// <summary>
@@ -3743,6 +4618,9 @@ namespace QuestTree.UI
         /// (see <see cref="Unuse"/>). Half of <see cref="Release"/>, and all of what a rebuild throws away.</summary>
         private void ReleaseFloors()
         {
+            // First: queued units and wall jobs point at these floors' entries, and must not run after them.
+            ResetPipeline();
+
             foreach (var floor in _floors)
             {
                 if (floor == null) continue;

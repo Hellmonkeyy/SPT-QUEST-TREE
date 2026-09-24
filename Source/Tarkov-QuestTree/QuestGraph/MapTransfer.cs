@@ -100,15 +100,29 @@ namespace QuestTree.QuestGraph
 
         /// <summary>The most one mesh may weigh, in either direction, decoded. The host's own ceiling
         /// (MapStore.MaxMeshBytes), so a mesh this side would offer is never one the host refuses, and a
-        /// mesh a host offers is never one this side would refuse after downloading it. Four times the
-        /// largest thing phase 3C's triangle budget produces.</summary>
-        private const int MaxMeshBytes = 12 * 1024 * 1024;
+        /// mesh a host offers is never one this side would refuse after downloading it. 48 MB since stage V,
+        /// whose builder keeps up to 3,000,000 building triangles a map. Past
+        /// <see cref="MeshPartBytes"/> it goes up in parts - see that constant for why.</summary>
+        private const int MaxMeshBytes = 48 * 1024 * 1024;
+
+        /// <summary>
+        /// How much of a mesh one upload post carries. A stock SPT host runs on Kestrel with its default
+        /// request limit of 30,000,000 bytes, and nothing in SPT raises it - measured on a real Kestrel
+        /// (scratchpad kestrel-limit): a body of 32.5 MB is refused with "Request body too large", one of
+        /// 23.5 MB goes through. SPT's RequestHandler zlib-compresses every body, which brings the base64
+        /// of an already-deflated mesh back to about 1.03 times the mesh, so ONE post can carry a mesh of
+        /// roughly 28 MB and no more - and stage V's cap is 48. A mesh past this size is therefore sent in
+        /// parts of this size (MapStore.HoldMeshPart joins them and checks the whole exactly as it checks a
+        /// mesh sent in one post). 16 MiB is ~17 MB on the wire: over 40 % under the limit, so a less
+        /// compressible body than any measured still fits, and a mesh at the cap is three posts.
+        /// </summary>
+        private const int MeshPartBytes = 16 * 1024 * 1024;
 
         /// <summary>The most one map's pictures, sides AND mesh may weigh coming down, decoded. The host's
         /// per-map ceiling (MapStore.MaxBytesPerMap), checked again here: 8 floors and 4 sides at 2.5 MB
-        /// and a 12 MB mesh. It rose from 20 MB with the mesh and from 32 MB with the sides, each time by
-        /// exactly the new part's ceiling.</summary>
-        private const long MaxMapDownloadBytes = 42L * 1024 * 1024;
+        /// and a 48 MB mesh make 78 MB, with 6 MB of margin - 84 MB. It rose 20 -> 32 MB with the mesh,
+        /// 32 -> 42 with the sides and 42 -> 84 with stage V's 48 MB mesh.</summary>
+        private const long MaxMapDownloadBytes = 84L * 1024 * 1024;
 
         /// <summary>The four sides a capture may carry an oblique picture from, in the order they are
         /// posted and fetched - the host's own order (MapStore.SideDirs), so both halves walk them
@@ -123,10 +137,10 @@ namespace QuestTree.QuestGraph
 
         /// <summary>The most a session will download in total. A player who joins a host holding
         /// thirty maps gets what fits and the rest on the next start, rather than a quarter of an hour
-        /// of a worker on the first Maps tab open. Doubled with the mesh, because a set that used to be
-        /// 1-4 MB of pictures can now be 4-15 MB with its geometry, and the old 60 MB would have taken
-        /// four maps and left the rest for a later session for ever.</summary>
-        private const long MaxSessionDownloadBytes = 120L * 1024 * 1024;
+        /// of a worker on the first Maps tab open. 300 MB since stage V: a set that was 1-4 MB of pictures
+        /// can now be 10-50 MB with its 3-million-triangle geometry, and the 120 MB before it would have
+        /// taken three or four such maps a session and left the rest for later every time.</summary>
+        private const long MaxSessionDownloadBytes = 300L * 1024 * 1024;
 
         /// <summary>The most floors of one map to take from a host, matching the harvested band
         /// ceiling the zone file enforces.</summary>
@@ -141,12 +155,14 @@ namespace QuestTree.QuestGraph
         /// measured by the worker and one by the frames.</summary>
         private const float RequestSeconds = 30f;
 
-        /// <summary>The deadline on the MESH post, in seconds, and three times the others on purpose: a
-        /// 12 MB mesh is a 16 MB base64 body, and on a remote host - which is the whole point of the
-        /// transport - 30 s is a limit the body itself can lose to rather than one the host has any say
-        /// in. Timing out here also costs more than timing out on a floor: the host is holding the whole
-        /// set waiting for this, so a deadline that is too short means the capture is never shared.</summary>
-        private const float MeshRequestSeconds = 90f;
+        /// <summary>The deadline on a MESH request, in seconds - one upload part, or the whole download -
+        /// and eight times the others on purpose. A download is one 48 MB mesh as a 64 MB base64 body; an
+        /// upload part is 16 MiB; and on a remote host - which is the whole point of the transport - a slow
+        /// uplink makes 30 s a limit the body itself loses to rather than one the host has any say in: 48 MB
+        /// at 2 MB/s is 24 s of transfer before either end has done any work. Timing out here also costs
+        /// more than timing out on a floor: the host is holding the whole set waiting for the mesh, so a
+        /// deadline that is too short means the capture is never shared. 240 s since stage V (was 90 s).</summary>
+        private const float MeshRequestSeconds = 240f;
 
         /// <summary>The worker's own deadline on the mesh post, matching
         /// <see cref="MeshRequestSeconds"/>: one is measured in frames, the other in the request.</summary>
@@ -320,7 +336,7 @@ namespace QuestTree.QuestGraph
                         yield break;
                     }
 
-                    var verdict = Judge(key, floor, task, out var held);
+                    var verdict = Judge(key, floor, task, out var held, out var completeReason);
                     if (verdict == Verdict.Stop) yield break;
 
                     posted++;
@@ -333,9 +349,11 @@ namespace QuestTree.QuestGraph
                     if (verdict == Verdict.Complete)
                     {
                         // The host has the set and wants nothing more. Either this capture has no mesh,
-                        // or the host is an old one that dropped the block, or it already had the mesh
-                        // staged from an earlier attempt of the same capture - in all three, sending the
-                        // mesh now would be 16 MB the host has no place for.
+                        // or the host dropped the mesh (an older host drops one past 12 MB at the meta;
+                        // any host drops one its meta cannot describe), or it already had the mesh staged
+                        // from an earlier attempt of the same capture - in all three, sending the mesh now
+                        // would be up to 48 MB the host has no place for. Only the middle one is news.
+                        SayIfMeshWasNotKept(key, mesh, completeReason);
                         Done(key, Math.Max(posted, held), bytes, 0, clock);
                         yield break;
                     }
@@ -390,7 +408,7 @@ namespace QuestTree.QuestGraph
                         // now has it or has dropped it, and nothing after this needs to name it again.
                         if (!encoded) meta.Sides?.Remove(side.SideEntry);
 
-                        var verdict = JudgeSide(key, side, task);
+                        var verdict = JudgeSide(key, side, task, out var sideReason);
 
                         if (verdict == SideVerdict.Stop) yield break;
 
@@ -407,6 +425,7 @@ namespace QuestTree.QuestGraph
 
                         if (verdict == SideVerdict.Complete)
                         {
+                            SayIfMeshWasNotKept(key, mesh, sideReason);
                             Done(key, posted, bytes, 0, clock, sidesPosted);
                             yield break;
                         }
@@ -419,31 +438,47 @@ namespace QuestTree.QuestGraph
                 //
                 // Not when a floor was dropped SINCE THE LAST POST, though: the host is then waiting for
                 // a picture that will never arrive, so it would hold the mesh with the rest and discard
-                // the lot. A 16 MB post to a host that cannot use it is worth skipping.
+                // the lot. Up to 48 MB of posts to a host that cannot use them is worth skipping.
                 if (posted > 0 && droppedSincePost == 0 && mesh != null)
                 {
-                    var task = StartMeshPost(key, meta, mesh);
+                    // In PARTS when the mesh is past what one post can carry to a stock host - see
+                    // MeshPartBytes. Each part is its own post under its own deadline; every part but the
+                    // last must come back "holding part k of n", and anything else - a refusal, an old host,
+                    // a dropped connection - is judged exactly as a one-post mesh's answer would be, and ends
+                    // the upload there. The LAST part's answer is the mesh's answer.
+                    var parts = MeshPartCount(mesh.Length);
+                    Task<string> task = null;
 
-                    // Its own exit, so the line below cannot blame an unencodable floor for a thread pool
-                    // that would not take the work. StartMeshPost has already said what happened.
-                    if (task == null) yield break;
-
-                    var deadline = Time.realtimeSinceStartup + MeshRequestSeconds;
-                    while (!task.IsCompleted && Time.realtimeSinceStartup < deadline) yield return null;
-
-                    if (!task.IsCompleted)
+                    for (var part = 0; part < parts; part++)
                     {
-                        // Said at the deadline, and then WAITED OUT rather than abandoned: the post is still
-                        // in flight, _uploading must stay set until it ends (see the floor loop's timeout
-                        // for why), and unlike a floor this answer is still worth hearing - a 16 MB body on a
-                        // slow link can land after the deadline, and if it does the host has the whole set.
-                        // So the line below says it is late, and the verdict that follows says how it ended.
-                        Plugin.LogSource?.LogInfo(
-                            $"QuestTree: the host has not answered within {MeshRequestSeconds:0}s while {key}'s " +
-                            $"{Mb(mesh.Length)} MB mesh is being offered - still waiting for it before anything else " +
-                            "is offered.");
+                        task = StartMeshPost(key, meta, mesh, part, parts);
 
-                        while (!task.IsCompleted) yield return null;
+                        // Its own exit, so the line below cannot blame an unencodable floor for a thread
+                        // pool that would not take the work. StartMeshPost has already said what happened.
+                        if (task == null) yield break;
+
+                        var deadline = Time.realtimeSinceStartup + MeshRequestSeconds;
+                        while (!task.IsCompleted && Time.realtimeSinceStartup < deadline) yield return null;
+
+                        if (!task.IsCompleted)
+                        {
+                            // Said at the deadline, and then WAITED OUT rather than abandoned: the post is
+                            // still in flight, _uploading must stay set until it ends (see the floor loop's
+                            // timeout for why), and unlike a floor this answer is still worth hearing - a
+                            // 16 MiB body on a slow link can land after the deadline, and if it does the host
+                            // has that part. So the line below says it is late, and the verdict that follows
+                            // says how it ended.
+                            Plugin.LogSource?.LogInfo(
+                                $"QuestTree: the host has not answered within {MeshRequestSeconds:0}s while " +
+                                $"{(parts > 1 ? $"part {part + 1} of {parts} of " : "")}{key}'s {Mb(mesh.Length)} MB mesh " +
+                                "is being offered - still waiting for it before anything else is offered.");
+
+                            while (!task.IsCompleted) yield return null;
+                        }
+
+                        if (part < parts - 1 && MeshPartHeld(task)) continue;
+
+                        break;
                     }
 
                     switch (JudgeMesh(key, mesh, task))
@@ -858,8 +893,10 @@ namespace QuestTree.QuestGraph
         ///   first version's mistake: the client then posted the whole mesh into a set the host would never
         ///   complete.
         /// </summary>
-        private static SideVerdict JudgeSide(string key, FloorUpload side, Task<string> task)
+        private static SideVerdict JudgeSide(string key, FloorUpload side, Task<string> task, out string reason)
         {
+            reason = "";
+
             string reply;
 
             try
@@ -880,6 +917,8 @@ namespace QuestTree.QuestGraph
 
             var response = NotOurs<MapUploadResponse>(reply, out var excerpt);
             var verdict = ClassifySide(response);
+
+            reason = response?.Reason ?? "";
 
             switch (verdict)
             {
@@ -1336,9 +1375,12 @@ namespace QuestTree.QuestGraph
         /// <param name="floor">The floor that was posted.</param>
         /// <param name="task">The finished post.</param>
         /// <param name="floorsHeld">How many floors of this map the host says it now holds.</param>
-        private static Verdict Judge(string key, FloorUpload floor, Task<string> task, out int floorsHeld)
+        /// <param name="reason">The host's reason text, for the caller's log line ("" when none).</param>
+        private static Verdict Judge(
+            string key, FloorUpload floor, Task<string> task, out int floorsHeld, out string reason)
         {
             floorsHeld = 0;
+            reason = "";
 
             string reply;
 
@@ -1371,6 +1413,7 @@ namespace QuestTree.QuestGraph
             }
 
             floorsHeld = response.FloorsHeld;
+            reason = response.Reason ?? "";
 
             switch (response.Outcome.Trim().ToLowerInvariant())
             {
@@ -1435,7 +1478,7 @@ namespace QuestTree.QuestGraph
         ///
         /// The sha256 is the check that can fail, and it is not ceremony: the meta and the .bin are two
         /// files written in sequence by a capture that can be interrupted, a merge can leave an older
-        /// mesh beside a newer meta, and a hand-copied folder can hold either half. Reading 12 MB and
+        /// mesh beside a newer meta, and a hand-copied folder can hold either half. Reading 48 MB and
         /// hashing it is ~30 ms, paid once per upload, outside a raid.
         /// </summary>
         /// <param name="key">The map's internal id.</param>
@@ -1511,13 +1554,42 @@ namespace QuestTree.QuestGraph
             return null;
         }
 
-        /// <summary>The mesh post, issued on a pool thread, or null when the pool would not take it. The
-        /// base64 and the serialisation go on the worker: a 12 MB mesh is a 16 MB string, and building it
-        /// on the main thread is a visible stall.</summary>
+        /// <summary>How many posts a mesh of this size takes: one up to <see cref="MeshPartBytes"/>, then one
+        /// per part of that size. Pure, so the client harness checks it.</summary>
+        internal static int MeshPartCount(int bytes) =>
+            bytes <= MeshPartBytes ? 1 : (bytes + MeshPartBytes - 1) / MeshPartBytes;
+
+        /// <summary>Whether a part post came back as one the host is holding - "accepted, not served,
+        /// holding part k of n" - which is the only answer that lets the next part go. Pure, so the client
+        /// harness can hold it to the host's real answer.</summary>
+        internal static bool IsMeshPartHeld(MapMeshUploadResponse response) =>
+            response != null && response.Accepted && !response.Served &&
+            (response.Reason ?? "").StartsWith("holding part", StringComparison.OrdinalIgnoreCase);
+
+        /// <summary><see cref="IsMeshPartHeld"/> over a finished post. False for anything that is not the
+        /// server half's reply - an old host's HTML, a failed request - which the caller then hands to
+        /// JudgeMesh for its line.</summary>
+        private static bool MeshPartHeld(Task<string> task)
+        {
+            try
+            {
+                return IsMeshPartHeld(NotOurs<MapMeshUploadResponse>(task.Result, out _));
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        /// <summary>One mesh post, issued on a pool thread, or null when the pool would not take it. The
+        /// base64 and the serialisation go on the worker: a part is a 21 MB string, and building it on the
+        /// main thread is a visible stall.</summary>
         /// <param name="key">The map's internal id.</param>
         /// <param name="meta">The meta whose mesh block this file belongs to.</param>
-        /// <param name="bytes">The mesh file's bytes, already checked by <see cref="PrepareMesh"/>.</param>
-        private static Task<string> StartMeshPost(string key, MapCaptureMetaDto meta, byte[] bytes)
+        /// <param name="bytes">The WHOLE mesh file's bytes, already checked by <see cref="PrepareMesh"/>.</param>
+        /// <param name="part">Which part this post carries, from 0.</param>
+        /// <param name="parts">How many parts the mesh goes up in; 1 for a mesh in one post.</param>
+        private static Task<string> StartMeshPost(string key, MapCaptureMetaDto meta, byte[] bytes, int part, int parts)
         {
             try
             {
@@ -1528,6 +1600,11 @@ namespace QuestTree.QuestGraph
 
                 return Task.Run(async () =>
                 {
+                    // The slice this post carries. The sha and the length stay the WHOLE mesh's: the host
+                    // checks the parts against them once it has joined them.
+                    var offset = parts > 1 ? part * MeshPartBytes : 0;
+                    var length = parts > 1 ? Math.Min(MeshPartBytes, bytes.Length - offset) : bytes.Length;
+
                     var request = new MapMeshUploadRequest
                     {
                         SchemaVersion = MapMeshUploadRequest.CurrentSchemaVersion,
@@ -1536,7 +1613,9 @@ namespace QuestTree.QuestGraph
                         CapturedAt = capturedAt,
                         Sha256 = sha,
                         Bytes = bytes.Length,
-                        DataBase64 = Convert.ToBase64String(bytes)
+                        Part = parts > 1 ? part : 0,
+                        Parts = parts > 1 ? parts : 0,
+                        DataBase64 = Convert.ToBase64String(bytes, offset, length)
                     };
 
                     return await RequestHandler.PostJsonAsync(MeshRoute, JsonConvert.SerializeObject(request));
@@ -1656,6 +1735,33 @@ namespace QuestTree.QuestGraph
         /// picture route has always used). The <c>served</c> flag says the capture is on the host; this
         /// prefix only picks the sentence and the level between "already there" and "shared flat".</summary>
         private const string MeshAlreadyHeldReason = "older than the set on the host";
+
+        /// <summary>
+        /// One Info line when the host COMPLETED a capture before its mesh was posted and did not keep the
+        /// mesh - so "uploaded" is not the only thing the player hears about a map that then draws flat on
+        /// every other machine. A host of this build says which in its answer ("stored with its 3D mesh"
+        /// when it already had it staged, and nothing is said then); a host from before stage V says
+        /// nothing, and it is exactly the host that drops a mesh past its 12 MB at the meta - so an answer
+        /// with no "with its 3D mesh" in it, while a mesh was waiting to go, is reported as not kept.
+        /// </summary>
+        /// <param name="key">The map's internal id.</param>
+        /// <param name="mesh">The mesh this upload was holding for its last post, or null.</param>
+        /// <param name="reason">The completing answer's reason.</param>
+        private static void SayIfMeshWasNotKept(string key, byte[] mesh, string reason)
+        {
+            if (!MeshWasNotKept(mesh != null, reason)) return;
+
+            Plugin.LogSource?.LogInfo(
+                $"QuestTree: the host stored the capture of {key} without its 3D mesh{Because(reason)} - it never " +
+                "asked for it, so that map draws flat on the other machines. A host older than this build drops a " +
+                "mesh past 12 MB this way; update the server half there to share the 3D map.");
+        }
+
+        /// <summary>Whether a completing answer means the host did not keep a mesh this upload was holding -
+        /// the decision <see cref="SayIfMeshWasNotKept"/> logs on. Pure, so the client harness checks it
+        /// against the host's real answers.</summary>
+        internal static bool MeshWasNotKept(bool meshPending, string reason) =>
+            meshPending && (reason ?? "").IndexOf("with its 3D mesh", StringComparison.OrdinalIgnoreCase) < 0;
 
         /// <summary>A byte array's SHA-256 as lower-case hex - the same value MapCapture.Sha256 wrote
         /// into the meta, computed here rather than shared because that one is private to the writer and
@@ -2479,7 +2585,7 @@ namespace QuestTree.QuestGraph
 
                 try
                 {
-                    // The longer deadline: a 12 MB mesh is a 16 MB base64 body, and this is a blocking
+                    // The longer deadline: a 48 MB mesh is a 64 MB base64 body, and this is a blocking
                     // wait on a worker, so 30 s would be a limit the body loses to rather than the host.
                     reply = Post(MeshFileRoute, body, MeshRequestTimeout);
                 }

@@ -1395,7 +1395,7 @@ namespace QuestTreeServer
     /// A ROUTE OF ITS OWN rather than a "floor" of the picture upload, and not because the bytes are
     /// bigger: the picture route checks image magic, caps a body at 2.5 MB and completes a set when
     /// every LEVEL the meta names has arrived. A mesh is none of those things - it has no level, it is
-    /// deflated binary, and it is up to 12 MB - so riding it on that route would mean loosening every
+    /// deflated binary, and it is up to 48 MB (in parts - see Parts) - so riding it on that route would mean loosening every
     /// one of those checks for every picture as well.
     ///
     /// No meta here, unlike the picture route: the mesh belongs to the capture identified by
@@ -1424,10 +1424,26 @@ namespace QuestTreeServer
         /// capture's mesh.</summary>
         [JsonPropertyName("sha256")] public string Sha256 { get; set; } = "";
 
-        /// <summary>The decoded length the sender claims. Checked against what actually decodes - two
-        /// numbers from one machine that disagree mean the file was not read whole.</summary>
+        /// <summary>The decoded length the sender claims - of the WHOLE mesh, when it comes in parts. Checked
+        /// against what actually decodes (or what the parts add up to) - two numbers from one machine that
+        /// disagree mean the file was not read whole.</summary>
         [JsonPropertyName("bytes")] public long Bytes { get; set; }
 
+        /// <summary>Which part of the mesh <see cref="DataBase64"/> carries, from 0, when it comes in
+        /// <see cref="Parts"/> parts.</summary>
+        [JsonPropertyName("part")] public int Part { get; set; }
+
+        /// <summary>How many parts the whole mesh comes in; 0 or 1 for a mesh in one post. Several, because
+        /// one HTTP body to a stock SPT host cannot carry more than 30,000,000 bytes (Kestrel's default,
+        /// measured), and a stage V mesh can be 48 MB: the client sends 16 MiB parts, and the host joins
+        /// them and checks the whole exactly as it checks a mesh that came in one post. A host from before
+        /// stage V never SEES a part: its meta check drops any mesh past its own 12 MB cap when the floors
+        /// arrive, so the set completes flat on its floors (or sides) before the client would post one - and
+        /// the client, holding a mesh the host then did not ask for, says so at Info
+        /// (MapTransfer.SayIfMeshWasNotKept).</summary>
+        [JsonPropertyName("parts")] public int Parts { get; set; }
+
+        /// <summary>The mesh, or this post's part of it.</summary>
         [JsonPropertyName("dataBase64")] public string DataBase64 { get; set; } = "";
     }
 

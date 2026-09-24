@@ -351,16 +351,26 @@ if ($fatImages.Count -gt 0) {
 # GATE 3 - TOTAL, and it is a WARNING rather than a failure, which is the user's own decision on the
 # 3D maps: the meshes are the payload nobody can trade away at packaging time (a mesh is the map's
 # geometry - there is no "lower quality" setting that keeps it usable), so a hard cap here would mean a
-# release that cannot be built at all rather than one that is large. 11 maps of 1-4 floors at ~1 MB
-# plus 0.3-3 MB of mesh each is 20-60 MB. The size is PRINTED either way, every run, because the one
-# thing that must not happen is the payload growing unnoticed; 80 MB is where it is worth stopping to
-# look at what grew.
+# release that cannot be built at all rather than one that is large. Since stage V the warning is
+# EXPECTED to fire: a map's building shells can hold up to 3,000,000 triangles and its mesh file up to
+# 48 MB, so eleven maps of 1-4 floors at ~1 MB plus 10-45 MB of mesh each is well past 80 MB. It still
+# prints on every run, with the mesh share beside the total, because the one thing that must not
+# happen is the payload growing unnoticed - and the share is what says whether it grew for the
+# expected reason: meshes most of it is stage V working; pictures most of it is something to look at.
 $warnMapsBytes = 80MB
 $mapsBytes = ($mapFiles | Measure-Object -Property Length -Sum).Sum
 $mapsMeshBytes = (@($mapFiles | Where-Object { $_.Name -like "*-mesh.bin" }) | Measure-Object -Property Length -Sum).Sum
-$mapsSizeLine = "Map payload: $("{0:N1}" -f ($mapsBytes / 1MB)) MB in maps\ ($("{0:N1}" -f ($mapsMeshBytes / 1MB)) MB of it 3D meshes)"
+if ($null -eq $mapsBytes) { $mapsBytes = 0 }
+if ($null -eq $mapsMeshBytes) { $mapsMeshBytes = 0 }
+$meshShare = if ($mapsBytes -gt 0) { [math]::Round(100 * $mapsMeshBytes / $mapsBytes) } else { 0 }
+$mapsSizeLine = "Map payload: $("{0:N1}" -f ($mapsBytes / 1MB)) MB in maps\ ($("{0:N1}" -f ($mapsMeshBytes / 1MB)) MB of it 3D meshes, $meshShare %)"
 if ($mapsBytes -gt $warnMapsBytes) {
-    Write-Host "$mapsSizeLine - over the $($warnMapsBytes / 1MB) MB the download budget was written for. NOT a failure (the user's call: a mesh cannot be shrunk without losing the map), but look at what grew before publishing." -ForegroundColor Yellow
+    $meshNote = if ($meshShare -ge 50) {
+        "the 3D meshes are $meshShare % of it, which is the expected reason since stage V (up to 3 M triangles and 48 MB a map)"
+    } else {
+        "the 3D meshes are only $meshShare % of it - the PICTURES grew, which is not the expected reason; look at them before publishing"
+    }
+    Write-Host "$mapsSizeLine - over $($warnMapsBytes / 1MB) MB, and NOT a failure (the user's call: a mesh cannot be shrunk without losing the map): $meshNote." -ForegroundColor Yellow
 } else {
     Write-Host $mapsSizeLine -ForegroundColor Green
 }

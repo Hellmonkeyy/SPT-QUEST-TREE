@@ -178,8 +178,9 @@ The host decides. Uploads are refused unless it runs with `QUESTTREE_ACCEPT_MAPS
 picture is the one thing a peer can post that everybody else then looks at; `tools/server-host.cmd`
 in the source repo sets it and starts the server. A host that has not opted in says so once, nothing
 is sent, and it is not asked again that session. The limits: one picture a post, up to 2.5 MB a
-picture, eight floors and four side pictures a map, one 3D mesh a capture up to 12 MB, 42 MB a map
-and 300 MB in all on the host, 120 MB downloaded per session. A solo player needs none of it - their own captures are read
+picture, eight floors and four side pictures a map, one 3D mesh a capture up to 48 MB (in 16 MiB
+parts past that size - an SPT server takes no request body past 30,000,000 bytes), 84 MB a map and
+300 MB in all on the host, 300 MB downloaded per session, and up to 240 seconds a mesh request. A solo player needs none of it - their own captures are read
 straight out of their own folder.
 
 ## DynamicMaps is now a choice rather than a dependency
@@ -210,13 +211,16 @@ camera height, and the buildings as geometry. The experiments measured the whole
 through `RaycastCommand` against 290 ms one ray at a time, and found that colliders do not stream out
 with the player - so the ground comes back complete from anywhere on the map and needs none of the
 merging the pixels need. The buildings come from the renderers themselves - 184,000 of them on
-Customs, filtered to a few hundred by size and by the layers the picture draws - taking each LOD
-group's last real geometry step rather than its impostor card, and reading the meshes only the
-graphics card holds back asynchronously off their own buffers. A mesh's buffer target is never
+Customs, filtered by size and by the layers the picture draws - taking each building's MOST detailed
+level of detail whenever its source totals at most 1,000,000 triangles (the last real level, never an
+impostor card, when it is bigger), reducing it with our own decimation (quadric edge collapse, on a
+worker thread) to a budget set by its footprint, and reading the meshes only the graphics card holds
+back asynchronously off their own buffers. A mesh's buffer target is never
 written: doing so killed the game outright on 2026-09-22, and it is forbidden everywhere in this
-feature. The work is spread over frames, capped at 300,000 triangles and twenty seconds, and three
-log lines say what was built and what was cut. A file is about 0.3 MB of ground plus one to three of
-buildings for a map of Customs' size.
+feature. The work is spread over frames, capped at 3,000,000 triangles a map, and three log lines
+say what was built and what was cut. A file is about 0.3 MB of ground plus up to a few tens of
+megabytes of buildings for a map of Customs' size; the format allows 6,000,000 triangles and
+12,000,000 vertices a file, and the host takes a mesh of up to 48 MB that inflates to at most 160 MB.
 
 **The 3D map travels with the pictures.** The mesh goes up to the host on its own route after the
 floors (`POST /questtree/maps/mesh`) and comes down with them (`POST /questtree/maps/meshfile`), so
@@ -243,8 +247,8 @@ the capture box its meta describes, or posted empty because the client could not
 dropped from the set with one line in the host's log and the rest is served, never refused and never
 flattened. On the way down, a side whose JPEG is not the size its meta states is left out; its walls
 are tinted. A host from before sides refuses a side post as a floor it has no record of, rather than
-storing it over floor 0, and the client goes on to the mesh. The per-map budget is 42 MB: eight floors
-and four sides at 2.5 MB and a 12 MB mesh.
+storing it over floor 0, and the client goes on to the mesh. The per-map budget is 84 MB: eight floors
+and four sides at 2.5 MB, a 48 MB mesh, and 6 MB of margin.
 
 **A throwaway diagnostic key ships in this build**, said out loud because it is not a feature: a bare
 **F10** is the mesh probe of the 3D experiments. In a raid it writes
@@ -287,8 +291,11 @@ probe key (throwaway)**, is kept out of the in-game Settings tab, and is meant t
   `tools/check-maps-pack.py`, which checks every floor's JPEG dimensions against its meta and its meta
   against the extent's own arithmetic, every side's JPEG size against its meta and its basis for unit
   length, that no floor or side file goes unnamed, and holds a set's 3D mesh to the sha256, byte
-  length, extent, floor levels and counts its meta states. The sixth is the payload's total size: printed on every run and a **warning**
-  past 80 MB rather than a failure, because a mesh cannot be made smaller without losing the map.
+  length, extent, floor levels and counts its meta states. The sixth is the payload's total size:
+  printed on every run with the meshes' share of it, and a **warning** past 80 MB rather than a
+  failure, because a mesh cannot be made smaller without losing the map. With 3 M-triangle meshes the
+  warning is expected to fire; it says so when the meshes are most of the payload, and says the
+  pictures grew when they are not.
   Each gate was proven able to fail against a planted fake set, one fault at a time. How many maps
   are covered is also a warning naming the missing ones, not a gate, because a map with no set falls
   back instead of breaking.

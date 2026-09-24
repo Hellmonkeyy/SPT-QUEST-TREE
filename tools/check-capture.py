@@ -99,8 +99,8 @@ MESH_MAX_BANDS = 8
 MESH_MAX_CELLS_PER_BAND = 4_000_000
 MESH_MAX_BUILDINGS = 20_000
 MESH_MAX_VERTICES_PER_BUILDING = 2_000_000
-MESH_MAX_VERTICES_TOTAL = 4_000_000
-MESH_MAX_TRIANGLES = 2_000_000
+MESH_MAX_VERTICES_TOTAL = 12_000_000   # stage V: was 4 M
+MESH_MAX_TRIANGLES = 6_000_000         # stage V: was 2 M (the building budget went 300 k -> 3 M)
 # What the file may inflate to. 8 bands of 4 M cells is 96 MB by the caps above; the bound exists so
 # a corrupt or hostile deflate stream cannot be expanded until this process dies, which is the same
 # reason MapMeshFile checks every count before it allocates.

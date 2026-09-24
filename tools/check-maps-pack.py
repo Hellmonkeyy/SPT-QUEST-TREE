@@ -89,9 +89,16 @@ MESH_VERSION = 1                    # MapMeshFile.Version
 MESH_MAX_BANDS = 8                  # MaxFloors
 MESH_MAX_CELLS_PER_BAND = 4_000_000
 MESH_MAX_BUILDINGS = 20_000
-MESH_MAX_VERTICES_TOTAL = 4_000_000
-MESH_MAX_TRIANGLES = 2_000_000
-MESH_MAX_INFLATED = 64 * 1024 * 1024    # what this script will inflate before giving up
+MESH_MAX_VERTICES_PER_BUILDING = 2_000_000
+MESH_MAX_VERTICES_TOTAL = 12_000_000    # stage V: MapMeshFile.MaxVerticesTotal
+MESH_MAX_TRIANGLES = 6_000_000          # stage V: MapMeshFile.MaxTriangles (the builder keeps up to 3 M)
+# What this script will inflate before giving up - the host's own ceiling (MapStore.MaxDecompressedMeshBytes):
+# 3 M triangles x 12 B of indices (36 MB) + the format's 12 M vertices x 6 B (72 MB) = 108 MB of buildings,
+# and 52 MB for the relief grids (four full 4 M-cell bands are 48 MB).
+MESH_MAX_INFLATED = 160 * 1024 * 1024
+# The largest mesh FILE a host takes (MapStore.MaxMeshBytes / MapTransfer.MaxMeshBytes). A shipped seed
+# past it would install and draw on this machine and then never reach anybody else: the host refuses it.
+MESH_MAX_FILE_BYTES = 48 * 1024 * 1024
 EXTENT_TOLERANCE = 1e-6                 # m, mesh header against the meta's extent
 
 # SOFn: C0-CF except C4 (DHT), C8 (JPG extension) and CC (DAC), which are not frame headers.
@@ -247,6 +254,9 @@ def mesh_header(path):
             vertex_count = i32(f"building {index}'s vertex count")
             if vertex_count < 0:
                 return None, f"has a building claiming {vertex_count:,} vertices"
+            if vertex_count > MESH_MAX_VERTICES_PER_BUILDING:
+                return None, (f"has a building claiming {vertex_count:,} vertices, past the "
+                              f"{MESH_MAX_VERTICES_PER_BUILDING:,} one building may have")
             vertices += vertex_count
             if vertices > MESH_MAX_VERTICES_TOTAL:
                 return None, (f"claims {vertices:,} vertices by building {index}, past the "
@@ -320,6 +330,9 @@ def check_mesh(meta, folder, key, extent, levels, errors):
         return named, 0
 
     size = path.stat().st_size
+    if size > MESH_MAX_FILE_BYTES:
+        errors.append(f"{where}: {rel} is {size:,} bytes, past the {MESH_MAX_FILE_BYTES:,} a host takes - "
+                      f"shipped, it would draw here and never travel; the host refuses it")
     claimed_bytes = mesh.get("bytes")
     if isinstance(claimed_bytes, bool) or not isinstance(claimed_bytes, int) or claimed_bytes <= 0:
         errors.append(f"{where}.bytes {claimed_bytes!r} is not a positive integer")

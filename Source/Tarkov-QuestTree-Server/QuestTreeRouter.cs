@@ -167,7 +167,7 @@ namespace QuestTreeServer
 
                 // The two MESH routes (1.19.0), separate from the picture routes above because a mesh
                 // is not a floor: it has no level, it is deflated binary rather than a picture, and it
-                // is up to 12 MB. The same IsRealLocation gate for the same reason - on Fika any peer
+                // is up to 48 MB, in parts when it is past what one post can carry. The same IsRealLocation gate for the same reason - on Fika any peer
                 // can post here - and the same store, which is what keeps a mesh and the pictures it
                 // belongs to in one set that completes or does not.
                 new RouteAction<MapMeshUploadRequest>(

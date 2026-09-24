@@ -270,14 +270,16 @@ meta, the capture casts a ray straight down through the centre of every two-metr
 rectangle - 151,000 of them on Customs, in 45 ms, batched through the physics jobs - from the same
 height the picture's camera stood at, and records what it hit as a height grid per floor band. Then
 it walks the scene's renderers for the buildings: anything at least six metres long and two and a
-half tall inside the rectangle, on the layers the picture draws, taking the last level-of-detail
-step that is real geometry rather than an impostor card, and reading the triangles either from the
-mesh directly or - for the fifth or so that live only on the graphics card - off the card itself,
-up to three hundred thousand triangles a map, biggest building first. One line in the log says when
+half tall inside the rectangle, on the layers the picture draws, taking the MOST detailed
+level-of-detail step whenever its source totals at most a million triangles (and the last real
+step, never an impostor card, when it is bigger), reading the triangles either from the mesh directly
+or - for the fifth or so that live only on the graphics card - off the card itself, and reducing
+each building with our own decimation to a budget set by its footprint: up to three million
+triangles a map. One line in the log says when
 the scene is being held for it, because the map's hidden geometry is switched on for as long as the
 build runs and the player can see that happen. The result is quantised to sixteen bits and deflated
-into `captures\<key>\<key>-mesh.bin` beside the pictures, 0.3 MB of ground plus a couple of
-megabytes of buildings, and the meta gains a `mesh` block naming it with its SHA-256. It is an
+into `captures\<key>\<key>-mesh.bin` beside the pictures, 0.3 MB of ground plus up to a few
+tens of megabytes of buildings, and the meta gains a `mesh` block naming it with its SHA-256. It is an
 addition, never a condition: a mesh phase that fails loses the mesh and nothing else, a relief with
 no buildings in it is a complete file, and every map captured before this release carries on
 drawing flat. Automatic capture, which comes round every few seconds, builds it only for a map that
@@ -296,7 +298,8 @@ no relief captured yet, and its tooltip says why. A map from DynamicMaps, and a 
 harvested rectangle, has no relief and always draws flat. Two settings do not apply in 3D and are
 ignored there: **Mirror map artwork** and **Extra map artwork rotation** - the picture is laid onto
 the ground by the coordinates it was measured over, so there is nothing left for them to correct. A
-relief file is about 0.3 MB of ground plus one to three of buildings for a map of Customs' size,
+relief file is about 0.3 MB of ground plus up to a few tens of megabytes of buildings for a map of
+Customs' size (the cap is 48 MB),
 and is read in the background; if one cannot be read, or does not describe the same rectangle as the
 picture, the map draws flat and the log says why.
 
@@ -312,8 +315,10 @@ session; captures stay on the machine that took them. An older host that has nev
 stores the pictures and ignores the rest, which costs one line in the log and nothing else. A solo
 player needs none of this - your own captures are read straight out of the folder above. The
 limits: one picture a post, up to 2.5 MB a picture, 8 floors and 4 side pictures a map, one mesh a
-capture up to 12 MB, 42 MB a map and 300 MB in all on the host, and at most 120 MB downloaded per
-session. A side picture is never worth the map either: one the host cannot use - not a JPEG, too
+capture up to 48 MB, 84 MB a map and 300 MB in all on the host, and at most 300 MB downloaded per
+session. A mesh past 16 MiB goes up in parts - an SPT server takes no request body past 30,000,000
+bytes - and the host joins them and checks the whole; a mesh upload or download may take up to 240
+seconds a request before the client calls it late. A side picture is never worth the map either: one the host cannot use - not a JPEG, too
 big, or not a view of the capture it came with - is dropped and the set is served without it, and on
 your machine a side that does not arrive at the size its meta states is left out; those walls are
 tinted instead. A set whose

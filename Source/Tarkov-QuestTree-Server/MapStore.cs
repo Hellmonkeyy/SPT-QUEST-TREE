@@ -71,29 +71,50 @@ namespace QuestTreeServer
         /// bytes, plus room for padding and line breaks.</summary>
         private const int MaxEncodedChars = MaxImageBytes / 3 * 4 + 1024;
 
-        /// <summary>One mesh file's ceiling. Customs' relief alone is ~0.3 MB and its building shells
-        /// are 2-3 MB; twelve is four times the largest thing phase 3C's triangle budget can produce,
-        /// and it is a number a peer on an unauthenticated route cannot walk past one post at a
-        /// time - there is exactly one mesh per capture.</summary>
-        private const int MaxMeshBytes = 12 * 1024 * 1024;
+        /// <summary>One mesh file's ceiling. Stage V's builder keeps up to 3,000,000 building triangles a
+        /// map - 36 MB of indices and up to 54 MB of vertex coordinates before deflate - and a Customs file
+        /// at that budget is measured in tens of megabytes; 48 MB is that with room. It is ALSO more than
+        /// one HTTP post can carry to a stock SPT host - Kestrel refuses a request body past 30,000,000
+        /// bytes, measured (scratchpad kestrel-limit) - which is why a mesh past
+        /// <see cref="MaxMeshPartBytes"/> arrives in parts (<see cref="AcceptMesh"/>).</summary>
+        private const int MaxMeshBytes = 48 * 1024 * 1024;
 
         /// <summary>The mesh's base64 ceiling, checked BEFORE decoding, for
         /// <see cref="MaxEncodedChars"/>' reason.</summary>
         private const int MaxEncodedMeshChars = MaxMeshBytes / 3 * 4 + 1024;
 
+        /// <summary>The most one PART of a mesh may weigh, decoded. The client sends 16 MiB parts; this is
+        /// the host's own ceiling on one, set by what a post can carry at all: Kestrel's default request
+        /// limit is 30,000,000 bytes on the wire, and SPT sends a body zlib-compressed, which brings the
+        /// base64 of an already-deflated mesh back to about 1.03 times its size - so 24 MiB of mesh is
+        /// ~25.9 MB on the wire, under the limit with room, while 28 MiB would not be.</summary>
+        private const int MaxMeshPartBytes = 24 * 1024 * 1024;
+
+        /// <summary>A part's base64 ceiling, checked before decoding.</summary>
+        private const int MaxEncodedMeshPartChars = MaxMeshPartBytes / 3 * 4 + 1024;
+
+        /// <summary>The most parts one mesh may come in. 48 MB at the client's 16 MiB is three; eight is room
+        /// for a smaller part size later without a host update, and a bound on how many files one upload
+        /// can make a host hold.</summary>
+        private const int MaxMeshParts = 8;
+
         /// <summary>The most a mesh file may INFLATE to while its header is being checked. A mesh file is
-        /// one deflate block, so a 12 MB body can legitimately hold tens of megabytes of quantised grid -
-        /// and a hostile one can hold a thousand times that. The header parse below stops reading at
-        /// this, which is what keeps a deflate bomb to a bounded read rather than a full disk of RAM.
+        /// one deflate block, so a 48 MB body can legitimately hold a hundred megabytes of quantised data -
+        /// and a hostile one can hold a thousand times that. The header parse below stops reading at this,
+        /// which is what keeps a deflate bomb to a bounded read rather than a full disk of RAM.
         ///
-        /// DELIBERATELY LOWER than the format's own theoretical ceiling, which is about 145 MB (8 bands x
-        /// 4 M cells x 3 bytes = 96 MB, plus 4 M vertices x 6 bytes and 2 M triangles x 12 bytes = 48
-        /// MB). Those caps are sized to "no count can ask the allocator for a silly number"; this one is
-        /// sized to what this mod actually writes, which is 1.5 MB inflated for Customs at 2 m cells and
-        /// 2.5 MB for Interchange's five bands. 64 MB is twenty-five times the largest real file and a
-        /// read a host can afford on a request thread; a file past it is refused with the number in the
-        /// message, so the day a 4 km map at 1 m cells exists, the log says exactly what to raise.</summary>
-        private const long MaxDecompressedMeshBytes = 64L * 1024 * 1024;
+        /// 160 MB, KEPT and its arithmetic corrected, from the most stage V's builder can write: 3,000,000
+        /// triangles x 12 bytes of uint32 indices = 36 MB, plus vertices up to the FORMAT's 12,000,000 (not
+        /// the 9 M a triangle soup of 3 M triangles would use - the builder is held to the format's cap, not
+        /// to that) x 3 axes x 2 bytes = 72 MB: 108 MB of buildings. That leaves 52 MB for the relief grids
+        /// and the headers - four full bands of the 4 M-cell maximum at 3 bytes a cell are 48 MB, and a real
+        /// band is far smaller (Customs at 2 m is 0.45 MB). A file with all eight bands at their maximum AND
+        /// a full building budget would pass 160 MB; it is refused with the number in the message. DELIBERATELY LOWER than the format's own theoretical ceiling, which is
+        /// about 240 MB at MapMeshFile's caps (8 bands x 4 M cells x 3 = 96 MB, 12 M vertices x 6 = 72 MB,
+        /// 6 M triangles x 12 = 72 MB): those caps are sized to "no count can ask the allocator for a silly
+        /// number", this one to what this mod writes. A file past it is refused with the number in the
+        /// message, so the day a map needs more, the log says exactly what to raise.</summary>
+        private const long MaxDecompressedMeshBytes = 160L * 1024 * 1024;
 
         /// <summary>The scratch buffer size for one header walk, shared by every read in it. 64 KiB
         /// divides by both 2 and 4, so a chunk never splits a uint16 or a uint32 element.</summary>
@@ -119,7 +140,7 @@ namespace QuestTreeServer
 
         private const int MaxMeshBuildings = 20_000;
 
-        private const long MaxMeshVerticesTotal = 4_000_000L;
+        private const long MaxMeshVerticesTotal = 12_000_000L;
 
         /// <summary>MapMeshFile.MaxVerticesPerBuilding - the per-building cap the client's reader
         /// enforces as well as the total.</summary>
@@ -131,7 +152,7 @@ namespace QuestTreeServer
         /// capture.</summary>
         private const double MeshExtentTolerance = 1e-6;
 
-        private const long MaxMeshTriangles = 2_000_000L;
+        private const long MaxMeshTriangles = 6_000_000L;
 
         /// <summary>The same ceiling ZoneStore puts on a map's floors, for the same reason: no Tarkov
         /// map has eight walkable layers, and each one here costs a picture.</summary>
@@ -146,16 +167,15 @@ namespace QuestTreeServer
         /// rounds a metre extent up to whole tiles and the two sides round in their own code.</summary>
         private const int PixelTolerance = 2;
 
-        /// <summary>One map's ceiling - and, said plainly because a guard that cannot fire must not look
-        /// like one: MaxFloors x MaxImageBytes PLUS four sides at MaxImageBytes PLUS
-        /// <see cref="MaxMeshBytes"/> is EXACTLY this figure (8 x 2.5 + 4 x 2.5 + 12 = 42 MB), so as the
-        /// constants stand today nothing can reach it. It is kept because the numbers are set
-        /// independently, and it is the one that would bite first if a later release raised the floor cap,
-        /// the picture size, the side count or the mesh size. It rose from 20 MB with the mesh and from
-        /// 32 MB with the sides, each time by exactly the new part's ceiling. The store's own total below
-        /// is reachable - eight maps at a full 42 MB pass it (seven are 294 MB) - but only by writing 300 MB.
-        /// Said here rather than discovered later.</summary>
-        private const long MaxBytesPerMap = 42L * 1024 * 1024;
+        /// <summary>One map's ceiling: 8 floors x 2.5 MB + 4 sides x 2.5 MB + a 48 MB mesh = 78 MB, and 6 MB of
+        /// margin on top for a later change to any one of them - 84 MB. Said plainly because a guard that
+        /// cannot fire must not look like one: as the constants stand today nothing can reach it, since
+        /// every part is capped on its own and they sum to 78. It is kept because the numbers are set
+        /// independently and it is the one that would bite first if a later release raised the floor cap,
+        /// the picture size, the side count or the mesh size. It rose 20 -> 32 MB with the mesh, 32 -> 42
+        /// with the sides and 42 -> 84 with stage V's 48 MB mesh. The store's own total below is reachable
+        /// - four maps at a full 84 MB pass it - but only by writing 300 MB.</summary>
+        private const long MaxBytesPerMap = 84L * 1024 * 1024;
 
         /// <summary>The four sides a set may carry an oblique picture from, in the one order every
         /// reader uses - the staging, the promotion, the stamp and the boot read all walk them in this
@@ -272,6 +292,16 @@ namespace QuestTreeServer
         /// </summary>
         private readonly HashSet<string> _completing = new(StringComparer.OrdinalIgnoreCase);
 
+        /// <summary>When the stale staging was last swept (<see cref="SweepStaleStagingIfDue"/>). Guarded by
+        /// <see cref="_lock"/>.</summary>
+        private DateTime _lastStaleSweep = DateTime.MinValue;
+
+        /// <summary>How often an upload post may trigger the stale-staging sweep. The sweep only lists the
+        /// staging folders and their files' times, so ten minutes is a bound on work nobody would notice
+        /// rather than a saving anyone needs - it exists so a host taking a burst of posts does not list
+        /// .incoming for every one of them.</summary>
+        private static readonly TimeSpan StaleSweepEvery = TimeSpan.FromMinutes(10);
+
         private readonly HashSet<string> _declinesLogged = new(StringComparer.OrdinalIgnoreCase);
 
         private bool _loaded;
@@ -380,6 +410,10 @@ namespace QuestTreeServer
 
             if (!MetaIsUsable(key, meta, out var problem)) return Reject(key, problem);
 
+            // Whether the client DECLARED a mesh, before anything here can drop it - so a floor or side post
+            // that completes the set can say whether the set it completed kept that mesh (see below).
+            var declaredMesh = meta.Mesh != null;
+
             // The mesh block, separately and NOT as a refusal - see the method. The sides likewise.
             DropUnusableMesh(key, meta);
             DropUnusableSides(key, meta);
@@ -451,13 +485,16 @@ namespace QuestTreeServer
 
             // Set under the lock, used after it: the folder this capture is staged in, and - only once
             // every piece is here - the meta to promote. The promotion itself reads and hashes up to
-            // 42 MB, so it is PREPARED outside the lock and only committed under it (see CompleteSet).
+            // 84 MB, so it is PREPARED outside the lock and only committed under it (see CompleteSet).
             string staging;
             MapCaptureMetaDto ready;
 
             lock (_lock)
             {
                 if (!_loaded) Load();
+
+                // Abandoned uploads, swept on the way in - see SweepStaleStagingIfDue.
+                SweepStaleStagingIfDue();
 
                 // Against the COMPLETE set only, never against what is staged: the second floor of one
                 // capture carries the same CapturedAt as the first and must not be refused as "not
@@ -729,9 +766,20 @@ namespace QuestTreeServer
 
             var completed = CompleteSet(key, ready, staging, Clip(request.ClientVersion ?? "", MaxFreeTextLength));
 
-            // A dropped side that happened to be the last piece still says it was dropped.
-            if (sideRefusal != null && completed.Outcome == "complete")
-                completed.Reason = SideNote(sideDir, sideRefusal, "");
+            // A floor or side post that COMPLETES a set whose client declared a mesh says what became of the
+            // mesh, because from the client's side "complete" before its mesh post is ambiguous: this host
+            // may have had the mesh staged already (a retry - the set is served in 3D), or may have dropped it
+            // at the meta or refused it for good earlier (served flat). Only the second is news the player
+            // should hear, and the client can only tell them apart by being told.
+            if (completed.Outcome == "complete")
+            {
+                var meshNote = !declaredMesh ? ""
+                    : ready.Mesh != null ? "stored with its 3D mesh"
+                    : "stored without its 3D mesh - this host could not take it (its own log says why)";
+
+                // A dropped side that happened to be the last piece still says it was dropped.
+                completed.Reason = SideNote(sideDir, sideRefusal, meshNote);
+            }
 
             return completed;
         }
@@ -888,7 +936,7 @@ namespace QuestTreeServer
             // THE CHEAP GATE, BEFORE THE BYTES ARE EVEN DECODED. Nothing below this line is work a
             // stranger can make this host do: a post for a capture nothing has staged, or for a capture
             // whose meta names a different mesh, is refused here having cost one directory probe and one
-            // small JSON read - no 12 MB decode, no sha over it, no inflate of the header. It needs only
+            // small JSON read - no 48 MB decode, no sha over it, no inflate of the header. It needs only
             // the CLAIMED sha, and the bytes are then held to that claim below, so the chain is
             // unbroken: claim matches the staged meta, bytes match the claim.
             //
@@ -902,27 +950,50 @@ namespace QuestTreeServer
             {
                 if (!_loaded) Load();
 
+                // Abandoned uploads, swept on the way in - see SweepStaleStagingIfDue.
+                SweepStaleStagingIfDue();
+
                 wanted = WantedMesh(key, capturedAt, captured, claimed, out var refusal, out var older);
 
                 if (wanted == null) return older ? AlreadyServed(key, refusal) : RejectMesh(key, refusal);
             }
 
-            var encoded = request.DataBase64 ?? "";
-
-            if (encoded.Length == 0) return RejectMesh(key, "the post carries no mesh");
-
-            if (encoded.Length > MaxEncodedMeshChars)
-                return RejectMesh(key, $"the mesh is larger than the {Mb(MaxMeshBytes)} MB a map's mesh may be");
-
             byte[] bytes;
 
-            try
+            // ONE post or SEVERAL. A mesh past what one HTTP body can carry to a stock SPT host (see
+            // MaxMeshPartBytes) arrives in parts, each held in the staging until the last one lands; the
+            // whole mesh is then put back together and goes through EXACTLY the checks a single-post mesh
+            // does below - its length against the declared total, its sha256 against the claim, the header
+            // walk, the fit and the budgets. So a part is only ever trusted as far as "it is a slice of the
+            // mesh the staged capture named", and that claim is proven on the whole before anything of it
+            // is used.
+            var parts = Math.Max(request.Parts, 1);
+
+            if (parts > 1)
             {
-                bytes = Convert.FromBase64String(encoded);
+                var answer = HoldMeshPart(key, request, capturedAt, captured, claimed, parts, out var assembled);
+
+                if (assembled == null) return answer!;
+
+                bytes = assembled;
             }
-            catch (FormatException)
+            else
             {
-                return RejectMesh(key, "the mesh is not base64");
+                var encoded = request.DataBase64 ?? "";
+
+                if (encoded.Length == 0) return RejectMesh(key, "the post carries no mesh");
+
+                if (encoded.Length > MaxEncodedMeshChars)
+                    return RejectMesh(key, $"the mesh is larger than the {Mb(MaxMeshBytes)} MB a map's mesh may be");
+
+                try
+                {
+                    bytes = Convert.FromBase64String(encoded);
+                }
+                catch (FormatException)
+                {
+                    return RejectMesh(key, "the mesh is not base64");
+                }
             }
 
             if (bytes.Length == 0) return RejectMesh(key, "the mesh decodes to nothing");
@@ -1108,6 +1179,280 @@ namespace QuestTreeServer
                 };
         }
 
+        /// <summary>
+        /// One PART of a mesh that arrives in several, held in the staging until every part has landed.
+        /// Returns the answer to send for this post - or null, with <paramref name="assembled"/> set to the
+        /// whole mesh, when this was the part that completed it; the caller then treats it exactly as a
+        /// mesh that came in one post.
+        ///
+        /// A part is refused plainly, never by flattening anything: until the parts are joined and the
+        /// whole hashes to the claim, nothing here is known to be the genuine file. The same cheap gate as a
+        /// one-post mesh comes first - is a capture waiting for a mesh with this sha - so a stranger's parts
+        /// cost nothing either.
+        ///
+        /// The parts are named for the whole mesh's sha and the number of parts, so two attempts at one
+        /// capture that split it differently, or a different mesh, can never be joined into one file.
+        /// Joining is done OUTSIDE the lock, as a set's completion is: under it the parts are only RENAMED to
+        /// a name no other post uses, so nothing else can touch them while up to 48 MB is read back.
+        /// </summary>
+        /// <param name="key">The canonical map name.</param>
+        /// <param name="request">The post, carrying one part.</param>
+        /// <param name="capturedAt">The capture it belongs to, clipped.</param>
+        /// <param name="captured">That timestamp parsed.</param>
+        /// <param name="claimed">The WHOLE mesh's sha256, as claimed.</param>
+        /// <param name="parts">How many parts the whole comes in; more than one.</param>
+        /// <param name="assembled">The whole mesh, when this post completed it; otherwise null.</param>
+        private MapMeshUploadResponse? HoldMeshPart(
+            string key, MapMeshUploadRequest request, string capturedAt, DateTime captured, string claimed,
+            int parts, out byte[]? assembled)
+        {
+            assembled = null;
+
+            if (parts > MaxMeshParts)
+                return RejectMesh(key, $"the mesh comes in {parts} parts, past the {MaxMeshParts} one mesh may");
+
+            if (request.Part < 0 || request.Part >= parts)
+                return RejectMesh(key, $"part {request.Part} is not one of the mesh's {parts} parts");
+
+            if (request.Bytes <= 0 || request.Bytes > MaxMeshBytes)
+                return RejectMesh(key,
+                    $"the mesh says it is {request.Bytes:N0} bytes, which is not a mesh up to {MaxMeshBytes:N0}");
+
+            var encoded = request.DataBase64 ?? "";
+
+            if (encoded.Length == 0) return RejectMesh(key, "the post carries no mesh part");
+
+            if (encoded.Length > MaxEncodedMeshPartChars)
+                return RejectMesh(key, $"a mesh part is larger than the {Mb(MaxMeshPartBytes)} MB one may be");
+
+            byte[] part;
+
+            try
+            {
+                part = Convert.FromBase64String(encoded);
+            }
+            catch (FormatException)
+            {
+                return RejectMesh(key, "the mesh part is not base64");
+            }
+
+            if (part.Length == 0 || part.Length > MaxMeshPartBytes)
+                return RejectMesh(key, $"a mesh part of {part.Length:N0} bytes is not one up to {MaxMeshPartBytes:N0}");
+
+            string[] claimedFiles;
+            string joining;
+
+            // Set when a BUDGET refusal of this mesh flattened the staged set and every floor and side is
+            // in: the set is then completed flat, outside the lock, exactly as AcceptMesh does it.
+            MapCaptureMetaDto? flatReady = null;
+            var flatReason = "";
+
+            lock (_lock)
+            {
+                if (!_loaded) Load();
+
+                SweepStaleStagingIfDue();
+
+                var staged = WantedMesh(key, capturedAt, captured, claimed, out var refusal, out var older);
+
+                if (staged == null) return older ? AlreadyServed(key, refusal) : RejectMesh(key, refusal);
+
+                var staging = StagingFolder(key, capturedAt);
+
+                // A completion - or another part's JOIN - of this capture is in flight: see the same guard
+                // in AcceptMesh. The join claims the folder too, so nothing writes a part into it or sweeps
+                // it while up to 48 MB of parts is being read back outside the lock.
+                if (_completing.Contains(staging))
+                    return MeshIsStaged(staging, claimed)
+                        ? new MapMeshUploadResponse { Accepted = true, Served = true }
+                        : new MapMeshUploadResponse
+                        {
+                            Accepted = false,
+                            Reason = "this capture is being completed right now - offer the mesh again"
+                        };
+
+                // The whole the parts claim to be must be the mesh the staged capture described - the same
+                // size its meta declared - or the budgets below would be judged on a number a sender chose.
+                if (staged.Mesh != null && request.Bytes != staged.Mesh.Bytes)
+                    return RejectMesh(key,
+                        $"the mesh's parts say it is {request.Bytes:N0} bytes, but the capture's meta says " +
+                        $"{staged.Mesh.Bytes:N0}");
+
+                var paths = Enumerable.Range(0, parts).Select(i => MeshPartPath(staging, claimed, i, parts)).ToArray();
+                var mine = SizeOf(paths[request.Part]);
+                var others = paths.Where((_, i) => i != request.Part).Sum(SizeOf);
+
+                // The parts may never add up to more than the whole they claim to be - which is also what
+                // bounds how much one upload can make this host hold before its sha is known.
+                if (others + part.Length > request.Bytes)
+                    return RejectMesh(key,
+                        $"the mesh's parts add up to more than the {request.Bytes:N0} bytes it says it is");
+
+                // THE BUDGETS, judged on the WHOLE mesh at its FIRST part, and a failure is PERMANENT - it
+                // flattens the staged set exactly as a one-post mesh's budget failure does (AcceptMesh), rather
+                // than refusing the part and leaving the floors, the sides and any held parts staged for a day.
+                // Safe to act on before the parts are joined and hashed, for a reason worth writing down: the
+                // verdict uses no byte of the part - only the whole's declared size, which has just been held
+                // to the staged capture's own meta, and this host's own totals - and reaching it at all took
+                // the sha the staged capture named.
+                string? permanent = null;
+
+                var pictures = FilesByLevel(staging).Sum(e => SizeOf(e.Value)) + SidesByDir(staging).Sum(e => SizeOf(e.Value));
+
+                if (pictures + request.Bytes > MaxBytesPerMap)
+                    permanent = $"this capture would be {Mb(pictures + request.Bytes)} MB with its mesh, past the " +
+                                $"{Mb(MaxBytesPerMap)} MB one map may hold";
+
+                var held = paths.Sum(SizeOf);
+                var total = _sets.Values.Sum(s => s.Bytes) + IncomingBytes() - held;
+
+                if (permanent == null && total + request.Bytes > MaxBytesTotal)
+                    permanent = $"the host holds {Mb(total)} MB of map pictures, and this {Mb(request.Bytes)} MB mesh " +
+                                $"would take it past the {Mb(MaxBytesTotal)} MB limit";
+
+                if (permanent != null)
+                {
+                    // Every part this capture holds goes with it - none of them will ever be joined.
+                    foreach (var path in paths)
+                        try { System.IO.File.Delete(path); } catch { /* the stale sweep takes it */ }
+
+                    if (!FlattenStaged(key, staging, staged, claimed, permanent)) return RejectMesh(key, permanent);
+
+                    var stillMissing = Missing(staged, staging, out var stillWaiting);
+
+                    if (stillMissing > 0)
+                        return new MapMeshUploadResponse
+                        {
+                            Accepted = false,
+                            Reason = $"{permanent} - the pictures will be served without it, and are waiting for " +
+                                     $"{stillWaiting}"
+                        };
+
+                    _completing.Add(staging);
+                    flatReady = staged;
+                    flatReason = permanent;
+                    claimedFiles = Array.Empty<string>();
+                    joining = staging;
+                }
+                else
+                {
+                    try
+                    {
+                        WriteAtomic(paths[request.Part], part);
+                    }
+                    catch (Exception ex)
+                    {
+                        return RejectMesh(key, $"the host could not store the mesh part ({ex.Message})");
+                    }
+
+                    var count = paths.Count(System.IO.File.Exists);
+
+                    if (count < parts)
+                        return new MapMeshUploadResponse
+                        {
+                            Accepted = true,
+                            Reason = $"holding part {count} of {parts}"
+                        };
+
+                    // Every part is here. The folder is CLAIMED for the join - so no other post writes into it
+                    // and no sweep or DropStaging removes it while the parts are read back outside the lock -
+                    // and the parts are taken out of every other post's reach by a rename, one name per join.
+                    _completing.Add(staging);
+                    joining = staging;
+
+                    var join = Guid.NewGuid().ToString("N").Substring(0, 12);
+
+                    claimedFiles = new string[parts];
+
+                    var moved = 0;
+
+                    try
+                    {
+                        for (; moved < parts; moved++)
+                        {
+                            claimedFiles[moved] = paths[moved] + ".join-" + join;
+                            System.IO.File.Move(paths[moved], claimedFiles[moved]);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        // Put back what was moved, so a failure here leaves the parts where the next post of
+                        // the last part will find them - and never a stray .join-* file nothing will read and
+                        // the store's total would count until the next boot.
+                        for (var i = 0; i < moved; i++)
+                        {
+                            try { System.IO.File.Move(claimedFiles[i], paths[i]); }
+                            catch { try { System.IO.File.Delete(claimedFiles[i]); } catch { /* the sweep takes it */ } }
+                        }
+
+                        _completing.Remove(staging);
+
+                        return RejectMesh(key, $"the host could not gather the mesh's parts ({ex.Message})");
+                    }
+                }
+            }
+
+            if (flatReady != null)
+            {
+                var promoted = CompleteSet(key, flatReady, joining, Clip(request.ClientVersion ?? "", MaxFreeTextLength));
+
+                return promoted.Outcome == "complete"
+                    ? new MapMeshUploadResponse
+                    {
+                        Accepted = false,
+                        Served = true,
+                        Reason = $"{flatReason} - the pictures are served without it"
+                    }
+                    : new MapMeshUploadResponse { Accepted = false, Reason = promoted.Reason };
+            }
+
+            // Outside the lock: read the parts back in order, into one array of the declared size, and let
+            // them go. The whole is then checked by the caller as if it had come in one post.
+            try
+            {
+                var whole = new byte[request.Bytes];
+                var at = 0;
+
+                foreach (var file in claimedFiles)
+                {
+                    var data = System.IO.File.ReadAllBytes(file);
+
+                    if (at + data.Length > whole.Length)
+                        return RejectMesh(key, $"the mesh's parts add up to more than the {request.Bytes:N0} bytes it says it is");
+
+                    Buffer.BlockCopy(data, 0, whole, at, data.Length);
+                    at += data.Length;
+                }
+
+                if (at != whole.Length)
+                    return RejectMesh(key, $"the mesh's parts add up to {at:N0} bytes, not the {request.Bytes:N0} it says it is");
+
+                assembled = whole;
+                return null;
+            }
+            catch (Exception ex)
+            {
+                return RejectMesh(key, $"the host could not read the mesh's parts back ({ex.Message})");
+            }
+            finally
+            {
+                foreach (var file in claimedFiles)
+                    try { System.IO.File.Delete(file); } catch { /* the staging sweep takes it */ }
+
+                // The join is over; the caller takes the folder again, under the lock, when it completes the
+                // set. Released here rather than there so the caller's own "being completed" guard does not
+                // meet this claim and turn the mesh away.
+                lock (_lock) _completing.Remove(joining);
+            }
+        }
+
+        /// <summary>Where one part of a mesh waits, named for the whole mesh's sha and the number of parts -
+        /// see <see cref="HoldMeshPart"/>. Not a picture extension, so FilesByLevel never reads it as one.</summary>
+        private static string MeshPartPath(string staging, string sha256, int index, int parts) =>
+            System.IO.Path.Combine(staging,
+                $"mesh-{sha256.Substring(0, 12).ToLowerInvariant()}-of{parts.ToString(CultureInfo.InvariantCulture)}" +
+                $".part{index.ToString(CultureInfo.InvariantCulture)}");
+
         /// <summary>One map's mesh file, read from disk on every request and never cached, for
         /// <see cref="Image"/>'s reason: it is megabytes, a client takes it once, and the stamp in the
         /// index is what stops it asking again.
@@ -1169,9 +1514,9 @@ namespace QuestTreeServer
         /// <summary>
         /// Completes a set whose every piece is staged: PREPARED outside the lock, COMMITTED under it.
         ///
-        /// Why two phases. A set is up to 32 MB - eight floors and a mesh - and completing it means
-        /// reading all of it, hashing the mesh again and hashing the whole of it for the stamp. Done under
-        /// <see cref="_lock"/>, as it used to be, that was ~44 MB of reading and hashing while the index
+        /// Why two phases. A set is up to 84 MB - eight floors, four sides and a mesh - and completing it
+        /// means reading all of it, hashing the mesh again and hashing the whole of it for the stamp. Done
+        /// under <see cref="_lock"/>, as it once was, that is well over 100 MB of reading and hashing while the index
         /// and image routes - which the game calls on its MAIN THREAD - waited for the same lock. So
         /// <see cref="PrepareSet"/> does every read and every hash with no lock held, and
         /// <see cref="CommitSet"/> takes the lock only to check nothing moved and to write.
@@ -1533,8 +1878,11 @@ namespace QuestTreeServer
                 };
 
                 // Every staging folder for this map, not only this one: an abandoned earlier attempt is
-                // exactly what the disk should not keep once a newer set is served.
-                DropStaging(key);
+                // exactly what the disk should not keep once a newer set is served. And the stale sweep over
+                // EVERY map's staging, once per completed set - cheap, and the one moment a host that is never
+                // restarted is sure to reach.
+                DropStaging(key, committing: staging);
+                SweepStaleStagingIfDue(now: true);
 
                 _logger.Info(
                     $"Quest Tracker: map picture set for '{key}' stored - {prepared.Floors.Count} floor(s)" +
@@ -2912,7 +3260,7 @@ namespace QuestTreeServer
         ///
         /// Read from the sidecar <see cref="MeshShaPath"/> rather than by hashing the file, because this
         /// is asked on EVERY floor post of a capture that already has its mesh: a four-floor map would
-        /// otherwise re-hash 12 MB four times over, on the request thread, to answer a question the
+        /// otherwise re-hash 48 MB four times over, on the request thread, to answer a question the
         /// staging folder already knows the answer to. The sidecar is written after the mesh and deleted
         /// before it, so its absence means "hash it" rather than "no mesh"; and it is only ever a HINT -
         /// <see cref="PrepareSet"/> re-hashes the file itself before serving it, which is the check that
@@ -3074,7 +3422,12 @@ namespace QuestTreeServer
         /// The length test is not belt and braces: a map name may contain a hyphen (SafeName allows
         /// one), so the glob "big-*" alone would also match the staging of a map called "big-map", and
         /// completing one map's set would then throw away another map's half-finished upload.</summary>
-        private static void DropStaging(string key)
+        /// <param name="key">The map whose staging goes.</param>
+        /// <param name="committing">The staging folder of the set being committed right now - claimed in
+        /// <see cref="_completing"/> by that very commit, and the one folder this must NOT skip for being
+        /// claimed. Skipping it too was a bug the harness caught at once: every completed set left its own
+        /// staging behind.</param>
+        private void DropStaging(string key, string? committing = null)
         {
             if (!System.IO.Directory.Exists(IncomingFolder)) return;
 
@@ -3085,6 +3438,12 @@ namespace QuestTreeServer
                 var name = System.IO.Path.GetFileName(dir);
 
                 if (name.Length != prefix.Length + StagingHashLength) continue;
+
+                // Never a folder ANOTHER post is completing or joining parts in right now: it is being read
+                // outside the lock. It goes with the next sweep once that post is done with it. The folder of
+                // the set being committed is claimed too - by this commit - and it is the one that must go.
+                if (_completing.Contains(dir) &&
+                    !string.Equals(dir, committing, StringComparison.OrdinalIgnoreCase)) continue;
 
                 try { System.IO.Directory.Delete(dir, recursive: true); } catch { /* it will be reused or replaced */ }
             }
@@ -3106,6 +3465,16 @@ namespace QuestTreeServer
             foreach (var dir in System.IO.Directory.EnumerateDirectories(IncomingFolder))
                 try
                 {
+                    // Not a folder being completed or joined right now - see DropStaging.
+                    if (_completing.Contains(dir)) continue;
+
+                    // Leftovers of a join that died between its rename and its delete: a .join-* file is only
+                    // ever alive for the length of one post, so one an hour old is nobody's, and it would
+                    // otherwise count against the store's total until the folder itself expired.
+                    foreach (var stray in System.IO.Directory.EnumerateFiles(dir, "*.join-*"))
+                        if (DateTime.UtcNow - System.IO.File.GetLastWriteTimeUtc(stray) > TimeSpan.FromHours(1))
+                            try { System.IO.File.Delete(stray); } catch { /* next sweep */ }
+
                     var newest = System.IO.Directory.EnumerateFiles(dir)
                         .Select(f => new System.IO.FileInfo(f).LastWriteTimeUtc)
                         .DefaultIfEmpty(System.IO.Directory.GetLastWriteTimeUtc(dir))
@@ -3120,6 +3489,22 @@ namespace QuestTreeServer
 
             if (dropped > 0)
                 _logger.Detail($"Quest Tracker: dropped {dropped} unfinished map picture upload(s) older than a day.");
+        }
+
+        /// <summary>
+        /// The stale-staging sweep, run by upload posts at most every <see cref="StaleSweepEvery"/> and by
+        /// every completed set - not only at boot, as it used to be. A host that is never restarted would
+        /// otherwise keep every abandoned upload - floors, sides, mesh parts, a join cut short - counted
+        /// against its 300 MB total for good, and a busy host would one day refuse every upload for space
+        /// taken by uploads nobody finished. Caller holds the lock.
+        /// </summary>
+        private void SweepStaleStagingIfDue(bool now = false)
+        {
+            if (!now && DateTime.UtcNow - _lastStaleSweep < StaleSweepEvery) return;
+
+            _lastStaleSweep = DateTime.UtcNow;
+
+            DropStaleStaging();
         }
 
         private static long IncomingBytes()

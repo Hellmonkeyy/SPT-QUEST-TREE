@@ -889,6 +889,15 @@ namespace QuestTree.QuestGraph
         /// reason this field exists rather than a local.</summary>
         private IEnumerator _meshBuild;
 
+        /// <summary>The running mesh build's request - the watchdog's handle on it (Abort).</summary>
+        private MapMeshBuilder.Request _meshRequest;
+
+        /// <summary>Seconds of frames the mesh build may take before the watchdog asks it to finish with
+        /// what it has, and the seconds after that before it is disposed outright.</summary>
+        private const double MeshWatchdogSeconds = 200d;
+
+        private const double MeshWatchdogGraceSeconds = 15d;
+
         private Camera _camera;
 
         /// <summary>The capture's own light - see <see cref="CaptureLightIntensity"/>. Enabled only
@@ -1225,14 +1234,41 @@ namespace QuestTree.QuestGraph
                     // its own try: the mesh is an UPGRADE to a capture and may never cost one its
                     // pictures. Every step inside the builder is guarded already; this is the line that
                     // holds even if one is not.
+                    // THE WATCHDOG (second review, C1): whatever the builder's own caps say, a mesh phase that
+                    // has yielded 200 s of frames is asked to stop reading and finish with what it stored -
+                    // a file of what exists - and one still running 15 s after that is disposed (its
+                    // finally blocks wait for any readback in flight) and writes nothing. Either way the
+                    // scene is released below and the capture goes on to its sides and meta.
+                    var meshClock = Stopwatch.StartNew();
+                    var asked = false;
+
                     while (true)
                     {
                         object current = null;
                         var more = false;
+                        var elapsed = meshClock.Elapsed.TotalSeconds;
+
+                        if (!asked && elapsed > MeshWatchdogSeconds && _meshRequest != null)
+                        {
+                            asked = true;
+                            _meshRequest.Abort = true;
+                            Plugin.LogSource?.LogWarning(
+                                $"QuestTree: the 3D mesh of {plan.Key} has run {elapsed:0} s - the watchdog stops it; " +
+                                "what is built so far is written.");
+                        }
+
+                        if (asked && elapsed > MeshWatchdogSeconds + MeshWatchdogGraceSeconds)
+                        {
+                            Plugin.LogSource?.LogWarning(
+                                $"QuestTree: the 3D mesh of {plan.Key} did not finish {MeshWatchdogGraceSeconds:0} s after " +
+                                "the watchdog stopped it - it is abandoned; the pictures are unaffected.");
+                            DisposeMeshBuild();
+                            break;
+                        }
 
                         try
                         {
-                            more = _meshBuild.MoveNext();
+                            more = _meshBuild != null && _meshBuild.MoveNext();
                             if (more) current = _meshBuild.Current;
                         }
                         catch (Exception ex)
@@ -5706,9 +5742,21 @@ namespace QuestTree.QuestGraph
         /// <param name="yMax">The box's high y.</param>
         private static string SideSecondsEstimate(Plan plan, float yMin, float yMax)
         {
+            var seconds = SideSeconds(plan, yMin, yMax);
+
+            return double.IsNaN(seconds) ? "?" : Math.Ceiling(seconds).ToString("0", CultureInfo.InvariantCulture);
+        }
+
+        /// <summary>The number behind <see cref="SideSecondsEstimate"/>: NaN when the floors rendered nothing
+        /// to measure from. The mesh build's time cap is derived from it too (see MeshRequest).</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="yMin">The box's low y.</param>
+        /// <param name="yMax">The box's high y.</param>
+        private static double SideSeconds(Plan plan, float yMin, float yMax)
+        {
             try
             {
-                if (plan.FloorPixels <= 0 || !(plan.FloorSeconds > 0d)) return "?";
+                if (plan.FloorPixels <= 0 || !(plan.FloorSeconds > 0d)) return double.NaN;
 
                 var e = plan.Extent;
                 var pixels = 0L;
@@ -5723,13 +5771,11 @@ namespace QuestTree.QuestGraph
                     pixels += (long)MapSideView.Size(frame[1], ppm) * MapSideView.Size(frame[3], ppm);
                 }
 
-                var seconds = plan.FloorSeconds * pixels / plan.FloorPixels * 1.25d;
-
-                return Math.Ceiling(seconds).ToString("0", CultureInfo.InvariantCulture);
+                return plan.FloorSeconds * pixels / plan.FloorPixels * 1.25d;
             }
             catch
             {
-                return "?";
+                return double.NaN;
             }
         }
 
@@ -6361,6 +6407,27 @@ namespace QuestTree.QuestGraph
                 });
             }
 
+            // The building phase's cap, from this capture's own clock (second review, H1): the capture's
+            // 140 s budget less what the floors MEASURED and what the side views are expected to take
+            // (the same estimate their own line prints, over the bands' y range - the sides' box is not
+            // known until the mesh is), never under the builder's minimum.
+            var sides = 0d;
+
+            if (plan.WantsSides && request.Bands.Count > 0)
+            {
+                var yMin = request.Bands.Min(b => b.MinY - b.DepthBelow);
+                var yMax = request.Bands.Max(b => Math.Max(b.MaxY, b.CameraY));
+                var estimate = SideSeconds(plan, yMin, yMax);
+
+                if (!double.IsNaN(estimate)) sides = estimate;
+            }
+
+            var floors = plan.FloorSeconds > 0d ? plan.FloorSeconds : 0d;
+
+            // Not floored here: the builder takes the relief's measured seconds off it first and floors what is
+            // left at MinBuildingSeconds.
+            request.BuildingSeconds = MapMeshBuilder.CaptureSecondsBudget - floors - sides;
+
             return request;
         }
 
@@ -6429,9 +6496,12 @@ namespace QuestTree.QuestGraph
                 // Said out loud, because the player is standing in the raid while it happens and the
                 // screen shows it: the hold forces every renderer and object EFT's distance culling
                 // switched off back on, so distant buildings appear for as long as the build runs.
+                var soft = Math.Max(MapMeshBuilder.MinBuildingSeconds, request.BuildingSeconds);
+
                 Plugin.LogSource?.LogInfo(
-                    $"QuestTree: building {plan.Key}'s 3D map - the scene is held for up to " +
-                    $"{MapMeshBuilder.SecondsCap.ToString("0", CultureInfo.InvariantCulture)} s, so distant " +
+                    $"QuestTree: building {plan.Key}'s 3D map - the scene is held for up to about " +
+                    $"{(MapMeshBuilder.HardSecondsFor(soft) + MapMeshBuilder.DrainSeconds).ToString("0", CultureInfo.InvariantCulture)} s " +
+                    $"(decimating for the first {soft.ToString("0", CultureInfo.InvariantCulture)}), so distant " +
                     "geometry stays drawn while it runs; the side views after it announce their own.");
 
                 // The collect LAST, so nothing above it can have thrown after it. The hold is NOT here:
@@ -6440,6 +6510,7 @@ namespace QuestTree.QuestGraph
                 // until the first MoveNext - so holding it in the field now costs nothing and means
                 // Cleanup can dispose it from this line on.
                 _meshBuild = build;
+                _meshRequest = request;
 
                 GC.Collect();
 
@@ -6490,6 +6561,7 @@ namespace QuestTree.QuestGraph
         {
             var build = _meshBuild;
             _meshBuild = null;
+            _meshRequest = null;
 
             if (build == null) return;
 

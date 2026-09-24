@@ -186,7 +186,7 @@ captured map carries our own credit line naming the build, the date and the raid
   alone read back asynchronously off their own buffers - never by writing a mesh's buffer target,
   which killed the process outright on 2026-09-22 and is now forbidden everywhere in this feature.
   Everything is chunked over frames (20,000 rays, 20,000 renderers, one building), capped at
-  300,000 triangles and twenty seconds, and says in three log lines what it built and what it cut.
+  3,000,000 triangles a map, and says in three log lines what it built and what it cut.
 - **Maps: 3D.** A captured map now opens as ground with its picture draped over it and its
   buildings standing on it - drag to move, right-drag to turn and tilt, scroll to come closer, and
   the floor picker peels the storeys. Markers, extracts and place names sit on the ground at their
@@ -213,10 +213,10 @@ captured map carries our own credit line naming the build, the date and the raid
   the session and is fetched again, whole, on the next start, rather than installed flat for good.
   Nothing about it bumps a schema version: an older host stores the pictures and ignores the mesh,
   an older client never asks. The release
-  payload gains the meshes (1-3 MB a map), so the packager's total-size gate is now a warning at
-  80 MB that prints the payload's size on every run instead of a hard 40 MB stop, and a shipped
-  mesh is checked against its meta's sha256, byte length, extent and floor levels before it can be
-  zipped.
+  payload gains the meshes (up to 48 MB a map), so the packager's total-size gate is now a warning at
+  80 MB that prints the payload's size - and the meshes' share of it - on every run instead of a hard
+  40 MB stop, and a shipped mesh is checked against its meta's sha256, byte length, extent and floor
+  levels before it can be zipped.
 - **The side pictures travel with the rest.** The four oblique views a capture takes for the 3D map's
   walls go up to the host through the same route as the floors - one post each, after the floors and
   before the mesh, encoded exactly as a floor is (flattened on the map backdrop, 2048 px on the long
@@ -229,11 +229,31 @@ captured map carries our own credit line naming the build, the date and the raid
   the box's own projections, and its pixel size the projected span at its scale within two pixels,
   which is what catches a side described at one size and sent at another. A host from before sides
   refuses a side post as a floor it does not know rather than filing it as floor 0, and the client
-  then goes on to the mesh. The per-map budget rises from 32 to 42 MB - eight floors and four sides
-  at 2.5 MB and a 12 MB mesh - with every side a meta names reserved against the store's total from
-  the first floor. Packaging admits `<key>\<key>-side-<N|S|E|W>.jpg` by that exact name, holds sides
+  then goes on to the mesh. Every side a meta names is reserved against the store's total from the
+  first floor. Packaging admits `<key>\<key>-side-<N|S|E|W>.jpg` by that exact name, holds sides
   to the 1.5 MB per-image gate, and `tools/check-maps-pack.py` checks each side's JPEG size against
   its meta, its basis for unit length, and that no side file goes unnamed.
+- **Buildings in full detail, up to 3,000,000 triangles a map.** Each building's MOST detailed
+  level of detail is read whenever its source totals at most 1,000,000 triangles (a bigger one keeps
+  the old rule: the last real level, never an impostor card), and our own decimation - quadric edge
+  collapse on a worker thread - reduces it to a budget set by its footprint area. The map budget
+  rises from 300,000 triangles to 3,000,000, and everything that carries a mesh rises with it: the
+  mesh format's caps are 6,000,000 triangles and 12,000,000 vertices a file; a mesh file may be 48 MB
+  (was 12), a map 84 MB on the host and on the way down (8 floors and 4 sides at 2.5 MB, a 48 MB mesh
+  and 6 MB of margin), a session downloads up to 300 MB (was 120), a mesh request may take 240 seconds
+  (was 90), and the host checks a mesh inflating to at most 160 MB (36 MB of indices and 54 MB of
+  vertices at 3 M triangles, and room for the relief grids). **A mesh past 16 MiB goes up in parts.**
+  An SPT server runs on Kestrel with its default limit of 30,000,000 bytes a request body - measured,
+  and nothing in SPT raises it - and a zlib-compressed post of a deflated mesh is about 1.03 times the
+  mesh, so one post cannot carry more than about 28 MB. The client sends parts of 16 MiB (~17 MB on
+  the wire), the host holds them in the capture's staging and joins them, and the whole is then
+  checked exactly as a mesh that came in one post: length, sha256, header, fit and budget - and a
+  budget failure found at the FIRST part serves the capture flat at once rather than holding its floors
+  and parts. A host from before stage V never sees a part: its meta check drops any mesh past its 12 MB
+  when the floors arrive, the set completes flat, and the client says at Info that the host kept the
+  capture without its 3D mesh. Abandoned uploads - held parts included - are now swept every time a set
+  completes and on upload posts every ten minutes, not only at the host's start. The packager's 80 MB
+  payload warning is now expected to fire, and says so when the meshes are most of the payload.
 - **A throwaway diagnostic key ships with this release**, which is worth saying out loud because it
   is not a feature: a bare **F10** is the mesh probe of the 3D map experiments, and it writes
   `BepInEx\plugins\QuestTree\captures\<map>.meshprobe.txt` in a raid - whether the game's own meshes

@@ -130,14 +130,22 @@ namespace QuestTree.QuestGraph
         /// <summary>Vertices across every building in the file. NOT redundant with
         /// <see cref="MaxVerticesPerBuilding"/> and <see cref="MaxTriangles"/>, which between them
         /// leave a hole a hostile file walks straight through: 20,000 buildings each declaring 2 M
-        /// vertices and NO triangles breaks neither of those caps and asks for 240 GB. Four million is
-        /// twice the triangle cap, which is more vertices than a triangle soup that size can use.</summary>
-        internal const int MaxVerticesTotal = 4_000_000;
+        /// vertices and NO triangles breaks neither of those caps and asks for 240 GB. Twelve million is
+        /// twice the triangle cap, which is more vertices than a triangle soup that size can use.
+        ///
+        /// Raised from 4 M with <see cref="MaxTriangles"/> at stage V, when the building budget went from
+        /// 300,000 to 3,000,000 triangles. The format's VERSION is unchanged - the byte layout is - but a
+        /// reader built before stage V carries the old caps and refuses a stage-V file with more than 2 M
+        /// triangles as over them. Accepted: nothing has been released with the old caps, and the refusal
+        /// is a named InvalidDataException, not a misread. A 12 M-vertex file is 72 MB of quantised
+        /// arrays read, inside the capture's working budget.</summary>
+        internal const int MaxVerticesTotal = 12_000_000;
 
-        /// <summary>Triangles across every building in the file - the phase 3C budget
-        /// (MaxBuildingTriangles) with headroom, and the bound that keeps the index arrays to 24 MB
-        /// read.</summary>
-        internal const int MaxTriangles = 2_000_000;
+        /// <summary>Triangles across every building in the file - stage V's building budget
+        /// (MapMeshBuilder.MaxBuildingTriangles, 3 M) with headroom, and the bound that keeps the index
+        /// arrays to 72 MB read. Was 2 M before stage V - see <see cref="MaxVerticesTotal"/> for what the
+        /// raise means for older readers.</summary>
+        internal const int MaxTriangles = 6_000_000;
 
         /// <summary>The suffix that makes a file name a mesh file. Shared by
         /// <see cref="FileNameFor"/> and <see cref="IsMeshFileName"/> so the writer's name and the

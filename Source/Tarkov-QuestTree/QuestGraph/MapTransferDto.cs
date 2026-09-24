@@ -407,8 +407,18 @@ namespace QuestTree.QuestGraph
         /// it and it against the staged capture's meta.</summary>
         [JsonProperty("sha256")] public string Sha256 { get; set; }
 
-        /// <summary>The decoded length, for the host to check against what actually arrives.</summary>
+        /// <summary>The decoded length of the WHOLE mesh, for the host to check against what actually
+        /// arrives (or what the parts add up to).</summary>
         [JsonProperty("bytes")] public long Bytes { get; set; }
+
+        /// <summary>Which part of the mesh this post carries, from 0, when it goes up in
+        /// <see cref="Parts"/> parts.</summary>
+        [JsonProperty("part")] public int Part { get; set; }
+
+        /// <summary>How many parts the mesh goes up in; 0 for a mesh in one post. Several because one
+        /// post to a stock SPT host cannot carry more than 30,000,000 bytes (MapTransfer.MeshPartBytes);
+        /// the host joins them and checks the whole as it checks a one-post mesh.</summary>
+        [JsonProperty("parts")] public int Parts { get; set; }
 
         [JsonProperty("dataBase64")] public string DataBase64 { get; set; }
     }
