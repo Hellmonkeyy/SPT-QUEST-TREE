@@ -237,6 +237,22 @@ namespace QuestTree.UI
             public long SideTriangles;
 
             /// <summary>
+            /// Top faces that stand ON ANOTHER FLOOR than the band their building is filed under, with the
+            /// level whose picture textures them. See <see cref="FloorForFace"/>.
+            ///
+            /// Seen on Interchange: the mall's ground-floor slab (184,000 m2 of floor at y = 21 m) belongs to
+            /// a building the builder filed under the BASEMENT band, because the same object reaches down to
+            /// the parking level at 16 m. Textured with its building's band, the ground floor of the mall
+            /// sampled the basement picture - transparent over the whole mall, so it drew as the black of a
+            /// transparent pixel's RGB, speckled where the basement picture happened to be opaque. A face on
+            /// a floor now takes that floor's picture: the same one the relief under it uses.
+            /// </summary>
+            public readonly List<(int Level, Mesh Mesh)> RoofsOnOtherFloors = new List<(int Level, Mesh Mesh)>();
+
+            /// <summary>How many top faces went to another floor's picture, for the log line.</summary>
+            public long MovedRoofTriangles;
+
+            /// <summary>
             /// The dollhouse cut: for each cut height, each building mesh of this entry clipped to what lies
             /// below it (null when nothing does). Made the first time a mesh is drawn under that cut and kept
             /// for as long as the entry - a map has a handful of floors, and stepping back to one already
@@ -918,6 +934,9 @@ namespace QuestTree.UI
 
             count += DestroyWalls(built);
 
+            for (var i = 0; i < built.RoofsOnOtherFloors.Count; i++) { Discard(built.RoofsOnOtherFloors[i].Mesh); count++; }
+            built.RoofsOnOtherFloors.Clear();
+
             foreach (var cut in built.Cuts.Values)
             {
                 foreach (var pair in cut)
@@ -1145,6 +1164,9 @@ namespace QuestTree.UI
             _buildingShader = shader;
             _flatColours = flat;
 
+            // Which heights are which floor's surfaces - the roof routing reads it while the floors build.
+            MeasureFloorRanges();
+
             // Now, and not at Attach: whether the sides take part depends on the shader just resolved.
             TakeSideRoom();
 
@@ -1154,7 +1176,7 @@ namespace QuestTree.UI
             // and against none is two different builds. HERE and not earlier, because whether the sides
             // take part at all depends on the shader just resolved (SidesActive reads _flatColours).
             var key = _meshPath + "|" + loaded.Stamp.ToString(CultureInfo.InvariantCulture) + "|" +
-                      (SidesActive ? _sidesKey : "-");
+                      (SidesActive ? _sidesKey : "-") + "|" + FloorRangesKey();
 
             if (_builtKey != key)
             {
@@ -1240,11 +1262,13 @@ namespace QuestTree.UI
 
             var topTriangles = 0L;
             var sideTriangles = 0L;
+            var movedRoofs = 0L;
 
             foreach (var floor in _floors)
             {
                 topTriangles += floor.Meshes.TopTriangles;
                 sideTriangles += floor.Meshes.SideTriangles;
+                movedRoofs += floor.Meshes.MovedRoofTriangles;
                 cells += floor.Meshes.Cells;
                 groundTriangles += floor.Meshes.GroundTriangles;
                 buildings += floor.Meshes.BuildingCount;
@@ -1285,6 +1309,10 @@ namespace QuestTree.UI
                     ? string.Format(CultureInfo.InvariantCulture,
                         ", faces top {0:0} % / sides {1:0} % / tint {2:0} %",
                         100d * topTriangles / faces, 100d * sideTriangles / faces, 100d * wallTriangles / faces)
+                    : "") +
+                (movedRoofs > 0
+                    ? string.Format(CultureInfo.InvariantCulture,
+                        ", {0:#,##0} top face(s) on the picture of the floor they stand on", movedRoofs)
                     : "");
 
             Plugin.LogSource?.LogInfo(string.Format(
@@ -1336,6 +1364,7 @@ namespace QuestTree.UI
                 if (built == null) continue;
 
                 for (var i = 0; i < built.Buildings.Count; i++) Under(built, built.Buildings[i], _cutY);
+                for (var i = 0; i < built.RoofsOnOtherFloors.Count; i++) Under(built, built.RoofsOnOtherFloors[i].Mesh, _cutY);
 
                 foreach (var tint in built.Walls)
                     for (var i = 0; i < tint.Meshes.Count; i++) Under(built, tint.Meshes[i], _cutY);
@@ -2076,6 +2105,10 @@ namespace QuestTree.UI
             // One per side slot, made on the first face that side takes.
             var sideAccumulators = new WallAccumulator[SideOrder.Length];
 
+            // Top faces standing on ANOTHER floor, by that floor's level: indices into the same chunk of
+            // vertices as the building's own roofs. See Built.RoofsOnOtherFloors.
+            var elsewhere = new Dictionary<int, List<int>>();
+
             var part = 0;
 
             foreach (var building in _file.Buildings)
@@ -2085,11 +2118,9 @@ namespace QuestTree.UI
 
                 into.BuildingCount++;
 
-                if (vertices.Count + building.VertexCount > MaxVerticesPerMesh && indices.Count > 0)
+                if (vertices.Count + building.VertexCount > MaxVerticesPerMesh && vertices.Count > 0)
                 {
-                    into.Buildings.Add(MakeMesh(
-                        $"{_mapKey}-buildings-{level}-{part++}", vertices, uvs, indices, colours));
-                    into.BuildingTriangles += indices.Count / 3;
+                    FlushRoofs(into, level, part++, vertices, uvs, indices, colours, elsewhere);
 
                     vertices.Clear();
                     uvs.Clear();
@@ -2172,10 +2203,28 @@ namespace QuestTree.UI
                         continue;
                     }
 
-                    indices.Add(offset + (int)a);
-                    indices.Add(offset + (int)b);
-                    indices.Add(offset + (int)c);
                     into.TopTriangles++;
+
+                    // Which floor's picture: the floor this face STANDS ON, where it stands on one, else the
+                    // band its building is filed under - see FloorForFace.
+                    var floorLevel = FloorForFace((pa.y + pb.y + pc.y) / 3f, level);
+
+                    var roofIndices = indices;
+
+                    if (floorLevel != level)
+                    {
+                        if (!elsewhere.TryGetValue(floorLevel, out roofIndices))
+                        {
+                            roofIndices = new List<int>();
+                            elsewhere[floorLevel] = roofIndices;
+                        }
+
+                        into.MovedRoofTriangles++;
+                    }
+
+                    roofIndices.Add(offset + (int)a);
+                    roofIndices.Add(offset + (int)b);
+                    roofIndices.Add(offset + (int)c);
                 }
             }
 
@@ -2187,10 +2236,123 @@ namespace QuestTree.UI
             into.BuildingTriangles += into.WallTriangles + into.SideTriangles;
             into.WallsPending = into.WallTriangles > 0;
 
-            if (indices.Count == 0) return;
+            FlushRoofs(into, level, part, vertices, uvs, indices, colours, elsewhere);
+        }
 
-            into.Buildings.Add(MakeMesh($"{_mapKey}-buildings-{level}-{part}", vertices, uvs, indices, colours));
-            into.BuildingTriangles += indices.Count / 3;
+        /// <summary>One chunk of roofs into meshes: the building band's own, and one per other floor its faces
+        /// stand on. Each mesh shares the chunk's vertex lists (an unreferenced vertex costs memory, not
+        /// correctness); the index lists are emptied for the next chunk.</summary>
+        private void FlushRoofs(
+            Built into, int level, int part, List<Vector3> vertices, List<Vector2> uvs, List<int> indices,
+            List<Color32> colours, Dictionary<int, List<int>> elsewhere)
+        {
+            if (indices.Count > 0)
+            {
+                into.Buildings.Add(MakeMesh($"{_mapKey}-buildings-{level}-{part}", vertices, uvs, indices, colours));
+                into.BuildingTriangles += indices.Count / 3;
+            }
+
+            foreach (var pair in elsewhere)
+            {
+                if (pair.Value.Count == 0) continue;
+
+                into.RoofsOnOtherFloors.Add((pair.Key, MakeMesh(
+                    $"{_mapKey}-buildings-{level}-on{pair.Key}-{part}", vertices, uvs, pair.Value, colours)));
+                into.BuildingTriangles += pair.Value.Count / 3;
+
+                pair.Value.Clear();
+            }
+        }
+
+        /// <summary>The floor ranges as text, for the cache key: the roof routing depends on them, and they
+        /// come from the meta, which a rescan can change while the mesh file stays the same.</summary>
+        private string FloorRangesKey()
+        {
+            var text = "";
+
+            for (var i = 0; i < _floorRanges.Count; i++)
+            {
+                var r = _floorRanges[i];
+                text += string.Format(CultureInfo.InvariantCulture, "{0}:{1:0.##}-{2:0.##};", r.Level, r.Low, r.High);
+            }
+
+            return text;
+        }
+
+        /// <summary>The height range each floor's own surfaces are found in, from the meta: [minY - slack,
+        /// maxY + slack] per band the mesh file has. Set by <see cref="BuildMeshes"/> before any floor is
+        /// built; the same for every selection, so the routing it drives is safe to cache.</summary>
+        private readonly List<(int Level, float Low, float High)> _floorRanges = new List<(int Level, float Low, float High)>();
+
+        /// <summary>How far outside its declared height band a face may be and still be ON that floor: the
+        /// half metre the harvest's bands and the relief's own floor test already allow.</summary>
+        private const float FloorFaceSlack = 0.5f;
+
+        /// <summary>Fills <see cref="_floorRanges"/> from the entry's layers, for the bands the file has. A
+        /// band with the catalog's "any height" placeholder (+-2000 m) is left out - a range that claims
+        /// every face would take every roof.</summary>
+        private void MeasureFloorRanges()
+        {
+            _floorRanges.Clear();
+
+            foreach (var band in _file.Bands)
+            {
+                if (band == null) continue;
+
+                var layer = LayerOf(band.Level);
+                if (layer == null || layer.GameBounds.Count == 0) continue;
+
+                var low = layer.GameBounds[0].Min.z;
+                var high = layer.GameBounds[0].Max.z;
+
+                if (!(low > -1000f) || !(high < 1000f) || high < low) continue;
+
+                _floorRanges.Add((band.Level, low - FloorFaceSlack, high + FloorFaceSlack));
+            }
+        }
+
+        /// <summary>
+        /// The floor whose picture textures a top face at height <paramref name="y"/>: the floor it STANDS
+        /// ON when its height is inside one floor's band (plus <see cref="FloorFaceSlack"/>), else
+        /// <paramref name="filed"/> - its building's band, which is what every face used before.
+        ///
+        /// Only a face ON a floor moves. A floor slab is exactly the surface that floor's picture
+        /// photographed (and that floor's relief measured): the camera for that band stood just above it.
+        /// A face between floors - a roof at 32 m on a map whose floors are at 27 and 36 m - is left where
+        /// it was, because the floor above's picture is cut out to that floor's walkable area and the one
+        /// below's camera was under it; neither is a better answer than the old one, so the old one stands.
+        /// When two ranges overlap after the slack, the nearer floor wins (distance outside its unslacked
+        /// band), ties to the higher floor.
+        /// </summary>
+        private int FloorForFace(float y, int filed)
+        {
+            var best = filed;
+            var bestDistance = float.MaxValue;
+
+            for (var i = 0; i < _floorRanges.Count; i++)
+            {
+                var range = _floorRanges[i];
+                if (y < range.Low || y > range.High) continue;
+
+                var distance = Mathf.Max(0f, Mathf.Max(range.Low + FloorFaceSlack - y, y - (range.High - FloorFaceSlack)));
+
+                if (distance < bestDistance || (Mathf.Approximately(distance, bestDistance) && range.Level > best))
+                {
+                    best = range.Level;
+                    bestDistance = distance;
+                }
+            }
+
+            return best;
+        }
+
+        /// <summary>This view's floor with the given level, or null. At most six floors, so a loop.</summary>
+        private Floor FloorAt(int level)
+        {
+            for (var i = 0; i < _floors.Count; i++)
+                if (_floors[i] != null && _floors[i].Level == level) return _floors[i];
+
+            return null;
         }
 
         /// <summary>One side's submesh on the entry, registered BEFORE anything is built into it (so a
@@ -3037,6 +3199,22 @@ namespace QuestTree.UI
             {
                 var mesh = Under(meshes, meshes.Buildings[i], _cutY);
                 if (mesh != null) Graphics.DrawMesh(mesh, Matrix4x4.identity, walls, _drawLayer, _camera);
+            }
+
+            // Roofs standing on another floor, with THAT floor's building material - its picture. A floor
+            // this view does not draw (it is above the chosen one) has its faces above the cut anyway; if it
+            // is not here they fall back to this floor's material. A floor whose picture has not arrived yet
+            // is skipped this frame rather than drawn white, as the floors themselves are.
+            for (var i = 0; i < meshes.RoofsOnOtherFloors.Count; i++)
+            {
+                var roof = meshes.RoofsOnOtherFloors[i];
+                var owner = FloorAt(roof.Level);
+                var material = owner != null ? owner.BuildingMaterial : walls;
+
+                if (material == null || (!_flatColours && material.mainTexture == null)) continue;
+
+                var mesh = Under(meshes, roof.Mesh, _cutY);
+                if (mesh != null) Graphics.DrawMesh(mesh, Matrix4x4.identity, material, _drawLayer, _camera);
             }
 
             // The walls, one colour at a time: at most sixteen more DrawMesh calls per floor. A tint with
