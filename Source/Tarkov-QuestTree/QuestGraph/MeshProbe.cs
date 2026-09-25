@@ -17,7 +17,8 @@ using UnityEngine.UI;
 namespace QuestTree.QuestGraph
 {
     /// <summary>
-    /// THROWAWAY DIAGNOSTIC - Phase 3-0 of the low-poly 3D map work. IT IS REMOVED BEFORE RELEASE,
+    /// THROWAWAY DIAGNOSTIC - Phase 3-0 of the low-poly 3D map work. It SHIPS in 1.19.0 as a documented,
+    /// UNBOUND diagnostic key (bind it under F12 > Advanced to use it - review F43) and is to be removed later,
     /// together with <see cref="ModSettings.ProbeKey"/>, the one line in
     /// <see cref="QuestTree.Patches.GameWorldStartedPatch"/>, the install call in
     /// <see cref="Plugin"/>, the two internal Probe* accessors in <see cref="MapCapture"/>, and the
@@ -2006,14 +2007,25 @@ namespace QuestTree.QuestGraph
                 // The test view lives on a DontDestroyOnLoad object, so a raid started while it is up
                 // would carry it into the raid and draw a 512 px panel over the player's screen. One
                 // check per frame, and it takes the view down through the same path the key does.
+                // A run whose host went away mid-run (Unity stops the coroutine without its finally) would
+                // leave _busy set for the session: cleared here, said once (review F42).
+                if (_busy && (_host == null || !_host.isActiveAndEnabled))
+                {
+                    _busy = false;
+                    Plugin.LogSource?.LogInfo("QuestTree: the mesh probe's host went away mid-run - it is idle again.");
+                }
+
                 if (_view != null && !_busy && InRaid())
                 {
                     Plugin.LogSource?.LogInfo(
                         "QuestTree: a raid started with the mesh probe's test view open - tearing it down.");
 
-                    _busy = true;
+                    // On the HOST, like a press, and busy only once it has started (review F41): this object never
+                    // ticks in the menu and StartCoroutine on it threw, which left _busy stuck and the overlay up.
                     _press++;
-                    StartCoroutine(Run(_press));
+                    _host = host;
+                    host.StartCoroutine(Run(_press));
+                    _busy = true;
                     return;
                 }
 
@@ -3126,7 +3138,9 @@ namespace QuestTree.QuestGraph
             foreach (var go in Resources.FindObjectsOfTypeAll<GameObject>())
             {
                 if (go == null) continue;
-                if (go.name.StartsWith("QuestTreeMeshProbe", StringComparison.Ordinal)) stray++;
+                // The view's own objects only (review F44): the raid watcher "QuestTreeMeshProbe" is not a leak.
+                if (go.name.StartsWith("QuestTreeMeshProbe", StringComparison.Ordinal) && go.name != "QuestTreeMeshProbe" &&
+                    go.GetComponent<MeshProbe>() == null) stray++;
             }
 
             var hooks = !view._preHooked && !view._postHooked;

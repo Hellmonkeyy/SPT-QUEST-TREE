@@ -883,11 +883,22 @@ namespace QuestTree.QuestGraph
         /// the coroutine starts and read once, in <see cref="Prepare"/>.</summary>
         private bool _automatic;
 
+        /// <summary>This capture builds no 3D mesh (TryStartCapture's buildMesh).</summary>
+        private bool _skipMesh;
+
         /// <summary>The 3D mesh build now running, so <see cref="Cleanup"/> can dispose it. An iterator
         /// that is disposed runs its finally blocks, which is where the builder waits for a GPU readback
         /// in flight before releasing its buffer - so a raid that ends in the middle of one is the
         /// reason this field exists rather than a local.</summary>
         private IEnumerator _meshBuild;
+
+        /// <summary>Seconds the floor phase may take before the floors not yet started are skipped (review F45),
+        /// and the overrun a floor that started in time may take before it too is abandoned. With the mesh
+        /// phase's own caps (140 s budget less floors, sides and relief, +10 hard, +8 drain, +40 atlas) this keeps
+        /// a capture under the campaign's 180 s wait.</summary>
+        internal const double FloorPhaseSeconds = 70d;
+
+        private const double FloorPhaseOverrun = 1.25d;
 
         /// <summary>The running mesh build's request - the watchdog's handle on it (Abort).</summary>
         private MapMeshBuilder.Request _meshRequest;
@@ -927,6 +938,13 @@ namespace QuestTree.QuestGraph
         private Component[] _culling;
 
         private bool[] _cullingWasEnabled;
+
+        /// <summary>The culling objects, and which of them owns each component and each object in the flat lists
+        /// (review F07) - so the release can leave alone what belongs to a culler the player is now inside.</summary>
+        private DisablerCullingObject[] _cullers;
+
+        private int[] _cullingOwner;
+        private int[] _cullingObjectOwner;
 
         /// <summary>The GameObjects the scene's distance culling DEACTIVATES, flattened out of the same
         /// culling objects, with room to remember which of them this capture switched on. Separate from
@@ -1034,6 +1052,7 @@ namespace QuestTree.QuestGraph
 
                 // A key press is the player asking for this map, so it always builds the 3D mesh.
                 _automatic = false;
+                _skipMesh = false;
                 StartCoroutine(Run());
             }
             catch (Exception ex)
@@ -1090,9 +1109,19 @@ namespace QuestTree.QuestGraph
                 // The floors' own wall time and pixels, which is what the side views' hold is estimated
                 // from - see CaptureSides.
                 var floorsClock = Stopwatch.StartNew();
+                var floorsCut = 0;
 
                 foreach (var floor in plan.Floors)
                 {
+                    // The floor phase's budget (review F45): past it the floors not yet started are skipped - an
+                    // earlier capture's picture of them is carried - so a campaign stop cannot outrun its 180 s.
+                    if (floorsClock.Elapsed.TotalSeconds > FloorPhaseSeconds)
+                    {
+                        floor.Failed = true;
+                        floorsCut++;
+                        continue;
+                    }
+
                     if (!BeginFloor(plan, floor))
                     {
                         floor.Failed = true;
@@ -1121,6 +1150,15 @@ namespace QuestTree.QuestGraph
 
                     for (var tile = 0; tile < plan.TileCount; tile++)
                     {
+                        // A floor still rendering well past the budget is abandoned too - half a floor is not a
+                        // picture - at a margin, so the one floor that started in time normally finishes.
+                        if (floorsClock.Elapsed.TotalSeconds > FloorPhaseSeconds * FloorPhaseOverrun)
+                        {
+                            floor.Failed = true;
+                            floorsCut++;
+                            break;
+                        }
+
                         RenderTile(plan, floor, tile);
                         if (floor.Failed) break;
 
@@ -1206,6 +1244,11 @@ namespace QuestTree.QuestGraph
                 }
 
                 plan.FloorSeconds = floorsClock.Elapsed.TotalSeconds;
+
+                if (floorsCut > 0)
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: {plan.Key} - {floorsCut} floor(s) were cut at the {FloorPhaseSeconds:0} s floor budget " +
+                        $"({plan.FloorSeconds:0} s spent); the pictures an earlier capture took of them are kept.");
 
                 // The 3D geometry, after the last picture and before the meta that will name it.
                 //
@@ -1542,7 +1585,7 @@ namespace QuestTree.QuestGraph
                 // CarriedMesh, not File.Exists: a mesh file on disk that the new meta cannot name -
                 // because this capture's recipe or scale refused the previous meta - is a file nothing
                 // will read, and skipping the build for it would silently lose the map's geometry.
-                plan.WantsMesh = !_automatic || CarriedMesh(plan, null) == null;
+                plan.WantsMesh = !_skipMesh && (!_automatic || CarriedMesh(plan, null) == null);
 
                 // The side views' gate. Every key press and every campaign stop takes them: they MERGE
                 // best-of-by-distance now (see SidePrevious), so each stop sharpens the walls near it and
@@ -2076,14 +2119,14 @@ namespace QuestTree.QuestGraph
 
                 if (png == null || png.Length == 0)
                 {
-                    // Left alone rather than deleted. The one already there - if there is one - was
-                    // written by the previous capture of this floor, so it is never NEWER than the
-                    // picture: every pixel this capture filled reads as empty in it and is simply
-                    // taken again next time, and every pixel it kept still carries the distance it
-                    // was seen from. A coarser merge, and nothing worse.
+                    // DELETED at commit (review F09), not left: after a fresh capture that kept the extent (a
+                    // render-tag or gamma change) the old sidecar describes a different picture, and its
+                    // distances would keep this picture's empty pixels empty. No sidecar is the safe state -
+                    // the next merge lets this capture win everywhere.
+                    floor.DistStale = true;
                     Plugin.LogSource?.LogInfo(
-                        $"QuestTree: the distance sidecar for {plan.Key} \"{floor.Dto.Name}\" could not be encoded, so " +
-                        "the next capture of this map compares against the one the last capture left.");
+                        $"QuestTree: the distance sidecar for {plan.Key} \"{floor.Dto.Name}\" could not be encoded - the " +
+                        "old one is removed with the picture's commit, so the next capture merges as if fresh.");
                     return;
                 }
 
@@ -2094,9 +2137,10 @@ namespace QuestTree.QuestGraph
             }
             catch (Exception ex)
             {
+                floor.DistStale = true;
                 Plugin.LogSource?.LogDebug(
                     $"QuestTree: the distance sidecar for {plan.Key} \"{floor.Dto?.Name}\" could not be written " +
-                    $"({ex.GetType().Name}: {ex.Message}).");
+                    $"({ex.GetType().Name}: {ex.Message}) - the old one is removed with the picture's commit.");
             }
         }
 
@@ -2134,8 +2178,9 @@ namespace QuestTree.QuestGraph
                     pixels[i] = new Color32(step, step, step, 255);
                 }
 
+                // No Apply: EncodeToPNG reads the CPU copy, and uploading ~29 MB to a GPU nothing reads it from was
+                // pure cost (review F10).
                 grey.SetPixels32(pixels);
-                grey.Apply(updateMipmaps: false);
 
                 return grey.EncodeToPNG();
             }
@@ -2249,6 +2294,20 @@ namespace QuestTree.QuestGraph
         }
 
         private static string Staged(string path) => path + ".tmp";
+
+        /// <summary>Deletes a file if it is there, quietly.</summary>
+        /// <param name="path">The file.</param>
+        private static void DeleteQuietly(string path)
+        {
+            try
+            {
+                if (File.Exists(path)) File.Delete(path);
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug($"QuestTree: {Path.GetFileName(path)} could not be removed ({ex.Message}).");
+            }
+        }
 
         private static string Share(int part, int whole) =>
             whole <= 0 ? "0" : (part * 100f / whole).ToString("0", CultureInfo.InvariantCulture);
@@ -3203,14 +3262,29 @@ namespace QuestTree.QuestGraph
             var area = (b.x - a.x) * (c.z - a.z) - (c.x - a.x) * (b.z - a.z);
             if (Math.Abs(area) < 1e-6f)
             {
-                // A triangle with no area in XZ - a wall's worth of NavMesh, seen edge on. Its bounding
-                // box is one row or column of cells and marking them all is right.
-                for (var z = fromZ; z <= untilZ; z++)
+                // A triangle with no area in XZ - a wall's worth of NavMesh, seen edge on: a SEGMENT, between its
+                // two farthest corners. Walked at a quarter-cell step and only the cells it crosses marked (review
+                // F12) - its bounding box is a square of cells when the segment is diagonal.
+                var p = a; var q = b;
+                if ((c - a).sqrMagnitude > (q - p).sqrMagnitude) q = c;
+                if ((c - b).sqrMagnitude > (q - p).sqrMagnitude) { p = b; q = c; }
+
+                var length = Math.Sqrt((q.x - p.x) * (q.x - p.x) + (q.z - p.z) * (q.z - p.z));
+                var steps = Math.Max(1, (int)Math.Ceiling(length / (ReachCellMetres * 0.25)));
+                var any = false;
+
+                for (var k = 0; k <= steps; k++)
                 {
-                    for (var x = fromX; x <= untilX; x++) distance[z * cellsX + x] = 0;
+                    var t = k / (float)steps;
+                    var cx = Cell(p.x + (q.x - p.x) * t - plan.Extent.MinX, cellsX);
+                    var cz = Cell(p.z + (q.z - p.z) * t - plan.Extent.MinZ, cellsZ);
+                    if (cx < 0 || cz < 0 || cx >= cellsX || cz >= cellsZ) continue;
+
+                    distance[cz * cellsX + cx] = 0;
+                    any = true;
                 }
 
-                return true;
+                return any;
             }
 
             var inverse = 1f / area;
@@ -3319,9 +3393,13 @@ namespace QuestTree.QuestGraph
             var cellsX = plan.ReachCellsX;
             var cellsZ = plan.ReachCellsZ;
 
-            // Texture row 0 is the extent's -z edge, and so is cell row 0, so this axis needs no flip.
+            // The picture is anchored at the extent's MaxZ edge (PositionCamera: row t is at
+            // MaxZ - (HeightPx - t - 0.5) / ppm), and HeightPx / ppm overshoots the extent's depth by up to a
+            // pixel; the mask's cells are anchored at MinZ. So a row's z is taken from the MaxZ side (review
+            // F11) - anchoring it at MinZ shifted the ramp up to 1/ppm south of the NavMesh.
             var x = ((col + 0.5f) / plan.Ppm) / ReachCellMetres - 0.5f;
-            var z = ((row + 0.5f) / plan.Ppm) / ReachCellMetres - 0.5f;
+            var depth = (float)(plan.Extent.MaxZ - plan.Extent.MinZ);
+            var z = (depth - (plan.HeightPx - row - 0.5f) / plan.Ppm) / ReachCellMetres - 0.5f;
 
             var x0 = (int)Math.Floor(x);
             var z0 = (int)Math.Floor(z);
@@ -3383,17 +3461,29 @@ namespace QuestTree.QuestGraph
                 var components = new List<Component>();
                 var objectsToTurnOn = new List<GameObject>();
                 var objects = FindObjectsOfType<DisablerCullingObject>();
+                var owners = new List<int>();
+                var objectOwners = new List<int>();
 
-                foreach (var culler in objects)
+                for (var c = 0; c < objects.Length; c++)
                 {
+                    var culler = objects[c];
                     if (culler == null) continue;
 
                     _cullingObjects++;
+
+                    var before = components.Count;
                     Take(components, culler._componentsToTurnOff);
                     Take(components, culler._compsToTurnOffWhoIgnoreInversedColliders);
+                    for (var k = before; k < components.Count; k++) owners.Add(c);
+
+                    var beforeObjects = objectsToTurnOn.Count;
                     TakeObjects(objectsToTurnOn, culler._gameObjectsToTurnOff);
+                    for (var k = beforeObjects; k < objectsToTurnOn.Count; k++) objectOwners.Add(c);
                 }
 
+                _cullers = objects;
+                _cullingOwner = owners.ToArray();
+                _cullingObjectOwner = objectOwners.ToArray();
                 _culling = components.ToArray();
                 _cullingWasEnabled = new bool[_culling.Length];
                 _cullingObjectsHeld = objectsToTurnOn.ToArray();
@@ -3410,6 +3500,9 @@ namespace QuestTree.QuestGraph
                 _cullingWasEnabled = null;
                 _cullingObjectsHeld = null;
                 _cullingObjectWasActive = null;
+                _cullers = null;
+                _cullingOwner = null;
+                _cullingObjectOwner = null;
                 Plugin.LogSource?.LogWarning(
                     $"QuestTree: the scene's distance culling could not be read " +
                     $"({ex.GetType().Name}: {ex.Message}) - buildings whose roofs are switched off at this " +
@@ -3767,6 +3860,10 @@ namespace QuestTree.QuestGraph
                     for (var i = 0; i < _culling.Length; i++)
                     {
                         var component = _culling[i];
+
+                        // "Was on" first, so an entry counted before its state is read is one the release leaves
+                        // alone - never the previous floor's state (review F08).
+                        _cullingWasEnabled[i] = true;
                         _cullingHeld = i + 1;
 
                         if (component == null) continue;
@@ -3853,12 +3950,19 @@ namespace QuestTree.QuestGraph
         {
             try
             {
+                // The cullers the player is inside NOW (review F07): the mesh hold lasts a minute or two, and a
+                // player who walked into a building's collider meanwhile has had its geometry switched on by the
+                // game - putting back the hold-start snapshot would switch the roof off over their head until they
+                // crossed the collider again. Those entries are left as they are.
+                var inside = CullersHoldingPlayer();
+
                 if (_culling != null)
                 {
                     for (var i = 0; i < _cullingHeld && i < _culling.Length; i++)
                     {
                         var component = _culling[i];
                         if (component == null || _cullingWasEnabled[i]) continue;
+                        if (inside != null && _cullingOwner != null && i < _cullingOwner.Length && inside[_cullingOwner[i]]) continue;
 
                         component.SetEnabledUniversal(false);
                     }
@@ -3870,6 +3974,8 @@ namespace QuestTree.QuestGraph
                     {
                         var item = _cullingObjectsHeld[i];
                         if (item == null || _cullingObjectWasActive[i]) continue;
+                        if (inside != null && _cullingObjectOwner != null && i < _cullingObjectOwner.Length &&
+                            inside[_cullingObjectOwner[i]]) continue;
 
                         // Guarded one by one for the same reason the hold is: OnDisable runs here.
                         try
@@ -3897,6 +4003,54 @@ namespace QuestTree.QuestGraph
                 _cullingHeld = 0;
                 _cullingObjectsHeldCount = 0;
                 ReleaseWater();
+            }
+        }
+
+        /// <summary>Which culling objects the player is inside right now - by each one's own enabled colliders
+        /// (ClosestPoint where the collider supports it, its bounds where it does not) - or null when there is no
+        /// player or no cullers. Guarded: a culler that will not answer counts as "not inside", which is the
+        /// release's old behaviour.</summary>
+        private bool[] CullersHoldingPlayer()
+        {
+            try
+            {
+                var cullers = _cullers;
+                var player = _gameWorld?.MainPlayer;
+                if (cullers == null || cullers.Length == 0 || player == null) return null;
+
+                var at = player.Transform.position;
+                var inside = new bool[cullers.Length];
+
+                for (var c = 0; c < cullers.Length; c++)
+                {
+                    var culler = cullers[c];
+                    if (culler == null) continue;
+
+                    try
+                    {
+                        foreach (var collider in culler.GetComponents<Collider>())
+                        {
+                            if (collider == null || !collider.enabled || !collider.bounds.Contains(at)) continue;
+
+                            var convex = !(collider is MeshCollider mesh) || mesh.convex;
+                            if (!convex || (collider.ClosestPoint(at) - at).sqrMagnitude < 1e-6f)
+                            {
+                                inside[c] = true;
+                                break;
+                            }
+                        }
+                    }
+                    catch
+                    {
+                        // not inside, as the release has always assumed
+                    }
+                }
+
+                return inside;
+            }
+            catch
+            {
+                return null;
             }
         }
 
@@ -5853,7 +6007,7 @@ namespace QuestTree.QuestGraph
                     yMin = mesh.YMin;
                     yMax = mesh.YMax;
                     yFrom = "the mesh";
-                    return true;
+                    return Stabilise(plan, ref yMin, ref yMax, ref yFrom);
                 }
 
                 yMin = float.PositiveInfinity;
@@ -5870,7 +6024,7 @@ namespace QuestTree.QuestGraph
                 yMax += SideBandsAbove;
                 yFrom = "the bands (no mesh this capture)";
 
-                return IsFinite(yMin) && IsFinite(yMax) && yMax > yMin;
+                return IsFinite(yMin) && IsFinite(yMax) && yMax > yMin && Stabilise(plan, ref yMin, ref yMax, ref yFrom);
             }
             catch (Exception ex)
             {
@@ -5878,6 +6032,42 @@ namespace QuestTree.QuestGraph
                     $"QuestTree: no side views for {plan.Key} ({ex.GetType().Name}: {ex.Message}).");
                 return false;
             }
+        }
+
+        /// <summary>Metres the side box's y range is snapped out to.</summary>
+        private const float SideYSnapMetres = 10f;
+
+        /// <summary>
+        /// Makes the side box's y range STABLE between captures (review F13): the per-pixel side merge refuses
+        /// any change of framing (originU to 1e-4, and u.y is 0.707, so a centimetre of yMin refused it), and
+        /// the range came from this build's measured mesh. Snapped out to whole <see cref="SideYSnapMetres"/>;
+        /// and when an earlier capture's sides were framed on a range that holds this one, that range is kept
+        /// exactly, so the new sides merge into the old instead of replacing them.
+        /// </summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="yMin">The box's low y, snapped or replaced.</param>
+        /// <param name="yMax">The box's high y, snapped or replaced.</param>
+        /// <param name="yFrom">Where it came from, for the line.</param>
+        private static bool Stabilise(Plan plan, ref float yMin, ref float yMax, ref string yFrom)
+        {
+            yMin = (float)(Math.Floor(yMin / SideYSnapMetres) * SideYSnapMetres);
+            yMax = (float)(Math.Ceiling(yMax / SideYSnapMetres) * SideYSnapMetres);
+
+            var previous = plan.Previous?.Sides;
+
+            if (previous != null && previous.Count > 0)
+            {
+                var old = previous[0];
+
+                if (old != null && IsFinite(old.YMin) && IsFinite(old.YMax) && old.YMin <= yMin && old.YMax >= yMax)
+                {
+                    yMin = old.YMin;
+                    yMax = old.YMax;
+                    yFrom += ", kept at the earlier sides' range so they merge";
+                }
+            }
+
+            return yMax > yMin;
         }
 
         /// <summary>
@@ -7014,7 +7204,11 @@ namespace QuestTree.QuestGraph
                         // order the crash story depends on: the picture, then its sidecar, and the
                         // meta after every floor - see Stage and WriteSidecar.
                         Commit(Path.Combine(plan.Dir, floor.File));
-                        if (!string.IsNullOrEmpty(floor.DistFile)) Commit(Path.Combine(plan.Dir, floor.DistFile));
+                        if (!string.IsNullOrEmpty(floor.DistFile))
+                        {
+                            if (floor.DistStale) DeleteQuietly(Path.Combine(plan.Dir, floor.DistFile));
+                            else Commit(Path.Combine(plan.Dir, floor.DistFile));
+                        }
                     }
                     else
                     {
@@ -7421,11 +7615,13 @@ namespace QuestTree.QuestGraph
         private static void Add(
             List<CaptureLabel> labels, HashSet<string> seen, Plan plan, string kind, string text, Vector3 at)
         {
-            if (!seen.Add(text)) return;
-
+            // The position checks FIRST (review F14): a label rejected for its place must not claim its text
+            // and silence a later, valid one of the same name.
             if (float.IsNaN(at.x) || float.IsNaN(at.z) || float.IsInfinity(at.x) || float.IsInfinity(at.z)) return;
             if (at.x < plan.Extent.MinX || at.x > plan.Extent.MaxX) return;
             if (at.z < plan.Extent.MinZ || at.z > plan.Extent.MaxZ) return;
+
+            if (!seen.Add(text)) return;
 
             labels.Add(new CaptureLabel { Text = text, Kind = kind, X = at.x, Z = at.z });
         }
@@ -8105,6 +8301,9 @@ namespace QuestTree.QuestGraph
 
             public string DistFile;
 
+            /// <summary>The sidecar could not be staged: the old one is deleted at commit (review F09).</summary>
+            public bool DistStale;
+
             /// <summary>Whether the previous picture was merged into this one, and the three counts
             /// the log line reports: pixels this capture supplied, pixels kept from the previous
             /// capture because it saw them from closer, and pixels nothing has drawn yet.</summary>
@@ -8420,7 +8619,10 @@ namespace QuestTree.QuestGraph
         /// it takes its pictures exactly as any other capture does, but it builds the 3D mesh only for
         /// a map that has none yet - see <see cref="Plan.WantsMesh"/>. False, the default, for a
         /// campaign stop, which is a place somebody chose.</param>
-        public static bool TryStartCapture(bool automatic = false)
+        /// <param name="buildMesh">False skips the 3D mesh for this capture (a campaign stop that is not its last:
+        /// the mesh is rebuilt whole by every capture that builds one, so only the last stop's survives - review
+        /// F46). The pictures and side views are taken either way.</param>
+        public static bool TryStartCapture(bool automatic = false, bool buildMesh = true)
         {
             try
             {
@@ -8433,6 +8635,7 @@ namespace QuestTree.QuestGraph
                 // second caller in the same frame must be refused rather than fight for the camera.
                 runner._running = true;
                 runner._automatic = automatic;
+                runner._skipMesh = !buildMesh;
                 runner.StartCoroutine(runner.Run());
 
                 // The flag, not a bare true: StartCoroutine runs the coroutine's body up to its first

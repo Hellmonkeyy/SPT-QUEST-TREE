@@ -1302,6 +1302,19 @@ namespace QuestTree.UI
                 return null;
             }
 
+            // The frame size from the header BEFORE decoding: a small, very compressible file (a hostile host's
+            // copy, a hand-placed one) could otherwise become a 256 MiB - 1 GiB texture in one frame (review F49).
+            // Nothing we write is over 4096 on a side; anything past MaxPictureSide, or with no header we can
+            // read, is refused like a picture that will not decode.
+            if (!PictureSize(bytes, out var declaredWidth, out var declaredHeight) ||
+                declaredWidth > MaxPictureSide || declaredHeight > MaxPictureSide)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: the map picture '{name}' is not a PNG or JPEG of at most {MaxPictureSide} px a side " +
+                    $"({declaredWidth}x{declaredHeight}) - drawing its extent instead.");
+                return null;
+            }
+
             Texture2D texture = null;
 
             try
@@ -1390,6 +1403,31 @@ namespace QuestTree.UI
         ///
         /// An unrecognised format is counted at four, so the number in the log is never optimistic.
         /// </summary>
+        /// <summary>The longest side a map picture may have before it is decoded. See BuildRasterSprite.</summary>
+        private const int MaxPictureSide = 8192;
+
+        /// <summary>A PNG's (IHDR) or JPEG's (frame header) width and height, read without decoding; false for
+        /// anything else.</summary>
+        internal static bool PictureSize(byte[] bytes, out int width, out int height)
+        {
+            width = height = 0;
+            if (bytes == null) return false;
+
+            if (bytes.Length >= 24 && bytes[0] == 0x89 && bytes[1] == 0x50 && bytes[2] == 0x4E && bytes[3] == 0x47 &&
+                bytes[12] == (byte)'I' && bytes[13] == (byte)'H' && bytes[14] == (byte)'D' && bytes[15] == (byte)'R')
+            {
+                // Big-endian, and read as long so a width with the top bit set is not a negative "small" one.
+                long w = ((long)bytes[16] << 24) | ((long)bytes[17] << 16) | ((long)bytes[18] << 8) | bytes[19];
+                long h = ((long)bytes[20] << 24) | ((long)bytes[21] << 16) | ((long)bytes[22] << 8) | bytes[23];
+
+                width = (int)Math.Min(w, int.MaxValue);
+                height = (int)Math.Min(h, int.MaxValue);
+                return w > 0 && h > 0;
+            }
+
+            return QuestGraph.MapTransfer.JpegSize(bytes, out width, out height);
+        }
+
         private static long TextureBytes(Texture2D texture)
         {
             var bytesPerPixel = texture.format switch

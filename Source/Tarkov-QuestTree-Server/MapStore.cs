@@ -117,8 +117,12 @@ namespace QuestTreeServer
         /// about 240 MB at MapMeshFile's caps (8 bands x 4 M cells x 3 = 96 MB, 12 M vertices x 6 = 72 MB,
         /// 6 M triangles x 12 = 72 MB): those caps are sized to "no count can ask the allocator for a silly
         /// number", this one to what this mod writes. A file past it is refused with the number in the
-        /// message, so the day a map needs more, the log says exactly what to raise.</summary>
-        private const long MaxDecompressedMeshBytes = 160L * 1024 * 1024;
+        /// message, so the day a map needs more, the log says exactly what to raise.
+        ///
+        /// 224 MB since stage W (format v2): every vertex may carry a U and a V, two more uint16s - up to
+        /// 12,000,000 x 4 = 48 MB more at the format's vertex cap - so the buildings' worst case is 156 MB
+        /// (72 + 48 of vertices, 36 of indices) and 64 MB is left for the relief grids and the headers.</summary>
+        private const long MaxDecompressedMeshBytes = 224L * 1024 * 1024;
 
         /// <summary>The scratch buffer size for one header walk, shared by every read in it. 64 KiB
         /// divides by both 2 and 4, so a chunk never splits a uint16 or a uint32 element.</summary>
@@ -127,8 +131,13 @@ namespace QuestTreeServer
         /// <summary>The mesh format this server stores, and the only one it will take: the client's
         /// MapMeshFile.Version. NOT a reference to that class - the server cannot see the Unity
         /// assembly - so this is the one number both halves must be changed for together, which is
-        /// why the magic below carries the same digit and is checked as well.</summary>
-        private const int MeshVersion = 1;
+        /// why the magic below carries the same digit and is checked as well. 2 since stage W: the header
+        /// gained the atlas page count and every building its UVs and atlas ranges - a v1 file is refused by
+        /// name, since no stage W client reads one.</summary>
+        private const int MeshVersion = 2;
+
+        /// <summary>MapMeshFile.MaxRangesPerBuilding: the most atlas ranges one building may carry.</summary>
+        private const int MaxMeshRangesPerBuilding = 64;
 
         /// <summary>The four bytes a mesh file starts with, inside the deflate stream
         /// (MapMeshFile.Magic).</summary>
@@ -265,8 +274,13 @@ namespace QuestTreeServer
         /// <summary>What a stored picture's file name may be, checked on the way back IN from disk.
         /// The name is written by this class, so a name that fails this came from a hand-edited meta
         /// or a set copied in from elsewhere - and it is about to be joined onto a folder path.</summary>
+        /// The stem is up to 76 characters since the review (F40): a key may be 64 (ZoneStore.SafeName) and a
+        /// floor's name is the key, a hyphen and its level - up to eleven characters for an int. At 60 a
+        /// 59-character modded map key was stored, served, and then skipped whole at the next boot. The
+        /// mesh, side and page rules below take the 64-character key plus their fixed suffix for the same
+        /// reason.
         private static readonly Regex StoredFileName =
-            new(@"^[A-Za-z0-9_\-]{1,60}\.(jpg|png)$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+            new(@"^[A-Za-z0-9_\-]{1,76}\.(jpg|png)$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
         /// <summary>What a stored MESH file's name may be, checked on the way back in from disk exactly
         /// as <see cref="StoredFileName"/> is, and SEPARATE from it on purpose: a floor that named a
@@ -274,19 +288,19 @@ namespace QuestTreeServer
         /// shape is the client's MapMeshFile.FileNameFor - <c>&lt;key&gt;-mesh.bin</c> - which is what
         /// both halves and package.ps1's layout gate spell.</summary>
         private static readonly Regex StoredMeshFileName =
-            new(@"^[A-Za-z0-9_\-]{1,60}-mesh\.bin$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+            new(@"^[A-Za-z0-9_\-]{1,64}-mesh\.bin$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
         /// <summary>What a stored SIDE picture's file name may be - <c>&lt;key&gt;-side-&lt;dir&gt;.jpg</c>, the
         /// name <see cref="SideName"/> writes and package.ps1's gates admit - checked on the way back in
         /// from disk like the others. JPEG only: a side is always uploaded as one.</summary>
         private static readonly Regex StoredSideFileName =
-            new(@"^[A-Za-z0-9_\-]{1,60}-side-[NSEW]\.jpg$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+            new(@"^[A-Za-z0-9_\-]{1,64}-side-[NSEW]\.jpg$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
         /// <summary>What a stored ATLAS page's file name may be - <c>&lt;key&gt;-atlas-&lt;n&gt;.jpg</c>, n 0 to 7, the
         /// name <see cref="AtlasName"/> writes and package.ps1's gates admit - checked on the way back in from
         /// disk like the others.</summary>
         private static readonly Regex StoredAtlasFileName =
-            new(@"^[A-Za-z0-9_\-]{1,60}-atlas-[0-7]\.jpg$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+            new(@"^[A-Za-z0-9_\-]{1,64}-atlas-[0-7]\.jpg$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
         /// <summary>A sha256 as this store will store one: 64 hex digits, lower case on the way out.
         /// Checked on the way in because it is printed into log lines and written into a served
@@ -537,6 +551,13 @@ namespace QuestTreeServer
                 // trusts it writes whatever it was sent under a name every client will try to decode.
                 if (!MagicMatches(format, bytes))
                     return Reject(key, $"the bytes do not start as a {format} picture does");
+
+                // The picture's OWN size, from its header - review F49: the meta's numbers are capped, the
+                // bytes were not, and a small file can declare an enormous picture that every client would
+                // then try to decode. The client refuses past 8192 px too (DynamicMapsLibrary).
+                var sizeProblem = PictureSizeProblem(format, bytes);
+
+                if (sizeProblem != null) return Reject(key, $"the picture {sizeProblem}");
             }
 
             var captured = ParseStamp(meta.CapturedAt);
@@ -1428,7 +1449,6 @@ namespace QuestTreeServer
                         $"{staged.Mesh.Bytes:N0}");
 
                 var paths = Enumerable.Range(0, parts).Select(i => MeshPartPath(staging, claimed, i, parts)).ToArray();
-                var mine = SizeOf(paths[request.Part]);
                 var others = paths.Where((_, i) => i != request.Part).Sum(SizeOf);
 
                 // The parts may never add up to more than the whole they claim to be - which is also what
@@ -1619,6 +1639,8 @@ namespace QuestTreeServer
 
             dto.Map = key;
 
+            byte[]? meshBytes = null;
+
             lock (_lock)
             {
                 if (!_loaded) Load();
@@ -1633,12 +1655,15 @@ namespace QuestTreeServer
 
                 try
                 {
-                    var bytes = System.IO.File.ReadAllBytes(System.IO.Path.Combine(Folder, key, mesh.File));
+                    // The READ stays under the lock - it must not meet CommitSet replacing the file, which
+                    // Windows refuses while a handle is open - but the base64 of up to 48 MB (a 64 M-character
+                    // string) is built after it is released (review F39): every other route, the index and
+                    // image routes the game calls on its main thread among them, waits on this lock.
+                    meshBytes = System.IO.File.ReadAllBytes(System.IO.Path.Combine(Folder, key, mesh.File));
 
                     dto.Stamp = set.Stamp;
                     dto.Sha256 = mesh.Sha256;
-                    dto.Bytes = bytes.Length;
-                    dto.DataBase64 = Convert.ToBase64String(bytes);
+                    dto.Bytes = meshBytes.Length;
                 }
                 catch (Exception ex)
                 {
@@ -1651,8 +1676,11 @@ namespace QuestTreeServer
                     dto.Sha256 = "";
                     dto.Bytes = 0;
                     dto.DataBase64 = "";
+                    meshBytes = null;
                 }
             }
+
+            if (meshBytes != null) dto.DataBase64 = Convert.ToBase64String(meshBytes);
 
             return dto;
         }
@@ -2094,7 +2122,7 @@ namespace QuestTreeServer
                 // exactly what the disk should not keep once a newer set is served. And the stale sweep over
                 // EVERY map's staging, once per completed set - cheap, and the one moment a host that is never
                 // restarted is sure to reach.
-                DropStaging(key, committing: staging);
+                DropStaging(key, committing: staging, committedAt: captured);
                 SweepStaleStagingIfDue(now: true);
 
                 _logger.Info(
@@ -2779,6 +2807,15 @@ namespace QuestTreeServer
 
             if (!MagicMatches("jpg", bytes)) return "its bytes do not start as a JPEG does";
 
+            // The header's own size - see PictureSizeProblem (review F49).
+            var sizeProblem = PictureSizeProblem("jpg", bytes);
+
+            if (sizeProblem != null)
+            {
+                bytes = Array.Empty<byte>();
+                return sizeProblem;
+            }
+
             return null;
         }
 
@@ -3175,6 +3212,48 @@ namespace QuestTreeServer
         /// <summary>A page's name in the map's folder - this server's own, never the client's.</summary>
         private static string AtlasName(string key, int page) => $"{key}-atlas-{page.ToString(CultureInfo.InvariantCulture)}.jpg";
 
+        /// <summary>The most pixels a stored picture may have on a side, READ FROM ITS HEADER - the client's own
+        /// ceiling on what it will decode (DynamicMapsLibrary, review F49). Twice MaxFloorPixels, so it never
+        /// bites a picture the meta could describe; it exists for the bytes, which nothing else measured.</summary>
+        private const int MaxHeaderPixels = 8192;
+
+        /// <summary>Why a picture's header is not one this host will store - unreadable, or past
+        /// <see cref="MaxHeaderPixels"/> a side, with the numbers - or null. A JPEG by its frame header, a PNG
+        /// by its IHDR. Decodes nothing.</summary>
+        private static string? PictureSizeProblem(string format, byte[] bytes)
+        {
+            int width, height;
+
+            var read = format == "png" ? PngSize(bytes, out width, out height) : JpegSize(bytes, out width, out height);
+
+            if (!read) return $"has a {(format == "png" ? "PNG" : "JPEG")} header whose size could not be read";
+
+            if (width > MaxHeaderPixels || height > MaxHeaderPixels)
+                return $"is {width}x{height} px by its header, past the {MaxHeaderPixels} px a side a picture may be";
+
+            return null;
+        }
+
+        /// <summary>A PNG's width and height from its IHDR chunk, which the format puts first: the 8-byte
+        /// signature, a 4-byte length of 13, "IHDR", then width and height as big-endian uint32.</summary>
+        private static bool PngSize(byte[] data, out int width, out int height)
+        {
+            width = height = 0;
+
+            if (data == null || data.Length < 24) return false;
+
+            if (data[12] != (byte)'I' || data[13] != (byte)'H' || data[14] != (byte)'D' || data[15] != (byte)'R') return false;
+
+            var w = ((uint)data[16] << 24) | ((uint)data[17] << 16) | ((uint)data[18] << 8) | data[19];
+            var h = ((uint)data[20] << 24) | ((uint)data[21] << 16) | ((uint)data[22] << 8) | data[23];
+
+            if (w == 0 || h == 0 || w > int.MaxValue || h > int.MaxValue) return false;
+
+            width = (int)w;
+            height = (int)h;
+            return true;
+        }
+
         /// <summary>A JPEG's width and height from its frame header, or false - the client's
         /// MapTransfer.JpegSize, the same marker walk tools/check-maps-pack.py makes, decoding nothing.</summary>
         private static bool JpegSize(byte[] data, out int width, out int height)
@@ -3224,9 +3303,11 @@ namespace QuestTreeServer
         /// assembly, which this half cannot reference, so the layout is written down twice on purpose
         /// (see <see cref="MeshVersion"/>). The layout, little-endian, inside ONE raw deflate block
         /// starting at byte 0 of the file: magic "QTM1", int32 version, 4 x float64 extent, 2 x float32
-        /// y range, int32 band count; per band int32 level, float32 cell metres, int32 width, int32
-        /// height, uint16[w*h] heights, uint8[w*h] distances; int32 building count; per building int32
-        /// key, int32 level, int32 vertex count, 3 x uint16[v], int32 index count, uint32[i] indices.
+        /// y range, int32 atlas page count (v2, 0..8), int32 band count; per band int32 level, float32
+        /// cell metres, int32 width, int32 height, uint16[w*h] heights, uint8[w*h] distances; int32
+        /// building count; per building int32 key, int32 level, int32 vertex count, 3 x uint16[v], int32
+        /// index count, uint32[i] indices, then (v2) int32 uv count (0 or the vertex count), uint16[uv] U,
+        /// uint16[uv] V, int32 range count (0..64) and per range int32 page, int32 first, int32 count.
         ///
         /// WHY IT IS WORTH DOING AT ALL, when the client checks the same things again before it draws:
         /// this host hands the file to every other client in the group. A file that no reader will take
@@ -3297,6 +3378,15 @@ namespace QuestTreeServer
                 var maxZ = reader.ReadDouble();
                 var yMin = reader.ReadSingle();
                 var yMax = reader.ReadSingle();
+
+                // v2: the atlas page count, which every building's ranges are held to below.
+                var atlasPages = reader.ReadInt32();
+
+                if (atlasPages < 0 || atlasPages > MaxAtlasPages)
+                {
+                    problem = $"the mesh claims {atlasPages:N0} atlas pages, past the {MaxAtlasPages} a map may have";
+                    return false;
+                }
 
                 if (!InWorld(minX) || !InWorld(minZ) || !InWorld(maxX) || !InWorld(maxZ) ||
                     minX >= maxX || minZ >= maxZ)
@@ -3455,6 +3545,60 @@ namespace QuestTreeServer
                         problem = $"the mesh's building {i} has index {badIndex:N0} pointing at vertex " +
                                   $"{badValue:N0} of {vertexCount:N0}";
                         return false;
+                    }
+
+                    // v2: the UVs - none, or exactly one U and one V per vertex (MapMeshFile.CheckAtlas).
+                    // Any sixteen-bit value is a texture coordinate, so they are skipped, in full.
+                    var uvCount = reader.ReadInt32();
+
+                    if (uvCount != 0 && uvCount != vertexCount)
+                    {
+                        problem = $"the mesh's building {i} claims {uvCount:N0} UVs for {vertexCount:N0} vertices";
+                        return false;
+                    }
+
+                    Skip(bounded, (long)uvCount * 4, buffer);   // uint16 U[uv], uint16 V[uv]
+
+                    // v2: the atlas ranges - the reader's own rules, so a file every client would throw away
+                    // is refused here: at most 64, only with UVs, each on a page the file has, each a positive
+                    // whole number of triangles inside this building's indices, ascending, not overlapping.
+                    var rangeCount = reader.ReadInt32();
+
+                    if (rangeCount < 0 || rangeCount > MaxMeshRangesPerBuilding)
+                    {
+                        problem = $"the mesh's building {i} claims {rangeCount:N0} atlas ranges, past the " +
+                                  $"{MaxMeshRangesPerBuilding} one building may have";
+                        return false;
+                    }
+
+                    if (rangeCount > 0 && uvCount == 0)
+                    {
+                        problem = $"the mesh's building {i} has atlas ranges and no UVs";
+                        return false;
+                    }
+
+                    var end = 0L;
+
+                    for (var k = 0; k < rangeCount; k++)
+                    {
+                        var page = reader.ReadInt32();
+                        var first = reader.ReadInt32();
+                        var count = reader.ReadInt32();
+
+                        if (page < 0 || page >= atlasPages)
+                        {
+                            problem = $"the mesh's building {i} range {k} is on atlas page {page}, and the file has {atlasPages}";
+                            return false;
+                        }
+
+                        if (first < end || first % 3 != 0 || count <= 0 || count % 3 != 0 || (long)first + count > indexCount)
+                        {
+                            problem = $"the mesh's building {i} range {k} is indices {first}+{count} of {indexCount} " +
+                                      $"(after {end}) - ranges are ascending whole triangles inside the building";
+                            return false;
+                        }
+
+                        end = (long)first + count;
                     }
                 }
 
@@ -3960,7 +4104,13 @@ namespace QuestTreeServer
         /// <see cref="_completing"/> by that very commit, and the one folder this must NOT skip for being
         /// claimed. Skipping it too was a bug the harness caught at once: every completed set left its own
         /// staging behind.</param>
-        private void DropStaging(string key, string? committing = null)
+        /// <param name="committedAt">The capture instant of the set just committed. A staging folder whose
+        /// staged meta is NEWER than it is kept (review F36): on a shared host two players can capture one map
+        /// seconds apart, and the older capture completing first used to delete the newer one's half-finished
+        /// upload - its later posts then restaged a single floor and its capture never reached the host. The
+        /// newer staging completes on its own posts or expires with the day-old sweep. MinValue drops them
+        /// all, as before.</param>
+        private void DropStaging(string key, string? committing = null, DateTime committedAt = default)
         {
             if (!System.IO.Directory.Exists(IncomingFolder)) return;
 
@@ -3978,7 +4128,32 @@ namespace QuestTreeServer
                 if (_completing.Contains(dir) &&
                     !string.Equals(dir, committing, StringComparison.OrdinalIgnoreCase)) continue;
 
+                // A newer capture's upload in progress is not this set's leftovers - see committedAt. A folder
+                // whose staged meta cannot be read is treated as leftovers, as every folder was before.
+                if (committedAt != default && !string.Equals(dir, committing, StringComparison.OrdinalIgnoreCase) &&
+                    StagedCapturedAt(dir) > committedAt) continue;
+
                 try { System.IO.Directory.Delete(dir, recursive: true); } catch { /* it will be reused or replaced */ }
+            }
+        }
+
+        /// <summary>The capture instant a staging folder's meta names, or MinValue when it has none that can be
+        /// read. A light read - the staged meta is a few kilobytes - for <see cref="DropStaging"/>.</summary>
+        private static DateTime StagedCapturedAt(string staging)
+        {
+            try
+            {
+                var path = System.IO.Path.Combine(staging, StagedMetaName);
+
+                if (!System.IO.File.Exists(path)) return DateTime.MinValue;
+
+                var meta = JsonSerializer.Deserialize<MapCaptureMetaDto>(System.IO.File.ReadAllBytes(path), FileOptions);
+
+                return ParseStamp(meta?.CapturedAt);
+            }
+            catch
+            {
+                return DateTime.MinValue;
             }
         }
 

@@ -24,7 +24,12 @@ containing `EscapeFromTarkov.exe`) and let them merge. You should end up with:
 [SPT folder]\SPT_Runtime\user\mods\QuestTree\cache\weapon-builds.json
 [SPT folder]\SPT_Runtime\user\mods\QuestTree\maps\<map>\*.jpg
 [SPT folder]\SPT_Runtime\user\mods\QuestTree\maps\<map>\<map>.map.json
+[SPT folder]\SPT_Runtime\user\mods\QuestTree\maps\<map>\<map>-mesh.bin
 ```
+
+A map's `*.jpg` are its floors and, for a map in 3D, its side pictures (`<map>-side-<N|S|E|W>.jpg`) and
+atlas pages (`<map>-atlas-<0..7>.jpg`); `<map>-mesh.bin` is its 3D model. A map without them draws
+flat.
 
 The archive also carries this README and the release notes beside those two folders; they are for
 reading, not for installing.

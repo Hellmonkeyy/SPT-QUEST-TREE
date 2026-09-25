@@ -218,8 +218,14 @@ namespace QuestTree.QuestGraph
         /// line.</summary>
         private const long DecimatorBytesPerTriangle = 480;
 
-        /// <summary>Milliseconds a cluster flight may take.</summary>
+        /// <summary>Milliseconds a cluster flight may take at the least.</summary>
         internal const double ClusterMs = 200d;
+
+        /// <summary>A cluster flight's cap for a source of this size (review F20): at least ClusterMs, and 2
+        /// microseconds a source triangle a pass for several passes above it - a flat 200 ms dropped a 600 k
+        /// source whose first pass did not fit, which "never dropped" promised it would not.</summary>
+        /// <param name="triangles">The source's triangles.</param>
+        internal static double ClusterCapMs(long triangles) => Math.Max(ClusterMs, triangles * 0.002 * 6);
 
         /// <summary>Seconds past the hard cap the queued coarse levels are still read before they are
         /// abandoned - the bound on the post-cap drain.</summary>
@@ -270,7 +276,7 @@ namespace QuestTree.QuestGraph
         /// <summary>A static-batch member's UVs are read when its own vertex range is at least 1/this of the batch.</summary>
         private const int StaticBatchUvShare = 4;
 
-        private const int AtlasRepeatMax = 4;
+        private const int AtlasRepeatMax = 8;
         private const int AtlasRepeatPixels = 1024;
         /// <summary>The gutter round every atlas tile, filled with copies of the tile's edge texels. 16 px, not 2
         /// (viewer review): the pages are loaded WITH mipmaps, and a gutter of 2^k px keeps a tile's own colour at
@@ -1094,6 +1100,7 @@ namespace QuestTree.QuestGraph
             internal Stopwatch AtlasClock;
             internal AtlasMapped[] Mapped;
             internal bool AtlasAbandoned;
+            internal string AtlasAbandonWhy;
             internal bool AtlasApplied;
             internal double AtlasSeconds;
             internal int TransparentMaterials;
@@ -1101,6 +1108,10 @@ namespace QuestTree.QuestGraph
             internal int FlatUses;
             internal int TiledUses;
             internal int TilesUnplaced;
+            internal int FlatNoTexture;
+            internal int FlatSpan16;
+            internal int FlatSpan64;
+            internal int FlatSpanMore;
             internal int SeamsRelaxed;
             internal int ClusteredTextureless;
             internal int TilesLate;
@@ -1144,6 +1155,7 @@ namespace QuestTree.QuestGraph
             /// <summary>Paths of the first hidden renderers skipped (M2), and static-batch members whose UVs were
             /// not read (M5).</summary>
             internal readonly List<string> HiddenSamples = new List<string>();
+            internal readonly Dictionary<string, int> HiddenRoots = new Dictionary<string, int>();
 
             internal int StaticBatchUvSkipped;
 
@@ -2118,8 +2130,6 @@ namespace QuestTree.QuestGraph
                 if ((mask & (1 << layer)) == 0) continue;
                 if ((notBuilding & (1 << layer)) != 0) continue;
 
-                if (Invisible(job, renderer)) continue;
-
                 var bounds = renderer.bounds;
                 var size = bounds.size;
 
@@ -2134,6 +2144,10 @@ namespace QuestTree.QuestGraph
                 var centre = bounds.center;
                 if (!IsFinite(centre.x) || !IsFinite(centre.y) || !IsFinite(centre.z)) continue;
                 if (centre.x < minX || centre.x > maxX || centre.z < minZ || centre.z > maxZ) continue;
+
+                // AFTER the size and extent tests, so the hidden counts are of renderers that would otherwise
+                // have been buildings - not of every pooled weapon part in the scene.
+                if (Invisible(job, renderer)) continue;
 
                 var filter = renderer.GetComponent<MeshFilter>();
                 var mesh = filter != null ? filter.sharedMesh : null;
@@ -2179,6 +2193,10 @@ namespace QuestTree.QuestGraph
                 // would show here as real geometry.
                 if (job.HiddenSamples.Count < HiddenSampleCount)
                     job.HiddenSamples.Add(HierarchyPath(renderer.transform));
+
+                // by the top of its hierarchy - the scene group it belongs to
+                var root = renderer.transform.root != null ? renderer.transform.root.name : "?";
+                job.HiddenRoots[root] = job.HiddenRoots.TryGetValue(root, out var seen) ? seen + 1 : 1;
 
                 return true;
             }
@@ -2506,21 +2524,28 @@ namespace QuestTree.QuestGraph
         /// shader.</summary>
         /// <param name="renderers">The level's renderers.</param>
         /// <param name="impostor">Whether any material's shader is an impostor.</param>
-        private static long LevelTriangles(Renderer[] renderers, out bool impostor)
+        private static long LevelTriangles(Renderer[] renderers, out bool impostor) =>
+            LevelTriangles(renderers, out impostor, out _);
+
+        /// <summary>A level's triangles - each renderer's OWN share (review F16: a static-batch member's mesh is
+        /// the whole batch, and counting it whole counted the batch once per member) - whether any material is an
+        /// impostor, and whether the level has any renderer at all. The one place both StateOf and ChooseLevel
+        /// count a level (review F05).</summary>
+        /// <param name="renderers">The level's renderers.</param>
+        /// <param name="impostor">Whether any material's shader is an impostor.</param>
+        /// <param name="any">Whether any renderer is non-null.</param>
+        private static long LevelTriangles(Renderer[] renderers, out bool impostor, out bool any)
         {
             impostor = false;
+            any = false;
             var triangles = 0L;
 
             foreach (var renderer in renderers)
             {
                 if (renderer == null) continue;
 
-                var filter = renderer.GetComponent<MeshFilter>();
-                var mesh = filter != null ? filter.sharedMesh : null;
-
-                if (mesh != null)
-                    for (var s = 0; s < mesh.subMeshCount; s++)
-                        if (mesh.GetTopology(s) == MeshTopology.Triangles) triangles += mesh.GetIndexCount(s) / 3;
+                any = true;
+                triangles += OwnTriangles(renderer);
 
                 var materials = renderer.sharedMaterials;
 
@@ -2534,6 +2559,35 @@ namespace QuestTree.QuestGraph
                             impostor = true;
                     }
             }
+
+            return triangles;
+        }
+
+        /// <summary>The triangles a renderer itself draws: its submeshes, or - for a static-batch member - only its
+        /// share of the batch's combined mesh, subMeshStartIndex onwards, one submesh per material (the same range
+        /// Placement reads), and 0 when that share cannot be told.</summary>
+        /// <param name="renderer">The renderer.</param>
+        private static long OwnTriangles(Renderer renderer)
+        {
+            var filter = renderer.GetComponent<MeshFilter>();
+            var mesh = filter != null ? filter.sharedMesh : null;
+            if (mesh == null) return 0L;
+
+            int first = 0, end = mesh.subMeshCount;
+
+            if (renderer is MeshRenderer batched && batched.isPartOfStaticBatch)
+            {
+                var materials = renderer.sharedMaterials;
+                first = batched.subMeshStartIndex;
+                var count = materials == null ? 0 : materials.Length;
+
+                if (first < 0 || first >= mesh.subMeshCount || count <= 0) return 0L;
+                end = Math.Min(mesh.subMeshCount, first + count);
+            }
+
+            var triangles = 0L;
+            for (var s = first; s < end; s++)
+                if (mesh.GetTopology(s) == MeshTopology.Triangles) triangles += mesh.GetIndexCount(s) / 3;
 
             return triangles;
         }
@@ -2733,21 +2787,32 @@ namespace QuestTree.QuestGraph
                 (state.Detail != null && state.Detail.SetEquals(state.Coarse)))
                 return false;
 
-            job.FellBack++;
-            state.UsingCoarse = true;
+            // The failing renderer is itself on the coarse level (the "shared renderer" authoring, LOD0 = {body,
+            // details}, LOD1 = {body}): it is claimed and will not be read again, so switching would lose it and
+            // every detail sibling with it. The caller stores or clusters this source instead (review F01).
+            if (state.Coarse != null && state.Coarse.Contains(candidate.Renderer)) return false;
+
+            // The coarse candidates first; the group switches, and FellBack counts, only when one survives.
+            var coarse = new List<Candidate>();
 
             foreach (var renderer in state.CoarseList)
             {
                 if (renderer == null || job.Claimed.Contains(renderer)) continue;
 
-                Candidate coarse = null;
-                Step(job, "a coarse level", () => coarse = MakeCandidate(job, renderer));
-                if (coarse == null) continue;
+                Candidate made = null;
+                Step(job, "a coarse level", () => made = MakeCandidate(job, renderer));
+                if (made == null) continue;
 
-                coarse.Group = candidate.Group;
-                coarse.Coarse = true;
-                job.Extra.Enqueue(coarse);
+                made.Group = candidate.Group;
+                made.Coarse = true;
+                coarse.Add(made);
             }
+
+            if (coarse.Count == 0) return false;
+
+            job.FellBack++;
+            state.UsingCoarse = true;
+            foreach (var made in coarse) job.Extra.Enqueue(made);
 
             return true;
         }
@@ -2824,36 +2889,7 @@ namespace QuestTree.QuestGraph
                 var renderers = lods[level].renderers;
                 if (renderers == null) continue;
 
-                var triangles = 0L;
-                var impostor = false;
-                var any = false;
-
-                foreach (var renderer in renderers)
-                {
-                    if (renderer == null) continue;
-
-                    any = true;
-
-                    var filter = renderer.GetComponent<MeshFilter>();
-                    var mesh = filter != null ? filter.sharedMesh : null;
-
-                    if (mesh != null)
-                        for (var s = 0; s < mesh.subMeshCount; s++)
-                            if (mesh.GetTopology(s) == MeshTopology.Triangles)
-                                triangles += mesh.GetIndexCount(s) / 3;
-
-                    var materials = renderer.sharedMaterials;
-
-                    if (materials != null)
-                        foreach (var material in materials)
-                        {
-                            var shader = material != null && material.shader != null ? material.shader.name : null;
-
-                            if (!string.IsNullOrEmpty(shader) &&
-                                shader.IndexOf(ImpostorShaderMark, StringComparison.OrdinalIgnoreCase) >= 0)
-                                impostor = true;
-                        }
-                }
+                var triangles = LevelTriangles(renderers, out var impostor, out var any);
 
                 if (!any) continue;
 
@@ -3001,7 +3037,8 @@ namespace QuestTree.QuestGraph
                 Bytes = (world.P.Length + world.T.Length) * 4L + world.Triangles * WorkerBytesPerTriangle,
                 Task = Task.Run(() =>
                 {
-                    var result = MeshDecimator.Cluster(world.P, world.T, limit, ClusterMs, world.UV, VertexMaterials(world));
+                    var result = MeshDecimator.Cluster(world.P, world.T, limit, ClusterCapMs(world.Triangles), world.UV,
+                        VertexMaterials(world));
                     var outcome = new Outcome { SourceTriangles = world.Triangles, TimedOut = result.TimedOut };
 
                     if (!result.TimedOut && result.Triangles != null && result.Triangles.Length >= 3)
@@ -3121,19 +3158,25 @@ namespace QuestTree.QuestGraph
                         job.SourceDecimated += outcome.SourceTriangles;
                     }
 
-                    // L2: refused for its vertices - fewer vertices is exactly what the cluster makes.
-                    if (code == RefusedVertices)
-                    {
-                        settled = false;
-                        Retake(job, limit);
-                        if (!Cluster(outcome.Mesh)) job.Unstored++;
-                    }
+                    // A refusal here (the vertex caps, the building cap) is a plain refusal (review F18): the vertex
+                    // caps cannot trip for a mesh inside its limit - every stored vertex is used, so a building is
+                    // at most 3 x 75 k vertices and the file at most 9 M of 12 M - and clustering a mesh already
+                    // inside its limit would hand back the same mesh.
+                    if (code != Stored) job.Unstored++;
 
                     return;
                 }
 
                 // Nothing to store at all - no geometry, no transform that fits: not a decimation failure.
                 if (outcome != null && outcome.Source == null) return;
+
+                // A worker that threw is counted as Failed and nothing else (review F04): its coarse level is still
+                // tried, but it is not a second time "a building with no path left".
+                if (outcome == null)
+                {
+                    EnqueueCoarse(job, candidate);
+                    return;
+                }
 
                 var source = outcome?.Source;
                 var fits = source != null && source.Triangles - (long)limit <= job.Ledger.Headroom;
@@ -3149,12 +3192,6 @@ namespace QuestTree.QuestGraph
                         var code = Store(source);
 
                         if (code == Stored) job.StoredUndecimated++;
-                        else if (code == RefusedVertices)
-                        {
-                            settled = false;
-                            Retake(job, limit);
-                            if (!Cluster(source)) job.Unstored++;
-                        }
                         else job.Unstored++;
 
                         return;
@@ -4330,7 +4367,11 @@ namespace QuestTree.QuestGraph
                         job.FrameClock.Restart();
                     }
 
-                    if (busy[b] != null && busy[b].IsFaulted) yield break;
+                    if (busy[b] != null && busy[b].IsFaulted)
+                    {
+                        job.AtlasAbandonWhy = $"page {page - 2}'s encode failed ({Describe(busy[b].Exception)})";
+                        yield break;
+                    }
 
                     var pixels = buffers[b];
                     var tiles = 0;
@@ -4403,30 +4444,22 @@ namespace QuestTree.QuestGraph
 
                     // handed to a worker: streamed to its staged file, hashed, then the buffer cleared for reuse
                     var path = job.Request.AtlasPartPath?.Invoke(page);
-                    if (string.IsNullOrEmpty(path)) yield break;
-
-                    var buffer = pixels;
-                    var encode = Task.Run(() =>
+                    if (string.IsNullOrEmpty(path))
                     {
-                        try
-                        {
-                            using (var stream = new System.IO.FileStream(path, System.IO.FileMode.Create, System.IO.FileAccess.Write,
-                                       System.IO.FileShare.None, 1 << 20))
-                                return AtlasPng.EncodeTo(stream, buffer, size, size);
-                        }
-                        finally
-                        {
-                            Array.Clear(buffer, 0, buffer.Length);
-                        }
-                    });
+                        job.AtlasAbandonWhy = $"the capture gave no file for page {page}";
+                        yield break;
+                    }
+
+                    // Started through a METHOD, so the worker's closure holds that method's own parameters. The
+                    // first version captured this iterator's locals and then nulled them "to let the 64 MB go":
+                    // an iterator's locals are fields the lambda shares, so the worker read a null buffer, every
+                    // encode faulted, and no page ever reached the disk (Customs, 2026-09-25: "0 of 2 page(s)
+                    // encoded and staged", then "abandoned - 2 page(s) dropped" once a third page waited on the
+                    // faulted buffer).
+                    var encode = StartEncode(path, pixels, size);
 
                     busy[b] = encode;
                     jobs.Add(new AtlasPageJob { Page = page, Tiles = tiles, PartPath = path, Encode = encode });
-
-                    // Nothing here keeps the 64 MB alive past the worker's own reference (lambda hoisting would).
-                    buffer = null;
-                    encode = null;
-                    pixels = null;
                 }
 
                 buffers = null;
@@ -4450,6 +4483,7 @@ namespace QuestTree.QuestGraph
                 // 5. done inside the cap: the ranges go in, the page count with them
                 Step(job, "the atlas's ranges", () => ApplyAtlas(job));
                 completed = job.AtlasApplied;
+                if (!completed) job.AtlasAbandonWhy = "the ranges could not be written (the warning above names why)";
                 if (completed) result.AtlasPages = jobs;
             }
             finally
@@ -4460,10 +4494,61 @@ namespace QuestTree.QuestGraph
             }
         }
 
-        /// <summary>Whether the atlas phase is past its cap (counted once).</summary>
+        /// <summary>Whether the atlas phase must stop: the capture's abort, or the atlas's OWN clock - started
+        /// when BuildAtlas starts, not with the mesh phase - past <see cref="AtlasSecondsCap"/>. Records why.</summary>
         /// <param name="job">The build.</param>
-        private static bool OverCap(Job job) =>
-            job.Request.Abort || (job.AtlasClock != null && job.AtlasClock.Elapsed.TotalSeconds > AtlasSecondsCap);
+        private static bool OverCap(Job job)
+        {
+            if (job.Request.Abort)
+            {
+                job.AtlasAbandonWhy = "the capture's watchdog stopped the build";
+                return true;
+            }
+
+            var seconds = job.AtlasClock?.Elapsed.TotalSeconds ?? 0d;
+            if (!PastAtlasCap(seconds)) return false;
+
+            job.AtlasAbandonWhy = $"past the {N(AtlasSecondsCap)} s atlas cap ({seconds.ToString("0.0", CultureInfo.InvariantCulture)} s on the atlas's own clock)";
+            return true;
+        }
+
+        /// <summary>The cap rule on its own, for the harness: seconds on the atlas's own clock past the cap.</summary>
+        /// <param name="atlasSeconds">Seconds since the atlas phase started.</param>
+        internal static bool PastAtlasCap(double atlasSeconds) => atlasSeconds > AtlasSecondsCap;
+
+        /// <summary>Starts one page's encode on a worker: streamed to <paramref name="path"/>, hashed, then the
+        /// buffer cleared for reuse. A method, so the closure holds these parameters and nothing the caller does
+        /// to its own variables afterwards can reach the worker.</summary>
+        /// <param name="path">The .part file.</param>
+        /// <param name="buffer">The page's pixels.</param>
+        /// <param name="size">The page's side.</param>
+        internal static Task<AtlasPng.Encoded> StartEncode(string path, byte[] buffer, int size) =>
+            Task.Run(() =>
+            {
+                try
+                {
+                    using (var stream = new System.IO.FileStream(path, System.IO.FileMode.Create, System.IO.FileAccess.Write,
+                               System.IO.FileShare.None, 1 << 20))
+                        return AtlasPng.EncodeTo(stream, buffer, size, size);
+                }
+                finally
+                {
+                    Array.Clear(buffer, 0, buffer.Length);
+                }
+            });
+
+        /// <summary>An exception as "Type: message at first frame", for a log line.</summary>
+        /// <param name="ex">The exception (an AggregateException is unwrapped).</param>
+        internal static string Describe(Exception ex)
+        {
+            if (ex == null) return "no exception recorded";
+
+            var inner = ex is AggregateException aggregate && aggregate.InnerException != null ? aggregate.GetBaseException() : ex;
+            var stack = inner.StackTrace ?? "";
+            var first = stack.Split('\n')[0].Trim();
+
+            return $"{inner.GetType().Name}: {inner.Message}" + (first.Length > 0 ? $" {first}" : "");
+        }
 
         /// <summary>An abandoned atlas: no ranges, the page count 0, every page file deleted as its encode ends
         /// (an encode still writing cannot be stopped, so its file is removed when it finishes), and one line.</summary>
@@ -4495,9 +4580,9 @@ namespace QuestTree.QuestGraph
             }
 
             Plugin.LogSource?.LogWarning(
-                $"QuestTree: the texture atlas of {job.Request.Map} was abandoned - {N(jobs.Count)} page(s) dropped " +
-                $"({(job.Request.Abort ? "the capture's watchdog stopped it" : $"past the {N(AtlasSecondsCap)} s atlas cap or a failure")}, " +
-                $"{job.AtlasClock?.Elapsed.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture)} s); every building keeps " +
+                $"QuestTree: the texture atlas of {job.Request.Map} was abandoned - {N(jobs.Count)} page(s) dropped: " +
+                $"{job.AtlasAbandonWhy ?? "an exception in the atlas phase (the warning above names it)"}, after " +
+                $"{job.AtlasClock?.Elapsed.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture)} s; every building keeps " +
                 "the side views.");
         }
 
@@ -4557,6 +4642,14 @@ namespace QuestTree.QuestGraph
                 {
                     info.Flat = true;
                     job.FlatUses++;
+
+                    // why, in buckets - the numbers that say whether a larger repeat cap or a wrapping shader is
+                    // what the rest of the flat uses need
+                    var k = Math.Max(ku, kv);
+                    if (info.Texture == null) job.FlatNoTexture++;
+                    else if (k <= 16) job.FlatSpan16++;
+                    else if (k <= 64) job.FlatSpan64++;
+                    else job.FlatSpanMore++;
                 }
                 else
                 {
@@ -4951,7 +5044,20 @@ namespace QuestTree.QuestGraph
                 var ok = page.Encode != null && page.Encode.Status == TaskStatus.RanToCompletion &&
                          page.Encode.Result != null && good.Count == page.Page;
 
-                if (!ok) break;
+                if (!ok)
+                {
+                    // Said, every time: this is the line whose absence hid a null buffer for a whole test run.
+                    var why = page.Encode == null ? "no encode was started"
+                        : page.Encode.IsFaulted ? $"its encode failed ({Describe(page.Encode.Exception)})"
+                        : !page.Encode.IsCompleted ? "its encode was still running when the capture stopped waiting"
+                        : page.Encode.IsCanceled ? "its encode was cancelled"
+                        : $"it arrived as page {page.Page} where page {good.Count} was due";
+
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: atlas page {page.Page} was not kept - {why}; it and every later page are dropped, " +
+                        "and their buildings keep the side views.");
+                    break;
+                }
 
                 good.Add(new AtlasPageDone
                 {
@@ -5164,8 +5270,15 @@ namespace QuestTree.QuestGraph
         {
             if (job.HiddenSamples.Count == 0) return;
 
+            var roots = new List<KeyValuePair<string, int>>(job.HiddenRoots);
+            roots.Sort((a, b) => b.Value.CompareTo(a.Value));
+
+            var top = new List<string>();
+            for (var i = 0; i < roots.Count && i < 12; i++) top.Add($"{roots[i].Key} {N(roots[i].Value)}");
+
             Plugin.LogSource?.LogInfo(
-                $"QuestTree: hidden renderers skipped on {job.Request.Map} ({N(job.HiddenSkipped)}), the first " +
+                $"QuestTree: hidden renderers skipped on {job.Request.Map} - {N(job.HiddenSkipped)} that were building-sized " +
+                $"and inside the extent, by scene root: {string.Join(", ", top.ToArray())}; the first " +
                 $"{job.HiddenSamples.Count}: {string.Join(" | ", job.HiddenSamples.ToArray())}");
         }
 
@@ -5183,7 +5296,9 @@ namespace QuestTree.QuestGraph
                 $"QuestTree: textures for {job.Request.Map} - {N(job.TexturesCaptured)} material(s) captured into " +
                 $"{N(job.File.AtlasPages)} atlas page(s) ({MapMeshFile.AtlasPageSize}, encoding on workers), " +
                 $"{N(job.TiledUses)} tiled, " +
-                $"{N(job.FlatUses)} fell back to a flat colour, {job.AtlasSeconds.ToString("0.0", f1)} s; " +
+                $"{N(job.FlatUses)} fell back to a flat colour ({N(job.FlatNoTexture)} without a texture; UVs spanning " +
+                $"{AtlasRepeatMax + 1}-16 repeats {N(job.FlatSpan16)}, 17-64 {N(job.FlatSpan64)}, more {N(job.FlatSpanMore)}), " +
+                $"{job.AtlasSeconds.ToString("0.0", f1)} s; " +
                 $"{N(used)} material(s) in use, {N(job.TexturesFailed)} texture(s) would not capture, " +
                 $"{N(job.TilesUnplaced)} tile(s) over the {MapMeshFile.MaxAtlasPages}-page cap, " +
                 $"{N(job.TilesLate)} left flat past {N(AtlasSecondsCap * AtlasCaptureShare)} s of the {N(AtlasSecondsCap)} s atlas cap, " +
@@ -6008,7 +6123,10 @@ namespace QuestTree.QuestGraph
 
                 for (var v = 0; v < n; v++)
                 {
-                    var key = Key((long)Math.Floor((positions[v * 3] - minX) / cell),
+                    // EXACT cell keys (review F19): the XOR hash Key() collides, and a collision merged two cells
+                    // metres apart into one vertex. Three 21-bit indices; a cell index past that is clamped - it
+                    // needs a building over 2,000 km across at the smallest cell.
+                    var key = CellKey((long)Math.Floor((positions[v * 3] - minX) / cell),
                         (long)Math.Floor((positions[v * 3 + 1] - minY) / cell),
                         (long)Math.Floor((positions[v * 3 + 2] - minZ) / cell));
 
@@ -6132,6 +6250,16 @@ namespace QuestTree.QuestGraph
         }
 
         private static long Key(long x, long y, long z) => unchecked(x * 73856093L ^ y * 19349663L ^ z * 83492791L);
+
+        /// <summary>A cell's exact identity: three indices of 21 bits each, clamped to [0, 2^21).</summary>
+        internal static long CellKey(long x, long y, long z)
+        {
+            const long max = (1L << 21) - 1;
+            x = Math.Max(0, Math.Min(max, x));
+            y = Math.Max(0, Math.Min(max, y));
+            z = Math.Max(0, Math.Min(max, z));
+            return (x << 42) | (y << 21) | z;
+        }
 
         /// <summary>A triangle's identity for the dedupe: its corners rotated so the smallest leads, the
         /// winding kept - a triangle and its reverse are two faces.</summary>
@@ -6782,6 +6910,20 @@ namespace QuestTree.QuestGraph
                         // target with collapses still possible: a 32 x 32 cube stopped at 14 triangles. Refill
                         // from the live edges while the last round made progress; a round with none is done.
                         var goal = _relaxed ? _limit : _target;
+
+                        // A round with no collapse while still over the HARD limit and not yet relaxed (every
+                        // cheap edge blocked by the fan or distance tests, which the relaxed pass lifts) is not
+                        // the end: go relaxed rather than stop over the limit (review F17).
+                        if (!_relaxed && sinceRefill == 0 && _live > _limit)
+                        {
+                            _relaxed = true;
+                            _result.Relaxed = true;
+                            sinceRefill = 1;
+                            Refill();
+                            if (_hCount == 0) break;
+                            continue;
+                        }
+
                         if (_live <= goal || sinceRefill == 0) break;
 
                         sinceRefill = 0;

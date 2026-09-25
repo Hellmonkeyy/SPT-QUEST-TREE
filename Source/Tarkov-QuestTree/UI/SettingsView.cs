@@ -367,8 +367,10 @@ namespace QuestTree.UI
                 ModSettings.CountUnacceptedQuests, ModSettings.ShowCredits,
                 ModSettings.MirrorMapArtwork, ModSettings.ShowMapGuides, ModSettings.DoNextRows,
                 ModSettings.MapArtworkRotation, ModSettings.PinLabels, ModSettings.SidebarWidth,
-                ModSettings.CaptureMapKey, ModSettings.CampaignKey, ModSettings.AutoCapture,
-                ModSettings.AutoCaptureSeconds, ModSettings.CaptureResolution, ModSettings.UploadCaptures,
+                // Only what this page has a control for: the capture/campaign keys and automatic capture are
+                // shown read-only here and set in F12, like the Open tracker shortcut, so a reset of the
+                // sidebar must not quietly unbind them (review F51).
+                ModSettings.CaptureResolution, ModSettings.UploadCaptures,
                 ModSettings.MapPictureSource, ModSettings.MapLabels, ModSettings.MapMode);
         }
 

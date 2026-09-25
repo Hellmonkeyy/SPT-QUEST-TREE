@@ -131,6 +131,24 @@ namespace QuestTree.QuestGraph
         /// rescuing them, which is the worse failure of the two.</summary>
         private const float MaxCaptureWaitSeconds = 180f;
 
+        /// <summary>Seconds past the campaign's own wait that a restore holds off for a capture still running
+        /// (review F45) - the mesh phase's watchdog (200 s + 15 s) is the capture's own backstop.</summary>
+        private const float RestoreBackstopSeconds = 60f;
+
+        /// <summary>The last stop's capture was still running when the campaign stopped waiting.</summary>
+        private bool _stillCapturing;
+
+        /// <summary>Restores the player once the capture has cleared its flag, or after the backstop.</summary>
+        /// <param name="start">Where the campaign started.</param>
+        private IEnumerator RestoreWhenDone(Vector3 start)
+        {
+            var until = Time.time + RestoreBackstopSeconds;
+
+            while (MapCapture.IsCapturing && Time.time < until) yield return null;
+
+            Restore(start);
+        }
+
         /// <summary>Metres the player must have moved since the last automatic capture STARTED before
         /// another one is taken. A capture from where the last one was taken is a second photograph of
         /// the same loaded chunks: it costs a hitch and merges to almost nothing.
@@ -549,6 +567,7 @@ namespace QuestTree.QuestGraph
             var clock = Stopwatch.StartNew();
             var captured = 0;
             var skipped = 0;
+            _stillCapturing = false;
             var failures = 0;
             string stopped = null;
 
@@ -599,7 +618,12 @@ namespace QuestTree.QuestGraph
                     stopped = WhyStop();
                     if (stopped != null) break;
 
-                    if (!MapCapture.TryStartCapture())
+                    // The 3D mesh at EVERY stop - the user's decision (2026-09-24: "keep the mesh per stop, sides at
+                    // every stop"), made knowing the review's F46 point that each build replaces the last: a mesh from
+                    // the last stop alone would lose nothing in the relief, but the per-stop build keeps the atlas and
+                    // the side views framed on a mesh from the stop they were taken at, and the 180 s ceiling was
+                    // judged fine for it. buildMesh stays on TryStartCapture for a caller that wants otherwise.
+                    if (!MapCapture.TryStartCapture(buildMesh: true))
                     {
                         skipped++;
                         failures++;
@@ -652,6 +676,7 @@ namespace QuestTree.QuestGraph
                     {
                         stopped =
                             $"the capture at stop {i + 1} had not finished after {Whole(MaxCaptureWaitSeconds)} s";
+                        _stillCapturing = true;
                         break;
                     }
 
@@ -663,7 +688,12 @@ namespace QuestTree.QuestGraph
             }
             finally
             {
-                Restore(start);
+                // A capture still running when the campaign gave up is NOT run out from under (review F45): the
+                // player stays at the stop until it clears, bounded by a backstop, before being moved back. Done
+                // in a coroutine of its own because a finally cannot wait.
+                if (_stillCapturing && MapCapture.IsCapturing) StartCoroutine(RestoreWhenDone(start));
+                else Restore(start);
+
                 _running = false;
 
                 // A campaign has just photographed the map from everywhere, including the cell it

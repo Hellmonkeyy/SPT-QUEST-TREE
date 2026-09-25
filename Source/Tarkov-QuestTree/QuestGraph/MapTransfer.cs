@@ -237,6 +237,36 @@ namespace QuestTree.QuestGraph
         /// the host would interleave two maps' floors.</summary>
         private static bool _uploading;
 
+        /// <summary>Captures that finished while another upload was running, offered one after another as each
+        /// upload ends (<see cref="StartNextPending"/>). Main thread only, like everything upload-side.</summary>
+        private static readonly HashSet<string> _pendingUploads = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>Offers the next queued capture, if any. Called as an upload ends.</summary>
+        private static void StartNextPending()
+        {
+            try
+            {
+                var next = _pendingUploads.FirstOrDefault();
+
+                if (next == null) return;
+
+                _pendingUploads.Remove(next);
+
+                // A host that declined takes nothing more this session - the queue goes with it.
+                if (_uploadsDeclined)
+                {
+                    _pendingUploads.Clear();
+                    return;
+                }
+
+                UploadCapture(next);
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug($"QuestTree: a queued capture could not be offered ({ex.Message}).");
+            }
+        }
+
         // ------------------------------------------------------------------ upload
 
         /// <summary>
@@ -268,9 +298,13 @@ namespace QuestTree.QuestGraph
 
                 if (_uploading)
                 {
+                    // QUEUED, and offered the moment the running upload ends (review F32: this line used to
+                    // promise a later offer that nothing made). One entry per map - a later capture of the
+                    // same map replaces the earlier one on disk anyway.
+                    _pendingUploads.Add(key);
+
                     Plugin.LogSource?.LogDebug(
-                        $"QuestTree: an upload is already running, so the capture of {key} is not offered now - " +
-                        "it goes up after the next capture, or when the host is next asked for its maps.");
+                        $"QuestTree: an upload is already running, so the capture of {key} waits and goes up when it ends.");
                     return;
                 }
 
@@ -305,6 +339,11 @@ namespace QuestTree.QuestGraph
 
             try
             {
+                // One frame first (review F34): StartCoroutine runs this synchronously up to its first yield,
+                // and the caller is the frame that just finished writing the capture - so without it the read
+                // and hash of up to 48 MB of mesh below landed in that same frame.
+                yield return null;
+
                 if (!ReadCapture(key, out var meta, out var floors)) yield break;
 
                 // BEFORE the first post, and for every floor at once - see DescribeWire. The meta
@@ -346,6 +385,7 @@ namespace QuestTree.QuestGraph
                 // both - which meant one unencodable interior floor cost the whole capture its mesh, and
                 // with it the whole set, where before this release the rest of the map was shared.
                 var droppedSincePost = 0;
+                FloorUpload lastPosted = null;
 
                 foreach (var floor in floors)
                 {
@@ -385,6 +425,7 @@ namespace QuestTree.QuestGraph
                         // Its late answer is not acted on: the player has been told this upload stopped.
                         while (!task.IsCompleted) yield return null;
 
+                        Observe(task);
                         yield break;
                     }
 
@@ -393,6 +434,7 @@ namespace QuestTree.QuestGraph
 
                     posted++;
                     bytes += floor.Bytes;
+                    lastPosted = floor;
 
                     // The host has just been handed a meta naming exactly the floors that are left, so
                     // whatever was dropped before now is not something it is waiting for.
@@ -405,6 +447,44 @@ namespace QuestTree.QuestGraph
                         // any host drops one its meta cannot describe), or it already had the mesh staged
                         // from an earlier attempt of the same capture - in all three, sending the mesh now
                         // would be up to 48 MB the host has no place for. Only the middle one is news.
+                        SayIfMeshWasNotKept(key, mesh, completeReason);
+                        Done(key, Math.Max(posted, held), bytes, 0, clock);
+                        yield break;
+                    }
+                }
+
+                // Review F31: floors that failed to encode AFTER the last post leave the host holding a meta that
+                // still names them. One more post of the last good floor carries the trimmed meta - the host
+                // restages its meta on every post and counts what is missing from it - so the set can
+                // complete after all, where this used to give up and ask for a new capture. Its picture is
+                // still on its FloorUpload, so nothing is encoded again.
+                if (posted > 0 && droppedSincePost > 0 && lastPosted != null && !string.IsNullOrEmpty(lastPosted.Base64))
+                {
+                    var again = StartPost(key, meta, lastPosted);
+                    if (again == null) yield break;
+
+                    var deadline = Time.realtimeSinceStartup + RequestSeconds;
+                    while (!again.IsCompleted && Time.realtimeSinceStartup < deadline) yield return null;
+
+                    if (!again.IsCompleted)
+                    {
+                        Plugin.LogSource?.LogInfo(
+                            $"QuestTree: the host did not answer within {RequestSeconds:0}s while {key}'s trimmed set " +
+                            "was being offered - the rest of the capture is not sent.");
+
+                        while (!again.IsCompleted) yield return null;
+
+                        Observe(again);
+                        yield break;
+                    }
+
+                    var verdict = Judge(key, lastPosted, again, out var held, out var completeReason);
+                    if (verdict == Verdict.Stop) yield break;
+
+                    droppedSincePost = 0;
+
+                    if (verdict == Verdict.Complete)
+                    {
                         SayIfMeshWasNotKept(key, mesh, completeReason);
                         Done(key, Math.Max(posted, held), bytes, 0, clock);
                         yield break;
@@ -454,6 +534,7 @@ namespace QuestTree.QuestGraph
                             // Waited out before letting go of _uploading - see the floor loop.
                             while (!task.IsCompleted) yield return null;
 
+                            Observe(task);
                             yield break;
                         }
 
@@ -677,6 +758,9 @@ namespace QuestTree.QuestGraph
             finally
             {
                 _uploading = false;
+
+                // The next capture that finished while this one was going up (review F32).
+                StartNextPending();
             }
         }
 
@@ -1745,7 +1829,7 @@ namespace QuestTree.QuestGraph
         /// The sha256 is the check that can fail, and it is not ceremony: the meta and the .bin are two
         /// files written in sequence by a capture that can be interrupted, a merge can leave an older
         /// mesh beside a newer meta, and a hand-copied folder can hold either half. Reading 48 MB and
-        /// hashing it is ~30 ms, paid once per upload, outside a raid.
+        /// hashing it is ~30 ms, paid once per upload - on the main thread, in the raid when the capture was taken in one, but a frame after the capture finished (UploadRoutine yields first) and hashed once (review F34).
         /// </summary>
         /// <param name="key">The map's internal id.</param>
         /// <param name="meta">The meta about to be offered. Its mesh block is stripped on any failure.</param>
@@ -1778,6 +1862,7 @@ namespace QuestTree.QuestGraph
                 else
                 {
                     var bytes = File.ReadAllBytes(Path.Combine(dir, mesh.File));
+                    string hash = null;
 
                     if (bytes.Length == 0)
                     {
@@ -1789,7 +1874,7 @@ namespace QuestTree.QuestGraph
                         // the set staged there - so it is not offered at all.
                         why = $"{mesh.File} is {Mb(bytes.Length)} MB, over the {Mb(MaxMeshBytes)} MB a host takes";
                     }
-                    else if (!string.Equals(Sha256(bytes), (mesh.Sha256 ?? "").Trim(),
+                    else if (!string.Equals(hash = Sha256(bytes), (mesh.Sha256 ?? "").Trim(),
                                  StringComparison.OrdinalIgnoreCase))
                     {
                         why = $"{mesh.File} does not hash to the sha256 its meta names, so the two are from " +
@@ -1797,9 +1882,10 @@ namespace QuestTree.QuestGraph
                     }
                     else
                     {
+                        // The hash above, once (review F34: it was computed a second time for this line).
                         Plugin.LogSource?.LogDebug(
                             $"QuestTree: {key}'s mesh is offered as {Mb(bytes.Length)} MB, sha " +
-                            $"{Sha256(bytes).Substring(0, 12)}, {mesh.Cells:N0} cell(s) and {mesh.Triangles:N0} " +
+                            $"{hash.Substring(0, 12)}, {mesh.Cells:N0} cell(s) and {mesh.Triangles:N0} " +
                             "triangle(s).");
 
                         return bytes;
@@ -2271,10 +2357,11 @@ namespace QuestTree.QuestGraph
                     if (string.Equals(HeldStamp(root, key), entry.Stamp, StringComparison.Ordinal))
                     {
                         var owed = HeldMissingPages(root, key);
+                        var owedSides = HeldMissingSides(root, key);
 
-                        if (owed.Count > 0)
+                        if (owed.Count > 0 || owedSides.Count > 0)
                         {
-                            var got = RefetchPages(root, key, entry, owed, result);
+                            var got = RefetchPages(root, key, entry, owed, owedSides, result);
 
                             if (got > 0)
                             {
@@ -2390,7 +2477,8 @@ namespace QuestTree.QuestGraph
                     if (floor == null || floors.Count >= MaxFloors) continue;
                     if (!seen.Add(floor.Level)) continue;
 
-                    var picture = Fetch(key, floor.Level, entry.Stamp, result, out var name, out var replaced);
+                    var picture = Fetch(key, floor.Level, entry.Stamp, result, out var name, out var replaced,
+                        out var floorTransient);
 
                     // The set was replaced on the host while it was being fetched. ABANDONED, not
                     // continued: the floors already in hand are the old set's and the ones left are
@@ -2400,6 +2488,20 @@ namespace QuestTree.QuestGraph
                     // the map exactly as it was, and the stamp this machine holds still differs from
                     // the host's new one, which is what makes the next session take the whole set.
                     if (replaced) return 0;
+
+                    // Review F29: a floor that did not ARRIVE - a timeout, a dropped connection, or an empty
+                    // answer for a level the host's own meta names, which is a host that could not read its
+                    // file - is not "the host has none". Installing the rest would write the host's stamp over
+                    // a set with a hole in it, and the stamp is what stops this machine asking again. So the
+                    // whole map is left as it was for this session, with no stamp, and taken again next time -
+                    // FetchMesh's rule for the same case.
+                    if (picture == null && floorTransient)
+                    {
+                        result.Debug.Add(
+                            $"QuestTree: floor {floor.Level} of the host's {key} did not arrive - that map is taken " +
+                            "again, whole, next session.");
+                        return 0;
+                    }
 
                     if (picture == null) continue;
 
@@ -2434,6 +2536,7 @@ namespace QuestTree.QuestGraph
                 // every set captured before sides existed.
                 var sideNames = new List<string>();
                 var keptSides = new List<MapCaptureSideDto>();
+                var owedSides = new List<string>();
 
                 if (meta.Sides != null)
                 {
@@ -2444,11 +2547,16 @@ namespace QuestTree.QuestGraph
 
                         if (side == null) continue;
 
-                        var picture = FetchSide(key, dirName, side, entry.Stamp, result, out var sideReplaced);
+                        var picture = FetchSide(key, dirName, side, entry.Stamp, result, out var sideReplaced,
+                            out var sideTransient);
 
                         // As for a floor: the host now holds a different set, and half of each is worse
                         // than either - nothing has left the staging, so the map stays as it was.
                         if (sideReplaced) return 0;
+
+                        // Review F29: a side that did not ARRIVE is OWED - named in the stamp file and fetched
+                        // alone next session, as an atlas page is - rather than lost under the host's stamp.
+                        if (picture == null && sideTransient) owedSides.Add(dirName);
 
                         if (picture == null) continue;
 
@@ -2591,7 +2699,7 @@ namespace QuestTree.QuestGraph
                     JsonConvert.SerializeObject(meta, Formatting.Indented));
 
                 if (!Swap(root, key, staging, floors, sideNames.Concat(pageNames).ToList(), meshName, entry.Stamp, result,
-                        owedPages))
+                        owedPages, owedSides))
                     return 0;
 
                 result.Info.Add(
@@ -2645,9 +2753,10 @@ namespace QuestTree.QuestGraph
         /// one does not.</param>
         /// <param name="owedPages">Atlas pages that did not arrive for a reason a retry could change, written
         /// into the stamp file for the next session to fetch (see <see cref="HeldMissingPages"/>).</param>
+        /// <param name="owedSides">Side pictures owed the same way (see <see cref="HeldMissingSides"/>).</param>
         private static bool Swap(
             string root, string key, string staging, List<MapCaptureFloorDto> floors, List<string> sides,
-            string mesh, string stamp, SyncResult result, List<int> owedPages = null)
+            string mesh, string stamp, SyncResult result, List<int> owedPages = null, List<string> owedSides = null)
         {
             var folder = Path.Combine(root, key);
 
@@ -2729,7 +2838,7 @@ namespace QuestTree.QuestGraph
 
                 // (5) And only now the record that says "this machine has that set", so a swap
                 // interrupted at any step above is simply done again on the next start.
-                WriteStamp(root, key, stamp, result, owedPages);
+                WriteStamp(root, key, stamp, result, owedPages, owedSides);
 
                 return true;
             }
@@ -2751,17 +2860,25 @@ namespace QuestTree.QuestGraph
         /// <param name="result">Where a failure's line goes.</param>
         /// <param name="owedPages">Atlas pages still owed, written as a second line - see
         /// <see cref="HeldMissingPages"/>. None, and the file is the stamp alone, as it always was.</param>
-        private static void WriteStamp(string root, string key, string stamp, SyncResult result, List<int> owedPages = null)
+        /// <param name="owedSides">Side pictures still owed (review F29), a line of their own - see
+        /// <see cref="OwedSidesPrefix"/>.</param>
+        private static void WriteStamp(string root, string key, string stamp, SyncResult result, List<int> owedPages = null,
+            List<string> owedSides = null)
         {
             try
             {
                 var path = Path.Combine(Path.Combine(root, key), StampFile);
                 var temp = path + ".tmp";
+                var text = stamp;
 
-                File.WriteAllText(temp, owedPages == null || owedPages.Count == 0
-                    ? stamp
-                    : stamp + "\n" + OwedPrefix + string.Join(",",
-                        owedPages.Distinct().OrderBy(p => p).Select(p => p.ToString(CultureInfo.InvariantCulture))));
+                if (owedPages != null && owedPages.Count > 0)
+                    text += "\n" + OwedPrefix + string.Join(",",
+                        owedPages.Distinct().OrderBy(p => p).Select(p => p.ToString(CultureInfo.InvariantCulture)));
+
+                if (owedSides != null && owedSides.Count > 0)
+                    text += "\n" + OwedSidesPrefix + string.Join(",", SideDirs.Where(d => owedSides.Contains(d)));
+
+                File.WriteAllText(temp, text);
                 if (File.Exists(path)) File.Delete(path);
                 File.Move(temp, path);
             }
@@ -2783,11 +2900,15 @@ namespace QuestTree.QuestGraph
         /// <param name="name">The file name to write, or null.</param>
         /// <param name="replaced">True when the host answered with a DIFFERENT set's stamp, which is
         /// the one failure the caller must not treat as "this floor is missing": see Download.</param>
+        /// <param name="transient">True when the floor did not ARRIVE - the request failed or timed out, or the host
+        /// answered empty for a level its own meta names - which a later session may change (review F29).</param>
         private static byte[] Fetch(
-            string key, int level, string stamp, SyncResult result, out string name, out bool replaced)
+            string key, int level, string stamp, SyncResult result, out string name, out bool replaced,
+            out bool transient)
         {
             name = null;
             replaced = false;
+            transient = false;
 
             try
             {
@@ -2805,9 +2926,11 @@ namespace QuestTree.QuestGraph
 
                 if (string.IsNullOrEmpty(image.ImageBase64))
                 {
-                    // The host does not have that floor. Not an error: the set lands without it and
-                    // the reader simply has one fewer storey.
-                    result.Debug.Add($"QuestTree: the host has no picture of {key} floor {level}.");
+                    // Every level the index names is backed by a stored file (the host serves from its meta),
+                    // so an empty answer is the host failing to READ it - its own log says so - not a floor it
+                    // lacks. TRANSIENT (review F29).
+                    transient = true;
+                    result.Debug.Add($"QuestTree: the host could not send {key} floor {level} this time.");
                     return null;
                 }
 
@@ -2852,6 +2975,8 @@ namespace QuestTree.QuestGraph
             }
             catch (Exception ex)
             {
+                // A timeout, a dropped connection, a reply cut short: TRANSIENT (review F29).
+                transient = true;
                 result.Debug.Add(
                     $"QuestTree: the host's picture of {key} floor {level} could not be taken ({ex.Message}).");
                 return null;
@@ -3076,10 +3201,13 @@ namespace QuestTree.QuestGraph
         /// <param name="stamp">The set this download belongs to.</param>
         /// <param name="result">Where the lines go.</param>
         /// <param name="replaced">True when the host answered with a DIFFERENT set's stamp.</param>
+        /// <param name="transient">True when the side did not ARRIVE - see <see cref="Fetch"/>'s (review F29).</param>
         private static byte[] FetchSide(
-            string key, string dir, MapCaptureSideDto side, string stamp, SyncResult result, out bool replaced)
+            string key, string dir, MapCaptureSideDto side, string stamp, SyncResult result, out bool replaced,
+            out bool transient)
         {
             replaced = false;
+            transient = false;
 
             try
             {
@@ -3094,7 +3222,9 @@ namespace QuestTree.QuestGraph
 
                 if (string.IsNullOrEmpty(image.ImageBase64))
                 {
-                    result.Debug.Add($"QuestTree: the host has no {dir} side picture of {key}.");
+                    // Named in the host's own meta, so an empty answer is a read the host failed (review F29).
+                    transient = true;
+                    result.Debug.Add($"QuestTree: the host could not send the {dir} side picture of {key} this time.");
                     return null;
                 }
 
@@ -3130,6 +3260,7 @@ namespace QuestTree.QuestGraph
             }
             catch (Exception ex)
             {
+                transient = true;
                 result.Debug.Add($"QuestTree: the host's {dir} side picture of {key} could not be taken ({ex.Message}).");
                 return null;
             }
@@ -3191,7 +3322,9 @@ namespace QuestTree.QuestGraph
 
                 if (string.IsNullOrEmpty(image.ImageBase64))
                 {
-                    result.Debug.Add($"QuestTree: the host has no atlas page {page.Page} of {key}.");
+                    // Named in the host's own meta: a read it failed, owed rather than lost (review F29's rule).
+                    transient = true;
+                    result.Debug.Add($"QuestTree: the host could not send atlas page {page.Page} of {key} this time.");
                     return null;
                 }
 
@@ -3326,6 +3459,39 @@ namespace QuestTree.QuestGraph
         /// sha), which the next session would get wrong in the same way.</summary>
         private const string OwedPrefix = "owed-atlas: ";
 
+        /// <summary>The stamp file's line of side pictures still owed: "owed-sides: N,E" (review F29).</summary>
+        private const string OwedSidesPrefix = "owed-sides: ";
+
+        /// <summary>The side pictures the set in this map's folder is still owed - see <see cref="OwedSidesPrefix"/>.</summary>
+        private static List<string> HeldMissingSides(string root, string key)
+        {
+            var owed = new List<string>();
+
+            try
+            {
+                var path = Path.Combine(Path.Combine(root, key), StampFile);
+                if (!File.Exists(path)) return owed;
+
+                foreach (var line in File.ReadAllLines(path).Skip(1))
+                {
+                    if (!line.StartsWith(OwedSidesPrefix, StringComparison.Ordinal)) continue;
+
+                    foreach (var part in line.Substring(OwedSidesPrefix.Length).Split(','))
+                    {
+                        var dir = part.Trim().ToUpperInvariant();
+
+                        if (SideDirs.Contains(dir) && !owed.Contains(dir)) owed.Add(dir);
+                    }
+                }
+            }
+            catch
+            {
+                owed.Clear();
+            }
+
+            return owed;
+        }
+
         /// <summary>The atlas pages the set in this map's folder is still owed - see <see cref="OwedPrefix"/>.
         /// Empty when none are, or the stamp file has no second line, or it cannot be read.</summary>
         private static List<int> HeldMissingPages(string root, string key)
@@ -3364,33 +3530,66 @@ namespace QuestTree.QuestGraph
         /// The meta is rewritten beside itself and REPLACED in one step, so a reader sees the old meta or the new
         /// one; the page file lands before the meta names it.
         /// </summary>
-        private static long RefetchPages(string root, string key, MapIndexEntryDto entry, List<int> owed, SyncResult result)
+        private static long RefetchPages(string root, string key, MapIndexEntryDto entry, List<int> owed,
+            List<string> owedSides, SyncResult result)
         {
             long written = 0;
             var still = new List<int>();
+            var stillSides = new List<string>();
 
             try
             {
                 var folder = Path.Combine(root, key);
                 var metaPath = Path.Combine(folder, key + MetaSuffix);
+                var local = File.Exists(metaPath)
+                    ? JsonConvert.DeserializeObject<MapCaptureMetaDto>(File.ReadAllText(metaPath))
+                    : null;
 
-                if (!File.Exists(metaPath) || entry.Meta?.Atlas == null || entry.Mesh == null)
+                if (local == null)
                 {
                     WriteStamp(root, key, entry.Stamp, result);
                     return 0;
                 }
 
-                var local = JsonConvert.DeserializeObject<MapCaptureMetaDto>(File.ReadAllText(metaPath));
+                // Review F29: the SIDES owed, each fetched alone and held to what the host's meta says of it.
+                var sides = local.Sides ?? new List<MapCaptureSideDto>();
 
-                if (local?.Mesh == null)
+                foreach (var dir in owedSides)
                 {
-                    WriteStamp(root, key, entry.Stamp, result);
-                    return 0;
+                    var hostSide = entry.Meta?.Sides?.Find(sd => sd != null &&
+                                                                  string.Equals(sd.Dir, dir, StringComparison.OrdinalIgnoreCase));
+
+                    if (hostSide == null || sides.Exists(sd => sd != null && string.Equals(sd.Dir, dir, StringComparison.OrdinalIgnoreCase)))
+                        continue;
+
+                    var picture = FetchSide(key, dir, hostSide, entry.Stamp, result, out var sideReplaced, out var sideTransient);
+
+                    if (sideReplaced) return written;
+
+                    if (picture == null)
+                    {
+                        if (sideTransient) stillSides.Add(dir);
+                        continue;
+                    }
+
+                    var name = SideFileName(key, dir);
+
+                    File.WriteAllBytes(Path.Combine(folder, name), picture);
+
+                    hostSide.Dir = dir;
+                    hostSide.File = name;
+                    sides.Add(hostSide);
+                    written += picture.Length;
                 }
 
+                local.Sides = sides.Count == 0 ? null : SideDirs
+                    .Select(d => sides.Find(sd => sd != null && string.Equals(sd.Dir, d, StringComparison.OrdinalIgnoreCase)))
+                    .Where(sd => sd != null).ToList();
+
+                // The PAGES owed - only while the set in place has its mesh, which is all a page dresses.
                 var pages = local.Atlas ?? new List<MapCaptureAtlasDto>();
 
-                foreach (var number in owed)
+                foreach (var number in local.Mesh != null && entry.Mesh != null && entry.Meta?.Atlas != null ? owed : new List<int>())
                 {
                     var hostPage = entry.Meta.Atlas.Find(p => p != null && p.Page == number);
 
@@ -3426,7 +3625,7 @@ namespace QuestTree.QuestGraph
 
                 if (written > 0)
                 {
-                    local.Atlas = pages.Where(p => p != null).OrderBy(p => p.Page).ToList();
+                    local.Atlas = pages.Count == 0 ? null : pages.Where(p => p != null).OrderBy(p => p.Page).ToList();
 
                     var temp = metaPath + ".tmp";
 
@@ -3434,11 +3633,11 @@ namespace QuestTree.QuestGraph
                     File.Replace(temp, metaPath, null);
 
                     result.Info.Add(
-                        $"QuestTree: {key}'s missing atlas page(s) arrived from the host - {Mb(written)} MB" +
-                        $"{(still.Count == 0 ? "" : $", {still.Count} still owed")}.");
+                        $"QuestTree: {key}'s missing picture(s) arrived from the host - {Mb(written)} MB" +
+                        $"{(still.Count + stillSides.Count == 0 ? "" : $", {still.Count + stillSides.Count} still owed")}.");
                 }
 
-                WriteStamp(root, key, entry.Stamp, result, still);
+                WriteStamp(root, key, entry.Stamp, result, still, stillSides);
             }
             catch (Exception ex)
             {
@@ -3732,6 +3931,30 @@ namespace QuestTree.QuestGraph
             return true;
         }
 
+        /// <summary>Marks a request this code has stopped waiting for as observed, so a fault it ends with later
+        /// is not an UnobservedTaskException on the finalizer thread (review F33) - the job QuestDataClient.Abandon
+        /// does for its own requests.</summary>
+        private static void Observe(Task task)
+        {
+            try
+            {
+                if (task == null) return;
+
+                if (task.IsCompleted)
+                {
+                    var ignored = task.Exception;
+                    return;
+                }
+
+                task.ContinueWith(t => { var ignored = t.Exception; },
+                    TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously);
+            }
+            catch
+            {
+                // Observing is best effort.
+            }
+        }
+
         /// <summary>A GET on this thread, with a deadline. For the worker only - it blocks.</summary>
         /// <param name="route">The route to ask.</param>
         private static string Get(string route)
@@ -3739,10 +3962,21 @@ namespace QuestTree.QuestGraph
             var request = RequestHandler.GetJsonAsync(route);
 
             if (!request.Wait(RequestTimeout))
+            {
+                Observe(request);
                 throw new TimeoutException($"no answer from {route} within {RequestTimeout.TotalSeconds:0}s");
+            }
 
             return request.Result;
         }
+
+        /// <summary>
+        /// A stand-in for the host, for the client harness only: when set, <see cref="Post"/> hands the route and
+        /// body to it instead of SPT's RequestHandler, which cannot run outside the game. It is how the download's
+        /// failure rules (review F29: a floor or side that did not ARRIVE) are proven against answers the harness
+        /// chooses - one floor served, the next timing out. Nothing in the mod sets it.
+        /// </summary>
+        internal static Func<string, string, string> PostForTests { get; set; }
 
         /// <summary>A POST on this thread, with a deadline. For the worker only - it blocks.</summary>
         /// <param name="route">The route to ask.</param>
@@ -3751,11 +3985,18 @@ namespace QuestTree.QuestGraph
         /// megabytes, as a mesh's is.</param>
         private static string Post(string route, string body, TimeSpan? timeout = null)
         {
+            // The test seam - see PostForTests. Null in the game, always.
+            var seam = PostForTests;
+            if (seam != null) return seam(route, body);
+
             var deadline = timeout ?? RequestTimeout;
             var request = RequestHandler.PostJsonAsync(route, body);
 
             if (!request.Wait(deadline))
+            {
+                Observe(request);
                 throw new TimeoutException($"no answer from {route} within {deadline.TotalSeconds:0}s");
+            }
 
             return request.Result;
         }

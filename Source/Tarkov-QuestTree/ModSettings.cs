@@ -582,9 +582,12 @@ namespace QuestTree
         ///
         /// 1.19.0 changed that default from extracts only to ALL names, because a captured picture carries
         /// no hand-drawn lettering and the zone names are the only place names it has - and because the
-        /// Maps tab now draws them from a zoom in, so the wide view stays clean either way. Bind leaves an
-        /// existing value alone, so shipping the new default alone would have fixed it for new installs
-        /// and for nobody else: every config written by 1.15-1.18 holds the old default explicitly.
+        /// Maps tab now draws them from a zoom in, so the wide view stays clean either way.
+        ///
+        /// WHO THIS COVERS (review F50): only configs written by the 1.19 TEST builds. "Map labels" was first
+        /// bound in stage C of 1.19 and no released version (1.15-1.18.x) ever wrote it, so on a real upgrade
+        /// the key is absent, Bind writes the new default, and this only sets its marker. Kept for the test-build
+        /// configs, which do hold the old default explicitly.
         ///
         /// Only a value that still equals the OLD DEFAULT moves, and only once - the marker entry goes
         /// down whether anything moved or not. Someone who chose extracts only on purpose, or who chooses
@@ -961,7 +964,9 @@ namespace QuestTree
             // visit set aside for the experiment. Nothing in a raid or the menu uses F10, and the probe
             // changes nothing that outlives the frame if it is hit by mistake.
             ProbeKey = config.Bind(
-                "Advanced", "Mesh probe key (throwaway)", new KeyboardShortcut(KeyCode.F10),
+                // Unbound by default (review F43): a bare F10 fired a GPU readback pass in the menu and left a
+                // click-eating overlay up until it was pressed again. A config that already has F10 keeps it.
+                "Advanced", "Mesh probe key (throwaway)", KeyboardShortcut.Empty,
                 "Debug only, and temporary. It is the diagnostic key of the 3D map experiments: pressed in a " +
                 "raid it measures whether the game's meshes can be read back off the GPU and how much of the " +
                 "map its colliders cover, and pressed in the menu it lists the loaded shaders, cameras and " +

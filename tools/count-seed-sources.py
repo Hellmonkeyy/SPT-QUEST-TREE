@@ -13,14 +13,16 @@ rate map below reports every Ref-only part as flea-only and overstates the basel
 Lega Medal is deliberately absent: the game does not treat it as currency, so Ref's other 11 offers
 are barters, which is what they are.
 
-    python tools/count-seed-sources.py [seed-path]
+    python tools/count-seed-sources.py [seed-path] [spt-database-path]
 """
 import collections
 import json
 import os
 import sys
 
-D = r"C:\Games\SPT\SPT_Runtime\SPT_Data\database"
+# The SPT database: the second argument when given (package.ps1 passes its -SptPath's), the default
+# install otherwise (review F54).
+D = sys.argv[2] if len(sys.argv) > 2 else r"C:\Games\SPT\SPT_Runtime\SPT_Data\database"
 SEED = sys.argv[1] if len(sys.argv) > 1 else os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "Source", "Tarkov-QuestTree-Server", "weapon-builds.json")
 FENCE = "579dc571d53a0658a154fbec"

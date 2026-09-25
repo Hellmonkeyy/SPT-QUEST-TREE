@@ -1358,6 +1358,8 @@ namespace QuestTree.UI
                 _builtKey = key;
             }
 
+            _viewBuildKey = key;
+
             _groundShader = ResolveGroundShader(shader, shaderName, out _groundCutout, out _cutoutNote);
 
             // One Floor per drawn band, each with a cache entry - reused when complete, registered empty
@@ -1370,7 +1372,13 @@ namespace QuestTree.UI
             _groundFallbackY = FallbackGroundY();
             _cutY = CutHeight();
 
-            if (!_restored) _distance = FitDistance();
+            // Fitted ONCE per view: RebuildWithoutFailedSides comes back through here, and refitting then snapped
+            // the player's zoom back and Finish saved the snapped distance (review F26).
+            if (!_restored)
+            {
+                _distance = FitDistance();
+                _restored = true;
+            }
 
             Place();
 
@@ -1525,7 +1533,10 @@ namespace QuestTree.UI
 
                 var level = data.Level;
 
-                foreach (var mesh in data.Ground) _work.Enqueue(() => into.Ground.Add(Upload(into, mesh)));
+                // The ground through MakeMesh, NOT Upload: nothing ever cuts it (Draw submits it whole; the peel
+                // leaves out the bands above instead), so keeping its worker arrays in Sources was a full CPU copy
+                // of every relief chunk held for the life of the entry (review F21).
+                foreach (var mesh in data.Ground) _work.Enqueue(() => into.Ground.Add(MakeMesh(mesh)));
                 foreach (var mesh in data.Roofs) _work.Enqueue(() => into.Buildings.Add(Upload(into, mesh)));
 
                 foreach (var roof in data.RoofsElsewhere)
@@ -1969,6 +1980,9 @@ namespace QuestTree.UI
 
         private bool _restored;
 
+        /// <summary>The cache key this view's current build was begun under. See the cancelled branch of LateUpdate.</summary>
+        private string _viewBuildKey;
+
         /// <summary>The height buildings are cut at, or NaN for no cut. See <see cref="CutHeight"/>.</summary>
         private float _cutY = float.NaN;
 
@@ -2094,9 +2108,9 @@ namespace QuestTree.UI
 
         /// <summary>
         /// Roughly what a mesh of ours costs in memory, in bytes: position, normal and UV per vertex (and a
-        /// colour under the flat shader), four bytes per index, times the copies held - TWO for a source mesh
-        /// (the GPU copy, and the worker's arrays the entry keeps for the cut), ONE for a clipped copy (GPU
-        /// only; nothing clips it again). An estimate for the log line, not an accounting.
+        /// colour under the flat shader), four bytes per index, times the copies held - TWO for a building mesh
+        /// (the GPU copy, and the worker's arrays the entry keeps for the cut), ONE for the ground (never cut, so
+        /// no arrays kept) and for a clipped copy (GPU only; nothing clips it again). An estimate for the log line, not an accounting.
         /// </summary>
         private static long MeshBytes(Mesh mesh, int copies)
         {
@@ -2122,7 +2136,7 @@ namespace QuestTree.UI
                 var built = floor?.Meshes;
                 if (built == null || !seen.Add(built)) continue;
 
-                foreach (var mesh in built.Ground) total += MeshBytes(mesh, 2);
+                foreach (var mesh in built.Ground) total += MeshBytes(mesh, 1);
                 foreach (var mesh in BuildingMeshesOf(built)) total += MeshBytes(mesh, 2);
 
                 foreach (var cut in built.Cuts.Values)
@@ -2912,10 +2926,15 @@ namespace QuestTree.UI
         {
             if (_flatColours || _buildingShader == null) return null;
 
+            // Remembered per shader: under Unlit/Texture every untextured side slot asks here EVERY frame, and a
+            // null answer that was not remembered made and destroyed a Material each time (review F25).
+            if (ReferenceEquals(_tintlessShader, _buildingShader)) return null;
+
             var material = Matte(new Material(_buildingShader) { name = name });
 
             if (!material.HasProperty("_Color"))
             {
+                _tintlessShader = _buildingShader;
                 Discard(material);
                 return null;
             }
@@ -2930,6 +2949,9 @@ namespace QuestTree.UI
         /// <summary>The shader the buildings are drawn with, kept for the wall materials, which may be made
         /// on a later frame than the rest (when the floor's picture arrives).</summary>
         private Shader _buildingShader;
+
+        /// <summary>The building shader last found to have no _Color, or null. See <see cref="MakeTintMaterial"/>.</summary>
+        private Shader _tintlessShader;
 
         // --- the geometry, prepared off the main thread ------------------------------------------------
 
@@ -2960,6 +2982,39 @@ namespace QuestTree.UI
 
                 data.Normals = NormalsOf(data.Vertices, data.Indices);
                 return data;
+            }
+
+            /// <summary>
+            /// WORKER. <see cref="From"/> over only the vertices <paramref name="indices"/> reference, renumbered in
+            /// first-use order. A roof chunk's vertices are shared by its own-floor list and every "on another
+            /// floor" list, and each destination copied ALL of them - up to 250k vertices per destination, most
+            /// unreferenced, on the CPU and the GPU alike (review F24). The normals are the same either way:
+            /// NormalsOf only sums the triangles of the list it is given.
+            /// </summary>
+            public static MeshData Compacted(
+                string name, List<Vector3> vertices, List<Vector2> uvs, List<int> indices, List<Color32> colours)
+            {
+                var remap = new Dictionary<int, int>(Math.Min(indices.Count, vertices.Count));
+                var keptVertices = new List<Vector3>();
+                var keptUvs = new List<Vector2>();
+                var keptColours = colours != null ? new List<Color32>() : null;
+                var keptIndices = new List<int>(indices.Count);
+
+                foreach (var old in indices)
+                {
+                    if (!remap.TryGetValue(old, out var index))
+                    {
+                        index = keptVertices.Count;
+                        remap[old] = index;
+                        keptVertices.Add(vertices[old]);
+                        keptUvs.Add(uvs[old]);
+                        keptColours?.Add(colours[old]);
+                    }
+
+                    keptIndices.Add(index);
+                }
+
+                return From(name, keptVertices, keptUvs, keptIndices, keptColours);
             }
 
             /// <summary>
@@ -3723,7 +3778,7 @@ namespace QuestTree.UI
         {
             if (indices.Count > 0)
             {
-                data.Roofs.Add(MeshData.From($"{p.MapKey}-buildings-{level}-{part}", vertices, uvs, indices, colours));
+                data.Roofs.Add(MeshData.Compacted($"{p.MapKey}-buildings-{level}-{part}", vertices, uvs, indices, colours));
                 data.BuildingTriangles += indices.Count / 3;
             }
 
@@ -3731,7 +3786,7 @@ namespace QuestTree.UI
             {
                 if (pair.Value.Count == 0) continue;
 
-                data.RoofsElsewhere.Add((pair.Key, MeshData.From(
+                data.RoofsElsewhere.Add((pair.Key, MeshData.Compacted(
                     $"{p.MapKey}-buildings-{level}-on{pair.Key}-{part}", vertices, uvs, pair.Value, colours)));
                 data.BuildingTriangles += pair.Value.Count / 3;
 
@@ -4335,6 +4390,15 @@ namespace QuestTree.UI
                         // Cancelled under us (a drop while this view waited): that level is asked for again.
                         if (WasCancelled(task))
                         {
+                            // Cancelled by a cache DROP (the shared key is gone or another map's): every caller of
+                            // DropCaches destroys this view first, so asking again would start a full-floor job
+                            // for a view on its way out, keyed "|level" off the null key (review F27). Stopped.
+                            if (_builtKey != _viewBuildKey)
+                            {
+                                _broke = true;
+                                return;
+                            }
+
                             var level = _held[i].Level;
                             ReleasePrep(_held[i].Prep);
                             _held[i] = (level, AcquirePrep(PrepKey(level), level, SnapshotPrep()));
@@ -4475,8 +4539,11 @@ namespace QuestTree.UI
             for (var i = 0; i < meshes.RoofsOnOtherFloors.Count; i++)
             {
                 var roof = meshes.RoofsOnOtherFloors[i];
-                var owner = FloorAt(roof.Level);
-                var material = owner != null ? owner.BuildingMaterial : walls;
+                // An owner above the chosen floor is not drawn: a SLOPED face routed there by its centroid can still
+                // reach below the cut, and that sliver takes the chosen floor's picture - the one at the cut - not
+                // this filing band's (review F28).
+                var owner = FloorAt(roof.Level) ?? FloorAt(_selectedLevel);
+                var material = owner != null && owner.BuildingMaterial != null ? owner.BuildingMaterial : walls;
 
                 if (material == null || (!_flatColours && material.mainTexture == null)) continue;
 
@@ -4696,7 +4763,13 @@ namespace QuestTree.UI
         {
             var layer = ResolveLayer();
 
-            if (layer != null && layer.GameBounds.Count > 0) return layer.GameBounds[0].Min.z;
+            // Not the "any height" placeholders (about -1003 m from the extent probe, -2000 m from the catalog):
+            // the same test MeasureFloorRanges makes, or the camera and pins went a kilometre under the map (F22).
+            if (layer != null && layer.GameBounds.Count > 0)
+            {
+                var low = layer.GameBounds[0].Min.z;
+                if (low > -1000f && low < 1000f) return low;
+            }
 
             return _file != null && !float.IsNaN(_file.YMin) ? _file.YMin : 0f;
         }
@@ -4928,6 +5001,14 @@ namespace QuestTree.UI
         }
 
         // --- the end ---------------------------------------------------------------------------------
+
+        /// <summary>
+        /// Stops this view for good, from MapView.DiscardViewport just before it destroys the viewport. Destroy is
+        /// deferred to the end of the frame, so the view still got one LateUpdate - and in the paced upload that
+        /// was up to <see cref="FrameBudgetMs"/> spent uploading into an entry the next view throws away (review
+        /// F23). Release still runs from OnDestroy and frees everything as before.
+        /// </summary>
+        internal void Abandon() => _broke = true;
 
         /// <summary>Says once that this map's mesh is not usable, and stops. The caller drops the mesh
         /// for the session and repaints into the flat picture.</summary>

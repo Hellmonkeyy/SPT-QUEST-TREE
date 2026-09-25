@@ -387,6 +387,11 @@ namespace QuestTree.UI
                 return;
             }
 
+            // The 3D view first: it would otherwise spend this frame's LateUpdate uploading for a viewport that is
+            // already gone (review F23).
+            var solid = _keptViewport.GetComponentInChildren<Map3DView>(true);
+            if (solid != null) solid.Abandon();
+
             _keptViewport.transform.SetParent(null);
             UnityEngine.Object.Destroy(_keptViewport);
             _keptViewport = null;
@@ -1462,8 +1467,9 @@ namespace QuestTree.UI
             {
                 AddAt(content, "<color=#FFFFFF60>No map image for this location.</color>", listX, ref y, 18f, 11, inner);
             }
-            else if (!DynamicMapsLibrary.Available)
+            else if (sprite == null && !DynamicMapsLibrary.Available)
             {
+                // Only with nothing drawn: a capture or a host picture draws without DynamicMaps (review F47).
                 AddAt(content, "<color=#FFFFFF60>Install the DynamicMaps mod to see map images here.</color>",
                     listX, ref y, 18f, 11, inner);
             }
@@ -1882,6 +1888,26 @@ namespace QuestTree.UI
 
                     if (raster)
                     {
+                        // The slab under the picture, as MapTransfer.BackdropFill says it is: a local capture's
+                        // transparent skirt then reads as the same colour a host JPEG was flattened onto, not
+                        // the viewport's 25%-black plate - one map, one tone (review F48). Same rect, rotation
+                        // and scale as the picture, and before it among the siblings so it draws underneath.
+                        var slabGo = new GameObject("MapSlab", typeof(RectTransform), typeof(Image));
+                        var slab = (RectTransform)slabGo.transform;
+                        slab.SetParent(space, worldPositionStays: false);
+                        slab.anchorMin = image.anchorMin;
+                        slab.anchorMax = image.anchorMax;
+                        slab.pivot = image.pivot;
+                        slab.sizeDelta = image.sizeDelta;
+                        slab.anchoredPosition = image.anchoredPosition;
+                        slab.localRotation = image.localRotation;
+                        slab.localScale = image.localScale;
+                        slab.SetSiblingIndex(image.GetSiblingIndex());
+
+                        var slabImage = slabGo.GetComponent<Image>();
+                        slabImage.color = BackdropColor;
+                        slabImage.raycastTarget = false;
+
                         var picture = imageGo.GetComponent<Image>();
                         picture.sprite = sprite;
 

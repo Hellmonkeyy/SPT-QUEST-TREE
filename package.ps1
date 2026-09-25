@@ -139,7 +139,14 @@ Write-Host "Server DTOs and client mirrors agree." -ForegroundColor Green
 function SeedFacts($path) {
     # count-seed-sources.py prints the stamp, the build count, the instance count and the split of
     # every part instance into trader-priced / flea-only / unpriced, all in one line.
-    $out = & python (Join-Path $repo "tools/count-seed-sources.py") $path 2>&1
+    #
+    # The database is -SptPath's own (review F54: the script read a hard-coded C:\Games\SPT, so on any
+    # other install every call failed), and the call runs with $ErrorActionPreference = 'Continue' so
+    # Windows PowerShell 5.1 does not turn the script's redirected stderr into a terminating error: a
+    # figure that cannot be counted is a line in the summary, never the end of the run.
+    $database = Join-Path $SptPath "SPT_Runtime\SPT_Data\database"
+    $ErrorActionPreference = 'Continue'
+    $out = & python (Join-Path $repo "tools/count-seed-sources.py") $path $database 2>&1
     if ($LASTEXITCODE -ne 0) { return "count-seed-sources.py exited $LASTEXITCODE - $($out -join ' ')" }
     return ($out -join " ")
 }
@@ -358,7 +365,7 @@ $isAtlasPage = { param($file) $file.Name -match "-atlas-[0-7]\.jpg$" }
 $fatImages = @($mapFiles | Where-Object { $_.Name -like "*.jpg" -and -not (& $isAtlasPage $_) -and $_.Length -gt $maxImageBytes } |
     ForEach-Object { "{0} ({1:N1} MB)" -f $_.FullName.Substring($mapsDir.Length + 1), ($_.Length / 1MB) })
 if ($fatImages.Count -gt 0) {
-    Fail "map image(s) over $($maxImageBytes / 1MB) MB - re-capture at a lower resolution or quality: $($fatImages -join ', ')"
+    Fail "map image(s) over $($maxImageBytes / 1MB) MB. Every upload is already 2048 px at JPEG q80, so no capture setting shrinks it - look at the picture (a busy floor photographs large), and either leave that map out of this release or raise this packaging gate knowingly (the host takes up to 2.5 MB): $($fatImages -join ', ')"
 }
 $fatPages = @($mapFiles | Where-Object { (& $isAtlasPage $_) -and $_.Length -gt $maxAtlasPageBytes } |
     ForEach-Object { "{0} ({1:N1} MB)" -f $_.FullName.Substring($mapsDir.Length + 1), ($_.Length / 1MB) })

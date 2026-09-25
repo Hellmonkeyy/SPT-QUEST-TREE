@@ -16,7 +16,8 @@ What it checks, per <key>\\ folder under the maps root:
      UI/MapCatalog.cs SupportedCaptureSchema. A set the shipped client would SKIP is not shippable.
   3. every floor: a distinct integer level, a non-empty name, a minY below its maxY, a "file" that is
      a plain name inside the folder, that file exists, starts with the JPEG SOI marker, and its SOF
-     width/height equal the meta's - which in turn equal ceil(extent span * pxPerMetre) within 1 px.
+     width/height equal the meta's - which in turn equal ceil(extent span * pxPerMetre) within 2 px, the
+     host's own MapStore.PixelTolerance (review F53: at 1 px a set the host accepted could fail here).
   4. no orphan .jpg: an image in the folder that no floor names is dead weight in a payload measured
      in megabytes, and it is what a re-capture with fewer floors leaves behind.
   5. the MESH, when the meta names one (the block is optional and absent on every set captured before
@@ -84,7 +85,7 @@ import sys
 import zlib
 from pathlib import Path
 
-PIXEL_TOLERANCE = 1     # px, on each axis, against ceil(span * pxPerMetre)
+PIXEL_TOLERANCE = 2     # px, on each axis, against ceil(span * pxPerMetre) - MapStore.PixelTolerance (review F53)
 META_SUFFIX = ".map.json"
 
 # The mesh file, from the client's MapMeshFile: the WHOLE file is one raw deflate block (no zlib
@@ -92,7 +93,9 @@ META_SUFFIX = ".map.json"
 # class's own, repeated here because this script runs with no access to it.
 MESH_SUFFIX = "-mesh.bin"
 MESH_MAGIC = b"QTM1"
-MESH_VERSION = 1                    # MapMeshFile.Version
+MESH_VERSION = 2                    # MapMeshFile.Version (2 since stage W: atlas pages, UVs, ranges)
+MESH_MAX_ATLAS_PAGES = 8            # MapMeshFile.MaxAtlasPages
+MESH_MAX_RANGES = 64                # MapMeshFile.MaxRangesPerBuilding
 MESH_MAX_BANDS = 8                  # MaxFloors
 MESH_MAX_CELLS_PER_BAND = 4_000_000
 MESH_MAX_BUILDINGS = 20_000
@@ -100,9 +103,9 @@ MESH_MAX_VERTICES_PER_BUILDING = 2_000_000
 MESH_MAX_VERTICES_TOTAL = 12_000_000    # stage V: MapMeshFile.MaxVerticesTotal
 MESH_MAX_TRIANGLES = 6_000_000          # stage V: MapMeshFile.MaxTriangles (the builder keeps up to 3 M)
 # What this script will inflate before giving up - the host's own ceiling (MapStore.MaxDecompressedMeshBytes):
-# 3 M triangles x 12 B of indices (36 MB) + the format's 12 M vertices x 6 B (72 MB) = 108 MB of buildings,
-# and 52 MB for the relief grids (four full 4 M-cell bands are 48 MB).
-MESH_MAX_INFLATED = 160 * 1024 * 1024
+# 3 M triangles x 12 B of indices (36 MB) + the format's 12 M vertices x 10 B with v2's UVs (120 MB) =
+# 156 MB of buildings, and 64 MB for the relief grids and headers.
+MESH_MAX_INFLATED = 224 * 1024 * 1024
 # The largest mesh FILE a host takes (MapStore.MaxMeshBytes / MapTransfer.MaxMeshBytes). A shipped seed
 # past it would install and draw on this machine and then never reach anybody else: the host refuses it.
 MESH_MAX_FILE_BYTES = 48 * 1024 * 1024
@@ -219,6 +222,9 @@ def mesh_header(path):
 
         min_x, min_z, max_x, max_z = struct.unpack("<4d", take(32, "its extent"))
         y_min, y_max = struct.unpack("<2f", take(8, "its height range"))
+        atlas_pages = i32("its atlas page count")
+        if atlas_pages < 0 or atlas_pages > MESH_MAX_ATLAS_PAGES:
+            return None, f"claims {atlas_pages:,} atlas pages, past the {MESH_MAX_ATLAS_PAGES} a map may have"
         if not (max_x > min_x and max_z > min_z):
             return None, f"has an empty extent: x {min_x:g}..{max_x:g}, z {min_z:g}..{max_z:g}"
         if not (y_max > y_min):
@@ -277,6 +283,26 @@ def mesh_header(path):
                 return None, (f"claims {indices // 3:,} triangles by building {index}, past the "
                               f"{MESH_MAX_TRIANGLES:,} a map may have")
             take(index_count * 4, f"building {index}'s indices")
+            # v2: UVs (none, or one U and one V per vertex) and atlas ranges, on the reader's own rules.
+            uv_count = i32(f"building {index}'s UV count")
+            if uv_count != 0 and uv_count != vertex_count:
+                return None, f"has a building claiming {uv_count:,} UVs for {vertex_count:,} vertices"
+            take(uv_count * 4, f"building {index}'s UVs")
+            range_count = i32(f"building {index}'s atlas range count")
+            if range_count < 0 or range_count > MESH_MAX_RANGES:
+                return None, (f"has a building claiming {range_count:,} atlas ranges, past the "
+                              f"{MESH_MAX_RANGES} one building may have")
+            if range_count > 0 and uv_count == 0:
+                return None, f"has a building {index} with atlas ranges and no UVs"
+            end = 0
+            for k in range(range_count):
+                page, first, count = struct.unpack("<3i", take(12, f"building {index}'s range {k}"))
+                if not 0 <= page < atlas_pages:
+                    return None, f"has building {index} range {k} on atlas page {page}, and the file has {atlas_pages}"
+                if first < end or first % 3 or count <= 0 or count % 3 or first + count > index_count:
+                    return None, (f"has building {index} range {k} at indices {first}+{count} of {index_count} "
+                                  f"(after {end}) - ranges are ascending whole triangles inside the building")
+                end = first + count
     except EOFError as exc:
         return None, f"ends inside {exc.args[0]} - the file is truncated"
 
@@ -287,6 +313,7 @@ def mesh_header(path):
         "version": version,
         "extent": (min_x, min_z, max_x, max_z),
         "yMin": y_min, "yMax": y_max,
+        "atlasPages": atlas_pages,
         "bands": bands,
         "cells": cells_total,
         "vertices": vertices,

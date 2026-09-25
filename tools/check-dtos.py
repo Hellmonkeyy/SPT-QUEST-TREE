@@ -184,9 +184,44 @@ def fail_hard(message):
     sys.exit(1)
 
 
+# The host's REASON TEXT the client branches on (review F02): the map routes answer in English, and the
+# client reads four decisions out of those words. Each pair is (the literal as the client matches it, a
+# fragment of the server line that must still produce it). A rewording on either side fails this check
+# instead of silently turning "an old host" into "a real refusal", or "part held" into "mesh refused".
+SHARED_REASONS = [
+    # MapTransfer.LevelRefusal - a host from before sides/pages refusing a side/page post by its level.
+    ('"is not one of"', 'is not one of the {meta.Floors.Count} floors the meta names'),
+    # MapTransfer.IsMeshPartHeld - every part of a mesh but the last.
+    ('StartsWith("holding part"', 'Reason = $"holding part {count} of {parts}"'),
+    # MapTransfer.MeshWasNotKept - a set completed by a floor or side post, with its mesh.
+    ('"with its 3D mesh"', '"stored with its 3D mesh"'),
+    # MapTransfer.JudgeSide - a side or page the host dropped and went on without.
+    ('"side was dropped"', '$"the {dir ?? "unnamed"} side was dropped ({refusal})"'),
+    ('"was dropped"', 'var note = $"{label} was dropped ({refusal})";'),
+]
+
+
+def check_shared_reasons(errors):
+    """Each shared literal must appear in the client's MapTransfer.cs and its producer in MapStore.cs."""
+    root = Path(__file__).resolve().parent.parent
+    client = (root / "Source" / "Tarkov-QuestTree" / "QuestGraph" / "MapTransfer.cs").read_text(encoding="utf-8-sig")
+    server = (root / "Source" / "Tarkov-QuestTree-Server" / "MapStore.cs").read_text(encoding="utf-8-sig")
+    checked = 0
+    for matched, produced in SHARED_REASONS:
+        checked += 1
+        if matched not in client:
+            errors.append(f"shared reason text: the client no longer matches {matched} in MapTransfer.cs - "
+                          f"update SHARED_REASONS with the new literal, or the branch it drove is gone")
+        if produced not in server:
+            errors.append(f"shared reason text: MapStore.cs no longer writes {produced!r}, which the client "
+                          f"matches with {matched} - the client would misread the host's answer")
+    return checked
+
+
 def main():
     server, client = parse(SERVER_FILES), parse(CLIENT_FILES)
     errors, warnings, compared = [], [], 0
+    reasons = check_shared_reasons(errors)
 
     print("server wire type                mirrored by")
     print("-" * 78)
@@ -247,7 +282,7 @@ def main():
               f"mirrors, {len(warnings)} warning(s).")
         return 1
 
-    print(f"{compared} wire types compared, 0 drift"
+    print(f"{compared} wire types compared, 0 drift; {reasons} shared reason texts agree"
           + (f" ({len(warnings)} warning(s))" if warnings else ""))
     return 0
 
