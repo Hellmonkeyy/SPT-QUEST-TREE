@@ -58,7 +58,7 @@ namespace QuestTree.QuestGraph
         /// the nearest-capture-wins merge needs (see the class comment). It also keeps the number of
         /// stops, and so the length of a campaign, sane: Customs' 1118x539 m extent is 6x3 = 18 cells
         /// at this size, a few minutes of captures.</summary>
-        internal const float CampaignCellMetres = 200f;
+        internal const float CampaignCellMetres = 120f; // 200 until 2026-09-24: areas between stops were not being scanned properly (user)
 
         /// <summary>How far from a cell's centre a standable point may be found, in metres, on a grid
         /// whose cells are the nominal size. A cell with nothing walkable inside this radius - open
