@@ -91,7 +91,11 @@ namespace QuestTree.QuestGraph
         /// teleport itself saves the player is the 500 m fall; the two metres are a real fall with a
         /// metre of headroom, which is why this number stays small. Raising it to four would break
         /// both of the player's legs at every stop.</summary>
-        private const float CampaignTeleportRise = 2f;
+        // Lowered from 2 m to 1 m on 2026-09-24: at 2 m the arrival point sat inside low ceilings
+        // (sheds, walkways, the underside of stairs) at stop after stop, which is worse than the
+        // clipping risk it guarded against - a NavMesh sample sits within a few tens of centimetres
+        // of the visible floor, so one metre still clears it, and the drop is barely a step.
+        private const float CampaignTeleportRise = 1f;
 
         /// <summary>Seconds waited between arriving at a stop and starting its capture, for the
         /// streamer to bring the surroundings in. TUNABLE, and the one number to change if captures
