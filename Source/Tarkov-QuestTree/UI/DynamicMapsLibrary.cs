@@ -674,6 +674,17 @@ namespace QuestTree.UI
         /// <summary>Spends this frame's decode. Taken BEFORE the decode, so a decode that fails still counts.</summary>
         private static void TakeDecodeTurn() => _lastDecodeFrame = Time.frameCount;
 
+        /// <summary>Takes this frame's one raster decode for a caller outside the picture cache - the 3D view's atlas
+        /// pages, which it decodes readable to cut tiles from (Map3DView.TileStore). False when the turn is gone;
+        /// the caller tries again next frame.</summary>
+        internal static bool TryTakeDecodeTurn()
+        {
+            if (!DecodeTurnAvailable()) return false;
+
+            TakeDecodeTurn();
+            return true;
+        }
+
         private static readonly List<MapLayer> _spriteUse = new();
 
         private static void NoteSpriteUse(MapLayer layer)

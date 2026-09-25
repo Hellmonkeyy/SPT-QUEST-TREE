@@ -121,8 +121,12 @@ namespace QuestTreeServer
         ///
         /// 224 MB since stage W (format v2): every vertex may carry a U and a V, two more uint16s - up to
         /// 12,000,000 x 4 = 48 MB more at the format's vertex cap - so the buildings' worst case is 156 MB
-        /// (72 + 48 of vertices, 36 of indices) and 64 MB is left for the relief grids and the headers.</summary>
-        private const long MaxDecompressedMeshBytes = 224L * 1024 * 1024;
+        /// (72 + 48 of vertices, 36 of indices) and 64 MB is left for the relief grids and the headers.
+        ///
+        /// 256 MB since stage X (format v3): a range grows from 12 bytes to 36 - its tile rect (4 x uint16) and
+        /// its UV bounds (4 x float32), 24 bytes more - and at the format's caps that is 20,000 buildings x 64
+        /// ranges x 24 B = 30.72 MB more. 224 + 30.72 = 254.72 MB, rounded up to 256 MB (268,435,456 bytes).</summary>
+        private const long MaxDecompressedMeshBytes = 256L * 1024 * 1024;
 
         /// <summary>The scratch buffer size for one header walk, shared by every read in it. 64 KiB
         /// divides by both 2 and 4, so a chunk never splits a uint16 or a uint32 element.</summary>
@@ -133,8 +137,19 @@ namespace QuestTreeServer
         /// assembly - so this is the one number both halves must be changed for together, which is
         /// why the magic below carries the same digit and is checked as well. 2 since stage W: the header
         /// gained the atlas page count and every building its UVs and atlas ranges - a v1 file is refused by
-        /// name, since no stage W client reads one.</summary>
-        private const int MeshVersion = 2;
+        /// name, since no stage W client reads one. 3 since stage X (wrapped textures): each range also carries
+        /// its tile's pixel rect on its page and the raw-UV bounds its vertices are quantised over, and a
+        /// vertex may belong to one range only. v2 and v1 are refused by name.</summary>
+        private const int MeshVersion = 3;
+
+        /// <summary>A range's tile side, in pixels: a multiple of 4 from 4 to 256 (stage X - one repeat of a
+        /// material, at most 256 px, cut out of its page by the viewer).</summary>
+        private const int MinTileSide = 4;
+
+        private const int MaxTileSide = 256;
+
+        /// <summary>The atlas page's side, which a tile rect must lie inside (MapMeshFile.AtlasPageSize).</summary>
+        private const int AtlasPageSide = 4096;
 
         /// <summary>MapMeshFile.MaxRangesPerBuilding: the most atlas ranges one building may carry.</summary>
         private const int MaxMeshRangesPerBuilding = 64;
@@ -3307,7 +3322,8 @@ namespace QuestTreeServer
         /// cell metres, int32 width, int32 height, uint16[w*h] heights, uint8[w*h] distances; int32
         /// building count; per building int32 key, int32 level, int32 vertex count, 3 x uint16[v], int32
         /// index count, uint32[i] indices, then (v2) int32 uv count (0 or the vertex count), uint16[uv] U,
-        /// uint16[uv] V, int32 range count (0..64) and per range int32 page, int32 first, int32 count.
+        /// uint16[uv] V, int32 range count (0..64) and per range int32 page, int32 first, int32 count, then
+        /// (v3) uint16 tileX, tileY, tileW, tileH and float32 uMin, uMax, vMin, vMax.
         ///
         /// WHY IT IS WORTH DOING AT ALL, when the client checks the same things again before it draws:
         /// this host hands the file to every other client in the group. A file that no reader will take
@@ -3468,6 +3484,13 @@ namespace QuestTreeServer
                 long vertices = 0;
                 long indices = 0;
 
+                // v3: the one-range-per-vertex rule needs a building's indices after its ranges are read, so
+                // they are kept - in ONE array for the whole walk, grown to the largest building and never
+                // per building (the summary's allocation rule), with one owner byte a vertex beside it. At the
+                // caps that is 18 M indices (72 MB) and 2 M bytes, allocated once.
+                var indexStore = Array.Empty<uint>();
+                var owner = Array.Empty<byte>();
+
                 for (var i = 0; i < buildings; i++)
                 {
                     reader.ReadInt32();     // the building's stable key
@@ -3539,8 +3562,10 @@ namespace QuestTreeServer
                     // MapMeshFile.Read enforces: an index past it throws out of Unity's SetTriangles, so
                     // the client refuses the whole file. Same bytes either way - they have to be walked
                     // to reach the next building - so checking them costs a comparison per index.
+                    if (indexStore.Length < indexCount) indexStore = new uint[indexCount];
+
                     if (!IndicesAreInRange(bounded, indexCount, vertexCount, buffer, out var badIndex,
-                            out var badValue))
+                            out var badValue, indexStore))
                     {
                         problem = $"the mesh's building {i} has index {badIndex:N0} pointing at vertex " +
                                   $"{badValue:N0} of {vertexCount:N0}";
@@ -3598,7 +3623,62 @@ namespace QuestTreeServer
                             return false;
                         }
 
+                        // v3: the tile's pixel rect on its page - sides a multiple of 4 from 4 to 256, inside
+                        // the 4096 px page - and the raw-UV bounds the range's vertices are quantised over.
+                        int tileX = reader.ReadUInt16(), tileY = reader.ReadUInt16();
+                        int tileW = reader.ReadUInt16(), tileH = reader.ReadUInt16();
+
+                        if (tileW < MinTileSide || tileW > MaxTileSide || tileW % 4 != 0 ||
+                            tileH < MinTileSide || tileH > MaxTileSide || tileH % 4 != 0)
+                        {
+                            problem = $"the mesh's building {i} range {k} has a {tileW}x{tileH} px tile - a tile's sides " +
+                                      $"are multiples of 4 from {MinTileSide} to {MaxTileSide}";
+                            return false;
+                        }
+
+                        if (tileX + tileW > AtlasPageSide || tileY + tileH > AtlasPageSide)
+                        {
+                            problem = $"the mesh's building {i} range {k} has its tile at {tileX},{tileY} {tileW}x{tileH}, " +
+                                      $"past the {AtlasPageSide} px page";
+                            return false;
+                        }
+
+                        var uMin = reader.ReadSingle();
+                        var uMax = reader.ReadSingle();
+                        var vMin = reader.ReadSingle();
+                        var vMax = reader.ReadSingle();
+
+                        if (!Finite(uMin) || !Finite(uMax) || !Finite(vMin) || !Finite(vMax) || uMax < uMin || vMax < vMin)
+                        {
+                            problem = $"the mesh's building {i} range {k} has UV bounds u {uMin}..{uMax}, v {vMin}..{vMax} - " +
+                                      "they must be finite, each max at least its min";
+                            return false;
+                        }
+
                         end = (long)first + count;
+
+                        // v3: every vertex belongs to at most one range - its U and V are quantised over THAT
+                        // range's bounds, so a vertex two ranges index would be read against the wrong one by
+                        // either. One pass over this range's indices with a byte a vertex.
+                        if (k == 0)
+                        {
+                            if (owner.Length < vertexCount) owner = new byte[vertexCount];
+                            Array.Clear(owner, 0, vertexCount);
+                        }
+
+                        for (var at = first; at < first + count; at++)
+                        {
+                            var vertex = (int)indexStore[at];
+                            var mine = (byte)(k + 1);
+
+                            if (owner[vertex] == 0) owner[vertex] = mine;
+                            else if (owner[vertex] != mine)
+                            {
+                                problem = $"the mesh's building {i} vertex {vertex} is used by ranges {owner[vertex] - 1} " +
+                                          $"and {k} - a vertex belongs to one range, whose UV bounds it is quantised over";
+                                return false;
+                            }
+                        }
                     }
                 }
 
@@ -3787,8 +3867,11 @@ namespace QuestTreeServer
         /// <param name="buffer">The walk's one scratch buffer.</param>
         /// <param name="bad">The position of the first out-of-range index, when this returns false.</param>
         /// <param name="value">What that index claimed.</param>
+        /// <param name="store">Where the indices are kept, at least indexCount long (v3's vertex rule reads them
+        /// again once the building's ranges are known).</param>
         private static bool IndicesAreInRange(
-            System.IO.Stream stream, int indexCount, int vertexCount, byte[] buffer, out int bad, out uint value)
+            System.IO.Stream stream, int indexCount, int vertexCount, byte[] buffer, out int bad, out uint value,
+            uint[] store)
         {
             bad = -1;
             value = 0;
@@ -3805,6 +3888,8 @@ namespace QuestTreeServer
                 for (var i = 0; i < take; i++)
                 {
                     var index = BitConverter.ToUInt32(buffer, i * 4);
+
+                    store[done + i] = index;
 
                     if (index < (uint)vertexCount) continue;
 

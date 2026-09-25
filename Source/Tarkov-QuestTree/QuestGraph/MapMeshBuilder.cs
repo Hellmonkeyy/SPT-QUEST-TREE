@@ -256,7 +256,7 @@ namespace QuestTree.QuestGraph
         /// <summary>Stage W's atlas: a repeat's largest side, the most repeats a tiled use may take per axis and
         /// the pixels those repeats may add up to, the border each tile keeps, the flat tile's side, and the
         /// slack a UV may have past a whole repeat before it needs another.</summary>
-        private const int AtlasTileMax = 256;
+        private const int AtlasTileMax = MapMeshFile.AtlasTileMax;
 
         /// <summary>Seconds the capture sets aside for the atlas out of its budget (taken off the building
         /// phase's), and the ONE cap over the whole atlas phase - measuring, packing, capturing, filling, handing
@@ -276,13 +276,11 @@ namespace QuestTree.QuestGraph
         /// <summary>A static-batch member's UVs are read when its own vertex range is at least 1/this of the batch.</summary>
         private const int StaticBatchUvShare = 4;
 
-        private const int AtlasRepeatMax = 8;
-        private const int AtlasRepeatPixels = 1024;
-        /// <summary>The gutter round every atlas tile, filled with copies of the tile's edge texels. 16 px, not 2
-        /// (viewer review): the pages are loaded WITH mipmaps, and a gutter of 2^k px keeps a tile's own colour at
-        /// its edge down to mip k - 16 px holds through mip 4 (256 px pages-worth of 4096), where a 2 px gutter
-        /// bled the neighbouring tile in from mip 1.</summary>
-        internal const int AtlasPadding = 16;
+        /// <summary>The gutter round every atlas tile, filled with copies of the tile's edge texels. 2 px (stage X):
+        /// the viewer cuts each tile out of its page into a texture of its own with wrapMode Repeat and its own
+        /// mips, so no mip level of the page is ever sampled across tiles - the 16 px gutter stage W's
+        /// mipmapped pages needed is gone; 2 px covers bilinear filtering at the cut.</summary>
+        internal const int AtlasPadding = 2;
         private const int AtlasFlatPixels = 4;
         private const int AtlasAveragePixels = 8;
         private const float AtlasTileSlack = 0.05f;
@@ -513,6 +511,9 @@ namespace QuestTree.QuestGraph
         private sealed class AtlasMapped
         {
             internal uint[] Indices;
+            internal ushort[] X;
+            internal ushort[] Z;
+            internal float[] YMetres;
             internal ushort[] U;
             internal ushort[] V;
             internal List<MapMeshFile.AtlasRange> Ranges;
@@ -1106,12 +1107,11 @@ namespace QuestTree.QuestGraph
             internal int TransparentMaterials;
             internal int UvElsewhere;
             internal int FlatUses;
-            internal int TiledUses;
             internal int TilesUnplaced;
             internal int FlatNoTexture;
-            internal int FlatSpan16;
-            internal int FlatSpan64;
-            internal int FlatSpanMore;
+            internal int FlatCaptureFailed;
+            internal int RangesWritten;
+            internal int SplitVertices;
             internal int SeamsRelaxed;
             internal int ClusteredTextureless;
             internal int TilesLate;
@@ -4176,11 +4176,6 @@ namespace QuestTree.QuestGraph
             internal float OffsetU;
             internal float OffsetV;
 
-            /// <summary>Repeats of the texture its textured uses need, each axis 1..AtlasRepeatMax.</summary>
-            internal int RepeatU = 1;
-
-            internal int RepeatV = 1;
-
             /// <summary>Whether any use is textured / flat (a span over the repeat cap, or no texture).</summary>
             internal bool Textured;
 
@@ -4219,8 +4214,6 @@ namespace QuestTree.QuestGraph
             internal float MinV = float.PositiveInfinity;
             internal float MaxU = float.NegativeInfinity;
             internal float MaxV = float.NegativeInfinity;
-            internal float ShiftU;
-            internal float ShiftV;
             internal bool Flat;
         }
 
@@ -4401,8 +4394,6 @@ namespace QuestTree.QuestGraph
                                 tile = CaptureTile(job, info, r[2], r[3]);
                                 tw = r[2];
                                 th = r[3];
-                                rx = info.RepeatU;
-                                ry = info.RepeatV;
                                 x = info.X;
                                 y = info.Y;
                             }
@@ -4630,33 +4621,20 @@ namespace QuestTree.QuestGraph
             {
                 var info = job.Materials[use.Material];
 
-                use.ShiftU = (float)Math.Floor(use.MinU + AtlasTileSlack);
-                use.ShiftV = (float)Math.Floor(use.MinV + AtlasTileSlack);
-
-                var ku = Math.Max(1, (int)Math.Ceiling(use.MaxU - use.ShiftU - AtlasTileSlack));
-                var kv = Math.Max(1, (int)Math.Ceiling(use.MaxV - use.ShiftV - AtlasTileSlack));
-
-                use.Flat = info.Texture == null || ku > AtlasRepeatMax || kv > AtlasRepeatMax;
+                // Stage X: the viewer REPEATS the tile, so a use's span no longer matters - it is flat only for
+                // having no texture (a capture that fails is decided when the building is mapped).
+                use.Flat = info.Texture == null;
 
                 if (use.Flat)
                 {
                     info.Flat = true;
                     job.FlatUses++;
 
-                    // why, in buckets - the numbers that say whether a larger repeat cap or a wrapping shader is
-                    // what the rest of the flat uses need
-                    var k = Math.Max(ku, kv);
-                    if (info.Texture == null) job.FlatNoTexture++;
-                    else if (k <= 16) job.FlatSpan16++;
-                    else if (k <= 64) job.FlatSpan64++;
-                    else job.FlatSpanMore++;
+                    job.FlatNoTexture++;
                 }
                 else
                 {
                     info.Textured = true;
-                    info.RepeatU = Math.Max(info.RepeatU, ku);
-                    info.RepeatV = Math.Max(info.RepeatV, kv);
-                    if (ku > 1 || kv > 1) job.TiledUses++;
                 }
             }
 
@@ -4664,7 +4642,7 @@ namespace QuestTree.QuestGraph
         }
 
         /// <summary>Every tile's size, packed (AtlasPacker): a textured block per material with a textured use -
-        /// min(texture, AtlasTileMax) a repeat, the repeats within AtlasRepeatPixels - in group 0, limited to one
+        /// one repeat at TileSide(texture) - in group 0, limited to one
         /// page fewer than the cap when there are flat tiles; and a flat tile per material in use at all (the
         /// fallback for its flat uses and for a texture never captured) in group 1, packed after them into what is
         /// left - so every flat tile is on a page no earlier than any textured tile, and a full atlas costs
@@ -4680,8 +4658,8 @@ namespace QuestTree.QuestGraph
 
                 if (info.Textured && info.Texture != null && info.Texture.dimension == TextureDimension.Tex2D)
                 {
-                    var w = Math.Max(1, Math.Min(Math.Min(info.Texture.width, AtlasTileMax), AtlasRepeatPixels / info.RepeatU));
-                    var h = Math.Max(1, Math.Min(Math.Min(info.Texture.height, AtlasTileMax), AtlasRepeatPixels / info.RepeatV));
+                    var w = TileSide(info.Texture.width);
+                    var h = TileSide(info.Texture.height);
                     requests.Add(new[] { m, 0, w, h, -1, 0, 0 });
                 }
 
@@ -4698,8 +4676,8 @@ namespace QuestTree.QuestGraph
             {
                 var info = job.Materials[requests[k][0]];
                 var textured = requests[k][1] == 0;
-                widths[k] = requests[k][2] * (textured ? info.RepeatU : 1);
-                heights[k] = requests[k][3] * (textured ? info.RepeatV : 1);
+                widths[k] = requests[k][2];
+                heights[k] = requests[k][3];
                 groups[k] = textured ? 0 : 1;
                 if (!textured) flats++;
             }
@@ -4743,6 +4721,13 @@ namespace QuestTree.QuestGraph
                 }
             }
         }
+
+        /// <summary>A tile's side for a texture side (stage X): min(it, AtlasTileMax), rounded DOWN to a multiple of
+        /// <see cref="MapMeshFile.TileAlign"/>, at least that - the viewer compresses each tile to DXT1, in 4 x 4
+        /// blocks.</summary>
+        /// <param name="texture">The texture's side in pixels.</param>
+        internal static int TileSide(int texture) =>
+            Math.Max(MapMeshFile.TileAlign, Math.Min(texture, AtlasTileMax) / MapMeshFile.TileAlign * MapMeshFile.TileAlign);
 
         /// <summary>One material's texture as one repeat's pixels: Blit to a temporary RenderTexture at that size,
         /// ReadPixels into the scratch texture, the tint multiplied in, and the material's average colour taken
@@ -4882,10 +4867,14 @@ namespace QuestTree.QuestGraph
             return tile;
         }
 
-        /// <summary>One building's page UVs and triangle order, worked out BESIDE it (job.Mapped): each vertex
-        /// mapped into its material's block (or flat tile), each triangle's page decided, the triangles regrouped
-        /// page by page and one range per page. Written into the building only by ApplyAtlas, when the phase
-        /// completes.</summary>
+        /// <summary>
+        /// One building's atlas mapping, worked out BESIDE it (stage X): one range per MATERIAL it uses, its
+        /// triangles grouped by material; each range drawn with its material's tile (or, for a material with no
+        /// texture or one that would not capture, its flat 4 x 4 tile), the raw material UVs of its vertices
+        /// quantised over the range's own bounds; and every vertex that two ranges use DUPLICATED, one copy per
+        /// range, so the one-range-per-vertex rule holds by construction (SplitByRange). Written into the
+        /// building only by ApplyAtlas, when the phase completes.
+        /// </summary>
         /// <param name="job">The build.</param>
         /// <param name="i">The building.</param>
         private static void MapBuilding(Job job, int i)
@@ -4898,96 +4887,220 @@ namespace QuestTree.QuestGraph
             if (uv == null || mats == null || uses == null) return;
 
             var pages = job.AtlasPageCount;
-            var vertices = building.X.Length;
             var triangles = mats.Length;
-            var indices = building.Indices;
 
-            var u = new ushort[vertices];
-            var v = new ushort[vertices];
-            var page = new int[triangles];
-            var any = false;
+            // each triangle's range: one per material that has a tile to draw it with
+            var rangeOf = new Dictionary<int, int>();
+            var rangeUse = new List<AtlasUse>();
+            var rangeTile = new List<int[]>();       // page, x, y, w, h
+            var triRange = new int[triangles];
 
             for (var t = 0; t < triangles; t++)
             {
-                page[t] = -1;
+                triRange[t] = -1;
 
                 var m = mats[t];
                 if (m < 0) continue;
 
-                AtlasUse use = null;
-                foreach (var candidate in uses)
-                    if (candidate.Material == m) { use = candidate; break; }
-
-                if (use == null) continue;
-
-                var info = job.Materials[m];
-                var textured = !use.Flat && info.Captured && info.Page >= 0 && info.Page < pages;
-                var flat = !textured && info.FlatPage >= 0 && info.FlatPage < pages;
-
-                if (!textured && !flat) continue;
-
-                page[t] = textured ? info.Page : info.FlatPage;
-                any = true;
-
-                for (var k = 0; k < 3; k++)
+                if (!rangeOf.TryGetValue(m, out var r))
                 {
-                    var vi = (int)indices[t * 3 + k];
-                    double px, py;
+                    r = -1;
+                    AtlasUse use = null;
+                    foreach (var candidate in uses)
+                        if (candidate.Material == m) { use = candidate; break; }
 
-                    if (textured)
+                    var info = job.Materials[m];
+                    var textured = use != null && !use.Flat && info.Captured && info.Page >= 0 && info.Page < pages;
+                    var flat = !textured && info.FlatPage >= 0 && info.FlatPage < pages;
+
+                    if (use != null && !use.Flat && !textured) job.FlatCaptureFailed++;
+
+                    if (use != null && (textured || flat))
                     {
-                        var fu = Math.Max(0d, Math.Min(info.RepeatU, uv[vi * 2] - use.ShiftU));
-                        var fv = Math.Max(0d, Math.Min(info.RepeatV, uv[vi * 2 + 1] - use.ShiftV));
-                        px = info.X + fu * info.TileW;
-                        py = info.Y + fv * info.TileH;
-                    }
-                    else
-                    {
-                        px = info.FlatX + AtlasFlatPixels * 0.5;
-                        py = info.FlatY + AtlasFlatPixels * 0.5;
+                        r = rangeUse.Count;
+                        rangeUse.Add(use);
+                        rangeTile.Add(textured
+                            ? new[] { info.Page, info.X, info.Y, info.TileW, info.TileH }
+                            : new[] { info.FlatPage, info.FlatX, info.FlatY, AtlasFlatPixels, AtlasFlatPixels });
                     }
 
-                    u[vi] = UvCode(px / MapMeshFile.AtlasPageSize);
-                    v[vi] = UvCode(py / MapMeshFile.AtlasPageSize);
+                    rangeOf[m] = r;
                 }
+
+                triRange[t] = r;
             }
 
-            if (!any)
+            if (rangeUse.Count == 0 || rangeUse.Count > MapMeshFile.MaxRangesPerBuilding)
             {
                 job.UntexturedBuildings++;
                 return;
             }
 
-            var order = new List<int>(triangles);
-            for (var p = 0; p < pages; p++)
+            // grouped by range, vertices split per range
+            var split = SplitByRange(building.Indices, building.X.Length, triRange, rangeUse.Count);
+            var source = split.Source;
+            var n = source.Length;
+
+            var x = new ushort[n];
+            var z = new ushort[n];
+            var y = new float[n];
+            var u = new ushort[n];
+            var v = new ushort[n];
+            var heights = job.PendingY[i];
+
+            for (var k = 0; k < n; k++)
+            {
+                var from = source[k];
+                x[k] = building.X[from];
+                z[k] = building.Z[from];
+                y[k] = heights != null && from < heights.Length ? heights[from] : 0f;
+            }
+
+            var ranges = new List<MapMeshFile.AtlasRange>(rangeUse.Count);
+
+            for (var r = 0; r < rangeUse.Count; r++)
+            {
+                if (split.Count[r] == 0) continue;
+
+                var use = rangeUse[r];
+                var tile = rangeTile[r];
+
+                var range = new MapMeshFile.AtlasRange
+                {
+                    Page = tile[0],
+                    First = split.First[r],
+                    Count = split.Count[r],
+                    TileX = (ushort)tile[1],
+                    TileY = (ushort)tile[2],
+                    TileW = (ushort)tile[3],
+                    TileH = (ushort)tile[4],
+                    UMin = use.MinU,
+                    UMax = use.MaxU,
+                    VMin = use.MinV,
+                    VMax = use.MaxV,
+                };
+
+                for (var j = range.First; j < range.First + range.Count; j++)
+                {
+                    var k = (int)split.Indices[j];
+                    var from = source[k];
+                    u[k] = UvCodeFor(uv[from * 2], range.UMin, range.UMax);
+                    v[k] = UvCodeFor(uv[from * 2 + 1], range.VMin, range.VMax);
+                }
+
+                ranges.Add(range);
+            }
+
+            job.SplitVertices += n - building.X.Length;
+            job.RangesWritten += ranges.Count;
+
+            job.Mapped[i] = new AtlasMapped
+            {
+                Indices = split.Indices, X = x, Z = z, YMetres = y, U = u, V = v, Ranges = ranges,
+                Triangles = split.Textured,
+            };
+        }
+
+        /// <summary>A raw UV as its code over a range's bounds (stage X): 0..MaxUv across [min, max], 0 for a
+        /// zero span (no division).</summary>
+        /// <param name="value">The raw UV.</param>
+        /// <param name="min">The range's minimum.</param>
+        /// <param name="max">The range's maximum.</param>
+        internal static ushort UvCodeFor(float value, float min, float max)
+        {
+            var span = (double)max - min;
+            if (!(span > 0d)) return 0;
+
+            var t = (value - (double)min) / span;
+            return (ushort)Math.Round(Math.Max(0d, Math.Min(1d, t)) * MapMeshFile.MaxUv);
+        }
+
+        /// <summary>What SplitByRange hands back: the new index list (range 0's triangles, then range 1's, ... then
+        /// the triangles in no range), each new vertex's source vertex, and each range's first index and index
+        /// count; Textured is the triangles in any range.</summary>
+        internal sealed class RangeSplit
+        {
+            internal uint[] Indices;
+            internal int[] Source;
+            internal int[] First;
+            internal int[] Count;
+            internal long Textured;
+        }
+
+        /// <summary>
+        /// Groups a building's triangles by range and gives every range its OWN vertices (stage X): a vertex two
+        /// ranges use becomes one vertex per range, so a vertex's UV code is quantised over exactly one range's
+        /// bounds by construction - the invariant MapMeshFile's reader checks. Triangles in no range (-1) come
+        /// last and share whichever copy of a vertex exists, since they carry no UV. Unity-free, for the harness.
+        /// </summary>
+        /// <param name="indices">The building's indices.</param>
+        /// <param name="vertices">Its vertex count.</param>
+        /// <param name="triRange">Each triangle's range, or -1.</param>
+        /// <param name="ranges">The range count.</param>
+        internal static RangeSplit SplitByRange(uint[] indices, int vertices, int[] triRange, int ranges)
+        {
+            var triangles = indices.Length / 3;
+            var result = new RangeSplit { Indices = new uint[indices.Length], First = new int[ranges], Count = new int[ranges] };
+            var source = new List<int>(vertices + vertices / 8);
+
+            var map = new int[vertices];      // old vertex -> new, for the range being written
+            var stamp = new int[vertices];    // which range map[] is for (range + 1)
+            var any = new int[vertices];      // old vertex -> any new copy, for the untextured triangles
+            for (var k = 0; k < vertices; k++) any[k] = -1;
+
+            var at = 0;
+
+            for (var r = -1; r < ranges; r++)
+            {
+                // ranges first (0..ranges-1), the untextured last: -1 is visited after the loop below
+                if (r < 0) continue;
+
+                result.First[r] = at;
+
                 for (var t = 0; t < triangles; t++)
-                    if (page[t] == p) order.Add(t);
+                {
+                    if (triRange[t] != r) continue;
 
-            var textured3 = order.Count;
+                    for (var c = 0; c < 3; c++)
+                    {
+                        var old = (int)indices[t * 3 + c];
+
+                        if (stamp[old] != r + 1)
+                        {
+                            stamp[old] = r + 1;
+                            map[old] = source.Count;
+                            source.Add(old);
+                            if (any[old] < 0) any[old] = map[old];
+                        }
+
+                        result.Indices[at++] = (uint)map[old];
+                    }
+                }
+
+                result.Count[r] = at - result.First[r];
+                result.Textured += result.Count[r] / 3;
+            }
+
             for (var t = 0; t < triangles; t++)
-                if (page[t] < 0) order.Add(t);
-
-            var reordered = new uint[indices.Length];
-            for (var k = 0; k < order.Count; k++)
             {
-                reordered[k * 3] = indices[order[k] * 3];
-                reordered[k * 3 + 1] = indices[order[k] * 3 + 1];
-                reordered[k * 3 + 2] = indices[order[k] * 3 + 2];
+                if (triRange[t] >= 0 && triRange[t] < ranges) continue;
+
+                for (var c = 0; c < 3; c++)
+                {
+                    var old = (int)indices[t * 3 + c];
+
+                    if (any[old] < 0)
+                    {
+                        any[old] = source.Count;
+                        source.Add(old);
+                    }
+
+                    result.Indices[at++] = (uint)any[old];
+                }
             }
 
-            var ranges = new List<MapMeshFile.AtlasRange>();
-            var start = 0;
-            while (start < textured3)
-            {
-                var p = page[order[start]];
-                var end = start;
-                while (end < textured3 && page[order[end]] == p) end++;
-
-                ranges.Add(new MapMeshFile.AtlasRange { Page = p, First = start * 3, Count = (end - start) * 3 });
-                start = end;
-            }
-
-            job.Mapped[i] = new AtlasMapped { Indices = reordered, U = u, V = v, Ranges = ranges, Triangles = textured3 };
+            result.Source = source.ToArray();
+            return result;
         }
 
         /// <summary>The completed atlas into the file: every mapped building's indices, UVs and ranges, and the page
@@ -5004,9 +5117,15 @@ namespace QuestTree.QuestGraph
 
                 var building = file.Buildings[i];
                 building.Indices = mapped.Indices;
+                building.X = mapped.X;
+                building.Z = mapped.Z;
                 building.U = mapped.U;
                 building.V = mapped.V;
                 building.Ranges = mapped.Ranges;
+
+                // the heights in metres travel with the split vertices until QuantiseBuildings
+                job.PendingY[i] = mapped.YMetres;
+                job.Vertices += mapped.X.Length - (job.PendingUV[i] != null ? job.PendingUV[i].Length / 2 : mapped.X.Length);
 
                 job.TexturedBuildings++;
                 job.TexturedTriangles += mapped.Triangles;
@@ -5295,9 +5414,10 @@ namespace QuestTree.QuestGraph
             Plugin.LogSource?.LogInfo(
                 $"QuestTree: textures for {job.Request.Map} - {N(job.TexturesCaptured)} material(s) captured into " +
                 $"{N(job.File.AtlasPages)} atlas page(s) ({MapMeshFile.AtlasPageSize}, encoding on workers), " +
-                $"{N(job.TiledUses)} tiled, " +
-                $"{N(job.FlatUses)} fell back to a flat colour ({N(job.FlatNoTexture)} without a texture; UVs spanning " +
-                $"{AtlasRepeatMax + 1}-16 repeats {N(job.FlatSpan16)}, 17-64 {N(job.FlatSpan64)}, more {N(job.FlatSpanMore)}), " +
+                $"{N(job.FlatNoTexture + job.FlatCaptureFailed)} use(s) on a flat colour ({N(job.FlatNoTexture)} without a " +
+                $"texture, {N(job.FlatCaptureFailed)} capture failed), {N(job.RangesWritten)} range(s), " +
+                $"{N(job.TexturesCaptured)} tile(s) on {N(job.File.AtlasPages)} page(s), {N(job.SplitVertices)} vertices split " +
+                "between ranges, " +
                 $"{job.AtlasSeconds.ToString("0.0", f1)} s; " +
                 $"{N(used)} material(s) in use, {N(job.TexturesFailed)} texture(s) would not capture, " +
                 $"{N(job.TilesUnplaced)} tile(s) over the {MapMeshFile.MaxAtlasPages}-page cap, " +

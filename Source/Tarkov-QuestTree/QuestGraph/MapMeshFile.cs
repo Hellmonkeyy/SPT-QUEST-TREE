@@ -23,8 +23,10 @@ namespace QuestTree.QuestGraph
     /// in-raid (MapMeshBuilder, phase 3A/3C) and the reader is in the menu (UI/Map3DView, phase 3B),
     /// which are different code paths that never run in the same frame and are written by different
     /// hands. One class that both call is the only way the two agree by construction. So the layout
-    /// below is FROZEN at <see cref="Version"/> 2 (stage W added the atlas: a page count in the header and
-    /// per building its UVs and page ranges); a change to it is a new version number, and
+    /// below is FROZEN at <see cref="Version"/> 3 (stage W added the atlas: a page count in the header and per
+    /// building its UVs and page ranges; stage X made the textures WRAP: each range carries its material's tile
+    /// rect on its page and the raw-UV bounds its vertices' U/V are quantised over, and every vertex belongs to at
+    /// most one range); a change to it is a new version number, and
     /// <see cref="Read(Stream)"/> refuses a version it does not know rather than mis-reading it.
     ///
     /// Why quantised: a float32 x/y/z per vertex and a float32 per relief cell doubles the file for
@@ -64,7 +66,15 @@ namespace QuestTree.QuestGraph
         /// <summary>The layout version, written into the header and checked on read. Bumped by ANY
         /// change to the byte layout, including an added field: readers refuse what they do not
         /// know.</summary>
-        internal const int Version = 2;
+        internal const int Version = 3;
+
+        /// <summary>A tile's largest side in pixels (stage X): each material's texture is captured at min(its size,
+        /// this), rounded down to a multiple of <see cref="TileAlign"/>.</summary>
+        internal const int AtlasTileMax = 256;
+
+        /// <summary>A tile's sides are multiples of this (and at least this): the viewer compresses each tile it cuts
+        /// out of its page to DXT1, which works in 4 x 4 blocks.</summary>
+        internal const int TileAlign = 4;
 
         /// <summary>Atlas pages a file may name (stage W): <c>&lt;key&gt;-atlas-&lt;n&gt;.png</c>, n below this.</summary>
         internal const int MaxAtlasPages = 8;
@@ -78,12 +88,14 @@ namespace QuestTree.QuestGraph
         internal static string AtlasFileNameFor(string mapKey, int page) =>
             $"{mapKey}-atlas-{page.ToString(CultureInfo.InvariantCulture)}.png";
 
-        /// <summary>Page ranges one building may carry - one per page is all the builder writes, so this is
-        /// the page cap with room, and the bound on what a hostile file can make a reader allocate.</summary>
+        /// <summary>Ranges one building may carry - one per MATERIAL it uses (stage X), and the bound on what a
+        /// hostile file can make a reader allocate.</summary>
         internal const int MaxRangesPerBuilding = 64;
 
-        /// <summary>The UV code for 1.0: a stored u or v is code / MaxUv over its page's [0, 1], with (0, 0) the
-        /// page PNG's BOTTOM-LEFT corner - Unity's texture convention, which Texture2D.LoadImage keeps.</summary>
+        /// <summary>The UV code for the top of a range's bounds (stage X): a stored u is
+        /// UMin + code / MaxUv * (UMax - UMin) of the range that uses the vertex - a RAW material UV in repeats of
+        /// its tile, which the viewer draws with wrapMode Repeat. v = 0 is the tile's bottom row (Unity's texture
+        /// convention, which Texture2D.LoadImage keeps for the page).</summary>
         internal const ushort MaxUv = 0xFFFF;
 
         /// <summary>The four bytes a mesh file starts with, as text. The digit is part of it - a
@@ -426,7 +438,7 @@ namespace QuestTree.QuestGraph
                     total += (building.Z?.Length ?? 0) * 2L;
                     total += (building.Indices?.Length ?? 0) * 4L;
                     total += ((building.U?.Length ?? 0) + (building.V?.Length ?? 0)) * 2L;
-                    total += (building.Ranges?.Count ?? 0) * 12L;
+                    total += (building.Ranges?.Count ?? 0) * 36L;
                 }
 
             return total;
@@ -629,8 +641,11 @@ namespace QuestTree.QuestGraph
 
         // --- one atlas range -------------------------------------------------------------------------
 
-        /// <summary>Triangles of one building drawn with one atlas page: indices [First, First + Count) of
-        /// its <see cref="Building.Indices"/>.</summary>
+        /// <summary>Triangles of one building drawn with one material's tile (stage X): indices
+        /// [First, First + Count) of its <see cref="Building.Indices"/>, the tile's pixel rect on its atlas page
+        /// (TileX/TileY from the page's BOTTOM-LEFT, W and H multiples of <see cref="TileAlign"/>), and the raw-UV
+        /// bounds its vertices' U/V codes are quantised over. Byte order: int Page, First, Count; ushort TileX,
+        /// TileY, TileW, TileH; float UMin, UMax, VMin, VMax.</summary>
         internal struct AtlasRange
         {
             /// <summary>The atlas page, below the file's <see cref="AtlasPages"/>.</summary>
@@ -641,6 +656,28 @@ namespace QuestTree.QuestGraph
 
             /// <summary>Indices in the range (a positive multiple of 3).</summary>
             internal int Count;
+
+            /// <summary>The tile's rect on its page, pixels from the page's bottom-left.</summary>
+            internal ushort TileX;
+
+            internal ushort TileY;
+            internal ushort TileW;
+            internal ushort TileH;
+
+            /// <summary>The raw-UV bounds (in repeats of the tile) the range's vertices are quantised over.</summary>
+            internal float UMin;
+
+            internal float UMax;
+            internal float VMin;
+            internal float VMax;
+
+            /// <summary>A stored u code as this range's raw u.</summary>
+            /// <param name="code">The code.</param>
+            internal float U(ushort code) => UMin + code / (float)MaxUv * (UMax - UMin);
+
+            /// <summary>A stored v code as this range's raw v.</summary>
+            /// <param name="code">The code.</param>
+            internal float V(ushort code) => VMin + code / (float)MaxUv * (VMax - VMin);
         }
 
         // --- one building ----------------------------------------------------------------------------
@@ -687,28 +724,41 @@ namespace QuestTree.QuestGraph
             /// IndexFormat.UInt32 takes these as they are.</summary>
             internal uint[] Indices;
 
-            /// <summary>Per-vertex texture coordinates over an atlas page's [0, 1] (<see cref="MaxUv"/>), or
-            /// null when no triangle of this building is textured. Same length as <see cref="X"/> when
-            /// present.</summary>
+            /// <summary>Per-vertex texture codes (stage X), quantised over the bounds of the ONE range whose triangles
+            /// use the vertex (<see cref="AtlasRange.U"/>), or null when no triangle of this building is textured.
+            /// Same length as <see cref="X"/> when present; a vertex used by no range carries 0.</summary>
             internal ushort[] U;
 
             /// <summary>See <see cref="U"/>.</summary>
             internal ushort[] V;
 
-            /// <summary>The textured triangles, as ranges of <see cref="Indices"/> drawn with one atlas page
-            /// each: ascending, not overlapping, each a whole number of triangles. A triangle in no range
-            /// has no captured texture and is drawn the stage U/V way (side views, top picture, tint).</summary>
+            /// <summary>The textured triangles, as ranges of <see cref="Indices"/> drawn with one material's tile
+            /// each: ascending, not overlapping, each a whole number of triangles, and no vertex used by two of
+            /// them. A triangle in no range has no captured texture and is drawn the stage U/V way (side views,
+            /// top picture, tint).</summary>
             internal List<AtlasRange> Ranges = new List<AtlasRange>();
 
             private MapMeshFile _file;
 
-            /// <summary>A stored u as a page coordinate in [0, 1].</summary>
+            /// <summary>Vertex i's CODE as a fraction in [0, 1] - the stage W reading, kept only so a viewer still on
+            /// v2 semantics compiles while it moves to <see cref="UOf(int, AtlasRange)"/>; in v3 this is NOT a page
+            /// coordinate.</summary>
             /// <param name="i">The vertex index.</param>
             internal float UOf(int i) => U == null ? 0f : U[i] / (float)MaxUv;
 
-            /// <summary>A stored v as a page coordinate in [0, 1] (0 = the page's bottom row).</summary>
+            /// <summary>See <see cref="UOf(int)"/>.</summary>
             /// <param name="i">The vertex index.</param>
             internal float VOf(int i) => V == null ? 0f : V[i] / (float)MaxUv;
+
+            /// <summary>Vertex i's raw u, over the bounds of the range that uses it.</summary>
+            /// <param name="i">The vertex index.</param>
+            /// <param name="range">The range whose triangles use it.</param>
+            internal float UOf(int i, AtlasRange range) => U == null ? 0f : range.U(U[i]);
+
+            /// <summary>Vertex i's raw v, over the bounds of the range that uses it.</summary>
+            /// <param name="i">The vertex index.</param>
+            /// <param name="range">The range whose triangles use it.</param>
+            internal float VOf(int i, AtlasRange range) => V == null ? 0f : range.V(V[i]);
 
             /// <summary>Vertices in this building.</summary>
             internal int VertexCount => X?.Length ?? 0;
@@ -907,9 +957,18 @@ namespace QuestTree.QuestGraph
 
                     for (var k = 0; k < ranges; k++)
                     {
-                        w.Write(building.Ranges[k].Page);
-                        w.Write(building.Ranges[k].First);
-                        w.Write(building.Ranges[k].Count);
+                        var range = building.Ranges[k];
+                        w.Write(range.Page);
+                        w.Write(range.First);
+                        w.Write(range.Count);
+                        w.Write(range.TileX);
+                        w.Write(range.TileY);
+                        w.Write(range.TileW);
+                        w.Write(range.TileH);
+                        w.Write(range.UMin);
+                        w.Write(range.UMax);
+                        w.Write(range.VMin);
+                        w.Write(range.VMax);
                     }
                 }
             }
@@ -1048,7 +1107,7 @@ namespace QuestTree.QuestGraph
                     throw new InvalidDataException(
                         $"building {i} (key {building.Key}) is on level {building.Level}, which no band is");
 
-                CheckAtlas(i, building.Key, building.X.Length, building.Indices.Length,
+                CheckAtlas(i, building.Key, building.X.Length, building.Indices,
                     building.U?.Length ?? 0, building.V?.Length ?? 0, building.Ranges, AtlasPages);
 
                 vertices += building.X.Length;
@@ -1066,18 +1125,23 @@ namespace QuestTree.QuestGraph
 
         /// <summary>The atlas rules for one building, the writer's and the reader's alike: UVs absent or one
         /// per vertex, no range without them, and every range a positive whole number of triangles inside
-        /// the building's indices, on a page the file has, ascending and not overlapping.</summary>
+        /// the building's indices, on a page the file has, ascending and not overlapping; its tile rect inside the
+        /// page with sides that are multiples of <see cref="TileAlign"/> in TileAlign..AtlasTileMax; its bounds
+        /// finite with max >= min; and no vertex used by two ranges (one pass over the indices, a byte a
+        /// vertex) - a vertex's code is quantised over ONE range's bounds.</summary>
         /// <param name="i">The building's position, for the message.</param>
         /// <param name="key">Its key, for the message.</param>
         /// <param name="vertices">Its vertex count.</param>
-        /// <param name="indices">Its index count.</param>
+        /// <param name="indexArray">Its indices.</param>
         /// <param name="us">Its u count.</param>
         /// <param name="vs">Its v count.</param>
         /// <param name="ranges">Its ranges.</param>
         /// <param name="pages">The file's page count.</param>
-        private static void CheckAtlas(int i, int key, int vertices, int indices, int us, int vs,
+        private static void CheckAtlas(int i, int key, int vertices, uint[] indexArray, int us, int vs,
             List<AtlasRange> ranges, int pages)
         {
+            var indices = indexArray?.Length ?? 0;
+
             if (us != vs || (us != 0 && us != vertices))
                 throw new InvalidDataException(
                     $"building {i} (key {key}) has {us} u and {vs} v for {vertices} vertices");
@@ -1107,7 +1171,46 @@ namespace QuestTree.QuestGraph
                         $"building {i} (key {key}) range {k} is indices {range.First}+{range.Count} of {indices} " +
                         $"(after {end}) - ranges are ascending whole triangles inside the building");
 
+                if (range.TileW < TileAlign || range.TileH < TileAlign || range.TileW > AtlasTileMax ||
+                    range.TileH > AtlasTileMax || range.TileW % TileAlign != 0 || range.TileH % TileAlign != 0 ||
+                    range.TileX + range.TileW > AtlasPageSize || range.TileY + range.TileH > AtlasPageSize)
+                    throw new InvalidDataException(
+                        $"building {i} (key {key}) range {k}'s tile is {range.TileW}x{range.TileH} at " +
+                        $"({range.TileX}, {range.TileY}) - a tile is {TileAlign}..{AtlasTileMax} px a side in steps of " +
+                        $"{TileAlign}, inside its {AtlasPageSize} px page");
+
+                if (!IsFinite(range.UMin) || !IsFinite(range.UMax) || !IsFinite(range.VMin) || !IsFinite(range.VMax) ||
+                    range.UMax < range.UMin || range.VMax < range.VMin)
+                    throw new InvalidDataException(
+                        $"building {i} (key {key}) range {k}'s UV bounds are u {range.UMin}..{range.UMax}, " +
+                        $"v {range.VMin}..{range.VMax} - they must be finite with max >= min");
+
                 end = range.First + range.Count;
+            }
+
+            // one range per vertex: a byte a vertex, 0 = unused, else the range's number + 1
+            if (count > 0 && indexArray != null)
+            {
+                var owner = new byte[vertices];
+
+                for (var k = 0; k < count; k++)
+                {
+                    var tag = (byte)(k + 1);
+                    var range = ranges[k];
+
+                    for (var j = range.First; j < range.First + range.Count; j++)
+                    {
+                        var v = indexArray[j];
+                        if (v >= (uint)vertices) continue;          // the index check names this one
+
+                        if (owner[v] != 0 && owner[v] != tag)
+                            throw new InvalidDataException(
+                                $"building {i} (key {key}) vertex {v} is used by ranges {owner[v] - 1} and {k} - a " +
+                                "vertex's UV code belongs to one range's bounds");
+
+                        owner[v] = tag;
+                    }
+                }
             }
         }
 
@@ -1405,9 +1508,23 @@ namespace QuestTree.QuestGraph
                         $"{MaxRangesPerBuilding}");
 
                 for (var k = 0; k < rangeCount; k++)
-                    building.Ranges.Add(new AtlasRange { Page = r.ReadInt32(), First = r.ReadInt32(), Count = r.ReadInt32() });
+                    building.Ranges.Add(new AtlasRange
+                    {
+                        Page = r.ReadInt32(),
+                        First = r.ReadInt32(),
+                        Count = r.ReadInt32(),
+                        TileX = r.ReadUInt16(),
+                        TileY = r.ReadUInt16(),
+                        TileW = r.ReadUInt16(),
+                        TileH = r.ReadUInt16(),
+                        UMin = r.ReadSingle(),
+                        UMax = r.ReadSingle(),
+                        VMin = r.ReadSingle(),
+                        VMax = r.ReadSingle(),
+                    });
 
-                CheckAtlas(i, building.Key, vertexCount, indexCount, uvCount, uvCount, building.Ranges, file.AtlasPages);
+                CheckAtlas(i, building.Key, vertexCount, building.Indices, uvCount, uvCount, building.Ranges,
+                    file.AtlasPages);
 
                 // See Validate: NoHit in a vertex's y is a NaN, and a NaN in a vertex buffer draws
                 // nothing without a word of complaint.

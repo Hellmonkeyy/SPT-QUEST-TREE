@@ -93,7 +93,7 @@ PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 # Write() doc comment is the byte table these constants and read_mesh() below follow. The caps are
 # ITS caps: a file this script accepts and the client refuses would be a check that cannot fail.
 MESH_MAGIC = b"QTM1"
-MESH_VERSION = 2            # MapMeshFile.Version (stage W: 2 added the atlas)
+MESH_VERSION = 3            # MapMeshFile.Version (stage W: 2 added the atlas; stage X: 3 wraps the tiles)
 MESH_NO_HIT = 0xFFFF        # MapMeshFile.NoHit
 MESH_MAX_BANDS = 8
 MESH_MAX_CELLS_PER_BAND = 4_000_000
@@ -104,6 +104,8 @@ MESH_MAX_TRIANGLES = 6_000_000         # stage V: was 2 M (the building budget w
 MESH_MAX_ATLAS_PAGES = 8               # MapMeshFile.MaxAtlasPages
 MESH_MAX_RANGES_PER_BUILDING = 64      # MapMeshFile.MaxRangesPerBuilding
 ATLAS_PAGE_SIZE = 4096                 # MapMeshFile.AtlasPageSize
+ATLAS_TILE_MAX = 256                   # MapMeshFile.AtlasTileMax
+ATLAS_TILE_ALIGN = 4                   # MapMeshFile.TileAlign (the viewer's DXT1 blocks)
 # What the file may inflate to. 8 bands of 4 M cells is 96 MB by the caps above; the bound exists so
 # a corrupt or hostile deflate stream cannot be expanded until this process dies, which is the same
 # reason MapMeshFile checks every count before it allocates.
@@ -530,7 +532,8 @@ def read_mesh(data):
 
         # The index check, per building and against ITS vertex count: an index past it is what would
         # throw from inside the viewer's SetTriangles, where nothing could say which building it was.
-        for position, value in enumerate(cur.u32s(indices, f"{where}'s indices")):
+        index_values = cur.u32s(indices, f"{where}'s indices")
+        for position, value in enumerate(index_values):
             if value >= count:
                 raise MeshError(f"{where} (key {key}) index {position} is {value}, past its "
                                 f"{count} vertices")
@@ -542,8 +545,9 @@ def read_mesh(data):
                 raise MeshError(f"{where} (key {key}) vertex {position} has no height (NoHit), "
                                 f"which would be a NaN vertex")
 
-        # Stage W: UVs (none, or one per vertex), then the page ranges - ascending whole triangles inside
-        # this building's indices, each on a page the file has.
+        # Stage W/X: UVs (none, or one per vertex), then the ranges - ascending whole triangles inside this
+        # building's indices, each on a page the file has, its tile rect inside the page in 4-px steps, its raw-UV
+        # bounds finite and ordered, and no vertex used by two ranges (its code is quantised over ONE range).
         uvs = cur.i32(f"{where}'s UV count")
         if uvs not in (0, count):
             raise MeshError(f"{where} (key {key}) claims {uvs} UVs for {count} vertices")
@@ -558,10 +562,22 @@ def read_mesh(data):
             raise MeshError(f"{where} (key {key}) has atlas ranges and no UVs")
 
         end = 0
+        owner = bytearray(count) if ranges else None
         for k in range(ranges):
             page = cur.i32(f"{where}'s range {k} page")
             first = cur.i32(f"{where}'s range {k} first index")
             span = cur.i32(f"{where}'s range {k} index count")
+            tx, ty, tw, th = struct.unpack("<4H", cur.take(8, f"{where}'s range {k} tile rect"))
+            u_min, u_max, v_min, v_max = struct.unpack("<4f", cur.take(16, f"{where}'s range {k} UV bounds"))
+            if not (ATLAS_TILE_ALIGN <= tw <= ATLAS_TILE_MAX and ATLAS_TILE_ALIGN <= th <= ATLAS_TILE_MAX
+                    and tw % ATLAS_TILE_ALIGN == 0 and th % ATLAS_TILE_ALIGN == 0
+                    and tx + tw <= ATLAS_PAGE_SIZE and ty + th <= ATLAS_PAGE_SIZE):
+                raise MeshError(f"{where} (key {key}) range {k}'s tile is {tw}x{th} at ({tx}, {ty}) - a tile is "
+                                f"{ATLAS_TILE_ALIGN}..{ATLAS_TILE_MAX} px a side in steps of {ATLAS_TILE_ALIGN}, "
+                                f"inside its {ATLAS_PAGE_SIZE} px page")
+            if not all(math.isfinite(b) for b in (u_min, u_max, v_min, v_max)) or u_max < u_min or v_max < v_min:
+                raise MeshError(f"{where} (key {key}) range {k}'s UV bounds are u {u_min}..{u_max}, "
+                                f"v {v_min}..{v_max} - they must be finite with max >= min")
             if not 0 <= page < mesh["atlasPages"]:
                 raise MeshError(f"{where} (key {key}) range {k} is on page {page}; the file has "
                                 f"{mesh['atlasPages']}")
@@ -570,6 +586,13 @@ def read_mesh(data):
                                 f"(after {end}) - ranges are ascending whole triangles inside the building")
             end = first + span
             mesh["textured"] += span // 3
+            tag = k + 1
+            for j in range(first, first + span):
+                vertex = index_values[j]
+                if owner[vertex] not in (0, tag):
+                    raise MeshError(f"{where} (key {key}) vertex {vertex} is used by ranges {owner[vertex] - 1} and "
+                                    f"{k} - a vertex's UV code belongs to one range's bounds")
+                owner[vertex] = tag
         mesh["ranges"] += ranges
 
         if levels and level not in levels:

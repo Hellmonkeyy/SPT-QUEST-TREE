@@ -935,10 +935,11 @@ namespace QuestTree.UI
                 {
                     Name = $"atlas {number}",
                     ImagePath = file,
-                    IsRaster = true,
 
-                    // Minified hard in the 3D view: decoded with a mip chain, trilinear and 4x aniso.
-                    Mipmapped = true
+                    // A path and nothing more since stage X: the page is never drawn or cached as a picture. The 3D
+                    // view's TileStore reads it, decodes it readable, cuts its tiles (each with its own mips and
+                    // Repeat wrap) and lets it go.
+                    IsRaster = true
                 }
             };
 

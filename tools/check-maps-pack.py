@@ -93,7 +93,10 @@ META_SUFFIX = ".map.json"
 # class's own, repeated here because this script runs with no access to it.
 MESH_SUFFIX = "-mesh.bin"
 MESH_MAGIC = b"QTM1"
-MESH_VERSION = 2                    # MapMeshFile.Version (2 since stage W: atlas pages, UVs, ranges)
+MESH_VERSION = 3                    # MapMeshFile.Version (2 since stage W: atlas pages, UVs, ranges;
+                                    # 3 since stage X: each range's tile rect and raw-UV bounds)
+MESH_TILE_MIN, MESH_TILE_MAX = 4, 256   # MapMeshFile.TileAlign .. AtlasTileMax: a tile side, a multiple of 4
+MESH_ATLAS_PAGE = 4096                  # MapMeshFile.AtlasPageSize: a tile rect lies inside it
 MESH_MAX_ATLAS_PAGES = 8            # MapMeshFile.MaxAtlasPages
 MESH_MAX_RANGES = 64                # MapMeshFile.MaxRangesPerBuilding
 MESH_MAX_BANDS = 8                  # MaxFloors
@@ -104,8 +107,9 @@ MESH_MAX_VERTICES_TOTAL = 12_000_000    # stage V: MapMeshFile.MaxVerticesTotal
 MESH_MAX_TRIANGLES = 6_000_000          # stage V: MapMeshFile.MaxTriangles (the builder keeps up to 3 M)
 # What this script will inflate before giving up - the host's own ceiling (MapStore.MaxDecompressedMeshBytes):
 # 3 M triangles x 12 B of indices (36 MB) + the format's 12 M vertices x 10 B with v2's UVs (120 MB) =
-# 156 MB of buildings, and 64 MB for the relief grids and headers.
-MESH_MAX_INFLATED = 224 * 1024 * 1024
+# 156 MB of buildings, and 64 MB for the relief grids and headers. Stage X's v3 ranges are 24 bytes longer,
+# which at the caps (20,000 buildings x 64 ranges) is 30.72 MB more: 256 MB, as the host.
+MESH_MAX_INFLATED = 256 * 1024 * 1024
 # The largest mesh FILE a host takes (MapStore.MaxMeshBytes / MapTransfer.MaxMeshBytes). A shipped seed
 # past it would install and draw on this machine and then never reach anybody else: the host refuses it.
 MESH_MAX_FILE_BYTES = 48 * 1024 * 1024
@@ -282,7 +286,7 @@ def mesh_header(path):
             if indices // 3 > MESH_MAX_TRIANGLES:
                 return None, (f"claims {indices // 3:,} triangles by building {index}, past the "
                               f"{MESH_MAX_TRIANGLES:,} a map may have")
-            take(index_count * 4, f"building {index}'s indices")
+            index_bytes = take(index_count * 4, f"building {index}'s indices")
             # v2: UVs (none, or one U and one V per vertex) and atlas ranges, on the reader's own rules.
             uv_count = i32(f"building {index}'s UV count")
             if uv_count != 0 and uv_count != vertex_count:
@@ -295,6 +299,7 @@ def mesh_header(path):
             if range_count > 0 and uv_count == 0:
                 return None, f"has a building {index} with atlas ranges and no UVs"
             end = 0
+            owner = {}
             for k in range(range_count):
                 page, first, count = struct.unpack("<3i", take(12, f"building {index}'s range {k}"))
                 if not 0 <= page < atlas_pages:
@@ -302,6 +307,23 @@ def mesh_header(path):
                 if first < end or first % 3 or count <= 0 or count % 3 or first + count > index_count:
                     return None, (f"has building {index} range {k} at indices {first}+{count} of {index_count} "
                                   f"(after {end}) - ranges are ascending whole triangles inside the building")
+                # v3: the tile's pixel rect on its page and the raw-UV bounds the range is quantised over.
+                tile_x, tile_y, tile_w, tile_h = struct.unpack("<4H", take(8, f"building {index}'s range {k} tile"))
+                u_min, u_max, v_min, v_max = struct.unpack("<4f", take(16, f"building {index}'s range {k} bounds"))
+                if not all(MESH_TILE_MIN <= side <= MESH_TILE_MAX and side % 4 == 0 for side in (tile_w, tile_h)):
+                    return None, (f"has building {index} range {k} with a {tile_w}x{tile_h} px tile - a tile's sides are "
+                                  f"multiples of 4 from {MESH_TILE_MIN} to {MESH_TILE_MAX}")
+                if tile_x + tile_w > MESH_ATLAS_PAGE or tile_y + tile_h > MESH_ATLAS_PAGE:
+                    return None, (f"has building {index} range {k} with its tile at {tile_x},{tile_y} {tile_w}x{tile_h}, "
+                                  f"past the {MESH_ATLAS_PAGE} px page")
+                if not all(math.isfinite(b) for b in (u_min, u_max, v_min, v_max)) or u_max < u_min or v_max < v_min:
+                    return None, (f"has building {index} range {k} with UV bounds u {u_min:g}..{u_max:g}, "
+                                  f"v {v_min:g}..{v_max:g} - they must be finite, each max at least its min")
+                # v3: a vertex belongs to one range - its UV is quantised over that range's bounds.
+                for vertex in struct.unpack_from(f"<{count}I", index_bytes, first * 4):
+                    if owner.setdefault(vertex, k) != k:
+                        return None, (f"has building {index} vertex {vertex} used by ranges {owner[vertex]} and {k} - "
+                                      f"a vertex belongs to one range")
                 end = first + count
     except EOFError as exc:
         return None, f"ends inside {exc.args[0]} - the file is truncated"

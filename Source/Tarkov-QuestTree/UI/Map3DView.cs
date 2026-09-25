@@ -238,13 +238,17 @@ namespace QuestTree.UI
             public long SideTriangles;
 
             /// <summary>
-            /// The faces textured with the game's OWN materials (Stage W): one submesh list and one material per
-            /// atlas page, indexed by page number; null where no face of this floor is on that page. UVs are the
-            /// file's per-vertex UVs into the page, so a brick wall is brick and a crane is a crane - where the
+            /// The faces textured with the game's OWN materials (Stage X): one mesh list and one material per TILE
+            /// this floor uses - one per game material - so each material a band draws is one draw call. UVs are the
+            /// material's raw UVs, in repeats of its tile, which the tile's Repeat wrap tiles on the GPU (a wall 40
+            /// repeats long is 40 bricks, not a stretched one). So a brick wall is brick and a crane is a crane - where the
             /// projected textures (top, sides, tints) can only paint what a camera saw from outside. Faces of a
             /// building with no captured texture keep those projected textures.
             /// </summary>
-            public readonly SideTexture[] Atlas = new SideTexture[MaxAtlasPages];
+            public readonly List<SideTexture> Atlas = new List<SideTexture>();
+
+            /// <summary><see cref="Atlas"/> by tile, for the upload units. Main thread only.</summary>
+            public readonly Dictionary<int, SideTexture> AtlasByTile = new Dictionary<int, SideTexture>();
 
             /// <summary>Building triangles textured from an atlas page, for the log line.</summary>
             public long AtlasTriangles;
@@ -329,6 +333,9 @@ namespace QuestTree.UI
         {
             public readonly List<Mesh> Meshes = new List<Mesh>();
             public Material Material;
+
+            /// <summary>For an atlas group: the tile (<see cref="TileStore"/> index) its material draws. -1 for a side.</summary>
+            public int Tile = -1;
         }
 
         /// <summary>The compass sides in slot order. Slot i of <see cref="Built.Sides"/> and of a view's
@@ -458,10 +465,11 @@ namespace QuestTree.UI
         {
             if (_reservedSides > 0) return;
 
-            // The side pictures AND the atlas pages: both are held by this view for as long as it draws, both
-            // sit in the floors' picture cache, and without their room a full peel would evict a floor this view
-            // asks for again next frame.
-            var room = (SidesActive ? _sideCount : 0) + (AtlasActive ? _pageCount : 0);
+            // The side pictures: held by this view for as long as it draws and in the floors' picture cache, so
+            // without their room a full peel would evict a floor this view asks for again next frame. NOT the
+            // atlas pages any more (stage X): those are decoded by the TileStore, cut into tiles and let go, and
+            // never enter the picture cache - the tiles' bytes are counted in the build line instead.
+            var room = SidesActive ? _sideCount : 0;
             if (room <= 0) return;
 
             DynamicMapsLibrary.ReserveSprites(room);
@@ -483,14 +491,12 @@ namespace QuestTree.UI
             _reservedSides = 0;
         }
 
-        /// <summary>The side and page pictures this view holds, for <see cref="ReturnSideRoom"/>.</summary>
+        /// <summary>The side pictures this view holds, for <see cref="ReturnSideRoom"/>. (Atlas pages are not in the
+        /// picture cache: see <see cref="TileStore"/>.)</summary>
         private IEnumerable<DynamicMapsLibrary.MapLayer> HeldPictures()
         {
             foreach (var side in _sides)
                 if (side?.Picture != null) yield return side.Picture;
-
-            foreach (var page in _pages)
-                if (page?.Picture != null) yield return page.Picture;
         }
 
         /// <summary>Whether the side pictures take part at all: they need a textured shader, so under the
@@ -977,6 +983,7 @@ namespace QuestTree.UI
         internal static void DropCaches()
         {
             DropBuiltMeshes();
+            DropTiles();
             CancelAllPreps();
 
             lock (CacheLock)
@@ -1083,9 +1090,10 @@ namespace QuestTree.UI
                 built.Sides[slot] = null;
             }
 
-            for (var page = 0; page < built.Atlas.Length; page++)
+            // The tile groups: meshes and materials are the entry's; the tile TEXTURES are the TileStore's and are
+            // not touched here (destroying a material never destroys its texture).
+            foreach (var atlas in built.Atlas)
             {
-                var atlas = built.Atlas[page];
                 if (atlas == null) continue;
 
                 for (var i = 0; i < atlas.Meshes.Count; i++) { Discard(atlas.Meshes[i]); count++; }
@@ -1093,8 +1101,10 @@ namespace QuestTree.UI
                 atlas.Meshes.Clear();
                 Discard(atlas.Material);
                 atlas.Material = null;
-                built.Atlas[page] = null;
             }
+
+            built.Atlas.Clear();
+            built.AtlasByTile.Clear();
 
             built.Ground.Clear();
             built.Buildings.Clear();
@@ -1390,10 +1400,9 @@ namespace QuestTree.UI
                 for (var slot = 0; slot < _sides.Length; slot++) _sides[slot]?.Picture?.TryGetSprite(out _);
             }
 
-            if (AtlasActive)
-            {
-                for (var page = 0; page < _pages.Length; page++) _pages[page]?.Picture?.TryGetSprite(out _);
-            }
+            // The atlas: the tiles of this file, cut from its pages a few a frame by the shared TileStore (see
+            // PumpTiles). Taken before the prep snapshot, which reads the tile index.
+            if (AtlasActive) AcquireTiles();
 
             foreach (var floor in _floors)
                 if (!_flatColours) floor.Layer?.TryGetSprite(out _);
@@ -1569,28 +1578,30 @@ namespace QuestTree.UI
                     }
                 }
 
-                for (var page = 0; page < data.Atlas.Length; page++)
+                foreach (var pair in data.Atlas)
                 {
-                    if (data.Atlas[page] == null) continue;
+                    var tile = pair.Key;
 
-                    var pg = page;
-
-                    foreach (var mesh in data.Atlas[page])
+                    foreach (var mesh in pair.Value)
                     {
                         _work.Enqueue(() =>
                         {
-                            // One Standard, matte, opaque material per page per floor; its _MainTex is the page,
-                            // assigned by Draw from this view's own entry (as the sides' are).
-                            if (into.Atlas[pg] == null)
+                            // One Standard, matte, opaque material per (tile, floor); its _MainTex is the tile, assigned
+                            // by Draw from this view's TileStore once the tile is cut.
+                            if (!into.AtlasByTile.TryGetValue(tile, out var group))
                             {
-                                into.Atlas[pg] = new SideTexture
+                                group = new SideTexture
                                 {
+                                    Tile = tile,
                                     Material = Matte(new Material(_buildingShader)
-                                        { name = $"QuestTreeMap3D-atlas{pg}-{level}" })
+                                        { name = $"QuestTreeMap3D-tile{tile}-{level}" })
                                 };
+
+                                into.AtlasByTile[tile] = group;
+                                into.Atlas.Add(group);
                             }
 
-                            into.Atlas[pg].Meshes.Add(Upload(into, mesh));
+                            group.Meshes.Add(Upload(into, mesh));
                         });
                     }
                 }
@@ -1762,7 +1773,8 @@ namespace QuestTree.UI
             var faces = atlasTriangles + topTriangles + sideTriangles + wallTriangles;
             var sidesNote =
                 (AtlasActive
-                    ? string.Format(CultureInfo.InvariantCulture, ", atlas {0} page(s)", _pageCount)
+                    ? string.Format(CultureInfo.InvariantCulture, ", atlas {0} page(s) {1} tile(s)", _pageCount,
+                        _heldTiles?.Tiles.Count ?? 0)
                     : "") +
                 (SidesActive
                     ? string.Format(CultureInfo.InvariantCulture, ", sides {0} ({1})",
@@ -1809,9 +1821,10 @@ namespace QuestTree.UI
                 _longestFrameMs,
                 ResidentMeshBytes() / (1024d * 1024d),
 
-                // Every decoded picture in the shared cache (floors, sides, pages), at 4 B a pixel plus a third
-                // for a mip chain. Pages still waiting their paced decode are not in it yet.
-                DynamicMapsLibrary.ResidentRasterBytes / (1024d * 1024d)));
+                // Every decoded picture in the shared cache (floors, sides), at 4 B a pixel plus a third for a mip
+                // chain, and every atlas tile cut so far (DXT1: half a byte a pixel plus a third). Tiles still
+                // waiting their paced cut are not in it yet; the TileStore logs its own total when it finishes.
+                (DynamicMapsLibrary.ResidentRasterBytes + TileStore.ResidentBytesAll) / (1024d * 1024d)));
 
             // ANNOUNCED, not just placed. The labels were culled when the viewport was built - against the
             // camera as it stood before the mesh landed, with the ground at the fallback height - and
@@ -2953,6 +2966,455 @@ namespace QuestTree.UI
         /// <summary>The building shader last found to have no _Color, or null. See <see cref="MakeTintMaterial"/>.</summary>
         private Shader _tintlessShader;
 
+        // --- the atlas tiles (stage X) -----------------------------------------------------------------
+
+        /// <summary>The tile store of the file last drawn with an atlas, or null. Main thread only; shared by every
+        /// view of that file, like <see cref="_cachedFloors"/>, and dropped with it by <see cref="DropCaches"/>.</summary>
+        private static TileStore _tiles;
+
+        /// <summary>The store this view holds a use of, or null. See <see cref="AcquireTiles"/>.</summary>
+        private TileStore _heldTiles;
+
+        /// <summary>Takes a use of this file's tile store, making it on the first view of the file. Idempotent.</summary>
+        private void AcquireTiles()
+        {
+            if (_heldTiles != null || _file == null) return;
+
+            if (_tiles == null || !ReferenceEquals(_tiles.File, _file))
+            {
+                DropTiles();
+
+                var paths = new string[MaxAtlasPages];
+                for (var page = 0; page < _pages.Length; page++) paths[page] = _pages[page]?.Picture?.ImagePath;
+
+                _tiles = TileStore.For(_file, _mapKey, paths);
+            }
+
+            _tiles.Users++;
+            _heldTiles = _tiles;
+        }
+
+        /// <summary>Lets go of this view's use of its tile store; the last user of a dropped store destroys it.
+        /// Idempotent.</summary>
+        private void ReleaseTiles()
+        {
+            var tiles = _heldTiles;
+            if (tiles == null) return;
+
+            _heldTiles = null;
+            tiles.Users--;
+
+            if (tiles.Users <= 0 && tiles.Orphaned) tiles.Destroy();
+        }
+
+        /// <summary>Takes the tile store out of the cache: destroyed now when no view uses it, else orphaned for its
+        /// last user to destroy - the same contract as <see cref="Built"/>.</summary>
+        private static void DropTiles()
+        {
+            var tiles = _tiles;
+            _tiles = null;
+
+            if (tiles == null) return;
+
+            if (tiles.Users > 0) tiles.Orphaned = true;
+            else tiles.Destroy();
+        }
+
+        /// <summary>
+        /// One file's atlas TILES: every (page, tile rect) its buildings' ranges name, each cut out of its page into a
+        /// texture of its own - so the GPU can REPEAT it. Stage W's page could not wrap (a UV past its tile sampled
+        /// the neighbour), and EFT's walls are UV'd in world units, many repeats long: on Customs 1,737 of ~1,900
+        /// textured uses fell back to a flat colour. A tile of its own with wrapMode Repeat draws the material's raw
+        /// UVs as they are, with the Standard shader and nothing compiled at runtime.
+        ///
+        /// Per page, in order, paced: the PNG read on a worker; decoded READABLE on the main thread in the frame's
+        /// one decode turn (DynamicMapsLibrary.TryTakeDecodeTurn - the picture cache's own LoadImage pacing, so a
+        /// page and a floor never decode in one frame); its pixels taken once (GetPixels32) and the page texture
+        /// destroyed at once; then its tiles cut a few a frame (<see cref="TileBudgetMs"/>) - each an RGB24 texture
+        /// with mips, compressed to DXT1 (the builder makes every side a multiple of 4), Repeat, trilinear, aniso 4,
+        /// and made non-readable - and the page's pixels let go. 284 tiles of 256 px are about 12 MB this way,
+        /// against about 99 MB uncompressed.
+        ///
+        /// The page never enters the picture cache: nothing else draws it, and holding it would be 85 MB for nothing.
+        /// REFERENCE-COUNTED by views and orphaned by a drop, as <see cref="Built"/> is; a tile's texture is assigned
+        /// to the entries' materials by Draw and never destroyed by them.
+        /// </summary>
+        internal sealed class TileStore
+        {
+            /// <summary>Main-thread time a frame spends cutting tiles, in milliseconds (a tile is about 1 ms).</summary>
+            private const double TileBudgetMs = 4d;
+
+            /// <summary>One tile: its rect on its page, and its texture once cut.</summary>
+            internal sealed class Tile
+            {
+                public int Page;
+                public int X;
+                public int Y;
+                public int W;
+                public int H;
+                public Texture2D Texture;
+                public bool Failed;
+                public long Bytes;
+            }
+
+            /// <summary>The parsed file this store belongs to - its identity in the cache.</summary>
+            public MapMeshFile File;
+
+            public readonly List<Tile> Tiles = new List<Tile>();
+
+            /// <summary>How many live views hold this store.</summary>
+            public int Users;
+
+            /// <summary>Taken out of the cache while in use: the last user destroys it.</summary>
+            public bool Orphaned;
+
+            /// <summary>Every tile in every live store's bytes, for the build line.</summary>
+            public static long ResidentBytesAll { get; private set; }
+
+            private readonly Dictionary<long, int> _index = new Dictionary<long, int>();
+            private readonly string[] _paths = new string[MaxAtlasPages];
+            private readonly bool[] _pageFailed = new bool[MaxAtlasPages];
+            private readonly List<int>[] _tilesOfPage = new List<int>[MaxAtlasPages];
+            private readonly Dictionary<int, Color32[]> _buffers = new Dictionary<int, Color32[]>();
+            private string _mapKey = "";
+
+            private int _page = -1;
+            private int _nextPage;
+            private int _cursor;
+            private Task<byte[]> _reading;
+            private Color32[] _pixels;
+            private int _pageWidth;
+            private int _pageHeight;
+
+            private int _pumpedFrame = -1;
+            private bool _done;
+            private bool _destroyed;
+            private int _frames;
+            private int _pagesCut;
+            private int _cut;
+            private int _failed;
+            private long _bytes;
+            private bool _allCompressed = true;
+            private readonly Stopwatch _clock = new Stopwatch();
+
+            /// <summary>The store for a file: every distinct tile its ranges name, indexed. Main thread; nothing is
+            /// read or decoded until the first <see cref="Pump"/>.</summary>
+            /// <param name="file">The parsed file.</param>
+            /// <param name="mapKey">For the log lines.</param>
+            /// <param name="paths">Each page's PNG by page number, null where the view has none.</param>
+            public static TileStore For(MapMeshFile file, string mapKey, string[] paths)
+            {
+                var store = new TileStore { File = file, _mapKey = mapKey ?? "" };
+
+                for (var page = 0; page < MaxAtlasPages && page < paths.Length; page++) store._paths[page] = paths[page];
+
+                if (file?.Buildings != null)
+                {
+                    foreach (var building in file.Buildings)
+                    {
+                        if (building?.Ranges == null) continue;
+
+                        foreach (var range in building.Ranges)
+                        {
+                            if (range.Page < 0 || range.Page >= MaxAtlasPages) continue;
+
+                            var key = KeyOf(range.Page, range.TileX, range.TileY, range.TileW, range.TileH);
+                            if (store._index.ContainsKey(key)) continue;
+
+                            store._index[key] = store.Tiles.Count;
+                            store.Tiles.Add(new Tile
+                            {
+                                Page = range.Page, X = range.TileX, Y = range.TileY, W = range.TileW, H = range.TileH
+                            });
+
+                            (store._tilesOfPage[range.Page] ??= new List<int>()).Add(store.Tiles.Count - 1);
+                        }
+                    }
+                }
+
+                // A page with tiles but no file here: those tiles can never be cut. Failed up front, so the view drops
+                // the page rather than drawing its faces in the fallback colour for good.
+                for (var page = 0; page < MaxAtlasPages; page++)
+                    if (store._tilesOfPage[page] != null && string.IsNullOrEmpty(store._paths[page]))
+                        store.FailPage(page, null);
+
+                return store;
+            }
+
+            /// <summary>A tile's identity: page (3 bits), x and y (13 each), w and h (9 each, up to 256... 511).</summary>
+            private static long KeyOf(int page, int x, int y, int w, int h) =>
+                ((long)page << 44) | ((long)(x & 0x1FFF) << 31) | ((long)(y & 0x1FFF) << 18) | ((long)(w & 0x1FF) << 9) |
+                (long)(h & 0x1FF);
+
+            /// <summary>WORKER-SAFE (the index is complete before any prep starts and never changes): the tile a
+            /// range draws, or -1.</summary>
+            public int TileOf(MapMeshFile.AtlasRange range) =>
+                _index.TryGetValue(KeyOf(range.Page, range.TileX, range.TileY, range.TileW, range.TileH), out var tile)
+                    ? tile
+                    : -1;
+
+            /// <summary>The tile's texture, or null while it is not cut yet, or failed.</summary>
+            public Texture2D TextureOf(int tile) =>
+                tile >= 0 && tile < Tiles.Count ? Tiles[tile].Texture : null;
+
+            /// <summary>Whether a page could not be had at all (missing, unreadable, will not decode, too big).</summary>
+            public bool PageFailed(int page) => page >= 0 && page < MaxAtlasPages && _pageFailed[page];
+
+            /// <summary>Whether the page of <paramref name="tile"/> failed.</summary>
+            public bool PageFailedFor(int tile) => tile >= 0 && tile < Tiles.Count && _pageFailed[Tiles[tile].Page];
+
+            /// <summary>MAIN THREAD, once a frame however many views call it: the next step of the paced cut.</summary>
+            public void Pump()
+            {
+                if (_done || _destroyed || _pumpedFrame == Time.frameCount) return;
+
+                _pumpedFrame = Time.frameCount;
+                _frames++;
+                if (!_clock.IsRunning) _clock.Start();
+
+                var frame = Stopwatch.StartNew();
+
+                while (frame.Elapsed.TotalMilliseconds < TileBudgetMs)
+                {
+                    if (_page < 0 && !NextPage())
+                    {
+                        Finish();
+                        return;
+                    }
+
+                    if (_pixels == null)
+                    {
+                        // Read on a worker; decoded in this frame's one decode turn, and that decode is the frame.
+                        if (_reading == null)
+                        {
+                            var path = _paths[_page];
+                            _reading = Task.Run(() => System.IO.File.ReadAllBytes(path));
+                            return;
+                        }
+
+                        if (!_reading.IsCompleted || !DynamicMapsLibrary.TryTakeDecodeTurn()) return;
+
+                        var task = _reading;
+                        _reading = null;
+
+                        if (!Decode(task)) _page = -1;
+                        return;
+                    }
+
+                    var tiles = _tilesOfPage[_page];
+
+                    if (_cursor >= tiles.Count)
+                    {
+                        // Every tile of the page is cut: its pixels go (64 MB of managed array for a 4096 page).
+                        _pixels = null;
+                        _pagesCut++;
+                        _page = -1;
+                        continue;
+                    }
+
+                    Cut(tiles[_cursor++]);
+                }
+            }
+
+            /// <summary>Moves to the next page with tiles still to cut; false when there is none.</summary>
+            private bool NextPage()
+            {
+                while (_nextPage < MaxAtlasPages)
+                {
+                    var page = _nextPage++;
+                    if (_tilesOfPage[page] == null || _pageFailed[page]) continue;
+
+                    _page = page;
+                    _cursor = 0;
+                    return true;
+                }
+
+                return false;
+            }
+
+            /// <summary>MAIN THREAD. The page's pixels, from a READABLE decode whose texture is destroyed at once.</summary>
+            private bool Decode(Task<byte[]> task)
+            {
+                if (task.IsFaulted || task.IsCanceled)
+                {
+                    FailPage(_page, $"could not be read ({task.Exception?.GetBaseException().Message})");
+                    return false;
+                }
+
+                var bytes = task.Result;
+
+                // The header before the decode, as for every picture (review F49): a page is AtlasPageSize a side.
+                if (!DynamicMapsLibrary.PictureSize(bytes, out var width, out var height) ||
+                    width > MapMeshFile.AtlasPageSize || height > MapMeshFile.AtlasPageSize)
+                {
+                    FailPage(_page, $"is not a PNG of at most {MapMeshFile.AtlasPageSize} px a side ({width}x{height})");
+                    return false;
+                }
+
+                Texture2D texture = null;
+
+                try
+                {
+                    texture = new Texture2D(2, 2, TextureFormat.RGBA32, mipChain: false) { name = "QuestTreeMap3D-atlaspage" };
+
+                    // Readable (markNonReadable false): the tiles are cut from its pixels.
+                    if (!texture.LoadImage(bytes, markNonReadable: false))
+                    {
+                        FailPage(_page, "would not decode");
+                        return false;
+                    }
+
+                    _pageWidth = texture.width;
+                    _pageHeight = texture.height;
+                    _pixels = texture.GetPixels32();
+                    return true;
+                }
+                catch (Exception ex)
+                {
+                    _pixels = null;
+                    FailPage(_page, $"could not be decoded ({ex.GetType().Name}: {ex.Message})");
+                    return false;
+                }
+                finally
+                {
+                    Discard(texture);
+                }
+            }
+
+            /// <summary>MAIN THREAD. One tile out of the current page's pixels into a texture of its own.</summary>
+            private void Cut(int index)
+            {
+                var tile = Tiles[index];
+
+                if (tile.W <= 0 || tile.H <= 0 || tile.X < 0 || tile.Y < 0 ||
+                    tile.X + tile.W > _pageWidth || tile.Y + tile.H > _pageHeight)
+                {
+                    tile.Failed = true;
+                    _failed++;
+                    return;
+                }
+
+                Texture2D texture = null;
+
+                try
+                {
+                    var size = tile.W * tile.H;
+
+                    if (!_buffers.TryGetValue(size, out var buffer))
+                    {
+                        buffer = new Color32[size];
+                        _buffers[size] = buffer;
+                    }
+
+                    // Row by row, bottom up on both sides: the page's row 0 is its bottom (LoadImage's order, and the
+                    // builder's TileY is from the bottom), and so is the tile's - no flip.
+                    for (var row = 0; row < tile.H; row++)
+                        Array.Copy(_pixels, (tile.Y + row) * _pageWidth + tile.X, buffer, row * tile.W, tile.W);
+
+                    texture = new Texture2D(tile.W, tile.H, TextureFormat.RGB24, mipChain: true)
+                    {
+                        name = $"QuestTreeMap3D-tile{index}",
+                        wrapMode = TextureWrapMode.Repeat,
+                        filterMode = FilterMode.Trilinear,
+                        anisoLevel = 4
+                    };
+
+                    texture.SetPixels32(buffer);
+                    texture.Apply(updateMipmaps: true, makeNoLongerReadable: false);
+
+                    // DXT1 needs 4 x 4 blocks; the builder aligns every tile, and one that is not stays RGB24.
+                    if (tile.W % MapMeshFile.TileAlign == 0 && tile.H % MapMeshFile.TileAlign == 0)
+                        texture.Compress(highQuality: false);
+
+                    // Uploaded and the CPU copy freed.
+                    texture.Apply(updateMipmaps: false, makeNoLongerReadable: true);
+
+                    var compressed = texture.format == TextureFormat.DXT1;
+                    if (!compressed) _allCompressed = false;
+
+                    // DXT1: half a byte a pixel; anything else counted at 4 (D3D11 has no 24-bit format). Mips + 1/3.
+                    var bytes = compressed ? (long)size / 2 : (long)size * 4;
+                    if (texture.mipmapCount > 1) bytes += bytes / 3;
+
+                    tile.Texture = texture;
+                    tile.Bytes = bytes;
+                    _bytes += bytes;
+                    ResidentBytesAll += bytes;
+                    _cut++;
+                    texture = null;
+                }
+                catch (Exception ex)
+                {
+                    tile.Failed = true;
+                    _failed++;
+
+                    Plugin.LogSource?.LogDebug(
+                        $"QuestTree: atlas tile {index} of '{_mapKey}' could not be cut ({ex.GetType().Name}: {ex.Message}).");
+                }
+                finally
+                {
+                    Discard(texture);
+                }
+            }
+
+            /// <summary>Marks a page and every tile on it failed, and says so once.</summary>
+            private void FailPage(int page, string reason)
+            {
+                if (page < 0 || page >= MaxAtlasPages || _pageFailed[page]) return;
+
+                _pageFailed[page] = true;
+
+                var tiles = _tilesOfPage[page];
+                if (tiles != null)
+                    foreach (var index in tiles)
+                        if (!Tiles[index].Failed && Tiles[index].Texture == null) { Tiles[index].Failed = true; _failed++; }
+
+                if (reason != null)
+                {
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: atlas page {page} of the 3D map for '{_mapKey}' {reason} - its faces are drawn " +
+                        $"without the game's textures.");
+                }
+            }
+
+            private void Finish()
+            {
+                _done = true;
+                _clock.Stop();
+                _buffers.Clear();
+
+                Plugin.LogSource?.LogInfo(string.Format(CultureInfo.InvariantCulture,
+                    "QuestTree: 3D map textures for {0} - {1} tile(s) cut from {2} page(s) in {3:#,##0} ms over {4} " +
+                    "frame(s), ~{5:0.0} MB {6}{7}.",
+                    _mapKey, _cut, _pagesCut, _clock.ElapsedMilliseconds, _frames, _bytes / (1024d * 1024d),
+                    _allCompressed ? "(DXT1)" : "(some uncompressed)",
+                    _failed > 0 ? string.Format(CultureInfo.InvariantCulture, ", {0} failed", _failed) : ""));
+            }
+
+            /// <summary>MAIN THREAD. Destroys every tile's texture and forgets the work in flight. Idempotent.</summary>
+            public void Destroy()
+            {
+                if (_destroyed) return;
+
+                _destroyed = true;
+                _done = true;
+                _reading = null;
+                _pixels = null;
+                _buffers.Clear();
+
+                foreach (var tile in Tiles)
+                {
+                    if (tile.Texture != null) Discard(tile.Texture);
+
+                    tile.Texture = null;
+                    ResidentBytesAll -= tile.Bytes;
+                    tile.Bytes = 0;
+                }
+
+                _bytes = 0;
+            }
+        }
+
         // --- the geometry, prepared off the main thread ------------------------------------------------
 
         /// <summary>
@@ -3074,8 +3536,8 @@ namespace QuestTree.UI
             public readonly List<(int Level, MeshData Data)> RoofsElsewhere = new List<(int Level, MeshData Data)>();
             public readonly List<MeshData>[] Sides = new List<MeshData>[4];
 
-            /// <summary>Atlas-textured faces, per page number.</summary>
-            public readonly List<MeshData>[] Atlas = new List<MeshData>[MaxAtlasPages];
+            /// <summary>Atlas-textured faces, per tile (<see cref="TileStore"/> index).</summary>
+            public readonly Dictionary<int, List<MeshData>> Atlas = new Dictionary<int, List<MeshData>>();
             public long AtlasTriangles;
         }
 
@@ -3115,36 +3577,47 @@ namespace QuestTree.UI
             /// the faces.</summary>
             public readonly bool[] PagePresent = new bool[MaxAtlasPages];
 
-            /// <summary>The atlas ranges (page, first index, index count) of the building last loaded, or null.</summary>
-            private (int Page, int First, int Count)[] _ranges;
+            /// <summary>The tiles of this file, for their index. Read-only on the worker: built whole before any
+            /// prep starts and never changed after (see <see cref="TileStore.TileOf"/>). Null without an atlas.</summary>
+            public TileStore Tiles;
+
+            /// <summary>The atlas ranges of the building last loaded, or null.</summary>
+            private List<MapMeshFile.AtlasRange> _ranges;
+
+            /// <summary>Per range of the building last loaded, its tile index, or -1 when it draws no tile here (page
+            /// absent, or a tile the store does not know).</summary>
+            private int[] _rangeTile = new int[0];
 
             /// <summary>The building last loaded - the one whose UVs <see cref="AtlasUv"/> reads.</summary>
             private MapMeshFile.Building _building;
 
             /// <summary>
-            /// The atlas page of the triangle at index position <paramref name="i"/> of the building last loaded,
-            /// or -1 when it is on no page this view can draw. Decides a face BEFORE the stage U/V rule does: an
-            /// atlas face is never a roof, a side face or a tint, so the roof pass and the wall pass both ask here
-            /// first and still split every triangle exactly once between them.
+            /// The atlas range of the triangle at index position <paramref name="i"/> of the building last loaded,
+            /// or -1 when it is in none this view can draw. Decides a face BEFORE the stage U/V rule does: an atlas
+            /// face is never a roof, a side face or a tint, so the roof pass and the wall pass both ask here first
+            /// and still split every triangle exactly once between them.
             /// </summary>
-            public int AtlasPageAt(int i)
+            public int AtlasRangeAt(int i)
             {
                 if (_ranges == null) return -1;
 
-                for (var k = 0; k < _ranges.Length; k++)
+                for (var k = 0; k < _ranges.Count; k++)
                 {
                     var range = _ranges[k];
                     if (i < range.First || i >= range.First + range.Count) continue;
 
-                    return range.Page >= 0 && range.Page < MaxAtlasPages && PagePresent[range.Page] ? range.Page : -1;
+                    return _rangeTile[k] >= 0 ? k : -1;
                 }
 
                 return -1;
             }
 
-            /// <summary>The texture UV of vertex <paramref name="i"/> of the building last loaded: the file's UV as
-            /// stored, already bottom-origin - see <see cref="AtlasUvOf"/>.</summary>
-            public Vector2 AtlasUv(int i) => AtlasUvOf(_building, i);
+            /// <summary>The tile range <paramref name="k"/> of the building last loaded draws with.</summary>
+            public int TileOfRange(int k) => _rangeTile[k];
+
+            /// <summary>The raw material UV of vertex <paramref name="i"/> of the building last loaded, in range
+            /// <paramref name="k"/> - see <see cref="AtlasUvOf"/>.</summary>
+            public Vector2 AtlasUv(int i, int k) => AtlasUvOf(_building, i, _ranges[k]);
 
             // Scratch, per worker. Grown, never shrunk.
             private bool[] _finite = new bool[0];
@@ -3199,6 +3672,19 @@ namespace QuestTree.UI
                 _count = n;
                 _building = building;
                 _ranges = AtlasRangesOf(building);
+
+                if (_ranges != null)
+                {
+                    if (_rangeTile.Length < _ranges.Count) _rangeTile = new int[_ranges.Count];
+
+                    for (var k = 0; k < _ranges.Count; k++)
+                    {
+                        var range = _ranges[k];
+                        var present = Tiles != null && range.Page >= 0 && range.Page < MaxAtlasPages && PagePresent[range.Page];
+                        _rangeTile[k] = present ? Tiles.TileOf(range) : -1;
+                    }
+                }
+
                 _skirtBand = File.Band(BandLevelFor(building.Level));
                 _minY = float.PositiveInfinity;
 
@@ -3360,7 +3846,7 @@ namespace QuestTree.UI
                 if (GroundSkirt(pa, pb, pc)) return false;
 
                 // An atlas face is textured by its own material, never tinted.
-                if (AtlasPageAt(i) >= 0) return false;
+                if (AtlasRangeAt(i) >= 0) return false;
 
                 a = pa;
                 b = pb;
@@ -3436,35 +3922,31 @@ namespace QuestTree.UI
         // --- the mesh file's atlas data (format v2) - the ONE place the viewer reads it --------------------
 
         /// <summary>
-        /// A building's atlas ranges - (page, first index, index count), index positions into its Indices - or
-        /// null when it has none: a building whose materials were not captured, or one with ranges but no UVs.
-        /// WORKER-safe: plain reads of the parsed file, which MapMeshFile.Read has already validated (ranges
-        /// ascending, whole triangles, inside the building, on a page the file has).
+        /// A building's atlas ranges, or null when it has none: a building whose materials were not captured, or
+        /// one with ranges but no UVs. WORKER-safe: plain reads of the parsed file, which MapMeshFile.Read has
+        /// already validated (ranges ascending, whole triangles, inside the building, on a page the file has, tile
+        /// rects on the page, finite bounds, every vertex in at most one range).
         ///
-        /// With <see cref="AtlasUvOf"/>, the ONE place the viewer reads MapMeshFile format v2's atlas data.
+        /// With <see cref="AtlasUvOf"/> and <see cref="TileStore.For"/>, the only places the viewer reads MapMeshFile
+        /// format v3's atlas data.
         /// </summary>
-        private static (int Page, int First, int Count)[] AtlasRangesOf(MapMeshFile.Building building)
+        private static List<MapMeshFile.AtlasRange> AtlasRangesOf(MapMeshFile.Building building)
         {
             var ranges = building.Ranges;
             if (ranges == null || ranges.Count == 0 || building.U == null || building.V == null) return null;
 
-            var result = new (int Page, int First, int Count)[ranges.Count];
-
-            for (var k = 0; k < ranges.Count; k++) result[k] = (ranges[k].Page, ranges[k].First, ranges[k].Count);
-
-            return result;
+            return ranges;
         }
 
         /// <summary>
-        /// Vertex <paramref name="i"/>'s texture UV on its atlas page, AS STORED - no flip. The builder writes the
-        /// page PNG with (0, 0) at its BOTTOM-LEFT (MapMeshFile.MaxUv: "Unity's texture convention, which
-        /// Texture2D.LoadImage keeps"; VOf: "0 = the page's bottom row"), which is already where a decoded
-        /// texture's v = 0 is. The brief said "v_tex = 1 - v_file unless the builder says otherwise"; it says
-        /// otherwise, so v_tex = v_file. A flip here would put every tile's texture upside down within the page -
-        /// and on a packed page, on the wrong tile altogether.
+        /// Vertex <paramref name="i"/>'s RAW material UV (format v3), dequantised over the bounds of the one range
+        /// that uses it: <c>u = UMin + code / 65535 * (UMax - UMin)</c> (MapMeshFile.AtlasRange.U), in repeats of
+        /// the range's tile. Drawn on the tile's OWN texture with wrapMode Repeat, so 17.25 samples the tile at
+        /// 0.25 - the GPU does the repeating a page never could. No flip: v = 0 is the tile's bottom row, which is
+        /// where a texture's v = 0 is, and the tile was cut from the page bottom-up (TileStore.Cut).
         /// </summary>
-        private static Vector2 AtlasUvOf(MapMeshFile.Building building, int i) =>
-            new Vector2(building.UOf(i), building.VOf(i));
+        private static Vector2 AtlasUvOf(MapMeshFile.Building building, int i, MapMeshFile.AtlasRange range) =>
+            new Vector2(building.UOf(i, range), building.VOf(i, range));
 
         /// <summary>The worker's snapshot of this view, with fresh scratch. Main thread only.</summary>
         private Prep SnapshotPrep()
@@ -3482,8 +3964,11 @@ namespace QuestTree.UI
 
             for (var slot = 0; slot < _sides.Length; slot++) prep.Sides[slot] = _sides[slot];
 
-            if (AtlasActive)
+            if (AtlasActive && _heldTiles != null)
+            {
+                prep.Tiles = _heldTiles;
                 for (var page = 0; page < _pages.Length; page++) prep.PagePresent[page] = _pages[page] != null;
+            }
 
             return prep;
         }
@@ -3620,9 +4105,9 @@ namespace QuestTree.UI
             // One per side slot, made on the first face that side takes.
             var sideSinks = new MeshSink[SideOrder.Length];
 
-            // One per atlas page, made on the first face on that page. Shared vertices per building, as the
-            // file indexes them: the game mesh's own topology, so its hard edges (split vertices) stay hard.
-            var pageSinks = new PageSink[MaxAtlasPages];
+            // One per TILE (game material), made on the first face that uses it. Shared vertices per building, as
+            // the file indexes them: the game mesh's own topology, so its hard edges (split vertices) stay hard.
+            var tileSinks = new Dictionary<int, PageSink>();
             var serial = 0;
 
             var part = 0;
@@ -3672,17 +4157,22 @@ namespace QuestTree.UI
                         continue;
                     }
 
-                    // An atlas face first: the game's own material, the file's own UVs.
-                    var page = p.AtlasPageAt(i);
+                    // An atlas face first: the game's own material, the file's own raw UVs.
+                    var range = p.AtlasRangeAt(i);
 
-                    if (page >= 0)
+                    if (range >= 0)
                     {
-                        var sink = pageSinks[page] ??= new PageSink();
+                        var tile = p.TileOfRange(range);
 
-                        if (sink.Count + 3 > MaxVerticesPerMesh)
-                            sink.Flush($"{p.MapKey}-atlas{page}-{level}", data.Atlas[page] ??= new List<MeshData>());
+                        if (!tileSinks.TryGetValue(tile, out var sink))
+                        {
+                            sink = new PageSink();
+                            tileSinks[tile] = sink;
+                        }
 
-                        sink.Triangle(p, serial, building.VertexCount, a, b, c);
+                        if (sink.Count + 3 > MaxVerticesPerMesh) sink.Flush($"{p.MapKey}-tile{tile}-{level}", AtlasList(data, tile));
+
+                        sink.Triangle(p, serial, building.VertexCount, range, a, b, c);
                         data.AtlasTriangles++;
                         continue;
                     }
@@ -3757,17 +4247,25 @@ namespace QuestTree.UI
                 sideSinks[slot].Flush($"{p.MapKey}-side{SideOrder[slot]}-{level}", data.Sides[slot] ??= new List<MeshData>());
             }
 
-            for (var page = 0; page < pageSinks.Length; page++)
-            {
-                if (pageSinks[page] == null) continue;
-                pageSinks[page].Flush($"{p.MapKey}-atlas{page}-{level}", data.Atlas[page] ??= new List<MeshData>());
-            }
+            foreach (var pair in tileSinks) pair.Value.Flush($"{p.MapKey}-tile{pair.Key}-{level}", AtlasList(data, pair.Key));
 
             // Counted into the building total whether or not they are built yet, so the log line's totals are
             // the file's and do not move when a floor's walls arrive a frame later.
             data.BuildingTriangles += data.WallTriangles + data.SideTriangles + data.AtlasTriangles;
 
             FlushRoofs(p, data, level, part, vertices, uvs, indices, colours, elsewhere);
+        }
+
+        /// <summary>WORKER. A floor's mesh list for one tile, made on first use.</summary>
+        private static List<MeshData> AtlasList(FloorData data, int tile)
+        {
+            if (!data.Atlas.TryGetValue(tile, out var list))
+            {
+                list = new List<MeshData>();
+                data.Atlas[tile] = list;
+            }
+
+            return list;
         }
 
         /// <summary>One chunk of roofs into mesh data: the building band's own, and one per other floor its
@@ -3912,7 +4410,7 @@ namespace QuestTree.UI
 
             public int Count => _vertices.Count;
 
-            public void Triangle(Prep p, int building, int vertexCount, int a, int b, int c)
+            public void Triangle(Prep p, int building, int vertexCount, int range, int a, int b, int c)
             {
                 if (building != _building)
                 {
@@ -3926,12 +4424,14 @@ namespace QuestTree.UI
                     }
                 }
 
-                _indices.Add(Vertex(p, a));
-                _indices.Add(Vertex(p, b));
-                _indices.Add(Vertex(p, c));
+                _indices.Add(Vertex(p, range, a));
+                _indices.Add(Vertex(p, range, b));
+                _indices.Add(Vertex(p, range, c));
             }
 
-            private int Vertex(Prep p, int i)
+            /// <summary>A building vertex placed once per chunk. Its UV is dequantised over ITS range, and a vertex is
+            /// in at most one range (MapMeshFile.Read checks it), so the first use's UV is every use's.</summary>
+            private int Vertex(Prep p, int range, int i)
             {
                 if (_stamp[i] == _current) return _index[i];
 
@@ -3939,7 +4439,7 @@ namespace QuestTree.UI
                 _index[i] = _vertices.Count;
 
                 _vertices.Add(p.Position(i));
-                _uvs.Add(p.AtlasUv(i));
+                _uvs.Add(p.AtlasUv(i, range));
 
                 return _index[i];
             }
@@ -4326,6 +4826,10 @@ namespace QuestTree.UI
 
             try
             {
+                // The atlas tiles, a few a frame, whatever else this frame is waiting for. Shared by every view of
+                // the file and pumped once a frame however many views ask.
+                _heldTiles?.Pump();
+
                 if (_loading != null)
                 {
                     if (!_loading.IsCompleted) return;
@@ -4567,26 +5071,31 @@ namespace QuestTree.UI
                 }
             }
 
-            // The faces the game's own materials texture: one DrawMesh per page chunk. A page not decoded yet (or
-            // evicted) draws in the floor's wall colour rather than leaving holes; a page that FAILED is dropped
-            // and the view rebuilt without it (RebuildWithoutFailedSides), its faces going back to the U/V rule.
+            // The faces the game's own materials texture: one DrawMesh per (tile, mesh chunk) - one per material a
+            // band uses, on a map of ~300 materials about 300 calls. A tile not cut yet draws in the floor's wall
+            // colour rather than leaving holes; a page that FAILED is dropped and the view rebuilt without it
+            // (RebuildWithoutFailedSides), its faces going back to the U/V rule.
             if (AtlasActive)
             {
-                for (var page = 0; page < meshes.Atlas.Length; page++)
+                var tiles = _heldTiles;
+
+                for (var g = 0; g < meshes.Atlas.Count; g++)
                 {
-                    var atlas = meshes.Atlas[page];
+                    var atlas = meshes.Atlas[g];
                     var material = atlas?.Material;
                     if (material == null) continue;
 
-                    var picture = _pages[page]?.Picture;
-
-                    if (material.mainTexture == null && picture != null && picture.TryGetSprite(out var pageSprite) &&
-                        pageSprite != null && pageSprite.texture != null)
+                    // The tile's texture, once the store has cut it (a few a frame); until then, and for good if it
+                    // failed, the floor's wall colour. Unity's null covers a store destroyed under a cached entry.
+                    if (material.mainTexture == null && tiles != null)
                     {
-                        material.mainTexture = pageSprite.texture;
+                        var texture = tiles.TextureOf(atlas.Tile);
+                        if (texture != null) material.mainTexture = texture;
                     }
 
-                    if (picture != null && picture.ArtworkFailed) _sideFailed = true;
+                    // A whole PAGE that failed (unreadable, will not decode, too big): the view is rebuilt without it,
+                    // its faces going back to the U/V rule - as a failed side picture's do.
+                    if (tiles != null && tiles.PageFailedFor(atlas.Tile)) _sideFailed = true;
 
                     var draw = material.mainTexture != null ? material : SideFallbackFor(meshes, floor.Level, walls);
 
@@ -4678,8 +5187,7 @@ namespace QuestTree.UI
 
             for (var page = 0; page < _pages.Length; page++)
             {
-                var picture = _pages[page]?.Picture;
-                if (picture == null || !picture.ArtworkFailed) continue;
+                if (_pages[page] == null || _heldTiles == null || !_heldTiles.PageFailed(page)) continue;
 
                 droppedPages += (droppedPages.Length > 0 ? "," : "") + page.ToString(CultureInfo.InvariantCulture);
                 _pages[page] = null;
@@ -5140,6 +5648,10 @@ namespace QuestTree.UI
         {
             // First: queued units and wall jobs point at these floors' entries, and must not run after them.
             ResetPipeline();
+
+            // The tiles are let go like the meshes: kept for the next view of this file, destroyed only when a drop
+            // has orphaned the store and this was its last user.
+            ReleaseTiles();
 
             foreach (var floor in _floors)
             {
