@@ -80,6 +80,15 @@ namespace QuestTree.UI
             public bool IsRaster;
 
             /// <summary>
+            /// Whether the decoded picture gets a mip chain, trilinear filtering and 4x anisotropy. Set by
+            /// <see cref="MapCatalog"/> for the 3D view's atlas pages and side pictures, which are minified
+            /// hard (a 4096 page over a building a few hundred pixels tall, seen at a grazing angle) and
+            /// shimmer without mips. The floors stay as they were: a flat floor is drawn near 1:1, and a
+            /// chain would add a third to the largest textures this cache holds for nothing.
+            /// </summary>
+            public bool Mipmapped;
+
+            /// <summary>
             /// The floor's name as the map ARTWORK calls it - the part of the image filename after
             /// the map's own name, so "Interchange-First_Floor.svg" gives "First_Floor". Empty for a
             /// map whose image carries no suffix, as Lighthouse's plain "Lighthouse.svg" does not.
@@ -307,6 +316,17 @@ namespace QuestTree.UI
                     return false;
                 }
 
+                // At most ONE decode a frame, across every layer. LoadImage of a 4096 page is a large
+                // fraction of a second on the main thread, and a 3D view asking for eight pages in one
+                // frame froze the game for seconds - with the wall-colour fallback never on screen,
+                // because the frame it shows in was the frozen one. The bytes stay parked in the task;
+                // the next frame's first caller (the views ask in draw order) decodes its own.
+                if (!DecodeTurnAvailable())
+                {
+                    sprite = null;
+                    return false;
+                }
+
                 var task = _loadingBytes;
                 _loadingBytes = null;
 
@@ -323,6 +343,7 @@ namespace QuestTree.UI
                     return true;
                 }
 
+                TakeDecodeTurn();
                 _sprite = BuildRasterSprite(task.Result, this);
                 _spriteFailed = _sprite == null;
                 if (_sprite != null) NoteSpriteUse(this);
@@ -425,6 +446,22 @@ namespace QuestTree.UI
         /// picture needs a second cache that could disagree with the first about how much memory the
         /// pictures hold.
         /// </summary>
+        internal sealed class AtlasPage
+        {
+            /// <summary>The page number the mesh file's ranges name, 0..7.</summary>
+            public int Page;
+
+            public int Width;
+            public int Height;
+
+            /// <summary>How many material tiles the builder packed into it, for the log.</summary>
+            public int Tiles;
+
+            /// <summary>The page's raster slot: decoded by the floor loader, held in the floor cache, evicted
+            /// and released by the same rules - exactly as a side picture is.</summary>
+            public MapLayer Picture;
+        }
+
         internal sealed class SidePicture
         {
             /// <summary>"N", "S", "E" or "W": the side the camera stood on.</summary>
@@ -481,6 +518,12 @@ namespace QuestTree.UI
             /// DynamicMaps map and for a synthesised extent. Filled by MapCatalog.ReadSides from the meta's
             /// <c>sides</c> array; a side that does not check out is left out, never the capture.</summary>
             public readonly List<SidePicture> Sides = new();
+
+            /// <summary>The atlas pages of this capture's building textures (Stage W): the game's own materials,
+            /// captured tile by tile into 4096x4096 sheets that the mesh file's per-vertex UVs point into. Empty
+            /// for a capture without them, whose buildings keep the projected textures (top, sides, tints).
+            /// Filled by MapCatalog.ReadAtlas; a page whose file is missing is left out, never the capture.</summary>
+            public readonly List<AtlasPage> AtlasPages = new();
 
             /// <summary>The map's declared coordinate rotation, applied to the artwork
             /// (MapView.PlaceArtwork) and to percentage-placed objective pins (MapView.PositionFor).
@@ -564,6 +607,72 @@ namespace QuestTree.UI
 
             _reservedSprites = next;
         }
+
+        /// <summary>
+        /// Gives back a 3D view's room AND frees at once whatever it held beyond the flat map's ceiling.
+        ///
+        /// Without the second half the room went back but the pictures stayed: nothing evicts until the next
+        /// NoteSpriteUse, so closing a 3D view left its pages and sides resident - up to 8 x 85 MiB with mips -
+        /// until some later floor happened to be decoded. The view's own pictures go first (the flat map never
+        /// shows one), oldest use first; if the cache is STILL over the ceiling after they are gone, the
+        /// ordinary LRU trims the rest.
+        /// </summary>
+        /// <param name="room">The slots the view reserved (positive).</param>
+        /// <param name="held">The side and page layers the view held.</param>
+        internal static void ReturnSprites(int room, IEnumerable<MapLayer> held)
+        {
+            ReserveSprites(-room);
+
+            var own = new HashSet<MapLayer>();
+            if (held != null)
+            {
+                foreach (var layer in held)
+                    if (layer != null) own.Add(layer);
+            }
+
+            var freed = 0L;
+            var count = 0;
+
+            for (var i = 0; i < _spriteUse.Count && _spriteUse.Count > Ceiling;)
+            {
+                var layer = _spriteUse[i];
+                if (!own.Contains(layer))
+                {
+                    i++;
+                    continue;
+                }
+
+                freed += layer.RasterBytes;
+                count++;
+                _spriteUse.RemoveAt(i);
+                layer.ReleaseSprite();
+            }
+
+            while (_spriteUse.Count > Ceiling)
+            {
+                var oldest = _spriteUse[0];
+                freed += oldest.RasterBytes;
+                count++;
+                _spriteUse.RemoveAt(0);
+                oldest.ReleaseSprite();
+            }
+
+            if (count > 0)
+            {
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: a 3D view closed - released {count} picture(s) past the flat ceiling, " +
+                    $"{freed / (1024f * 1024f):F1} MB.");
+            }
+        }
+
+        /// <summary>The frame the last paced raster decode ran in; -1 before any. See TryGetRasterSprite.</summary>
+        private static int _lastDecodeFrame = -1;
+
+        /// <summary>Whether this frame's one raster decode is still free.</summary>
+        private static bool DecodeTurnAvailable() => Time.frameCount != _lastDecodeFrame;
+
+        /// <summary>Spends this frame's decode. Taken BEFORE the decode, so a decode that fails still counts.</summary>
+        private static void TakeDecodeTurn() => _lastDecodeFrame = Time.frameCount;
 
         private static readonly List<MapLayer> _spriteUse = new();
 
@@ -1201,7 +1310,7 @@ namespace QuestTree.UI
 
                 // RGBA32, not RGB24: see the remarks. LoadImage picks the file's own format, and
                 // this is the one that cannot discard alpha if it ever does not.
-                texture = new Texture2D(2, 2, TextureFormat.RGBA32, mipChain: false);
+                texture = new Texture2D(2, 2, TextureFormat.RGBA32, mipChain: layer.Mipmapped);
 
                 if (!texture.LoadImage(bytes, markNonReadable: true))
                 {
@@ -1214,7 +1323,19 @@ namespace QuestTree.UI
                     return null;
                 }
 
-                texture.filterMode = FilterMode.Bilinear;
+                // A mipmapped page or side: LoadImage builds the chain itself (the texture was made with one),
+                // and trilinear + 4x anisotropy is what keeps a grazing wall from shimmering. The atlas tiles
+                // carry 16 px of padding so the smaller mips do not bleed one tile into the next.
+                if (layer.Mipmapped)
+                {
+                    texture.filterMode = FilterMode.Trilinear;
+                    texture.anisoLevel = 4;
+                }
+                else
+                {
+                    texture.filterMode = FilterMode.Bilinear;
+                }
+
                 texture.wrapMode = TextureWrapMode.Clamp;
 
                 var sprite = Sprite.Create(
@@ -1264,8 +1385,8 @@ namespace QuestTree.UI
         /// What a decoded picture costs, from the format the texture ENDED UP in rather than from the
         /// one it was constructed with or the file's extension: our captures are RGBA PNGs and decode
         /// to RGBA32 at four bytes a pixel (39 MiB for a 3262x3136 floor, the largest the capture's
-        /// memory budget allows), a host's JPEG and any PNG without an alpha channel decode to RGB24 at
-        /// three (29 MiB for the same floor, and a host's copy is downscaled to 2048 long side anyway).
+        /// memory budget allows), a host's JPEG and any PNG without an alpha channel decode to RGB24 -
+        /// counted at four as well, since D3D11 stores it as RGBA. A mipmapped page or side adds a third.
         ///
         /// An unrecognised format is counted at four, so the number in the log is never optimistic.
         /// </summary>
@@ -1276,7 +1397,9 @@ namespace QuestTree.UI
                 // What LoadImage actually produces for our files: ARGB32 for a PNG with alpha (our
                 // captures), RGB24 for one without (a host's JPEG); RGBA32 in case a build ever differs.
                 TextureFormat.RGBA32 => 4,
-                TextureFormat.RGB24 => 3,
+                // D3D11 has no 24-bit format: an RGB24 texture is stored as RGBA on the device, so it
+                // costs four bytes like the rest. Counted at three it would under-report a host's JPEG floor.
+                TextureFormat.RGB24 => 4,
 
                 // The rest are here so an unexpected answer is still counted rather than guessed at.
                 TextureFormat.ARGB32 => 4,
@@ -1288,7 +1411,10 @@ namespace QuestTree.UI
                 _ => 4
             };
 
-            return (long)texture.width * texture.height * bytesPerPixel;
+            var bytes = (long)texture.width * texture.height * bytesPerPixel;
+
+            // A full mip chain adds a third (1/4 + 1/16 + ... -> 1/3).
+            return texture.mipmapCount > 1 ? bytes + bytes / 3 : bytes;
         }
 
         private static bool OverBudget(List<VectorUtils.Geometry> geometry)

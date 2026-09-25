@@ -93,7 +93,7 @@ PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 # Write() doc comment is the byte table these constants and read_mesh() below follow. The caps are
 # ITS caps: a file this script accepts and the client refuses would be a check that cannot fail.
 MESH_MAGIC = b"QTM1"
-MESH_VERSION = 1            # MapMeshFile.Version
+MESH_VERSION = 2            # MapMeshFile.Version (stage W: 2 added the atlas)
 MESH_NO_HIT = 0xFFFF        # MapMeshFile.NoHit
 MESH_MAX_BANDS = 8
 MESH_MAX_CELLS_PER_BAND = 4_000_000
@@ -101,6 +101,9 @@ MESH_MAX_BUILDINGS = 20_000
 MESH_MAX_VERTICES_PER_BUILDING = 2_000_000
 MESH_MAX_VERTICES_TOTAL = 12_000_000   # stage V: was 4 M
 MESH_MAX_TRIANGLES = 6_000_000         # stage V: was 2 M (the building budget went 300 k -> 3 M)
+MESH_MAX_ATLAS_PAGES = 8               # MapMeshFile.MaxAtlasPages
+MESH_MAX_RANGES_PER_BUILDING = 64      # MapMeshFile.MaxRangesPerBuilding
+ATLAS_PAGE_SIZE = 4096                 # MapMeshFile.AtlasPageSize
 # What the file may inflate to. 8 bands of 4 M cells is 96 MB by the caps above; the bound exists so
 # a corrupt or hostile deflate stream cannot be expanded until this process dies, which is the same
 # reason MapMeshFile checks every count before it allocates.
@@ -436,7 +439,10 @@ def read_mesh(data):
         "maxZ": cur.f64("the extent"),
         "yMin": cur.f32("the y range"),
         "yMax": cur.f32("the y range"),
+        "atlasPages": cur.i32("the atlas page count"),
         "bands": [],
+        "textured": 0,
+        "ranges": 0,
         "buildings": 0,
         "cells": 0,
         "triangles": 0,
@@ -449,6 +455,8 @@ def read_mesh(data):
                         f"z {mesh['minZ']:g}..{mesh['maxZ']:g}")
     if not mesh["yMax"] > mesh["yMin"]:
         raise MeshError(f"has an empty y range: {mesh['yMin']:g}..{mesh['yMax']:g}")
+    if not 0 <= mesh["atlasPages"] <= MESH_MAX_ATLAS_PAGES:
+        raise MeshError(f"claims {mesh['atlasPages']} atlas pages; the cap is {MESH_MAX_ATLAS_PAGES}")
 
     bands = cur.i32("the band count")
     if bands < 0 or bands > MESH_MAX_BANDS:
@@ -533,6 +541,36 @@ def read_mesh(data):
             if value == MESH_NO_HIT:
                 raise MeshError(f"{where} (key {key}) vertex {position} has no height (NoHit), "
                                 f"which would be a NaN vertex")
+
+        # Stage W: UVs (none, or one per vertex), then the page ranges - ascending whole triangles inside
+        # this building's indices, each on a page the file has.
+        uvs = cur.i32(f"{where}'s UV count")
+        if uvs not in (0, count):
+            raise MeshError(f"{where} (key {key}) claims {uvs} UVs for {count} vertices")
+        if uvs:
+            cur.take(4 * uvs, f"{where}'s UVs")
+
+        ranges = cur.i32(f"{where}'s atlas range count")
+        if ranges < 0 or ranges > MESH_MAX_RANGES_PER_BUILDING:
+            raise MeshError(f"{where} (key {key}) claims {ranges} atlas ranges; the cap is "
+                            f"{MESH_MAX_RANGES_PER_BUILDING}")
+        if ranges and not uvs:
+            raise MeshError(f"{where} (key {key}) has atlas ranges and no UVs")
+
+        end = 0
+        for k in range(ranges):
+            page = cur.i32(f"{where}'s range {k} page")
+            first = cur.i32(f"{where}'s range {k} first index")
+            span = cur.i32(f"{where}'s range {k} index count")
+            if not 0 <= page < mesh["atlasPages"]:
+                raise MeshError(f"{where} (key {key}) range {k} is on page {page}; the file has "
+                                f"{mesh['atlasPages']}")
+            if first < end or first % 3 or span <= 0 or span % 3 or first + span > indices:
+                raise MeshError(f"{where} (key {key}) range {k} is indices {first}+{span} of {indices} "
+                                f"(after {end}) - ranges are ascending whole triangles inside the building")
+            end = first + span
+            mesh["textured"] += span // 3
+        mesh["ranges"] += ranges
 
         if levels and level not in levels:
             raise MeshError(f"{where} (key {key}) is on level {level}, which no band is")
@@ -660,11 +698,103 @@ def check_mesh(meta, folder, key, extent, levels, errors, warnings):
                       f"{claimed_triangles}")
 
     hit = sum(band["hit"] for band in mesh["bands"])
+    meta["_meshAtlasPages"] = mesh["atlasPages"]
 
     return (f"mesh {len(data) / 1048576:.2f} MB, {len(mesh['bands'])} band(s), "
             f"{mesh['cells']} cells ({(100 * hit / mesh['cells']) if mesh['cells'] else 0:.0f} % "
             f"hit), {mesh['buildings']} building(s), "
-            f"{mesh['triangles']} triangles")
+            f"{mesh['triangles']} triangles, {mesh['textured']} textured in {mesh['ranges']} range(s) "
+            f"over {mesh['atlasPages']} atlas page(s)")
+
+
+def png_is(path, width, height):
+    """(ok, actual size) for a PNG that must be width x height."""
+    size, why = png_size(path)
+    return size == (width, height), size if size is not None else why
+
+
+def check_atlas(meta, folder, key, errors, warnings):
+    """Stage W's atlas pages beside the mesh: page n is <key>-atlas-<n>.png, 4096x4096, with the length and
+    sha256 the meta records; the mesh may not name more pages than the meta lists. Returns the summary
+    line's atlas column."""
+    block = meta.get("atlas")
+    pages_in_mesh = meta.pop("_meshAtlasPages", None)
+    on_disk = sorted(p.name for p in folder.iterdir()
+                     if p.is_file() and p.name.lower().startswith(f"{key.lower()}-atlas-")
+                     and p.name.lower().endswith(".png"))
+
+    if block is None:
+        for name in on_disk:
+            warnings.append(f"{key}: {name} is on disk but the meta names no atlas - nothing reads it")
+        if pages_in_mesh:
+            warnings.append(f"{key}: the mesh's ranges name {pages_in_mesh} atlas page(s) but the meta lists none - "
+                            f"those buildings fall back to the side views")
+        return "no atlas"
+
+    if not isinstance(block, list) or len(block) > MESH_MAX_ATLAS_PAGES:
+        errors.append(f"{key}: atlas is not a list of at most {MESH_MAX_ATLAS_PAGES} pages")
+        return "atlas UNREADABLE"
+
+    if meta.get("mesh") is None:
+        errors.append(f"{key}: the meta lists an atlas but no mesh - an atlas belongs to a mesh")
+
+    named = set()
+    total = 0
+
+    for n, page in enumerate(block):
+        if not isinstance(page, dict):
+            errors.append(f"{key}: atlas[{n}] is not an object")
+            continue
+
+        want = f"{key}-atlas-{n}.png"
+        name = page.get("file")
+        if name != want:
+            errors.append(f"{key}: atlas[{n}].file is {name!r}, not {want!r} - page n is <key>-atlas-<n>.png")
+            continue
+        named.add(name.lower())
+
+        if page.get("page") != n:
+            errors.append(f"{key}: atlas[{n}].page is {page.get('page')!r}, not {n}")
+
+        width, height = page.get("width"), page.get("height")
+        if width != ATLAS_PAGE_SIZE or height != ATLAS_PAGE_SIZE:
+            errors.append(f"{key}: atlas[{n}] is {width!r}x{height!r}; a page is {ATLAS_PAGE_SIZE}x{ATLAS_PAGE_SIZE}")
+
+        tiles = page.get("tiles")
+        if isinstance(tiles, bool) or not isinstance(tiles, int) or tiles < 0:
+            errors.append(f"{key}: atlas[{n}].tiles {tiles!r} is not a non-negative integer")
+
+        path = folder / name
+        if not path.is_file():
+            errors.append(f"{key}: atlas page {name} does not exist in {folder}")
+            continue
+
+        data = path.read_bytes()
+        total += len(data)
+
+        claimed = page.get("bytes")
+        if claimed is not None and claimed != len(data):
+            errors.append(f"{key}: {name} is {len(data)} bytes but atlas[{n}].bytes says {claimed}")
+
+        sha = page.get("sha256")
+        if not isinstance(sha, str) or hashlib.sha256(data).hexdigest() != sha:
+            errors.append(f"{key}: {name}'s sha256 is not atlas[{n}].sha256 - not the page this meta describes")
+
+        ok, size = png_is(path, width if isinstance(width, int) else -1, height if isinstance(height, int) else -1)
+        if not ok:
+            errors.append(f"{key}: {name} is {size} but atlas[{n}] says {width}x{height}")
+
+    for name in on_disk:
+        if name.lower() not in named:
+            warnings.append(f"{key}: {name} is on disk but the meta's atlas does not name it - nothing reads it")
+
+    if pages_in_mesh is not None and pages_in_mesh > len(block):
+        # The documented degraded state (a page commit failed after the mesh was written): the viewer draws
+        # those ranges the stage U/V way. A warning, not an error (stage W review, M4).
+        warnings.append(f"{key}: the mesh's ranges may name {pages_in_mesh} atlas page(s) but the meta lists "
+                        f"{len(block)} - the buildings on the missing pages fall back to the side views")
+
+    return f"atlas {len(block)} page(s), {total / 1048576:.1f} MB"
 
 
 SIDE_DIRS = ("N", "S", "E", "W")
@@ -907,6 +1037,7 @@ def check_capture(folder, errors, warnings):
     levels, pixels, total = check_floors(meta, folder, key, extent, px_per_metre, errors)
 
     mesh = check_mesh(meta, folder, key, extent, levels, errors, warnings)
+    atlas = check_atlas(meta, folder, key, errors, warnings)
     sides = check_sides(meta, folder, key, extent, errors, warnings)
 
     zones, rotation = check_zone(key, extent, levels, errors, warnings)
@@ -919,7 +1050,7 @@ def check_capture(folder, errors, warnings):
     scale = f"{1 / px_per_metre:.2f} m/px" if px_per_metre else "? m/px"
     captured = meta.get("capturedAt") or "?"
     return (f"{key}: {floor_count} floor(s), {pixels} @ {scale}, {total / 1048576:.1f} MB, {zones}\n"
-            f"    {mesh}; {sides}",
+            f"    {mesh}; {atlas}; {sides}",
             captured)
 
 

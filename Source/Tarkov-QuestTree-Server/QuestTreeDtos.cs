@@ -1157,6 +1157,37 @@ namespace QuestTreeServer
         [JsonPropertyName("yMax")] public float YMax { get; set; }
     }
 
+    /// <summary>One ATLAS page of a map: a 4096 px sheet of the game's own building textures, packed as
+    /// tiles, which the 3D view drapes on the buildings by the mesh file's own UVs (stage W). Up to eight per
+    /// set, numbered by <see cref="Page"/>.
+    ///
+    /// OPTIONAL, like the sides and the mesh: absent on older sets, dropped by an older host, ignored by an
+    /// older client - no schema version moves for it. And a page is never worth a map: a page this host
+    /// cannot use is dropped from the set's atlas and the rest is served, and the buildings drawn from it
+    /// fall back in the viewer to the sides and tints they used before pages existed.</summary>
+    public sealed class MapCaptureAtlasDto
+    {
+        /// <summary>The page's file name. REWRITTEN by the server to <c>&lt;key&gt;-atlas-&lt;page&gt;.jpg</c>,
+        /// as a floor's is - a name from a peer is a path. On the way in it may still be the capture's own
+        /// <c>.png</c>: the client does not rewrite it, since this server discards it anyway.</summary>
+        [JsonPropertyName("file")] public string File { get; set; } = "";
+
+        /// <summary>Which page, 0 to 7 - the number the mesh file's per-building ranges refer to.</summary>
+        [JsonPropertyName("page")] public int Page { get; set; }
+
+        [JsonPropertyName("width")] public int Width { get; set; }
+        [JsonPropertyName("height")] public int Height { get; set; }
+
+        /// <summary>How many texture tiles are packed on the page. Informational.</summary>
+        [JsonPropertyName("tiles")] public int Tiles { get; set; }
+
+        /// <summary>sha256 of the page file, hex. On the way IN it describes the capture's own PNG, which
+        /// the upload re-encodes as a JPEG - so the server does not check it, and REWRITES it when the set is
+        /// stored to the hash of the JPEG it serves. From then on it is what a downloader and the packaging
+        /// gate hold the page to.</summary>
+        [JsonPropertyName("sha256")] public string Sha256 { get; set; } = "";
+    }
+
     /// <summary>Everything about one map's captured picture set except the pictures: exactly the
     /// client's <c>&lt;key&gt;.map.json</c>, field for field.
     ///
@@ -1233,6 +1264,11 @@ namespace QuestTreeServer
         /// <see cref="MapCaptureSideDto"/>. When set, the set is not served until every side named here
         /// has arrived or been dropped, so a meta never names a side picture the host does not hold.</summary>
         [JsonPropertyName("sides")] public List<MapCaptureSideDto>? Sides { get; set; }
+
+        /// <summary>The atlas pages this set carries, or null/empty for none - see
+        /// <see cref="MapCaptureAtlasDto"/>. When set, the set is not served until every page named here has
+        /// arrived or been dropped, as for the sides.</summary>
+        [JsonPropertyName("atlas")] public List<MapCaptureAtlasDto>? Atlas { get; set; }
     }
 
     /// <summary>The body of POST /questtree/maps/upload: ONE floor's picture, with the whole set's
@@ -1279,8 +1315,15 @@ namespace QuestTreeServer
         /// storing a side picture over floor 0.</summary>
         [JsonPropertyName("side")] public string? Side { get; set; }
 
+        /// <summary>The ATLAS page this post carries, 0 to 7; null for a floor or a side. Rides this route
+        /// for the side's reason - it is a JPEG picture - and with the side's level (int.MinValue), so a host
+        /// that predates this field reads it as a floor it does not know and refuses it rather than filing a
+        /// texture sheet as floor 0. Its size cap is its own (MapStore.MaxAtlasPageBytes): a page is sent at
+        /// its full 4096 px.</summary>
+        [JsonPropertyName("atlas")] public int? Atlas { get; set; }
+
         /// <summary>"jpg" or "png", and the bytes must actually start with that format's magic
-        /// numbers - the extension a client claims decides nothing. A side must be "jpg".</summary>
+        /// numbers - the extension a client claims decides nothing. A side or a page must be "jpg".</summary>
         [JsonPropertyName("format")] public string Format { get; set; } = "";
 
         /// <summary>The picture. For a side, EMPTY is meaningful: it is how a client that could not
@@ -1368,6 +1411,9 @@ namespace QuestTreeServer
         /// for the floor at <see cref="Level"/>. An older host ignores it and answers with a floor, which
         /// is why the client only ever asks for a side the index said the set has.</summary>
         [JsonPropertyName("side")] public string? Side { get; set; }
+
+        /// <summary>An atlas page number to ask for that page instead of a floor; null for a floor or side.</summary>
+        [JsonPropertyName("atlas")] public int? Atlas { get; set; }
     }
 
     /// <summary>One floor's picture, base64-encoded.

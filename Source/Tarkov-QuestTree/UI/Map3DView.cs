@@ -238,6 +238,18 @@ namespace QuestTree.UI
             public long SideTriangles;
 
             /// <summary>
+            /// The faces textured with the game's OWN materials (Stage W): one submesh list and one material per
+            /// atlas page, indexed by page number; null where no face of this floor is on that page. UVs are the
+            /// file's per-vertex UVs into the page, so a brick wall is brick and a crane is a crane - where the
+            /// projected textures (top, sides, tints) can only paint what a camera saw from outside. Faces of a
+            /// building with no captured texture keep those projected textures.
+            /// </summary>
+            public readonly SideTexture[] Atlas = new SideTexture[MaxAtlasPages];
+
+            /// <summary>Building triangles textured from an atlas page, for the log line.</summary>
+            public long AtlasTriangles;
+
+            /// <summary>
             /// Top faces that stand ON ANOTHER FLOOR than the band their building is filed under, with the
             /// level whose picture textures them. See <see cref="Prep.FloorForFace"/>.
             ///
@@ -252,6 +264,10 @@ namespace QuestTree.UI
 
             /// <summary>How many top faces went to another floor's picture, for the log line.</summary>
             public long MovedRoofTriangles;
+
+            /// <summary>How many ground-skirt faces were left out as ground, for the log line. See
+            /// Prep.GroundSkirt.</summary>
+            public long GroundSkirtTriangles;
 
             /// <summary>
             /// The dollhouse cut: for each cut height, each building mesh of this entry clipped to what lies
@@ -440,24 +456,93 @@ namespace QuestTree.UI
         /// the room already. See DynamicMapsLibrary.ReserveSprites for why a 3D view with sides needs it.</summary>
         private void TakeSideRoom()
         {
-            if (!SidesActive || _reservedSides > 0) return;
+            if (_reservedSides > 0) return;
 
-            DynamicMapsLibrary.ReserveSprites(_sideCount);
-            _reservedSides = _sideCount;
+            // The side pictures AND the atlas pages: both are held by this view for as long as it draws, both
+            // sit in the floors' picture cache, and without their room a full peel would evict a floor this view
+            // asks for again next frame.
+            var room = (SidesActive ? _sideCount : 0) + (AtlasActive ? _pageCount : 0);
+            if (room <= 0) return;
+
+            DynamicMapsLibrary.ReserveSprites(room);
+            _reservedSides = room;
         }
 
-        /// <summary>Gives back whatever room this view holds. Idempotent.</summary>
-        private void ReturnSideRoom()
+        /// <summary>Gives back whatever room this view holds. Idempotent. With <paramref name="evict"/> (the
+        /// view closing or switched off) the side and page pictures it held past the flat map's ceiling are
+        /// freed on the spot rather than whenever the next floor decode happens to trim the cache; a rebuild
+        /// that takes the room straight back passes false, so the pages it still uses are not thrown away and
+        /// decoded again.</summary>
+        private void ReturnSideRoom(bool evict = true)
         {
             if (_reservedSides <= 0) return;
 
-            DynamicMapsLibrary.ReserveSprites(-_reservedSides);
+            if (evict) DynamicMapsLibrary.ReturnSprites(_reservedSides, HeldPictures());
+            else DynamicMapsLibrary.ReserveSprites(-_reservedSides);
+
             _reservedSides = 0;
+        }
+
+        /// <summary>The side and page pictures this view holds, for <see cref="ReturnSideRoom"/>.</summary>
+        private IEnumerable<DynamicMapsLibrary.MapLayer> HeldPictures()
+        {
+            foreach (var side in _sides)
+                if (side?.Picture != null) yield return side.Picture;
+
+            foreach (var page in _pages)
+                if (page?.Picture != null) yield return page.Picture;
         }
 
         /// <summary>Whether the side pictures take part at all: they need a textured shader, so under the
         /// flat-colour fallback every wall is a tint, exactly as if the capture had no sides.</summary>
         private bool SidesActive => _sideCount > 0 && !_flatColours;
+
+        /// <summary>The most atlas pages a map has: MapMeshFile's cap, referenced rather than copied.</summary>
+        private const int MaxAtlasPages = MapMeshFile.MaxAtlasPages;
+
+        /// <summary>This capture's USABLE atlas pages by page number, null where absent or already failed.</summary>
+        private readonly DynamicMapsLibrary.AtlasPage[] _pages = new DynamicMapsLibrary.AtlasPage[MaxAtlasPages];
+
+        private int _pageCount;
+
+        /// <summary>The usable page numbers, for the cache key and the log line.</summary>
+        private string _pagesKey = "";
+
+        /// <summary>Whether the atlas takes part: a textured shader and at least one usable page. Under the flat
+        /// fallback, or with no pages (a capture from before Stage W), every building face keeps the stage U/V
+        /// rule, exactly as before.</summary>
+        private bool AtlasActive => _pageCount > 0 && !_flatColours;
+
+        /// <summary>Reads the entry's usable atlas pages into their slots - present and not already failed.</summary>
+        private void TakeAtlas()
+        {
+            if (_entry?.AtlasPages != null)
+            {
+                foreach (var page in _entry.AtlasPages)
+                {
+                    if (page?.Picture == null || page.Page < 0 || page.Page >= MaxAtlasPages) continue;
+                    if (_pages[page.Page] != null || page.Picture.ArtworkFailed) continue;
+
+                    _pages[page.Page] = page;
+                }
+            }
+
+            CountPages();
+        }
+
+        private void CountPages()
+        {
+            _pageCount = 0;
+            _pagesKey = "";
+
+            for (var page = 0; page < _pages.Length; page++)
+            {
+                if (_pages[page] == null) continue;
+
+                _pageCount++;
+                _pagesKey += (_pagesKey.Length > 0 ? "," : "") + page.ToString(CultureInfo.InvariantCulture);
+            }
+        }
 
         /// <summary>Why the mesh was refused, in a few words for the tooltip.</summary>
         private string _refusal = "";
@@ -608,8 +693,10 @@ namespace QuestTree.UI
             view._backdrop = backdrop;
             view._onRefused = onRefused;
 
-            // The side pictures this capture has, by slot, and the room for them in the picture cache.
+            // The side pictures and atlas pages this capture has, by slot. Their cache room is taken once the
+            // shader is known (TakeSideRoom).
             view.TakeSides();
+            view.TakeAtlas();
 
             try
             {
@@ -996,6 +1083,19 @@ namespace QuestTree.UI
                 built.Sides[slot] = null;
             }
 
+            for (var page = 0; page < built.Atlas.Length; page++)
+            {
+                var atlas = built.Atlas[page];
+                if (atlas == null) continue;
+
+                for (var i = 0; i < atlas.Meshes.Count; i++) { Discard(atlas.Meshes[i]); count++; }
+
+                atlas.Meshes.Clear();
+                Discard(atlas.Material);
+                atlas.Material = null;
+                built.Atlas[page] = null;
+            }
+
             built.Ground.Clear();
             built.Buildings.Clear();
             built.Complete = false;
@@ -1249,7 +1349,8 @@ namespace QuestTree.UI
             // and against none is two different builds. HERE and not earlier, because whether the sides
             // take part at all depends on the shader just resolved (SidesActive reads _flatColours).
             var key = _meshPath + "|" + loaded.Stamp.ToString(CultureInfo.InvariantCulture) + "|" +
-                      (SidesActive ? _sidesKey : "-") + "|" + FloorRangesKey();
+                      (SidesActive ? _sidesKey : "-") + "|atlas:" + (AtlasActive ? _pagesKey : "-") + "|" +
+                      FloorRangesKey();
 
             if (_builtKey != key)
             {
@@ -1279,6 +1380,11 @@ namespace QuestTree.UI
             if (SidesActive)
             {
                 for (var slot = 0; slot < _sides.Length; slot++) _sides[slot]?.Picture?.TryGetSprite(out _);
+            }
+
+            if (AtlasActive)
+            {
+                for (var page = 0; page < _pages.Length; page++) _pages[page]?.Picture?.TryGetSprite(out _);
             }
 
             foreach (var floor in _floors)
@@ -1367,6 +1473,8 @@ namespace QuestTree.UI
                 into.SideTriangles = data.SideTriangles;
                 into.WallTriangles = data.WallTriangles;
                 into.MovedRoofTriangles = data.MovedRoofTriangles;
+                into.GroundSkirtTriangles = data.GroundSkirtTriangles;
+                into.AtlasTriangles = data.AtlasTriangles;
                 into.WallsPending = data.WallTriangles > 0;
             }
 
@@ -1446,6 +1554,32 @@ namespace QuestTree.UI
                             }
 
                             into.Sides[s].Meshes.Add(Upload(into, mesh));
+                        });
+                    }
+                }
+
+                for (var page = 0; page < data.Atlas.Length; page++)
+                {
+                    if (data.Atlas[page] == null) continue;
+
+                    var pg = page;
+
+                    foreach (var mesh in data.Atlas[page])
+                    {
+                        _work.Enqueue(() =>
+                        {
+                            // One Standard, matte, opaque material per page per floor; its _MainTex is the page,
+                            // assigned by Draw from this view's own entry (as the sides' are).
+                            if (into.Atlas[pg] == null)
+                            {
+                                into.Atlas[pg] = new SideTexture
+                                {
+                                    Material = Matte(new Material(_buildingShader)
+                                        { name = $"QuestTreeMap3D-atlas{pg}-{level}" })
+                                };
+                            }
+
+                            into.Atlas[pg].Meshes.Add(Upload(into, mesh));
                         });
                     }
                 }
@@ -1580,12 +1714,16 @@ namespace QuestTree.UI
             var topTriangles = 0L;
             var sideTriangles = 0L;
             var movedRoofs = 0L;
+            var skirts = 0L;
+            var atlasTriangles = 0L;
 
             foreach (var floor in _floors)
             {
+                atlasTriangles += floor.Meshes.AtlasTriangles;
                 topTriangles += floor.Meshes.TopTriangles;
                 sideTriangles += floor.Meshes.SideTriangles;
                 movedRoofs += floor.Meshes.MovedRoofTriangles;
+                skirts += floor.Meshes.GroundSkirtTriangles;
                 cells += floor.Meshes.Cells;
                 groundTriangles += floor.Meshes.GroundTriangles;
                 buildings += floor.Meshes.BuildingCount;
@@ -1610,27 +1748,37 @@ namespace QuestTree.UI
 
             // Which pictures the building faces went to: the Stage U split. Over every building triangle
             // that was kept (top + sides + tint); percentages rounded, so they may sum to 99 or 101.
-            var faces = topTriangles + sideTriangles + wallTriangles;
+            var faces = atlasTriangles + topTriangles + sideTriangles + wallTriangles;
             var sidesNote =
+                (AtlasActive
+                    ? string.Format(CultureInfo.InvariantCulture, ", atlas {0} page(s)", _pageCount)
+                    : "") +
                 (SidesActive
                     ? string.Format(CultureInfo.InvariantCulture, ", sides {0} ({1})",
                         _sideCount, string.Join(",", _sidesKey.ToCharArray()))
                     : ", sides 0") +
                 (faces > 0
-                    ? string.Format(CultureInfo.InvariantCulture,
-                        ", faces top {0:0} % / sides {1:0} % / tint {2:0} %",
-                        100d * topTriangles / faces, 100d * sideTriangles / faces, 100d * wallTriangles / faces)
+                    ? (AtlasActive
+                        ? string.Format(CultureInfo.InvariantCulture, ", faces atlas {0:0} % / top {1:0} % / sides {2:0} % / tint {3:0} %",
+                            100d * atlasTriangles / faces, 100d * topTriangles / faces, 100d * sideTriangles / faces,
+                            100d * wallTriangles / faces)
+                        : string.Format(CultureInfo.InvariantCulture, ", faces top {0:0} % / sides {1:0} % / tint {2:0} %",
+                            100d * topTriangles / faces, 100d * sideTriangles / faces, 100d * wallTriangles / faces))
                     : "") +
                 (movedRoofs > 0
                     ? string.Format(CultureInfo.InvariantCulture,
                         ", {0:#,##0} top face(s) on the picture of the floor they stand on", movedRoofs)
+                    : "") +
+                (skirts > 0
+                    ? string.Format(CultureInfo.InvariantCulture,
+                        ", {0:#,##0} ground-skirt face(s) left to the relief", skirts)
                     : "");
 
             Plugin.LogSource?.LogInfo(string.Format(
                 CultureInfo.InvariantCulture,
                 "QuestTree: 3D map for {0} - {1} band(s) {2:#,##0} cells -> {3:#,##0} triangles, " +
                 "{4:#,##0} buildings {5:#,##0} triangles ({11}), built in {6:#,##0} ms over {14} frame(s) " +
-                "(longest {15:#,##0} ms), meshes ~{16:#,##0} MB, layer {7}, shader {8}, " +
+                "(longest {15:#,##0} ms), meshes ~{16:#,##0} MB, textures resident ~{17:#,##0} MB, layer {7}, shader {8}, " +
                 "ground cutout: {9}{10}{12}{13}.",
                 _mapKey, _levels.Count, cells, groundTriangles, buildings, buildingTriangles,
                 _buildClock.ElapsedMilliseconds, _drawLayer,
@@ -1648,7 +1796,11 @@ namespace QuestTree.UI
                         _cutY, _selectedLevel, _cutMillis),
                 _buildFrames,
                 _longestFrameMs,
-                ResidentMeshBytes() / (1024d * 1024d)));
+                ResidentMeshBytes() / (1024d * 1024d),
+
+                // Every decoded picture in the shared cache (floors, sides, pages), at 4 B a pixel plus a third
+                // for a mip chain. Pages still waiting their paced decode are not in it yet.
+                DynamicMapsLibrary.ResidentRasterBytes / (1024d * 1024d)));
 
             // ANNOUNCED, not just placed. The labels were culled when the viewport was built - against the
             // camera as it stood before the mesh landed, with the ground at the fallback height - and
@@ -1890,6 +2042,12 @@ namespace QuestTree.UI
             {
                 if (side == null) continue;
                 foreach (var mesh in side.Meshes) yield return mesh;
+            }
+
+            foreach (var atlas in built.Atlas)
+            {
+                if (atlas == null) continue;
+                foreach (var mesh in atlas.Meshes) yield return mesh;
             }
         }
 
@@ -2852,6 +3010,7 @@ namespace QuestTree.UI
             public long SideTriangles;
             public long WallTriangles;
             public long MovedRoofTriangles;
+            public long GroundSkirtTriangles;
             public int BuildingCount;
             public int Dropped;
 
@@ -2859,6 +3018,10 @@ namespace QuestTree.UI
             public readonly List<MeshData> Roofs = new List<MeshData>();
             public readonly List<(int Level, MeshData Data)> RoofsElsewhere = new List<(int Level, MeshData Data)>();
             public readonly List<MeshData>[] Sides = new List<MeshData>[4];
+
+            /// <summary>Atlas-textured faces, per page number.</summary>
+            public readonly List<MeshData>[] Atlas = new List<MeshData>[MaxAtlasPages];
+            public long AtlasTriangles;
         }
 
         /// <summary>One floor's walls as a worker prepared them: a colour and its meshes per tint.</summary>
@@ -2891,6 +3054,42 @@ namespace QuestTree.UI
             public (int Level, float Low, float High)[] FloorRanges = new (int, float, float)[0];
             public float SpanX;
             public float SpanZ;
+
+            /// <summary>Which atlas pages this view can draw (usable, textured shader). A face on a page that is
+            /// not here keeps the stage U/V rule, so a page lost in transport costs its faces' texture, never
+            /// the faces.</summary>
+            public readonly bool[] PagePresent = new bool[MaxAtlasPages];
+
+            /// <summary>The atlas ranges (page, first index, index count) of the building last loaded, or null.</summary>
+            private (int Page, int First, int Count)[] _ranges;
+
+            /// <summary>The building last loaded - the one whose UVs <see cref="AtlasUv"/> reads.</summary>
+            private MapMeshFile.Building _building;
+
+            /// <summary>
+            /// The atlas page of the triangle at index position <paramref name="i"/> of the building last loaded,
+            /// or -1 when it is on no page this view can draw. Decides a face BEFORE the stage U/V rule does: an
+            /// atlas face is never a roof, a side face or a tint, so the roof pass and the wall pass both ask here
+            /// first and still split every triangle exactly once between them.
+            /// </summary>
+            public int AtlasPageAt(int i)
+            {
+                if (_ranges == null) return -1;
+
+                for (var k = 0; k < _ranges.Length; k++)
+                {
+                    var range = _ranges[k];
+                    if (i < range.First || i >= range.First + range.Count) continue;
+
+                    return range.Page >= 0 && range.Page < MaxAtlasPages && PagePresent[range.Page] ? range.Page : -1;
+                }
+
+                return -1;
+            }
+
+            /// <summary>The texture UV of vertex <paramref name="i"/> of the building last loaded: the file's UV as
+            /// stored, already bottom-origin - see <see cref="AtlasUvOf"/>.</summary>
+            public Vector2 AtlasUv(int i) => AtlasUvOf(_building, i);
 
             // Scratch, per worker. Grown, never shrunk.
             private bool[] _finite = new bool[0];
@@ -2943,6 +3142,11 @@ namespace QuestTree.UI
                 if (_remap.Length < n) _remap = new int[n];
 
                 _count = n;
+                _building = building;
+                _ranges = AtlasRangesOf(building);
+                _skirtBand = File.Band(BandLevelFor(building.Level));
+                _minY = float.PositiveInfinity;
+
                 var any = false;
 
                 for (var i = 0; i < n; i++)
@@ -2955,9 +3159,43 @@ namespace QuestTree.UI
 
                     _positions[i] = vertex;
                     any |= _finite[i];
+                    if (_finite[i] && vertex.y < _minY) _minY = vertex.y;
                 }
 
                 return any;
+            }
+
+            /// <summary>The relief of the band the building last loaded is filed in, or null. See GroundSkirt.</summary>
+            private MapMeshFile.ReliefBand _skirtBand;
+
+            /// <summary>The lowest finite vertex height of the building last loaded.</summary>
+            private float _minY;
+
+            /// <summary>
+            /// Whether a triangle of the building last loaded is GROUND the building happens to own - a
+            /// foundation skirt, a pavement apron, a kiosk's plinth - rather than a roof: near-horizontal
+            /// (<c>|n.y| &gt;= 0.5</c>), at the building's base (centroid within <see cref="GroundSkirtRise"/> of its
+            /// lowest vertex), and within <see cref="GroundSkirtTolerance"/> of the band's relief height under
+            /// the centroid. The relief already draws that ground with the floor's own picture; the face drawn
+            /// as well took a side view or a wall tint and smeared it over the street (the brown apron around
+            /// the Bridge kiosk). The base test is what keeps real roofs: the top band's relief is measured from
+            /// over the roofs, so a roof is ALSO within 0.3 m of its relief - but never within a metre of its
+            /// building's foot. No relief under the centroid (a hole, off the grid) keeps the face.
+            /// </summary>
+            public bool GroundSkirt(Vector3 a, Vector3 b, Vector3 c)
+            {
+                if (_skirtBand == null) return false;
+
+                var n = Vector3.Cross(b - a, c - a);
+                var length = n.magnitude;
+                if (!(length > 1e-6f) || Mathf.Abs(n.y) / length < RoofNormalY) return false;
+
+                var y = (a.y + b.y + c.y) / 3f;
+                if (!(y <= _minY + GroundSkirtRise)) return false;
+
+                if (!_skirtBand.TryHeightAt((a.x + b.x + c.x) / 3f, (a.z + b.z + c.z) / 3f, out var ground)) return false;
+
+                return Mathf.Abs(y - ground) <= GroundSkirtTolerance;
             }
 
             /// <summary>Forgets every roof vertex placed from the building last loaded - at the start of each
@@ -3059,9 +3297,19 @@ namespace QuestTree.UI
                 if (ia >= building.VertexCount || ib >= building.VertexCount || ic >= building.VertexCount) return false;
                 if (!_finite[ia] || !_finite[ib] || !_finite[ic]) return false;
 
-                a = _positions[ia];
-                b = _positions[ib];
-                c = _positions[ic];
+                var pa = _positions[ia];
+                var pb = _positions[ib];
+                var pc = _positions[ic];
+
+                // Ground a building owns is the relief's, in both passes: the roof pass skips it the same way.
+                if (GroundSkirt(pa, pb, pc)) return false;
+
+                // An atlas face is textured by its own material, never tinted.
+                if (AtlasPageAt(i) >= 0) return false;
+
+                a = pa;
+                b = pb;
+                c = pc;
 
                 return ViewFor(a, b, c) == TintView;
             }
@@ -3130,6 +3378,39 @@ namespace QuestTree.UI
             }
         }
 
+        // --- the mesh file's atlas data (format v2) - the ONE place the viewer reads it --------------------
+
+        /// <summary>
+        /// A building's atlas ranges - (page, first index, index count), index positions into its Indices - or
+        /// null when it has none: a building whose materials were not captured, or one with ranges but no UVs.
+        /// WORKER-safe: plain reads of the parsed file, which MapMeshFile.Read has already validated (ranges
+        /// ascending, whole triangles, inside the building, on a page the file has).
+        ///
+        /// With <see cref="AtlasUvOf"/>, the ONE place the viewer reads MapMeshFile format v2's atlas data.
+        /// </summary>
+        private static (int Page, int First, int Count)[] AtlasRangesOf(MapMeshFile.Building building)
+        {
+            var ranges = building.Ranges;
+            if (ranges == null || ranges.Count == 0 || building.U == null || building.V == null) return null;
+
+            var result = new (int Page, int First, int Count)[ranges.Count];
+
+            for (var k = 0; k < ranges.Count; k++) result[k] = (ranges[k].Page, ranges[k].First, ranges[k].Count);
+
+            return result;
+        }
+
+        /// <summary>
+        /// Vertex <paramref name="i"/>'s texture UV on its atlas page, AS STORED - no flip. The builder writes the
+        /// page PNG with (0, 0) at its BOTTOM-LEFT (MapMeshFile.MaxUv: "Unity's texture convention, which
+        /// Texture2D.LoadImage keeps"; VOf: "0 = the page's bottom row"), which is already where a decoded
+        /// texture's v = 0 is. The brief said "v_tex = 1 - v_file unless the builder says otherwise"; it says
+        /// otherwise, so v_tex = v_file. A flip here would put every tile's texture upside down within the page -
+        /// and on a packed page, on the wrong tile altogether.
+        /// </summary>
+        private static Vector2 AtlasUvOf(MapMeshFile.Building building, int i) =>
+            new Vector2(building.UOf(i), building.VOf(i));
+
         /// <summary>The worker's snapshot of this view, with fresh scratch. Main thread only.</summary>
         private Prep SnapshotPrep()
         {
@@ -3145,6 +3426,9 @@ namespace QuestTree.UI
             };
 
             for (var slot = 0; slot < _sides.Length; slot++) prep.Sides[slot] = _sides[slot];
+
+            if (AtlasActive)
+                for (var page = 0; page < _pages.Length; page++) prep.PagePresent[page] = _pages[page] != null;
 
             return prep;
         }
@@ -3281,11 +3565,17 @@ namespace QuestTree.UI
             // One per side slot, made on the first face that side takes.
             var sideSinks = new MeshSink[SideOrder.Length];
 
+            // One per atlas page, made on the first face on that page. Shared vertices per building, as the
+            // file indexes them: the game mesh's own topology, so its hard edges (split vertices) stay hard.
+            var pageSinks = new PageSink[MaxAtlasPages];
+            var serial = 0;
+
             var part = 0;
 
             foreach (var building in p.File.Buildings)
             {
                 cancel.ThrowIfCancellationRequested();
+                serial++;
 
                 if (building == null || building.VertexCount == 0 || building.Indices == null) continue;
                 if (p.BandLevelFor(building.Level) != level) continue;
@@ -3316,6 +3606,29 @@ namespace QuestTree.UI
                     if (!p.Finite(a) || !p.Finite(b) || !p.Finite(c))
                     {
                         data.Dropped++;
+                        continue;
+                    }
+
+                    // Ground the building owns (a foundation skirt): the relief draws it with the floor's picture.
+                    // Before the atlas, as in WallTriangle, so both passes still split every triangle once.
+                    if (p.GroundSkirt(p.Position(a), p.Position(b), p.Position(c)))
+                    {
+                        data.GroundSkirtTriangles++;
+                        continue;
+                    }
+
+                    // An atlas face first: the game's own material, the file's own UVs.
+                    var page = p.AtlasPageAt(i);
+
+                    if (page >= 0)
+                    {
+                        var sink = pageSinks[page] ??= new PageSink();
+
+                        if (sink.Count + 3 > MaxVerticesPerMesh)
+                            sink.Flush($"{p.MapKey}-atlas{page}-{level}", data.Atlas[page] ??= new List<MeshData>());
+
+                        sink.Triangle(p, serial, building.VertexCount, a, b, c);
+                        data.AtlasTriangles++;
                         continue;
                     }
 
@@ -3389,9 +3702,15 @@ namespace QuestTree.UI
                 sideSinks[slot].Flush($"{p.MapKey}-side{SideOrder[slot]}-{level}", data.Sides[slot] ??= new List<MeshData>());
             }
 
+            for (var page = 0; page < pageSinks.Length; page++)
+            {
+                if (pageSinks[page] == null) continue;
+                pageSinks[page].Flush($"{p.MapKey}-atlas{page}-{level}", data.Atlas[page] ??= new List<MeshData>());
+            }
+
             // Counted into the building total whether or not they are built yet, so the log line's totals are
             // the file's and do not move when a floor's walls arrive a frame later.
-            data.BuildingTriangles += data.WallTriangles + data.SideTriangles;
+            data.BuildingTriangles += data.WallTriangles + data.SideTriangles + data.AtlasTriangles;
 
             FlushRoofs(p, data, level, part, vertices, uvs, indices, colours, elsewhere);
         }
@@ -3519,6 +3838,71 @@ namespace QuestTree.UI
             return data;
         }
 
+        /// <summary>
+        /// Atlas-textured geometry while it is prepared: SHARED vertices per building, as the file indexes them,
+        /// with the file's UVs, flushed into mesh data under the vertex cap. The remap is stamped rather than
+        /// cleared - a new building, or a flush in the middle of one, bumps the stamp, and every older entry reads
+        /// as unset - so eight page sinks cost nothing per building they are not touched by.
+        /// </summary>
+        private sealed class PageSink
+        {
+            private readonly List<Vector3> _vertices = new List<Vector3>();
+            private readonly List<Vector2> _uvs = new List<Vector2>();
+            private readonly List<int> _indices = new List<int>();
+            private int[] _index = new int[0];
+            private int[] _stamp = new int[0];
+            private int _current = 1;
+            private int _building = -1;
+            private int _part;
+
+            public int Count => _vertices.Count;
+
+            public void Triangle(Prep p, int building, int vertexCount, int a, int b, int c)
+            {
+                if (building != _building)
+                {
+                    _building = building;
+                    _current++;
+
+                    if (_index.Length < vertexCount)
+                    {
+                        _index = new int[vertexCount];
+                        _stamp = new int[vertexCount];
+                    }
+                }
+
+                _indices.Add(Vertex(p, a));
+                _indices.Add(Vertex(p, b));
+                _indices.Add(Vertex(p, c));
+            }
+
+            private int Vertex(Prep p, int i)
+            {
+                if (_stamp[i] == _current) return _index[i];
+
+                _stamp[i] = _current;
+                _index[i] = _vertices.Count;
+
+                _vertices.Add(p.Position(i));
+                _uvs.Add(p.AtlasUv(i));
+
+                return _index[i];
+            }
+
+            public void Flush(string name, List<MeshData> target)
+            {
+                if (_indices.Count > 0)
+                    target.Add(MeshData.From($"{name}-{_part++}", _vertices, _uvs, _indices, null));
+
+                _vertices.Clear();
+                _uvs.Clear();
+                _indices.Clear();
+
+                // The next chunk starts empty, so this building's vertices are placed afresh in it.
+                _current++;
+            }
+        }
+
         /// <summary>Unshared-vertex geometry while it is prepared, flushed into mesh data under the vertex cap:
         /// a tint's walls, or a side's faces.</summary>
         private sealed class MeshSink
@@ -3565,6 +3949,14 @@ namespace QuestTree.UI
 
         /// <summary>How close to vertical a face's normal has to be to count as a roof: cos 60 degrees.</summary>
         private const float RoofNormalY = 0.5f;
+
+        /// <summary>How near the relief a near-horizontal building face has to be to count as ground. See
+        /// Prep.GroundSkirt.</summary>
+        private const float GroundSkirtTolerance = 0.3f;
+
+        /// <summary>How far above its building's lowest vertex a face can sit and still be a ground skirt: well
+        /// under a storey, so no roof - whose relief it also matches - ever qualifies.</summary>
+        private const float GroundSkirtRise = 1f;
 
         /// <summary>Whether a triangle faces up or down enough to take the top-down picture, from its own
         /// cross product. |n.y|, not n.y: an overhang's underside is as flat as a roof. Degenerate goes with the
@@ -4108,6 +4500,37 @@ namespace QuestTree.UI
                 }
             }
 
+            // The faces the game's own materials texture: one DrawMesh per page chunk. A page not decoded yet (or
+            // evicted) draws in the floor's wall colour rather than leaving holes; a page that FAILED is dropped
+            // and the view rebuilt without it (RebuildWithoutFailedSides), its faces going back to the U/V rule.
+            if (AtlasActive)
+            {
+                for (var page = 0; page < meshes.Atlas.Length; page++)
+                {
+                    var atlas = meshes.Atlas[page];
+                    var material = atlas?.Material;
+                    if (material == null) continue;
+
+                    var picture = _pages[page]?.Picture;
+
+                    if (material.mainTexture == null && picture != null && picture.TryGetSprite(out var pageSprite) &&
+                        pageSprite != null && pageSprite.texture != null)
+                    {
+                        material.mainTexture = pageSprite.texture;
+                    }
+
+                    if (picture != null && picture.ArtworkFailed) _sideFailed = true;
+
+                    var draw = material.mainTexture != null ? material : SideFallbackFor(meshes, floor.Level, walls);
+
+                    for (var i = 0; i < atlas.Meshes.Count; i++)
+                    {
+                        var mesh = Under(meshes, atlas.Meshes[i], _cutY);
+                        if (mesh != null) Submit(mesh, draw);
+                    }
+                }
+            }
+
             // The faces the side pictures texture: at most four more DrawMesh calls per floor. Each side's
             // picture is fetched from THIS view's entry whenever the material has lost it (the picture
             // cache can evict a side like a floor), and a side whose picture is not here yet is skipped
@@ -4174,27 +4597,43 @@ namespace QuestTree.UI
         {
             _sideFailed = false;
 
-            var dropped = "";
+            var droppedSides = "";
+            var droppedPages = "";
 
             for (var slot = 0; slot < _sides.Length; slot++)
             {
                 var picture = _sides[slot]?.Picture;
                 if (picture == null || !picture.ArtworkFailed) continue;
 
-                dropped += SideOrder[slot];
+                droppedSides += SideOrder[slot];
                 _sides[slot] = null;
             }
+
+            for (var page = 0; page < _pages.Length; page++)
+            {
+                var picture = _pages[page]?.Picture;
+                if (picture == null || !picture.ArtworkFailed) continue;
+
+                droppedPages += (droppedPages.Length > 0 ? "," : "") + page.ToString(CultureInfo.InvariantCulture);
+                _pages[page] = null;
+            }
+
+            // "sides NE, atlas pages 3" - two lists, not the letters and the page numbers run together.
+            var dropped = droppedSides.Length > 0 ? "sides " + droppedSides : "";
+            if (droppedPages.Length > 0) dropped += (dropped.Length > 0 ? ", " : "") + "atlas pages " + droppedPages;
 
             if (dropped.Length == 0 || _loaded == null) return;
 
             CountSides();
+            CountPages();
 
-            // The room for the dropped sides goes back; BeginBuild takes what the rest need.
-            ReturnSideRoom();
+            // The room for the dropped sides goes back; BeginBuild takes what the rest need straight away, so
+            // nothing is evicted in between.
+            ReturnSideRoom(evict: false);
 
             Plugin.LogSource?.LogWarning(
-                $"QuestTree: the side picture(s) {string.Join(",", dropped.ToCharArray())} of the 3D map for " +
-                $"'{_mapKey}' could not be decoded - the walls are rebuilt without them.");
+                $"QuestTree: the picture(s) {dropped} of the 3D map for '{_mapKey}' could not be decoded - the " +
+                $"buildings are rebuilt without them.");
 
             ReleaseFloors();
             BeginBuild();

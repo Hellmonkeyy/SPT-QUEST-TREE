@@ -152,6 +152,25 @@ namespace QuestTree.QuestGraph
         [JsonProperty("yMax")] public float YMax { get; set; }
     }
 
+    /// <summary>One atlas page of a capture: a 4096 px sheet of the game's own building textures, which the 3D
+    /// view drapes on the buildings by the mesh file's UVs. Optional: absent on older sets, and a page a host
+    /// cannot use is dropped by it while the rest of the set is served (those buildings fall back).
+    ///
+    /// <see cref="Sha256"/> is the capture's own PNG's on this machine and the served JPEG's once a host has
+    /// stored the set - the host rewrites it, and a download is held to the host's.</summary>
+    internal sealed class MapCaptureAtlasDto
+    {
+        /// <summary>The page file's name beside the meta. A bare name, never a path. On an upload it may
+        /// still be the capture's own <c>.png</c>; the host names the file it stores itself.</summary>
+        [JsonProperty("file")] public string File { get; set; }
+
+        [JsonProperty("page")] public int Page { get; set; }
+        [JsonProperty("width")] public int Width { get; set; }
+        [JsonProperty("height")] public int Height { get; set; }
+        [JsonProperty("tiles")] public int Tiles { get; set; }
+        [JsonProperty("sha256")] public string Sha256 { get; set; }
+    }
+
     /// <summary>
     /// A capture's meta, field for field the same shape as the <c>&lt;key&gt;.map.json</c> that
     /// MapCapture.WriteMeta writes and MapCatalog.ReadMeta reads, but for the two fields named below.
@@ -235,6 +254,10 @@ namespace QuestTree.QuestGraph
         /// existed). An upload names only the sides whose picture is on this disk; a side that then
         /// fails to encode is posted EMPTY, which tells the host to drop it rather than wait.</summary>
         [JsonProperty("sides")] public List<MapCaptureSideDto> Sides { get; set; }
+
+        /// <summary>The atlas pages, or null for none. An upload names only the pages whose picture is on this
+        /// disk; a page that then fails to encode is posted EMPTY, which tells the host to drop it.</summary>
+        [JsonProperty("atlas")] public List<MapCaptureAtlasDto> Atlas { get; set; }
     }
 
     /// <summary>
@@ -273,6 +296,10 @@ namespace QuestTree.QuestGraph
         /// <summary>"N"/"S"/"E"/"W" for a side picture; null for a floor. Omitted from the JSON when
         /// null, so a floor post is byte-for-byte what it was before sides existed.</summary>
         [JsonProperty("side", NullValueHandling = NullValueHandling.Ignore)] public string Side { get; set; }
+
+        /// <summary>The atlas page this post carries, or null for a floor or a side (and then left out of the
+        /// JSON). Sent with SideLevel for the side's reason: a host too old to know it refuses the post.</summary>
+        [JsonProperty("atlas", NullValueHandling = NullValueHandling.Ignore)] public int? Atlas { get; set; }
 
         /// <summary>"jpg". The one format an upload sends; the host checks the bytes' magic against
         /// it rather than trusting this.</summary>
@@ -354,6 +381,9 @@ namespace QuestTree.QuestGraph
         /// <summary>A side's direction to fetch that side picture instead of a floor; null for a floor,
         /// and then left out of the JSON entirely.</summary>
         [JsonProperty("side", NullValueHandling = NullValueHandling.Ignore)] public string Side { get; set; }
+
+        /// <summary>An atlas page number to fetch that page instead of a floor; null for a floor or a side.</summary>
+        [JsonProperty("atlas", NullValueHandling = NullValueHandling.Ignore)] public int? Atlas { get; set; }
     }
 
     /// <summary>One floor's picture from the host. An empty <see cref="ImageBase64"/> with an empty

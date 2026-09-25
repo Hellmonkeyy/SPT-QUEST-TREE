@@ -306,22 +306,34 @@ picture, the map draws flat and the log says why.
 **Sharing is through the host.** A server started with `tools/server-host.cmd` - which sets
 `QUESTTREE_ACCEPT_MAPS=1` and nothing else - accepts uploaded pictures, and **Share captured maps**
 (on by default) offers each finished capture to it one floor at a time as a JPEG, then its side
-pictures (the four oblique views the 3D map textures building walls with) the same way, then the
-capture's 3D mesh if it built one. Every client of that host then picks up the maps it does not
+pictures (the four oblique views the 3D map textures building walls with) the same way, then its
+atlas pages (up to eight 4096 px sheets of the game's own building textures, which the 3D map dresses
+the buildings in) at their full size as JPEGs at quality 90 (80 for a page that would otherwise pass
+6 MB), then the capture's 3D mesh if it built
+one. Every client of that host then picks up the maps it does not
 have itself, once per session, the first time the Maps tab reaches a map nothing on that machine
 can already draw a picture of - mesh included, so a map somebody else raided opens in 3D on your
 machine too. A host without the variable refuses, says so in one line, and is not asked again that
 session; captures stay on the machine that took them. An older host that has never heard of meshes
 stores the pictures and ignores the rest, which costs one line in the log and nothing else. A solo
 player needs none of this - your own captures are read straight out of the folder above. The
-limits: one picture a post, up to 2.5 MB a picture, 8 floors and 4 side pictures a map, one mesh a
-capture up to 48 MB, 84 MB a map and 300 MB in all on the host, and at most 300 MB downloaded per
-session. A mesh past 16 MiB goes up in parts - an SPT server takes no request body past 30,000,000
-bytes - and the host joins them and checks the whole; a mesh upload or download may take up to 240
-seconds a request before the client calls it late. A side picture is never worth the map either: one the host cannot use - not a JPEG, too
+limits: one picture a post, up to 2.5 MB a picture, 8 floors and 4 side pictures a map, up to 8
+atlas pages a map at up to 6 MB each, one mesh a capture up to 48 MB, 132 MB a map and 1.5 GB in all
+on the host, at most 600 MB downloaded per session, and at most 2 GB of other players' maps kept
+on your machine (the set installed longest ago makes way). The download gets at least three minutes a
+session and goes on past that while it is still arriving at 1 MB/s or better. A mesh past 16 MiB goes up in parts - an SPT server takes no request body past 30,000,000
+bytes - and the host joins them and checks the whole; a mesh or atlas-page upload or download may
+take up to 240 seconds a request before the client calls it late. A page that does not get through is
+dropped from that upload rather than ending it, and a page that does not arrive on your machine is
+fetched again, on its own, the next session. A map you captured yourself is never downloaded back
+from the host. A side picture is never worth the map either: one the host cannot use - not a JPEG, too
 big, or not a view of the capture it came with - is dropped and the set is served without it, and on
 your machine a side that does not arrive at the size its meta states is left out; those walls are
-tinted instead. A set whose
+tinted instead. An atlas page likewise: one the host cannot use - not a JPEG, over 6 MB, or not the
+size its meta states - is dropped and the set is served without it, a page that does not arrive at
+its stated size and sha256 is left out on your machine, and the buildings drawn from it fall back to
+the side pictures and tints. A set served without its mesh carries no pages - they only dress the
+mesh's buildings. A set whose
 capture built a mesh is not served until both the floors and the mesh have arrived, so a borrowed
 map never names geometry the host does not hold. A mesh problem costs the mesh and never the map:
 a mesh the host can never use - unreadable, not the same rectangle or the same floors as its

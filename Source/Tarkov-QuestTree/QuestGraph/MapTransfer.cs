@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
+using System.Linq;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
 using SPT.Common.Http;
@@ -118,11 +119,39 @@ namespace QuestTree.QuestGraph
         /// </summary>
         private const int MeshPartBytes = 16 * 1024 * 1024;
 
-        /// <summary>The most one map's pictures, sides AND mesh may weigh coming down, decoded. The host's
-        /// per-map ceiling (MapStore.MaxBytesPerMap), checked again here: 8 floors and 4 sides at 2.5 MB
-        /// and a 48 MB mesh make 78 MB, with 6 MB of margin - 84 MB. It rose 20 -> 32 MB with the mesh,
-        /// 32 -> 42 with the sides and 42 -> 84 with stage V's 48 MB mesh.</summary>
-        private const long MaxMapDownloadBytes = 84L * 1024 * 1024;
+        /// <summary>The most one map's pictures, sides, atlas pages AND mesh may weigh coming down, decoded.
+        /// The host's per-map ceiling (MapStore.MaxBytesPerMap), checked again here: 8 floors and 4 sides at
+        /// 2.5 MB, a 48 MB mesh and 8 atlas pages at 6 MB make 126 MB, with 6 MB of margin - 132 MB. It rose
+        /// 20 -> 32 MB with the mesh, 32 -> 42 with the sides, 42 -> 84 with stage V's 48 MB mesh and
+        /// 84 -> 132 with stage W's atlas pages.</summary>
+        private const long MaxMapDownloadBytes = 132L * 1024 * 1024;
+
+        /// <summary>The most atlas pages one capture carries - the builder's own cap, and the host's
+        /// (MapStore.MaxAtlasPages).</summary>
+        private const int MaxAtlasPages = 8;
+
+        /// <summary>The long side an atlas page may have: the builder packs 4096 px pages, and a page is
+        /// sent at its FULL size - never scaled to <see cref="MaxLongSide"/> as a floor is, because the mesh's
+        /// UVs address it texel by texel and a halved page is every wall blurred.</summary>
+        private const int MaxAtlasPixels = 4096;
+
+        /// <summary>The JPEG quality an atlas page goes up at. Higher than a floor's
+        /// <see cref="JpegQuality"/>: a floor is a map seen from above, a page is brick, signage and window
+        /// frames seen up close in the 3D view, where blocking shows - and a tile's edge sits against its
+        /// neighbour's, so ringing across a JPEG block bleeds one texture into the next unless the builder's
+        /// 16 px tile padding holds it. A page over <see cref="MaxAtlasPageBytes"/> at this quality is encoded
+        /// ONCE more at <see cref="AtlasRetryJpegQuality"/> before it is given up on.</summary>
+        private const int AtlasJpegQuality = 90;
+
+        /// <summary>The second and last quality a page is tried at when the first came out over the cap.</summary>
+        private const int AtlasRetryJpegQuality = 80;
+
+        /// <summary>The most one atlas page may weigh as a JPEG, in either direction - 6 MB, the host's own
+        /// cap (MapStore.MaxAtlasPageBytes). A 4096 px page of building textures at q90 measures 3-5 MB; a page
+        /// past six at q90 is encoded again at q80, and one past six even then is not offered but still POSTED
+        /// empty, so the host drops it rather than waiting for it,
+        /// and the buildings drawn from it fall back to the sides and tints they had before pages.</summary>
+        private const int MaxAtlasPageBytes = 6 * 1024 * 1024;
 
         /// <summary>The four sides a capture may carry an oblique picture from, in the order they are
         /// posted and fetched - the host's own order (MapStore.SideDirs), so both halves walk them
@@ -139,8 +168,10 @@ namespace QuestTree.QuestGraph
         /// thirty maps gets what fits and the rest on the next start, rather than a quarter of an hour
         /// of a worker on the first Maps tab open. 300 MB since stage V: a set that was 1-4 MB of pictures
         /// can now be 10-50 MB with its 3-million-triangle geometry, and the 120 MB before it would have
-        /// taken three or four such maps a session and left the rest for later every time.</summary>
-        private const long MaxSessionDownloadBytes = 300L * 1024 * 1024;
+        /// taken three or four such maps a session and left the rest for later every time. 600 MB since
+        /// stage W, whose atlas pages add up to 48 MB a map: at 300 a group's eleven maps in 3D would have
+        /// taken three sessions to arrive.</summary>
+        private const long MaxSessionDownloadBytes = 600L * 1024 * 1024;
 
         /// <summary>The most floors of one map to take from a host, matching the harvested band
         /// ceiling the zone file enforces.</summary>
@@ -169,8 +200,23 @@ namespace QuestTree.QuestGraph
         private static readonly TimeSpan MeshRequestTimeout = TimeSpan.FromSeconds(MeshRequestSeconds);
 
         /// <summary>How long the whole download may take before it gives up and leaves the rest for
-        /// the next session. A worker that never returns is one the session can never retry.</summary>
+        /// the next session. A worker that never returns is one the session can never retry.
+        ///
+        /// A MINIMUM since stage W, not a flat limit: past it the session keeps going for as long as it is
+        /// still receiving at <see cref="MinSyncBytesPerSecond"/> or better on average, up to
+        /// <see cref="MaxSessionDownloadBytes"/> - which bounds it (600 MB at 1 MB/s is ten minutes). A flat
+        /// three minutes took a third of a 3D map a session on a slow link and all of them on a fast one.</summary>
         private static readonly TimeSpan SyncBudget = TimeSpan.FromMinutes(3);
+
+        /// <summary>The average rate, over the whole session, a download must be keeping up past
+        /// <see cref="SyncBudget"/> to go on to the next map. 1 MB/s.</summary>
+        private const double MinSyncBytesPerSecond = 1024d * 1024d;
+
+        /// <summary>The most the host-picture cache (<see cref="MapsRoot"/>) may hold on this disk. Eleven maps at
+        /// the host's 132 MB ceiling are 1.45 GB; 2 GB is that with room for a modded map or two. Past it, the
+        /// set whose stamp was written longest ago is evicted - never one taken this session - before the next
+        /// is installed, and a set that cannot fit even then waits.</summary>
+        private const long MaxHostCacheBytes = 2048L * 1024 * 1024;
 
         /// <summary>Where a download stages a set before it replaces the one in place. Under the maps
         /// folder, so it is on the same volume as its destination and a move cannot become a copy;
@@ -282,6 +328,12 @@ namespace QuestTree.QuestGraph
                 // already stripped when there is nothing to offer.
                 var mesh = PrepareMesh(key, meta);
 
+                // The ATLAS pages, read AFTER the mesh is settled and before the first post: a page drapes
+                // the mesh's buildings and nothing else, so with no mesh to offer the meta names no pages
+                // (a host told about a page waits for it), and a page not on this disk is taken out of the
+                // meta here for the sides' reason.
+                var pages = ReadAtlas(key, meta, mesh != null);
+
                 var posted = 0;
                 long bytes = 0;
 
@@ -363,6 +415,7 @@ namespace QuestTree.QuestGraph
                 // meta it can complete (nothing dropped since the last post): otherwise it is waiting for a
                 // floor that will never arrive, and nothing more is worth sending.
                 var sidesPosted = 0;
+                var hostPredatesSides = false;
 
                 if (posted > 0 && droppedSincePost == 0 && sides.Count > 0)
                 {
@@ -414,8 +467,13 @@ namespace QuestTree.QuestGraph
 
                         // A host that takes no sides - one from before they existed - has already been
                         // shown every floor, and may still be waiting for the mesh. Sides stop; the mesh
-                        // goes.
-                        if (verdict == SideVerdict.NoSides) break;
+                        // goes - and no atlas page is offered, since a host older than sides is older than
+                        // pages too.
+                        if (verdict == SideVerdict.NoSides)
+                        {
+                            hostPredatesSides = true;
+                            break;
+                        }
 
                         if (encoded)
                         {
@@ -427,6 +485,98 @@ namespace QuestTree.QuestGraph
                         {
                             SayIfMeshWasNotKept(key, mesh, sideReason);
                             Done(key, posted, bytes, 0, clock, sidesPosted);
+                            yield break;
+                        }
+                    }
+                }
+
+                // The ATLAS PAGES, after the sides and before the mesh, on exactly the sides' terms: each
+                // page encoded a frame apart at its full size, one that cannot be encoded POSTED EMPTY so the
+                // host stops waiting for it, a drop logged and passed over, a real refusal the end of the
+                // upload. The one difference is what an old host means: a host from before pages (stage W)
+                // reads a page post as a floor of SideLevel and refuses it by level, and it never read the
+                // meta's atlas either - so it is not waiting for pages, and the mesh still goes.
+                var pagesPosted = 0;
+
+                if (posted > 0 && droppedSincePost == 0 && !hostPredatesSides && pages.Count > 0)
+                {
+                    foreach (var page in pages)
+                    {
+                        yield return null;
+
+                        var encoded = Encode(key, page);
+
+                        if (!encoded)
+                        {
+                            page.Base64 = "";
+                            page.Bytes = 0;
+
+                            Plugin.LogSource?.LogInfo(
+                                $"QuestTree: {key}'s {page.Name} could not be prepared, so the host is told to go on " +
+                                "without it - the buildings textured from it draw without it.");
+                        }
+
+                        // The MESH's deadline, not a picture's: a page is up to 6 MB, 8 MB of base64, and at
+                        // 30 s a link under ~2 Mbit/s would time out every page. And a page that does not get
+                        // through is DROPPED rather than ending the upload - the post is made again EMPTY,
+                        // which tells the host to stop waiting for that page - because ending it here would
+                        // leave the host holding the whole set, mesh unsent, until its stale sweep a day
+                        // later: a whole map lost over one sheet of wall textures. At most two posts a page.
+                        Task<string> task = null;
+
+                        for (var attempt = 0; attempt < 2; attempt++)
+                        {
+                            task = StartPost(key, meta, page);
+                            if (task == null) break;
+
+                            var deadline = Time.realtimeSinceStartup + MeshRequestSeconds;
+                            while (!task.IsCompleted && Time.realtimeSinceStartup < deadline) yield return null;
+
+                            if (!task.IsCompleted)
+                            {
+                                // Said at the deadline and then WAITED OUT, as the mesh's post is: _uploading
+                                // must stay set while it is in flight, and a late answer is still an answer.
+                                Plugin.LogSource?.LogInfo(
+                                    $"QuestTree: the host has not answered within {MeshRequestSeconds:0}s while {key}'s " +
+                                    $"{page.Name} is being offered - still waiting for it.");
+
+                                while (!task.IsCompleted) yield return null;
+                            }
+
+                            // Answered, or already the empty post: JudgeSide takes it from here.
+                            if (!(task.IsFaulted || task.IsCanceled) || !encoded) break;
+
+                            Plugin.LogSource?.LogInfo(
+                                $"QuestTree: {key}'s {page.Name} did not get through to the host " +
+                                $"({task.Exception?.GetBaseException().Message ?? "cancelled"}) - the host is told to go on " +
+                                "without it, and the rest of the capture is still sent.");
+
+                            encoded = false;
+                            page.Base64 = "";
+                            page.Bytes = 0;
+                        }
+
+                        if (task == null) yield break;
+
+                        if (!encoded) meta.Atlas?.Remove(page.AtlasEntry);
+
+                        var verdict = JudgeSide(key, page, task, out var pageReason);
+
+                        if (verdict == SideVerdict.Stop) yield break;
+
+                        // A host from before pages: stop offering them; the mesh goes.
+                        if (verdict == SideVerdict.NoSides) break;
+
+                        if (encoded)
+                        {
+                            pagesPosted++;
+                            bytes += page.Bytes;
+                        }
+
+                        if (verdict == SideVerdict.Complete)
+                        {
+                            SayIfMeshWasNotKept(key, mesh, pageReason);
+                            Done(key, posted, bytes, 0, clock, sidesPosted, pagesPosted);
                             yield break;
                         }
                     }
@@ -484,12 +634,13 @@ namespace QuestTree.QuestGraph
                     switch (JudgeMesh(key, mesh, task))
                     {
                         case MeshVerdict.Stored:
-                            Done(key, posted, bytes, mesh.Length, clock, sidesPosted);
+                            Done(key, posted, bytes, mesh.Length, clock, sidesPosted, pagesPosted);
                             break;
 
                         case MeshVerdict.ServedFlat:
                             // The pictures ARE on the host - the warning above said the mesh is not - so
-                            // the upload's own line is still true, without the mesh in it.
+                            // the upload's own line is still true, without the mesh in it. Nor the pages:
+                            // a set served flat is served without them.
                             Done(key, posted, bytes, 0, clock, sidesPosted);
                             break;
                     }
@@ -858,6 +1009,77 @@ namespace QuestTree.QuestGraph
             return spanR > 0d && spanU > 0d;
         }
 
+        /// <summary>
+        /// The capture's atlas pages that are actually on this disk, ready to post, in page order - or none,
+        /// with the meta's atlas removed, when there is no mesh to offer (<paramref name="hasMesh"/>): a
+        /// page textures the mesh's buildings and nothing else, and a host told about a page waits for it.
+        /// A page the meta names whose picture is missing, whose name is not a bare file name, whose number
+        /// is not 0..7 or named twice, or which is not a picture up to <see cref="MaxAtlasPixels"/> a side
+        /// is taken out of the meta here, before the first post, for <see cref="ReadSides"/>' reason. Its
+        /// width and height are NOT rewritten, unlike a side's: a page goes up at its own size. Never throws;
+        /// on any failure the capture goes up without pages.
+        /// </summary>
+        /// <param name="key">The map's internal id.</param>
+        /// <param name="meta">The meta being offered; its <c>Atlas</c> is trimmed to what will be sent.</param>
+        /// <param name="hasMesh">Whether a mesh will be offered with it.</param>
+        private static List<FloorUpload> ReadAtlas(string key, MapCaptureMetaDto meta, bool hasMesh)
+        {
+            var pages = new List<FloorUpload>();
+
+            try
+            {
+                if (meta?.Atlas == null || meta.Atlas.Count == 0 || !hasMesh)
+                {
+                    if (meta != null) meta.Atlas = null;
+                    return pages;
+                }
+
+                var dir = CaptureDir(key);
+                var kept = new List<MapCaptureAtlasDto>();
+
+                foreach (var page in meta.Atlas.Where(p => p != null).OrderBy(p => p.Page))
+                {
+                    if (dir == null || page.Page < 0 || page.Page >= MaxAtlasPages) continue;
+                    if (kept.Any(k => k.Page == page.Page)) continue;
+                    if (page.Width <= 0 || page.Height <= 0 || page.Width > MaxAtlasPixels || page.Height > MaxAtlasPixels) continue;
+                    if (string.IsNullOrEmpty(page.File)) continue;
+                    if (!string.Equals(page.File, Path.GetFileName(page.File), StringComparison.Ordinal)) continue;
+
+                    var picture = Path.Combine(dir, page.File);
+                    if (!File.Exists(picture)) continue;
+
+                    kept.Add(page);
+
+                    pages.Add(new FloorUpload
+                    {
+                        Level = SideLevel,
+                        Name = $"atlas page {page.Page.ToString(CultureInfo.InvariantCulture)}",
+                        Path = picture,
+                        Atlas = page.Page,
+                        AtlasEntry = page
+                    });
+                }
+
+                if (kept.Count < meta.Atlas.Count)
+                    Plugin.LogSource?.LogDebug(
+                        $"QuestTree: {meta.Atlas.Count - kept.Count} of {key}'s {meta.Atlas.Count} atlas page(s) are " +
+                        "not on this disk as the meta describes them - the capture goes up without those.");
+
+                meta.Atlas = kept.Count == 0 ? null : kept;
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: the atlas pages of {key} could not be read back for upload ({ex.Message}) - " +
+                    "the capture goes up without them.");
+
+                meta.Atlas = null;
+                pages.Clear();
+            }
+
+            return pages;
+        }
+
         /// <summary>What the host's answer to one side post means for the rest of the upload.</summary>
         internal enum SideVerdict
         {
@@ -910,7 +1132,7 @@ namespace QuestTree.QuestGraph
                     : ex.Message;
 
                 Plugin.LogSource?.LogInfo(
-                    $"QuestTree: the host could not be offered {key}'s {side.Side} side ({message}) - the rest of the " +
+                    $"QuestTree: the host could not be offered {key}'s {What(side)} ({message}) - the rest of the " +
                     "capture is not sent.");
                 return SideVerdict.Stop;
             }
@@ -925,9 +1147,10 @@ namespace QuestTree.QuestGraph
                 case SideVerdict.NoSides:
                     Plugin.LogSource?.LogDebug(
                         response == null || string.IsNullOrEmpty(response.Outcome)
-                            ? $"QuestTree: the reply to {key}'s {side.Side} side was not the server half's - {excerpt}"
-                            : $"QuestTree: the host did not take {key}'s {side.Side} side{Because(response.Reason)} - it " +
-                              "predates side pictures, so the rest of the capture goes up without them.");
+                            ? $"QuestTree: the reply to {key}'s {What(side)} was not the server half's - {excerpt}"
+                            : $"QuestTree: the host did not take {key}'s {What(side)}{Because(response.Reason)} - it " +
+                              $"predates {(side.Atlas != null ? "atlas pages" : "side pictures")}, so the rest of the " +
+                              "capture goes up without them.");
                     return verdict;
 
                 case SideVerdict.Declined:
@@ -940,20 +1163,27 @@ namespace QuestTree.QuestGraph
 
                 case SideVerdict.Stop:
                     Plugin.LogSource?.LogWarning(
-                        $"QuestTree: the host refused the capture of {key} at its {side.Side} side" +
+                        $"QuestTree: the host refused the capture of {key} at its {What(side)}" +
                         $"{Because(response.Reason)} - the rest of it is not sent.");
                     return verdict;
 
                 default:
-                    // The host dropped this side and went on - the one thing about a side worth a line.
+                    // The host dropped this side or page and went on - the one thing about either worth a
+                    // line. The host's words: "the E side was dropped (...)", "atlas page 3 was dropped (...)".
                     if (response.Reason != null &&
-                        response.Reason.IndexOf("side was dropped", StringComparison.OrdinalIgnoreCase) >= 0)
+                        response.Reason.IndexOf(side.Atlas != null ? "page " : "side was dropped",
+                            StringComparison.OrdinalIgnoreCase) >= 0 &&
+                        response.Reason.IndexOf("was dropped", StringComparison.OrdinalIgnoreCase) >= 0)
                         Plugin.LogSource?.LogInfo(
-                            $"QuestTree: the host went on without {key}'s {side.Side} side picture{Because(response.Reason)}.");
+                            $"QuestTree: the host went on without {key}'s {What(side)}{Because(response.Reason)}.");
 
                     return verdict;
             }
         }
+
+        /// <summary>A side or page upload's name for a log line: "E side picture", "atlas page 3".</summary>
+        private static string What(FloorUpload upload) =>
+            upload.Atlas != null ? upload.Name : $"{upload.Side} side picture";
 
         /// <summary>The host's refusal of a floor whose level its meta does not name - the sentence a host
         /// from before sides answers a side post with, because it reads the post as a floor of SideLevel.
@@ -1092,8 +1322,21 @@ namespace QuestTree.QuestGraph
                 // A side is scaled with its short side ceiled, exactly as DescribeSidesForWire described
                 // it; a floor with the rounding it has always had. The two MUST match, or the size check
                 // below drops every rescaled side.
-                ScaleTo(source.width, source.height, MaxLongSide, out var width, out var height,
-                    ceilShort: floor.Side != null);
+                //
+                // An ATLAS page is not scaled at all - see MaxAtlasPixels - so it comes out at the size its
+                // meta names or not at all.
+                int width, height;
+
+                if (floor.Atlas != null)
+                {
+                    width = source.width;
+                    height = source.height;
+                }
+                else
+                {
+                    ScaleTo(source.width, source.height, MaxLongSide, out width, out height,
+                        ceilShort: floor.Side != null);
+                }
 
                 // The alpha flattened onto the tab's own backdrop BEFORE the downscale, because a JPEG
                 // has none - see BackdropFill.
@@ -1145,13 +1388,27 @@ namespace QuestTree.QuestGraph
                     Plugin.LogSource?.LogWarning(
                         $"QuestTree: {key} \"{floor.Name}\" came out {encodeFrom.width}x{encodeFrom.height} px " +
                         $"where its meta says {floor.WantWidth}x{floor.WantHeight} - the capture's meta does " +
-                        (floor.Side != null
+                        (floor.Atlas != null
+                            ? "not describe its own atlas page, so the host is told to go on without this page."
+                            : floor.Side != null
                             ? "not describe its own side picture, so the host is told to go on without this side."
                             : "not describe its own pictures, so this floor is not offered. Capture the map again."));
                     return false;
                 }
 
-                var jpg = encodeFrom.EncodeToJPG(JpegQuality);
+                var quality = floor.Atlas != null ? AtlasJpegQuality : JpegQuality;
+                var jpg = encodeFrom.EncodeToJPG(quality);
+
+                // A page over its cap gets ONE more try, at the lower quality - see AtlasJpegQuality.
+                if (floor.Atlas != null && jpg != null && jpg.Length > MaxAtlasPageBytes)
+                {
+                    Plugin.LogSource?.LogDebug(
+                        $"QuestTree: {key} \"{floor.Name}\" is {Mb(jpg.Length)} MB at q{quality}, over the " +
+                        $"{Mb(MaxAtlasPageBytes)} MB a page may be - encoded again at q{AtlasRetryJpegQuality}.");
+
+                    quality = AtlasRetryJpegQuality;
+                    jpg = encodeFrom.EncodeToJPG(quality);
+                }
 
                 if (jpg == null || jpg.Length == 0)
                 {
@@ -1160,14 +1417,18 @@ namespace QuestTree.QuestGraph
                     return false;
                 }
 
-                if (jpg.Length > MaxFloorUploadBytes)
+                // A page's own cap - see MaxAtlasPageBytes - and a floor's (and a side's) otherwise.
+                var cap = floor.Atlas != null ? MaxAtlasPageBytes : MaxFloorUploadBytes;
+
+                if (jpg.Length > cap)
                 {
                     // Skipped rather than sent: the host would reject it, and a rejection stops the
-                    // whole upload - see MaxFloorUploadBytes.
+                    // whole upload - see MaxFloorUploadBytes. (A side or page skipped here is still posted
+                    // empty by the caller, which is how the host is told to stop waiting for it.)
                     Plugin.LogSource?.LogInfo(
                         $"QuestTree: {key} \"{floor.Name}\" is {Mb(jpg.Length)} MB as a JPEG, over the " +
-                        $"{Mb(MaxFloorUploadBytes)} MB a host takes per floor - it is not offered. The other " +
-                        "floors still are.");
+                        $"{Mb(cap)} MB a host takes per {(floor.Atlas != null ? "atlas page" : "picture")} - it is " +
+                        "not offered. The rest of the capture still is.");
                     return false;
                 }
 
@@ -1176,7 +1437,7 @@ namespace QuestTree.QuestGraph
 
                 Plugin.LogSource?.LogDebug(
                     $"QuestTree: {key} \"{floor.Name}\" {source.width}x{source.height} -> " +
-                    $"{encodeFrom.width}x{encodeFrom.height} JPEG q{JpegQuality}, {Mb(jpg.Length)} MB.");
+                    $"{encodeFrom.width}x{encodeFrom.height} JPEG q{quality}, {Mb(jpg.Length)} MB.");
 
                 return true;
             }
@@ -1343,9 +1604,11 @@ namespace QuestTree.QuestGraph
                 ClientVersion = ModInfo.Version,
                 Meta = meta,
 
-                // A side carries a level no floor has - see SideLevel - and its direction.
-                Level = floor.Side != null ? SideLevel : floor.Level,
+                // A side carries a level no floor has - see SideLevel - and its direction; an atlas page
+                // the same level, and its number.
+                Level = floor.Side != null || floor.Atlas != null ? SideLevel : floor.Level,
                 Side = floor.Side,
+                Atlas = floor.Atlas,
                 Format = "jpg",
                 ImageBase64 = floor.Base64 ?? ""
             };
@@ -1453,12 +1716,15 @@ namespace QuestTree.QuestGraph
         /// <param name="meshBytes">What the mesh weighed, or 0 when none was sent.</param>
         /// <param name="clock">Running since the upload started.</param>
         /// <param name="sides">How many side pictures went up with it.</param>
+        /// <param name="pages">How many atlas pages went up with it.</param>
         private static void Done(
-            string key, int floors, long bytes, long meshBytes, System.Diagnostics.Stopwatch clock, int sides = 0)
+            string key, int floors, long bytes, long meshBytes, System.Diagnostics.Stopwatch clock, int sides = 0,
+            int pages = 0)
         {
             Plugin.LogSource?.LogInfo(
                 $"QuestTree: capture of {key} uploaded to the host - {floors} floor(s)" +
                 $"{(sides > 0 ? $", {sides} side(s)" : "")}" +
+                $"{(pages > 0 ? $", {pages} atlas page(s)" : "")}" +
                 $"{(meshBytes > 0 ? $" and a {Mb(meshBytes)} MB mesh" : "")}, {Mb(bytes + meshBytes)} MB.");
 
             Plugin.LogSource?.LogDebug(
@@ -1799,11 +2065,18 @@ namespace QuestTree.QuestGraph
 
             public MapCaptureSideDto SideEntry;
 
+            /// <summary>The page number when this is an ATLAS page going up through the floor route, with
+            /// its entry in the meta; null otherwise. Encoded as a side is, but at its own size and quality
+            /// and under its own cap (see <see cref="Encode"/>).</summary>
+            public int? Atlas;
+
+            public MapCaptureAtlasDto AtlasEntry;
+
             /// <summary>The size the meta promises this picture goes up at - the check
             /// <see cref="Encode"/> holds what it produced to.</summary>
-            public int WantWidth => SideEntry != null ? SideEntry.Width : Entry.Width;
+            public int WantWidth => AtlasEntry != null ? AtlasEntry.Width : SideEntry != null ? SideEntry.Width : Entry.Width;
 
-            public int WantHeight => SideEntry != null ? SideEntry.Height : Entry.Height;
+            public int WantHeight => AtlasEntry != null ? AtlasEntry.Height : SideEntry != null ? SideEntry.Height : Entry.Height;
 
             public string Base64;
             public long Bytes;
@@ -1972,14 +2245,15 @@ namespace QuestTree.QuestGraph
                 if (index == null) return result;
 
                 long budget = 0;
+                var installed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
                 foreach (var entry in index.Maps)
                 {
-                    if (clock.Elapsed > SyncBudget)
+                    if (!MaySyncGoOn(clock.Elapsed, budget))
                     {
                         result.Debug.Add(
-                            "QuestTree: the host's map pictures took longer than this session allows - the rest " +
-                            "are fetched on the next start.");
+                            $"QuestTree: the host's map pictures took longer than this session allows " +
+                            $"({clock.Elapsed.TotalSeconds:0}s for {Mb(budget)} MB) - the rest are fetched on the next start.");
                         break;
                     }
 
@@ -1990,8 +2264,27 @@ namespace QuestTree.QuestGraph
                     if (string.IsNullOrEmpty(entry.Stamp)) continue;
                     if (entry.Meta == null || entry.Meta.Floors == null || entry.Meta.Floors.Count == 0) continue;
 
-                    // Already have exactly this set.
-                    if (string.Equals(HeldStamp(root, key), entry.Stamp, StringComparison.Ordinal)) continue;
+                    // Already have exactly this set - but perhaps not every page of it: a page whose fetch
+                    // failed for a reason a retry could change (a timeout, a dropped connection) is noted in
+                    // the stamp file and fetched on its own now, rather than lost under a stamp that says the
+                    // set is here.
+                    if (string.Equals(HeldStamp(root, key), entry.Stamp, StringComparison.Ordinal))
+                    {
+                        var owed = HeldMissingPages(root, key);
+
+                        if (owed.Count > 0)
+                        {
+                            var got = RefetchPages(root, key, entry, owed, result);
+
+                            if (got > 0)
+                            {
+                                budget += got;
+                                result.Landed++;
+                            }
+                        }
+
+                        continue;
+                    }
 
                     if (LocalCaptureIsNewer(key, entry, result)) continue;
 
@@ -2003,10 +2296,15 @@ namespace QuestTree.QuestGraph
                         break;
                     }
 
+                    // The cache's own cap, BEFORE the download: room is made by evicting the sets written
+                    // longest ago (never one taken this session), and a set that cannot fit waits.
+                    if (!MakeRoom(root, key, Math.Max(entry.Bytes, 0L), installed, result)) continue;
+
                     var bytes = Download(root, key, entry, result);
                     if (bytes <= 0) continue;
 
                     budget += bytes;
+                    installed.Add(key);
                     result.Landed++;
                 }
 
@@ -2233,6 +2531,54 @@ namespace QuestTree.QuestGraph
                     }
                 }
 
+                // The ATLAS PAGES, after the mesh and only when one landed: a page drapes the mesh's
+                // buildings and nothing else. Each through the image route by its number and held to what
+                // the host's index says of it - a JPEG, of the width and height named, hashing to the sha256
+                // named (the host's own, rewritten when it stored the set). A page that fails any of that,
+                // or would take the map past its budget, is left out of the meta rather than named beside a
+                // file that is not there; the 3D view then draws those buildings as it did before pages.
+                var pageNames = new List<string>();
+                var keptPages = new List<MapCaptureAtlasDto>();
+                var owedPages = new List<int>();
+
+                if (meshName != null && meta.Atlas != null)
+                {
+                    foreach (var page in meta.Atlas.Where(p => p != null).OrderBy(p => p.Page))
+                    {
+                        if (page.Page < 0 || page.Page >= MaxAtlasPages || keptPages.Any(k => k.Page == page.Page)) continue;
+
+                        var picture = FetchAtlasPage(key, page, entry.Stamp, result, out var pageReplaced, out var transient);
+
+                        // As for a floor: half of two sets is worse than either.
+                        if (pageReplaced) return 0;
+
+                        // A page that did not ARRIVE (as opposed to one that arrived wrong) is owed: the stamp
+                        // file names it, and the next session fetches it alone - see HeldMissingPages.
+                        if (picture == null && transient) owedPages.Add(page.Page);
+
+                        if (picture == null) continue;
+
+                        if (bytes + picture.Length > MaxMapDownloadBytes)
+                        {
+                            result.Debug.Add(
+                                $"QuestTree: {key}'s atlas page {page.Page} would take the map past the " +
+                                $"{Mb(MaxMapDownloadBytes)} MB it may weigh - it is left out.");
+                            continue;
+                        }
+
+                        var pageName = AtlasFileName(key, page.Page);
+
+                        File.WriteAllBytes(Path.Combine(staging, pageName), picture);
+
+                        page.File = pageName;
+                        keptPages.Add(page);
+                        pageNames.Add(pageName);
+                        bytes += picture.Length;
+                    }
+                }
+
+                meta.Atlas = keptPages.Count == 0 ? null : keptPages;
+
                 // The meta written out names exactly the floors whose picture is in the staging
                 // folder. A floor the host could not send is dropped rather than named: the reader
                 // would drop it anyway, and a meta naming a file that is not there is how a set
@@ -2244,11 +2590,14 @@ namespace QuestTree.QuestGraph
                     Path.Combine(staging, key + MetaSuffix),
                     JsonConvert.SerializeObject(meta, Formatting.Indented));
 
-                if (!Swap(root, key, staging, floors, sideNames, meshName, entry.Stamp, result)) return 0;
+                if (!Swap(root, key, staging, floors, sideNames.Concat(pageNames).ToList(), meshName, entry.Stamp, result,
+                        owedPages))
+                    return 0;
 
                 result.Info.Add(
                     $"QuestTree: map picture set for {key} received from the host - {floors.Count} floor(s)" +
                     $"{(sideNames.Count == 0 ? "" : $", {sideNames.Count} side(s)")}" +
+                    $"{(pageNames.Count == 0 ? "" : $", {pageNames.Count} atlas page(s)")}" +
                     $"{(meshName == null ? "" : " and a 3D mesh")}, {Mb(bytes)} MB.");
 
                 return bytes;
@@ -2291,11 +2640,14 @@ namespace QuestTree.QuestGraph
         /// method exists to prevent.</param>
         /// <param name="stamp">The host's name for this set, written last of all.</param>
         /// <param name="result">Where a failure's line goes.</param>
-        /// <param name="sides">The side pictures' names in the staging folder - moved with the floors and
-        /// kept by step 4, which sweeps any side an older set of this map had and this one does not.</param>
+        /// <param name="sides">The side pictures' AND atlas pages' names in the staging folder - moved with
+        /// the floors and kept by step 4, which sweeps any side or page an older set of this map had and this
+        /// one does not.</param>
+        /// <param name="owedPages">Atlas pages that did not arrive for a reason a retry could change, written
+        /// into the stamp file for the next session to fetch (see <see cref="HeldMissingPages"/>).</param>
         private static bool Swap(
             string root, string key, string staging, List<MapCaptureFloorDto> floors, List<string> sides,
-            string mesh, string stamp, SyncResult result)
+            string mesh, string stamp, SyncResult result, List<int> owedPages = null)
         {
             var folder = Path.Combine(root, key);
 
@@ -2377,7 +2729,7 @@ namespace QuestTree.QuestGraph
 
                 // (5) And only now the record that says "this machine has that set", so a swap
                 // interrupted at any step above is simply done again on the next start.
-                WriteStamp(root, key, stamp, result);
+                WriteStamp(root, key, stamp, result, owedPages);
 
                 return true;
             }
@@ -2397,14 +2749,19 @@ namespace QuestTree.QuestGraph
         /// <param name="key">The map's internal id.</param>
         /// <param name="stamp">The host's name for the set now in place.</param>
         /// <param name="result">Where a failure's line goes.</param>
-        private static void WriteStamp(string root, string key, string stamp, SyncResult result)
+        /// <param name="owedPages">Atlas pages still owed, written as a second line - see
+        /// <see cref="HeldMissingPages"/>. None, and the file is the stamp alone, as it always was.</param>
+        private static void WriteStamp(string root, string key, string stamp, SyncResult result, List<int> owedPages = null)
         {
             try
             {
                 var path = Path.Combine(Path.Combine(root, key), StampFile);
                 var temp = path + ".tmp";
 
-                File.WriteAllText(temp, stamp);
+                File.WriteAllText(temp, owedPages == null || owedPages.Count == 0
+                    ? stamp
+                    : stamp + "\n" + OwedPrefix + string.Join(",",
+                        owedPages.Distinct().OrderBy(p => p).Select(p => p.ToString(CultureInfo.InvariantCulture))));
                 if (File.Exists(path)) File.Delete(path);
                 File.Move(temp, path);
             }
@@ -2782,6 +3139,114 @@ namespace QuestTree.QuestGraph
         /// the key and the direction, never from anything the host sent.</summary>
         private static string SideFileName(string key, string dir) => $"{key}-side-{dir}.jpg";
 
+        /// <summary>
+        /// One atlas page from the host, checked, or null when there is none to have - <see cref="FetchSide"/>
+        /// for a page, with one check more: the bytes must hash to the sha256 the host's index names for the
+        /// page. A page's texels are addressed by the mesh's UVs and nothing else, so a wrong page is every
+        /// building wearing another building's walls with no other symptom, and the sha is the one field
+        /// that can say so. The request carries SideLevel as its level, so a host that does not know pages
+        /// answers "no floor there" rather than sending floor 0.
+        /// </summary>
+        /// <param name="key">The map's internal id.</param>
+        /// <param name="page">Its entry in the host's meta.</param>
+        /// <param name="stamp">The set this download belongs to.</param>
+        /// <param name="result">Where the lines go.</param>
+        /// <param name="replaced">True when the host answered with a DIFFERENT set's stamp.</param>
+        /// <param name="transient">True when the page did not ARRIVE - the request failed or timed out - which a
+        /// later session may change; false when it arrived wrong or the host has none, which it will not.</param>
+        private static byte[] FetchAtlasPage(
+            string key, MapCaptureAtlasDto page, string stamp, SyncResult result, out bool replaced, out bool transient)
+        {
+            replaced = false;
+            transient = false;
+
+            string reply;
+
+            try
+            {
+                // The MESH's deadline: a page is up to 6 MB, 8 MB of base64, which a slow link does not bring
+                // down in a picture's 30 s.
+                var body = JsonConvert.SerializeObject(new MapImageRequest { Map = key, Level = SideLevel, Atlas = page.Page });
+                reply = Post(ImageRoute, body, MeshRequestTimeout);
+            }
+            catch (Exception ex)
+            {
+                transient = true;
+
+                result.Debug.Add(
+                    $"QuestTree: the host's atlas page {page.Page} of {key} did not arrive ({ex.GetBaseException().Message}) - " +
+                    "it is fetched again next session.");
+                return null;
+            }
+
+            try
+            {
+                var image = NotOurs<MapImageDto>(reply, out var excerpt);
+
+                if (image == null)
+                {
+                    result.Debug.Add($"QuestTree: the reply for {key}'s atlas page {page.Page} was not the server half's - {excerpt}");
+                    return null;
+                }
+
+                if (string.IsNullOrEmpty(image.ImageBase64))
+                {
+                    result.Debug.Add($"QuestTree: the host has no atlas page {page.Page} of {key}.");
+                    return null;
+                }
+
+                if (!string.IsNullOrEmpty(image.Stamp) && !string.Equals(image.Stamp, stamp, StringComparison.Ordinal))
+                {
+                    replaced = true;
+
+                    result.Debug.Add(
+                        $"QuestTree: the host's pictures of {key} changed while they were being fetched - the whole " +
+                        "set is taken again next session rather than half of each.");
+                    return null;
+                }
+
+                var bytes = Convert.FromBase64String(image.ImageBase64);
+
+                if (bytes.Length == 0 || bytes.Length > MaxAtlasPageBytes || Extension(bytes) != ".jpg")
+                {
+                    result.Debug.Add(
+                        $"QuestTree: the host's atlas page {page.Page} of {key} is not a JPEG of up to " +
+                        $"{Mb(MaxAtlasPageBytes)} MB - it is left out.");
+                    return null;
+                }
+
+                if (!JpegSize(bytes, out var width, out var height) || width != page.Width || height != page.Height)
+                {
+                    result.Debug.Add(
+                        $"QuestTree: the host's atlas page {page.Page} of {key} is {width}x{height} px where its meta " +
+                        $"says {page.Width}x{page.Height} - it is left out rather than drawn misplaced.");
+                    return null;
+                }
+
+                var hash = Sha256(bytes);
+
+                if (!string.Equals(hash, page.Sha256 ?? "", StringComparison.OrdinalIgnoreCase))
+                {
+                    result.Debug.Add(
+                        $"QuestTree: the host's atlas page {page.Page} of {key} hashes to {hash.Substring(0, 12)}, not the " +
+                        "sha256 its index names - it is left out rather than drawn on the wrong buildings.");
+                    return null;
+                }
+
+                return bytes;
+            }
+            catch (Exception ex)
+            {
+                result.Debug.Add($"QuestTree: the host's atlas page {page.Page} of {key} could not be taken ({ex.Message}).");
+                return null;
+            }
+        }
+
+        /// <summary>An atlas page's file name in a map's folder - the host's own name for it, built from the
+        /// key and the page number, never from anything the host sent.</summary>
+        private static string AtlasFileName(string key, int page) =>
+            $"{key}-atlas-{page.ToString(CultureInfo.InvariantCulture)}.jpg";
+
         /// <summary>A JPEG's width and height from its frame header, or false. Walks the marker chain
         /// rather than trusting an offset - the frame header comes after however many other segments the
         /// encoder wrote - and decodes nothing: the same walk tools/check-maps-pack.py makes.</summary>
@@ -2845,12 +3310,220 @@ namespace QuestTree.QuestGraph
             try
             {
                 var path = Path.Combine(Path.Combine(root, key), StampFile);
-                return File.Exists(path) ? File.ReadAllText(path).Trim() : "";
+
+                // The FIRST line: a second one, when there is one, lists the atlas pages still owed.
+                return File.Exists(path) ? (File.ReadAllLines(path).FirstOrDefault() ?? "").Trim() : "";
             }
             catch
             {
                 return "";
             }
+        }
+
+        /// <summary>The stamp file's second line, when a download left atlas pages owed: "owed-atlas: 1,4".
+        /// Written by <see cref="WriteStamp"/> for a page whose fetch failed for a reason a retry could change -
+        /// a timeout, a dropped connection - and never for one that arrived WRONG (another size, another
+        /// sha), which the next session would get wrong in the same way.</summary>
+        private const string OwedPrefix = "owed-atlas: ";
+
+        /// <summary>The atlas pages the set in this map's folder is still owed - see <see cref="OwedPrefix"/>.
+        /// Empty when none are, or the stamp file has no second line, or it cannot be read.</summary>
+        private static List<int> HeldMissingPages(string root, string key)
+        {
+            var owed = new List<int>();
+
+            try
+            {
+                var path = Path.Combine(Path.Combine(root, key), StampFile);
+                if (!File.Exists(path)) return owed;
+
+                foreach (var line in File.ReadAllLines(path).Skip(1))
+                {
+                    if (!line.StartsWith(OwedPrefix, StringComparison.Ordinal)) continue;
+
+                    foreach (var part in line.Substring(OwedPrefix.Length).Split(','))
+                        if (int.TryParse(part.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var page) &&
+                            page >= 0 && page < MaxAtlasPages && !owed.Contains(page))
+                            owed.Add(page);
+                }
+            }
+            catch
+            {
+                owed.Clear();
+            }
+
+            return owed;
+        }
+
+        /// <summary>
+        /// Fetches the atlas pages a held set is still owed, on their own - the set is otherwise exactly the
+        /// host's, so nothing else is asked for - and writes each into the map's folder and its meta. Pages that
+        /// fail AGAIN for a reason a retry could change stay owed; a page that arrives wrong, or that the host's
+        /// meta no longer names, stops being owed. Returns the bytes written.
+        ///
+        /// The meta is rewritten beside itself and REPLACED in one step, so a reader sees the old meta or the new
+        /// one; the page file lands before the meta names it.
+        /// </summary>
+        private static long RefetchPages(string root, string key, MapIndexEntryDto entry, List<int> owed, SyncResult result)
+        {
+            long written = 0;
+            var still = new List<int>();
+
+            try
+            {
+                var folder = Path.Combine(root, key);
+                var metaPath = Path.Combine(folder, key + MetaSuffix);
+
+                if (!File.Exists(metaPath) || entry.Meta?.Atlas == null || entry.Mesh == null)
+                {
+                    WriteStamp(root, key, entry.Stamp, result);
+                    return 0;
+                }
+
+                var local = JsonConvert.DeserializeObject<MapCaptureMetaDto>(File.ReadAllText(metaPath));
+
+                if (local?.Mesh == null)
+                {
+                    WriteStamp(root, key, entry.Stamp, result);
+                    return 0;
+                }
+
+                var pages = local.Atlas ?? new List<MapCaptureAtlasDto>();
+
+                foreach (var number in owed)
+                {
+                    var hostPage = entry.Meta.Atlas.Find(p => p != null && p.Page == number);
+
+                    if (hostPage == null || pages.Exists(p => p != null && p.Page == number)) continue;
+
+                    var picture = FetchAtlasPage(key, hostPage, entry.Stamp, result, out var replaced, out var transient);
+
+                    // The host's set changed under us: the whole set is taken again, so nothing is owed here.
+                    if (replaced) return written;
+
+                    if (picture == null)
+                    {
+                        if (transient) still.Add(number);
+                        continue;
+                    }
+
+                    var name = AtlasFileName(key, number);
+
+                    File.WriteAllBytes(Path.Combine(folder, name), picture);
+
+                    pages.Add(new MapCaptureAtlasDto
+                    {
+                        File = name,
+                        Page = hostPage.Page,
+                        Width = hostPage.Width,
+                        Height = hostPage.Height,
+                        Tiles = hostPage.Tiles,
+                        Sha256 = hostPage.Sha256
+                    });
+
+                    written += picture.Length;
+                }
+
+                if (written > 0)
+                {
+                    local.Atlas = pages.Where(p => p != null).OrderBy(p => p.Page).ToList();
+
+                    var temp = metaPath + ".tmp";
+
+                    File.WriteAllText(temp, JsonConvert.SerializeObject(local, Formatting.Indented));
+                    File.Replace(temp, metaPath, null);
+
+                    result.Info.Add(
+                        $"QuestTree: {key}'s missing atlas page(s) arrived from the host - {Mb(written)} MB" +
+                        $"{(still.Count == 0 ? "" : $", {still.Count} still owed")}.");
+                }
+
+                WriteStamp(root, key, entry.Stamp, result, still);
+            }
+            catch (Exception ex)
+            {
+                // The set in place is untouched or has the pages that landed; what is still owed stays owed.
+                result.Debug.Add($"QuestTree: {key}'s missing atlas pages could not be taken ({ex.GetType().Name}: {ex.Message}).");
+            }
+
+            return written;
+        }
+
+        /// <summary>Whether the sync may start on another map: always within <see cref="SyncBudget"/>, and past
+        /// it only while the session's average is still <see cref="MinSyncBytesPerSecond"/> or better.
+        /// Internal and pure so the client harness can check it.</summary>
+        internal static bool MaySyncGoOn(TimeSpan elapsed, long bytesSoFar) =>
+            elapsed <= SyncBudget ||
+            (elapsed.TotalSeconds > 0 && bytesSoFar / elapsed.TotalSeconds >= MinSyncBytesPerSecond);
+
+        /// <summary>
+        /// Makes room in the host-picture cache for a set of <paramref name="incoming"/> bytes that will replace
+        /// whatever <paramref name="key"/>'s folder holds now - see <see cref="MaxHostCacheBytes"/>. Evicts the
+        /// sets whose stamp was written longest ago, never one in <paramref name="keep"/> (taken this session)
+        /// and never this map's own. False, with a line, when the set cannot fit even then.
+        /// </summary>
+        private static bool MakeRoom(string root, string key, long incoming, HashSet<string> keep, SyncResult result)
+        {
+            try
+            {
+                var sets = HostSets(root);
+                var total = sets.Where(s => !string.Equals(s.Key, key, StringComparison.OrdinalIgnoreCase)).Sum(s => s.Bytes);
+
+                if (total + incoming <= MaxHostCacheBytes) return true;
+
+                foreach (var set in sets.Where(s => !string.Equals(s.Key, key, StringComparison.OrdinalIgnoreCase) &&
+                                                   !keep.Contains(s.Key))
+                             .OrderBy(s => s.Written))
+                {
+                    if (total + incoming <= MaxHostCacheBytes) break;
+
+                    Wipe(set.Folder);
+
+                    if (Directory.Exists(set.Folder)) continue;
+
+                    total -= set.Bytes;
+                    result.Info.Add(
+                        $"QuestTree: the host's pictures of {set.Key} were removed from this machine ({Mb(set.Bytes)} MB) " +
+                        $"to keep the host-picture cache under {Mb(MaxHostCacheBytes)} MB - they come back the next time " +
+                        "there is room.");
+                }
+
+                if (total + incoming <= MaxHostCacheBytes) return true;
+
+                result.Debug.Add(
+                    $"QuestTree: the host's {key} ({Mb(incoming)} MB) does not fit in the {Mb(MaxHostCacheBytes)} MB " +
+                    "host-picture cache - it waits.");
+                return false;
+            }
+            catch (Exception ex)
+            {
+                // Cannot measure: take it, as a machine with no cap would.
+                result.Debug.Add($"QuestTree: the host-picture cache could not be measured ({ex.Message}).");
+                return true;
+            }
+        }
+
+        /// <summary>The host sets in the cache - folders with a stamp file - with what each weighs and when its
+        /// stamp was written.</summary>
+        private static List<(string Key, string Folder, long Bytes, DateTime Written)> HostSets(string root)
+        {
+            var sets = new List<(string, string, long, DateTime)>();
+
+            if (!Directory.Exists(root)) return sets;
+
+            foreach (var folder in Directory.GetDirectories(root))
+            {
+                var name = Path.GetFileName(folder);
+                var stamp = Path.Combine(folder, StampFile);
+
+                if (name.StartsWith(".", StringComparison.Ordinal) || !File.Exists(stamp)) continue;
+
+                var bytes = Directory.GetFiles(folder).Sum(f => new FileInfo(f).Length);
+
+                sets.Add((name, folder, bytes, File.GetLastWriteTimeUtc(stamp)));
+            }
+
+            return sets;
         }
 
         /// <summary>
@@ -2884,10 +3557,16 @@ namespace QuestTree.QuestGraph
                 var theirs = Timestamp(entry.CapturedAt ?? entry.Meta?.CapturedAt);
 
                 if (!ours.HasValue) return false;
-                if (!theirs.HasValue || ours.Value > theirs.Value)
+
+                // EQUAL counts as ours: the host's set with this machine's capture instant is, in every case
+                // that happens, the set this machine uploaded - taking it back would be up to 132 MB of our own
+                // pictures down the wire, to be drawn second to the local capture anyway.
+                if (!theirs.HasValue || ours.Value >= theirs.Value)
                 {
                     result.Debug.Add(
-                        $"QuestTree: this machine's own capture of {key} is the newer one, so the host's is not taken.");
+                        ours.Value == theirs
+                            ? $"QuestTree: the host's set of {key} is this machine's own capture, so it is not taken back."
+                            : $"QuestTree: this machine's own capture of {key} is the newer one, so the host's is not taken.");
                     return true;
                 }
 

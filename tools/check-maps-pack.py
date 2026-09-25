@@ -34,6 +34,13 @@ What it checks, per <key>\\ folder under the maps root:
      1e-3) and its origins and height range are numbers. A side's pixels are placed on walls by those
      numbers alone, so a picture of another size or a skewed basis textures every wall wrong with
      nothing else to show it. Side files the meta does not name are orphans like any other image.
+  7. the ATLAS PAGES, when the meta names any (stage W: 4096 px sheets of the game's building
+     textures the 3D view drapes on the mesh's buildings by the mesh's UVs; absent on every older
+     set): only beside a mesh, each a distinct page 0..7, its file exactly <key>-atlas-<page>.jpg and
+     present, a real JPEG whose frame size equals the entry's width/height, and hashing to the entry's
+     sha256 - which the host rewrote to the stored JPEG's when it stored the set. The UVs address a
+     page texel by texel, so a page of another size or another capture's page dresses every building
+     in the wrong walls with nothing else to show it. Page files the meta does not name are orphans.
 
 Every folder it finds is checked the same way, whether it is a vanilla map or a modded one the
 maintainer chose to ship.
@@ -476,6 +483,82 @@ def check_sides(meta, folder, key, errors):
     return named, len(seen), total
 
 
+ATLAS_PAGES = 8
+
+
+def check_atlas(meta, folder, key, has_mesh, errors):
+    """The atlas pages against their meta entries. Returns (named files lower-cased, count, bytes).
+
+    A meta with no atlas - absent, null or empty - passes with nothing checked: every set captured
+    before stage W has none, and the 3D view draws those buildings from the sides and tints."""
+    pages = meta.get("atlas")
+    if pages is None or pages == []:
+        return set(), 0, 0
+    if not isinstance(pages, list):
+        errors.append(f"{key}: atlas is present but not a list ({pages!r})")
+        return set(), 0, 0
+    if not has_mesh:
+        errors.append(f"{key}: the meta names {len(pages)} atlas page(s) but no mesh - a page textures the "
+                      f"mesh's buildings and nothing else, so no host stores one without it and these would "
+                      f"ship as megabytes nothing draws")
+
+    named, seen, total = set(), set(), 0
+    for index, page in enumerate(pages):
+        where = f"{key}: atlas[{index}]"
+        if not isinstance(page, dict):
+            errors.append(f"{where} is not an object")
+            continue
+
+        number_ = page.get("page")
+        if isinstance(number_, bool) or not isinstance(number_, int) or not 0 <= number_ < ATLAS_PAGES:
+            errors.append(f"{where}.page {number_!r} is not a page 0..{ATLAS_PAGES - 1}")
+            continue
+        if number_ in seen:
+            errors.append(f"{key}: atlas page {number_} is named twice - which sheet do its UVs address?")
+            continue
+        seen.add(number_)
+        where = f"{key}: atlas page {number_}"
+
+        wanted = f"{key}-atlas-{number_}.jpg"
+        rel = page.get("file")
+        if not isinstance(rel, str) or rel != wanted:
+            errors.append(f"{where}.file {rel!r} is not {wanted} - that exact name is what the host stores "
+                          f"and reads back, and nothing else is")
+            continue
+        named.add(rel.lower())
+        path = folder / rel
+        if not path.is_file():
+            errors.append(f"{where}.file {rel!r} does not exist in {folder} - the meta names a page the set "
+                          f"does not carry. Re-run -RefreshMaps.")
+            continue
+        data = path.read_bytes()
+        total += len(data)
+
+        meta_w, meta_h = page.get("width"), page.get("height")
+        if any(isinstance(v, bool) or not isinstance(v, int) or v <= 0 for v in (meta_w, meta_h)):
+            errors.append(f"{where}: width/height {meta_w!r}x{meta_h!r} are not positive integers")
+        else:
+            actual, why = jpeg_size(path)
+            if actual is None:
+                errors.append(f"{where}: {rel} {why}")
+            elif actual != (meta_w, meta_h):
+                errors.append(f"{where}: {rel} is {actual[0]}x{actual[1]} px but its meta says "
+                              f"{meta_w}x{meta_h} - every UV on it would land on the wrong texel")
+
+        tiles = page.get("tiles")
+        if isinstance(tiles, bool) or not isinstance(tiles, int) or tiles < 0:
+            errors.append(f"{where}.tiles {tiles!r} is not a count")
+
+        claimed = page.get("sha256")
+        actual_sha = hashlib.sha256(data).hexdigest()
+        if not isinstance(claimed, str) or claimed.lower() != actual_sha:
+            errors.append(f"{where}: {rel} hashes to {actual_sha[:16]}, not the "
+                          f"{(claimed or '')[:16] if isinstance(claimed, str) else claimed!r} its meta names - "
+                          f"a page from another capture, or a meta from before the host stored this one")
+
+    return named, len(seen), total
+
+
 def load_json(path):
     """(object, None) or (None, reason). utf-8-sig: the client writes these files on Windows."""
     try:
@@ -669,11 +752,15 @@ def check_set(folder, schema, errors):
     side_named, side_count, side_bytes = check_sides(meta, folder, key, errors)
     named |= side_named
 
+    # And the atlas pages' names, for the same reason: a page a re-capture no longer packs is an orphan.
+    page_named, page_count, page_bytes = check_atlas(meta, folder, key, mesh_named is not None, errors)
+    named |= page_named
+
     orphans = sorted(p.name for p in folder.iterdir()
                      if p.is_file() and p.name.lower().endswith(".jpg")
                      and p.name.lower() not in named)
     if orphans:
-        errors.append(f"{key}: {', '.join(orphans)} - image(s) no floor or side in the meta names. They "
+        errors.append(f"{key}: {', '.join(orphans)} - image(s) no floor, side or atlas page in the meta names. They "
                       f"would ship as megabytes nothing loads; a re-capture with fewer floors "
                       f"leaves exactly this behind. Delete them or re-run -RefreshMaps.")
 
@@ -694,6 +781,7 @@ def check_set(folder, schema, errors):
     scale = f"{1 / px_per_metre:.2f} m/px" if px_per_metre else "? m/px"
     mesh_note = f", mesh {mesh_bytes / 1048576:.1f} MB" if mesh_named is not None else ", no mesh"
     mesh_note += f", {side_count} side(s) {side_bytes / 1048576:.1f} MB" if side_count else ", no sides"
+    mesh_note += f", {page_count} atlas page(s) {page_bytes / 1048576:.1f} MB" if page_count else ""
     return (f"{key}: {floor_count} floor(s), {pixels} @ {scale}, {total / 1048576:.1f} MB{mesh_note}, "
             f"captured {meta.get('capturedAt') or '?'}")
 

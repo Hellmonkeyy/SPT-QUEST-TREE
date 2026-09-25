@@ -23,7 +23,8 @@ namespace QuestTree.QuestGraph
     /// in-raid (MapMeshBuilder, phase 3A/3C) and the reader is in the menu (UI/Map3DView, phase 3B),
     /// which are different code paths that never run in the same frame and are written by different
     /// hands. One class that both call is the only way the two agree by construction. So the layout
-    /// below is FROZEN at <see cref="Version"/> 1; a change to it is a new version number, and
+    /// below is FROZEN at <see cref="Version"/> 2 (stage W added the atlas: a page count in the header and
+    /// per building its UVs and page ranges); a change to it is a new version number, and
     /// <see cref="Read(Stream)"/> refuses a version it does not know rather than mis-reading it.
     ///
     /// Why quantised: a float32 x/y/z per vertex and a float32 per relief cell doubles the file for
@@ -63,7 +64,27 @@ namespace QuestTree.QuestGraph
         /// <summary>The layout version, written into the header and checked on read. Bumped by ANY
         /// change to the byte layout, including an added field: readers refuse what they do not
         /// know.</summary>
-        internal const int Version = 1;
+        internal const int Version = 2;
+
+        /// <summary>Atlas pages a file may name (stage W): <c>&lt;key&gt;-atlas-&lt;n&gt;.png</c>, n below this.</summary>
+        internal const int MaxAtlasPages = 8;
+
+        /// <summary>An atlas page's side in pixels (stage W): every page is AtlasPageSize x AtlasPageSize RGBA.</summary>
+        internal const int AtlasPageSize = 4096;
+
+        /// <summary>An atlas page's file name: <c>&lt;key&gt;-atlas-&lt;n&gt;.png</c>, beside the mesh.</summary>
+        /// <param name="mapKey">The map's key.</param>
+        /// <param name="page">The page.</param>
+        internal static string AtlasFileNameFor(string mapKey, int page) =>
+            $"{mapKey}-atlas-{page.ToString(CultureInfo.InvariantCulture)}.png";
+
+        /// <summary>Page ranges one building may carry - one per page is all the builder writes, so this is
+        /// the page cap with room, and the bound on what a hostile file can make a reader allocate.</summary>
+        internal const int MaxRangesPerBuilding = 64;
+
+        /// <summary>The UV code for 1.0: a stored u or v is code / MaxUv over its page's [0, 1], with (0, 0) the
+        /// page PNG's BOTTOM-LEFT corner - Unity's texture convention, which Texture2D.LoadImage keeps.</summary>
+        internal const ushort MaxUv = 0xFFFF;
 
         /// <summary>The four bytes a mesh file starts with, as text. The digit is part of it - a
         /// mistaken pairing of an old file with a new reader is then caught by the magic as well as by
@@ -182,6 +203,10 @@ namespace QuestTree.QuestGraph
 
         /// <summary>The high end of the y quantisation range. See <see cref="YMin"/>.</summary>
         internal float YMax = float.NaN;
+
+        /// <summary>Atlas pages the buildings' ranges may name (0..<see cref="MaxAtlasPages"/>): page n is
+        /// the meta's atlas entry n, <c>&lt;key&gt;-atlas-&lt;n&gt;.png</c>. 0 means no texture anywhere.</summary>
+        internal int AtlasPages;
 
         /// <summary>The ground relief, one band per captured floor. Ordered as written; levels are
         /// distinct.</summary>
@@ -400,6 +425,8 @@ namespace QuestTree.QuestGraph
                     total += (building.Y?.Length ?? 0) * 2L;
                     total += (building.Z?.Length ?? 0) * 2L;
                     total += (building.Indices?.Length ?? 0) * 4L;
+                    total += ((building.U?.Length ?? 0) + (building.V?.Length ?? 0)) * 2L;
+                    total += (building.Ranges?.Count ?? 0) * 12L;
                 }
 
             return total;
@@ -600,6 +627,22 @@ namespace QuestTree.QuestGraph
                     "filling Bands by hand (Read and Write bind for you)");
         }
 
+        // --- one atlas range -------------------------------------------------------------------------
+
+        /// <summary>Triangles of one building drawn with one atlas page: indices [First, First + Count) of
+        /// its <see cref="Building.Indices"/>.</summary>
+        internal struct AtlasRange
+        {
+            /// <summary>The atlas page, below the file's <see cref="AtlasPages"/>.</summary>
+            internal int Page;
+
+            /// <summary>The first index (a multiple of 3).</summary>
+            internal int First;
+
+            /// <summary>Indices in the range (a positive multiple of 3).</summary>
+            internal int Count;
+        }
+
         // --- one building ----------------------------------------------------------------------------
 
         /// <summary>One building's shell: a quantised triangle soup in WORLD space, already
@@ -644,7 +687,28 @@ namespace QuestTree.QuestGraph
             /// IndexFormat.UInt32 takes these as they are.</summary>
             internal uint[] Indices;
 
+            /// <summary>Per-vertex texture coordinates over an atlas page's [0, 1] (<see cref="MaxUv"/>), or
+            /// null when no triangle of this building is textured. Same length as <see cref="X"/> when
+            /// present.</summary>
+            internal ushort[] U;
+
+            /// <summary>See <see cref="U"/>.</summary>
+            internal ushort[] V;
+
+            /// <summary>The textured triangles, as ranges of <see cref="Indices"/> drawn with one atlas page
+            /// each: ascending, not overlapping, each a whole number of triangles. A triangle in no range
+            /// has no captured texture and is drawn the stage U/V way (side views, top picture, tint).</summary>
+            internal List<AtlasRange> Ranges = new List<AtlasRange>();
+
             private MapMeshFile _file;
+
+            /// <summary>A stored u as a page coordinate in [0, 1].</summary>
+            /// <param name="i">The vertex index.</param>
+            internal float UOf(int i) => U == null ? 0f : U[i] / (float)MaxUv;
+
+            /// <summary>A stored v as a page coordinate in [0, 1] (0 = the page's bottom row).</summary>
+            /// <param name="i">The vertex index.</param>
+            internal float VOf(int i) => V == null ? 0f : V[i] / (float)MaxUv;
 
             /// <summary>Vertices in this building.</summary>
             internal int VertexCount => X?.Length ?? 0;
@@ -802,6 +866,7 @@ namespace QuestTree.QuestGraph
                 w.Write(file.MaxZ);
                 w.Write(file.YMin);
                 w.Write(file.YMax);
+                w.Write(file.AtlasPages);
 
                 w.Write(file.Bands.Count);
 
@@ -827,6 +892,25 @@ namespace QuestTree.QuestGraph
                     WriteUShorts(w, building.Z);
                     w.Write(building.Indices.Length);
                     WriteUInts(w, building.Indices);
+
+                    var uvs = building.U == null ? 0 : building.U.Length;
+                    w.Write(uvs);
+
+                    if (uvs > 0)
+                    {
+                        WriteUShorts(w, building.U);
+                        WriteUShorts(w, building.V);
+                    }
+
+                    var ranges = building.Ranges?.Count ?? 0;
+                    w.Write(ranges);
+
+                    for (var k = 0; k < ranges; k++)
+                    {
+                        w.Write(building.Ranges[k].Page);
+                        w.Write(building.Ranges[k].First);
+                        w.Write(building.Ranges[k].Count);
+                    }
                 }
             }
         }
@@ -862,6 +946,9 @@ namespace QuestTree.QuestGraph
             if (!IsFinite(YMin) || !IsFinite(YMax) || !(YMax > YMin))
                 throw new InvalidDataException(
                     $"the mesh y range is empty or not finite: {F(YMin)}..{F(YMax)} - call SetYRange first");
+
+            if (AtlasPages < 0 || AtlasPages > MaxAtlasPages)
+                throw new InvalidDataException($"{AtlasPages} atlas pages is outside 0..{MaxAtlasPages}");
 
             if (Bands == null) throw new InvalidDataException("the mesh has no band list");
             if (Buildings == null) throw new InvalidDataException("the mesh has no building list");
@@ -961,6 +1048,9 @@ namespace QuestTree.QuestGraph
                     throw new InvalidDataException(
                         $"building {i} (key {building.Key}) is on level {building.Level}, which no band is");
 
+                CheckAtlas(i, building.Key, building.X.Length, building.Indices.Length,
+                    building.U?.Length ?? 0, building.V?.Length ?? 0, building.Ranges, AtlasPages);
+
                 vertices += building.X.Length;
                 triangles += building.Indices.Length / 3;
             }
@@ -972,6 +1062,53 @@ namespace QuestTree.QuestGraph
             if (triangles > MaxTriangles)
                 throw new InvalidDataException(
                     $"{triangles:#,##0} triangles in total is over the cap of {MaxTriangles:#,##0}");
+        }
+
+        /// <summary>The atlas rules for one building, the writer's and the reader's alike: UVs absent or one
+        /// per vertex, no range without them, and every range a positive whole number of triangles inside
+        /// the building's indices, on a page the file has, ascending and not overlapping.</summary>
+        /// <param name="i">The building's position, for the message.</param>
+        /// <param name="key">Its key, for the message.</param>
+        /// <param name="vertices">Its vertex count.</param>
+        /// <param name="indices">Its index count.</param>
+        /// <param name="us">Its u count.</param>
+        /// <param name="vs">Its v count.</param>
+        /// <param name="ranges">Its ranges.</param>
+        /// <param name="pages">The file's page count.</param>
+        private static void CheckAtlas(int i, int key, int vertices, int indices, int us, int vs,
+            List<AtlasRange> ranges, int pages)
+        {
+            if (us != vs || (us != 0 && us != vertices))
+                throw new InvalidDataException(
+                    $"building {i} (key {key}) has {us} u and {vs} v for {vertices} vertices");
+
+            var count = ranges?.Count ?? 0;
+
+            if (count > MaxRangesPerBuilding)
+                throw new InvalidDataException(
+                    $"building {i} (key {key}) has {count} atlas ranges; the cap is {MaxRangesPerBuilding}");
+
+            if (count > 0 && us == 0)
+                throw new InvalidDataException($"building {i} (key {key}) has atlas ranges and no UVs");
+
+            var end = 0;
+
+            for (var k = 0; k < count; k++)
+            {
+                var range = ranges[k];
+
+                if (range.Page < 0 || range.Page >= pages)
+                    throw new InvalidDataException(
+                        $"building {i} (key {key}) range {k} is on page {range.Page}; the file has {pages}");
+
+                if (range.First < end || range.First % 3 != 0 || range.Count <= 0 || range.Count % 3 != 0 ||
+                    (long)range.First + range.Count > indices)
+                    throw new InvalidDataException(
+                        $"building {i} (key {key}) range {k} is indices {range.First}+{range.Count} of {indices} " +
+                        $"(after {end}) - ranges are ascending whole triangles inside the building");
+
+                end = range.First + range.Count;
+            }
         }
 
         /// <summary>A quantised array's raw little-endian bytes. <see cref="Buffer.BlockCopy"/> on the
@@ -1124,8 +1261,13 @@ namespace QuestTree.QuestGraph
                 MaxX = r.ReadDouble(),
                 MaxZ = r.ReadDouble(),
                 YMin = r.ReadSingle(),
-                YMax = r.ReadSingle()
+                YMax = r.ReadSingle(),
+                AtlasPages = r.ReadInt32()
             };
+
+            if (file.AtlasPages < 0 || file.AtlasPages > MaxAtlasPages)
+                throw new InvalidDataException(
+                    $"the mesh file claims {file.AtlasPages} atlas pages; the cap is {MaxAtlasPages}");
 
             if (!IsFinite(file.MinX) || !IsFinite(file.MinZ) || !IsFinite(file.MaxX) || !IsFinite(file.MaxZ))
                 throw new InvalidDataException("the mesh file's extent is not finite");
@@ -1242,6 +1384,30 @@ namespace QuestTree.QuestGraph
                         throw new InvalidDataException(
                             $"building {i} (key {building.Key}) index {j} is {building.Indices[j]}, past its " +
                             $"{vertexCount:#,##0} vertices");
+
+                var uvCount = r.ReadInt32();
+
+                if (uvCount != 0 && uvCount != vertexCount)
+                    throw new InvalidDataException(
+                        $"building {i} (key {building.Key}) claims {uvCount:#,##0} UVs for {vertexCount:#,##0} vertices");
+
+                if (uvCount > 0)
+                {
+                    building.U = ReadUShorts(raw, uvCount, $"building {i} (key {building.Key}) u");
+                    building.V = ReadUShorts(raw, uvCount, $"building {i} (key {building.Key}) v");
+                }
+
+                var rangeCount = r.ReadInt32();
+
+                if (rangeCount < 0 || rangeCount > MaxRangesPerBuilding)
+                    throw new InvalidDataException(
+                        $"building {i} (key {building.Key}) claims {rangeCount} atlas ranges; the cap is " +
+                        $"{MaxRangesPerBuilding}");
+
+                for (var k = 0; k < rangeCount; k++)
+                    building.Ranges.Add(new AtlasRange { Page = r.ReadInt32(), First = r.ReadInt32(), Count = r.ReadInt32() });
+
+                CheckAtlas(i, building.Key, vertexCount, indexCount, uvCount, uvCount, building.Ranges, file.AtlasPages);
 
                 // See Validate: NoHit in a vertex's y is a NaN, and a NaN in a vertex buffer draws
                 // nothing without a word of complaint.

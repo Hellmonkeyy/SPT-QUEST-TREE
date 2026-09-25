@@ -246,8 +246,9 @@ if ($RefreshMaps) {
             Write-Host "  skipped $($src.Name)\ - not a map key" -ForegroundColor DarkGray
             continue
         }
-        # `*.jpg` takes the side pictures (<key>-side-<dir>.jpg) with the floors - they are the same kind of
-        # file, and GATE 1 below holds both to their exact names.
+        # `*.jpg` takes the side pictures (<key>-side-<dir>.jpg) and the atlas pages (<key>-atlas-<n>.jpg)
+        # with the floors - they are the same kind of file, and GATE 1 below holds all three to their exact
+        # names.
         # Three globs, not two: `*-mesh.bin` is the 3D mesh the same capture wrote beside its pictures
         # (MapMeshFile), and a set refreshed without it would ship a meta naming a mesh the zip does not
         # carry - which the mesh gate below then fails, loudly, rather than shipping.
@@ -302,7 +303,8 @@ if ($mapsPresent) {
 # the point: they are about sets that exist, not about whether any do.
 
 # GATE 1 - LAYOUT. maps\ holds nothing but the floors <key>\<key>-<level>.jpg, the oblique side
-# pictures <key>\<key>-side-<N|S|E|W>.jpg, <key>\*.map.json and the one file <key>\<key>-mesh.bin. The allowlist below is BUILT from this folder, so anything else in here is a
+# pictures <key>\<key>-side-<N|S|E|W>.jpg, the atlas pages <key>\<key>-atlas-<0..7>.jpg, <key>\*.map.json
+# and the one file <key>\<key>-mesh.bin. The allowlist below is BUILT from this folder, so anything else in here is a
 # file the zip carries: a raw .png capture, a ".incoming" directory a refresh skipped but a hand-copy
 # did not, an editor's .bak, a stray .svg from the DynamicMaps era. The depth test is what catches the
 # directories - a file two levels down is not in a key folder, it is in something nested inside one -
@@ -318,34 +320,50 @@ if ($mapsPresent) {
 # map's folder is the case that matters: it parses, its extent is somebody else's, and nothing but the
 # name says so.
 #
-# The JPEGs are matched by the two names the host writes and nothing looser, for the mesh's reason: a
-# floor is <key>-<level>.jpg (the level can be negative, hence "Interchange--1.jpg") and a side is
-# <key>-side-<dir>.jpg for one of the four directions. Any other .jpg is a file the host would never
-# have written and the client never reads by that name - a side of a direction that does not exist, or
-# a picture from another map's folder - and it would ship as megabytes nothing loads.
+# The JPEGs are matched by the three names the host writes and nothing looser, for the mesh's reason: a
+# floor is <key>-<level>.jpg (the level can be negative, hence "Interchange--1.jpg"), a side is
+# <key>-side-<dir>.jpg for one of the four directions, and an atlas page is <key>-atlas-<n>.jpg for page
+# 0 to 7 (MapStore's StoredAtlasFileName). Any other .jpg is a file the host would never have written
+# and the client never reads by that name - a side of a direction that does not exist, a ninth page, the
+# capture's own .png page, or a picture from another map's folder - and it would ship as megabytes
+# nothing loads.
 $strayMapFiles = @($mapFiles | ForEach-Object {
     $rel = $_.FullName.Substring($mapsDir.Length + 1)
     $parts = @($rel -split "\\")
     $named = $false
     if ($parts.Count -eq 2) {
         $keyPattern = [regex]::Escape($parts[0])
-        $named = $_.Name -match "^$keyPattern-(-?[0-9]+|side-[NSEW])\.jpg$" -or
+        $named = $_.Name -match "^$keyPattern-(-?[0-9]+|side-[NSEW]|atlas-[0-7])\.jpg$" -or
                  $_.Name -like "*.map.json" -or $_.Name -eq "$($parts[0])-mesh.bin"
     }
     if (-not $named) { $rel }
 })
 if ($strayMapFiles.Count -gt 0) {
-    Fail "maps\ holds $($strayMapFiles.Count) file(s) that are not <key>\<key>-<level>.jpg, <key>\<key>-side-<N|S|E|W>.jpg, <key>\*.map.json or <key>\<key>-mesh.bin, and the allowlist is built from this folder: $($strayMapFiles -join ', ')"
+    Fail "maps\ holds $($strayMapFiles.Count) file(s) that are not <key>\<key>-<level>.jpg, <key>\<key>-side-<N|S|E|W>.jpg, <key>\<key>-atlas-<0..7>.jpg, <key>\*.map.json or <key>\<key>-mesh.bin, and the allowlist is built from this folder: $($strayMapFiles -join ', ')"
 }
 
 # GATE 2 - PER IMAGE, floors and side pictures alike (both are *.jpg). A floor over 1.5 MB is a capture that came out at a resolution or a quality the
 # release cannot afford: the budget is the whole set, and one 4 MB floor is three normal ones. The cap
 # is a ceiling on the capture settings, not a guess about content.
+#
+# ATLAS PAGES have their OWN gate, 6 MB, and are left out of the 1.5 MB one: a page is a 4096 px sheet of
+# building textures stored at q85 and never downscaled (MapTransfer.MaxAtlasPixels), which is 2-4 MB by
+# design - the 1.5 MB picture gate would fail every real page. Six is the host's and the client's own cap
+# on one page (MapStore.MaxAtlasPageBytes, MapTransfer.MaxAtlasPageBytes), so a page past it here is one no
+# host would have stored and no client would download. Matched by GATE 1's exact name, so only a file
+# that gate admitted as a page is judged as one.
 $maxImageBytes = 1.5MB
-$fatImages = @($mapFiles | Where-Object { $_.Name -like "*.jpg" -and $_.Length -gt $maxImageBytes } |
+$maxAtlasPageBytes = 6MB
+$isAtlasPage = { param($file) $file.Name -match "-atlas-[0-7]\.jpg$" }
+$fatImages = @($mapFiles | Where-Object { $_.Name -like "*.jpg" -and -not (& $isAtlasPage $_) -and $_.Length -gt $maxImageBytes } |
     ForEach-Object { "{0} ({1:N1} MB)" -f $_.FullName.Substring($mapsDir.Length + 1), ($_.Length / 1MB) })
 if ($fatImages.Count -gt 0) {
     Fail "map image(s) over $($maxImageBytes / 1MB) MB - re-capture at a lower resolution or quality: $($fatImages -join ', ')"
+}
+$fatPages = @($mapFiles | Where-Object { (& $isAtlasPage $_) -and $_.Length -gt $maxAtlasPageBytes } |
+    ForEach-Object { "{0} ({1:N1} MB)" -f $_.FullName.Substring($mapsDir.Length + 1), ($_.Length / 1MB) })
+if ($fatPages.Count -gt 0) {
+    Fail "atlas page(s) over $($maxAtlasPageBytes / 1MB) MB, the most a host stores or a client downloads per page: $($fatPages -join ', ')"
 }
 
 # GATE 3 - TOTAL, and it is a WARNING rather than a failure, which is the user's own decision on the
@@ -353,22 +371,24 @@ if ($fatImages.Count -gt 0) {
 # geometry - there is no "lower quality" setting that keeps it usable), so a hard cap here would mean a
 # release that cannot be built at all rather than one that is large. Since stage V the warning is
 # EXPECTED to fire: a map's building shells can hold up to 3,000,000 triangles and its mesh file up to
-# 48 MB, so eleven maps of 1-4 floors at ~1 MB plus 10-45 MB of mesh each is well past 80 MB. It still
-# prints on every run, with the mesh share beside the total, because the one thing that must not
-# happen is the payload growing unnoticed - and the share is what says whether it grew for the
-# expected reason: meshes most of it is stage V working; pictures most of it is something to look at.
+# 48 MB, so eleven maps of 1-4 floors at ~1 MB plus 10-45 MB of mesh each is well past 80 MB - and since
+# stage W each map adds up to eight 2-4 MB atlas pages of building textures. It still prints on every
+# run, with the 3D share beside the total, because the one thing that must not happen is the payload
+# growing unnoticed - and the share is what says whether it grew for the expected reason: meshes and
+# atlas pages most of it is stages V and W working; floor and side pictures most of it is something to
+# look at.
 $warnMapsBytes = 80MB
 $mapsBytes = ($mapFiles | Measure-Object -Property Length -Sum).Sum
-$mapsMeshBytes = (@($mapFiles | Where-Object { $_.Name -like "*-mesh.bin" }) | Measure-Object -Property Length -Sum).Sum
+$mapsMeshBytes = (@($mapFiles | Where-Object { $_.Name -like "*-mesh.bin" -or $_.Name -match "-atlas-[0-7]\.jpg$" }) | Measure-Object -Property Length -Sum).Sum
 if ($null -eq $mapsBytes) { $mapsBytes = 0 }
 if ($null -eq $mapsMeshBytes) { $mapsMeshBytes = 0 }
 $meshShare = if ($mapsBytes -gt 0) { [math]::Round(100 * $mapsMeshBytes / $mapsBytes) } else { 0 }
-$mapsSizeLine = "Map payload: $("{0:N1}" -f ($mapsBytes / 1MB)) MB in maps\ ($("{0:N1}" -f ($mapsMeshBytes / 1MB)) MB of it 3D meshes, $meshShare %)"
+$mapsSizeLine = "Map payload: $("{0:N1}" -f ($mapsBytes / 1MB)) MB in maps\ ($("{0:N1}" -f ($mapsMeshBytes / 1MB)) MB of it 3D meshes and atlas pages, $meshShare %)"
 if ($mapsBytes -gt $warnMapsBytes) {
     $meshNote = if ($meshShare -ge 50) {
-        "the 3D meshes are $meshShare % of it, which is the expected reason since stage V (up to 3 M triangles and 48 MB a map)"
+        "the 3D meshes and atlas pages are $meshShare % of it, which is the expected reason since stages V and W (up to 48 MB of mesh and 48 MB of pages a map)"
     } else {
-        "the 3D meshes are only $meshShare % of it - the PICTURES grew, which is not the expected reason; look at them before publishing"
+        "the 3D meshes and atlas pages are only $meshShare % of it - the PICTURES grew, which is not the expected reason; look at them before publishing"
     }
     Write-Host "$mapsSizeLine - over $($warnMapsBytes / 1MB) MB, and NOT a failure (the user's call: a mesh cannot be shrunk without losing the map): $meshNote." -ForegroundColor Yellow
 } else {

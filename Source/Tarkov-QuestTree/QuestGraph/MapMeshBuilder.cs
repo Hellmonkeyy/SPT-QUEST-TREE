@@ -142,6 +142,18 @@ namespace QuestTree.QuestGraph
         /// centre can easily be outside the rectangle the harvest measured.</summary>
         private const float CentreMargin = 20f;
 
+        /// <summary>The size over which an untextured Standard/Unlit renderer is a helper volume, metres.</summary>
+        private const float HiddenVolumeMetres = 10f;
+
+        /// <summary>What a helper volume's name says.</summary>
+        private static readonly string[] HelperNameMarks = { "Cube", "Portal", "Stencil", "Volume" };
+
+        /// <summary>Hidden renderers' paths logged per capture.</summary>
+        private const int HiddenSampleCount = 10;
+
+        /// <summary>LOD groups mapped a frame (screen defect 4's duplicates).</summary>
+        private const int LodGroupsPerFrame = 2_000;
+
         /// <summary>Metres outside the extent a single VERTEX may sit before its triangle is dropped.
         /// One metre: the quantisation has no room outside the extent, so a triangle reaching past it
         /// would be squashed onto the edge, and a fence stretching to the horizon is what that looks
@@ -234,6 +246,40 @@ namespace QuestTree.QuestGraph
         /// <summary>Frames a readback is waited for before the mesh is given up as unreadable. The
         /// probe measured two frames for a real one; 120 is two seconds of being wrong.</summary>
         private const int ReadbackFrameCap = 120;
+
+        /// <summary>Stage W's atlas: a repeat's largest side, the most repeats a tiled use may take per axis and
+        /// the pixels those repeats may add up to, the border each tile keeps, the flat tile's side, and the
+        /// slack a UV may have past a whole repeat before it needs another.</summary>
+        private const int AtlasTileMax = 256;
+
+        /// <summary>Seconds the capture sets aside for the atlas out of its budget (taken off the building
+        /// phase's), and the ONE cap over the whole atlas phase - measuring, packing, capturing, filling, handing
+        /// pages to the encoders and mapping the buildings (stage W review, H1). Past it the atlas is abandoned.</summary>
+        internal const double AtlasSecondsReserve = 40d;
+
+        internal const double AtlasSecondsCap = AtlasSecondsReserve;
+
+        /// <summary>The share of the atlas cap textures are captured in; past it the tiles still to capture take
+        /// their material's flat colour, leaving the rest of the cap for the flat tiles, the last pages and the
+        /// buildings' UVs.</summary>
+        private const double AtlasCaptureShare = 0.75;
+
+        /// <summary>Block rows copied into a page a step.</summary>
+        private const int AtlasRowsPerStep = 128;
+
+        /// <summary>A static-batch member's UVs are read when its own vertex range is at least 1/this of the batch.</summary>
+        private const int StaticBatchUvShare = 4;
+
+        private const int AtlasRepeatMax = 4;
+        private const int AtlasRepeatPixels = 1024;
+        /// <summary>The gutter round every atlas tile, filled with copies of the tile's edge texels. 16 px, not 2
+        /// (viewer review): the pages are loaded WITH mipmaps, and a gutter of 2^k px keeps a tile's own colour at
+        /// its edge down to mip k - 16 px holds through mip 4 (256 px pages-worth of 4096), where a 2 px gutter
+        /// bled the neighbouring tile in from mip 1.</summary>
+        internal const int AtlasPadding = 16;
+        private const int AtlasFlatPixels = 4;
+        private const int AtlasAveragePixels = 8;
+        private const float AtlasTileSlack = 0.05f;
 
         /// <summary>Building vertices quantised a frame.</summary>
         private const long QuantisePerFrameVertices = 500_000;
@@ -399,6 +445,14 @@ namespace QuestTree.QuestGraph
             /// <summary>Set by the capture's watchdog: the build stops reading buildings at once, abandons
             /// what is queued or in flight, and finishes with what it has.</summary>
             internal bool Abort;
+
+            /// <summary>Stage W: the file atlas page n is streamed to by its encoder (a worker) - the capture's
+            /// staged name plus ".part", renamed on the main thread once the encode is done. Null: no atlas.</summary>
+            internal Func<int, string> AtlasPartPath;
+
+            /// <summary>Whether the capture's culling scan worked, so "switched off" after the hold means hidden
+            /// (stage W review, M2). False keeps the old behaviour: no renderer is skipped for being off.</summary>
+            internal bool CullingKnown = true;
         }
 
         /// <summary>What a build produced. <see cref="File"/> is null when nothing usable was
@@ -422,6 +476,41 @@ namespace QuestTree.QuestGraph
 
             /// <summary>Bytes the buildings' arrays occupy before deflate.</summary>
             internal long BuildingBytes;
+
+            /// <summary>Stage W: the atlas pages whose encodes were started, in page order - still running, possibly,
+            /// when the build returns. The capture waits for them after releasing the scene and settles them
+            /// (SettleAtlas) before it serialises the mesh. Null or empty: no atlas.</summary>
+            internal List<AtlasPageJob> AtlasPages;
+        }
+
+        /// <summary>One atlas page handed to its encoder: the page, its tiles, the file it streams to, and the
+        /// encode.</summary>
+        internal sealed class AtlasPageJob
+        {
+            internal int Page;
+            internal int Tiles;
+            internal string PartPath;
+            internal Task<AtlasPng.Encoded> Encode;
+        }
+
+        /// <summary>One atlas page that finished: its file and what the meta records.</summary>
+        internal sealed class AtlasPageDone
+        {
+            internal int Page;
+            internal int Tiles;
+            internal string PartPath;
+            internal long Bytes;
+            internal string Sha256;
+        }
+
+        /// <summary>One building's atlas mapping, held beside it until the phase completes (ApplyAtlas).</summary>
+        private sealed class AtlasMapped
+        {
+            internal uint[] Indices;
+            internal ushort[] U;
+            internal ushort[] V;
+            internal List<MapMeshFile.AtlasRange> Ranges;
+            internal long Triangles;
         }
 
         // --- the build ------------------------------------------------------------------------------
@@ -493,6 +582,33 @@ namespace QuestTree.QuestGraph
                 }
 
                 Step(job, "the candidate order", () => SortCandidates(job));
+
+                // Every LOD group's levels, mapped renderer -> group, BEFORE the budget asks which group a
+                // renderer is in: a group is not always an ancestor of its renderers (a sibling holds it),
+                // and a child under a group is not always one of its levels (always drawn). The nearest-
+                // parent lookup got both wrong - the second review of Customs found 1,243 stacks of
+                // same-box buildings, 540 k triangles, many of them LOD levels of one object stored
+                // together.
+                if (Step(job, "the LOD groups", () => job.LodGroups = UnityEngine.Object.FindObjectsOfType<LODGroup>(true)))
+                {
+                    yield return null;
+
+                    var mapped = true;
+
+                    while (job.LodGroups != null && job.LodMapped < job.LodGroups.Length)
+                    {
+                        if (!Step(job, "the LOD map", () => MapLods(job)))
+                        {
+                            mapped = false;
+                            break;
+                        }
+
+                        yield return null;
+                    }
+
+                    job.LodMapComplete = mapped && job.LodGroups != null;
+                    job.LodGroups = null;
+                }
             }
 
             // --- the area budget (stage V) -------------------------------------------------------------
@@ -691,6 +807,45 @@ namespace QuestTree.QuestGraph
                 }
 
                 Step(job, "the buildings' log line", () => ReportBuildings(job));
+                Step(job, "the hidden renderers' line", () => ReportHidden(job));
+            }
+
+            // --- stage W: the atlas -----------------------------------------------------------------------
+            //
+            // After the buildings (it maps what was stored) and inside the same hold (the textures are the
+            // scene's). A few tiles a frame; each page encoded on a worker.
+
+            if (job.WantsBuildings && job.File != null && job.File.Buildings.Count > 0 && job.Request.AtlasPartPath != null &&
+                !job.Request.Abort)
+            {
+                job.FrameClock.Restart();
+                var atlasRun = BuildAtlas(job, result);
+
+                try
+                {
+                    while (true)
+                    {
+                        var more = false;
+                        if (!Step(job, "the atlas", () => more = atlasRun.MoveNext()) || !more) break;
+
+                        yield return atlasRun.Current;
+                        job.FrameClock.Restart();
+
+                        if (job.Request.Abort) break;
+                    }
+                }
+                finally
+                {
+                    (atlasRun as IDisposable)?.Dispose();
+
+                    if (job.AtlasScratch != null)
+                    {
+                        UnityEngine.Object.Destroy(job.AtlasScratch);
+                        job.AtlasScratch = null;
+                    }
+                }
+
+                Step(job, "the textures' log line", () => ReportAtlas(job));
             }
 
             // --- the y range, and everything quantised over it -------------------------------------
@@ -922,6 +1077,76 @@ namespace QuestTree.QuestGraph
             /// <summary>How far the sliced height quantisation has got.</summary>
             internal int QuantisedUpTo;
 
+            /// <summary>Stage W: the materials registry, each stored building's material-space UVs and triangle
+            /// materials until the atlas maps them, and its uses.</summary>
+            internal readonly List<AtlasMaterial> Materials = new List<AtlasMaterial>();
+
+            internal readonly Dictionary<Material, int> MaterialIds = new Dictionary<Material, int>();
+            internal readonly List<float[]> PendingUV = new List<float[]>();
+            internal readonly List<int[]> PendingTriMat = new List<int[]>();
+            internal long PendingUVBytes;
+            internal long PendingTriMatBytes;
+            internal List<AtlasUse>[] Uses;
+            internal Texture2D AtlasScratch;
+
+            internal int AtlasPageCount;
+            internal long PeakAtlasBytes;
+            internal Stopwatch AtlasClock;
+            internal AtlasMapped[] Mapped;
+            internal bool AtlasAbandoned;
+            internal bool AtlasApplied;
+            internal double AtlasSeconds;
+            internal int TransparentMaterials;
+            internal int UvElsewhere;
+            internal int FlatUses;
+            internal int TiledUses;
+            internal int TilesUnplaced;
+            internal int SeamsRelaxed;
+            internal int ClusteredTextureless;
+            internal int TilesLate;
+            internal int TexturesCaptured;
+            internal int TexturesFailed;
+            internal int TexturedBuildings;
+            internal int UntexturedBuildings;
+            internal long TexturedTriangles;
+
+            /// <summary>Renderers skipped as never seen: off or inactive, shadow-only, helper volumes.</summary>
+            internal int HiddenSkipped;
+
+            internal int ShadowOnlySkipped;
+
+            internal int VolumeSkipped;
+
+            /// <summary>The LOD map: every group's levels, and renderer -> the group that lists it.</summary>
+            internal LODGroup[] LodGroups;
+
+            internal int LodMapped;
+
+            internal readonly Dictionary<Renderer, LODGroup> LodOf = new Dictionary<Renderer, LODGroup>();
+
+            internal readonly Dictionary<LODGroup, LOD[]> LodsOf = new Dictionary<LODGroup, LOD[]>();
+
+            /// <summary>Candidates under a group that none of its levels lists (now their own building),
+            /// candidates whose group is not their ancestor, and renderers two groups list.</summary>
+            internal int LodUnmanaged;
+
+            internal int LodNotAncestor;
+
+            internal int LodShared;
+
+            /// <summary>Whether the LOD map finished; candidates that fell back to the nearest-parent rule; groups
+            /// skipped for being inactive.</summary>
+            internal bool LodMapComplete;
+
+            internal int LodFallback;
+            internal int LodInactive;
+
+            /// <summary>Paths of the first hidden renderers skipped (M2), and static-batch members whose UVs were
+            /// not read (M5).</summary>
+            internal readonly List<string> HiddenSamples = new List<string>();
+
+            internal int StaticBatchUvSkipped;
+
             /// <summary>Why decimation stopped, for the log line.</summary>
             internal string DecimationStoppedWhy;
 
@@ -1057,6 +1282,14 @@ namespace QuestTree.QuestGraph
 
             internal int SubEnd;
 
+            /// <summary>The TexCoord0 attribute's stream, offset, format and dimension (stage W), or a stream of
+            /// -1 when the mesh has none. Decoded on the GPU path only from the position's own stream.</summary>
+            internal int UvStream = -1;
+
+            internal int UvOffset;
+            internal int UvDimension;
+            internal VertexAttributeFormat UvFormat;
+
             /// <summary>The transform the mesh's vertices are believed to be in. The renderer's own
             /// localToWorldMatrix normally; for a static batch, whose combined mesh Unity builds in the
             /// space of the batch's root (world space when there is none), the identity - the root is
@@ -1119,6 +1352,12 @@ namespace QuestTree.QuestGraph
             internal int[] T;
             internal bool Mirrored;
 
+            /// <summary>Stage W: u, v per vertex in its material's texture space (the material's scale and
+            /// offset applied), and each triangle's material id - both null when nothing was textured.</summary>
+            internal float[] UV;
+
+            internal int[] TriMat;
+
             internal int Triangles => T == null ? 0 : T.Length / 3;
         }
 
@@ -1132,6 +1371,23 @@ namespace QuestTree.QuestGraph
             // the readable path
             internal Vector3[] Local;
             internal List<int[]> Parts;
+
+            /// <summary>Each part's slot (readable path), each GPU range's slot (SubSlot), and per slot the
+            /// material's registry id and its texture's scale and offset (su, sv, ou, ov) - stage W.</summary>
+            internal List<int> PartSlot;
+
+            internal int[] SubSlot;
+            internal int[] SlotMaterial;
+            internal float[] SlotST;
+
+            /// <summary>TexCoord0 per vertex (readable path), or null.</summary>
+            internal Vector2[] LocalUV;
+
+            /// <summary>The GPU path's TexCoord0 in the position's stream: offset and element size (4 or 2), or
+            /// a size of 0 for none.</summary>
+            internal int UvOffset;
+
+            internal int UvSize;
 
             // the GPU path
             internal bool FromGpu;
@@ -1165,7 +1421,8 @@ namespace QuestTree.QuestGraph
             /// <summary>The arrays out of Unity, bytes.</summary>
             internal long Bytes()
             {
-                var bytes = (Local?.Length ?? 0) * 12L + (VertexBytes?.Length ?? 0) + (IndexBytes?.Length ?? 0);
+                var bytes = (Local?.Length ?? 0) * 12L + (LocalUV?.Length ?? 0) * 8L + (VertexBytes?.Length ?? 0) +
+                            (IndexBytes?.Length ?? 0);
                 if (Parts != null) foreach (var part in Parts) bytes += part.Length * 4L;
                 return bytes;
             }
@@ -1183,6 +1440,7 @@ namespace QuestTree.QuestGraph
             internal bool Implausible;
             internal bool TimedOut;
             internal bool OverLimit;
+            internal bool SeamsRelaxed;
             internal long SourceTriangles;
             internal int Dropped;
             internal long DecodedBytes;
@@ -1201,9 +1459,18 @@ namespace QuestTree.QuestGraph
             internal readonly List<int> T = new List<int>();
             internal int[] Remap = new int[0];
 
+            /// <summary>Stage W: the slot of each triangle in Indices, the material a kept vertex was kept for,
+            /// and the kept vertices' UVs and triangles' materials.</summary>
+            internal readonly List<int> TriSlot = new List<int>();
+
+            internal int[] RemapMat = new int[0];
+            internal readonly List<float> UV = new List<float>();
+            internal readonly List<int> TriMat = new List<int>();
+
             /// <summary>What this lane holds, bytes: the decimator's arrays and the lists' capacities.</summary>
             internal long Bytes() =>
-                Decimator.Bytes() + (Indices.Capacity + P.Capacity + T.Capacity + (long)Remap.Length) * 4L;
+                Decimator.Bytes() + (Indices.Capacity + P.Capacity + T.Capacity + (long)Remap.Length +
+                                     TriSlot.Capacity + RemapMat.Length + UV.Capacity + TriMat.Capacity) * 4L;
         }
 
         /// <summary>A building on a worker: the task, what it was given, and the limit pending for it in the
@@ -1851,6 +2118,8 @@ namespace QuestTree.QuestGraph
                 if ((mask & (1 << layer)) == 0) continue;
                 if ((notBuilding & (1 << layer)) != 0) continue;
 
+                if (Invisible(job, renderer)) continue;
+
                 var bounds = renderer.bounds;
                 var size = bounds.size;
 
@@ -1859,6 +2128,8 @@ namespace QuestTree.QuestGraph
 
                 if (verdict == SizeOversized) job.Oversized++;
                 if (verdict != SizeOk) continue;
+
+                if (HiddenVolume(job, renderer, size)) continue;
 
                 var centre = bounds.center;
                 if (!IsFinite(centre.x) || !IsFinite(centre.y) || !IsFinite(centre.z)) continue;
@@ -1882,6 +2153,104 @@ namespace QuestTree.QuestGraph
             }
 
             if (job.Scanned >= job.RendererCount) job.Renderers = null;
+        }
+
+        /// <summary>
+        /// Whether a renderer is something the player never sees (screen defect 1, 2026-09-24): switched
+        /// off, on an inactive object, told not to render, or drawing only into the shadow map. The scan
+        /// runs INSIDE the scene hold, and the hold is the only thing that switches renderers on - every
+        /// component a DisablerCullingObject lists is on by now - so a renderer still off here was off
+        /// before the hold and is on no culling list: a hidden volume, not a building. The probe's cases:
+        /// SBG_Custom_Portals/Tamozhnya/ambient_portal (N)/Cube and MapGeneration/Cube (1) (Standard,
+        /// enabled no, 17-35 m boxes - stored as 12-triangle blank boxes; 208 such boxes were in the
+        /// 2026-09-24 Customs file), and tamozhnya/shadow (ShadowsOnly - a second roof on top of the
+        /// real one). Counted.
+        /// </summary>
+        /// <param name="job">The build, for the counts.</param>
+        /// <param name="renderer">The renderer.</param>
+        private static bool Invisible(Job job, Renderer renderer)
+        {
+            if (job.Request.CullingKnown &&
+                (!renderer.enabled || renderer.forceRenderingOff || !renderer.gameObject.activeInHierarchy))
+            {
+                job.HiddenSkipped++;
+
+                // A handful of paths, once a capture: what a room-culling system (Streets, Labs) switches off
+                // would show here as real geometry.
+                if (job.HiddenSamples.Count < HiddenSampleCount)
+                    job.HiddenSamples.Add(HierarchyPath(renderer.transform));
+
+                return true;
+            }
+
+            if (renderer.shadowCastingMode == ShadowCastingMode.ShadowsOnly)
+            {
+                job.ShadowOnlySkipped++;
+                return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>Whether a renderer is a helper volume the game draws nothing useful with: every
+        /// material a plain Standard or Unlit one with no main texture, and bounds over
+        /// <see cref="HiddenVolumeMetres"/> - portal cubes, stencils, trigger shells that happen to be
+        /// switched on. Asked only of renderers that passed every cheaper test, because sharedMaterials
+        /// allocates.</summary>
+        /// <param name="job">The build, for the count.</param>
+        /// <param name="renderer">The renderer.</param>
+        /// <param name="size">Its world bounds' size.</param>
+        private static bool HiddenVolume(Job job, Renderer renderer, Vector3 size)
+        {
+            if (Math.Max(size.x, Math.Max(size.y, size.z)) <= HiddenVolumeMetres) return false;
+
+            var materials = renderer.sharedMaterials;
+            if (materials == null || materials.Length == 0) return false;
+
+            var coloured = false;
+
+            foreach (var material in materials)
+            {
+                if (material == null) continue;
+
+                var shader = material.shader != null ? material.shader.name : "";
+                var plain = shader.StartsWith("Standard", StringComparison.Ordinal) ||
+                            shader.StartsWith("Unlit/", StringComparison.Ordinal);
+
+                if (!plain) return false;
+                if (material.HasProperty("_MainTex") && material.mainTexture != null) return false;
+
+                if (material.HasProperty("_Color"))
+                {
+                    var c = material.color;
+                    if (c.r < 0.95f || c.g < 0.95f || c.b < 0.95f) coloured = true;
+                }
+            }
+
+            // Both signals (stage W review, LOW): an untextured plain box painted a real colour is geometry
+            // someone meant to be seen, unless its name says it is a helper.
+            if (coloured && !HelperName(renderer.transform)) return false;
+
+            job.VolumeSkipped++;
+            return true;
+        }
+
+        /// <summary>Whether a renderer's name or one of its three nearest parents' names says it is a helper
+        /// volume: Cube, Portal, Stencil or Volume.</summary>
+        /// <param name="transform">The renderer's transform.</param>
+        private static bool HelperName(Transform transform)
+        {
+            var walk = transform;
+
+            for (var depth = 0; walk != null && depth < 4; depth++, walk = walk.parent)
+            {
+                var name = walk.name ?? "";
+
+                foreach (var mark in HelperNameMarks)
+                    if (name.IndexOf(mark, StringComparison.OrdinalIgnoreCase) >= 0) return true;
+            }
+
+            return false;
         }
 
         /// <summary>
@@ -1950,9 +2319,25 @@ namespace QuestTree.QuestGraph
                 candidate.Format = mesh.GetVertexAttributeFormat(VertexAttribute.Position);
                 candidate.Dimension = mesh.GetVertexAttributeDimension(VertexAttribute.Position);
                 candidate.Stride = candidate.Stream >= 0 ? mesh.GetVertexBufferStride(candidate.Stream) : 0;
+                UvLayout(candidate);
 
                 Placement(candidate);
             }
+        }
+
+        /// <summary>Where the mesh keeps TexCoord0, if it has one (stage W).</summary>
+        /// <param name="candidate">The candidate to fill in.</param>
+        private static void UvLayout(Candidate candidate)
+        {
+            var mesh = candidate.Mesh;
+            candidate.UvStream = -1;
+
+            if (!mesh.HasVertexAttribute(VertexAttribute.TexCoord0)) return;
+
+            candidate.UvStream = mesh.GetVertexAttributeStream(VertexAttribute.TexCoord0);
+            candidate.UvOffset = mesh.GetVertexAttributeOffset(VertexAttribute.TexCoord0);
+            candidate.UvFormat = mesh.GetVertexAttributeFormat(VertexAttribute.TexCoord0);
+            candidate.UvDimension = mesh.GetVertexAttributeDimension(VertexAttribute.TexCoord0);
         }
 
         /// <summary>Which submeshes are this renderer's and what space their vertices are in - the
@@ -2074,8 +2459,8 @@ namespace QuestTree.QuestGraph
 
             state = new GroupState();
 
-            // GetLODs once per GROUP - it allocates the whole LOD array every call.
-            var lods = group.GetLODs();
+            // The levels MapLods read - GetLODs allocates the whole LOD array every call.
+            if (!job.LodsOf.TryGetValue(group, out var lods)) lods = group.GetLODs();
             var coarse = ChooseLevel(job, lods);
 
             if (coarse >= 0 && lods[coarse].renderers != null)
@@ -2153,6 +2538,58 @@ namespace QuestTree.QuestGraph
             return triangles;
         }
 
+        /// <summary>One frame's worth of the LOD map: each group's levels read once, and every renderer
+        /// they list mapped to the group (the first group wins; a renderer two groups list is counted).</summary>
+        /// <param name="job">The build.</param>
+        private static void MapLods(Job job)
+        {
+            var groups = job.LodGroups;
+            var end = Math.Min(groups.Length, job.LodMapped + LodGroupsPerFrame);
+
+            for (var i = job.LodMapped; i < end; i++)
+            {
+                job.LodMapped = i + 1;
+
+                var group = groups[i];
+                if (group == null) continue;
+
+                // A group on an inactive object culls nothing (stage W review, M3).
+                if (!group.gameObject.activeInHierarchy)
+                {
+                    job.LodInactive++;
+                    continue;
+                }
+
+                var lods = group.GetLODs();
+                job.LodsOf[group] = lods;
+
+                if (lods == null) continue;
+
+                foreach (var lod in lods)
+                {
+                    if (lod.renderers == null) continue;
+
+                    foreach (var renderer in lod.renderers)
+                    {
+                        if (renderer == null) continue;
+
+                        if (job.LodOf.TryGetValue(renderer, out var other))
+                        {
+                            if (other == group) continue;
+
+                            // Listed by two groups: the one that is its ancestor, if either is.
+                            job.LodShared++;
+                            if (!renderer.transform.IsChildOf(other.transform) && renderer.transform.IsChildOf(group.transform))
+                                job.LodOf[renderer] = group;
+                            continue;
+                        }
+
+                        job.LodOf[renderer] = group;
+                    }
+                }
+            }
+        }
+
         /// <summary>One frame's worth of the budget pass: each candidate's group state, its source size
         /// (its own submeshes - a static batch's share), and its footprint. Each candidate in its OWN
         /// guard: a renderer that throws (destroyed under us, a mesh that will not answer) costs that
@@ -2171,10 +2608,24 @@ namespace QuestTree.QuestGraph
 
                 try
                 {
-                    // includeInactive: the hold has just switched culled objects on, and a group can still sit
-                    // on an inactive parent - the default overload would answer "no group" and let every level
-                    // of one building through.
-                    candidate.Group = candidate.Renderer.GetComponentInParent<LODGroup>(true);
+                    // The group whose LEVELS list this renderer (MapLods), not the nearest parent with a
+                    // group on it. A renderer under a group that none of its levels lists is always drawn,
+                    // so it is its own building; one listed by a group that is not its ancestor belongs to
+                    // that group. Both are counted, against the old nearest-parent answer.
+                    job.LodOf.TryGetValue(candidate.Renderer, out var group);
+                    var parent = candidate.Renderer.GetComponentInParent<LODGroup>(true);
+
+                    // The map is trusted only when it finished and found something; otherwise the nearest-parent
+                    // rule, as before (stage W review, M3).
+                    if (!job.LodMapComplete || (job.LodsOf.Count == 0 && parent != null))
+                    {
+                        group = parent;
+                        job.LodFallback++;
+                    }
+                    else if (group == null && parent != null) job.LodUnmanaged++;
+                    else if (group != null && group != parent) job.LodNotAncestor++;
+
+                    candidate.Group = group;
                     if (candidate.Group != null) StateOf(job, candidate.Group);
 
                     candidate.SourceTriangles = SubmeshTriangles(candidate);
@@ -2317,6 +2768,7 @@ namespace QuestTree.QuestGraph
             var layer = go.layer;
             if ((job.Request.RenderMask & (1 << layer)) == 0) return null;
             if ((NotBuildingMask() & (1 << layer)) != 0) return null;
+            if (Invisible(job, renderer)) return null;
 
             var bounds = renderer.bounds;
             var size = bounds.size;
@@ -2324,6 +2776,8 @@ namespace QuestTree.QuestGraph
             if (SizeVerdict(size.x, size.y, size.z, job.Request.MaxX - job.Request.MinX,
                     job.Request.MaxZ - job.Request.MinZ) != SizeOk)
                 return null;
+
+            if (HiddenVolume(job, renderer, size)) return null;
 
             var centre = bounds.center;
             if (!IsFinite(centre.x) || !IsFinite(centre.y) || !IsFinite(centre.z)) return null;
@@ -2350,6 +2804,7 @@ namespace QuestTree.QuestGraph
             };
 
             candidate.Stride = candidate.Stream >= 0 ? mesh.GetVertexBufferStride(candidate.Stream) : 0;
+            UvLayout(candidate);
             Placement(candidate);
             candidate.SourceTriangles = SubmeshTriangles(candidate);
 
@@ -2546,11 +3001,15 @@ namespace QuestTree.QuestGraph
                 Bytes = (world.P.Length + world.T.Length) * 4L + world.Triangles * WorkerBytesPerTriangle,
                 Task = Task.Run(() =>
                 {
-                    var result = MeshDecimator.Cluster(world.P, world.T, limit, ClusterMs);
+                    var result = MeshDecimator.Cluster(world.P, world.T, limit, ClusterMs, world.UV, VertexMaterials(world));
                     var outcome = new Outcome { SourceTriangles = world.Triangles, TimedOut = result.TimedOut };
 
                     if (!result.TimedOut && result.Triangles != null && result.Triangles.Length >= 3)
-                        outcome.Mesh = new WorldMesh { P = result.Positions, T = result.Triangles, Mirrored = world.Mirrored };
+                        outcome.Mesh = new WorldMesh
+                        {
+                            P = result.Positions, T = result.Triangles, Mirrored = world.Mirrored,
+                            UV = result.UV, TriMat = result.UV != null ? result.TriangleMaterial : null,
+                        };
 
                     return outcome;
                 }),
@@ -2621,7 +3080,10 @@ namespace QuestTree.QuestGraph
                 if (flight.Clustering)
                 {
                     if (outcome?.Mesh != null && outcome.Mesh.Triangles <= limit && Store(outcome.Mesh) == Stored)
+                    {
                         job.ClusteredStored++;
+                        if (outcome.Mesh.UV == null) job.ClusteredTextureless++;
+                    }
                     else if (outcome != null && outcome.TimedOut) job.ClusterTimedOut++;
                     else job.Unstored++;
 
@@ -2643,6 +3105,7 @@ namespace QuestTree.QuestGraph
                     }
 
                     if (outcome.Implausible) job.Implausible++;
+                    if (outcome.SeamsRelaxed) job.SeamsRelaxed++;
                     if (outcome.TimedOut) job.TimedOut++;
                     if (outcome.OverLimit) job.OverLimit++;
                 }
@@ -2747,6 +3210,7 @@ namespace QuestTree.QuestGraph
             if (local == null || local.Length < 3) yield break;
 
             var parts = new List<int[]>();
+            var partSlots = new List<int>();
 
             for (var s = candidate.SubFirst; s < candidate.SubEnd; s++)
             {
@@ -2765,20 +3229,83 @@ namespace QuestTree.QuestGraph
                     if (mesh.GetTopology(sub) != MeshTopology.Triangles) return;
 
                     var indices = mesh.GetTriangles(sub);
-                    if (indices != null && indices.Length >= 3) parts.Add(indices);
+                    if (indices == null || indices.Length < 3) return;
+
+                    parts.Add(indices);
+                    partSlots.Add(sub - candidate.SubFirst);
                 });
                 job.PeakReadableMs = Math.Max(job.PeakReadableMs, clock.Elapsed.TotalMilliseconds);
             }
 
             if (parts.Count == 0) yield break;
 
+            // TexCoord0, when the mesh has one per vertex (stage W).
+            Vector2[] uvs = null;
+            Step(job, "a readable building's UVs", () =>
+            {
+                if (candidate.UvStream < 0) return;
+
+                // A static-batch member's mesh is the whole batch: its UV array is read only when this member's
+                // own vertex range is a real share of it (stage W review, M5).
+                if (candidate.Renderer.isPartOfStaticBatch)
+                {
+                    int lo = int.MaxValue, hi = -1;
+                    foreach (var part in parts)
+                        foreach (var index in part)
+                        {
+                            if (index < lo) lo = index;
+                            if (index > hi) hi = index;
+                        }
+
+                    if (hi < lo || (long)(hi - lo + 1) * StaticBatchUvShare < local.Length)
+                    {
+                        job.StaticBatchUvSkipped++;
+                        return;
+                    }
+                }
+
+                var read = mesh.uv;
+                if (read != null && read.Length == local.Length) uvs = read;
+            });
+
             Step(job, "a readable building's placement", () =>
             {
                 var source = NewSource(job, candidate);
                 source.Local = local;
                 source.Parts = parts;
+                source.PartSlot = partSlots;
+                source.LocalUV = uvs;
+                Slots(job, candidate, source);
                 job.Captured = source;
             });
+        }
+
+        /// <summary>Stage W: each of the candidate's submesh slots' material, registered, with its texture's
+        /// scale and offset. Slot j is submesh SubFirst + j and sharedMaterials[j] (the last material repeats,
+        /// as Unity draws it).</summary>
+        /// <param name="job">The build.</param>
+        /// <param name="candidate">The candidate.</param>
+        /// <param name="source">The source to fill.</param>
+        private static void Slots(Job job, Candidate candidate, Source source)
+        {
+            var count = Math.Max(0, candidate.SubEnd - candidate.SubFirst);
+            var materials = candidate.Renderer.sharedMaterials;
+
+            source.SlotMaterial = new int[count];
+            source.SlotST = new float[count * 4];
+
+            for (var j = 0; j < count; j++)
+            {
+                var material = materials == null || materials.Length == 0 ? null : materials[Math.Min(j, materials.Length - 1)];
+                var id = MaterialId(job, material);
+                source.SlotMaterial[j] = id;
+
+                var info = id >= 0 ? job.Materials[id] : null;
+                source.SlotST[j * 4] = info?.ScaleU ?? 1f;
+                source.SlotST[j * 4 + 1] = info?.ScaleV ?? 1f;
+                source.SlotST[j * 4 + 2] = info?.OffsetU ?? 0f;
+                source.SlotST[j * 4 + 3] = info?.OffsetV ?? 0f;
+            }
         }
 
         /// <summary>A source with everything the worker needs that only the main thread may read: the
@@ -2836,6 +3363,7 @@ namespace QuestTree.QuestGraph
             var starts = new List<int>();
             var counts = new List<int>();
             var bases = new List<int>();
+            var slots = new List<int>();
 
             for (var s = candidate.SubFirst; s < candidate.SubEnd; s++)
             {
@@ -2845,6 +3373,7 @@ namespace QuestTree.QuestGraph
                 starts.Add(sub.indexStart);
                 counts.Add(sub.indexCount);
                 bases.Add(sub.baseVertex);
+                slots.Add(s - candidate.SubFirst);
             }
 
             var source = NewSource(job, candidate);
@@ -2861,6 +3390,21 @@ namespace QuestTree.QuestGraph
             source.SubStart = starts.ToArray();
             source.SubCount = counts.ToArray();
             source.SubBase = bases.ToArray();
+            source.SubSlot = slots.ToArray();
+            Slots(job, candidate, source);
+
+            // TexCoord0 from the SAME buffer the positions came from - a UV in another stream would be a
+            // second readback, and the building then simply has no texture (counted).
+            if (candidate.UvStream == candidate.Stream && candidate.UvDimension >= 2 &&
+                (candidate.UvFormat == VertexAttributeFormat.Float32 || candidate.UvFormat == VertexAttributeFormat.Float16))
+            {
+                source.UvOffset = candidate.UvOffset;
+                source.UvSize = candidate.UvFormat == VertexAttributeFormat.Float32 ? 4 : 2;
+            }
+            else if (candidate.UvStream >= 0)
+            {
+                job.UvElsewhere++;
+            }
 
             return source;
         }
@@ -2880,32 +3424,44 @@ namespace QuestTree.QuestGraph
             var outcome = new Outcome { SourceTriangles = source.SourceTriangles };
             var triangles = lane.Indices;
             triangles.Clear();
+            lane.TriSlot.Clear();
 
             Vector3[] local;
+            Vector2[] uv;
 
             if (source.Local != null)
             {
                 local = source.Local;
-                foreach (var part in source.Parts) triangles.AddRange(part);
+                uv = source.LocalUV;
+
+                for (var p = 0; p < source.Parts.Count; p++)
+                {
+                    var part = source.Parts[p];
+                    triangles.AddRange(part);
+
+                    var slot = source.PartSlot != null && p < source.PartSlot.Count ? source.PartSlot[p] : -1;
+                    for (var t = 0; t + 2 < part.Length; t += 3) lane.TriSlot.Add(slot);
+                }
             }
-            else if (!Decode(source, triangles, out local))
+            else if (!Decode(source, triangles, lane.TriSlot, out local, out uv))
             {
                 outcome.Undecodable = true;
                 return outcome;
             }
             else
             {
-                outcome.DecodedBytes = local.Length * 12L;
+                outcome.DecodedBytes = local.Length * 12L + (uv?.Length ?? 0) * 8L;
             }
 
             // The arrays out of Unity are not needed past this point; the source object lives until the
             // flight is applied, so they are let go of here.
             source.Local = null;
             source.Parts = null;
+            source.LocalUV = null;
             source.VertexBytes = null;
             source.IndexBytes = null;
 
-            var world = Place(source, local, triangles, lane, outcome);
+            var world = Place(source, local, uv, triangles, lane, outcome);
             if (world == null) return outcome;
 
             outcome.SourceTriangles = world.Triangles;
@@ -2918,8 +3474,10 @@ namespace QuestTree.QuestGraph
 
             if (source.MayDecimate && world.Triangles <= MaxDecimatedSource)
             {
-                var result = MeshDecimator.DecimateWith(world.P, world.T, source.Target, source.Limit,
-                    DecimateBuildingMs, true, lane.Decimator);
+                var result = MeshDecimator.DecimateTextured(world.P, world.T, source.Target, source.Limit,
+                    DecimateBuildingMs, lane.Decimator, world.UV, VertexMaterials(world));
+
+                if (result.SeamsRelaxed) outcome.SeamsRelaxed = true;
 
                 outcome.WorkerMs = result.Milliseconds;
                 outcome.WorkspaceBytes = result.WorkspaceBytes;
@@ -2929,7 +3487,11 @@ namespace QuestTree.QuestGraph
                 if (!result.TimedOut && result.Triangles != null && result.Triangles.Length >= 3 &&
                     result.Triangles.Length / 3 <= source.Limit)
                 {
-                    outcome.Mesh = new WorldMesh { P = result.Positions, T = result.Triangles, Mirrored = world.Mirrored };
+                    outcome.Mesh = new WorldMesh
+                    {
+                        P = result.Positions, T = result.Triangles, Mirrored = world.Mirrored,
+                        UV = world.UV != null ? result.UV : null, TriMat = world.UV != null ? result.TriangleMaterial : null,
+                    };
                     outcome.Decimated = true;
                     return outcome;
                 }
@@ -2947,10 +3509,14 @@ namespace QuestTree.QuestGraph
         /// count needs, or no triangles at all. Worker-safe: plain arrays and numbers only.</summary>
         /// <param name="source">The source.</param>
         /// <param name="triangles">Filled with the indices, base vertex applied.</param>
+        /// <param name="triSlot">Filled with each triangle's slot (stage W).</param>
         /// <param name="local">The decoded positions.</param>
-        private static bool Decode(Source source, List<int> triangles, out Vector3[] local)
+        /// <param name="uv">The decoded TexCoord0, or null when the layout has none in this stream.</param>
+        private static bool Decode(Source source, List<int> triangles, List<int> triSlot, out Vector3[] local,
+            out Vector2[] uv)
         {
             local = null;
+            uv = null;
 
             var stride = source.Stride;
             var count = source.VertexCount;
@@ -2966,9 +3532,22 @@ namespace QuestTree.QuestGraph
 
             local = new Vector3[count];
 
+            // TexCoord0 from the same bytes (stage W), when the layout says it is there and fits.
+            var uvSize = source.UvSize;
+            if (uvSize > 0 && (long)source.UvOffset + (long)(count - 1) * stride + 2L * uvSize <= vertexBytes.Length)
+                uv = new Vector2[count];
+
             for (var v = 0; v < count; v++)
             {
                 var at = source.Offset + v * stride;
+
+                if (uv != null)
+                {
+                    var ut = source.UvOffset + v * stride;
+                    uv[v] = uvSize == 4
+                        ? new Vector2(BitConverter.ToSingle(vertexBytes, ut), BitConverter.ToSingle(vertexBytes, ut + 4))
+                        : new Vector2(Half(BitConverter.ToUInt16(vertexBytes, ut)), Half(BitConverter.ToUInt16(vertexBytes, ut + 2)));
+                }
 
                 local[v] = size == 4
                     ? new Vector3(
@@ -2990,6 +3569,9 @@ namespace QuestTree.QuestGraph
 
                 if (start < 0 || indices < 0) continue;
                 if ((start + indices) * indexSize > indexBytes.Length) continue;
+
+                var slot = source.SubSlot != null && s < source.SubSlot.Length ? source.SubSlot[s] : -1;
+                for (var i = 0L; i + 2 < indices; i += 3) triSlot.Add(slot);
 
                 for (var i = 0L; i < indices; i++)
                 {
@@ -3046,10 +3628,12 @@ namespace QuestTree.QuestGraph
         /// </summary>
         /// <param name="source">The source, for its transforms, bounds and extent.</param>
         /// <param name="local">Its vertex positions, in the mesh's own space.</param>
+        /// <param name="uv">Its TexCoord0 per vertex, or null (stage W).</param>
         /// <param name="triangles">Its triangle indices into <paramref name="local"/>.</param>
         /// <param name="lane">The worker's reused lists.</param>
         /// <param name="outcome">Where the implausible flag and the dropped count go.</param>
-        private static WorldMesh Place(Source source, Vector3[] local, List<int> triangles, Lane lane, Outcome outcome)
+        private static WorldMesh Place(Source source, Vector3[] local, Vector2[] uv, List<int> triangles, Lane lane,
+            Outcome outcome)
         {
             if (local == null || triangles == null || triangles.Count < 3) return null;
 
@@ -3063,11 +3647,17 @@ namespace QuestTree.QuestGraph
 
             lane.P.Clear();
             lane.T.Clear();
+            lane.UV.Clear();
+            lane.TriMat.Clear();
 
             if (lane.Remap.Length < local.Length) lane.Remap = new int[local.Length];
+            if (lane.RemapMat.Length < local.Length) lane.RemapMat = new int[local.Length];
 
             var map = lane.Remap;
             for (var i = 0; i < local.Length; i++) map[i] = -1;
+
+            // Stage W: textured only when there are UVs for every vertex; a triangle's material is its slot's.
+            var textured = uv != null && uv.Length >= local.Length && source.SlotMaterial != null;
 
             var dropped = 0;
 
@@ -3093,26 +3683,58 @@ namespace QuestTree.QuestGraph
                     continue;
                 }
 
-                lane.T.Add(Keep(lane, map, a, pa));
-                lane.T.Add(Keep(lane, map, b, pb));
-                lane.T.Add(Keep(lane, map, c, pc));
+                var slot = t / 3 < lane.TriSlot.Count ? lane.TriSlot[t / 3] : -1;
+                var material = textured && slot >= 0 && slot < source.SlotMaterial.Length ? source.SlotMaterial[slot] : -1;
+
+                lane.T.Add(Keep(lane, map, a, pa, uv, material, source, slot));
+                lane.T.Add(Keep(lane, map, b, pb, uv, material, source, slot));
+                lane.T.Add(Keep(lane, map, c, pc, uv, material, source, slot));
+                lane.TriMat.Add(material);
             }
 
             outcome.Dropped += dropped;
 
             if (lane.T.Count < 3) return null;
 
-            return new WorldMesh { P = lane.P.ToArray(), T = lane.T.ToArray(), Mirrored = mirrored };
+            return new WorldMesh
+            {
+                P = lane.P.ToArray(), T = lane.T.ToArray(), Mirrored = mirrored,
+                UV = textured ? lane.UV.ToArray() : null, TriMat = textured ? lane.TriMat.ToArray() : null,
+            };
         }
 
-        /// <summary>One vertex kept in the world-space source, or the index it already has.</summary>
+        /// <summary>Each vertex's material, from the triangles that use it - a vertex is kept once per
+        /// material (Keep), so every triangle using it agrees. Null when the mesh is untextured.</summary>
+        /// <param name="world">The mesh.</param>
+        private static int[] VertexMaterials(WorldMesh world)
+        {
+            if (world.UV == null || world.TriMat == null) return null;
+
+            var materials = new int[world.P.Length / 3];
+            for (var i = 0; i < materials.Length; i++) materials[i] = -1;
+
+            for (var t = 0; t < world.TriMat.Length; t++)
+                for (var k = 0; k < 3; k++)
+                    materials[world.T[t * 3 + k]] = world.TriMat[t];
+
+            return materials;
+        }
+
+        /// <summary>One vertex kept in the world-space source, or the index it already has - once per
+        /// MATERIAL (stage W): a vertex two materials share becomes two, because its UV is transformed by each
+        /// material's own scale and offset and the atlas gives each material its own tile.</summary>
         /// <param name="lane">The worker's lists.</param>
         /// <param name="map">Local index to kept index, -1 for a vertex not yet kept.</param>
         /// <param name="index">The local vertex index.</param>
         /// <param name="world">Its world position.</param>
-        private static int Keep(Lane lane, int[] map, int index, Vector3 world)
+        /// <param name="uv">The local UVs, or null.</param>
+        /// <param name="material">The triangle's material id, or -1.</param>
+        /// <param name="source">The source, for the slot's texture scale and offset.</param>
+        /// <param name="slot">The triangle's slot.</param>
+        private static int Keep(Lane lane, int[] map, int index, Vector3 world, Vector2[] uv, int material,
+            Source source, int slot)
         {
-            if (map[index] >= 0) return map[index];
+            if (map[index] >= 0 && lane.RemapMat[index] == material) return map[index];
 
             var at = lane.P.Count / 3;
 
@@ -3120,7 +3742,22 @@ namespace QuestTree.QuestGraph
             lane.P.Add(world.y);
             lane.P.Add(world.z);
 
+            if (uv != null)
+            {
+                float u = uv[index].x, v = uv[index].y;
+
+                if (slot >= 0 && source.SlotST != null && slot * 4 + 3 < source.SlotST.Length)
+                {
+                    u = u * source.SlotST[slot * 4] + source.SlotST[slot * 4 + 2];
+                    v = v * source.SlotST[slot * 4 + 1] + source.SlotST[slot * 4 + 3];
+                }
+
+                lane.UV.Add(IsFinite(u) ? u : 0f);
+                lane.UV.Add(IsFinite(v) ? v : 0f);
+            }
+
             map[index] = at;
+            lane.RemapMat[index] = material;
 
             return at;
         }
@@ -3463,6 +4100,18 @@ namespace QuestTree.QuestGraph
             job.PendingY.Add(heights);
             job.Centroids.Add((float)(heightSum / vertices));
 
+            // Stage W: the material-space UVs and triangle materials wait for the atlas (BuildAtlas).
+            var textured = world.UV != null && world.TriMat != null && world.UV.Length == vertices * 2 &&
+                           world.TriMat.Length == kept;
+            job.PendingUV.Add(textured ? world.UV : null);
+            job.PendingTriMat.Add(textured ? world.TriMat : null);
+
+            if (textured)
+            {
+                job.PendingUVBytes += world.UV.Length * 4L;
+                job.PendingTriMatBytes += world.TriMat.Length * 4L;
+            }
+
             job.Kept++;
             job.Triangles += kept;
             job.Vertices += vertices;
@@ -3472,6 +4121,888 @@ namespace QuestTree.QuestGraph
 
             return Stored;
         }
+
+        // --- stage W: the atlas ------------------------------------------------------------------------
+
+        /// <summary>
+        /// A material stored buildings are drawn with, as the atlas sees it (stage W): its main texture, tint
+        /// and tiling, how many repeats its uses need, and where its tiles landed. Registered on the main
+        /// thread the first time a building with it is read (MaterialId).
+        /// </summary>
+        private sealed class AtlasMaterial
+        {
+            internal Material Material;
+            internal Texture Texture;
+            internal Color Tint = Color.white;
+            internal float ScaleU = 1f;
+            internal float ScaleV = 1f;
+            internal float OffsetU;
+            internal float OffsetV;
+
+            /// <summary>Repeats of the texture its textured uses need, each axis 1..AtlasRepeatMax.</summary>
+            internal int RepeatU = 1;
+
+            internal int RepeatV = 1;
+
+            /// <summary>Whether any use is textured / flat (a span over the repeat cap, or no texture).</summary>
+            internal bool Textured;
+
+            internal bool Flat;
+
+            /// <summary>The textured block (all repeats): page, inner origin and one repeat's size in pixels;
+            /// Page -1 when it has none or it did not fit.</summary>
+            internal int Page = -1;
+
+            internal int X;
+            internal int Y;
+            internal int TileW;
+            internal int TileH;
+
+            /// <summary>The flat-colour tile: page and inner origin (AtlasFlatPixels square).</summary>
+            internal int FlatPage = -1;
+
+            internal int FlatX;
+            internal int FlatY;
+
+            /// <summary>Whether the texture was captured, and the material's average colour, tint applied (the
+            /// tint alone without a texture) - measured before packing, see Average.</summary>
+            internal bool Captured;
+
+            internal byte AvgR = 255;
+            internal byte AvgG = 255;
+            internal byte AvgB = 255;
+        }
+
+        /// <summary>One building's use of one material: its UV bounds and the integer shift and flat verdict
+        /// the atlas decided for it.</summary>
+        private sealed class AtlasUse
+        {
+            internal int Material;
+            internal float MinU = float.PositiveInfinity;
+            internal float MinV = float.PositiveInfinity;
+            internal float MaxU = float.NegativeInfinity;
+            internal float MaxV = float.NegativeInfinity;
+            internal float ShiftU;
+            internal float ShiftV;
+            internal bool Flat;
+        }
+
+        /// <summary>The shader properties a main texture is looked for under, in order.</summary>
+        private static readonly string[] TextureProperties = { "_MainTex", "_BaseMap", "_BaseColorMap" };
+
+        /// <summary>The shader properties a tint is looked for under, in order.</summary>
+        private static readonly string[] TintProperties = { "_Color", "_BaseColor" };
+
+        /// <summary>A material's registry id, registering it the first time: -1 for none, and for a
+        /// transparent or alpha-tested one (render queue 2450 and up) - those keep the stage U/V fallback, since
+        /// the atlas is drawn opaque and a leaf card or a window would come out a solid square.</summary>
+        /// <param name="job">The build.</param>
+        /// <param name="material">The material.</param>
+        private static int MaterialId(Job job, Material material)
+        {
+            if (material == null) return -1;
+            if (job.MaterialIds.TryGetValue(material, out var id)) return id;
+
+            id = -1;
+
+            try
+            {
+                if (material.renderQueue >= 2450)
+                {
+                    job.TransparentMaterials++;
+                }
+                else
+                {
+                    var info = new AtlasMaterial { Material = material };
+
+                    foreach (var name in TextureProperties)
+                    {
+                        if (!material.HasProperty(name)) continue;
+
+                        var texture = material.GetTexture(name);
+                        if (texture == null) continue;
+
+                        info.Texture = texture;
+
+                        var scale = material.GetTextureScale(name);
+                        var offset = material.GetTextureOffset(name);
+                        info.ScaleU = IsFinite(scale.x) ? scale.x : 1f;
+                        info.ScaleV = IsFinite(scale.y) ? scale.y : 1f;
+                        info.OffsetU = IsFinite(offset.x) ? offset.x : 0f;
+                        info.OffsetV = IsFinite(offset.y) ? offset.y : 0f;
+                        break;
+                    }
+
+                    foreach (var name in TintProperties)
+                    {
+                        if (!material.HasProperty(name)) continue;
+
+                        info.Tint = material.GetColor(name);
+                        break;
+                    }
+
+                    id = job.Materials.Count;
+                    job.Materials.Add(info);
+                }
+            }
+            catch (Exception ex)
+            {
+                job.Note("a building's material", ex);
+                id = -1;
+            }
+
+            job.MaterialIds[material] = id;
+            return id;
+        }
+
+        /// <summary>
+        /// The atlas (stage W), after the buildings and inside the same hold, under ONE cap over the whole
+        /// phase (<see cref="AtlasSecondsCap"/>, the same seconds the capture reserves for it). In order: every
+        /// stored building's use of every material; the tiles packed (textured blocks, then the small flat-colour
+        /// tiles after them on a page no earlier than any textured one); the pages filled into two alternating
+        /// 64 MB buffers, a few tiles a frame - Graphics.Blit into a temporary RenderTexture at min(size,
+        /// AtlasTileMax), ReadPixels back, tint multiplied in, the average taken from the tile itself, the
+        /// repeats copied a slice of rows at a time - each page handed to a worker that streams it to its staged
+        /// file as a PNG while the next page fills; then every building's page UVs and ranges worked out beside
+        /// it. Only when all of that is done inside the cap are the ranges written into the buildings and the page
+        /// count into the file; the encodes still running are the capture's to finish after the hold is released
+        /// (<see cref="Result.AtlasPages"/>). Past three quarters of the cap no more textures are captured (their
+        /// tiles take the flat colour); past the cap, or on a throw or the capture's abort, the atlas is
+        /// ABANDONED: no ranges, every page file deleted, and a line says so.
+        /// </summary>
+        /// <param name="job">The build.</param>
+        /// <param name="result">Where the page encodes are handed over.</param>
+        private static IEnumerator BuildAtlas(Job job, Result result)
+        {
+            var clock = Stopwatch.StartNew();
+            var file = job.File;
+            var jobs = new List<AtlasPageJob>();
+            var completed = false;
+
+            job.AtlasClock = clock;
+            job.Uses = new List<AtlasUse>[file.Buildings.Count];
+            job.Mapped = new AtlasMapped[file.Buildings.Count];
+
+            try
+            {
+                // 1. the uses
+                for (var i = 0; i < file.Buildings.Count && i < job.PendingUV.Count; i++)
+                {
+                    var building = i;
+                    Step(job, "a building's texture use", () => MeasureUse(job, building));
+
+                    if (FrameSpent(job))
+                    {
+                        if (OverCap(job)) yield break;
+                        yield return null;
+                        job.FrameClock.Restart();
+                    }
+                }
+
+                // 2. the tiles, packed
+                var requests = new List<int[]>();       // material, kind (0 textured, 1 flat), w, h, page, x, y
+                Step(job, "the atlas layout", () => Layout(job, requests));
+
+                if (job.AtlasPageCount == 0)
+                {
+                    completed = true;
+                    yield break;
+                }
+
+                // textured tiles first on every page, so a page's flat tiles are filled with averages measured
+                requests.Sort((a, b) => a[4] != b[4] ? a[4].CompareTo(b[4]) : a[1].CompareTo(b[1]));
+
+                // 3. the pages, double-buffered: page p fills buffer p % 2 while page p - 1 encodes
+                var size = MapMeshFile.AtlasPageSize;
+                var buffers = new[] { new byte[size * size * 4], new byte[size * size * 4] };
+                var busy = new Task[2];
+                job.PeakAtlasBytes = 2L * size * size * 4;
+
+                for (var page = 0; page < job.AtlasPageCount; page++)
+                {
+                    var b = page % 2;
+
+                    // the buffer this page fills must be free: its last encode has written and cleared it
+                    while (busy[b] != null && !busy[b].IsCompleted)
+                    {
+                        if (OverCap(job)) yield break;
+                        yield return null;
+                        job.FrameClock.Restart();
+                    }
+
+                    if (busy[b] != null && busy[b].IsFaulted) yield break;
+
+                    var pixels = buffers[b];
+                    var tiles = 0;
+
+                    foreach (var request in requests)
+                    {
+                        if (request[4] != page) continue;
+
+                        var info = job.Materials[request[0]];
+                        var flat = request[1] == 1;
+                        var r = request;
+                        byte[] tile = null;
+                        int tw = 0, th = 0, rx = 1, ry = 1, x = 0, y = 0;
+
+                        Step(job, "an atlas tile", () =>
+                        {
+                            if (flat)
+                            {
+                                if (!info.Captured) Average(job, info);
+                                tile = FlatTile(info);
+                                tw = th = AtlasFlatPixels;
+                                x = info.FlatX;
+                                y = info.FlatY;
+                            }
+                            else if (clock.Elapsed.TotalSeconds < AtlasSecondsCap * AtlasCaptureShare)
+                            {
+                                tile = CaptureTile(job, info, r[2], r[3]);
+                                tw = r[2];
+                                th = r[3];
+                                rx = info.RepeatU;
+                                ry = info.RepeatV;
+                                x = info.X;
+                                y = info.Y;
+                            }
+                            else
+                            {
+                                job.TilesLate++;
+                            }
+                        });
+
+                        tiles++;
+
+                        // the copy into the page, a slice of rows a step: a 1024 x 1024 block is a million texels
+                        if (tile != null)
+                        {
+                            var rows = th * ry + AtlasPadding * 2;
+
+                            for (var from = 0; from < rows; from += AtlasRowsPerStep)
+                            {
+                                var start = from;
+                                Step(job, "an atlas tile's rows", () => AtlasPacker.BlitRows(pixels, size, tile, tw, th, x, y,
+                                    rx, ry, AtlasPadding, start - AtlasPadding, Math.Min(rows, start + AtlasRowsPerStep) - AtlasPadding));
+
+                                if (FrameSpent(job))
+                                {
+                                    if (OverCap(job)) yield break;
+                                    yield return null;
+                                    job.FrameClock.Restart();
+                                }
+                            }
+                        }
+
+                        if (FrameSpent(job))
+                        {
+                            if (OverCap(job)) yield break;
+                            yield return null;
+                            job.FrameClock.Restart();
+                        }
+                    }
+
+                    // handed to a worker: streamed to its staged file, hashed, then the buffer cleared for reuse
+                    var path = job.Request.AtlasPartPath?.Invoke(page);
+                    if (string.IsNullOrEmpty(path)) yield break;
+
+                    var buffer = pixels;
+                    var encode = Task.Run(() =>
+                    {
+                        try
+                        {
+                            using (var stream = new System.IO.FileStream(path, System.IO.FileMode.Create, System.IO.FileAccess.Write,
+                                       System.IO.FileShare.None, 1 << 20))
+                                return AtlasPng.EncodeTo(stream, buffer, size, size);
+                        }
+                        finally
+                        {
+                            Array.Clear(buffer, 0, buffer.Length);
+                        }
+                    });
+
+                    busy[b] = encode;
+                    jobs.Add(new AtlasPageJob { Page = page, Tiles = tiles, PartPath = path, Encode = encode });
+
+                    // Nothing here keeps the 64 MB alive past the worker's own reference (lambda hoisting would).
+                    buffer = null;
+                    encode = null;
+                    pixels = null;
+                }
+
+                buffers = null;
+
+                // 4. the buildings' UVs and ranges, worked out beside them
+                for (var i = 0; i < file.Buildings.Count && i < job.PendingUV.Count; i++)
+                {
+                    var building = i;
+                    Step(job, "a building's atlas UVs", () => MapBuilding(job, building));
+
+                    if (FrameSpent(job))
+                    {
+                        if (OverCap(job)) yield break;
+                        yield return null;
+                        job.FrameClock.Restart();
+                    }
+                }
+
+                if (OverCap(job)) yield break;
+
+                // 5. done inside the cap: the ranges go in, the page count with them
+                Step(job, "the atlas's ranges", () => ApplyAtlas(job));
+                completed = job.AtlasApplied;
+                if (completed) result.AtlasPages = jobs;
+            }
+            finally
+            {
+                job.AtlasSeconds = clock.Elapsed.TotalSeconds;
+
+                if (!completed) AbandonAtlas(job, jobs);
+            }
+        }
+
+        /// <summary>Whether the atlas phase is past its cap (counted once).</summary>
+        /// <param name="job">The build.</param>
+        private static bool OverCap(Job job) =>
+            job.Request.Abort || (job.AtlasClock != null && job.AtlasClock.Elapsed.TotalSeconds > AtlasSecondsCap);
+
+        /// <summary>An abandoned atlas: no ranges, the page count 0, every page file deleted as its encode ends
+        /// (an encode still writing cannot be stopped, so its file is removed when it finishes), and one line.</summary>
+        /// <param name="job">The build.</param>
+        /// <param name="jobs">The pages started.</param>
+        private static void AbandonAtlas(Job job, List<AtlasPageJob> jobs)
+        {
+            job.AtlasAbandoned = true;
+            job.Mapped = null;
+
+            // No range may outlive the pages - an ApplyAtlas that threw half way would otherwise leave ranges on a
+            // file that names no page, which Write refuses whole.
+            TruncateAtlas(job.File, 0);
+
+            foreach (var page in jobs)
+            {
+                var path = page.PartPath;
+                page.Encode?.ContinueWith(_ =>
+                {
+                    try
+                    {
+                        if (System.IO.File.Exists(path)) System.IO.File.Delete(path);
+                    }
+                    catch
+                    {
+                        // a staged temporary nothing names; the capture's cleanup sweeps .part files too
+                    }
+                });
+            }
+
+            Plugin.LogSource?.LogWarning(
+                $"QuestTree: the texture atlas of {job.Request.Map} was abandoned - {N(jobs.Count)} page(s) dropped " +
+                $"({(job.Request.Abort ? "the capture's watchdog stopped it" : $"past the {N(AtlasSecondsCap)} s atlas cap or a failure")}, " +
+                $"{job.AtlasClock?.Elapsed.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture)} s); every building keeps " +
+                "the side views.");
+        }
+
+        /// <summary>One building's uses: per material its UV bounds, then its integer shift (so a wall whose
+        /// UVs run 7.2..9.8 uses repeats 7..10 of its tile as 0..3) and whether it fits the repeat cap.</summary>
+        /// <param name="job">The build.</param>
+        /// <param name="i">The building.</param>
+        private static void MeasureUse(Job job, int i)
+        {
+            var uv = job.PendingUV[i];
+            var mats = job.PendingTriMat[i];
+            if (uv == null || mats == null) return;
+
+            var indices = job.File.Buildings[i].Indices;
+            var uses = new List<AtlasUse>();
+
+            for (var t = 0; t < mats.Length; t++)
+            {
+                var m = mats[t];
+                if (m < 0) continue;
+
+                AtlasUse use = null;
+                foreach (var u in uses)
+                    if (u.Material == m) { use = u; break; }
+
+                if (use == null)
+                {
+                    use = new AtlasUse { Material = m };
+                    uses.Add(use);
+                }
+
+                for (var k = 0; k < 3; k++)
+                {
+                    var v = (int)indices[t * 3 + k];
+                    float uu = uv[v * 2], vv = uv[v * 2 + 1];
+
+                    if (uu < use.MinU) use.MinU = uu;
+                    if (uu > use.MaxU) use.MaxU = uu;
+                    if (vv < use.MinV) use.MinV = vv;
+                    if (vv > use.MaxV) use.MaxV = vv;
+                }
+            }
+
+            foreach (var use in uses)
+            {
+                var info = job.Materials[use.Material];
+
+                use.ShiftU = (float)Math.Floor(use.MinU + AtlasTileSlack);
+                use.ShiftV = (float)Math.Floor(use.MinV + AtlasTileSlack);
+
+                var ku = Math.Max(1, (int)Math.Ceiling(use.MaxU - use.ShiftU - AtlasTileSlack));
+                var kv = Math.Max(1, (int)Math.Ceiling(use.MaxV - use.ShiftV - AtlasTileSlack));
+
+                use.Flat = info.Texture == null || ku > AtlasRepeatMax || kv > AtlasRepeatMax;
+
+                if (use.Flat)
+                {
+                    info.Flat = true;
+                    job.FlatUses++;
+                }
+                else
+                {
+                    info.Textured = true;
+                    info.RepeatU = Math.Max(info.RepeatU, ku);
+                    info.RepeatV = Math.Max(info.RepeatV, kv);
+                    if (ku > 1 || kv > 1) job.TiledUses++;
+                }
+            }
+
+            job.Uses[i] = uses;
+        }
+
+        /// <summary>Every tile's size, packed (AtlasPacker): a textured block per material with a textured use -
+        /// min(texture, AtlasTileMax) a repeat, the repeats within AtlasRepeatPixels - in group 0, limited to one
+        /// page fewer than the cap when there are flat tiles; and a flat tile per material in use at all (the
+        /// fallback for its flat uses and for a texture never captured) in group 1, packed after them into what is
+        /// left - so every flat tile is on a page no earlier than any textured tile, and a full atlas costs
+        /// textures, never colours.</summary>
+        /// <param name="job">The build.</param>
+        /// <param name="requests">Filled: material, kind, one repeat's w and h, page, x, y.</param>
+        private static void Layout(Job job, List<int[]> requests)
+        {
+            for (var m = 0; m < job.Materials.Count; m++)
+            {
+                var info = job.Materials[m];
+                if (!info.Textured && !info.Flat) continue;
+
+                if (info.Textured && info.Texture != null && info.Texture.dimension == TextureDimension.Tex2D)
+                {
+                    var w = Math.Max(1, Math.Min(Math.Min(info.Texture.width, AtlasTileMax), AtlasRepeatPixels / info.RepeatU));
+                    var h = Math.Max(1, Math.Min(Math.Min(info.Texture.height, AtlasTileMax), AtlasRepeatPixels / info.RepeatV));
+                    requests.Add(new[] { m, 0, w, h, -1, 0, 0 });
+                }
+
+                requests.Add(new[] { m, 1, AtlasFlatPixels, AtlasFlatPixels, -1, 0, 0 });
+            }
+
+            var n = requests.Count;
+            var widths = new int[n];
+            var heights = new int[n];
+            var groups = new int[n];
+            var flats = 0;
+
+            for (var k = 0; k < n; k++)
+            {
+                var info = job.Materials[requests[k][0]];
+                var textured = requests[k][1] == 0;
+                widths[k] = requests[k][2] * (textured ? info.RepeatU : 1);
+                heights[k] = requests[k][3] * (textured ? info.RepeatV : 1);
+                groups[k] = textured ? 0 : 1;
+                if (!textured) flats++;
+            }
+
+            var pages = new int[n];
+            var xs = new int[n];
+            var ys = new int[n];
+            var limits = new[] { flats > 0 ? MapMeshFile.MaxAtlasPages - 1 : MapMeshFile.MaxAtlasPages, MapMeshFile.MaxAtlasPages };
+
+            job.AtlasPageCount = AtlasPacker.Pack(widths, heights, MapMeshFile.AtlasPageSize, MapMeshFile.MaxAtlasPages,
+                AtlasPadding, pages, xs, ys, groups, limits);
+
+            for (var k = 0; k < n; k++)
+            {
+                var r = requests[k];
+                r[4] = pages[k];
+                r[5] = xs[k];
+                r[6] = ys[k];
+
+                var info = job.Materials[r[0]];
+
+                if (pages[k] < 0)
+                {
+                    job.TilesUnplaced++;
+                    continue;
+                }
+
+                if (r[1] == 0)
+                {
+                    info.Page = pages[k];
+                    info.X = xs[k];
+                    info.Y = ys[k];
+                    info.TileW = r[2];
+                    info.TileH = r[3];
+                }
+                else
+                {
+                    info.FlatPage = pages[k];
+                    info.FlatX = xs[k];
+                    info.FlatY = ys[k];
+                }
+            }
+        }
+
+        /// <summary>One material's texture as one repeat's pixels: Blit to a temporary RenderTexture at that size,
+        /// ReadPixels into the scratch texture, the tint multiplied in, and the material's average colour taken
+        /// from the same pixels. Null (and the material left uncaptured) when it fails. Main thread; the
+        /// RenderTexture is released and the active one restored however it goes.</summary>
+        /// <param name="job">The build.</param>
+        /// <param name="info">The material.</param>
+        /// <param name="w">One repeat's width.</param>
+        /// <param name="h">One repeat's height.</param>
+        private static byte[] CaptureTile(Job job, AtlasMaterial info, int w, int h)
+        {
+            if (info.Texture == null || info.Page < 0) return null;
+
+            var tile = ReadTexture(job, info, w, h);
+            if (tile == null)
+            {
+                job.TexturesFailed++;
+                return null;
+            }
+
+            long sr = 0, sg = 0, sb = 0;
+            for (var o = 0; o < tile.Length; o += 4)
+            {
+                sr += tile[o];
+                sg += tile[o + 1];
+                sb += tile[o + 2];
+            }
+
+            var n = Math.Max(1, w * h);
+            info.AvgR = (byte)(sr / n);
+            info.AvgG = (byte)(sg / n);
+            info.AvgB = (byte)(sb / n);
+            info.Captured = true;
+            job.TexturesCaptured++;
+
+            return tile;
+        }
+
+        /// <summary>A texture read back at w x h, tint applied, RGBA with row 0 at the bottom - or null.</summary>
+        /// <param name="job">The build.</param>
+        /// <param name="info">The material.</param>
+        /// <param name="w">The width.</param>
+        /// <param name="h">The height.</param>
+        private static byte[] ReadTexture(Job job, AtlasMaterial info, int w, int h)
+        {
+            if (info.Texture == null || info.Texture.dimension != TextureDimension.Tex2D) return null;
+
+            var previous = RenderTexture.active;
+            RenderTexture rt = null;
+
+            try
+            {
+                rt = RenderTexture.GetTemporary(w, h, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB);
+                Graphics.Blit(info.Texture, rt);
+
+                if (job.AtlasScratch == null)
+                    job.AtlasScratch = new Texture2D(AtlasTileMax, AtlasTileMax, TextureFormat.RGBA32, false, false);
+
+                RenderTexture.active = rt;
+                job.AtlasScratch.ReadPixels(new Rect(0, 0, w, h), 0, 0, false);
+
+                // A view of the scratch texture's own bytes - no 256 KB array a tile.
+                var read = job.AtlasScratch.GetRawTextureData<Color32>();
+                var stride = job.AtlasScratch.width;
+                var tile = new byte[w * h * 4];
+
+                for (var y = 0; y < h; y++)
+                    for (var x = 0; x < w; x++)
+                    {
+                        var c = read[y * stride + x];
+                        var o = (y * w + x) * 4;
+
+                        tile[o] = (byte)Math.Min(255f, c.r * info.Tint.r);
+                        tile[o + 1] = (byte)Math.Min(255f, c.g * info.Tint.g);
+                        tile[o + 2] = (byte)Math.Min(255f, c.b * info.Tint.b);
+                        tile[o + 3] = 255;
+                    }
+
+                return tile;
+            }
+            catch (Exception ex)
+            {
+                job.Note("a building's texture", ex);
+                return null;
+            }
+            finally
+            {
+                RenderTexture.active = previous;
+                if (rt != null) RenderTexture.ReleaseTemporary(rt);
+            }
+        }
+
+        /// <summary>The average colour of a material whose texture was never captured: an AtlasAveragePixels Blit
+        /// when the capture share of the cap has time left, else its tint alone (already the default).</summary>
+        /// <param name="job">The build.</param>
+        /// <param name="info">The material.</param>
+        private static void Average(Job job, AtlasMaterial info)
+        {
+            info.AvgR = (byte)(Mathf.Clamp01(info.Tint.r) * 255f);
+            info.AvgG = (byte)(Mathf.Clamp01(info.Tint.g) * 255f);
+            info.AvgB = (byte)(Mathf.Clamp01(info.Tint.b) * 255f);
+
+            if (job.AtlasClock == null || job.AtlasClock.Elapsed.TotalSeconds >= AtlasSecondsCap * AtlasCaptureShare) return;
+
+            var tile = ReadTexture(job, info, AtlasAveragePixels, AtlasAveragePixels);
+            if (tile == null) return;
+
+            long r = 0, g = 0, b = 0;
+            for (var o = 0; o < tile.Length; o += 4)
+            {
+                r += tile[o];
+                g += tile[o + 1];
+                b += tile[o + 2];
+            }
+
+            const int n = AtlasAveragePixels * AtlasAveragePixels;
+            info.AvgR = (byte)(r / n);
+            info.AvgG = (byte)(g / n);
+            info.AvgB = (byte)(b / n);
+        }
+
+        /// <summary>A material's flat tile, in its average colour.</summary>
+        /// <param name="info">The material.</param>
+        private static byte[] FlatTile(AtlasMaterial info)
+        {
+            if (info.FlatPage < 0) return null;
+
+            var tile = new byte[AtlasFlatPixels * AtlasFlatPixels * 4];
+            for (var o = 0; o < tile.Length; o += 4)
+            {
+                tile[o] = info.AvgR;
+                tile[o + 1] = info.AvgG;
+                tile[o + 2] = info.AvgB;
+                tile[o + 3] = 255;
+            }
+
+            return tile;
+        }
+
+        /// <summary>One building's page UVs and triangle order, worked out BESIDE it (job.Mapped): each vertex
+        /// mapped into its material's block (or flat tile), each triangle's page decided, the triangles regrouped
+        /// page by page and one range per page. Written into the building only by ApplyAtlas, when the phase
+        /// completes.</summary>
+        /// <param name="job">The build.</param>
+        /// <param name="i">The building.</param>
+        private static void MapBuilding(Job job, int i)
+        {
+            var uv = job.PendingUV[i];
+            var mats = job.PendingTriMat[i];
+            var uses = job.Uses[i];
+            var building = job.File.Buildings[i];
+
+            if (uv == null || mats == null || uses == null) return;
+
+            var pages = job.AtlasPageCount;
+            var vertices = building.X.Length;
+            var triangles = mats.Length;
+            var indices = building.Indices;
+
+            var u = new ushort[vertices];
+            var v = new ushort[vertices];
+            var page = new int[triangles];
+            var any = false;
+
+            for (var t = 0; t < triangles; t++)
+            {
+                page[t] = -1;
+
+                var m = mats[t];
+                if (m < 0) continue;
+
+                AtlasUse use = null;
+                foreach (var candidate in uses)
+                    if (candidate.Material == m) { use = candidate; break; }
+
+                if (use == null) continue;
+
+                var info = job.Materials[m];
+                var textured = !use.Flat && info.Captured && info.Page >= 0 && info.Page < pages;
+                var flat = !textured && info.FlatPage >= 0 && info.FlatPage < pages;
+
+                if (!textured && !flat) continue;
+
+                page[t] = textured ? info.Page : info.FlatPage;
+                any = true;
+
+                for (var k = 0; k < 3; k++)
+                {
+                    var vi = (int)indices[t * 3 + k];
+                    double px, py;
+
+                    if (textured)
+                    {
+                        var fu = Math.Max(0d, Math.Min(info.RepeatU, uv[vi * 2] - use.ShiftU));
+                        var fv = Math.Max(0d, Math.Min(info.RepeatV, uv[vi * 2 + 1] - use.ShiftV));
+                        px = info.X + fu * info.TileW;
+                        py = info.Y + fv * info.TileH;
+                    }
+                    else
+                    {
+                        px = info.FlatX + AtlasFlatPixels * 0.5;
+                        py = info.FlatY + AtlasFlatPixels * 0.5;
+                    }
+
+                    u[vi] = UvCode(px / MapMeshFile.AtlasPageSize);
+                    v[vi] = UvCode(py / MapMeshFile.AtlasPageSize);
+                }
+            }
+
+            if (!any)
+            {
+                job.UntexturedBuildings++;
+                return;
+            }
+
+            var order = new List<int>(triangles);
+            for (var p = 0; p < pages; p++)
+                for (var t = 0; t < triangles; t++)
+                    if (page[t] == p) order.Add(t);
+
+            var textured3 = order.Count;
+            for (var t = 0; t < triangles; t++)
+                if (page[t] < 0) order.Add(t);
+
+            var reordered = new uint[indices.Length];
+            for (var k = 0; k < order.Count; k++)
+            {
+                reordered[k * 3] = indices[order[k] * 3];
+                reordered[k * 3 + 1] = indices[order[k] * 3 + 1];
+                reordered[k * 3 + 2] = indices[order[k] * 3 + 2];
+            }
+
+            var ranges = new List<MapMeshFile.AtlasRange>();
+            var start = 0;
+            while (start < textured3)
+            {
+                var p = page[order[start]];
+                var end = start;
+                while (end < textured3 && page[order[end]] == p) end++;
+
+                ranges.Add(new MapMeshFile.AtlasRange { Page = p, First = start * 3, Count = (end - start) * 3 });
+                start = end;
+            }
+
+            job.Mapped[i] = new AtlasMapped { Indices = reordered, U = u, V = v, Ranges = ranges, Triangles = textured3 };
+        }
+
+        /// <summary>The completed atlas into the file: every mapped building's indices, UVs and ranges, and the page
+        /// count - all at once, so a file never names pages whose ranges were only half written.</summary>
+        /// <param name="job">The build.</param>
+        private static void ApplyAtlas(Job job)
+        {
+            var file = job.File;
+
+            for (var i = 0; i < job.Mapped.Length && i < file.Buildings.Count; i++)
+            {
+                var mapped = job.Mapped[i];
+                if (mapped == null) continue;
+
+                var building = file.Buildings[i];
+                building.Indices = mapped.Indices;
+                building.U = mapped.U;
+                building.V = mapped.V;
+                building.Ranges = mapped.Ranges;
+
+                job.TexturedBuildings++;
+                job.TexturedTriangles += mapped.Triangles;
+            }
+
+            file.AtlasPages = job.AtlasPageCount;
+            job.AtlasApplied = true;
+
+            for (var i = 0; i < job.PendingUV.Count; i++)
+            {
+                job.PendingUV[i] = null;
+                job.PendingTriMat[i] = null;
+            }
+
+            job.Mapped = null;
+        }
+
+        /// <summary>
+        /// The capture's end of the atlas (stage W review, H1): an atlas's pages were STARTED inside the hold and
+        /// finish encoding on workers after it; the capture waits for them after releasing the scene and hands
+        /// the list to this. Every page whose encode finished becomes pages 0..n-1 in order; the first that did not
+        /// ends the atlas there - the file's page count and any range on a later page are cut to match (the
+        /// buildings on them fall back), and those later pages' files are deleted.
+        /// </summary>
+        /// <param name="file">The mesh the pages belong to.</param>
+        /// <param name="pages">The builder's page jobs, all finished.</param>
+        /// <returns>The pages that are good, in order.</returns>
+        internal static List<AtlasPageDone> SettleAtlas(MapMeshFile file, List<AtlasPageJob> pages)
+        {
+            var good = new List<AtlasPageDone>();
+            if (pages == null) return good;
+
+            foreach (var page in pages)
+            {
+                var ok = page.Encode != null && page.Encode.Status == TaskStatus.RanToCompletion &&
+                         page.Encode.Result != null && good.Count == page.Page;
+
+                if (!ok) break;
+
+                good.Add(new AtlasPageDone
+                {
+                    Page = page.Page, Tiles = page.Tiles, PartPath = page.PartPath,
+                    Bytes = page.Encode.Result.Length, Sha256 = page.Encode.Result.Sha256,
+                });
+            }
+
+            for (var i = good.Count; i < pages.Count; i++)
+            {
+                var path = pages[i].PartPath;
+
+                void Delete()
+                {
+                    try
+                    {
+                        if (System.IO.File.Exists(path)) System.IO.File.Delete(path);
+                    }
+                    catch
+                    {
+                        // swept by the capture's cleanup
+                    }
+                }
+
+                // One still writing is removed when it finishes; one that finished, now.
+                if (pages[i].Encode != null && !pages[i].Encode.IsCompleted) pages[i].Encode.ContinueWith(_ => Delete());
+                else Delete();
+            }
+
+            if (file != null && good.Count < file.AtlasPages) TruncateAtlas(file, good.Count);
+
+            return good;
+        }
+
+        /// <summary>Cuts a file's atlas to its first <paramref name="pages"/> pages: the count, and every range on a
+        /// later page dropped (those triangles fall back). UVs stay; a building left with no range keeps them
+        /// harmlessly.</summary>
+        /// <param name="file">The mesh.</param>
+        /// <param name="pages">Pages kept.</param>
+        internal static void TruncateAtlas(MapMeshFile file, int pages)
+        {
+            file.AtlasPages = Math.Max(0, pages);
+
+            foreach (var building in file.Buildings)
+                building.Ranges?.RemoveAll(r => r.Page >= file.AtlasPages);
+        }
+
+        /// <summary>A page coordinate in [0, 1] as the file's UV code.</summary>
+        /// <param name="t">The coordinate.</param>
+        private static ushort UvCode(double t) =>
+            (ushort)Math.Round(Math.Max(0d, Math.Min(1d, t)) * MapMeshFile.MaxUv);
 
         /// <summary>Quantises the kept buildings' heights over the file's y range, now that there is one, and
         /// gives each its band, now that the bands are in the file - <see cref="QuantisePerFrameVertices"/>
@@ -3585,7 +5116,14 @@ namespace QuestTree.QuestGraph
                     : "") +
                 (job.DecimationStopped ? $"; decimation stopped at {job.DecimationStoppedWhy}" : "") +
                 $"; {N(job.InputGuarded)} over the {Millions(MaxSourceTriangles)} source guard, " +
-                $"{N(job.Oversized)} oversized, {N(job.GpuRead)} read back off the GPU, " +
+                $"{N(job.Oversized)} oversized, {N(job.HiddenSkipped + job.ShadowOnlySkipped + job.VolumeSkipped)} hidden " +
+                $"volumes skipped ({N(job.HiddenSkipped)} switched off or inactive, {N(job.ShadowOnlySkipped)} shadow-only, " +
+                $"{N(job.VolumeSkipped)} untextured helper volumes), LOD map {N(job.LodsOf.Count)} group(s): " +
+                $"{N(job.LodUnmanaged)} candidate(s) under a group that lists none of them, {N(job.LodNotAncestor)} listed by a " +
+                $"group that is not their parent, {N(job.LodShared)} renderer(s) in two groups, {N(job.LodInactive)} inactive " +
+                $"group(s) skipped" + (job.LodFallback > 0 ? $", {N(job.LodFallback)} on the nearest-parent rule (the LOD map did not complete)" : "") +
+                "; " +
+                $"{N(job.GpuRead)} read back off the GPU, " +
                 $"{N(job.Unreadable)} unreadable, {N(job.ImpostorSkipped)} impostor LODs skipped, " +
                 $"{N(job.ThinSkipped)} thin LODs skipped, " +
                 $"{job.BuildingClock.Elapsed.TotalSeconds.ToString("0.0", f1)} s (soft cap {N(job.SoftSeconds)} s, hard " +
@@ -3617,6 +5155,45 @@ namespace QuestTree.QuestGraph
                 (job.DroppedTriangles > 0
                     ? $" {N(job.DroppedTriangles)} triangle(s) reached outside the extent and were dropped."
                     : ""));
+        }
+
+        /// <summary>The hidden renderers' sample paths, once a capture - what the "switched off" filter dropped,
+        /// for a map where a room-culling system might hide real geometry.</summary>
+        /// <param name="job">The build.</param>
+        private static void ReportHidden(Job job)
+        {
+            if (job.HiddenSamples.Count == 0) return;
+
+            Plugin.LogSource?.LogInfo(
+                $"QuestTree: hidden renderers skipped on {job.Request.Map} ({N(job.HiddenSkipped)}), the first " +
+                $"{job.HiddenSamples.Count}: {string.Join(" | ", job.HiddenSamples.ToArray())}");
+        }
+
+        /// <summary>Stage W's log line: what the atlas captured, where it went and what fell back.</summary>
+        /// <param name="job">The build.</param>
+        private static void ReportAtlas(Job job)
+        {
+            var f1 = CultureInfo.InvariantCulture;
+            var used = 0;
+
+            foreach (var m in job.Materials)
+                if (m.Textured || m.Flat) used++;
+
+            Plugin.LogSource?.LogInfo(
+                $"QuestTree: textures for {job.Request.Map} - {N(job.TexturesCaptured)} material(s) captured into " +
+                $"{N(job.File.AtlasPages)} atlas page(s) ({MapMeshFile.AtlasPageSize}, encoding on workers), " +
+                $"{N(job.TiledUses)} tiled, " +
+                $"{N(job.FlatUses)} fell back to a flat colour, {job.AtlasSeconds.ToString("0.0", f1)} s; " +
+                $"{N(used)} material(s) in use, {N(job.TexturesFailed)} texture(s) would not capture, " +
+                $"{N(job.TilesUnplaced)} tile(s) over the {MapMeshFile.MaxAtlasPages}-page cap, " +
+                $"{N(job.TilesLate)} left flat past {N(AtlasSecondsCap * AtlasCaptureShare)} s of the {N(AtlasSecondsCap)} s atlas cap, " +
+                $"{N(job.TransparentMaterials)} transparent material(s) left to the side views, " +
+                $"{N(job.UvElsewhere)} GPU mesh(es) with UVs in another stream, {N(job.StaticBatchUvSkipped)} static-batch " +
+                "member(s) with their UVs not read; " +
+                $"{N(job.TexturedBuildings)} building(s) textured ({Millions(job.TexturedTriangles)} triangles), " +
+                $"{N(job.UntexturedBuildings)} with UVs but no tile; {N(job.SeamsRelaxed)} decimated with their seams " +
+                $"relaxed, {N(job.ClusteredTextureless)} clustered without a texture" +
+                (job.AtlasAbandoned ? " - ABANDONED, no page kept." : "."));
         }
 
         /// <summary>Binds the file, fills the result's counts and says what the build cost in
@@ -3687,7 +5264,13 @@ namespace QuestTree.QuestGraph
             var candidates = job.Candidates.Count * 240L + job.Groups.Count * 96L + job.LevelRenderers * 16L + job.Emitted.Count * 16L;
             // The pipeline's measured peak - flights (sources, worker lists, decimator workspaces) plus the
             // pooled lanes - and the largest decoded source.
-            var buffers = job.PeakPipelineBytes + job.PeakDecodedBytes;
+            // Stage W: the two page buffers and every building's material-space UVs, triangle materials and
+            // heights in metres, all alive together during the atlas (stage W review, H3).
+            var pending = 0L;
+            foreach (var y in job.PendingY) pending += (y?.Length ?? 0) * 4L;
+            pending += job.PendingUVBytes + job.PendingTriMatBytes;
+
+            var buffers = job.PeakPipelineBytes + job.PeakDecodedBytes + job.PeakAtlasBytes + pending;
 
             var peak = relief + floats + job.RendererCount * 8L + job.PeakReadbackBytes +
                        result.BuildingBytes + candidates + buffers;
@@ -4094,6 +5677,12 @@ namespace QuestTree.QuestGraph
         /// <summary>The default hard limit, as a multiple of the target.</summary>
         internal const double HardLimitFactor = 1.25;
 
+        /// <summary>Two corners at one position whose texture coordinates differ by more than this (either
+        /// axis) are two vertices - a UV SEAM (stage W). A seam's edges then belong to one face on each side,
+        /// which makes them boundary edges, and the boundary planes keep them where they are: a textured
+        /// cube keeps each face's UV square.</summary>
+        internal const double UvSeam = 1d / 64d;
+
         /// <summary>The heap's tie-break weight on an edge's squared length - see Push.</summary>
         private const double TieBreak = 1e-9;
 
@@ -4118,6 +5707,21 @@ namespace QuestTree.QuestGraph
             internal int RejectedFans;
             internal int RejectedDistance;
             internal int RejectedLink;
+
+            /// <summary>Collapses refused because the two ends belong to different materials (stage W).</summary>
+            internal int RejectedSeam;
+
+            /// <summary>Whether this result came from the RELAXED retry (DecimateTextured): seams and material
+            /// borders were not boundaries, and a survivor kept its own material and UV.</summary>
+            internal bool SeamsRelaxed;
+
+            /// <summary>u, v per output vertex (the survivor's UV follows its position), or null when the input
+            /// carried none.</summary>
+            internal float[] UV;
+
+            /// <summary>Each output triangle's material, or null when the input carried none.</summary>
+            internal int[] TriangleMaterial;
+
             internal double Milliseconds;
 
             /// <summary>Where the time went: the weld, the adjacency and quadrics, the collapses.</summary>
@@ -4166,6 +5770,10 @@ namespace QuestTree.QuestGraph
             internal readonly HashSet<long> Seen = new HashSet<long>(Mixed.Instance);
             internal readonly List<int> Faces = new List<int>();
             internal int[] Map = new int[0];
+            internal double[] SubUV = new double[0];
+            internal int[] SubMat = new int[0];
+            internal double[] UV = new double[0];
+            internal int[] VMat = new int[0];
 
             /// <summary>One heap entry: the collapse's cost, its two ends and their stamps when it was pushed, and
             /// where the survivor goes - valid for as long as both stamps are.</summary>
@@ -4186,6 +5794,7 @@ namespace QuestTree.QuestGraph
                 b += (FaceN.Length + FirstN.Length + OppN.Length + SubP.Length + SubN.Length + P.Length + N.Length +
                       Q.Length + W.Length + F0.Length) * 8L;
                 b += Heap.Length * 48L;
+                b += (SubUV.Length + UV.Length) * 8L + (SubMat.Length + VMat.Length) * 4L;
                 b += (SubId.Length + Next.Length + Rep.Length + F.Length + Stamp.Length + Mark.Length + Map.Length +
                       Count.Length + LastFace.Length) * 4L;
                 b += FaceOk.Length + NormalState.Length + FaceDead.Length + Dead.Length + Boundary.Length + CornerGroup.Length;
@@ -4218,8 +5827,13 @@ namespace QuestTree.QuestGraph
         /// <param name="timeCapMs">Milliseconds of worker time allowed.</param>
         /// <param name="rejectFlips">The flip test; see Decimate.</param>
         /// <param name="workspace">Scratch memory to reuse, or null for a fresh one.</param>
+        /// <param name="uvs">u, v per input vertex, or null (stage W).</param>
+        /// <param name="vertexMaterial">Each input vertex's material, or null. Corners of different materials
+        /// never weld and their vertices never collapse into each other.</param>
+        /// <param name="relaxSeams">The retry's mode (DecimateTextured): seams and borders are not boundaries.</param>
         internal static Result DecimateWith(float[] positions, int[] triangles, int target, int hardLimit,
-            double timeCapMs, bool rejectFlips, Workspace workspace)
+            double timeCapMs, bool rejectFlips, Workspace workspace, float[] uvs = null, int[] vertexMaterial = null,
+            bool relaxSeams = false)
         {
             var clock = Stopwatch.StartNew();
             var result = new Result { SourceTriangles = triangles == null ? 0 : triangles.Length / 3 };
@@ -4228,7 +5842,8 @@ namespace QuestTree.QuestGraph
             try
             {
                 new Work(positions, triangles, target, Math.Max(target, hardLimit), timeCapMs, rejectFlips, clock,
-                    result, ws).Run();
+                    result, ws, uvs, vertexMaterial, relaxSeams).Run();
+                result.SeamsRelaxed = relaxSeams;
             }
             finally
             {
@@ -4237,6 +5852,79 @@ namespace QuestTree.QuestGraph
             }
 
             return result;
+        }
+
+        /// <summary>
+        /// A textured decimation with its one retry (stage W review, H2): first with UV seams and material
+        /// borders as boundaries - which keeps every texture exact - and, when that cannot reach the hard limit
+        /// (a shed of ten materials cannot get to 24 triangles with every border fixed), once more with them
+        /// RELAXED, in what is left of the time cap: corners weld across a seam, collapses cross a border, and
+        /// the survivor keeps its own material and UV. A visible seam is the price; the alternative was the
+        /// cluster, which used to carry no texture at all.
+        /// </summary>
+        /// <param name="positions">x, y, z per vertex.</param>
+        /// <param name="triangles">Three indices per triangle.</param>
+        /// <param name="target">The target.</param>
+        /// <param name="hardLimit">The hard limit.</param>
+        /// <param name="timeCapMs">Milliseconds for both runs together.</param>
+        /// <param name="workspace">Scratch to reuse, or null.</param>
+        /// <param name="uvs">u, v per vertex, or null (then this is DecimateWith).</param>
+        /// <param name="vertexMaterial">Each vertex's material, or null.</param>
+        internal static Result DecimateTextured(float[] positions, int[] triangles, int target, int hardLimit,
+            double timeCapMs, Workspace workspace, float[] uvs, int[] vertexMaterial)
+        {
+            var clock = Stopwatch.StartNew();
+            var strict = DecimateWith(positions, triangles, target, hardLimit, timeCapMs, true, workspace, uvs, vertexMaterial);
+
+            if (uvs == null || strict.TimedOut) return strict;
+
+            // The strict run either could not reach the limit, or reached it by letting whole material regions
+            // collapse away - a region bounded by fixed borders shrinks to nothing in the relaxed phase and leaves
+            // a HOLE (measured: a box of 24 quarter-face regions kept 3.75 of its 6 m2). Either way, retry.
+            var before = Area(positions, triangles);
+            var kept = Area(strict.Positions, strict.Triangles);
+
+            if (!strict.OverLimit && kept >= before * AreaKept) return strict;
+
+            var left = timeCapMs - clock.Elapsed.TotalMilliseconds;
+            if (left <= 0) return strict;
+
+            var relaxed = DecimateWith(positions, triangles, target, hardLimit, left, true, workspace, uvs, vertexMaterial,
+                relaxSeams: true);
+            relaxed.RejectedSeam = strict.RejectedSeam;
+            relaxed.Milliseconds += strict.Milliseconds;
+
+            if (relaxed.TimedOut || relaxed.Triangles == null) return strict;
+
+            // the relaxed run is taken when it fits where the strict one did not, or keeps more of the surface
+            if (strict.OverLimit && !relaxed.OverLimit) return relaxed;
+            return Area(relaxed.Positions, relaxed.Triangles) > kept ? relaxed : strict;
+        }
+
+        /// <summary>The share of its surface a strict textured decimation must keep before its result is
+        /// trusted; under it the seams-relaxed retry runs.</summary>
+        private const double AreaKept = 0.97;
+
+        /// <summary>A mesh's surface area.</summary>
+        private static double Area(float[] p, int[] t)
+        {
+            if (p == null || t == null) return 0d;
+
+            var area = 0d;
+            var n = p.Length / 3;
+
+            for (var k = 0; k + 2 < t.Length; k += 3)
+            {
+                int a = t[k], b = t[k + 1], c = t[k + 2];
+                if (a < 0 || b < 0 || c < 0 || a >= n || b >= n || c >= n) continue;
+
+                double ux = p[b * 3] - p[a * 3], uy = p[b * 3 + 1] - p[a * 3 + 1], uz = p[b * 3 + 2] - p[a * 3 + 2];
+                double vx = p[c * 3] - p[a * 3], vy = p[c * 3 + 1] - p[a * 3 + 1], vz = p[c * 3 + 2] - p[a * 3 + 2];
+                double nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+                area += 0.5 * Math.Sqrt(nx * nx + ny * ny + nz * nz);
+            }
+
+            return area;
         }
 
         /// <summary>
@@ -4251,7 +5939,11 @@ namespace QuestTree.QuestGraph
         /// <param name="triangles">Three indices per triangle.</param>
         /// <param name="limit">The most triangles the result may have.</param>
         /// <param name="timeCapMs">Milliseconds allowed; past them the result is TimedOut with no mesh.</param>
-        internal static Result Cluster(float[] positions, int[] triangles, int limit, double timeCapMs = double.MaxValue)
+        /// <param name="uvs">u, v per vertex, or null (stage W review, H2): a cell's UV is the mean of its
+        /// dominant material's vertices, and a triangle takes its first corner's cell's material.</param>
+        /// <param name="vertexMaterial">Each vertex's material, or null.</param>
+        internal static Result Cluster(float[] positions, int[] triangles, int limit, double timeCapMs = double.MaxValue,
+            float[] uvs = null, int[] vertexMaterial = null)
         {
             var clock = Stopwatch.StartNew();
             var result = new Result { SourceTriangles = triangles == null ? 0 : triangles.Length / 3 };
@@ -4374,6 +6066,10 @@ namespace QuestTree.QuestGraph
 
                     result.Positions = outP.ToArray();
                     result.Triangles = outT.ToArray();
+
+                    if (uvs != null && vertexMaterial != null && uvs.Length >= n * 2 && vertexMaterial.Length >= n)
+                        ClusterUVs(result, map, id, n, uvs, vertexMaterial, counts.Count);
+
                     break;
                 }
 
@@ -4383,6 +6079,56 @@ namespace QuestTree.QuestGraph
             result.Milliseconds = clock.Elapsed.TotalMilliseconds;
 
             return result;
+        }
+
+        /// <summary>A cluster's UVs: per cell its dominant material (majority vote) and the mean UV of that
+        /// material's vertices in it; each output triangle takes its first corner's material. Crude - a tiled
+        /// texture's UVs average across repeats - but a coloured blob beats a textureless one.</summary>
+        private static void ClusterUVs(Result result, int[] map, int[] id, int n, float[] uvs, int[] vertexMaterial,
+            int cellCount)
+        {
+            var vote = new int[cellCount];
+            var votes = new int[cellCount];
+
+            for (var v = 0; v < n; v++)
+            {
+                var k = id[v];
+                if (votes[k] == 0) { vote[k] = vertexMaterial[v]; votes[k] = 1; }
+                else if (vote[k] == vertexMaterial[v]) votes[k]++;
+                else votes[k]--;
+            }
+
+            var su = new double[cellCount];
+            var sv = new double[cellCount];
+            var sn = new int[cellCount];
+
+            for (var v = 0; v < n; v++)
+            {
+                var k = id[v];
+                if (vertexMaterial[v] != vote[k]) continue;
+                su[k] += uvs[v * 2];
+                sv[k] += uvs[v * 2 + 1];
+                sn[k]++;
+            }
+
+            var outCount = result.Positions.Length / 3;
+            var uv = new float[outCount * 2];
+            var cellOf = new int[outCount];
+
+            for (var k = 0; k < map.Length; k++)
+            {
+                var o = map[k];
+                if (o < 0) continue;
+                cellOf[o] = k;
+                uv[o * 2] = sn[k] > 0 ? (float)(su[k] / sn[k]) : 0f;
+                uv[o * 2 + 1] = sn[k] > 0 ? (float)(sv[k] / sn[k]) : 0f;
+            }
+
+            var mats = new int[result.Triangles.Length / 3];
+            for (var t = 0; t < mats.Length; t++) mats[t] = vote[cellOf[result.Triangles[t * 3]]];
+
+            result.UV = uv;
+            result.TriangleMaterial = mats;
         }
 
         private static long Key(long x, long y, long z) => unchecked(x * 73856093L ^ y * 19349663L ^ z * 83492791L);
@@ -4427,6 +6173,9 @@ namespace QuestTree.QuestGraph
         {
             private readonly float[] _in;
             private readonly int[] _tris;
+            private readonly float[] _uvIn;
+            private readonly int[] _matIn;
+            private readonly bool _relaxSeams;
             private readonly int _target;
             private readonly int _limit;
             private readonly double _cap;
@@ -4445,10 +6194,15 @@ namespace QuestTree.QuestGraph
             private readonly double[] _sum = new double[10];
 
             internal Work(float[] positions, int[] triangles, int target, int limit, double cap, bool rejectFlips,
-                Stopwatch clock, Result result, Workspace ws)
+                Stopwatch clock, Result result, Workspace ws, float[] uvs = null, int[] vertexMaterial = null,
+                bool relaxSeams = false)
             {
+                _relaxSeams = relaxSeams;
                 _in = positions;
                 _tris = triangles;
+                _uvIn = uvs != null && positions != null && uvs.Length >= positions.Length / 3 * 2 ? uvs : null;
+                _matIn = vertexMaterial != null && positions != null && vertexMaterial.Length >= positions.Length / 3
+                    ? vertexMaterial : null;
                 _target = Math.Max(0, target);
                 _limit = Math.Max(_target, limit);
                 _cap = cap;
@@ -4548,6 +6302,10 @@ namespace QuestTree.QuestGraph
 
                 ws.SubP = Workspace.Grow(ws.SubP, subs * 3);
                 ws.SubN = Workspace.Grow(ws.SubN, subs * 3);
+                ws.SubUV = Workspace.Grow(ws.SubUV, subs * 2);
+                ws.SubMat = Workspace.Grow(ws.SubMat, subs);
+                ws.UV = Workspace.Grow(ws.UV, subs * 2);
+                ws.VMat = Workspace.Grow(ws.VMat, subs);
                 ws.Next = Workspace.Grow(ws.Next, subs);
                 ws.Rep = Workspace.Grow(ws.Rep, subs);
                 ws.P = Workspace.Grow(ws.P, subs * 3);
@@ -4567,6 +6325,10 @@ namespace QuestTree.QuestGraph
                         ws.SubN[id * 3] = source[v * 3];
                         ws.SubN[id * 3 + 1] = source[v * 3 + 1];
                         ws.SubN[id * 3 + 2] = source[v * 3 + 2];
+
+                        ws.SubUV[id * 2] = _uvIn != null ? _uvIn[v * 2] : 0d;
+                        ws.SubUV[id * 2 + 1] = _uvIn != null ? _uvIn[v * 2 + 1] : 0d;
+                        ws.SubMat[id] = _matIn != null ? _matIn[v] : -1;
                     }
 
                 // the spatial weld of the sub-vertices: 2x2x2 cells nearest the point, normals under 120 deg
@@ -4581,6 +6343,8 @@ namespace QuestTree.QuestGraph
 
                     double x = ws.SubP[i * 3], y = ws.SubP[i * 3 + 1], z = ws.SubP[i * 3 + 2];
                     double sx = ws.SubN[i * 3], sy = ws.SubN[i * 3 + 1], sz = ws.SubN[i * 3 + 2];
+                    double su = ws.SubUV[i * 2], sv = ws.SubUV[i * 2 + 1];
+                    var sm = ws.SubMat[i];
 
                     var gx = x / cell; var gy = y / cell; var gz = z / cell;
                     var cx = (long)Math.Floor(gx); var cy = (long)Math.Floor(gy); var cz = (long)Math.Floor(gz);
@@ -4601,6 +6365,11 @@ namespace QuestTree.QuestGraph
                             var dot = ws.N[j * 3] * sx + ws.N[j * 3 + 1] * sy + ws.N[j * 3 + 2] * sz;
                             if (dot < OpposedCosine) continue;
 
+                            // A UV seam or a material border is two vertices at one position (stage W).
+                            if (!_relaxSeams && (ws.VMat[j] != sm || Math.Abs(ws.UV[j * 2] - su) > UvSeam ||
+                                                 Math.Abs(ws.UV[j * 2 + 1] - sv) > UvSeam))
+                                continue;
+
                             found = j;
                             break;
                         }
@@ -4615,6 +6384,8 @@ namespace QuestTree.QuestGraph
                     var w = _vertices++;
                     ws.P[w * 3] = x; ws.P[w * 3 + 1] = y; ws.P[w * 3 + 2] = z;
                     ws.N[w * 3] = sx; ws.N[w * 3 + 1] = sy; ws.N[w * 3 + 2] = sz;
+                    ws.UV[w * 2] = su; ws.UV[w * 2 + 1] = sv;
+                    ws.VMat[w] = sm;
 
                     var own = Key(cx, cy, cz);
                     ws.Next[w] = head.TryGetValue(own, out var first) ? first : -1;
@@ -5051,6 +6822,12 @@ namespace QuestTree.QuestGraph
                         continue;
                     }
 
+                    if (!_relaxSeams && ws.VMat[a] != ws.VMat[b])
+                    {
+                        _result.RejectedSeam++;
+                        continue;
+                    }
+
                     if (!LinkCondition(a, b, out var shared, out var fan))
                     {
                         _result.RejectedLink++;
@@ -5233,6 +7010,22 @@ namespace QuestTree.QuestGraph
             {
                 var ws = _ws;
 
+                // The survivor's UV follows its position along the edge (stage W): an end's UV at that end, the
+                // midpoint's at the midpoint, the quadric's point projected onto the edge.
+                double ex = ws.P[b * 3] - ws.P[a * 3], ey = ws.P[b * 3 + 1] - ws.P[a * 3 + 1], ez = ws.P[b * 3 + 2] - ws.P[a * 3 + 2];
+                var e2 = ex * ex + ey * ey + ez * ez;
+                var t = e2 > 1e-18
+                    ? ((x - ws.P[a * 3]) * ex + (y - ws.P[a * 3 + 1]) * ey + (z - ws.P[a * 3 + 2]) * ez) / e2
+                    : 0d;
+                t = Math.Max(0d, Math.Min(1d, t));
+
+                // Across a border (relaxed retry only) the two UVs are in different textures: the survivor keeps
+                // its own.
+                if (ws.VMat[a] != ws.VMat[b]) t = 0d;
+
+                ws.UV[a * 2] += (ws.UV[b * 2] - ws.UV[a * 2]) * t;
+                ws.UV[a * 2 + 1] += (ws.UV[b * 2 + 1] - ws.UV[a * 2 + 1]) * t;
+
                 ws.P[a * 3] = x; ws.P[a * 3 + 1] = y; ws.P[a * 3 + 2] = z;
 
                 for (var i = 0; i < 10; i++) ws.Q[a * 10 + i] += ws.Q[b * 10 + i];
@@ -5294,6 +7087,8 @@ namespace QuestTree.QuestGraph
 
                 var positions = new List<float>();
                 var triangles = new List<int>(_live * 3);
+                var uvs = _uvIn != null ? new List<float>() : null;
+                var mats = _matIn != null ? new List<int>(_live) : null;
 
                 for (var f = 0; f < _faces; f++)
                 {
@@ -5309,15 +7104,380 @@ namespace QuestTree.QuestGraph
                             positions.Add((float)ws.P[v * 3]);
                             positions.Add((float)ws.P[v * 3 + 1]);
                             positions.Add((float)ws.P[v * 3 + 2]);
+
+                            if (uvs != null)
+                            {
+                                uvs.Add((float)ws.UV[v * 2]);
+                                uvs.Add((float)ws.UV[v * 2 + 1]);
+                            }
                         }
 
                         triangles.Add(ws.Map[v]);
                     }
+
+                    mats?.Add(ws.VMat[ws.F[f * 3]]);
                 }
 
                 _result.Positions = positions.ToArray();
                 _result.Triangles = triangles.ToArray();
+                _result.UV = uvs?.ToArray();
+                _result.TriangleMaterial = mats?.ToArray();
             }
+        }
+    }
+
+    /// <summary>
+    /// The atlas's shelf packing (stage W), Unity-free so the harness proves no two tiles overlap: tiles taken
+    /// by group, then tallest first, placed left to right along a shelf as tall as the first tile on it, a new
+    /// shelf above when the row is full or a taller tile starts one, a new page when the page is full; each tile
+    /// keeps a border of <c>padding</c> pixels that no other tile's border overlaps. A group may be held to fewer
+    /// pages than the cap; a tile that fits no page its group may use is left unplaced (page -1) WITHOUT moving
+    /// the packing on, so the smaller tiles after it - and the next group - still fill what is left.
+    /// </summary>
+    internal static class AtlasPacker
+    {
+        /// <summary>Packs the tiles. Returns the pages used.</summary>
+        /// <param name="widths">Each tile's inner width.</param>
+        /// <param name="heights">Each tile's inner height.</param>
+        /// <param name="pageSize">A page's side.</param>
+        /// <param name="maxPages">Pages allowed.</param>
+        /// <param name="padding">The border each tile keeps, pixels.</param>
+        /// <param name="pages">Filled: each tile's page, or -1.</param>
+        /// <param name="xs">Filled: each tile's inner x.</param>
+        /// <param name="ys">Filled: each tile's inner y.</param>
+        /// <param name="groups">Each tile's group, or null: lower groups are packed first.</param>
+        /// <param name="groupPageLimits">Pages each group may use (indexed by group), or null for maxPages.</param>
+        internal static int Pack(int[] widths, int[] heights, int pageSize, int maxPages, int padding, int[] pages,
+            int[] xs, int[] ys, int[] groups = null, int[] groupPageLimits = null)
+        {
+            var n = widths.Length;
+            var order = new int[n];
+            for (var i = 0; i < n; i++)
+            {
+                order[i] = i;
+                pages[i] = -1;
+            }
+
+            Array.Sort(order, (a, b) =>
+            {
+                var g = groups == null ? 0 : groups[a].CompareTo(groups[b]);
+                if (g != 0) return g;
+
+                var c = heights[b].CompareTo(heights[a]);
+                if (c != 0) return c;
+                c = widths[b].CompareTo(widths[a]);
+                return c != 0 ? c : a.CompareTo(b);
+            });
+
+            var page = 0;
+            var shelfY = 0;         // the current shelf's bottom
+            var shelfH = 0;         // its height (outer)
+            var cursor = 0;         // the next free x on it
+            var used = 0;
+
+            foreach (var i in order)
+            {
+                var ow = widths[i] + padding * 2;
+                var oh = heights[i] + padding * 2;
+
+                if (ow > pageSize || oh > pageSize || widths[i] <= 0 || heights[i] <= 0) continue;
+
+                var group = groups == null ? 0 : groups[i];
+                var limit = Math.Min(maxPages,
+                    groupPageLimits != null && group >= 0 && group < groupPageLimits.Length ? groupPageLimits[group] : maxPages);
+
+                // a tentative placement, committed only if it lands on a page this group may use
+                int tPage = page, tShelfY = shelfY, tShelfH = shelfH, tCursor = cursor;
+
+                if (tCursor + ow > pageSize || (tCursor > 0 && oh > tShelfH))
+                {
+                    tShelfY += tShelfH;
+                    tShelfH = 0;
+                    tCursor = 0;
+                }
+
+                if (tShelfY + Math.Max(tShelfH, oh) > pageSize)
+                {
+                    tPage++;
+                    tShelfY = 0;
+                    tShelfH = 0;
+                    tCursor = 0;
+                }
+
+                if (tPage >= limit) continue;
+
+                page = tPage;
+                shelfY = tShelfY;
+                shelfH = Math.Max(tShelfH, oh);
+                cursor = tCursor + ow;
+
+                pages[i] = page;
+                xs[i] = tCursor + padding;
+                ys[i] = tShelfY + padding;
+                used = Math.Max(used, page + 1);
+            }
+
+            return used;
+        }
+
+        /// <summary>Copies rows [rowFrom, rowTo) of a block - the tile repeated rx x ry times, with a border of
+        /// <c>padding</c> filled by copies of the block's edge texels (row -padding is the bottom of the gutter) -
+        /// into a page at (x, y). RGBA bytes, row 0 at the bottom, in both arrays. Called a slice at a time so a
+        /// 1024 x 1024 block is several short steps.</summary>
+        /// <param name="page">The page's pixels.</param>
+        /// <param name="pageSize">The page's side.</param>
+        /// <param name="tile">One repeat's pixels.</param>
+        /// <param name="w">Its width.</param>
+        /// <param name="h">Its height.</param>
+        /// <param name="x">The block's inner x.</param>
+        /// <param name="y">The block's inner y.</param>
+        /// <param name="rx">Repeats across.</param>
+        /// <param name="ry">Repeats up.</param>
+        /// <param name="padding">The border.</param>
+        /// <param name="rowFrom">First block row, from -padding.</param>
+        /// <param name="rowTo">One past the last block row, up to block height + padding.</param>
+        internal static void BlitRows(byte[] page, int pageSize, byte[] tile, int w, int h, int x, int y, int rx, int ry,
+            int padding, int rowFrom, int rowTo)
+        {
+            var bw = w * rx;
+            var bh = h * ry;
+
+            for (var py = Math.Max(-padding, rowFrom); py < Math.Min(bh + padding, rowTo); py++)
+            {
+                var ty = y + py;
+                if (ty < 0 || ty >= pageSize) continue;
+
+                var sy = Math.Max(0, Math.Min(bh - 1, py)) % h;
+
+                for (var px = -padding; px < bw + padding; px++)
+                {
+                    var tx = x + px;
+                    if (tx < 0 || tx >= pageSize) continue;
+
+                    var sx = Math.Max(0, Math.Min(bw - 1, px)) % w;
+                    var o = (ty * pageSize + tx) * 4;
+                    var s = (sy * w + sx) * 4;
+
+                    page[o] = tile[s];
+                    page[o + 1] = tile[s + 1];
+                    page[o + 2] = tile[s + 2];
+                    page[o + 3] = tile[s + 3];
+                }
+            }
+        }
+
+        /// <summary>The whole block at once - BlitRows over every row.</summary>
+        internal static void Blit(byte[] page, int pageSize, byte[] tile, int w, int h, int x, int y, int rx, int ry,
+            int padding) =>
+            BlitRows(page, pageSize, tile, w, h, x, y, rx, ry, padding, -padding, h * ry + padding);
+    }
+
+    /// <summary>A PNG encoder for the atlas pages (stage W), Unity-free so it runs on a worker. RGBA8, the "Sub"
+    /// filter on every row, one zlib stream STREAMED into IDAT chunks of at most <see cref="ChunkBytes"/> - no
+    /// whole-file buffer anywhere: the rows go through deflate into a fixed 1 MB chunk buffer that is written out
+    /// as each IDAT fills, and every byte written is hashed on its way out. Rows written top first, so row 0 of
+    /// the input (the bottom, Unity's texture order) is the PNG's last row and the picture reads the right way
+    /// up.</summary>
+    internal static class AtlasPng
+    {
+        /// <summary>The largest IDAT chunk, and the only buffer the encoder holds beside one row.</summary>
+        internal const int ChunkBytes = 1 << 20;
+
+        /// <summary>An encoded page: its length, its SHA-256 (lower-case hex), and its bytes when encoded to
+        /// memory (Encode - the harness).</summary>
+        internal sealed class Encoded
+        {
+            internal long Length;
+            internal string Sha256;
+            internal byte[] Bytes;
+        }
+
+        private static readonly uint[] Crc = MakeCrc();
+
+        /// <summary>Encodes to memory (the harness's entry).</summary>
+        /// <param name="rgba">The pixels, row 0 at the bottom.</param>
+        /// <param name="width">The width.</param>
+        /// <param name="height">The height.</param>
+        internal static Encoded Encode(byte[] rgba, int width, int height)
+        {
+            using (var memory = new System.IO.MemoryStream())
+            {
+                var encoded = EncodeTo(memory, rgba, width, height);
+                encoded.Bytes = memory.ToArray();
+                return encoded;
+            }
+        }
+
+        /// <summary>Encodes RGBA pixels (row 0 at the bottom) as a PNG straight into a stream, hashing as it
+        /// writes.</summary>
+        /// <param name="output">Where the PNG goes. Left open.</param>
+        /// <param name="rgba">The pixels.</param>
+        /// <param name="width">The width.</param>
+        /// <param name="height">The height.</param>
+        internal static Encoded EncodeTo(System.IO.Stream output, byte[] rgba, int width, int height)
+        {
+            using (var sha = System.Security.Cryptography.SHA256.Create())
+            {
+                var sink = new Hashed(output, sha);
+
+                sink.Write(new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A }, 0, 8);
+
+                var header = new byte[13];
+                BigEndian(header, 0, (uint)width);
+                BigEndian(header, 4, (uint)height);
+                header[8] = 8;      // bit depth
+                header[9] = 6;      // RGBA
+                Chunk(sink, "IHDR", header, header.Length);
+
+                var idat = new Idat(sink);
+                idat.Write(new byte[] { 0x78, 0x01 }, 0, 2);   // zlib header: deflate, fastest-level hint
+
+                uint a = 1, b = 0;
+
+                using (var deflate = new System.IO.Compression.DeflateStream(idat, System.IO.Compression.CompressionLevel.Optimal, true))
+                {
+                    var row = new byte[width * 4 + 1];
+
+                    for (var y = height - 1; y >= 0; y--)
+                    {
+                        var start = y * width * 4;
+                        row[0] = 1;     // Sub
+
+                        for (var i = 0; i < width * 4; i++)
+                        {
+                            var left = i >= 4 ? rgba[start + i - 4] : (byte)0;
+                            row[i + 1] = (byte)(rgba[start + i] - left);
+                        }
+
+                        for (var i = 0; i < row.Length; i++)
+                        {
+                            a = (a + row[i]) % 65521;
+                            b = (b + a) % 65521;
+                        }
+
+                        deflate.Write(row, 0, row.Length);
+                    }
+                }
+
+                var adler = new byte[4];
+                BigEndian(adler, 0, (b << 16) | a);
+                idat.Write(adler, 0, 4);
+                idat.Flush();
+
+                Chunk(sink, "IEND", new byte[0], 0);
+
+                sha.TransformFinalBlock(new byte[0], 0, 0);
+                var hex = new System.Text.StringBuilder(64);
+                foreach (var h in sha.Hash) hex.Append(h.ToString("x2", CultureInfo.InvariantCulture));
+
+                return new Encoded { Length = sink.Written, Sha256 = hex.ToString() };
+            }
+        }
+
+        /// <summary>Everything written to the output, hashed and counted on the way.</summary>
+        private sealed class Hashed
+        {
+            private readonly System.IO.Stream _out;
+            private readonly System.Security.Cryptography.HashAlgorithm _sha;
+            internal long Written;
+
+            internal Hashed(System.IO.Stream output, System.Security.Cryptography.HashAlgorithm sha)
+            {
+                _out = output;
+                _sha = sha;
+            }
+
+            internal void Write(byte[] data, int offset, int count)
+            {
+                if (count <= 0) return;
+                _sha.TransformBlock(data, offset, count, null, 0);
+                _out.Write(data, offset, count);
+                Written += count;
+            }
+        }
+
+        /// <summary>The zlib stream's sink: bytes collect in one ChunkBytes buffer and go out as an IDAT chunk
+        /// each time it fills, and once more on Flush.</summary>
+        private sealed class Idat : System.IO.Stream
+        {
+            private readonly Hashed _sink;
+            private readonly byte[] _buffer = new byte[ChunkBytes];
+            private int _count;
+
+            internal Idat(Hashed sink)
+            {
+                _sink = sink;
+            }
+
+            public override void Write(byte[] data, int offset, int count)
+            {
+                while (count > 0)
+                {
+                    var take = Math.Min(count, _buffer.Length - _count);
+                    Buffer.BlockCopy(data, offset, _buffer, _count, take);
+                    _count += take;
+                    offset += take;
+                    count -= take;
+
+                    if (_count == _buffer.Length) Flush();
+                }
+            }
+
+            public override void Flush()
+            {
+                if (_count == 0) return;
+                Chunk(_sink, "IDAT", _buffer, _count);
+                _count = 0;
+            }
+
+            public override bool CanRead => false;
+            public override bool CanSeek => false;
+            public override bool CanWrite => true;
+            public override long Length => throw new NotSupportedException();
+            public override long Position { get => throw new NotSupportedException(); set => throw new NotSupportedException(); }
+            public override int Read(byte[] buffer, int offset, int count) => throw new NotSupportedException();
+            public override long Seek(long offset, System.IO.SeekOrigin origin) => throw new NotSupportedException();
+            public override void SetLength(long value) => throw new NotSupportedException();
+        }
+
+        private static void Chunk(Hashed sink, string type, byte[] data, int length)
+        {
+            var head = new byte[8];
+            BigEndian(head, 0, (uint)length);
+            for (var i = 0; i < 4; i++) head[4 + i] = (byte)type[i];
+
+            var crc = 0xFFFFFFFFu;
+            for (var i = 4; i < 8; i++) crc = Crc[(crc ^ head[i]) & 0xFF] ^ (crc >> 8);
+            for (var i = 0; i < length; i++) crc = Crc[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
+
+            var tail = new byte[4];
+            BigEndian(tail, 0, crc ^ 0xFFFFFFFFu);
+
+            sink.Write(head, 0, 8);
+            sink.Write(data, 0, length);
+            sink.Write(tail, 0, 4);
+        }
+
+        private static void BigEndian(byte[] buffer, int at, uint value)
+        {
+            buffer[at] = (byte)(value >> 24);
+            buffer[at + 1] = (byte)(value >> 16);
+            buffer[at + 2] = (byte)(value >> 8);
+            buffer[at + 3] = (byte)value;
+        }
+
+        private static uint[] MakeCrc()
+        {
+            var table = new uint[256];
+
+            for (uint n = 0; n < 256; n++)
+            {
+                var c = n;
+                for (var k = 0; k < 8; k++) c = (c & 1) != 0 ? 0xEDB88320u ^ (c >> 1) : c >> 1;
+                table[n] = c;
+            }
+
+            return table;
         }
     }
 

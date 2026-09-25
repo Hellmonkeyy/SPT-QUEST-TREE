@@ -36,9 +36,13 @@ namespace QuestTreeServer
     /// THREE. A stamp, not a timestamp, is what a client compares. <see
     /// cref="MapIndexEntryDto.Stamp"/> is sha256 over the stored meta's bytes, every picture's bytes
     /// in level order and the mesh's bytes if there is one, so it changes when the set changes and not
-    /// otherwise. It is computed on completion and rebuilt at boot by reading the folders, never
-    /// persisted: a stamp file could disagree with the pictures beside it, and then a client would keep
-    /// a stale map forever while both halves reported success.
+    /// otherwise. It is computed on completion and rebuilt at boot from the folders. A stamp that
+    /// disagreed with the pictures beside it would keep a client on a stale map forever while both halves
+    /// reported success, so the one thing persisted beside a set is a CACHE of it (<c>&lt;key&gt;.stamp-cache.json</c>,
+    /// stage W): the stamp and each file's sha256, keyed on every file's name, size and write time and the
+    /// meta's - trusted only while ALL of those still match, and rebuilt from the bytes otherwise. It exists
+    /// because a host at the 1.5 GB ceiling would otherwise hash all of it under the lock on the first
+    /// index request after every boot.
     ///
     /// FOUR (1.19.0). A set may carry a MESH - the map's ground relief and building shells, which the
     /// Maps tab drapes the pictures over in 3D. It arrives on its own route
@@ -167,15 +171,31 @@ namespace QuestTreeServer
         /// rounds a metre extent up to whole tiles and the two sides round in their own code.</summary>
         private const int PixelTolerance = 2;
 
-        /// <summary>One map's ceiling: 8 floors x 2.5 MB + 4 sides x 2.5 MB + a 48 MB mesh = 78 MB, and 6 MB of
-        /// margin on top for a later change to any one of them - 84 MB. Said plainly because a guard that
-        /// cannot fire must not look like one: as the constants stand today nothing can reach it, since
-        /// every part is capped on its own and they sum to 78. It is kept because the numbers are set
-        /// independently and it is the one that would bite first if a later release raised the floor cap,
-        /// the picture size, the side count or the mesh size. It rose 20 -> 32 MB with the mesh, 32 -> 42
-        /// with the sides and 42 -> 84 with stage V's 48 MB mesh. The store's own total below is reachable
-        /// - four maps at a full 84 MB pass it - but only by writing 300 MB.</summary>
-        private const long MaxBytesPerMap = 84L * 1024 * 1024;
+        /// <summary>One map's ceiling: 8 floors x 2.5 MB + 4 sides x 2.5 MB + a 48 MB mesh + 8 atlas pages x
+        /// 6 MB = 126 MB, and 6 MB of margin on top for a later change to any one of them - 132 MB. Said
+        /// plainly because a guard that cannot fire must not look like one: as the constants stand today
+        /// nothing can reach it, since every part is capped on its own and they sum to 126. It is kept
+        /// because the numbers are set independently and it is the one that would bite first if a later
+        /// release raised the floor cap, the picture size, the side or page count or the mesh size. It rose
+        /// 20 -> 32 MB with the mesh, 32 -> 42 with the sides, 42 -> 84 with stage V's 48 MB mesh and
+        /// 84 -> 132 with stage W's atlas pages. The store's own total below is reachable.</summary>
+        private const long MaxBytesPerMap = 132L * 1024 * 1024;
+
+        /// <summary>The most atlas pages one set may carry (MapCaptureAtlasDto.Page is 0 to this less one),
+        /// the builder's own ceiling.</summary>
+        private const int MaxAtlasPages = 8;
+
+        /// <summary>One atlas page's ceiling, decoded. A page is a 4096 px sheet of building textures, sent
+        /// at its full size as a JPEG at quality 85 - never downscaled, since a texel lost here is a blurred
+        /// wall on every client - and a sheet of dense brick and signage at that quality measures 2-4 MB.
+        /// Six is that with room, and still far under what one post can carry (a 6 MB page is ~8.3 MB of
+        /// base64). The client holds a page to the same six before it posts it
+        /// (MapTransfer.MaxAtlasPageBytes).</summary>
+        private const int MaxAtlasPageBytes = 6 * 1024 * 1024;
+
+        /// <summary>A page's base64 ceiling, checked BEFORE decoding, for
+        /// <see cref="MaxEncodedChars"/>' reason.</summary>
+        private const int MaxEncodedAtlasChars = MaxAtlasPageBytes / 3 * 4 + 1024;
 
         /// <summary>The four sides a set may carry an oblique picture from, in the one order every
         /// reader uses - the staging, the promotion, the stamp and the boot read all walk them in this
@@ -200,9 +220,16 @@ namespace QuestTreeServer
         /// holds a shipped set to.</summary>
         private const double SideUnitTolerance = 1e-3;
 
-        /// <summary>The whole store's ceiling. ~26 floors of the 11 vanilla maps is 15-30 MB, so this
-        /// is ten times a full set and still small enough that a peer cannot fill a host's disk.</summary>
-        private const long MaxBytesTotal = 300L * 1024 * 1024;
+        /// <summary>The whole store's ceiling, counting what is staged with what is served. Raised 300 MB ->
+        /// 1.5 GB with stage W: a map in 3D is now its floors, its sides, a mesh of up to 48 MB and up to
+        /// 48 MB of atlas pages, so 300 MB held about two maps at their ceilings and the eleven vanilla maps
+        /// of one group could not all be served. Eleven maps at the full 132 MB are 1,452 MB, which leaves
+        /// 84 MB - LESS than one more map at its ceiling. So a host already holding eleven maps at the ceiling
+        /// cannot stage a twelfth set, nor a full-size replacement of one of them, until something is freed;
+        /// that is the bound working, and it is far from real sets (a 3D map measures tens of megabytes, not
+        /// 132). Still a bound a peer cannot pass - and uploads are refused by default
+        /// (<see cref="AcceptVariable"/>), so only a host that opted in can be asked to hold it.</summary>
+        private const long MaxBytesTotal = 1536L * 1024 * 1024;
 
         private const int MaxLabels = 200;
         private const int MaxLabelLength = 40;
@@ -254,6 +281,12 @@ namespace QuestTreeServer
         /// from disk like the others. JPEG only: a side is always uploaded as one.</summary>
         private static readonly Regex StoredSideFileName =
             new(@"^[A-Za-z0-9_\-]{1,60}-side-[NSEW]\.jpg$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+        /// <summary>What a stored ATLAS page's file name may be - <c>&lt;key&gt;-atlas-&lt;n&gt;.jpg</c>, n 0 to 7, the
+        /// name <see cref="AtlasName"/> writes and package.ps1's gates admit - checked on the way back in from
+        /// disk like the others.</summary>
+        private static readonly Regex StoredAtlasFileName =
+            new(@"^[A-Za-z0-9_\-]{1,60}-atlas-[0-7]\.jpg$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
         /// <summary>A sha256 as this store will store one: 64 hex digits, lower case on the way out.
         /// Checked on the way in because it is printed into log lines and written into a served
@@ -414,20 +447,35 @@ namespace QuestTreeServer
             // that completes the set can say whether the set it completed kept that mesh (see below).
             var declaredMesh = meta.Mesh != null;
 
-            // The mesh block, separately and NOT as a refusal - see the method. The sides likewise.
+            // The mesh block, separately and NOT as a refusal - see the method. The sides and the atlas
+            // pages likewise, the pages AFTER the mesh: a set whose mesh is dropped has nothing to drape
+            // them on, so they go with it.
             DropUnusableMesh(key, meta);
             DropUnusableSides(key, meta);
+            DropUnusableAtlas(key, meta);
 
             // A FLOOR post or a SIDE post. The two are the same picture checks with one difference in
             // what a failure costs: a floor that fails refuses the post, as it always has, while a side
             // that fails is DROPPED - taken out of the set's sides - and the post carries on, because a
             // side picture only textures some walls and is never worth the map. So a side's problem is
             // collected here rather than returned, and acted on under the lock.
+            //
+            // An ATLAS page post is a side post in every respect but its checks and its name: the same
+            // level (int.MinValue, which is what makes an older host refuse it rather than file it), the
+            // same drop-never-refuse rule, the same markers. pageNo is the page when it is one this host
+            // could stage, null otherwise - a page 99 is dropped with no marker, as a side 'Q' is.
             var isSide = !string.IsNullOrWhiteSpace(request.Side);
             var sideDir = isSide ? NormaliseSide(request.Side) : null;
             string? sideRefusal = null;
+            var isAtlas = request.Atlas != null;
+            int? pageNo = isAtlas && request.Atlas >= 0 && request.Atlas < MaxAtlasPages ? request.Atlas : null;
+            string? pageRefusal = null;
             var format = "jpg";
             var bytes = Array.Empty<byte>();
+
+            // A post that claims to be both is a client bug, not a piece of anything: refused, since no
+            // answer about one of the two would be true of the post.
+            if (isSide && isAtlas) return Reject(key, "the post names both a side and an atlas page");
 
             if (isSide)
             {
@@ -437,6 +485,19 @@ namespace QuestTreeServer
                     sideRefusal = $"the capture's meta names no {sideDir} side";
                 else
                     sideRefusal = DecodeSide(request, out bytes);
+            }
+            else if (isAtlas)
+            {
+                var entry = meta.Atlas?.FirstOrDefault(p => p.Page == pageNo);
+
+                if (pageNo == null)
+                    pageRefusal = $"{request.Atlas} is not an atlas page (0 to {MaxAtlasPages - 1})";
+                else if (entry == null)
+                    pageRefusal = meta.Mesh == null
+                        ? "the set carries no 3D mesh for it to texture"
+                        : $"the capture's meta names no atlas page {pageNo}";
+                else
+                    pageRefusal = DecodeAtlasPage(request, entry, out bytes);
             }
             else
             {
@@ -485,7 +546,7 @@ namespace QuestTreeServer
 
             // Set under the lock, used after it: the folder this capture is staged in, and - only once
             // every piece is here - the meta to promote. The promotion itself reads and hashes up to
-            // 84 MB, so it is PREPARED outside the lock and only committed under it (see CompleteSet).
+            // 132 MB, so it is PREPARED outside the lock and only committed under it (see CompleteSet).
             string staging;
             MapCaptureMetaDto ready;
 
@@ -512,6 +573,14 @@ namespace QuestTreeServer
                         {
                             Outcome = "stored",
                             Reason = SideNote(sideDir ?? SideLabel(request.Side), "older than the set on the host", "")
+                        };
+
+                    // An atlas page likewise, for the same reason.
+                    if (isAtlas)
+                        return new MapUploadResponse
+                        {
+                            Outcome = "stored",
+                            Reason = PageNote(PageLabel(request.Atlas), "older than the set on the host", "")
                         };
 
                     return Reject(key, "older than the set on the host");
@@ -544,6 +613,11 @@ namespace QuestTreeServer
                     string.Equals(meta.Mesh.Sha256, refused, StringComparison.OrdinalIgnoreCase))
                     meta.Mesh = null;
 
+                // And a set served flat has no buildings to drape an atlas page on, so its pages go with the
+                // mesh - out of the meta the completion waits on, exactly as FlattenStaged took them out of
+                // the staged one.
+                if (meta.Mesh == null) meta.Atlas = null;
+
                 // The same for SIDES this host has already dropped for this capture: every floor post
                 // re-stages the meta, and one that still named a dropped side would put it back on the
                 // list the completion waits for - which it would then wait for until the staging expired.
@@ -560,6 +634,24 @@ namespace QuestTreeServer
                 // staged or the completion counts what is missing.
                 if (sideRefusal != null && sideDir != null)
                     meta.Sides?.RemoveAll(s => s.Dir == sideDir);
+
+                // The same three steps for ATLAS pages: the ones already dropped for this capture out of the
+                // meta, a page posted again after it was dropped (or after its set went flat) dropped again,
+                // and this post's own page out of the meta when it is being dropped.
+                StripDroppedPages(staging, meta);
+
+                if (isAtlas && pageRefusal == null && pageNo != null &&
+                    (meta.Atlas == null || !meta.Atlas.Any(p => p.Page == pageNo)))
+                    pageRefusal = meta.Mesh == null
+                        ? "the set is served without its 3D mesh, which is all a page textures"
+                        : "it was already dropped for this capture";
+
+                if (pageRefusal != null && pageNo != null)
+                {
+                    meta.Atlas?.RemoveAll(p => p.Page == pageNo);
+
+                    if (meta.Atlas != null && meta.Atlas.Count == 0) meta.Atlas = null;
+                }
 
                 // TWO CLIENTS, ONE CAPTURE INSTANT. The staging folder is keyed on the map and the
                 // capturedAt, so two clients that captured the same map in the same second share it - and
@@ -583,6 +675,7 @@ namespace QuestTreeServer
 
                 var staged = FilesByLevel(staging);
                 var stagedSides = SidesByDir(staging);
+                var stagedPages = PagesByNumber(staging);
 
                 // What this post REPLACES, which is the only thing either budget may discount: a floor
                 // or side posted twice overwrites its own staged copy, so counting the old one as well
@@ -590,7 +683,9 @@ namespace QuestTreeServer
                 // which is what stops a set being walked past the budget one picture at a time.
                 var mine = isSide
                     ? (sideDir != null && stagedSides.TryGetValue(sideDir, out var mySide) ? SizeOf(mySide) : 0)
-                    : (staged.TryGetValue(request.Level, out var already) ? SizeOf(already) : 0);
+                    : isAtlas
+                        ? (pageNo != null && stagedPages.TryGetValue(pageNo.Value, out var myPage) ? SizeOf(myPage) : 0)
+                        : (staged.TryGetValue(request.Level, out var already) ? SizeOf(already) : 0);
 
                 // The sides the meta names that are not staged yet, other than this post's own: each is
                 // reserved at the most a picture may weigh, because a side carries no declared size and
@@ -598,6 +693,10 @@ namespace QuestTreeServer
                 // FIRST post, before anything is staged, rather than after its floors are all in.
                 var pendingSides = (meta.Sides ?? new List<MapCaptureSideDto>())
                     .Count(sd => sd.Dir != sideDir && !stagedSides.ContainsKey(sd.Dir)) * (long)MaxImageBytes;
+
+                // The atlas pages likewise, each at the most a PAGE may weigh.
+                var pendingPages = (meta.Atlas ?? new List<MapCaptureAtlasDto>())
+                    .Count(p => p.Page != pageNo && !stagedPages.ContainsKey(p.Page)) * (long)MaxAtlasPageBytes;
 
                 // The mesh counts against the map's budget from the FIRST floor: staged, at its size on
                 // disk; not yet staged, at the size the meta declares for it (bounded to MaxMeshBytes by
@@ -609,7 +708,8 @@ namespace QuestTreeServer
                     : Math.Max(meta.Mesh?.Bytes ?? 0L, 0L);
 
                 var setBytes = staged.Sum(entry => SizeOf(entry.Value)) +
-                               stagedSides.Sum(entry => SizeOf(entry.Value)) + pendingSides + meshBytes - mine;
+                               stagedSides.Sum(entry => SizeOf(entry.Value)) + pendingSides +
+                               stagedPages.Sum(entry => SizeOf(entry.Value)) + pendingPages + meshBytes - mine;
 
                 // A SIDE that does not fit is DROPPED rather than refusing the post, for the reason every
                 // other side problem is: a refusal would leave the side named in the staged meta, and the
@@ -627,14 +727,16 @@ namespace QuestTreeServer
                 // The declared-but-not-staged mesh again, for the same reason: it is coming, and the
                 // store has to have room for it when it does.
                 var pendingMesh = System.IO.File.Exists(MeshPath(staging)) ? 0L : Math.Max(meta.Mesh?.Bytes ?? 0L, 0L);
-                var pending = pendingMesh + pendingSides;
+                var pending = pendingMesh + pendingSides + pendingPages;
                 var total = _sets.Values.Sum(s => s.Bytes) + IncomingBytes() - mine;
 
                 // Two sentences, because "holds" has to stay true: what is on the disk, and - only when
-                // it is what tipped the balance - the mesh and sides this capture says are still to come.
-                // Named for what is actually pending, so the sentence is true of this capture.
-                var pendingWhat = pendingMesh > 0 && pendingSides > 0 ? "mesh and sides"
-                    : pendingMesh > 0 ? "mesh" : "sides";
+                // it is what tipped the balance - the mesh, sides and pages this capture says are still to
+                // come. Named for what is actually pending, so the sentence is true of this capture.
+                var pendingWhat = Listed(
+                    pendingMesh > 0 ? "mesh" : null,
+                    pendingSides > 0 ? "sides" : null,
+                    pendingPages > 0 ? "atlas pages" : null);
 
                 if (overBudget == null && total + pending + bytes.Length > MaxBytesTotal)
                     overBudget = pending > 0 && total + bytes.Length <= MaxBytesTotal
@@ -644,17 +746,26 @@ namespace QuestTreeServer
 
                 if (overBudget != null)
                 {
-                    if (!isSide || sideDir == null || sideRefusal != null)
-                    {
-                        // A side already being dropped writes nothing but a marker, so a budget cannot be
-                        // what stops it; everything else refuses, as a floor always has.
-                        if (!isSide) return Reject(key, overBudget);
-                    }
-                    else
+                    // A side or page already being dropped writes nothing but a marker, so a budget cannot be
+                    // what stops it; a side or page that would be staged is dropped instead; a floor refuses,
+                    // as a floor always has.
+                    if (isSide && sideDir != null && sideRefusal == null)
                     {
                         sideRefusal = overBudget;
                         bytes = Array.Empty<byte>();
                         meta.Sides?.RemoveAll(sd => sd.Dir == sideDir);
+                    }
+                    else if (isAtlas && pageNo != null && pageRefusal == null)
+                    {
+                        pageRefusal = overBudget;
+                        bytes = Array.Empty<byte>();
+                        meta.Atlas?.RemoveAll(p => p.Page == pageNo);
+
+                        if (meta.Atlas != null && meta.Atlas.Count == 0) meta.Atlas = null;
+                    }
+                    else if (!isSide && !isAtlas)
+                    {
+                        return Reject(key, overBudget);
                     }
                 }
 
@@ -662,7 +773,24 @@ namespace QuestTreeServer
                 {
                     System.IO.Directory.CreateDirectory(staging);
 
-                    if (!isSide)
+                    if (isAtlas)
+                    {
+                        // A page staged, or - dropped - its marker, with any copy an earlier attempt staged
+                        // deleted so it cannot be promoted. Exactly the side's two cases below.
+                        if (pageNo != null && pageRefusal == null)
+                        {
+                            WriteAtomic(System.IO.Path.Combine(staging, StagedPageName(pageNo.Value)), bytes);
+                        }
+                        else if (pageNo != null)
+                        {
+                            WriteAtomic(System.IO.Path.Combine(staging, DroppedPageName(pageNo.Value)),
+                                Encoding.UTF8.GetBytes(pageRefusal!));
+
+                            try { System.IO.File.Delete(System.IO.Path.Combine(staging, StagedPageName(pageNo.Value))); }
+                            catch { /* there may be none */ }
+                        }
+                    }
+                    else if (!isSide)
                     {
                         var wanted = System.IO.Path.Combine(staging, StagedName(request.Level, format));
 
@@ -717,6 +845,9 @@ namespace QuestTreeServer
                 if (sideRefusal != null)
                     NoteSideDropped(key, sideDir ?? SideLabel(request.Side), meta.CapturedAt, sideRefusal);
 
+                if (pageRefusal != null)
+                    NoteAtlasDropped(key, PageLabel(request.Atlas), meta.CapturedAt, pageRefusal);
+
                 // Re-read from disk rather than adding one to a count: the staged set is the authority
                 // on what has arrived, which is what makes a server restarted mid-upload resume
                 // instead of starting over.
@@ -734,7 +865,7 @@ namespace QuestTreeServer
                     return new MapUploadResponse
                     {
                         Outcome = "stored",
-                        Reason = SideNote(sideDir, sideRefusal, $"waiting for {waitingFor}"),
+                        Reason = Note($"waiting for {waitingFor}"),
                         FloorsHeld = staged.Count
                     };
                 }
@@ -753,7 +884,7 @@ namespace QuestTreeServer
                     return new MapUploadResponse
                     {
                         Outcome = "stored",
-                        Reason = SideNote(sideDir, sideRefusal, "waiting for the mesh"),
+                        Reason = Note("waiting for the mesh"),
                         FloorsHeld = staged.Count
                     };
                 }
@@ -777,11 +908,17 @@ namespace QuestTreeServer
                     : ready.Mesh != null ? "stored with its 3D mesh"
                     : "stored without its 3D mesh - this host could not take it (its own log says why)";
 
-                // A dropped side that happened to be the last piece still says it was dropped.
-                completed.Reason = SideNote(sideDir, sideRefusal, meshNote);
+                // A dropped side or page that happened to be the last piece still says it was dropped.
+                completed.Reason = Note(meshNote);
             }
 
             return completed;
+
+            // The answer's reason with this post's own drop in front of it, when it was one - a side's or a
+            // page's, in the words the client reads for each.
+            string Note(string rest) => isAtlas
+                ? PageNote(PageLabel(request.Atlas), pageRefusal, rest)
+                : SideNote(sideDir, sideRefusal, rest);
         }
 
         /// <summary>What this host holds, answered from memory: a client asks for this on every Maps
@@ -848,6 +985,14 @@ namespace QuestTreeServer
                     var side = dir == null ? null : set.Meta.Sides?.FirstOrDefault(s => s.Dir == dir);
 
                     file = side != null && StoredSideFileName.IsMatch(side.File ?? "") ? side.File : null;
+                }
+                else if (request.Atlas != null)
+                {
+                    // An ATLAS page by its number, the name again from the stored meta and held to the
+                    // stored-page rule. A page this set does not carry answers empty, as a side does.
+                    var page = set.Meta.Atlas?.FirstOrDefault(p => p.Page == request.Atlas);
+
+                    file = page != null && StoredAtlasFileName.IsMatch(page.File ?? "") ? page.File : null;
                 }
                 else
                 {
@@ -1075,10 +1220,14 @@ namespace QuestTreeServer
                     // not reserved here, unlike on the floor route: the mesh is the 3D map and a side is one
                     // wall texture, so a budget squeeze is settled in the mesh's favour - a side that then
                     // does not fit is dropped when it arrives (Accept), and the set completes without it.
+                    //
+                    // The staged ATLAS pages count for the same reason - they are posted before the mesh, so by
+                    // now they are on the disk - and pages still to come are not reserved, for the sides'.
                     var stagedSides = SidesByDir(staging);
 
                     var setBytes = floors.Sum(entry => SizeOf(entry.Value)) +
-                                   stagedSides.Sum(entry => SizeOf(entry.Value));
+                                   stagedSides.Sum(entry => SizeOf(entry.Value)) +
+                                   PagesByNumber(staging).Sum(entry => SizeOf(entry.Value));
 
                     if (setBytes + bytes.Length > MaxBytesPerMap)
                         permanent = $"this capture would be {Mb(setBytes + bytes.Length)} MB with its mesh, past the " +
@@ -1297,7 +1446,8 @@ namespace QuestTreeServer
                 // the sha the staged capture named.
                 string? permanent = null;
 
-                var pictures = FilesByLevel(staging).Sum(e => SizeOf(e.Value)) + SidesByDir(staging).Sum(e => SizeOf(e.Value));
+                var pictures = FilesByLevel(staging).Sum(e => SizeOf(e.Value)) + SidesByDir(staging).Sum(e => SizeOf(e.Value)) +
+                               PagesByNumber(staging).Sum(e => SizeOf(e.Value));
 
                 if (pictures + request.Bytes > MaxBytesPerMap)
                     permanent = $"this capture would be {Mb(pictures + request.Bytes)} MB with its mesh, past the " +
@@ -1514,7 +1664,8 @@ namespace QuestTreeServer
         /// <summary>
         /// Completes a set whose every piece is staged: PREPARED outside the lock, COMMITTED under it.
         ///
-        /// Why two phases. A set is up to 84 MB - eight floors, four sides and a mesh - and completing it
+        /// Why two phases. A set is up to 132 MB - eight floors, four sides, eight atlas pages and a mesh -
+        /// and completing it
         /// means reading all of it, hashing the mesh again and hashing the whole of it for the stamp. Done
         /// under <see cref="_lock"/>, as it once was, that is well over 100 MB of reading and hashing while the index
         /// and image routes - which the game calls on its MAIN THREAD - waited for the same lock. So
@@ -1576,6 +1727,9 @@ namespace QuestTreeServer
 
             /// <summary>The side pictures, in <see cref="SideDirs"/> order.</summary>
             public readonly List<PreparedFile> Sides = new();
+
+            /// <summary>The atlas pages, in page order.</summary>
+            public readonly List<PreparedFile> Atlas = new();
             public PreparedFile? Mesh;
             public byte[] MetaBytes = Array.Empty<byte>();
             public string Stamp = "";
@@ -1595,6 +1749,9 @@ namespace QuestTreeServer
             public DateTime Written;
             public string Name = "";
             public byte[] Data = Array.Empty<byte>();
+
+            /// <summary>The file's sha256, hashed in PrepareSet (outside the lock) for the stamp cache.</summary>
+            public string Sha = "";
         }
 
         /// <summary>
@@ -1635,6 +1792,7 @@ namespace QuestTreeServer
                     file.Name = $"{key}-{floor.Level.ToString(CultureInfo.InvariantCulture)}.{format}";
                     floor.File = file.Name;
 
+                    file.Sha = HashOf(file.Data);
                     prepared.Floors.Add(file);
                     prepared.Bytes += file.Data.Length;
                 }
@@ -1662,6 +1820,7 @@ namespace QuestTreeServer
                         file.Name = SideName(key, dir);
                         side.File = file.Name;
 
+                        file.Sha = HashOf(file.Data);
                         prepared.Sides.Add(file);
                         prepared.Bytes += file.Data.Length;
                     }
@@ -1673,6 +1832,42 @@ namespace QuestTreeServer
                 else
                 {
                     meta.Sides = null;
+                }
+
+                // The atlas pages, in page order, under the SERVER'S names - and with the sha256 the meta
+                // will be served with REWRITTEN to the hash of the stored JPEG. The meta arrived naming the
+                // capture's own PNG, which no machine but the capturer's has; from here on the sha is the
+                // served file's, and that is what a downloader and the packaging gate hold a page to. Only
+                // when the set keeps a mesh: pages drape buildings, and a set promoted flat has none.
+                if (meta.Mesh != null && meta.Atlas != null && meta.Atlas.Count > 0)
+                {
+                    var stagedPages = PagesByNumber(staging);
+                    var ordered = meta.Atlas.OrderBy(p => p.Page).ToList();
+
+                    foreach (var page in ordered)
+                    {
+                        if (!stagedPages.TryGetValue(page.Page, out var source))
+                        {
+                            prepared.Problem = $"atlas page {page.Page} is no longer staged";
+                            return prepared;
+                        }
+
+                        var file = Read(source);
+
+                        file.Name = AtlasName(key, page.Page);
+                        page.File = file.Name;
+                        page.Sha256 = Convert.ToHexString(SHA256.HashData(file.Data)).ToLowerInvariant();
+
+                        file.Sha = page.Sha256;
+                        prepared.Atlas.Add(file);
+                        prepared.Bytes += file.Data.Length;
+                    }
+
+                    meta.Atlas = ordered;
+                }
+                else
+                {
+                    meta.Atlas = null;
                 }
 
                 if (meta.Mesh != null)
@@ -1701,6 +1896,7 @@ namespace QuestTreeServer
                     meta.Mesh.Sha256 = hash;
                     meta.Mesh.Bytes = mesh.Data.Length;
 
+                    mesh.Sha = hash;
                     prepared.Mesh = mesh;
                     prepared.Bytes += mesh.Data.Length;
                 }
@@ -1708,13 +1904,15 @@ namespace QuestTreeServer
                 prepared.MetaBytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(meta, FileOptions));
 
                 // Over the bytes as they WILL BE written - the floors in level order, then the sides in
-                // SideDirs order, then the mesh - so the boot that reads this folder back computes the
+                // SideDirs order, then the atlas pages in page order, then the mesh - so the boot that reads
+                // this folder back computes the
                 // same value from the same files. That identity is what makes the stamp worth comparing
-                // at all: it is never persisted, because a stamp file could disagree with the pictures
-                // beside it.
+                // at all. It is cached beside the set (WriteStampCache) but never trusted over a file that
+                // changed - see the class comment.
                 prepared.Stamp = StampOf(
                     prepared.MetaBytes,
-                    prepared.Floors.Select(f => f.Data).Concat(prepared.Sides.Select(sd => sd.Data)),
+                    prepared.Floors.Select(f => f.Data).Concat(prepared.Sides.Select(sd => sd.Data))
+                        .Concat(prepared.Atlas.Select(p => p.Data)),
                     prepared.Mesh?.Data);
 
                 return prepared;
@@ -1814,7 +2012,7 @@ namespace QuestTreeServer
                 };
             }
 
-            if (!prepared.Floors.All(Unchanged) || !prepared.Sides.All(Unchanged) ||
+            if (!prepared.Floors.All(Unchanged) || !prepared.Sides.All(Unchanged) || !prepared.Atlas.All(Unchanged) ||
                 (prepared.Mesh != null && !Unchanged(prepared.Mesh)))
                 return new MapUploadResponse
                 {
@@ -1845,6 +2043,14 @@ namespace QuestTreeServer
                     written.Add(side.Name);
                 }
 
+                // The atlas pages the same way: a page this set carries is kept, a page the previous set
+                // carried past this one's last is swept.
+                foreach (var page in prepared.Atlas)
+                {
+                    WriteAtomic(System.IO.Path.Combine(target, page.Name), page.Data);
+                    written.Add(page.Name);
+                }
+
                 if (prepared.Mesh != null)
                 {
                     WriteAtomic(System.IO.Path.Combine(target, prepared.Mesh.Name), prepared.Mesh.Data);
@@ -1869,6 +2075,13 @@ namespace QuestTreeServer
 
                 WriteAtomic(System.IO.Path.Combine(target, metaName), prepared.MetaBytes);
 
+                // The stamp cache, AFTER the meta, so the boot that reads this folder back does not hash it
+                // again. Best effort: a cache that failed to write costs one hash at the next boot.
+                WriteStampCache(target, key, prepared.Stamp,
+                    prepared.Floors.Concat(prepared.Sides).Concat(prepared.Atlas)
+                        .Concat(prepared.Mesh == null ? Array.Empty<PreparedFile>() : new[] { prepared.Mesh })
+                        .Select(f => (f.Name, f.Sha)).ToList());
+
                 _sets[key] = new StoredSet
                 {
                     Key = key,
@@ -1887,6 +2100,7 @@ namespace QuestTreeServer
                 _logger.Info(
                     $"Quest Tracker: map picture set for '{key}' stored - {prepared.Floors.Count} floor(s)" +
                     $"{(prepared.Sides.Count == 0 ? "" : $", {prepared.Sides.Count} side(s)")}" +
+                    $"{(prepared.Atlas.Count == 0 ? "" : $", {prepared.Atlas.Count} atlas page(s)")}" +
                     $"{(prepared.Mesh == null ? "" : $" and a {Mb(prepared.Mesh.Data.Length)} MB mesh")}, " +
                     $"{Mb(prepared.Bytes)} MB, captured {Clip(meta.CapturedAt, MaxFreeTextLength)} by client " +
                     $"{(clientVersion.Length == 0 ? "unknown" : clientVersion)}.");
@@ -1928,6 +2142,10 @@ namespace QuestTreeServer
                 WriteAtomic(RefusedMarkerPath(staging), Encoding.UTF8.GetBytes(sha.ToLowerInvariant()));
 
                 staged.Mesh = null;
+
+                // Its atlas pages with it: they texture the mesh's buildings and nothing else, so the flat
+                // set neither waits for them nor serves them. Any already staged go with the staging.
+                staged.Atlas = null;
 
                 WriteAtomic(
                     System.IO.Path.Combine(staging, StagedMetaName),
@@ -2052,11 +2270,34 @@ namespace QuestTreeServer
 
                 if (meta.Floors == null || meta.Floors.Count == 0) return null;
 
-                var ordered = meta.Floors.OrderBy(f => f.Level).ToList();
-                var payloads = new List<byte[]>(ordered.Count);
-                long bytes = 0;
+                // The stamp cache (see the class comment): each file's sha256 is taken from it while the
+                // file's size and write time still match, and hashed from the bytes otherwise.
+                var cache = ReadStampCache(dir, key);
+                var cached = new Dictionary<string, CachedFile>(StringComparer.OrdinalIgnoreCase);
 
-                foreach (var floor in ordered)
+                foreach (var entry in cache?.Files ?? new List<CachedFile>())
+                    if (entry?.Name != null && !cached.ContainsKey(entry.Name)) cached[entry.Name] = entry;
+
+                var shas = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+                string ShaOf(string name)
+                {
+                    if (shas.TryGetValue(name, out var known)) return known;
+
+                    var info = new System.IO.FileInfo(System.IO.Path.Combine(dir, name));
+                    var sha = cached.TryGetValue(name, out var entry) && Matches(entry, info) && Sha256Hex.IsMatch(entry.Sha ?? "")
+                        ? entry.Sha!.ToLowerInvariant()
+                        : HashFile(info.FullName);
+
+                    shas[name] = sha;
+                    return sha;
+                }
+
+                // The files the stamp covers, in its order: floors by level, sides in SideDirs order, atlas
+                // pages by page, and the mesh last.
+                var order = new List<string>();
+
+                foreach (var floor in meta.Floors.OrderBy(f => f.Level))
                 {
                     // The name is about to be joined onto this folder's path. It was written by
                     // CommitSet, so a name that fails this was hand-edited or copied in from elsewhere -
@@ -2069,9 +2310,7 @@ namespace QuestTreeServer
                         return null;
                     }
 
-                    var path = System.IO.Path.Combine(dir, floor.File);
-
-                    if (!System.IO.File.Exists(path))
+                    if (!System.IO.File.Exists(System.IO.Path.Combine(dir, floor.File)))
                     {
                         _logger.Warning(
                             $"Quest Tracker: maps/{key} is missing {floor.File}, so the set is incomplete - " +
@@ -2079,9 +2318,7 @@ namespace QuestTreeServer
                         return null;
                     }
 
-                    var data = System.IO.File.ReadAllBytes(path);
-                    payloads.Add(data);
-                    bytes += data.Length;
+                    order.Add(floor.File);
                 }
 
                 // The sides, in the fixed order, each held to the stored-name rule and required to be on
@@ -2110,24 +2347,20 @@ namespace QuestTreeServer
                             continue;
                         }
 
-                        var sideBytes = System.IO.File.ReadAllBytes(System.IO.Path.Combine(dir, sideFile));
-
-                        payloads.Add(sideBytes);
-                        bytes += sideBytes.Length;
+                        order.Add(sideFile);
                         kept.Add(side);
                     }
 
                     meta.Sides = kept.Count == 0 ? null : kept;
                 }
 
-                // The mesh, read back the same way and held to its own sha256 - the one field in the
-                // meta that cannot be checked by looking at the file it describes. DROPPED rather than
-                // fatal, which is the opposite of how a missing PICTURE is treated above, and
-                // deliberately so: the mesh is optional by construction, so a set whose .bin was not
-                // copied across still draws in 2D on every client, while refusing the whole folder would
-                // lose a map over a file nothing needs. The block goes with it, so no client is told
-                // about a mesh this host cannot serve.
-                byte[]? meshBytes = null;
+                // The mesh, held to its own sha256 - the one field in the meta that cannot be checked by
+                // looking at the file it describes. DROPPED rather than fatal, which is the opposite of how a
+                // missing PICTURE is treated above, and deliberately so: the mesh is optional by
+                // construction, so a set whose .bin was not copied across still draws in 2D on every client,
+                // while refusing the whole folder would lose a map over a file nothing needs. The block goes
+                // with it, so no client is told about a mesh this host cannot serve.
+                string? meshFile = null;
 
                 if (meta.Mesh != null)
                 {
@@ -2142,16 +2375,11 @@ namespace QuestTreeServer
                         why = $"is missing {file}";
                     else
                     {
-                        meshBytes = System.IO.File.ReadAllBytes(System.IO.Path.Combine(dir, file));
-
-                        var hash = Convert.ToHexString(SHA256.HashData(meshBytes)).ToLowerInvariant();
+                        var hash = ShaOf(file);
 
                         if (!string.Equals(hash, meta.Mesh.Sha256, StringComparison.OrdinalIgnoreCase))
-                        {
                             why = $"holds a {file} that hashes to {Short(hash)}, not the " +
                                   $"{Short(meta.Mesh.Sha256!)} its meta names";
-                            meshBytes = null;
-                        }
                     }
 
                     if (why.Length > 0)
@@ -2164,15 +2392,83 @@ namespace QuestTreeServer
                     }
                     else
                     {
-                        bytes += meshBytes!.Length;
+                        meshFile = file;
                     }
+                }
+
+                // The atlas pages, in page order, AFTER the sides in the stamp - PrepareSet's order. Each
+                // held to the stored-name rule, required on disk and to hash to the sha the meta names (which
+                // this server wrote: the served JPEG's). DROPPED one by one rather than fatal, for the sides'
+                // reason - the buildings on a missing page fall back in the viewer. All of them go when the
+                // set has no mesh to drape them on.
+                if (meta.Atlas != null && meta.Atlas.Count > 0)
+                {
+                    var kept = new List<MapCaptureAtlasDto>();
+
+                    if (meta.Mesh != null)
+                    {
+                        foreach (var page in meta.Atlas.Where(p => p != null).OrderBy(p => p.Page))
+                        {
+                            var pageFile = page.File ?? "";
+                            string? why = null;
+
+                            if (page.Page < 0 || page.Page >= MaxAtlasPages || kept.Any(k => k.Page == page.Page))
+                                why = "it is not one page of eight";
+                            else if (!StoredAtlasFileName.IsMatch(pageFile) || !System.IO.File.Exists(System.IO.Path.Combine(dir, pageFile)))
+                                why = $"maps/{key} does not hold '{Clip(pageFile, MaxFreeTextLength)}'";
+                            else
+                            {
+                                var hash = ShaOf(pageFile);
+
+                                if (!string.Equals(hash, page.Sha256 ?? "", StringComparison.OrdinalIgnoreCase))
+                                    why = $"maps/{key}/{pageFile} hashes to {Short(hash)}, not the " +
+                                          $"{Short(page.Sha256 ?? "")} its meta names";
+                            }
+
+                            if (why != null)
+                            {
+                                NoteAtlasDropped(key, PageLabel(page.Page), meta.CapturedAt, why);
+                                continue;
+                            }
+
+                            order.Add(pageFile);
+                            kept.Add(page);
+                        }
+                    }
+
+                    meta.Atlas = kept.Count == 0 ? null : kept;
+                }
+
+                if (meshFile != null) order.Add(meshFile);
+
+                // The stamp: the cached one when the meta and EVERY file it covers - the same names, in the
+                // same order, at the same sizes and write times - are exactly as they were when it was
+                // cached; otherwise streamed from the bytes, one file at a time, and cached again.
+                var infos = order.Select(name => new System.IO.FileInfo(System.IO.Path.Combine(dir, name))).ToList();
+                var metaInfo = new System.IO.FileInfo(metaPath);
+                string stamp;
+
+                if (cache != null && Sha256Hex.IsMatch(cache.Stamp ?? "") &&
+                    string.Equals(cache.Meta?.Name, metaInfo.Name, StringComparison.OrdinalIgnoreCase) &&
+                    Matches(cache.Meta, metaInfo) && cache.Meta!.Size == metaBytes.Length &&
+                    cache.Files != null && cache.Files.Count == order.Count &&
+                    order.Select((name, i) => cache.Files[i] != null &&
+                                              string.Equals(cache.Files[i].Name, name, StringComparison.OrdinalIgnoreCase) &&
+                                              Matches(cache.Files[i], infos[i])).All(ok => ok))
+                {
+                    stamp = cache.Stamp!.ToLowerInvariant();
+                }
+                else
+                {
+                    stamp = StreamStamp(metaBytes, infos, shas);
+                    WriteStampCache(dir, key, stamp, order.Select(name => (name, shas[name])).ToList());
                 }
 
                 return new StoredSet
                 {
                     Key = key,
-                    Stamp = StampOf(metaBytes, payloads, meshBytes),
-                    Bytes = bytes,
+                    Stamp = stamp,
+                    Bytes = infos.Sum(info => info.Length),
                     Meta = meta
                 };
             }
@@ -2625,17 +2921,34 @@ namespace QuestTreeServer
         {
             var floors = FilesByLevel(staging);
             var sides = SidesByDir(staging);
+            var pages = PagesByNumber(staging);
 
             var floorsMissing = meta.Floors.Count(f => !floors.ContainsKey(f.Level));
             var sidesMissing = (meta.Sides ?? new List<MapCaptureSideDto>()).Count(sd => !sides.ContainsKey(sd.Dir));
 
-            words = floorsMissing > 0 && sidesMissing > 0
-                ? $"{floorsMissing} more floor(s) and {sidesMissing} side(s)"
-                : floorsMissing > 0
-                    ? $"{floorsMissing} more floor(s)"
-                    : $"{sidesMissing} more side(s)";
+            // Pages only while the set keeps its mesh - a flat set is promoted without them (PrepareSet),
+            // so waiting for one would hold it for nothing.
+            var pagesMissing = meta.Mesh == null ? 0
+                : (meta.Atlas ?? new List<MapCaptureAtlasDto>()).Count(p => !pages.ContainsKey(p.Page));
 
-            return floorsMissing + sidesMissing;
+            // "more" on the first item only, which keeps the words every older answer used exactly as they
+            // were: "2 more floor(s)", "2 more floor(s) and 1 side(s)", "1 more side(s)".
+            var first = true;
+
+            string Item(int count, string what)
+            {
+                if (count <= 0) return "";
+
+                var said = first ? $"{count} more {what}" : $"{count} {what}";
+                first = false;
+                return said;
+            }
+
+            words = Listed(Item(floorsMissing, "floor(s)"), Item(sidesMissing, "side(s)"), Item(pagesMissing, "atlas page(s)"));
+
+            if (words.Length == 0) words = "0 more floor(s)";
+
+            return floorsMissing + sidesMissing + pagesMissing;
         }
 
         /// <summary>A side post's answer, with the drop in front when its side was dropped - so the
@@ -2683,6 +2996,224 @@ namespace QuestTreeServer
 
         /// <summary>A side's name in the map's folder - this server's own, never the client's.</summary>
         private static string SideName(string key, string dir) => $"{key}-side-{dir}.jpg";
+
+        /// <summary>Words joined as a sentence lists them - "a", "a and b", "a, b and c" - skipping the
+        /// empty ones. For the answers that name what a capture still lacks.</summary>
+        private static string Listed(params string?[] items)
+        {
+            var said = items.Where(i => !string.IsNullOrEmpty(i)).Select(i => i!).ToList();
+
+            return said.Count <= 1
+                ? string.Concat(said)
+                : string.Join(", ", said.Take(said.Count - 1)) + " and " + said[^1];
+        }
+
+        // ---------------------------------------------------------------------------------------
+        // Atlas pages
+        // ---------------------------------------------------------------------------------------
+
+        /// <summary>An atlas page post's picture, decoded and checked, or the reason it is DROPPED. A
+        /// side's checks with a page's size cap, plus one a side does not get: the JPEG's own frame must be
+        /// the size the meta names, because the mesh's UVs address the page as that many texels, and
+        /// package.ps1's gate holds a shipped page to exactly this. Empty means "the client could not
+        /// encode this page after naming it".</summary>
+        private static string? DecodeAtlasPage(MapUploadRequest request, MapCaptureAtlasDto entry, out byte[] bytes)
+        {
+            bytes = Array.Empty<byte>();
+
+            if (Format(request.Format) != "jpg") return "an atlas page must be a JPEG";
+
+            var encoded = request.ImageBase64 ?? "";
+
+            if (encoded.Length == 0) return "the client could not encode it";
+
+            if (encoded.Length > MaxEncodedAtlasChars)
+                return $"it is larger than the {Mb(MaxAtlasPageBytes)} MB a page may be";
+
+            try
+            {
+                bytes = Convert.FromBase64String(encoded);
+            }
+            catch (FormatException)
+            {
+                bytes = Array.Empty<byte>();
+                return "it is not base64";
+            }
+
+            if (bytes.Length > MaxAtlasPageBytes)
+                return $"it is {bytes.Length:N0} bytes, past the {MaxAtlasPageBytes:N0} a page may be";
+
+            if (!MagicMatches("jpg", bytes)) return "its bytes do not start as a JPEG does";
+
+            if (!JpegSize(bytes, out var width, out var height))
+                return "its JPEG frame header could not be read";
+
+            if (width != entry.Width || height != entry.Height)
+                return $"it is {width}x{height} px, not the {entry.Width}x{entry.Height} its meta names";
+
+            return null;
+        }
+
+        /// <summary>
+        /// Drops every atlas page in a meta this host could not serve, each with one line - never refusing
+        /// the capture over one, the sides' rule. ALL of them, silently, when the meta has no mesh: a page
+        /// textures the mesh's buildings and nothing else, and the mesh's own drop has already been said.
+        /// Otherwise a page must be one of <see cref="MaxAtlasPages"/>, named once, and a picture up to
+        /// <see cref="MaxFloorPixels"/> a side. Its file name and sha are bounded here and rewritten at
+        /// promotion (PrepareSet), so neither is trusted further.
+        /// </summary>
+        private void DropUnusableAtlas(string key, MapCaptureMetaDto meta)
+        {
+            if (meta.Atlas == null) return;
+
+            if (meta.Mesh == null)
+            {
+                meta.Atlas = null;
+                return;
+            }
+
+            var kept = new List<MapCaptureAtlasDto>();
+
+            foreach (var page in meta.Atlas)
+            {
+                if (page == null) continue;
+
+                string? why = null;
+
+                if (page.Page < 0 || page.Page >= MaxAtlasPages)
+                    why = $"page {page.Page} is not one of the {MaxAtlasPages} a set may carry";
+                else if (kept.Any(k => k.Page == page.Page))
+                    why = $"the meta names page {page.Page} twice";
+                else if (page.Width < 1 || page.Height < 1 || page.Width > MaxFloorPixels || page.Height > MaxFloorPixels)
+                    why = $"it is {page.Width}x{page.Height} px, which is not a picture up to {MaxFloorPixels} px a side";
+                else if (page.Tiles < 0)
+                    why = $"it claims {page.Tiles} tiles";
+
+                if (why != null)
+                {
+                    NoteAtlasDropped(key, PageLabel(page.Page), meta.CapturedAt, why);
+                    continue;
+                }
+
+                page.File = Clip((page.File ?? "").Trim(), MaxFreeTextLength);
+                page.Sha256 = Clip((page.Sha256 ?? "").Trim(), 64);
+                kept.Add(page);
+            }
+
+            meta.Atlas = kept.Count == 0 ? null : kept;
+        }
+
+        /// <summary>Takes out of a meta every atlas page this host has already dropped for this capture -
+        /// <see cref="StripDroppedSides"/> for pages.</summary>
+        private static void StripDroppedPages(string staging, MapCaptureMetaDto meta)
+        {
+            if (meta.Atlas == null) return;
+
+            meta.Atlas.RemoveAll(p => p.Page >= 0 && p.Page < MaxAtlasPages &&
+                                      System.IO.File.Exists(System.IO.Path.Combine(staging, DroppedPageName(p.Page))));
+
+            if (meta.Atlas.Count == 0) meta.Atlas = null;
+        }
+
+        /// <summary>The staged atlas pages of one capture, by page number.</summary>
+        private static Dictionary<int, string> PagesByNumber(string staging)
+        {
+            var found = new Dictionary<int, string>();
+
+            if (!System.IO.Directory.Exists(staging)) return found;
+
+            for (var page = 0; page < MaxAtlasPages; page++)
+            {
+                var path = System.IO.Path.Combine(staging, StagedPageName(page));
+
+                if (System.IO.File.Exists(path)) found[page] = path;
+            }
+
+            return found;
+        }
+
+        /// <summary>A page post's answer, with the drop in front when its page was dropped -
+        /// <see cref="SideNote"/>'s shape, "atlas page 3 was dropped (why)".</summary>
+        private static string PageNote(string label, string? refusal, string rest)
+        {
+            if (refusal == null) return rest;
+
+            var note = $"{label} was dropped ({refusal})";
+
+            return rest.Length == 0 ? note : $"{note} - {rest}";
+        }
+
+        /// <summary>
+        /// The ONE line a dropped atlas page gets: "atlas page 3 of 'bigmap' was dropped - why". Deduped on
+        /// the map, the page and the capture, for <see cref="NoteSideDropped"/>'s reason, and capped with the
+        /// other refusals.
+        /// </summary>
+        private void NoteAtlasDropped(string key, string label, string? capturedAt, string why)
+        {
+            bool first;
+
+            lock (_rejectionsLogged)
+                first = _rejectionsLogged.Count < MaxRejectionsLogged &&
+                        _rejectionsLogged.Add($"{key}|atlas|{label}|{Clip(capturedAt ?? "", MaxFreeTextLength)}");
+
+            if (first)
+                _logger.Warning(
+                    $"Quest Tracker: {label} of '{key}' was dropped - {why} - and the buildings textured from it " +
+                    "are drawn without it.");
+        }
+
+        /// <summary>"atlas page 3", fit to print - a number is all a client can send, so nothing to clip.</summary>
+        private static string PageLabel(int? page) => $"atlas page {page?.ToString(CultureInfo.InvariantCulture) ?? "?"}";
+
+        /// <summary>A page's name in the staging folder. Not a number, so FilesByLevel never reads it as a
+        /// floor.</summary>
+        private static string StagedPageName(int page) => $"atlas-{page.ToString(CultureInfo.InvariantCulture)}.jpg";
+
+        /// <summary>The marker a dropped page leaves in the staging folder.</summary>
+        private static string DroppedPageName(int page) => $"atlas-{page.ToString(CultureInfo.InvariantCulture)}.dropped";
+
+        /// <summary>A page's name in the map's folder - this server's own, never the client's.</summary>
+        private static string AtlasName(string key, int page) => $"{key}-atlas-{page.ToString(CultureInfo.InvariantCulture)}.jpg";
+
+        /// <summary>A JPEG's width and height from its frame header, or false - the client's
+        /// MapTransfer.JpegSize, the same marker walk tools/check-maps-pack.py makes, decoding nothing.</summary>
+        private static bool JpegSize(byte[] data, out int width, out int height)
+        {
+            width = height = 0;
+
+            if (data == null || data.Length < 4 || data[0] != 0xFF || data[1] != 0xD8) return false;
+
+            var at = 2;
+
+            while (at + 3 < data.Length)
+            {
+                if (data[at] != 0xFF) return false;
+
+                var marker = data[at + 1];
+
+                if (marker == 0xFF) { at++; continue; }
+                if (marker == 0x01 || (marker >= 0xD0 && marker <= 0xD7)) { at += 2; continue; }
+                if (marker == 0xD9 || marker == 0xDA) return false;
+
+                var length = (data[at + 2] << 8) | data[at + 3];
+                if (length < 2) return false;
+
+                // SOF0-15 except DHT (C4), JPG (C8) and DAC (CC), which are not frame headers.
+                if (marker >= 0xC0 && marker <= 0xCF && marker != 0xC4 && marker != 0xC8 && marker != 0xCC)
+                {
+                    if (at + 9 > data.Length) return false;
+
+                    height = (data[at + 5] << 8) | data[at + 6];
+                    width = (data[at + 7] << 8) | data[at + 8];
+
+                    return width > 0 && height > 0;
+                }
+
+                at += 2 + length;
+            }
+
+            return false;
+        }
 
         /// <summary>
         /// Whether a mesh file's HEADER is one this build would read, and if not, the reason to refuse
@@ -3385,7 +3916,9 @@ namespace QuestTreeServer
 
                 DropUnusableMesh(key, meta);
                 DropUnusableSides(key, meta);
+                DropUnusableAtlas(key, meta);
                 StripDroppedSides(staging, meta);
+                StripDroppedPages(staging, meta);
 
                 return meta;
             }
@@ -3495,7 +4028,7 @@ namespace QuestTreeServer
         /// The stale-staging sweep, run by upload posts at most every <see cref="StaleSweepEvery"/> and by
         /// every completed set - not only at boot, as it used to be. A host that is never restarted would
         /// otherwise keep every abandoned upload - floors, sides, mesh parts, a join cut short - counted
-        /// against its 300 MB total for good, and a busy host would one day refuse every upload for space
+        /// against its total for good, and a busy host would one day refuse every upload for space
         /// taken by uploads nobody finished. Caller holds the lock.
         /// </summary>
         private void SweepStaleStagingIfDue(bool now = false)
@@ -3559,6 +4092,121 @@ namespace QuestTreeServer
             if (meshBytes != null) hash.AppendData(meshBytes);
 
             return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+        }
+
+        /// <summary>StampOf over files on disk rather than arrays in memory - the same bytes in the same order,
+        /// so the same value - read one megabyte at a time, and each file's own sha256 into
+        /// <paramref name="shas"/> on the same pass, for the cache.</summary>
+        private static string StreamStamp(byte[] metaBytes, List<System.IO.FileInfo> files, Dictionary<string, string> shas)
+        {
+            using var stamp = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            var buffer = new byte[1024 * 1024];
+
+            stamp.AppendData(metaBytes);
+
+            foreach (var info in files)
+            {
+                using var own = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+                using var stream = new System.IO.FileStream(info.FullName, System.IO.FileMode.Open, System.IO.FileAccess.Read,
+                    System.IO.FileShare.Read);
+
+                int read;
+
+                while ((read = stream.Read(buffer, 0, buffer.Length)) > 0)
+                {
+                    stamp.AppendData(buffer, 0, read);
+                    own.AppendData(buffer, 0, read);
+                }
+
+                shas[info.Name] = Convert.ToHexString(own.GetHashAndReset()).ToLowerInvariant();
+            }
+
+            return Convert.ToHexString(stamp.GetHashAndReset()).ToLowerInvariant();
+        }
+
+        /// <summary>A byte array's sha256, lower-case hex.</summary>
+        private static string HashOf(byte[] data) => Convert.ToHexString(SHA256.HashData(data)).ToLowerInvariant();
+
+        /// <summary>A file's sha256, lower-case hex, streamed.</summary>
+        private static string HashFile(string path)
+        {
+            using var stream = System.IO.File.OpenRead(path);
+
+            return Convert.ToHexString(SHA256.HashData(stream)).ToLowerInvariant();
+        }
+
+        /// <summary>The stamp cache beside a stored set - see the class comment.</summary>
+        private sealed class StampCache
+        {
+            [System.Text.Json.Serialization.JsonPropertyName("stamp")] public string? Stamp { get; set; }
+            [System.Text.Json.Serialization.JsonPropertyName("meta")] public CachedFile? Meta { get; set; }
+            [System.Text.Json.Serialization.JsonPropertyName("files")] public List<CachedFile>? Files { get; set; }
+        }
+
+        /// <summary>One file as the cache last saw it: its name, size, write time and sha256.</summary>
+        private sealed class CachedFile
+        {
+            [System.Text.Json.Serialization.JsonPropertyName("name")] public string? Name { get; set; }
+            [System.Text.Json.Serialization.JsonPropertyName("size")] public long Size { get; set; }
+            [System.Text.Json.Serialization.JsonPropertyName("ticks")] public long Ticks { get; set; }
+            [System.Text.Json.Serialization.JsonPropertyName("sha256")] public string? Sha { get; set; }
+        }
+
+        /// <summary>The cache's file name in a map's folder. Not a picture, a meta or a mesh, so no reader
+        /// takes it for one; package.ps1 -RefreshMaps does not copy it, and CommitSet's sweep replaces it.</summary>
+        private static string StampCacheName(string key) => key + ".stamp-cache.json";
+
+        /// <summary>Whether a cached entry still describes this file: the same size and the same write time,
+        /// to the tick.</summary>
+        private static bool Matches(CachedFile? entry, System.IO.FileInfo info) =>
+            entry != null && info.Exists && entry.Size == info.Length && entry.Ticks == info.LastWriteTimeUtc.Ticks;
+
+        /// <summary>The cache beside a set, or null when there is none or it cannot be read.</summary>
+        private static StampCache? ReadStampCache(string dir, string key)
+        {
+            try
+            {
+                var path = System.IO.Path.Combine(dir, StampCacheName(key));
+
+                return System.IO.File.Exists(path)
+                    ? JsonSerializer.Deserialize<StampCache>(System.IO.File.ReadAllBytes(path))
+                    : null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>Writes the cache beside a set: the stamp, the meta as it is on disk now, and each file
+        /// the stamp covers, in the stamp's order, with the sha256 it was hashed to. Best effort - a cache
+        /// that fails to write costs one hash at the next boot, nothing else.</summary>
+        private static void WriteStampCache(string dir, string key, string stamp, List<(string Name, string Sha)> files)
+        {
+            try
+            {
+                var meta = new System.IO.FileInfo(System.IO.Path.Combine(dir, MetaName(key)));
+
+                if (!meta.Exists) return;
+
+                var cache = new StampCache
+                {
+                    Stamp = stamp,
+                    Meta = new CachedFile { Name = meta.Name, Size = meta.Length, Ticks = meta.LastWriteTimeUtc.Ticks },
+                    Files = files.Select(f =>
+                    {
+                        var info = new System.IO.FileInfo(System.IO.Path.Combine(dir, f.Name));
+
+                        return new CachedFile { Name = f.Name, Size = info.Length, Ticks = info.LastWriteTimeUtc.Ticks, Sha = f.Sha };
+                    }).ToList()
+                };
+
+                WriteAtomic(System.IO.Path.Combine(dir, StampCacheName(key)), JsonSerializer.SerializeToUtf8Bytes(cache));
+            }
+            catch
+            {
+                // A cache, not a record.
+            }
         }
 
         /// <summary>The first twelve characters of a hash, for a log line or a refusal: enough to tell

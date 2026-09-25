@@ -527,6 +527,9 @@ namespace QuestTree.UI
                 // replaced capture's sides would otherwise stay resident with no view that could ever
                 // draw them again.
                 foreach (var side in capture.Entry.Sides) DynamicMapsLibrary.ReleaseLayer(side?.Picture);
+
+                // And the atlas pages, which sit in the same cache for the same reason.
+                foreach (var page in capture.Entry.AtlasPages) DynamicMapsLibrary.ReleaseLayer(page?.Picture);
             }
         }
 
@@ -562,6 +565,9 @@ namespace QuestTree.UI
 
             /// <summary>The side pictures that checked out. See <see cref="ReadSides"/>.</summary>
             public readonly List<DynamicMapsLibrary.SidePicture> Sides = new();
+
+            /// <summary>The atlas pages that checked out. See <see cref="ReadAtlas"/>.</summary>
+            public readonly List<DynamicMapsLibrary.AtlasPage> AtlasPages = new();
             public readonly List<(int Level, string Name, string File, float MinY, float MaxY)> Floors = new();
             public readonly List<(string Text, float X, float Z, DynamicMapsLibrary.MapLabelKind Kind)> Labels = new();
         }
@@ -664,6 +670,7 @@ namespace QuestTree.UI
                 ReadLabels(root, parsed);
                 ReadMesh(root, folder, name, parsed);
                 ReadSides(root, folder, name, parsed);
+                ReadAtlas(root, folder, name, parsed);
 
                 parsed.Attribution = Attribution(
                     (string)Field(root, "modVersion"), firstCapturedAt,
@@ -679,7 +686,8 @@ namespace QuestTree.UI
                     parsed.MinX, parsed.MinZ, parsed.MaxX, parsed.MaxZ,
                     parsed.Rotation, parsed.Floors.Count,
                     parsed.MeshPath ?? "", parsed.MeshBytes,
-                    string.Join("", parsed.Sides.Select(side => side.Dir)));
+                    string.Join("", parsed.Sides.Select(side => side.Dir)) + "|atlas" +
+                    string.Join(",", parsed.AtlasPages.Select(page => page.Page.ToString(CultureInfo.InvariantCulture))));
 
                 return parsed;
             }
@@ -834,6 +842,110 @@ namespace QuestTree.UI
         }
 
         /// <summary>
+        /// The capture's optional atlas pages (Stage W): <c>"atlas": [{"file","page","width","height","tiles",
+        /// "sha256"}]</c> - the game's own building materials, captured tile by tile into sheets the mesh file's
+        /// per-vertex UVs point into. Optional, and checked ONE PAGE AT A TIME like the sides: a page that does not
+        /// check out (missing file, bad name, repeated or out-of-range number) is left out with one line, and the
+        /// buildings on it fall back to the projected textures - never the capture. The sha256 is the tools'.
+        /// </summary>
+        private static void ReadAtlas(JObject root, string folder, string metaName, ParsedCapture parsed)
+        {
+            if (!(Field(root, "atlas") is JArray pages)) return;
+
+            var seen = new HashSet<int>();
+
+            foreach (var token in pages)
+            {
+                if (!(token is JObject node)) continue;
+
+                var label = "?";
+                string refusal;
+                DynamicMapsLibrary.AtlasPage page = null;
+
+                try
+                {
+                    label = ((string)Field(node, "file") ?? "").Trim();
+                    refusal = ReadAtlasPage(node, folder, seen, out page);
+                }
+                catch (Exception ex)
+                {
+                    refusal = $"a field is not readable ({ex.GetType().Name})";
+                }
+
+                if (refusal != null)
+                {
+                    // One line, and the buildings on this page fall back to the projected textures.
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: capture '{metaName}' atlas page '{label}' is left out - {refusal}. Its " +
+                        $"buildings are drawn with the projected textures instead.");
+                    continue;
+                }
+
+                seen.Add(page.Page);
+                parsed.AtlasPages.Add(page);
+            }
+        }
+
+        /// <summary>The most atlas pages a map has: MapMeshFile's own cap, referenced rather than copied - two
+        /// copies of a cap are two caps that can disagree.</summary>
+        private const int MaxAtlasPages = MapMeshFile.MaxAtlasPages;
+
+        /// <summary>One atlas page, read and checked. Null on success, else the reason it is left out.</summary>
+        private static string ReadAtlasPage(
+            JObject node, string folder, HashSet<int> seen, out DynamicMapsLibrary.AtlasPage page)
+        {
+            page = null;
+
+            var number = (int?)Field(node, "page") ?? -1;
+            if (number < 0 || number >= MaxAtlasPages) return $"its page number {number} is not 0..{MaxAtlasPages - 1}";
+            if (seen.Contains(number)) return $"page {number} is listed twice";
+
+            var declared = ((string)Field(node, "file") ?? "").Trim();
+            if (declared.Length == 0) return "it names no file";
+
+            string file;
+
+            try
+            {
+                if (!string.Equals(declared, Path.GetFileName(declared), StringComparison.Ordinal))
+                    return $"'{declared}' is not a plain file name in the capture's own folder";
+
+                file = Path.Combine(folder, declared);
+            }
+            catch (Exception ex)
+            {
+                return $"'{declared}' is not a usable file name ({ex.GetType().Name})";
+            }
+
+            if (!File.Exists(file)) return $"'{declared}' is not on disk";
+
+            var width = (int?)Field(node, "width") ?? 0;
+            var height = (int?)Field(node, "height") ?? 0;
+            if (width <= 0 || height <= 0) return "its size is not positive";
+
+            page = new DynamicMapsLibrary.AtlasPage
+            {
+                Page = number,
+                Width = width,
+                Height = height,
+                Tiles = (int?)Field(node, "tiles") ?? 0,
+
+                // A raster slot and nothing more, like a side picture.
+                Picture = new DynamicMapsLibrary.MapLayer
+                {
+                    Name = $"atlas {number}",
+                    ImagePath = file,
+                    IsRaster = true,
+
+                    // Minified hard in the 3D view: decoded with a mip chain, trilinear and 4x aniso.
+                    Mipmapped = true
+                }
+            };
+
+            return null;
+        }
+
+        /// <summary>
         /// The capture's optional oblique side pictures: <c>"sides": [{"dir","file","width","height",
         /// "pxPerMetre","forward":[x,y,z],"right":[x,y,z],"up":[x,y,z],"originR","originU","yMin","yMax"}]</c>
         /// - the frozen Stage U contract.
@@ -982,7 +1094,10 @@ namespace QuestTree.UI
                 {
                     Name = $"side {dir}",
                     ImagePath = file,
-                    IsRaster = true
+                    IsRaster = true,
+
+                    // Minified hard in the 3D view: decoded with a mip chain, trilinear and 4x aniso.
+                    Mipmapped = true
                 }
             };
 
@@ -1166,6 +1281,9 @@ namespace QuestTree.UI
 
             // The side pictures, as read. Paths until a 3D view asks for their textures, like the floors.
             entry.Sides.AddRange(parsed.Sides);
+
+            // The building texture pages, as read: paths until a 3D view asks for their textures.
+            entry.AtlasPages.AddRange(parsed.AtlasPages);
 
             var boundsMin = new Vector2(parsed.MinX, parsed.MinZ);
             var boundsMax = new Vector2(parsed.MaxX, parsed.MaxZ);

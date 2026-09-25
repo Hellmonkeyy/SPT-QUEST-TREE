@@ -178,9 +178,12 @@ The host decides. Uploads are refused unless it runs with `QUESTTREE_ACCEPT_MAPS
 picture is the one thing a peer can post that everybody else then looks at; `tools/server-host.cmd`
 in the source repo sets it and starts the server. A host that has not opted in says so once, nothing
 is sent, and it is not asked again that session. The limits: one picture a post, up to 2.5 MB a
-picture, eight floors and four side pictures a map, one 3D mesh a capture up to 48 MB (in 16 MiB
-parts past that size - an SPT server takes no request body past 30,000,000 bytes), 84 MB a map and
-300 MB in all on the host, 300 MB downloaded per session, and up to 240 seconds a mesh request. A solo player needs none of it - their own captures are read
+picture, eight floors and four side pictures a map, up to eight atlas pages a map at up to 6 MB each,
+one 3D mesh a capture up to 48 MB (in 16 MiB parts past that size - an SPT server takes no request
+body past 30,000,000 bytes), 132 MB a map and 1.5 GB in all on the host, 600 MB downloaded per
+session (at least three minutes, and longer while it still arrives at 1 MB/s), 2 GB of other players'
+maps kept on a client, and up to 240 seconds a mesh or atlas-page request. A map you captured yourself
+is not downloaded back from the host. A solo player needs none of it - their own captures are read
 straight out of their own folder.
 
 ## DynamicMaps is now a choice rather than a dependency
@@ -247,8 +250,23 @@ the capture box its meta describes, or posted empty because the client could not
 dropped from the set with one line in the host's log and the rest is served, never refused and never
 flattened. On the way down, a side whose JPEG is not the size its meta states is left out; its walls
 are tinted. A host from before sides refuses a side post as a floor it has no record of, rather than
-storing it over floor 0, and the client goes on to the mesh. The per-map budget is 84 MB: eight floors
-and four sides at 2.5 MB, a 48 MB mesh, and 6 MB of margin.
+storing it over floor 0, and the client goes on to the mesh.
+
+**The atlas pages travel the same way.** A capture's atlas pages - up to eight 4096 px sheets of the
+game's own building textures, which the 3D view drapes on the buildings - go up after the sides and
+before the mesh, one post each, at their full size as JPEGs at quality 90 (80 for one that would pass
+6 MB), up to 6 MB a page. A page that does not get through in 240 seconds is dropped and the upload goes
+on; a page that does not arrive on the way down is fetched again, alone, the next session. A page is
+never worth the map either: one the host cannot use (not a JPEG, over 6 MB, not the size its meta
+states, or posted empty because the client could not encode it) is dropped with one line in the host's
+log and the rest is served; the buildings drawn from it fall back to the side pictures and tints. The
+host stores a page as `<key>-atlas-<n>.jpg` and rewrites its sha256 to the stored JPEG's, and a client
+downloading the set holds each page to that sha and its stated size. Pages only dress the mesh's
+buildings, so they come down only with a mesh, and a set served flat carries none. A host from before
+pages refuses a page post as a floor it has no record of, and the client goes on to the mesh. The
+per-map budget is 132 MB: eight floors and four sides at 2.5 MB, eight pages at 6 MB, a 48 MB mesh, and
+6 MB of margin; the host's whole store is 1.5 GB - all eleven maps at that ceiling, though not a
+twelfth set beside them.
 
 **A throwaway diagnostic key ships in this build**, said out loud because it is not a feature: a bare
 **F10** is the mesh probe of the 3D experiments. In a raid it writes
@@ -285,12 +303,14 @@ probe key (throwaway)**, is kept out of the in-game Settings tab, and is meant t
   `Source\Tarkov-QuestTree-Server\maps\` - none to all eleven - and `package.ps1 -RefreshMaps` copies
   them from the install, refusing while the server is running (a host writes into that folder as
   sets arrive). There are six gates, and five of them fail the run: the folder layout (nothing but
-  the floors `<key>\<key>-<level>.jpg`, the side pictures `<key>\<key>-side-<N|S|E|W>.jpg`,
-  `<key>\*.map.json` and the map's own `<key>\<key>-mesh.bin`), 1.5 MB per image - side pictures
-  included - the meta's schema against the constant the shipped client reads, and
+  the floors `<key>\<key>-<level>.jpg`, the side pictures `<key>\<key>-side-<N|S|E|W>.jpg`, the
+  atlas pages `<key>\<key>-atlas-<0..7>.jpg`, `<key>\*.map.json` and the map's own
+  `<key>\<key>-mesh.bin`), 1.5 MB per image - side pictures included - and 6 MB per atlas page, the
+  meta's schema against the constant the shipped client reads, and
   `tools/check-maps-pack.py`, which checks every floor's JPEG dimensions against its meta and its meta
   against the extent's own arithmetic, every side's JPEG size against its meta and its basis for unit
-  length, that no floor or side file goes unnamed, and holds a set's 3D mesh to the sha256, byte
+  length, every atlas page's JPEG size and sha256 against its meta, that no floor, side or page file
+  goes unnamed, and holds a set's 3D mesh to the sha256, byte
   length, extent, floor levels and counts its meta states. The sixth is the payload's total size:
   printed on every run with the meshes' share of it, and a **warning** past 80 MB rather than a
   failure, because a mesh cannot be made smaller without losing the map. With 3 M-triangle meshes the

@@ -240,7 +240,8 @@ captured map carries our own credit line naming the build, the date and the raid
   rises from 300,000 triangles to 3,000,000, and everything that carries a mesh rises with it: the
   mesh format's caps are 6,000,000 triangles and 12,000,000 vertices a file; a mesh file may be 48 MB
   (was 12), a map 84 MB on the host and on the way down (8 floors and 4 sides at 2.5 MB, a 48 MB mesh
-  and 6 MB of margin), a session downloads up to 300 MB (was 120), a mesh request may take 240 seconds
+  and 6 MB of margin), a session downloads up to 300 MB (was 120) - both raised again by the atlas
+  pages below - a mesh request may take 240 seconds
   (was 90), and the host checks a mesh inflating to at most 160 MB (36 MB of indices and 54 MB of
   vertices at 3 M triangles, and room for the relief grids). **A mesh past 16 MiB goes up in parts.**
   An SPT server runs on Kestrel with its default limit of 30,000,000 bytes a request body - measured,
@@ -254,6 +255,38 @@ captured map carries our own credit line naming the build, the date and the raid
   capture without its 3D mesh. Abandoned uploads - held parts included - are now swept every time a set
   completes and on upload posts every ten minutes, not only at the host's start. The packager's 80 MB
   payload warning is now expected to fire, and says so when the meshes are most of the payload.
+- **The atlas pages travel with the rest.** A capture's atlas pages - up to eight 4096 px sheets of
+  the game's own building textures, which the 3D view drapes on the buildings by the mesh's UVs - go up
+  to the host through the floors' route, one post each, after the sides and before the mesh. A page is
+  sent at its FULL size, never scaled to 2048 px as a floor is, as a JPEG at quality 90 - encoded once
+  more at 80 if it comes out over 6 MB - and one still past that, or one that cannot be encoded, is posted
+  empty so the host stops waiting for it. A page post may take 240 seconds, the mesh's deadline, both ways;
+  a page that does not get through is dropped (posted empty) and the upload goes on to the mesh, and a
+  page that does not arrive on the way down is noted in the map's stamp file and fetched alone next
+  session.
+  A set that names pages waits for every one as it waits for its sides - but a page is never worth
+  the map: one the host cannot use (not a JPEG, over 6 MB, not the width and height its meta states,
+  not a page 0 to 7, or posted empty) is DROPPED with one line in the host's log and the rest is
+  served, and the buildings drawn from it fall back to the sides and tints. The host stores each page
+  as `<key>-atlas-<n>.jpg` and REWRITES its sha256 in the served meta to the stored JPEG's (the capture's
+  meta hashed its own PNG); a client downloading the set holds each page to that sha, its JPEG size and
+  6 MB, and leaves out any page that fails. Pages come down after the mesh and only when the mesh
+  landed, and a set served flat carries no pages at all. A host from before pages refuses a page post
+  as a floor it does not know, never filing it as floor 0, and the client goes on to the mesh. The
+  budgets rise with them: a map may hold 132 MB (was 84: 8 floors and 4 sides at 2.5 MB, 8 pages at
+  6 MB, a 48 MB mesh, 6 MB of margin) on the host and on the way down, the host's whole store 1.5 GB
+  (was 300 MB - eleven maps at the full 132 MB are 1,452 MB), and a session downloads up to 600 MB
+  (was 300) - for at least three minutes and past that while it still arrives at 1 MB/s or better, where
+  three minutes was a flat limit. A client now keeps at most 2 GB of host pictures, evicting the set
+  installed longest ago (never one taken that session). A host set with the same capture instant as this
+  machine's own capture is this machine's upload, and is no longer downloaded back. The host caches each
+  set's stamp and per-file sha256 beside it (`<key>.stamp-cache.json`), keyed on every file's size and
+  write time, so a restart re-hashes only files that changed rather than up to 1.5 GB under its lock.
+  Every page a meta names is reserved at 6 MB against the store from the first floor.
+  Packaging admits `<key>\<key>-atlas-<0..7>.jpg` by that exact name and holds pages to their own 6 MB
+  gate rather than the 1.5 MB picture gate; the payload warning counts pages with the meshes; and
+  `tools/check-maps-pack.py` checks every page's JPEG size and sha256 against its meta, that pages sit
+  only beside a mesh, and that no page file goes unnamed.
 - **A throwaway diagnostic key ships with this release**, which is worth saying out loud because it
   is not a feature: a bare **F10** is the mesh probe of the 3D map experiments, and it writes
   `BepInEx\plugins\QuestTree\captures\<map>.meshprobe.txt` in a raid - whether the game's own meshes

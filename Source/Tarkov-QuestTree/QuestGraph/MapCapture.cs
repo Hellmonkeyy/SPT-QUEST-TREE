@@ -1288,6 +1288,20 @@ namespace QuestTree.QuestGraph
 
                     yield return null;
 
+                    // Stage W: the atlas pages' encodes, started inside the hold, are waited for HERE - after the
+                    // scene is released - and settled before the mesh is serialised, so the file's page count and
+                    // ranges name only pages that made it.
+                    if (mesh.AtlasPages != null && mesh.AtlasPages.Count > 0)
+                    {
+                        var encodeClock = Stopwatch.StartNew();
+
+                        while (mesh.AtlasPages.Any(p => p.Encode != null && !p.Encode.IsCompleted) &&
+                               encodeClock.Elapsed.TotalSeconds < AtlasEncodeWaitSeconds)
+                            yield return null;
+
+                        SettleAtlasPages(plan, mesh);
+                    }
+
                     // The deflate and the hash on a worker, the coroutine waiting a frame at a time: at
                     // CompressionLevel.Optimal a few megabytes of buildings is well over a frame of
                     // main-thread work, and nothing in it touches a Unity object - the mesh file is plain
@@ -2189,6 +2203,22 @@ namespace QuestTree.QuestGraph
             // The 3D mesh is staged the same way and has to be dropped the same way: a refused capture
             // must not leave a <key>-mesh.bin.tmp behind for the next one to trip over.
             Forget(plan, plan.MeshFile);
+
+            // And its atlas pages, every possible one by name.
+            for (var page = 0; page < MapMeshFile.MaxAtlasPages; page++)
+            {
+                Forget(plan, MapMeshFile.AtlasFileNameFor(plan.Key, page));
+
+                try
+                {
+                    var part = AtlasPartPath(plan, page);
+                    if (File.Exists(part)) File.Delete(part);
+                }
+                catch (Exception ex)
+                {
+                    Plugin.LogSource?.LogDebug($"QuestTree: an atlas .part could not be removed ({ex.Message}).");
+                }
+            }
 
             // And the side views, all four by name whether or not this capture got to them - forgetting
             // a .tmp that is not there costs one File.Exists.
@@ -6426,9 +6456,119 @@ namespace QuestTree.QuestGraph
 
             // Not floored here: the builder takes the relief's measured seconds off it first and floors what is
             // left at MinBuildingSeconds.
-            request.BuildingSeconds = MapMeshBuilder.CaptureSecondsBudget - floors - sides;
+            request.BuildingSeconds = MapMeshBuilder.CaptureSecondsBudget - floors - sides -
+                                      MapMeshBuilder.AtlasSecondsReserve;
+
+            // Stage W: each atlas page is streamed by its encoder (a worker) to its staged name plus ".part",
+            // renamed to the staged name once the capture has waited for it after the hold (SettleAtlasPages), and
+            // committed with the mesh in WriteMeta.
+            plan.Atlas.Clear();
+            request.AtlasPartPath = page => AtlasPartPath(plan, page);
 
             return request;
+        }
+
+        /// <summary>Where atlas page n's encoder streams it: the page's staged name plus ".part".</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="page">The page.</param>
+        private static string AtlasPartPath(Plan plan, int page) =>
+            Staged(Path.Combine(plan.Dir, MapMeshFile.AtlasFileNameFor(plan.Key, page))) + ".part";
+
+        /// <summary>Seconds the capture waits, after releasing the scene, for the atlas encodes still running.</summary>
+        private const double AtlasEncodeWaitSeconds = 60d;
+
+        /// <summary>
+        /// The atlas pages' second half (stage W review, H1): their encodes were started inside the hold and ran
+        /// on workers while the builder went on; the capture has waited for them after releasing the scene. Each
+        /// finished page's ".part" is renamed to its staged name here, on the main thread, and recorded for the
+        /// meta; the first page that did not finish or will not rename ends the atlas - the mesh file's page count
+        /// and its later ranges are cut to match BEFORE it is serialised, and the later pages' files deleted.
+        /// </summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="mesh">The build's result.</param>
+        private static void SettleAtlasPages(Plan plan, MapMeshBuilder.Result mesh)
+        {
+            plan.Atlas.Clear();
+            if (mesh?.AtlasPages == null || mesh.AtlasPages.Count == 0) return;
+
+            var done = MapMeshBuilder.SettleAtlas(mesh.File, mesh.AtlasPages);
+
+            for (var i = 0; i < done.Count; i++)
+            {
+                var page = done[i];
+                var name = MapMeshFile.AtlasFileNameFor(plan.Key, page.Page);
+
+                try
+                {
+                    var staged = Staged(Path.Combine(plan.Dir, name));
+                    if (File.Exists(staged)) File.Delete(staged);
+                    File.Move(page.PartPath, staged);
+
+                    plan.Atlas.Add(new CaptureAtlas
+                    {
+                        File = name,
+                        Page = page.Page,
+                        Width = MapMeshFile.AtlasPageSize,
+                        Height = MapMeshFile.AtlasPageSize,
+                        Tiles = page.Tiles,
+                        Bytes = page.Bytes,
+                        Sha256 = page.Sha256,
+                    });
+                }
+                catch (Exception ex)
+                {
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: atlas page {page.Page} of {plan.Key} could not be staged ({ex.GetType().Name}: " +
+                        $"{ex.Message}) - it and every later page are dropped; their buildings keep the side views.");
+
+                    if (mesh.File != null) MapMeshBuilder.TruncateAtlas(mesh.File, i);
+
+                    for (var k = i; k < done.Count; k++)
+                    {
+                        try
+                        {
+                            if (File.Exists(done[k].PartPath)) File.Delete(done[k].PartPath);
+                        }
+                        catch
+                        {
+                            // swept by DropStaged
+                        }
+                    }
+
+                    break;
+                }
+            }
+
+            Plugin.LogSource?.LogInfo(
+                $"QuestTree: texture atlas for {plan.Key} - {plan.Atlas.Count} of {mesh.AtlasPages.Count} page(s) encoded " +
+                $"and staged, {MB(plan.Atlas.Sum(p => p.Bytes))} MB.");
+        }
+
+        /// <summary>The atlas an earlier capture wrote for the mesh this meta carries forward, when every page of
+        /// it is still on disk - null otherwise (the carried mesh's ranges then name pages that are gone, and
+        /// the viewer falls those buildings back, which it must handle anyway).</summary>
+        /// <param name="plan">The capture's plan.</param>
+        private static List<CaptureAtlas> CarriedAtlas(Plan plan)
+        {
+            var previous = plan.Previous?.Atlas;
+            if (previous == null || previous.Count == 0) return null;
+
+            try
+            {
+                for (var i = 0; i < previous.Count; i++)
+                {
+                    var page = previous[i];
+                    if (page == null || page.Page != i || page.File != MapMeshFile.AtlasFileNameFor(plan.Key, i) ||
+                        !File.Exists(Path.Combine(plan.Dir, page.File)))
+                        return null;
+                }
+
+                return previous;
+            }
+            catch
+            {
+                return null;
+            }
         }
 
         /// <summary>Whether <see cref="WriteMeta"/> will name this floor: it was captured this time, or
@@ -6482,6 +6622,10 @@ namespace QuestTree.QuestGraph
 
                 var request = MeshRequest(plan);
 
+                // The hidden-renderer filter trusts "switched off" only when the hold knows the culling lists; a
+                // capture whose culling scan failed keeps the old behaviour (stage W review, M2).
+                request.CullingKnown = _culling != null;
+
                 if (request.Bands.Count == 0)
                 {
                     Plugin.LogSource?.LogDebug(
@@ -6500,8 +6644,9 @@ namespace QuestTree.QuestGraph
 
                 Plugin.LogSource?.LogInfo(
                     $"QuestTree: building {plan.Key}'s 3D map - the scene is held for up to about " +
-                    $"{(MapMeshBuilder.HardSecondsFor(soft) + MapMeshBuilder.DrainSeconds).ToString("0", CultureInfo.InvariantCulture)} s " +
-                    $"(decimating for the first {soft.ToString("0", CultureInfo.InvariantCulture)}), so distant " +
+                    $"{(MapMeshBuilder.HardSecondsFor(soft) + MapMeshBuilder.DrainSeconds + MapMeshBuilder.AtlasSecondsReserve).ToString("0", CultureInfo.InvariantCulture)} s " +
+                    $"(decimating for the first {soft.ToString("0", CultureInfo.InvariantCulture)}, then up to " +
+                    $"{MapMeshBuilder.AtlasSecondsReserve.ToString("0", CultureInfo.InvariantCulture)} s of textures), so distant " +
                     "geometry stays drawn while it runs; the side views after it announce their own.");
 
                 // The collect LAST, so nothing above it can have thrown after it. The hold is NOT here:
@@ -6712,6 +6857,16 @@ namespace QuestTree.QuestGraph
 
             if (previous == null || !MapMeshFile.IsMeshFileName(previous.File)) return null;
 
+            // A mesh of another format version is one this build cannot read and must not name (a v1 file carried
+            // into a v2 meta would be refused by every reader).
+            if (previous.Version != MapMeshFile.Version)
+            {
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: {plan.Key}'s earlier 3D mesh is format {previous.Version}, not {MapMeshFile.Version} - " +
+                    "it is not carried forward.");
+                return null;
+            }
+
             if (floors != null && !SameLevels(LevelsOf(plan.Previous.Floors), floors))
             {
                 Plugin.LogSource?.LogDebug(
@@ -6913,6 +7068,7 @@ namespace QuestTree.QuestGraph
                 }
 
                 var mesh = plan.Mesh ?? CarriedMesh(plan, floors);
+                List<CaptureAtlas> atlas = null;
 
                 if (plan.Mesh != null)
                 {
@@ -6927,6 +7083,30 @@ namespace QuestTree.QuestGraph
 
                         Plugin.LogSource?.LogInfo(
                             $"QuestTree: mesh for {plan.Key} written - {plan.MeshNote}.");
+
+                        // Stage W: the mesh's atlas pages, each in its own try; the first that will not go in
+                        // place ends the list, so the meta names pages 0..n-1 and nothing past a hole.
+                        atlas = new List<CaptureAtlas>();
+
+                        foreach (var page in plan.Atlas)
+                        {
+                            try
+                            {
+                                if (atlas.Count != page.Page) break;
+                                Commit(Path.Combine(plan.Dir, page.File));
+                                atlas.Add(page);
+                            }
+                            catch (Exception pageEx)
+                            {
+                                Plugin.LogSource?.LogWarning(
+                                    $"QuestTree: {plan.Key}'s atlas page {page.Page} could not be put in place " +
+                                    $"({pageEx.GetType().Name}: {pageEx.Message}) - the buildings on it and later pages " +
+                                    "keep the side views.");
+                                break;
+                            }
+                        }
+
+                        if (atlas.Count == 0) atlas = null;
                     }
                     catch (Exception ex)
                     {
@@ -6940,6 +7120,12 @@ namespace QuestTree.QuestGraph
                         mesh = CarriedMesh(plan, floors);
                     }
                 }
+
+                if (mesh != null && plan.Mesh == null) atlas = CarriedAtlas(plan);
+
+                if (atlas != null)
+                    foreach (var page in atlas)
+                        keep.Add(page.File);
 
                 if (mesh != null)
                 {
@@ -6981,6 +7167,7 @@ namespace QuestTree.QuestGraph
                     Floors = floors,
                     Labels = plan.Labels,
                     Mesh = mesh,
+                    Atlas = mesh != null ? atlas : null,
                     Sides = sides,
                 };
 
@@ -7795,6 +7982,9 @@ namespace QuestTree.QuestGraph
             /// printed when the file is really in place.</summary>
             public string MeshNote;
 
+            /// <summary>Stage W: the atlas pages this capture's mesh build staged, in page order.</summary>
+            public List<CaptureAtlas> Atlas = new List<CaptureAtlas>();
+
             /// <summary>Set on a SIDE VIEW's own plan only: which side it is and how it is framed, which is
             /// what sends PositionCamera down the side branch. Null on the capture's plan.</summary>
             public SideView Side;
@@ -8026,6 +8216,34 @@ namespace QuestTree.QuestGraph
             /// by one that does not (CarriedSides).</summary>
             [JsonProperty("sides", NullValueHandling = NullValueHandling.Ignore)]
             public List<CaptureSide> Sides { get; set; }
+
+            /// <summary>Stage W: the mesh's texture atlas pages, page n at index n - a CONTRACT with the viewer,
+            /// the host and tools/check-capture.py. ABSENT when there is none (no mesh, or a mesh with no captured
+            /// texture); a building range naming a page past this list falls back to the side views.</summary>
+            [JsonProperty("atlas", NullValueHandling = NullValueHandling.Ignore)]
+            public List<CaptureAtlas> Atlas { get; set; }
+        }
+
+        /// <summary>One atlas page as the meta describes it (stage W). The JSON names are the contract.</summary>
+        private sealed class CaptureAtlas
+        {
+            /// <summary><c>&lt;key&gt;-atlas-&lt;n&gt;.png</c>, beside this meta.</summary>
+            [JsonProperty("file")] public string File { get; set; }
+
+            /// <summary>The page number the mesh's ranges use - its index in the list.</summary>
+            [JsonProperty("page")] public int Page { get; set; }
+
+            [JsonProperty("width")] public int Width { get; set; }
+            [JsonProperty("height")] public int Height { get; set; }
+
+            /// <summary>Tiles packed on it, for the log lines and the checker.</summary>
+            [JsonProperty("tiles")] public int Tiles { get; set; }
+
+            /// <summary>Its size on disk.</summary>
+            [JsonProperty("bytes")] public long Bytes { get; set; }
+
+            /// <summary>SHA-256 of the PNG's bytes, lower-case hex.</summary>
+            [JsonProperty("sha256")] public string Sha256 { get; set; }
         }
 
         /// <summary>One side view as the meta describes it. The JSON names are the CONTRACT (plan,
