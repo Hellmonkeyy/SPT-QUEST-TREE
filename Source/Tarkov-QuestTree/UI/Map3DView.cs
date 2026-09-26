@@ -254,6 +254,14 @@ namespace QuestTree.UI
             /// <summary>Building triangles textured from an atlas page, for the log line.</summary>
             public long AtlasTriangles;
 
+            /// <summary>WP8 (V.2): the four shares by area, m2, and the walls tinted outside 40 degrees.</summary>
+            public double AtlasArea;
+
+            public double TopArea;
+            public double SideArea;
+            public double TintArea;
+            public long WallsOutside;
+
             /// <summary>
             /// Top faces that stand ON ANOTHER FLOOR than the band their building is filed under, with the
             /// level whose picture textures them. See <see cref="Prep.FloorForFace"/>.
@@ -1459,6 +1467,11 @@ namespace QuestTree.UI
                 into.MovedRoofTriangles = data.MovedRoofTriangles;
                 into.GroundSkirtTriangles = data.GroundSkirtTriangles;
                 into.AtlasTriangles = data.AtlasTriangles;
+                into.AtlasArea = data.AtlasArea;
+                into.TopArea = data.TopArea;
+                into.SideArea = data.SideArea;
+                into.TintArea = data.TintArea;
+                into.WallsOutside = data.WallsOutside;
                 into.WallsPending = data.WallTriangles > 0;
             }
 
@@ -1694,12 +1707,19 @@ namespace QuestTree.UI
             var movedRoofs = 0L;
             var skirts = 0L;
             var atlasTriangles = 0L;
+            double atlasArea = 0d, topArea = 0d, sideArea = 0d, tintArea = 0d;
+            var wallsOutside = 0L;
 
             GroundAboveCut(out var groundAbove, out var groundMeasured);
 
             foreach (var floor in _floors)
             {
                 atlasTriangles += floor.Meshes.AtlasTriangles;
+                atlasArea += floor.Meshes.AtlasArea;
+                topArea += floor.Meshes.TopArea;
+                sideArea += floor.Meshes.SideArea;
+                tintArea += floor.Meshes.TintArea;
+                wallsOutside += floor.Meshes.WallsOutside;
                 topTriangles += floor.Meshes.TopTriangles;
                 sideTriangles += floor.Meshes.SideTriangles;
                 movedRoofs += floor.Meshes.MovedRoofTriangles;
@@ -1745,6 +1765,17 @@ namespace QuestTree.UI
                             100d * wallTriangles / faces)
                         : string.Format(CultureInfo.InvariantCulture, ", faces top {0:0} % / sides {1:0} % / tint {2:0} %",
                             100d * topTriangles / faces, 100d * sideTriangles / faces, 100d * wallTriangles / faces))
+                    : "") +
+                (atlasArea + topArea + sideArea + tintArea > 0d
+                    ? string.Format(CultureInfo.InvariantCulture,
+                        ", by area atlas {0:0} % / top {1:0} % / sides {2:0} % / tint {3:0} %",
+                        100d * atlasArea / (atlasArea + topArea + sideArea + tintArea),
+                        100d * topArea / (atlasArea + topArea + sideArea + tintArea),
+                        100d * sideArea / (atlasArea + topArea + sideArea + tintArea),
+                        100d * tintArea / (atlasArea + topArea + sideArea + tintArea))
+                    : "") +
+                (SidesActive && !LegacyViewRule
+                    ? string.Format(CultureInfo.InvariantCulture, ", walls outside 40 deg tinted {0:#,##0}", wallsOutside)
                     : "") +
                 (movedRoofs > 0
                     ? string.Format(CultureInfo.InvariantCulture,
@@ -3141,8 +3172,12 @@ namespace QuestTree.UI
             public int[] Indices;
             public Color32[] Colours;
 
+            /// <summary>WORKER. The arrays, copied, with their normals. <paramref name="creases"/> (WP8 D5, building
+            /// geometry): corners whose faces meet at a crease sharper than <see cref="CreaseCosine"/> get vertices of
+            /// their own (<see cref="SplitCreases"/>); the relief passes false and keeps the smooth average.</summary>
             public static MeshData From(
-                string name, List<Vector3> vertices, List<Vector2> uvs, List<int> indices, List<Color32> colours)
+                string name, List<Vector3> vertices, List<Vector2> uvs, List<int> indices, List<Color32> colours,
+                bool creases = true)
             {
                 var data = new MeshData
                 {
@@ -3153,8 +3188,163 @@ namespace QuestTree.UI
                     Colours = colours?.ToArray()
                 };
 
-                data.Normals = NormalsOf(data.Vertices, data.Indices);
+                data.Normals = creases && CreaseCosine > -1f
+                    ? SplitCreases(data, CreaseCosine)
+                    : NormalsOf(data.Vertices, data.Indices);
                 return data;
+            }
+
+            /// <summary>Two corner normals closer than this share one output vertex.</summary>
+            private const float CornerAgree = 0.999f;
+
+            /// <summary>
+            /// WORKER. WP8 (D5): CREASE-AWARE normals. For each corner (face f at vertex v) the normal is the
+            /// area-weighted sum of the faces around v within <paramref name="creaseCosine"/> of f's own normal - so a
+            /// roof corner sums the roof's faces and not the wall's it is welded to (the decimator welds a game mesh's
+            /// split hard-edge vertices; 24 % of the atlas roof vertices shared an index with a wall, and lit from above
+            /// the band along every roof edge rendered dark). Corners of one vertex whose normals agree share it; each
+            /// further group gets a COPY of the vertex (position, UV, colour) and its corners are repointed - the
+            /// indices, vertices, UVs and colours of <paramref name="data"/> are replaced in place. A degenerate face's
+            /// corner takes every face. At <paramref name="creaseCosine"/> -2 every corner of a vertex sums the same
+            /// faces in the same order as <see cref="NormalsOf"/>, so nothing splits and the normals are its own.
+            /// O(corners x fan).
+            /// </summary>
+            internal static Vector3[] SplitCreases(MeshData data, float creaseCosine)
+            {
+                var vertices = data.Vertices;
+                var indices = data.Indices;
+                var n = vertices.Length;
+                var faces = indices.Length / 3;
+                var fw = new Vector3[faces];
+                var fn = new Vector3[faces];
+
+                for (var f = 0; f < faces; f++)
+                {
+                    int a = indices[f * 3], b = indices[f * 3 + 1], c = indices[f * 3 + 2];
+                    if ((uint)a >= (uint)n || (uint)b >= (uint)n || (uint)c >= (uint)n) continue;
+
+                    var w = Vector3.Cross(vertices[b] - vertices[a], vertices[c] - vertices[a]);
+                    var length = w.magnitude;
+
+                    fw[f] = w;
+                    fn[f] = length > 1e-12f ? w / length : Vector3.zero;
+                }
+
+                // each vertex's corners, in corner order (so the sums run in NormalsOf's face order)
+                var start = new int[n + 1];
+                for (var k = 0; k < faces * 3; k++)
+                {
+                    var v = indices[k];
+                    if ((uint)v < (uint)n) start[v + 1]++;
+                }
+
+                for (var v = 0; v < n; v++) start[v + 1] += start[v];
+
+                var corners = new int[start[n]];
+                var fill = new int[n];
+                Array.Copy(start, fill, n);
+
+                for (var k = 0; k < faces * 3; k++)
+                {
+                    var v = indices[k];
+                    if ((uint)v < (uint)n) corners[fill[v]++] = k;
+                }
+
+                var normals = new List<Vector3>(n);
+                for (var v = 0; v < n; v++) normals.Add(Vector3.up);
+
+                List<Vector3> extraVertices = null;
+                List<Vector2> extraUvs = null;
+                List<Color32> extraColours = null;
+
+                var groupNormal = new List<Vector3>();
+                var groupIndex = new List<int>();
+
+                for (var v = 0; v < n; v++)
+                {
+                    int s = start[v], e = start[v + 1];
+                    if (s == e) continue;
+
+                    groupNormal.Clear();
+                    groupIndex.Clear();
+
+                    for (var i = s; i < e; i++)
+                    {
+                        var corner = corners[i];
+                        var own = fn[corner / 3];
+                        var degenerate = own.sqrMagnitude < 0.5f;
+                        var sum = Vector3.zero;
+
+                        for (var j = s; j < e; j++)
+                        {
+                            var g = corners[j] / 3;
+                            if (degenerate || Vector3.Dot(fn[g], own) >= creaseCosine) sum += fw[g];
+                        }
+
+                        var length = sum.magnitude;
+                        var normal = length > 1e-12f ? sum / length : Vector3.up;
+
+                        var index = -1;
+                        for (var k = 0; k < groupNormal.Count; k++)
+                        {
+                            if (Vector3.Dot(groupNormal[k], normal) < CornerAgree) continue;
+
+                            index = groupIndex[k];
+                            break;
+                        }
+
+                        if (index < 0)
+                        {
+                            if (groupIndex.Count == 0)
+                            {
+                                index = v;
+                                normals[v] = normal;
+                            }
+                            else
+                            {
+                                extraVertices ??= new List<Vector3>();
+                                index = n + extraVertices.Count;
+                                extraVertices.Add(vertices[v]);
+
+                                if (data.Uvs != null && v < data.Uvs.Length) (extraUvs ??= new List<Vector2>()).Add(data.Uvs[v]);
+                                if (data.Colours != null && v < data.Colours.Length) (extraColours ??= new List<Color32>()).Add(data.Colours[v]);
+
+                                normals.Add(normal);
+                            }
+
+                            groupNormal.Add(normal);
+                            groupIndex.Add(index);
+                        }
+
+                        indices[corner] = index;
+                    }
+                }
+
+                if (extraVertices != null)
+                {
+                    var grownV = new Vector3[n + extraVertices.Count];
+                    Array.Copy(vertices, grownV, n);
+                    extraVertices.CopyTo(grownV, n);
+                    data.Vertices = grownV;
+
+                    if (data.Uvs != null)
+                    {
+                        var grownU = new Vector2[grownV.Length];
+                        Array.Copy(data.Uvs, grownU, Math.Min(n, data.Uvs.Length));
+                        extraUvs?.CopyTo(grownU, n);
+                        data.Uvs = grownU;
+                    }
+
+                    if (data.Colours != null)
+                    {
+                        var grownC = new Color32[grownV.Length];
+                        Array.Copy(data.Colours, grownC, Math.Min(n, data.Colours.Length));
+                        extraColours?.CopyTo(grownC, n);
+                        data.Colours = grownC;
+                    }
+                }
+
+                return normals.ToArray();
             }
 
             /// <summary>
@@ -3197,7 +3387,7 @@ namespace QuestTree.UI
             /// Mesh.RecalculateNormals on the main thread, so the upload is cheaper. A vertex no
             /// triangle uses, or whose faces cancel, gets straight up.
             /// </summary>
-            private static Vector3[] NormalsOf(Vector3[] vertices, int[] indices)
+            internal static Vector3[] NormalsOf(Vector3[] vertices, int[] indices)
             {
                 var normals = new Vector3[vertices.Length];
 
@@ -3249,6 +3439,15 @@ namespace QuestTree.UI
             /// <summary>Atlas-textured faces, per tile (<see cref="TileStore"/> index).</summary>
             public readonly Dictionary<int, List<MeshData>> Atlas = new Dictionary<int, List<MeshData>>();
             public long AtlasTriangles;
+
+            /// <summary>WP8 (V.2): the same four shares by AREA, m2, and the walls tinted for facing no side within
+            /// 40 degrees.</summary>
+            public double AtlasArea;
+
+            public double TopArea;
+            public double SideArea;
+            public double TintArea;
+            public long WallsOutside;
         }
 
         /// <summary>One floor's walls as a worker prepared them: a colour and its meshes per tint.</summary>
@@ -3473,11 +3672,16 @@ namespace QuestTree.UI
 
             /// <summary>
             /// Which picture textures a building face: <see cref="TopView"/>, a side (slot + 1), or
-            /// <see cref="TintView"/>. WITHOUT side pictures, exactly the tint build's rule - top when
-            /// <c>|n.y| &gt;= 0.5</c> (<see cref="IsRoof"/>), else tint. WITH them, the Stage U contract: the
-            /// picture whose camera looks most squarely at the face, scored <c>-dot(n, f)</c> with the top
-            /// camera's f = (0,-1,0) among them; below <see cref="MinViewScore"/> a tint. Signed normal, ties to
-            /// the earlier view (top, then N, S, E, W).
+            /// <see cref="TintView"/> - asked only after <see cref="AtlasRangeAt"/>, so the order is atlas, then this.
+            /// WITHOUT side pictures, exactly the tint build's rule - top when <c>|n.y| &gt;= 0.5</c>
+            /// (<see cref="IsRoof"/>), else tint. WITH them (WP8 D4): the TOP picture for every face with
+            /// <c>n.y &gt;= 0.5</c> - roofs pitched up to 60 degrees, which the top camera sees unoccluded; the tint for
+            /// an underside (<c>n.y &lt;= -0.35</c>); a SIDE picture for a wall only when its horizontal normal is within
+            /// 40 degrees of facing that side's camera, the closest winning; else the tint (the building's own colour).
+            /// The roof pass and the wall pass both ask here, so a triangle still lands in exactly one of them.
+            /// Under <see cref="LegacyViewRule"/> the pre-WP8 contract: the picture whose camera looks most squarely at
+            /// the face, scored <c>-dot(n, f)</c> with the top camera's f = (0,-1,0) among them; below
+            /// <see cref="MinViewScore"/> a tint.
             /// </summary>
             public int ViewFor(Vector3 a, Vector3 b, Vector3 c)
             {
@@ -3489,6 +3693,42 @@ namespace QuestTree.UI
                 if (!(length > 1e-6f)) return TopView;
 
                 n /= length;
+
+                if (!LegacyViewRule)
+                {
+                    if (n.y >= RoofNormalY) return TopView;
+                    if (n.y <= -UndersideNormalY) return TintView;
+                    if (!SideWalls) return TintView;
+
+                    var h = new Vector2(n.x, n.z);
+                    var hl = h.magnitude;
+                    if (!(hl > 1e-4f)) return TintView;
+
+                    h /= hl;
+
+                    var wall = TintView;
+                    var bestCos = SideMaxCosine;
+
+                    for (var slot = 0; slot < Sides.Length; slot++)
+                    {
+                        var side = Sides[slot];
+                        if (side == null) continue;
+
+                        // The side camera's horizontal look, reversed: a wall faces the camera when its normal
+                        // points back along it.
+                        var d = new Vector2(-side.Forward.x, -side.Forward.z);
+                        var dl = d.magnitude;
+                        if (!(dl > 1e-6f)) continue;
+
+                        var cos = Vector2.Dot(h, d / dl);
+                        if (!(cos > bestCos)) continue;
+
+                        bestCos = cos;
+                        wall = slot + 1;
+                    }
+
+                    return wall;
+                }
 
                 var best = TopView;
                 var bestScore = n.y;
@@ -3760,7 +4000,8 @@ namespace QuestTree.UI
 
                 if (indices.Count > 0)
                 {
-                    data.Ground.Add(MeshData.From($"{p.MapKey}-relief-{band.Level}-{first}", vertices, uvs, indices, colours));
+                    data.Ground.Add(MeshData.From($"{p.MapKey}-relief-{band.Level}-{first}", vertices, uvs, indices, colours,
+                        creases: false));
                     data.GroundTriangles += indices.Count / 3;
                 }
 
@@ -3880,10 +4121,12 @@ namespace QuestTree.UI
                             tileSinks[tile] = sink;
                         }
 
-                        if (sink.Count + 3 > MaxVerticesPerMesh) sink.Flush($"{p.MapKey}-tile{tile}-{level}", AtlasList(data, tile));
+                        // +6, not +3 (WP8 D5): MeshData.From may split a crease corner into a vertex of its own.
+                        if (sink.Count + 6 > MaxVerticesPerMesh) sink.Flush($"{p.MapKey}-tile{tile}-{level}", AtlasList(data, tile));
 
                         sink.Triangle(p, serial, building.VertexCount, range, a, b, c);
                         data.AtlasTriangles++;
+                        data.AtlasArea += TriangleArea(p.Position(a), p.Position(b), p.Position(c));
                         continue;
                     }
 
@@ -3892,10 +4135,20 @@ namespace QuestTree.UI
                     var pc = p.Position(c);
 
                     var view = p.ViewFor(pa, pb, pc);
+                    var area = TriangleArea(pa, pb, pc);
 
                     if (view == TintView)
                     {
                         data.WallTriangles++;
+                        data.TintArea += area;
+
+                        // WP8 (V.2): a WALL (not an underside) the rule left without a side picture.
+                        if (p.SidesActive && !LegacyViewRule && area > 0d)
+                        {
+                            var ny = Vector3.Cross(pb - pa, pc - pa).y / (float)(2d * area);
+                            if (ny > -UndersideNormalY && ny < RoofNormalY) data.WallsOutside++;
+                        }
+
                         continue;
                     }
 
@@ -3913,14 +4166,16 @@ namespace QuestTree.UI
                         sink.Add(pc, SideUv(side, pc));
 
                         data.SideTriangles++;
+                        data.SideArea += area;
                         continue;
                     }
 
                     data.TopTriangles++;
+                    data.TopArea += area;
 
-                    // Room for up to three new vertices, or the chunk goes now and this building's vertices are
-                    // placed afresh in the next one.
-                    if (vertices.Count + 3 > MaxVerticesPerMesh)
+                    // Room for up to three new vertices (six: MeshData may split a crease corner, WP8 D5), or the chunk
+                    // goes now and this building's vertices are placed afresh in the next one.
+                    if (vertices.Count + 6 > MaxVerticesPerMesh)
                     {
                         FlushRoofs(p, data, level, part++, vertices, uvs, indices, colours, elsewhere);
 
@@ -3965,6 +4220,9 @@ namespace QuestTree.UI
 
             FlushRoofs(p, data, level, part, vertices, uvs, indices, colours, elsewhere);
         }
+
+        /// <summary>A triangle's area, m2.</summary>
+        private static double TriangleArea(Vector3 a, Vector3 b, Vector3 c) => 0.5d * Vector3.Cross(b - a, c - a).magnitude;
 
         /// <summary>WORKER. A floor's mesh list for one tile, made on first use.</summary>
         private static List<MeshData> AtlasList(FloorData data, int tile)
@@ -4209,8 +4467,36 @@ namespace QuestTree.UI
         /// <summary>What <see cref="Prep.ViewFor"/> answers for a face drawn in a flat tint.</summary>
         private const int TintView = -1;
 
-        /// <summary>The least score a face needs to be textured by the picture that sees it best.</summary>
+        /// <summary>The least score a face needs to be textured by the picture that sees it best (the pre-WP8 rule,
+        /// <see cref="LegacyViewRule"/>).</summary>
         private const float MinViewScore = 0.35f;
+
+        /// <summary>WP8 (D4 commit 4): a face whose normal points down more than this (n.y &lt;= -0.35) is an underside -
+        /// a ceiling or a soffit - and takes the tint: no picture sees it.</summary>
+        private const float UndersideNormalY = 0.35f;
+
+        /// <summary>WP8 (D4 commit 4): a wall takes a side picture only when its horizontal normal is within 40 degrees
+        /// (cosine 0.766) of facing that side's camera; beyond it the 45-degree oblique shows it as a streak.</summary>
+        private const float SideMaxCosine = 0.766f;
+
+        /// <summary>WP8 rollback: the pre-WP8 face rule (the picture that sees the face best, scored -dot(n, f), a tint
+        /// under 0.35) - which gave pitched roofs to the side pictures and walls at any angle to them. Static readonly so
+        /// the choice is not a constant the compiler folds.</summary>
+        internal static readonly bool LegacyViewRule = false;
+
+        /// <summary>WP8 rollback: walls take a side picture within 40 degrees. False: every wall without an atlas tile
+        /// takes the tint.</summary>
+        internal static readonly bool SideWalls = true;
+
+        /// <summary>WP8 (V.3) debug switch, OFF in every build: draws the building faces by SOURCE - atlas textured as
+        /// usual, an atlas FLAT tile magenta, top-picture faces blue, side-picture faces orange, tints grey - and logs
+        /// the camera's world position whenever it moves, so before/after screenshots can be matched to the metre.</summary>
+        internal static readonly bool DebugFaceSources = false;
+
+        /// <summary>WP8 (D5): corners of one vertex whose faces are within this cosine (45 degrees) share a smoothed
+        /// normal; a vertex whose faces meet at a sharper crease is split, so a roof edge welded to its wall stops
+        /// darkening a band along the roof. Rollback: -2 (never split - the pre-WP8 area-weighted average).</summary>
+        internal static readonly float CreaseCosine = 0.707f;
 
         /// <summary>How close to vertical a face's normal has to be to count as a roof: cos 60 degrees.</summary>
         private const float RoofNormalY = 0.5f;
@@ -4725,6 +5011,10 @@ namespace QuestTree.UI
             var meshes = floor.Meshes;
             if (meshes == null) return;
 
+            // WP8 (V.3): the faces by source, when the debug switch is on (never in a shipped build).
+            var debug = DebugFaceSources && !_flatColours;
+            if (debug) NoteDebugCamera();
+
             // The first frame this floor's picture is here: its walls can be coloured now - started here,
             // prepared on a worker and uploaded paced (StartWalls), so not a per-frame cost either.
             if (meshes.WallsPending && !meshes.WallsRunning) StartWalls(meshes, floor.Level, ground.mainTexture, late: true);
@@ -4738,10 +5028,12 @@ namespace QuestTree.UI
             // Every mesh is drawn whole: the dollhouse cut is the camera's oblique near plane (ApplyCut), which
             // clips each triangle on the GPU at the cut height. The peel still leaves out every band over the
             // chosen floor.
+            var roofMaterial = debug ? DebugOr(DebugTop, walls) : walls;
+
             for (var i = 0; i < meshes.Buildings.Count; i++)
             {
                 var mesh = meshes.Buildings[i];
-                if (mesh != null) Submit(mesh, walls);
+                if (mesh != null) Submit(mesh, roofMaterial);
             }
 
             // Roofs standing on another floor, with THAT floor's building material - its picture. A floor
@@ -4760,7 +5052,7 @@ namespace QuestTree.UI
                 if (material == null || (!_flatColours && material.mainTexture == null)) continue;
 
                 var mesh = roof.Mesh;
-                if (mesh != null) Submit(mesh, material);
+                if (mesh != null) Submit(mesh, debug ? DebugOr(DebugTop, material) : material);
             }
 
             // The walls, one colour at a time: at most sixteen more DrawMesh calls per floor. A tint with
@@ -4771,6 +5063,7 @@ namespace QuestTree.UI
                 if (tint == null) continue;
 
                 var material = tint.Material != null ? tint.Material : walls;
+                if (debug) material = DebugOr(DebugTint, material);
 
                 for (var i = 0; i < tint.Meshes.Count; i++)
                 {
@@ -4806,6 +5099,10 @@ namespace QuestTree.UI
                     if (tiles != null && tiles.PageFailedFor(atlas.Tile)) _sideFailed = true;
 
                     var draw = material.mainTexture != null ? material : SideFallbackFor(meshes, floor.Level, walls);
+
+                    // debug: a FLAT tile (the atlas's 4 x 4 colour for a material without a texture) in magenta
+                    if (debug && material.mainTexture != null && material.mainTexture.width <= 4)
+                        draw = DebugOr(DebugFlat, draw);
 
                     for (var i = 0; i < atlas.Meshes.Count; i++)
                     {
@@ -4843,6 +5140,7 @@ namespace QuestTree.UI
                 // No picture on it (decoding, evicted, or failed): drawn in the floor's wall colour rather
                 // than skipped. A skipped face is a hole straight through the building.
                 var draw = material.mainTexture != null ? material : SideFallbackFor(meshes, floor.Level, walls);
+                if (debug) draw = DebugOr(DebugSide, draw);
 
                 for (var i = 0; i < side.Meshes.Count; i++)
                 {
@@ -4850,6 +5148,58 @@ namespace QuestTree.UI
                     if (mesh != null) Submit(mesh, draw);
                 }
             }
+        }
+
+        /// <summary>The debug switch's colours, by source (see <see cref="DebugFaceSources"/>).</summary>
+        private const int DebugTop = 0;
+
+        private const int DebugSide = 1;
+        private const int DebugTint = 2;
+        private const int DebugFlat = 3;
+
+        private static readonly Color[] DebugColours =
+        {
+            new Color(0.2f, 0.35f, 1f), new Color(1f, 0.55f, 0.1f), new Color(0.55f, 0.55f, 0.55f), new Color(1f, 0f, 1f)
+        };
+
+        /// <summary>The debug switch's materials, made on first need and destroyed with the view.</summary>
+        private readonly Material[] _debugMaterials = new Material[4];
+
+        /// <summary>Where the camera was when the debug switch last logged it.</summary>
+        private Vector3 _debugCameraAt = new Vector3(float.NaN, float.NaN, float.NaN);
+
+        /// <summary>A debug source's flat material, or null when the shader has nothing to colour with.</summary>
+        private Material DebugMaterial(int kind)
+        {
+            if (_debugMaterials[kind] == null)
+                _debugMaterials[kind] = MakeTintMaterial($"QuestTreeMap3D-debug-{kind}", DebugColours[kind]);
+
+            return _debugMaterials[kind];
+        }
+
+        /// <summary>A debug source's material, or <paramref name="fallback"/> when it cannot be made.</summary>
+        private Material DebugOr(int kind, Material fallback)
+        {
+            var material = DebugMaterial(kind);
+            return material != null ? material : fallback;
+        }
+
+        /// <summary>Logs the camera's world position and angles when it has moved half a metre since the last line -
+        /// the debug switch's way of matching two runs' screenshots to the metre.</summary>
+        private void NoteDebugCamera()
+        {
+            if (_camera == null) return;
+
+            var at = _camera.transform.position;
+            if (!float.IsNaN(_debugCameraAt.x) && (at - _debugCameraAt).sqrMagnitude < 0.25f) return;
+
+            _debugCameraAt = at;
+            var angles = _camera.transform.eulerAngles;
+
+            Plugin.LogSource?.LogInfo(string.Format(CultureInfo.InvariantCulture,
+                "QuestTree: 3D map face-source debug for {0} - camera at ({1:0.0}, {2:0.0}, {3:0.0}), pitch {4:0.0}, yaw {5:0.0}; " +
+                "atlas textured, flat tile magenta, top blue, side orange, tint grey.",
+                _mapKey, at.x, at.y, at.z, angles.x, angles.y));
         }
 
         /// <summary>The material a side's faces are drawn with while the side has no picture: the entry's
@@ -5378,6 +5728,12 @@ namespace QuestTree.UI
 
             _overlays.Clear();
             _groundBand = null;
+
+            for (var i = 0; i < _debugMaterials.Length; i++)
+            {
+                Discard(_debugMaterials[i]);
+                _debugMaterials[i] = null;
+            }
 
             Discard(_rt);
             Discard(_cameraGo);
