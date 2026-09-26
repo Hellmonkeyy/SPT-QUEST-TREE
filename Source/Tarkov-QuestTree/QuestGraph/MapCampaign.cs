@@ -203,6 +203,10 @@ namespace QuestTree.QuestGraph
             var still = MapCapture.IsCapturing ? " while a capture is still running" : "";
             MapTransfer.UploadStart outcome;
 
+            // Automatic capture's hold goes first (WP3 5.1): with both on the map, the campaign's own release is then
+            // the one that uploads, so "one upload at the end of the campaign" is literal.
+            if (_autoHold != null) ReleaseAutoHold("capture campaign ended");
+
             // Never throws: the callers are a finally and OnDestroy, and the lines after them (clearing _running) must run.
             try
             {
@@ -263,6 +267,25 @@ namespace QuestTree.QuestGraph
         /// it, so the poll simply slows down rather than asking the same question every second and
         /// writing the same skip.</summary>
         private const float AutoCaptureProbeSeconds = 5f;
+
+        /// <summary>WP3: while automatic capture runs, its map's upload waits at most this long (s) - so a player who
+        /// keeps walking shares the map at most once per ten minutes, and a crash loses at most ten minutes of it...</summary>
+        internal const float AutoUploadMaxHoldSeconds = 600f;
+
+        /// <summary>...or until no automatic capture has started for this long (s): longer than an ordinary loot or
+        /// fight pause, short enough that a player who has finished shares the result within two minutes.</summary>
+        internal const float AutoUploadIdleSeconds = 120f;
+
+        /// <summary>WP3 rollback for the debounce alone: false = every automatic capture uploads as it lands, as before.</summary>
+        internal const bool AutoUploadDebounce = true;
+
+        /// <summary>Automatic capture's hold on its map's uploads (WP3), null when none is held. Taken before an
+        /// automatic capture starts, released by <see cref="ReleaseAutoHold"/> on the rules above, when the setting
+        /// goes off, when a campaign ends and when the raid does.</summary>
+        private MapTransfer.UploadHold _autoHold;
+
+        /// <summary>Time.realtimeSinceStartup of the last automatic capture that STARTED - the idle rule's clock.</summary>
+        private float _autoLastStartAt;
 
         /// <summary>Adds the campaign key and the automatic-capture ticker to a raid that has just
         /// started, from <see cref="QuestTree.Patches.GameWorldStartedPatch"/> - beside
@@ -350,6 +373,8 @@ namespace QuestTree.QuestGraph
             {
                 if (_campaignHold != null)
                     ReleaseCampaignHold(_lastMap ?? _campaignHold.Key, _lastCaptured, _lastStops, "campaign ended with the raid");
+
+                if (_autoHold != null) ReleaseAutoHold("raid ended");
             }
             catch (Exception ex)
             {
@@ -967,12 +992,27 @@ namespace QuestTree.QuestGraph
                     // an earlier spell cannot suppress the first line of the next one.
                     _autoAnnounced = false;
                     _autoSkip = null;
+
+                    // WP3: turned off - what automatic capture held back goes up now, once its last capture is written.
+                    if (_autoHold != null && !MapCapture.IsCapturing) ReleaseAutoHold("automatic capture turned off");
                     return;
                 }
 
                 var now = Time.time;
                 if (now < _autoEvalAt) return;
                 _autoEvalAt = now + AutoCaptureEvalSeconds;
+
+                // WP3: the debounce's two flushes. Before the campaign check, so a campaign cannot starve the idle flush
+                // (both holds may cover the map; the second release is the one that uploads).
+                if (_autoHold != null && !MapCapture.IsCapturing)
+                {
+                    var rt = Time.realtimeSinceStartup;
+
+                    if (rt - _autoLastStartAt >= AutoUploadIdleSeconds)
+                        ReleaseAutoHold($"no automatic capture for {Whole(AutoUploadIdleSeconds)} s");
+                    else if (rt - _autoHold.Since >= AutoUploadMaxHoldSeconds)
+                        ReleaseAutoHold($"{Whole(AutoUploadMaxHoldSeconds / 60f)} min since the last upload");
+                }
 
                 var seconds = ModSettings.AutoCaptureSeconds.Value;
 
@@ -1043,6 +1083,12 @@ namespace QuestTree.QuestGraph
                     return;
                 }
 
+                // WP3: held BEFORE the start - TryStartCapture can run the capture's first step there and then, and the
+                // hold must exist before any meta of this capture is written. A start that fails leaves the hold for the
+                // idle rule to release, with nothing owed.
+                if (AutoUploadDebounce && _autoHold == null)
+                    _autoHold = MapTransfer.HoldUploads(this, map, "automatic capture", preempts: false);
+
                 // automatic: this tick comes round every few seconds, so the capture builds the 3D mesh
                 // only for a map that has none yet - the pictures are taken exactly as ever. A campaign
                 // stop and a key press are places somebody chose and always build it.
@@ -1051,6 +1097,8 @@ namespace QuestTree.QuestGraph
                     Skip("the capture did not start");
                     return;
                 }
+
+                _autoLastStartAt = Time.realtimeSinceStartup;
 
                 // Only a capture that STARTED moves the clock and the reference position - see
                 // AutoCaptureEvalSeconds.
@@ -1067,6 +1115,36 @@ namespace QuestTree.QuestGraph
                 if (_warnedOnPoll) return;
                 _warnedOnPoll = true;
                 Plugin.LogSource?.LogWarning($"QuestTree: automatic map capture failed ({ex.Message}).");
+            }
+        }
+
+        /// <summary>
+        /// Ends automatic capture's hold on its map's uploads (WP3), and so issues the one upload of what it held back
+        /// - unless nothing was written, sharing is off, or another hold (a campaign's) still covers the map. The next
+        /// automatic capture takes the hold again, so a player who keeps walking uploads at most once per
+        /// <see cref="AutoUploadMaxHoldSeconds"/>. Never throws.
+        /// </summary>
+        /// <param name="reason">Why now, for the line.</param>
+        private void ReleaseAutoHold(string reason)
+        {
+            var hold = _autoHold;
+            _autoHold = null;
+            if (hold == null) return;
+
+            try
+            {
+                var outcome = MapTransfer.ReleaseUploads(hold);
+
+                if (outcome == MapTransfer.UploadStart.Started || outcome == MapTransfer.UploadStart.Queued)
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: automatic capture: 1 upload of {hold.Key} ({hold.Deferred} capture(s) held back, {reason}).");
+                else
+                    Plugin.LogSource?.LogDebug(
+                        $"QuestTree: automatic capture: no upload of {hold.Key} ({outcome}, {reason}).");
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug($"QuestTree: automatic capture's upload hold could not be released ({ex.Message}).");
             }
         }
 
