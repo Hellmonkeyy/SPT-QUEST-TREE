@@ -885,6 +885,22 @@ namespace QuestTree.QuestGraph
         /// <summary>This capture builds no 3D mesh (TryStartCapture's buildMesh).</summary>
         private bool _skipMesh;
 
+        /// <summary>WP2: this capture is a campaign's last stop and, with MeshVerifyLastStop on, also builds the mesh from
+        /// scratch into &lt;key&gt;-mesh.verify.bin for tools/compare-mesh.py (TryStartCapture's verifyMesh).</summary>
+        private bool _verifyMesh;
+
+        /// <summary>WP2 (7): the raid's LOD map and path hashes, kept across its captures (MapMeshBuilder.CacheFor, keyed
+        /// on the GameWorld). This component hangs off the GameWorld, so it goes with the raid anyway.</summary>
+        private MapMeshBuilder.SceneCache _sceneCache;
+
+        /// <summary>WP2: seconds the capture waits for the stored mesh and its sidecar to load and check on a worker
+        /// before it builds from scratch instead.</summary>
+        private const double MeshBaseWaitSeconds = 20d;
+
+        /// <summary>WP2: the extra seconds a campaign's last stop may take when MeshVerifyLastStop builds the mesh a
+        /// second time - the watchdog, its grace and the atlas encode wait, once more.</summary>
+        internal const double VerifyExtraSeconds = MeshWatchdogSeconds + MeshWatchdogGraceSeconds + AtlasEncodeWaitSeconds;
+
         /// <summary>The 3D mesh build now running, so <see cref="Cleanup"/> can dispose it. An iterator
         /// that is disposed runs its finally blocks, which is where the builder waits for a GPU readback
         /// in flight before releasing its buffer - so a raid that ends in the middle of one is the
@@ -1084,6 +1100,7 @@ namespace QuestTree.QuestGraph
                 // A key press is the player asking for this map, so it always builds the 3D mesh.
                 _automatic = false;
                 _skipMesh = false;
+                _verifyMesh = false;
                 StartCoroutine(Run());
             }
             catch (Exception ex)
@@ -1281,6 +1298,21 @@ namespace QuestTree.QuestGraph
                         $"QuestTree: {plan.Key} - {floorsCut} floor(s) were cut at the {FloorPhaseSeconds:0} s floor budget " +
                         $"({plan.FloorSeconds:0} s spent); the pictures an earlier capture took of them are kept.");
 
+                // WP2 (2.5): the stored mesh and its identity sidecar, read and checked on a worker while the frames go on -
+                // what this capture's build adds to. Anything that makes it untrustworthy, or a load slower than
+                // MeshBaseWaitSeconds, leaves plan.MeshBase null and the build takes the from-scratch path, which is the
+                // pre-WP2 build exactly.
+                if (!plan.Refused && plan.WantsMesh && plan.Floors.Any(f => !f.Failed && f.Bytes > 0))
+                {
+                    var baseLoad = StartMeshBase(plan, _culling != null);
+                    var baseClock = Stopwatch.StartNew();
+
+                    while (baseLoad != null && !baseLoad.IsCompleted && baseClock.Elapsed.TotalSeconds < MeshBaseWaitSeconds)
+                        yield return null;
+
+                    TakeMeshBase(plan, baseLoad);
+                }
+
                 // The 3D geometry, after the last picture and before the meta that will name it.
                 //
                 // Inside a hold of its own: the relief's rays do not care what is switched on, but the
@@ -1372,20 +1404,67 @@ namespace QuestTree.QuestGraph
                         while (mesh.AtlasPages.Any(p => p.Encode != null && !p.Encode.IsCompleted) &&
                                encodeClock.Elapsed.TotalSeconds < AtlasEncodeWaitSeconds)
                             yield return null;
-
-                        SettleAtlasPages(plan, mesh);
                     }
 
-                    // The deflate and the hash on a worker, the coroutine waiting a frame at a time: at
-                    // CompressionLevel.Optimal a few megabytes of buildings is well over a frame of
-                    // main-thread work, and nothing in it touches a Unity object - the mesh file is plain
-                    // arrays. The write of the staged file stays here, on this thread, so the abort path
-                    // (DropStaged) can never race a worker still writing a .tmp.
-                    var serialised = SerialiseMesh(plan, mesh);
+                    // WP2: settled whether or not a page was encoded - a mesh built onto a stored one names the stored
+                    // pages it carries as well as the ones it rewrote.
+                    SettleAtlasPages(plan, mesh);
 
-                    while (serialised != null && !serialised.IsCompleted) yield return null;
+                    if (mesh.Unchanged)
+                    {
+                        // WP2 (2.13): nothing was added, replaced or re-targeted, no tile or page changed, and the relief
+                        // and y range are the stored ones byte for byte - the stored mesh, sidecar and pages are carried
+                        // (WriteMeta's CarriedMesh), not rewritten with a new date.
+                        plan.MeshCarriedUnchanged = true;
 
-                    StageMesh(plan, mesh, serialised);
+                        Plugin.LogSource?.LogInfo(
+                            $"QuestTree: {plan.Key} built no new 3D geometry this time - the stored mesh is kept.");
+                    }
+                    else
+                    {
+                        // The deflate and the hash on a worker, the coroutine waiting a frame at a time: at
+                        // CompressionLevel.Optimal a few megabytes of buildings is well over a frame of
+                        // main-thread work, and nothing in it touches a Unity object - the mesh file is plain
+                        // arrays. The write of the staged file stays here, on this thread, so the abort path
+                        // (DropStaged) can never race a worker still writing a .tmp.
+                        var serialised = SerialiseMesh(plan, mesh);
+
+                        while (serialised != null && !serialised.IsCompleted) yield return null;
+
+                        StageMesh(plan, mesh, serialised);
+                    }
+
+                    // WP2 (4.1a): the campaign's last stop builds the mesh a second time FROM SCRATCH, in the same scene,
+                    // into <key>-mesh.verify.bin - file L of the comparison tools/compare-mesh.py makes against the
+                    // accumulated file A. Debug only; never named by the meta.
+                    if (_verifyMesh && (ModSettings.MeshVerifyLastStop?.Value ?? false) && !plan.Refused)
+                    {
+                        var verify = VerifyMesh(plan);
+
+                        while (true)
+                        {
+                            object current = null;
+                            var more = false;
+
+                            try
+                            {
+                                more = verify.MoveNext();
+                                if (more) current = verify.Current;
+                            }
+                            catch (Exception ex)
+                            {
+                                Plugin.LogSource?.LogWarning(
+                                    $"QuestTree: the verification mesh of {plan.Key} was abandoned ({ex.GetType().Name}: {ex.Message}).");
+                                more = false;
+                            }
+
+                            if (!more) break;
+
+                            yield return current;
+                        }
+
+                        EndMesh(plan, null);
+                    }
                 }
 
                 // The four side views, after the mesh because the box they frame is the mesh's y range.
@@ -2294,6 +2373,9 @@ namespace QuestTree.QuestGraph
             // The 3D mesh is staged the same way and has to be dropped the same way: a refused capture
             // must not leave a <key>-mesh.bin.tmp behind for the next one to trip over.
             Forget(plan, plan.MeshFile);
+
+            // WP2: and its identity sidecar.
+            Forget(plan, MapMeshIndex.FileNameFor(plan.Key));
 
             // And its atlas pages, every possible one by name.
             for (var page = 0; page < MapMeshFile.MaxAtlasPages; page++)
@@ -6939,6 +7021,388 @@ namespace QuestTree.QuestGraph
 
         private static float[] Floats(double[] v) => new[] { (float)v[0], (float)v[1], (float)v[2] };
 
+        // --- WP2: the stored mesh ---------------------------------------------------------------------
+
+        /// <summary>WP2: the stored mesh and its sidecar, read and checked on a worker (LoadMeshBase), and the lowest and
+        /// highest stored building height; or why they cannot be used.</summary>
+        private sealed class MeshBaseLoad
+        {
+            public MapMeshFile File;
+            public MapMeshIndex Index;
+            public float YLow = float.PositiveInfinity;
+            public float YHigh = float.NegativeInfinity;
+            public string Refused;
+        }
+
+        /// <summary>
+        /// WP2 (2.5): starts reading the stored mesh this capture's build can add to, or returns null with the reason in
+        /// plan.MeshBaseRefused: accumulation off (the MeshAccumulate rollback), a rebuild asked for (MeshRebuildNext), no
+        /// earlier capture merged (LoadPrevious refused it: extent, scale, floors, recipe, exposure), no mesh this meta
+        /// can carry, or no sidecar beside it. Everything the worker needs is read here, on the main thread - the game
+        /// string included. Never throws.
+        /// </summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="cullingKnown">Whether this capture knows the culling lists (the request's CullingKnown).</param>
+        private static Task<MeshBaseLoad> StartMeshBase(Plan plan, bool cullingKnown)
+        {
+            plan.MeshBase = null;
+            plan.MeshBaseRefused = null;
+
+            try
+            {
+                plan.Game = Application.version + "|" + Application.unityVersion;
+
+                if (!(ModSettings.MeshAccumulate?.Value ?? true))
+                {
+                    plan.MeshBaseRefused = "accumulation is off ('3D map: add to the stored mesh')";
+                    return null;
+                }
+
+                if (ModSettings.MeshRebuildNext?.Value ?? false)
+                {
+                    plan.MeshBaseRefused = "a rebuild was asked for ('3D map: rebuild from scratch on the next capture')";
+                    return null;
+                }
+
+                if (plan.Previous == null)
+                {
+                    plan.MeshBaseRefused = "no earlier mesh (no earlier capture of this map this one merges into)";
+                    return null;
+                }
+
+                var carried = CarriedMesh(plan, null);
+                if (carried == null)
+                {
+                    plan.MeshBaseRefused = "no earlier mesh this capture could carry";
+                    return null;
+                }
+
+                var indexPath = Path.Combine(plan.Dir, MapMeshIndex.FileNameFor(plan.Key));
+                if (!File.Exists(indexPath))
+                {
+                    plan.MeshBaseRefused = "no index beside the mesh";
+                    return null;
+                }
+
+                var meshPath = Path.Combine(plan.Dir, carried.File);
+                var bytes = carried.Bytes;
+                var sha = carried.Sha256;
+                var recipe = MapMeshBuilder.MeshRecipe;
+                var game = plan.Game;
+                double minX = plan.Extent.MinX, minZ = plan.Extent.MinZ, maxX = plan.Extent.MaxX, maxZ = plan.Extent.MaxZ;
+                var mask = plan.RenderMask;
+
+                var pages = new List<KeyValuePair<string, string>>();
+                if (plan.Previous.Atlas != null)
+                    foreach (var page in plan.Previous.Atlas)
+                        pages.Add(new KeyValuePair<string, string>(
+                            page == null || !IsPlainFileName(page.File) ? null : Path.Combine(plan.Dir, page.File), page?.Sha256));
+
+                return Task.Run(() => LoadMeshBase(meshPath, bytes, sha, indexPath, recipe, game, minX, minZ, maxX, maxZ, mask,
+                    cullingKnown, pages));
+            }
+            catch (Exception ex)
+            {
+                plan.MeshBaseRefused = $"the stored mesh could not be looked at ({ex.GetType().Name}: {ex.Message})";
+                return null;
+            }
+        }
+
+        /// <summary>Whether a meta-given file name is a bare name in the capture's folder (no path).</summary>
+        private static bool IsPlainFileName(string name) =>
+            !string.IsNullOrEmpty(name) && name.IndexOfAny(new[] { '/', '\\', ':' }) < 0 && name != "." && name != "..";
+
+        /// <summary>
+        /// WP2 (2.5), on a worker: the stored mesh read and bound to its sidecar - its length and SHA-256 the meta's, the
+        /// file read with its caps (MapMeshFile.Read), the sidecar read with its caps and matched (MapMeshIndex.Mismatch:
+        /// sha, buildings, triangles, ranges, recipe, game, extent, render mask, culling, pages), and every atlas page on
+        /// disk with the sha the meta AND the sidecar name. Then the lowest and highest stored building height, so the
+        /// main thread is not charged for it. Any failure is a reason, never a throw.
+        /// </summary>
+        private static MeshBaseLoad LoadMeshBase(string meshPath, long bytes, string sha, string indexPath, string recipe, string game,
+            double minX, double minZ, double maxX, double maxZ, int mask, bool cullingKnown, List<KeyValuePair<string, string>> pages)
+        {
+            var load = new MeshBaseLoad();
+
+            try
+            {
+                var data = File.ReadAllBytes(meshPath);
+                if (data.Length != bytes)
+                {
+                    load.Refused = $"the mesh is {data.Length} bytes where the meta says {bytes}";
+                    return load;
+                }
+
+                var hex = Sha256(data);
+                if (!string.Equals(hex, sha, StringComparison.OrdinalIgnoreCase))
+                {
+                    load.Refused = "the mesh's sha256 is not the one the meta names";
+                    return load;
+                }
+
+                var file = MapMeshFile.Read(data);
+                var index = MapMeshIndex.Read(File.ReadAllBytes(indexPath));
+
+                var why = index.Mismatch(file, MapMeshIndex.ShaBytes(hex), recipe, game, minX, minZ, maxX, maxZ, mask, cullingKnown);
+                if (why != null)
+                {
+                    load.Refused = $"the index does not fit it - {why}";
+                    return load;
+                }
+
+                if (pages.Count != file.AtlasPages)
+                {
+                    load.Refused = $"the meta names {pages.Count} atlas page(s) where the mesh has {file.AtlasPages}";
+                    return load;
+                }
+
+                for (var p = 0; p < pages.Count; p++)
+                {
+                    var path = pages[p].Key;
+                    if (path == null || !File.Exists(path))
+                    {
+                        load.Refused = $"atlas page {p} is missing";
+                        return load;
+                    }
+
+                    var pageHex = Sha256(File.ReadAllBytes(path));
+                    if (!string.Equals(pageHex, pages[p].Value, StringComparison.OrdinalIgnoreCase) ||
+                        !MapMeshIndex.SameBytes(MapMeshIndex.ShaBytes(pageHex), index.Pages[p].Sha))
+                    {
+                        load.Refused = $"atlas page {p} is not the one the meta and the index name";
+                        return load;
+                    }
+                }
+
+                file.Bind();
+
+                foreach (var b in file.Buildings)
+                    foreach (var code in b.Y)
+                    {
+                        if (code == MapMeshFile.NoHit) continue;
+
+                        var y = file.HeightOf(code);
+                        if (y < load.YLow) load.YLow = y;
+                        if (y > load.YHigh) load.YHigh = y;
+                    }
+
+                load.File = file;
+                load.Index = index;
+                return load;
+            }
+            catch (Exception ex)
+            {
+                load.Refused = $"the stored mesh or its index would not read ({ex.GetType().Name}: {ex.Message})";
+                return load;
+            }
+        }
+
+        /// <summary>WP2: the stored mesh taken for this capture's build, or the reason it is not - a load that did not
+        /// finish within MeshBaseWaitSeconds included - written to the log's build line and the journal.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="load">The worker's task, or null (the reason is already on the plan).</param>
+        private static void TakeMeshBase(Plan plan, Task<MeshBaseLoad> load)
+        {
+            try
+            {
+                if (load != null)
+                {
+                    if (!load.IsCompleted)
+                        plan.MeshBaseRefused = $"the stored mesh did not load within {MeshBaseWaitSeconds:0} s";
+                    else if (load.IsFaulted || load.IsCanceled)
+                        plan.MeshBaseRefused = $"the stored mesh would not load ({load.Exception?.GetBaseException().Message ?? "cancelled"})";
+                    else if (load.Result.Refused != null)
+                        plan.MeshBaseRefused = load.Result.Refused;
+                    else
+                        plan.MeshBase = load.Result;
+                }
+
+                if (plan.MeshBase == null && plan.MeshBaseRefused != null)
+                    Journal(plan.Key, $"3D mesh rebuilt from scratch - {plan.MeshBaseRefused}.");
+            }
+            catch (Exception ex)
+            {
+                plan.MeshBase = null;
+                plan.MeshBaseRefused = $"the stored mesh could not be taken ({ex.GetType().Name}: {ex.Message})";
+            }
+        }
+
+        /// <summary>WP2 (4.1a): a MeshVerifyLastStop page's file - never named by a meta, left alone by every sweep.</summary>
+        private static string VerifyAtlasName(string key, int page) =>
+            $"{key}-verify-atlas-{page.ToString(CultureInfo.InvariantCulture)}.png";
+
+        /// <summary>
+        /// WP2 (4.1a): MeshVerifyLastStop - the same stop's mesh built again FROM SCRATCH (Request.Base null), in the
+        /// same scene and a hold of its own, into &lt;key&gt;-mesh.verify.bin with its sidecar and pages
+        /// (&lt;key&gt;-verify-atlas-&lt;n&gt;.png): file L, for tools/compare-mesh.py to hold the accumulated file A to.
+        /// Written in place, not staged - nothing reads them but the tool. Under the same watchdog as the capture's own build.
+        /// </summary>
+        /// <param name="plan">The capture's plan.</param>
+        private IEnumerator VerifyMesh(Plan plan)
+        {
+            MapMeshBuilder.Request request;
+            MapMeshBuilder.Result result;
+
+            try
+            {
+                request = new MapMeshBuilder.Request
+                {
+                    Map = plan.Key,
+                    MinX = plan.Extent.MinX,
+                    MinZ = plan.Extent.MinZ,
+                    MaxX = plan.Extent.MaxX,
+                    MaxZ = plan.Extent.MaxZ,
+                    From = plan.From,
+                    RenderMask = plan.RenderMask,
+                    CullingKnown = _culling != null,
+                    ProxyRenderers = _culling != null ? _proxyRenderers : null,
+                    GameCulled = _culling != null ? _gameCulled : null,
+                    OcclusionCulled = _culling != null ? _occlusionCulled : null,
+                    Scene = _sceneCache,
+                    Game = plan.Game ?? "",
+                    CaptureOrdinal = plan.Captures,
+                    BaseRefused = "this is MeshVerifyLastStop's comparison build",
+                    AtlasPartPath = page => Path.Combine(plan.Dir, VerifyAtlasName(plan.Key, page)) + ".part",
+                };
+
+                // the same bands and budget the capture's own build had - MeshRequest clears plan.Atlas, which by now is
+                // the list the meta will name for the capture's OWN mesh, so it is put back
+                var named = new List<CaptureAtlas>(plan.Atlas);
+                var own = MeshRequest(plan);
+                plan.Atlas.Clear();
+                plan.Atlas.AddRange(named);
+                request.Bands = own.Bands;
+                request.BuildingSeconds = own.BuildingSeconds;
+
+                result = new MapMeshBuilder.Result();
+                _meshBuild = MapMeshBuilder.Build(request, result);
+                _meshRequest = request;
+
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: MeshVerifyLastStop - building {plan.Key}'s 3D map again from scratch into " +
+                    $"{plan.Key}-mesh.verify.bin for tools/compare-mesh.py; the scene is held again.");
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: the verification mesh of {plan.Key} could not be started ({ex.GetType().Name}: {ex.Message}).");
+                yield break;
+            }
+
+            yield return null;
+            HoldScene();
+            yield return null;
+
+            var clock = Stopwatch.StartNew();
+            var asked = false;
+
+            while (true)
+            {
+                if (!asked && clock.Elapsed.TotalSeconds > MeshWatchdogSeconds && _meshRequest != null)
+                {
+                    asked = true;
+                    _meshRequest.Abort = true;
+                }
+
+                if (asked && clock.Elapsed.TotalSeconds > MeshWatchdogSeconds + MeshWatchdogGraceSeconds)
+                {
+                    DisposeMeshBuild();
+                    break;
+                }
+
+                object current = null;
+                var more = false;
+
+                try
+                {
+                    more = _meshBuild != null && _meshBuild.MoveNext();
+                    if (more) current = _meshBuild.Current;
+                }
+                catch (Exception ex)
+                {
+                    Plugin.LogSource?.LogWarning($"QuestTree: the verification mesh of {plan.Key} was abandoned ({ex.Message}).");
+                    more = false;
+                }
+
+                if (!more) break;
+
+                yield return current;
+            }
+
+            EndMesh(plan, result);
+            yield return null;
+
+            if (result.AtlasPages != null && result.AtlasPages.Count > 0)
+            {
+                var encodeClock = Stopwatch.StartNew();
+
+                while (result.AtlasPages.Any(p => p.Encode != null && !p.Encode.IsCompleted) &&
+                       encodeClock.Elapsed.TotalSeconds < AtlasEncodeWaitSeconds)
+                    yield return null;
+            }
+
+            if (result.File == null)
+            {
+                Plugin.LogSource?.LogWarning($"QuestTree: the verification mesh of {plan.Key} built nothing.");
+                yield break;
+            }
+
+            Task<byte[][]> write = null;
+
+            try
+            {
+                foreach (var page in MapMeshBuilder.SettleAccumulated(result))
+                {
+                    var target = Path.Combine(plan.Dir, VerifyAtlasName(plan.Key, page.Page));
+                    if (File.Exists(target)) File.Delete(target);
+                    File.Move(page.PartPath, target);
+                }
+
+                var file = result.File;
+                var index = result.Index;
+
+                write = Task.Run(() =>
+                {
+                    var mesh = MapMeshFile.ToBytes(file);
+                    byte[] sidecar = null;
+
+                    if (index != null)
+                    {
+                        index.MeshSha = MapMeshIndex.ShaBytes(Sha256(mesh));
+                        sidecar = MapMeshIndex.ToBytes(index);
+                    }
+
+                    return new[] { mesh, sidecar };
+                });
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: the verification mesh of {plan.Key} could not be settled ({ex.GetType().Name}: {ex.Message}).");
+                yield break;
+            }
+
+            while (!write.IsCompleted) yield return null;
+
+            try
+            {
+                if (write.IsFaulted) throw write.Exception.GetBaseException();
+
+                File.WriteAllBytes(Path.Combine(plan.Dir, plan.Key + "-mesh.verify.bin"), write.Result[0]);
+                if (write.Result[1] != null)
+                    File.WriteAllBytes(Path.Combine(plan.Dir, plan.Key + "-mesh.verify.index"), write.Result[1]);
+
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: MeshVerifyLastStop - {plan.Key}-mesh.verify.bin written ({result.File.Describe()}); compare it with " +
+                    $"python tools/compare-mesh.py captures/{plan.Key}");
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: the verification mesh of {plan.Key} could not be written ({ex.GetType().Name}: {ex.Message}).");
+            }
+        }
+
         // --- the 3D mesh -------------------------------------------------------------------------
 
         /// <summary>What <see cref="MapMeshBuilder"/> needs to build this capture's geometry, out of
@@ -6968,6 +7432,16 @@ namespace QuestTree.QuestGraph
                 MaxZ = plan.Extent.MaxZ,
                 From = plan.From,
                 RenderMask = plan.RenderMask,
+
+                // WP2: what the build adds to, and what it stamps its sidecar with
+                Base = plan.MeshBase?.File,
+                BaseIndex = plan.MeshBase?.Index,
+                BaseYLow = plan.MeshBase?.YLow ?? float.PositiveInfinity,
+                BaseYHigh = plan.MeshBase?.YHigh ?? float.NegativeInfinity,
+                BaseRefused = plan.MeshBaseRefused,
+                CaptureOrdinal = plan.Captures,
+                Game = plan.Game ?? "",
+                AtlasPagePath = page => Path.Combine(plan.Dir, MapMeshFile.AtlasFileNameFor(plan.Key, page)),
             };
 
             foreach (var floor in plan.Floors)
@@ -7046,9 +7520,13 @@ namespace QuestTree.QuestGraph
         private static void SettleAtlasPages(Plan plan, MapMeshBuilder.Result mesh)
         {
             plan.Atlas.Clear();
-            if (mesh?.AtlasPages == null || mesh.AtlasPages.Count == 0) return;
+            if (mesh?.File == null) return;
 
-            var done = MapMeshBuilder.SettleAtlas(mesh.File, mesh.AtlasPages);
+            // WP2: page by page, with the sidecar kept in step (MapMeshBuilder.SettleAccumulated): from scratch the stage-W
+            // rule (pages 0..n-1 up to the first that did not finish); onto a stored atlas a rewritten page that did not
+            // finish keeps its stored file, a new one ends the atlas there.
+            var done = MapMeshBuilder.SettleAccumulated(mesh);
+            var staged = new Dictionary<int, CaptureAtlas>();
 
             for (var i = 0; i < done.Count; i++)
             {
@@ -7057,11 +7535,11 @@ namespace QuestTree.QuestGraph
 
                 try
                 {
-                    var staged = Staged(Path.Combine(plan.Dir, name));
-                    if (File.Exists(staged)) File.Delete(staged);
-                    File.Move(page.PartPath, staged);
+                    var target = Staged(Path.Combine(plan.Dir, name));
+                    if (File.Exists(target)) File.Delete(target);
+                    File.Move(page.PartPath, target);
 
-                    plan.Atlas.Add(new CaptureAtlas
+                    staged[page.Page] = new CaptureAtlas
                     {
                         File = name,
                         Page = page.Page,
@@ -7070,15 +7548,21 @@ namespace QuestTree.QuestGraph
                         Tiles = page.Tiles,
                         Bytes = page.Bytes,
                         Sha256 = page.Sha256,
-                    });
+                    };
                 }
                 catch (Exception ex)
                 {
-                    Plugin.LogSource?.LogWarning(
-                        $"QuestTree: atlas page {page.Page} of {plan.Key} could not be staged ({ex.GetType().Name}: " +
-                        $"{ex.Message}) - it and every later page are dropped; their buildings keep the side views.");
+                    var fresh = !mesh.Accumulated || page.Page >= mesh.BasePages;
 
-                    if (mesh.File != null) MapMeshBuilder.TruncateAtlas(mesh.File, i);
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: atlas page {page.Page} of {plan.Key} could not be staged ({ex.GetType().Name}: {ex.Message}) - " +
+                        (fresh
+                            ? "it and every later page are dropped; their buildings keep the side views."
+                            : "the stored page stays and the tiles this capture put on it are dropped."));
+
+                    MapMeshBuilder.FailAtlasPage(mesh, page.Page);
+
+                    if (!fresh) continue;
 
                     for (var k = i; k < done.Count; k++)
                     {
@@ -7096,9 +7580,38 @@ namespace QuestTree.QuestGraph
                 }
             }
 
-            Plugin.LogSource?.LogInfo(
-                $"QuestTree: texture atlas for {plan.Key} - {plan.Atlas.Count} of {mesh.AtlasPages.Count} page(s) encoded " +
-                $"and staged, {MB(plan.Atlas.Sum(p => p.Bytes))} MB.");
+            // The meta's list: every page the mesh names, each staged now or carried from the earlier capture (already in
+            // place; WriteMeta's Commit is a no-op for it). A page that is neither ends the atlas there.
+            var carried = 0;
+
+            for (var page = 0; page < mesh.File.AtlasPages; page++)
+            {
+                if (staged.TryGetValue(page, out var entry))
+                {
+                    plan.Atlas.Add(entry);
+                    continue;
+                }
+
+                var previous = plan.Previous?.Atlas;
+                var old = previous != null && page < previous.Count ? previous[page] : null;
+
+                if (mesh.Accumulated && page < mesh.BasePages && old != null && old.Page == page &&
+                    old.File == MapMeshFile.AtlasFileNameFor(plan.Key, page))
+                {
+                    plan.Atlas.Add(old);
+                    carried++;
+                    continue;
+                }
+
+                MapMeshBuilder.TruncateAtlasIndexed(mesh.File, page, mesh.Index);
+                break;
+            }
+
+            if (done.Count > 0 || carried > 0 || (mesh.AtlasPages?.Count ?? 0) > 0)
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: texture atlas for {plan.Key} - {staged.Count} of {mesh.AtlasPages?.Count ?? 0} page(s) encoded " +
+                    $"and staged, {MB(staged.Values.Sum(p => p.Bytes))} MB" +
+                    (mesh.Accumulated ? $", {carried} stored page(s) carried" : "") + ".");
         }
 
         /// <summary>The atlas an earlier capture wrote for the mesh this meta carries forward, when every page of
@@ -7188,6 +7701,10 @@ namespace QuestTree.QuestGraph
                 request.GameCulled = _culling != null ? _gameCulled : null;
                 request.OcclusionCulled = _culling != null ? _occlusionCulled : null;
 
+                // WP2 (7): the raid's LOD map and path hashes, read once a raid rather than once a stop
+                _sceneCache = MapMeshBuilder.CacheFor(_sceneCache, _gameWorld);
+                request.Scene = _sceneCache;
+
                 if (request.Bands.Count == 0)
                 {
                     Plugin.LogSource?.LogDebug(
@@ -7209,7 +7726,13 @@ namespace QuestTree.QuestGraph
                     $"{(MapMeshBuilder.HardSecondsFor(soft) + MapMeshBuilder.DrainSeconds + MapMeshBuilder.AtlasSecondsReserve).ToString("0", CultureInfo.InvariantCulture)} s " +
                     $"(decimating for the first {soft.ToString("0", CultureInfo.InvariantCulture)}, then up to " +
                     $"{MapMeshBuilder.AtlasSecondsReserve.ToString("0", CultureInfo.InvariantCulture)} s of textures), so distant " +
-                    "geometry stays drawn while it runs; the side views after it announce their own.");
+                    "geometry stays drawn while it runs; the side views after it announce their own" +
+                    (request.Base != null
+                        ? $" - accumulating: {request.Base.Buildings.Count.ToString("#,##0", CultureInfo.InvariantCulture)} stored building(s) will not be read again unless degraded."
+                        : $" - from scratch: {plan.MeshBaseRefused ?? "there is no earlier mesh to add to"}."));
+
+                // the stored mesh is the request's now; the plan lets go of it
+                plan.MeshBase = null;
 
                 // The collect LAST, so nothing above it can have thrown after it. The hold is NOT here:
                 // Run takes it a frame later, so the collect and the pass over the culled components
@@ -7294,6 +7817,7 @@ namespace QuestTree.QuestGraph
             if (mesh?.File == null) return null;
 
             var file = mesh.File;
+            var index = mesh.Index;
 
             try
             {
@@ -7305,8 +7829,34 @@ namespace QuestTree.QuestGraph
                     {
                         var buffer = stream.GetBuffer();
                         var length = (int)stream.Length;
+                        var sha = Sha256(buffer, length);
 
-                        return new SerialisedMesh { Bytes = buffer, Length = length, Sha256 = Sha256(buffer, length) };
+                        // WP2: the sidecar, bound to these bytes by their hash. One that will not serialise is left out -
+                        // the next capture then rebuilds from scratch, which is safe.
+                        byte[] indexBytes = null;
+                        string indexWhy = null;
+
+                        if (index != null)
+                        {
+                            try
+                            {
+                                index.MeshSha = MapMeshIndex.ShaBytes(sha);
+                                indexBytes = MapMeshIndex.ToBytes(index);
+                            }
+                            catch (Exception ex)
+                            {
+                                indexWhy = $"{ex.GetType().Name}: {ex.Message}";
+                            }
+                        }
+                        else
+                        {
+                            indexWhy = "the build produced none";
+                        }
+
+                        return new SerialisedMesh
+                        {
+                            Bytes = buffer, Length = length, Sha256 = sha, IndexBytes = indexBytes, IndexWhy = indexWhy,
+                        };
                     }
                 });
             }
@@ -7326,6 +7876,11 @@ namespace QuestTree.QuestGraph
             public byte[] Bytes;
             public int Length;
             public string Sha256;
+
+            /// <summary>WP2: the sidecar's bytes, or null with the reason.</summary>
+            public byte[] IndexBytes;
+
+            public string IndexWhy;
         }
 
         /// <summary>Writes the built mesh beside the pictures as a STAGED file and records what the
@@ -7363,6 +7918,21 @@ namespace QuestTree.QuestGraph
 
                 Stage(Path.Combine(plan.Dir, plan.MeshFile), bytes, length);
 
+                // WP2: the sidecar beside it, staged the same way and committed with it
+                plan.IndexStaged = false;
+
+                if (serialised.Result.IndexBytes != null)
+                {
+                    Stage(Path.Combine(plan.Dir, MapMeshIndex.FileNameFor(plan.Key)), serialised.Result.IndexBytes);
+                    plan.IndexStaged = true;
+                }
+                else
+                {
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: {plan.Key}'s mesh has no identity sidecar this time ({serialised.Result.IndexWhy}) - the next " +
+                        "capture rebuilds its 3D mesh from scratch.");
+                }
+
                 // The bands that ended up in the file, for the one thing WriteMeta can check and this
                 // cannot: that they are exactly the floors the meta will name.
                 plan.MeshLevels = new HashSet<int>();
@@ -7384,14 +7954,16 @@ namespace QuestTree.QuestGraph
                 // separately. The third number is what is actually on the disk.
                 plan.MeshNote =
                     $"{MB(mesh.ReliefBytes)} MB relief + {MB(mesh.BuildingBytes)} MB buildings, " +
-                    $"{MB(length)} MB deflated, sha256 {ShortSha(sha)}";
+                    $"{MB(length)} MB deflated, sha256 {ShortSha(sha)}" + (mesh.Accumulated ? " (accumulated)" : "");
             }
             catch (Exception ex)
             {
                 plan.Mesh = null;
                 plan.MeshNote = null;
                 plan.MeshLevels = null;
+                plan.IndexStaged = false;
                 Forget(plan, plan.MeshFile);
+                Forget(plan, MapMeshIndex.FileNameFor(plan.Key));
 
                 Plugin.LogSource?.LogWarning(
                     $"QuestTree: the 3D mesh of {plan.Key} could not be written ({ex.GetType().Name}: " +
@@ -7627,7 +8199,9 @@ namespace QuestTree.QuestGraph
                 //
                 // Three cases, in order:
                 //   - this capture BUILT one: it is checked against the floors below, committed, and
-                //     named. The mesh is rebuilt whole by every capture that builds one, never merged.
+                //     named - by accumulating onto the mesh and index an earlier capture left
+                //     (MapMeshBuilder.Request.Base), or from scratch when there is none it can trust. A build that
+                //     changed nothing (Result.Unchanged) carries the earlier one instead, below.
                 //   - this capture built NONE (the AutoCapture cost gate, or a mesh phase that failed):
                 //     the one an earlier capture wrote is carried forward, when it is still on disk and
                 //     its floors are this meta's floors - the same rule Carried follows for a floor's
@@ -7665,8 +8239,31 @@ namespace QuestTree.QuestGraph
                     {
                         Commit(Path.Combine(plan.Dir, plan.Mesh.File));
 
+                        // WP2: the sidecar right after the mesh it describes. One that will not go in place - or a mesh
+                        // that has none - leaves no sidecar at all: the old one's sha no longer matches the mesh, and the
+                        // next capture rebuilds from scratch rather than trusting it.
+                        var indexPath = Path.Combine(plan.Dir, MapMeshIndex.FileNameFor(plan.Key));
+
+                        try
+                        {
+                            if (plan.IndexStaged) Commit(indexPath);
+                            else DeleteOrWarn(indexPath);
+                        }
+                        catch (Exception indexEx)
+                        {
+                            Plugin.LogSource?.LogWarning(
+                                $"QuestTree: {plan.Key}'s mesh sidecar could not be put in place ({indexEx.GetType().Name}: " +
+                                $"{indexEx.Message}) - the next capture rebuilds the 3D mesh from scratch.");
+                            Forget(plan, MapMeshIndex.FileNameFor(plan.Key));
+                            DeleteOrWarn(indexPath);
+                        }
+
                         Plugin.LogSource?.LogInfo(
                             $"QuestTree: mesh for {plan.Key} written - {plan.MeshNote}.");
+
+                        // WP2 (2.12): the one-shot rebuild is spent once a mesh is in place
+                        if (ModSettings.MeshRebuildNext != null && ModSettings.MeshRebuildNext.Value)
+                            ModSettings.MeshRebuildNext.Value = false;
 
                         // Stage W: the mesh's atlas pages, each in its own try; the first that will not go in
                         // place ends the list, so the meta names pages 0..n-1 and nothing past a hole.
@@ -7894,6 +8491,9 @@ namespace QuestTree.QuestGraph
                     var name = Path.GetFileName(file);
                     if (keep.Contains(name)) continue;
 
+                    // WP2: MeshVerifyLastStop's pages are a debug comparison's, never named by a meta
+                    if (name.IndexOf("-verify-atlas-", StringComparison.OrdinalIgnoreCase) >= 0) continue;
+
                     File.Delete(file);
                     Plugin.LogSource?.LogDebug($"QuestTree: removed {name}, which this capture of {plan.Key} has no floor for.");
                 }
@@ -7906,6 +8506,14 @@ namespace QuestTree.QuestGraph
                     File.Delete(file);
                     Plugin.LogSource?.LogDebug(
                         $"QuestTree: removed {name}, a 3D mesh this capture of {plan.Key} no longer names.");
+                }
+
+                // WP2: a sidecar with no mesh beside it describes nothing
+                var index = Path.Combine(plan.Dir, MapMeshIndex.FileNameFor(plan.Key));
+                if (!keep.Any(MapMeshFile.IsMeshFileName) && File.Exists(index))
+                {
+                    File.Delete(index);
+                    Plugin.LogSource?.LogDebug($"QuestTree: removed {Path.GetFileName(index)}, the sidecar of a mesh {plan.Key} no longer names.");
                 }
             }
             catch (Exception ex)
@@ -8568,8 +9176,25 @@ namespace QuestTree.QuestGraph
             /// printed when the file is really in place.</summary>
             public string MeshNote;
 
-            /// <summary>Stage W: the atlas pages this capture's mesh build staged, in page order.</summary>
+            /// <summary>Stage W: the atlas pages this capture's mesh build staged, in page order. WP2: onto a stored mesh
+            /// the whole list the meta names - the pages this capture rewrote or added (staged) and the stored ones it
+            /// carries (already in place).</summary>
             public List<CaptureAtlas> Atlas = new List<CaptureAtlas>();
+
+            /// <summary>WP2: the stored mesh and sidecar this capture's build adds to (StartMeshBase), or null - with the
+            /// reason in <see cref="MeshBaseRefused"/> - for the from-scratch path.</summary>
+            public MeshBaseLoad MeshBase;
+
+            public string MeshBaseRefused;
+
+            /// <summary>WP2: Application.version + "|" + Application.unityVersion - the sidecar's game string.</summary>
+            public string Game;
+
+            /// <summary>WP2: the build changed nothing, so the stored mesh, sidecar and pages are carried (2.13).</summary>
+            public bool MeshCarriedUnchanged;
+
+            /// <summary>WP2: a sidecar was staged beside the staged mesh.</summary>
+            public bool IndexStaged;
 
             /// <summary>Set on a SIDE VIEW's own plan only: which side it is and how it is framed, which is
             /// what sends PositionCamera down the side branch. Null on the capture's plan.</summary>
@@ -9016,10 +9641,12 @@ namespace QuestTree.QuestGraph
         /// it takes its pictures exactly as any other capture does, but it builds the 3D mesh only for
         /// a map that has none yet - see <see cref="Plan.WantsMesh"/>. False, the default, for a
         /// campaign stop, which is a place somebody chose.</param>
-        /// <param name="buildMesh">False skips the 3D mesh for this capture; the campaign passes true at every stop,
-        /// so the 3D model is rebuilt at every stop - whole, from what that stop has loaded, each build replacing
-        /// the last (review F46). The pictures and side views are taken either way.</param>
-        public static bool TryStartCapture(bool automatic = false, bool buildMesh = true)
+        /// <param name="buildMesh">False skips the 3D mesh for this capture; the campaign passes true at every stop, and
+        /// each stop ADDS what it has loaded to the stored mesh (WP2, MapMeshBuilder.Request.Base) - the map's mesh is the
+        /// union of every stop, not the last one's. The pictures and side views are taken either way.</param>
+        /// <param name="verifyMesh">WP2: the campaign's last stop - with MeshVerifyLastStop on, the mesh is built a second
+        /// time from scratch into &lt;key&gt;-mesh.verify.bin for tools/compare-mesh.py.</param>
+        public static bool TryStartCapture(bool automatic = false, bool buildMesh = true, bool verifyMesh = false)
         {
             try
             {
@@ -9033,6 +9660,7 @@ namespace QuestTree.QuestGraph
                 runner._running = true;
                 runner._automatic = automatic;
                 runner._skipMesh = !buildMesh;
+                runner._verifyMesh = verifyMesh && buildMesh;
                 runner.StartCoroutine(runner.Run());
 
                 // The flag, not a bare true: StartCoroutine runs the coroutine's body up to its first

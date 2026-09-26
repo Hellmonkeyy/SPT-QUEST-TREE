@@ -237,6 +237,20 @@ namespace QuestTree
         /// session. Off is for the player who would rather not offer at all.</summary>
         public static ConfigEntry<bool> UploadCaptures { get; private set; }
 
+        /// <summary>WP2: whether each capture ADDS the buildings it newly sees to the map's stored 3D mesh (and re-reads
+        /// only what is new or degraded), or rebuilds the mesh from scratch as before - the rollback switch. On by default.
+        /// F12 and the cfg only, like the other 3D-map switches below.</summary>
+        public static ConfigEntry<bool> MeshAccumulate { get; private set; }
+
+        /// <summary>WP2: a one-shot - the next capture rebuilds the 3D mesh from scratch whatever is stored; set back to
+        /// off once a capture has written its mesh. The remedy for something removed from a map within one game version,
+        /// which accumulation keeps.</summary>
+        public static ConfigEntry<bool> MeshRebuildNext { get; private set; }
+
+        /// <summary>WP2 (debug): after a campaign's last stop, also build the mesh from scratch into
+        /// &lt;key&gt;-mesh.verify.bin for tools/compare-mesh.py. Costs one extra full mesh phase.</summary>
+        public static ConfigEntry<bool> MeshVerifyLastStop { get; private set; }
+
         /// <summary>THROWAWAY. The debug key of the 3D map experiments - see QuestGraph/MeshProbe.cs,
         /// which measures in one raid and one menu visit whether a scene mesh can be read back off the
         /// GPU, whether colliders stream out with the player, which layer has no renderer on it, and
@@ -917,6 +931,26 @@ namespace QuestTree
                 "layers and puts a small test view on screen (press again to close it). It writes " +
                 "BepInEx/plugins/QuestTree/captures/<map>.meshprobe.txt and captures/menu.meshprobe.txt and " +
                 "will be removed again; nothing in the mod depends on it.");
+
+            // WP2: the 3D mesh's accumulation - out of Entries, so the in-panel Settings tab shows no row for them; F12 and
+            // the cfg file only.
+            MeshAccumulate = config.Bind(
+                "Advanced", "3D map: add to the stored mesh", true,
+                "On, each capture adds the buildings it newly sees to the map's stored 3D mesh and re-reads only what is new or " +
+                "degraded - so a campaign's mesh is every stop's buildings, not the last stop's alone. Off, every capture " +
+                "rebuilds the mesh from scratch as before (the last one wins).");
+
+            MeshRebuildNext = config.Bind(
+                "Advanced", "3D map: rebuild from scratch on the next capture", false,
+                "Turn on to have the NEXT capture rebuild the map's 3D mesh from scratch, whatever is stored - for a map where " +
+                "something has since been removed, which an added-to mesh would keep. It turns itself off again once that " +
+                "capture has written its mesh.");
+
+            MeshVerifyLastStop = config.Bind(
+                "Advanced", "3D map: verify the last campaign stop (debug)", false,
+                "Debug only. After a campaign's last stop, also build the mesh from scratch into <key>-mesh.verify.bin (with " +
+                "its sidecar and <key>-verify-atlas-<n>.png pages) for tools/compare-mesh.py to compare with the accumulated " +
+                "mesh. This costs one extra full mesh phase at that stop.");
 
             Entries.AddRange(new ConfigEntryBase[]
             {

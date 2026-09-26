@@ -624,13 +624,15 @@ namespace QuestTree.QuestGraph
                     stopped = WhyStop();
                     if (stopped != null) break;
 
-                    // The 3D model is rebuilt at EVERY stop - the user's decision (2026-09-24: "keep the mesh per stop,
-                    // sides at every stop"), kept on review F46: each build is whole, from what that stop has loaded, and
-                    // replaces the last, so the file on disk is the latest stop's. The side views take their y range from
-                    // the stored one and only widen it (review F13), so the rebuilds do not refuse their merge, and the
-                    // stop's wait is the capture's own worst case (MapCapture.WorstCaseSeconds, review F45). buildMesh
-                    // stays on TryStartCapture for a caller that wants otherwise.
-                    if (!MapCapture.TryStartCapture(buildMesh: true))
+                    // The 3D mesh at every stop, and cheap after the first: each stop ADDS the buildings the streamer has
+                    // loaded there to the stored mesh (MapMeshBuilder.Request.Base, WP2) and re-reads only what is new or
+                    // degraded - so the campaign's mesh is the union of every stop, not the last stop's alone (review
+                    // F46). The side views take their y range from the stored one and only widen it (review F13), and the
+                    // stop's wait is the capture's own worst case (MapCapture.WorstCaseSeconds, review F45). The last stop
+                    // may also build the mesh from scratch for comparison (MeshVerifyLastStop), and waits for that too.
+                    var verify = i == stops.Count - 1 && (ModSettings.MeshVerifyLastStop?.Value ?? false);
+
+                    if (!MapCapture.TryStartCapture(buildMesh: true, verifyMesh: verify))
                     {
                         skipped++;
                         failures++;
@@ -660,7 +662,7 @@ namespace QuestTree.QuestGraph
                     // MaxCaptureWaitSeconds. The timeout is recorded rather than acted on here: the
                     // line below re-asks WhyStop first, so that a player who died during the capture is
                     // reported as having died rather than as a slow capture.
-                    var waitUntil = Time.time + MaxCaptureWaitSeconds;
+                    var waitUntil = Time.time + MaxCaptureWaitSeconds + (verify ? (float)MapCapture.VerifyExtraSeconds : 0f);
                     var timedOut = false;
 
                     while (MapCapture.IsCapturing)
