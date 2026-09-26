@@ -1232,6 +1232,12 @@ namespace QuestTree.QuestGraph
             internal bool AtlasApplied;
             internal double AtlasSeconds;
             internal int TransparentMaterials;
+
+            /// <summary>WP8 (D4 commit 1): every material the atlas leaves out - by render queue (2450 and up) or for
+            /// having no main texture (flat) - with what its shader exposes and how much geometry it draws, for the
+            /// materials line (ReportAtlas).</summary>
+            internal readonly Dictionary<Material, MaterialDiag> MaterialDiags = new Dictionary<Material, MaterialDiag>();
+
             internal int UvElsewhere;
             internal int FlatUses;
             internal int TilesUnplaced;
@@ -3519,12 +3525,24 @@ namespace QuestTree.QuestGraph
 
             source.SlotMaterial = new int[count];
             source.SlotST = new float[count * 4];
+            HashSet<MaterialDiag> counted = null;
 
             for (var j = 0; j < count; j++)
             {
                 var material = materials == null || materials.Length == 0 ? null : materials[Math.Min(j, materials.Length - 1)];
                 var id = MaterialId(job, material);
                 source.SlotMaterial[j] = id;
+
+                // WP8 (D4 commit 1): the triangles a left-out material draws, and the buildings it draws them in.
+                if (material != null && job.MaterialDiags.TryGetValue(material, out var diag))
+                {
+                    var submesh = candidate.SubFirst + j;
+                    if (candidate.Mesh != null && submesh < candidate.Mesh.subMeshCount &&
+                        candidate.Mesh.GetTopology(submesh) == MeshTopology.Triangles)
+                        diag.Triangles += candidate.Mesh.GetIndexCount(submesh) / 3;
+
+                    if ((counted ??= new HashSet<MaterialDiag>()).Add(diag)) diag.Buildings++;
+                }
 
                 var info = id >= 0 ? job.Materials[id] : null;
                 source.SlotST[j * 4] = info?.ScaleU ?? 1f;
@@ -4395,6 +4413,67 @@ namespace QuestTree.QuestGraph
             internal byte AvgB = 255;
         }
 
+        /// <summary>WP8 (D4 commit 1): what the atlas left out, one material at a time - its shader, render queue,
+        /// whether it is alpha-tested and at what cutoff, every texture property its shader exposes (a star marks
+        /// one that holds a texture), and the buildings and source triangles read with it. Diagnostics only: the
+        /// materials line settles whether the queue filter drops the common wall and roof materials.</summary>
+        private sealed class MaterialDiag
+        {
+            internal string Shader;
+            internal int Queue;
+            internal bool AlphaTest;
+            internal float Cutoff = float.NaN;
+            internal string Properties;
+            internal bool ByQueue;
+            internal int Buildings;
+            internal long Triangles;
+        }
+
+        /// <summary>Entries the materials line lists, most triangles first.</summary>
+        private const int MaterialDiagEntries = 20;
+
+        /// <summary>WP8 (D4 commit 1): records a material the atlas leaves out. Never throws.</summary>
+        /// <param name="job">The build.</param>
+        /// <param name="material">The material.</param>
+        /// <param name="byQueue">Left out by its render queue (true) or for having no main texture (false).</param>
+        private static void Diagnose(Job job, Material material, bool byQueue)
+        {
+            if (material == null || job.MaterialDiags.ContainsKey(material)) return;
+
+            var diag = new MaterialDiag { ByQueue = byQueue };
+
+            try
+            {
+                diag.Shader = material.shader != null ? material.shader.name : "?";
+                diag.Queue = material.renderQueue;
+                diag.AlphaTest = material.IsKeywordEnabled("_ALPHATEST_ON");
+                if (material.HasProperty("_Cutoff")) diag.Cutoff = material.GetFloat("_Cutoff");
+
+                var names = material.GetTexturePropertyNames();
+                var listed = new List<string>();
+
+                if (names != null)
+                    foreach (var name in names)
+                    {
+                        if (listed.Count >= 12)
+                        {
+                            listed.Add("...");
+                            break;
+                        }
+
+                        listed.Add(material.GetTexture(name) != null ? name + "*" : name);
+                    }
+
+                diag.Properties = listed.Count > 0 ? string.Join(" ", listed.ToArray()) : "none";
+            }
+            catch (Exception ex)
+            {
+                diag.Properties = $"unreadable ({ex.GetType().Name})";
+            }
+
+            job.MaterialDiags[material] = diag;
+        }
+
         /// <summary>One building's use of one material: its UV bounds and the integer shift and flat verdict
         /// the atlas decided for it.</summary>
         private sealed class AtlasUse
@@ -4430,6 +4509,7 @@ namespace QuestTree.QuestGraph
                 if (material.renderQueue >= 2450)
                 {
                     job.TransparentMaterials++;
+                    Diagnose(job, material, true);
                 }
                 else
                 {
@@ -4463,6 +4543,8 @@ namespace QuestTree.QuestGraph
 
                     id = job.Materials.Count;
                     job.Materials.Add(info);
+
+                    if (info.Texture == null) Diagnose(job, material, false);
                 }
             }
             catch (Exception ex)
@@ -5636,6 +5718,54 @@ namespace QuestTree.QuestGraph
                 $"{N(job.UntexturedBuildings)} with UVs but no tile; {N(job.SeamsRelaxed)} decimated with their seams " +
                 $"relaxed, {N(job.ClusteredTextureless)} clustered without a texture" +
                 (job.AtlasAbandoned ? " - ABANDONED, no page kept." : "."));
+
+            ReportMaterialDiags(job);
+        }
+
+        /// <summary>WP8 (D4 commit 1): the materials the atlas left out, by render queue and flat, the
+        /// <see cref="MaterialDiagEntries"/> drawing the most triangles listed with what their shaders expose -
+        /// the evidence for (or against) the AlphaTest-queue walls and roofs before anything depends on it.</summary>
+        /// <param name="job">The build.</param>
+        private static void ReportMaterialDiags(Job job)
+        {
+            if (job.MaterialDiags.Count == 0) return;
+
+            var f1 = CultureInfo.InvariantCulture;
+            var all = new List<MaterialDiag>(job.MaterialDiags.Values);
+            all.Sort((a, b) => b.Triangles.CompareTo(a.Triangles));
+
+            int byQueue = 0, flat = 0;
+            long queueTriangles = 0, flatTriangles = 0;
+
+            foreach (var d in all)
+            {
+                if (d.ByQueue)
+                {
+                    byQueue++;
+                    queueTriangles += d.Triangles;
+                }
+                else
+                {
+                    flat++;
+                    flatTriangles += d.Triangles;
+                }
+            }
+
+            var entries = new List<string>();
+            for (var i = 0; i < all.Count && i < MaterialDiagEntries; i++)
+            {
+                var d = all[i];
+                entries.Add($"{(d.ByQueue ? "queue" : "flat")}: {d.Shader} | {d.Queue} | " +
+                            $"{(d.AlphaTest ? "alphatest" : "-")} | " +
+                            $"{(float.IsNaN(d.Cutoff) ? "-" : d.Cutoff.ToString("0.00", f1))} | {d.Properties} | " +
+                            $"{N(d.Buildings)} | {N(d.Triangles)}");
+            }
+
+            Plugin.LogSource?.LogInfo(
+                $"QuestTree: materials left out of the atlas on {job.Request.Map} - {N(byQueue)} by render queue >= 2450 " +
+                $"({N(queueTriangles)} source triangles), {N(flat)} flat without a main texture ({N(flatTriangles)} source " +
+                $"triangles); the {entries.Count} drawing the most (kind: shader | renderQueue | _ALPHATEST_ON | _Cutoff | " +
+                $"texture properties, * = set | buildings | triangles): {string.Join(" ;; ", entries.ToArray())}");
         }
 
         /// <summary>Binds the file, fills the result's counts and says what the build cost in
