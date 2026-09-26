@@ -114,8 +114,10 @@ namespace QuestTree.QuestGraph
         /// nothing.</summary>
         private const int MaxStartFailures = 2;
 
-        /// <summary>Seconds a single stop will wait for its capture to finish before the campaign
-        /// stops, having said so, and puts the player back.
+        /// <summary>Seconds a single stop waits for its capture: the capture's own worst case with every cap in
+        /// force (MapCapture.WorstCaseSeconds, review F45), so this only fires for a capture that has stopped
+        /// finishing. Past it the campaign stops, having said so, and puts the player back once the capture
+        /// has let go.
         ///
         /// Deliberately far above anything a capture should take, because it is not a performance
         /// budget: it is the one thing standing between a capture that has stopped finishing and a
@@ -124,29 +126,31 @@ namespace QuestTree.QuestGraph
         /// stopped with the flag still set - a coroutine Unity abandoned while the object lived, a step
         /// that hung on a file.
         ///
-        /// Three minutes rather than the one first written, because the capture is allowed to be slow:
-        /// a picture of a multi-floor map at the sharpest resolution setting is tens of tile renders and
-        /// a per-floor develop and encode of tens of millions of pixels, each spread over frames on
-        /// purpose. A ceiling that a legitimate capture could reach would abort campaigns instead of
-        /// rescuing them, which is the worse failure of the two.</summary>
-        private const float MaxCaptureWaitSeconds = 180f;
-
-        /// <summary>Seconds past the campaign's own wait that a restore holds off for a capture still running
-        /// (review F45) - the mesh phase's watchdog (200 s + 15 s) is the capture's own backstop.</summary>
-        private const float RestoreBackstopSeconds = 60f;
+        /// The capture is allowed to be slow: a picture of a multi-floor map at the sharpest resolution
+        /// setting is tens of tile renders and a per-floor develop and encode of tens of millions of pixels,
+        /// each spread over frames on purpose. A ceiling that a legitimate capture could reach would abort
+        /// campaigns instead of rescuing them, which is the worse failure of the two.</summary>
+        private static readonly float MaxCaptureWaitSeconds = (float)MapCapture.WorstCaseSeconds;
 
         /// <summary>The last stop's capture was still running when the campaign stopped waiting.</summary>
         private bool _stillCapturing;
 
-        /// <summary>Restores the player once the capture has cleared its flag, or after the backstop.</summary>
+        /// <summary>Restores the player once the capture has cleared its flag - with no time backstop (review F45):
+        /// the capture is bounded by its own caps and watchdog, and a restore while it runs would photograph the
+        /// wrong place. The campaign stays "running" until then, so neither the key nor the automatic tick can start
+        /// something that the restore would then teleport out from under.</summary>
         /// <param name="start">Where the campaign started.</param>
         private IEnumerator RestoreWhenDone(Vector3 start)
         {
-            var until = Time.time + RestoreBackstopSeconds;
-
-            while (MapCapture.IsCapturing && Time.time < until) yield return null;
-
-            Restore(start);
+            try
+            {
+                while (MapCapture.IsCapturing) yield return null;
+            }
+            finally
+            {
+                Restore(start);
+                _running = false;
+            }
         }
 
         /// <summary>Metres the player must have moved since the last automatic capture STARTED before
@@ -689,12 +693,20 @@ namespace QuestTree.QuestGraph
             finally
             {
                 // A capture still running when the campaign gave up is NOT run out from under (review F45): the
-                // player stays at the stop until it clears, bounded by a backstop, before being moved back. Done
+                // player stays at the stop until it clears, with no time backstop, before being moved back. Done
                 // in a coroutine of its own because a finally cannot wait.
-                if (_stillCapturing && MapCapture.IsCapturing) StartCoroutine(RestoreWhenDone(start));
-                else Restore(start);
-
-                _running = false;
+                if (_stillCapturing && MapCapture.IsCapturing)
+                {
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: the capture is still running past its own worst case of {Whole(MaxCaptureWaitSeconds)} s - " +
+                        "you are put back as soon as it finishes.");
+                    StartCoroutine(RestoreWhenDone(start));   // clears _running itself
+                }
+                else
+                {
+                    Restore(start);
+                    _running = false;
+                }
 
                 // A campaign has just photographed the map from everywhere, including the cell it
                 // started in, so automatic capture treats the start position as its own last capture:

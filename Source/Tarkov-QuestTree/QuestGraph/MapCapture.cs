@@ -893,9 +893,9 @@ namespace QuestTree.QuestGraph
         private IEnumerator _meshBuild;
 
         /// <summary>Seconds the floor phase may take before the floors not yet started are skipped (review F45),
-        /// and the overrun a floor that started in time may take before it too is abandoned. With the mesh
-        /// phase's own caps (140 s budget less floors, sides and relief, +10 hard, +8 drain, +40 atlas) this keeps
-        /// a capture under the campaign's 180 s wait.</summary>
+        /// and the overrun a floor that started in time may take before it too is abandoned. With the side
+        /// phase's cap and the mesh watchdog this bounds a capture at <see cref="WorstCaseSeconds"/>, which is
+        /// what the campaign waits for.</summary>
         internal const double FloorPhaseSeconds = 70d;
 
         private const double FloorPhaseOverrun = 1.25d;
@@ -908,6 +908,29 @@ namespace QuestTree.QuestGraph
         private const double MeshWatchdogSeconds = 200d;
 
         private const double MeshWatchdogGraceSeconds = 15d;
+
+        /// <summary>Seconds the side phase may take before the sides not yet started are skipped, and the overrun
+        /// a side that started in time may take (review F45) - the floors' own numbers, because the sides render
+        /// the same tiles and on a one-floor map take about the floors' time (SideSeconds). A skipped side keeps the
+        /// picture an earlier capture took of it (CommitSides carries it).</summary>
+        internal const double SidePhaseSeconds = FloorPhaseSeconds;
+
+        private const double SidePhaseOverrun = FloorPhaseOverrun;
+
+        /// <summary>Seconds for the steps no cap covers: the last floor's and the last side's development and
+        /// encode after their tiles, the collect before the mesh, the mesh file's deflate on a worker, and the meta.
+        /// Each is measured in seconds, not tens of them.</summary>
+        private const double FinishAllowanceSeconds = 60d;
+
+        /// <summary>The longest a capture can run with every cap in force (review F45): floors, mesh watchdog and
+        /// grace, the atlas encode wait, sides, and the uncapped finishing steps. 510 s with today's numbers. The
+        /// campaign waits this long for a stop, so a slow capture is never taken for a stuck one.</summary>
+        internal const double WorstCaseSeconds =
+            FloorPhaseSeconds * FloorPhaseOverrun +                 //  87.5
+            MeshWatchdogSeconds + MeshWatchdogGraceSeconds +        // 215
+            AtlasEncodeWaitSeconds +                                //  60
+            SidePhaseSeconds * SidePhaseOverrun +                   //  87.5
+            FinishAllowanceSeconds;                                 //  60
 
         private Camera _camera;
 
@@ -1114,7 +1137,7 @@ namespace QuestTree.QuestGraph
                 foreach (var floor in plan.Floors)
                 {
                     // The floor phase's budget (review F45): past it the floors not yet started are skipped - an
-                    // earlier capture's picture of them is carried - so a campaign stop cannot outrun its 180 s.
+                    // earlier capture's picture of them is carried - so a campaign stop stays inside WorstCaseSeconds.
                     if (floorsClock.Elapsed.TotalSeconds > FloorPhaseSeconds)
                     {
                         floor.Failed = true;
@@ -5849,9 +5872,18 @@ namespace QuestTree.QuestGraph
             var sizes = new List<string>();
             var scales = new HashSet<float>();
             var rendered = 0;
+            var cut = 0;
 
             for (var i = 0; i < MapSideView.Directions.Length; i++)
             {
+                // The side phase's budget (review F45), as the floors have: past it the sides not yet started are
+                // skipped and carried from an earlier capture.
+                if (clock.Elapsed.TotalSeconds > SidePhaseSeconds)
+                {
+                    cut++;
+                    continue;
+                }
+
                 var dir = MapSideView.Directions[i];
                 var view = BeginSide(plan, dir, yMin, yMax, exposure);
 
@@ -5867,6 +5899,14 @@ namespace QuestTree.QuestGraph
 
                 for (var tile = 0; tile < view.Plan.TileCount; tile++)
                 {
+                    // A side still rendering well past the budget is abandoned, as a floor is (review F45).
+                    if (clock.Elapsed.TotalSeconds > SidePhaseSeconds * SidePhaseOverrun)
+                    {
+                        view.Floor.Failed = true;
+                        cut++;
+                        break;
+                    }
+
                     RenderTile(view.Plan, view.Floor, tile);
                     if (view.Floor.Failed) break;
 
@@ -5940,6 +5980,11 @@ namespace QuestTree.QuestGraph
                 $"QuestTree: side views for {plan.Key} - {rendered} of {MapSideView.Directions.Length} rendered " +
                 $"{scale} ({string.Join(", ", sizes.ToArray())}), " +
                 $"{(clock.Elapsed.TotalSeconds).ToString("0.0", CultureInfo.InvariantCulture)} s this stop.");
+
+            if (cut > 0)
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: {plan.Key} - {cut} side view(s) were cut at the {SidePhaseSeconds:0} s side budget; " +
+                    "the pictures an earlier capture took of them are kept.");
         }
 
         /// <summary>The side views' expected wall time, whole seconds rounded up: the floors' measured

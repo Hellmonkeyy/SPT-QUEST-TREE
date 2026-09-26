@@ -234,9 +234,10 @@ namespace QuestTree.QuestGraph
         /// <summary>Milliseconds of main-thread work the building loop does before it yields a frame.</summary>
         private const double FrameBudgetMs = 8d;
 
-        /// <summary>Seconds of the campaign's 180 s stop the capture plans for: floors, relief, buildings and
-        /// side views together (second review, H1). The building phase's soft cap is what the floors' and
-        /// relief's measured seconds and the sides' estimate leave of it, never under
+        /// <summary>Seconds the capture plans for: floors, relief, buildings and side views together (second
+        /// review, H1) - a planning budget, not the campaign's wait (MapCapture.WorstCaseSeconds). The building
+        /// phase's soft cap is what the floors' and relief's measured seconds and the sides' estimate leave of
+        /// it, never under
         /// <see cref="MinBuildingSeconds"/>.</summary>
         internal const double CaptureSecondsBudget = 140d;
 
