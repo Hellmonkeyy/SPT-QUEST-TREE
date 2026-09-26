@@ -885,7 +885,7 @@ def check_sides(meta, folder, key, extent, errors, warnings):
         errors.append(f"{key}: sides is not a list")
         return "sides UNREADABLE"
 
-    named, seen, sizes = set(), set(), []
+    named, seen, sizes, ranges = set(), set(), [], set()
 
     for index, side in enumerate(sides):
         where = f"{key}: sides[{index}]"
@@ -996,6 +996,7 @@ def check_sides(meta, folder, key, extent, errors, warnings):
         if None in (y_min, y_max, origin_r, origin_u) or not y_max > y_min:
             errors.append(f"{where}: yMin/yMax/originR/originU are missing, not numbers, or yMax <= yMin")
             continue
+        ranges.add((y_min, y_max))
 
         if extent is None or not basis_ok:
             continue
@@ -1023,6 +1024,12 @@ def check_sides(meta, folder, key, extent, errors, warnings):
         if name.lower() not in named:
             warnings.append(f"{key}: {name} is on disk but the meta does not list it - it is what an older "
                             f"capture leaves behind, and nothing reads it")
+
+    # One box for all four (review F13): the capture frames every side it renders on one y range, which only
+    # grows. A legacy mix is legal until the next capture that renders all four, which reframes them.
+    if len(ranges) > 1:
+        n = len(ranges)
+        warnings.append(f"{key}: the side views are framed on {n} different y ranges - the next capture reframes them (review F13)")
 
     return f"sides {', '.join(sizes) if sizes else 'none valid'}"
 

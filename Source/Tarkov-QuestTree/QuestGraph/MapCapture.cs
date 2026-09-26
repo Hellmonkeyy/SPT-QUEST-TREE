@@ -5997,8 +5997,10 @@ namespace QuestTree.QuestGraph
         /// over the same buildings' roofs, and the walls would not match their tops. When the top band
         /// failed this time its stored exposure is used; when there is neither, no side is taken.
         ///
-        /// The y range is the mesh's (the contract's yMin/yMax), and the bands' own range widened by
-        /// <see cref="SideBandsBelow"/> and <see cref="SideBandsAbove"/> when no mesh was built.</summary>
+        /// The y range is the mesh's (the contract's yMin/yMax) united with the earlier sides' range, so it
+        /// only grows (review F13); with no mesh this capture it is the earlier sides' range exactly, and the
+        /// bands' own range widened by <see cref="SideBandsBelow"/> and <see cref="SideBandsAbove"/> only
+        /// when there is neither.</summary>
         /// <param name="plan">The capture's plan.</param>
         /// <param name="mesh">The mesh built this capture, or null.</param>
         /// <param name="exposure">The exposure to develop every side with.</param>
@@ -6034,6 +6036,16 @@ namespace QuestTree.QuestGraph
                     return Stabilise(plan, ref yMin, ref yMax, ref yFrom);
                 }
 
+                // No mesh this capture (an AutoCapture tick, a campaign stop that builds none): the earlier sides' own
+                // range, exactly - it was framed on a mesh, and anything else would reframe and refuse their merge.
+                if (SideRangeOnlyGrows && PreviousSideRange(plan, out var keptMin, out var keptMax))
+                {
+                    yMin = keptMin;
+                    yMax = keptMax;
+                    yFrom = "the earlier sides (no mesh this capture)";
+                    return true;
+                }
+
                 yMin = float.PositiveInfinity;
                 yMax = float.NegativeInfinity;
 
@@ -6066,7 +6078,9 @@ namespace QuestTree.QuestGraph
         /// any change of framing (originU to 1e-4, and u.y is 0.707, so a centimetre of yMin refused it), and
         /// the range came from this build's measured mesh. Snapped out to whole <see cref="SideYSnapMetres"/>;
         /// and when an earlier capture's sides were framed on a range that holds this one, that range is kept
-        /// exactly, so the new sides merge into the old instead of replacing them.
+        /// exactly, so the new sides merge into the old instead of replacing them. When it does not hold this
+        /// one, the union of the two is used, never the new range alone, so the range only grows and settles
+        /// after one replacement (review F13).
         /// </summary>
         /// <param name="plan">The capture's plan.</param>
         /// <param name="yMin">The box's low y, snapped or replaced.</param>
@@ -6077,21 +6091,69 @@ namespace QuestTree.QuestGraph
             yMin = (float)(Math.Floor(yMin / SideYSnapMetres) * SideYSnapMetres);
             yMax = (float)(Math.Ceiling(yMax / SideYSnapMetres) * SideYSnapMetres);
 
-            var previous = plan.Previous?.Sides;
-
-            if (previous != null && previous.Count > 0)
+            if (SideRangeOnlyGrows && PreviousSideRange(plan, out var oldMin, out var oldMax))
             {
-                var old = previous[0];
-
-                if (old != null && IsFinite(old.YMin) && IsFinite(old.YMax) && old.YMin <= yMin && old.YMax >= yMax)
+                if (oldMin <= yMin && oldMax >= yMax)
                 {
-                    yMin = old.YMin;
-                    yMax = old.YMax;
+                    yMin = oldMin;
+                    yMax = oldMax;
                     yFrom += ", kept at the earlier sides' range so they merge";
+                }
+                else
+                {
+                    // The union, never the new range alone (review F13): the range only grows, so it settles
+                    // after one replacement instead of two overlapping ranges replacing each other stop after stop.
+                    yFrom += $", widened from the earlier sides' {F(oldMin)}..{F(oldMax)} m - they are replaced once";
+                    yMin = Math.Min(yMin, oldMin);
+                    yMax = Math.Max(yMax, oldMax);
+                }
+            }
+            else if (!SideRangeOnlyGrows)
+            {
+                var previous = plan.Previous?.Sides;
+
+                if (previous != null && previous.Count > 0)
+                {
+                    var old = previous[0];
+
+                    if (old != null && IsFinite(old.YMin) && IsFinite(old.YMax) && old.YMin <= yMin && old.YMax >= yMax)
+                    {
+                        yMin = old.YMin;
+                        yMax = old.YMax;
+                        yFrom += ", kept at the earlier sides' range so they merge";
+                    }
                 }
             }
 
             return yMax > yMin;
+        }
+
+        /// <summary>Rollback switch for review F13's union rule: false frames the sides as f1aa04f did (the earlier
+        /// sides' range only when it holds the new one, the first entry's only; the bands' when no mesh). Static
+        /// readonly rather than const, like the file's other switches, so the path it turns off still compiles clean.</summary>
+        private static readonly bool SideRangeOnlyGrows = true;
+
+        /// <summary>The union of every earlier side's y range in the previous meta - all four directions, which
+        /// can have been framed by different captures - or false when there is none.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="yMin">The union's low y.</param>
+        /// <param name="yMax">The union's high y.</param>
+        private static bool PreviousSideRange(Plan plan, out float yMin, out float yMax)
+        {
+            yMin = float.PositiveInfinity;
+            yMax = float.NegativeInfinity;
+
+            var previous = plan.Previous?.Sides;
+            if (previous == null) return false;
+
+            foreach (var side in previous)
+            {
+                if (side == null || !IsFinite(side.YMin) || !IsFinite(side.YMax) || !(side.YMax > side.YMin)) continue;
+                if (side.YMin < yMin) yMin = side.YMin;
+                if (side.YMax > yMax) yMax = side.YMax;
+            }
+
+            return IsFinite(yMin) && IsFinite(yMax) && yMax > yMin;
         }
 
         /// <summary>
@@ -8524,7 +8586,8 @@ namespace QuestTree.QuestGraph
             /// <summary>The minimum of dot(up, corner) over the box's 8 corners.</summary>
             [JsonProperty("originU")] public double OriginU { get; set; }
 
-            /// <summary>The box's y range: the mesh's, or the bands' widened when no mesh was built.</summary>
+            /// <summary>The box's y range: the union of every mesh range the map's sides were framed on, snapped to
+            /// 10 m; the bands' widened only before any mesh.</summary>
             [JsonProperty("yMin")] public float YMin { get; set; }
             [JsonProperty("yMax")] public float YMax { get; set; }
 
