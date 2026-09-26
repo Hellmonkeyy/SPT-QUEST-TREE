@@ -987,9 +987,14 @@ namespace QuestTree.QuestGraph
         /// Each is measured in seconds, not tens of them.</summary>
         private const double FinishAllowanceSeconds = 60d;
 
+        /// <summary>Seconds a capture waits, before it commits, for an upload of the same map to finish reading a file on
+        /// a worker (WP3 Phase A, MapTransfer.IsReadingCapture). A read is one file - frames - so this bounds only a hung
+        /// disk, after which the commit goes ahead as it always did.</summary>
+        private const double CommitWaitSeconds = 10d;
+
         /// <summary>The longest a capture can run with every cap in force (review F45): floors, the stored mesh's load
-        /// (WP2), mesh watchdog and grace, the atlas encode wait, sides, and the uncapped finishing steps. 530 s with
-        /// today's numbers. The
+        /// (WP2), mesh watchdog and grace, the atlas encode wait, sides, the uncapped finishing steps, and the wait for an
+        /// upload's read before the commit (WP3). 540 s with today's numbers. The
         /// campaign waits this long for a stop, so a slow capture is never taken for a stuck one.</summary>
         internal const double WorstCaseSeconds =
             FloorPhaseSeconds * FloorPhaseOverrun +                 //  87.5
@@ -997,7 +1002,8 @@ namespace QuestTree.QuestGraph
             MeshWatchdogSeconds + MeshWatchdogGraceSeconds +        // 215
             AtlasEncodeWaitSeconds +                                //  60
             SidePhaseSeconds * SidePhaseOverrun +                   //  87.5
-            FinishAllowanceSeconds;                                 //  60
+            FinishAllowanceSeconds +                                //  60
+            CommitWaitSeconds;                                      //  10 (WP3: an upload's read before the commit)
 
         private Camera _camera;
 
@@ -1589,6 +1595,14 @@ namespace QuestTree.QuestGraph
                     plan.SideFloor = null;
                     RestoreTopCamera();
                 }
+
+                // WP3 Phase A, the commit handshake: never commit over a file an upload of this map is reading on a
+                // worker - Windows refuses the delete and the rename, and a Commit that throws leaves the capture with
+                // its pictures but no meta. A read is at most one file, so this is frames; the bound only matters for a
+                // hung disk, and then the commit goes ahead as it always did.
+                var commitWait = Stopwatch.StartNew();
+                while (!plan.Refused && MapTransfer.IsReadingCapture(plan.Key) && commitWait.Elapsed.TotalSeconds < CommitWaitSeconds)
+                    yield return null;
 
                 // Nothing is in place until this runs: it commits every staged picture and then
                 // writes the meta. A refused capture skips it, which is the whole of what makes the

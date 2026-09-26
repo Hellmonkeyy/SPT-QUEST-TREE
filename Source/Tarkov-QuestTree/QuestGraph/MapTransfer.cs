@@ -676,34 +676,30 @@ namespace QuestTree.QuestGraph
                 stamp0 = MapCapture.CommitStampOf(key);
                 _pendingUploads.Remove(key);
 
-                if (!ReadCapture(key, out var meta, out var floors)) yield break;
+                // WP3 Phase A: the meta, the sides and pages on disk, and the mesh's read and hash (up to 512 MiB) on a
+                // worker - see PrepareOffThread - polled a frame at a time. A capture that would commit this map in the
+                // meantime waits for it (MapCapture.Run, IsReadingCapture): Windows refuses to replace a file another
+                // handle is reading.
+                var prepTask = StartRead(key, () => PrepareOffThread(key));
+                while (prepTask != null && !prepTask.IsCompleted) yield return null;
 
-                // BEFORE the first post, and for every floor at once - see DescribeWire. The meta
-                // travels with every post and the host checks EVERY floor in it against the meta's
-                // own scale, so rewriting one floor at a time would make the first post describe no
-                // single projection and be refused outright.
-                if (!DescribeWire(key, meta, floors)) yield break;
+                var prep = prepTask == null || prepTask.IsFaulted || prepTask.IsCanceled ? null : prepTask.Result;
 
-                // The SIDES, read and described for the wire before the first post for the reason the
-                // floors are: every post carries the meta, and the host checks each side in it against
-                // its own scale. A side whose picture is not on this disk is taken out of the meta here,
-                // so the host is never told to wait for it.
-                var sides = ReadSides(key, meta);
+                // The worker's lines, here and in its order - the SyncResult discipline.
+                prep?.Lines.Replay();
 
-                DescribeSidesForWire(key, meta, sides);
+                if (prep == null || !prep.Ok)
+                {
+                    if (prep == null)
+                        Plugin.LogSource?.LogDebug($"QuestTree: the capture of {key} could not be read back for upload.");
+                    yield break;
+                }
 
-                // The MESH, read and checked BEFORE the first post. Before, because the meta travels
-                // with every floor and a host that sees a mesh block HOLDS THE WHOLE SET until the file
-                // arrives - so a block this machine cannot honour has to be out of the meta before the
-                // meta is sent, or the capture is lost to a wait that never ends. Null with the block
-                // already stripped when there is nothing to offer.
-                var mesh = PrepareMesh(key, meta);
-
-                // The ATLAS pages, read AFTER the mesh is settled and before the first post: a page drapes
-                // the mesh's buildings and nothing else, so with no mesh to offer the meta names no pages
-                // (a host told about a page waits for it), and a page not on this disk is taken out of the
-                // meta here for the sides' reason.
-                var pages = ReadAtlas(key, meta, mesh != null);
+                var meta = prep.Meta;
+                var floors = prep.Floors;
+                var sides = prep.Sides;
+                var mesh = prep.Mesh;
+                var pages = prep.Pages;
 
                 var posted = 0;
                 long bytes = 0;
@@ -728,16 +724,18 @@ namespace QuestTree.QuestGraph
 
                     // WP3: the supersede guard, at an item boundary - the previous post has completed, so nothing is
                     // abandoned in flight (Q8: the map is asked for again, owed if held, else queued).
-                    var overtaken = Overtaken(key, stamp0, ref pixelsSaid);
-                    if (overtaken != null)
-                    {
-                        Plugin.LogSource?.LogInfo(
-                            $"QuestTree: the upload of {key} stopped - {overtaken}; the newer capture goes up instead.");
-                        TryStartUpload(key);
-                        yield break;
-                    }
+                    if (StopIfOvertaken(key, stamp0, ref pixelsSaid)) yield break;
 
-                    if (!Encode(key, floor))
+                    // WP3 Phase A: the file read on a worker, polled a frame at a time; a commit of this map waits for it.
+                    var readFloor = StartRead(key, () => SafeReadAllBytes(floor.Path));
+                    while (readFloor != null && !readFloor.IsCompleted) yield return null;
+
+                    // Again: a commit that waited for the read may have run in the frame it finished.
+                    if (StopIfOvertaken(key, stamp0, ref pixelsSaid)) yield break;
+
+                    var bytesFloor = ReadOutcome(readFloor);
+
+                    if (!Encode(key, floor, bytesFloor.Bytes, bytesFloor.Error))
                     {
                         // Taken out of the meta the LATER floors carry, so the host is never told
                         // about a picture it is not going to be sent. The posts already made named
@@ -843,20 +841,22 @@ namespace QuestTree.QuestGraph
 
                         // WP3: the supersede guard, at an item boundary - the previous post has completed, so nothing is
                         // abandoned in flight (Q8: the map is asked for again, owed if held, else queued).
-                        var overtaken = Overtaken(key, stamp0, ref pixelsSaid);
-                        if (overtaken != null)
-                        {
-                            Plugin.LogSource?.LogInfo(
-                                $"QuestTree: the upload of {key} stopped - {overtaken}; the newer capture goes up instead.");
-                            TryStartUpload(key);
-                            yield break;
-                        }
+                        if (StopIfOvertaken(key, stamp0, ref pixelsSaid)) yield break;
+
+                        // WP3 Phase A: the file read on a worker, polled a frame at a time; a commit of this map waits for it.
+                        var readSide = StartRead(key, () => SafeReadAllBytes(side.Path));
+                        while (readSide != null && !readSide.IsCompleted) yield return null;
+
+                        // Again: a commit that waited for the read may have run in the frame it finished.
+                        if (StopIfOvertaken(key, stamp0, ref pixelsSaid)) yield break;
+
+                        var bytesSide = ReadOutcome(readSide);
 
                         // A side that cannot be encoded is still POSTED - empty. The host has already been
                         // told to expect it (every floor's meta named it), and an empty side post is how it
                         // is told to stop expecting it; leaving it unsent would hold the whole set until the
                         // host's next start a day later.
-                        var encoded = Encode(key, side);
+                        var encoded = Encode(key, side, bytesSide.Bytes, bytesSide.Error);
 
                         if (!encoded)
                         {
@@ -934,16 +934,18 @@ namespace QuestTree.QuestGraph
 
                         // WP3: the supersede guard, at an item boundary - the previous post has completed, so nothing is
                         // abandoned in flight (Q8: the map is asked for again, owed if held, else queued).
-                        var overtaken = Overtaken(key, stamp0, ref pixelsSaid);
-                        if (overtaken != null)
-                        {
-                            Plugin.LogSource?.LogInfo(
-                                $"QuestTree: the upload of {key} stopped - {overtaken}; the newer capture goes up instead.");
-                            TryStartUpload(key);
-                            yield break;
-                        }
+                        if (StopIfOvertaken(key, stamp0, ref pixelsSaid)) yield break;
 
-                        var encoded = Encode(key, page);
+                        // WP3 Phase A: the file read on a worker, polled a frame at a time; a commit of this map waits for it.
+                        var readPage = StartRead(key, () => SafeReadAllBytes(page.Path));
+                        while (readPage != null && !readPage.IsCompleted) yield return null;
+
+                        // Again: a commit that waited for the read may have run in the frame it finished.
+                        if (StopIfOvertaken(key, stamp0, ref pixelsSaid)) yield break;
+
+                        var bytesPage = ReadOutcome(readPage);
+
+                        var encoded = Encode(key, page, bytesPage.Bytes, bytesPage.Error);
 
                         if (!encoded)
                         {
@@ -1027,14 +1029,7 @@ namespace QuestTree.QuestGraph
                 {
                     // WP3: the supersede guard, at an item boundary - the previous post has completed, so nothing is
                     // abandoned in flight (Q8: the map is asked for again, owed if held, else queued).
-                    var overtakenAtMesh = Overtaken(key, stamp0, ref pixelsSaid);
-                    if (overtakenAtMesh != null)
-                    {
-                        Plugin.LogSource?.LogInfo(
-                            $"QuestTree: the upload of {key} stopped - {overtakenAtMesh}; the newer capture goes up instead.");
-                        TryStartUpload(key);
-                        yield break;
-                    }
+                    if (StopIfOvertaken(key, stamp0, ref pixelsSaid)) yield break;
 
                     // In PARTS when the mesh is past what one post can carry to a stock host - see
                     // MeshPartBytes. Each part is its own post under its own deadline; every part but the
@@ -1157,6 +1152,186 @@ namespace QuestTree.QuestGraph
             return null;
         }
 
+        /// <summary><see cref="Overtaken"/> with its consequence: the Info line and the map asked for again (Q8) -
+        /// true when the upload must end here.</summary>
+        private static bool StopIfOvertaken(string key, MapCapture.CommitStamp at, ref bool pixelsSaid)
+        {
+            var why = Overtaken(key, at, ref pixelsSaid);
+            if (why == null) return false;
+
+            Plugin.LogSource?.LogInfo($"QuestTree: the upload of {key} stopped - {why}; the newer capture goes up instead.");
+            TryStartUpload(key);
+            return true;
+        }
+
+        // ------------------------------------------------------------------ Phase A: the reads off the main thread
+
+        /// <summary>The upload's read of a capture now running on a worker, and whose map it is (WP3 Phase A). Read by
+        /// <see cref="IsReadingCapture"/> through the task itself, so a routine stopped from outside cannot leave it
+        /// stuck: a read still running when its routine died is still a handle on the file, and still counts.</summary>
+        private static Task _reading;
+
+        private static string _readingKey;
+
+        /// <summary>
+        /// Whether an upload is reading this map's capture files on a worker right now (WP3 Phase A, the commit
+        /// handshake). MapCapture waits for this to clear before its WriteMeta replaces them: on Windows a file another
+        /// handle is reading cannot be deleted or renamed, and a Commit that throws leaves the capture with "its
+        /// pictures but no meta". A read only ever STARTS on the main thread and WriteMeta runs in one main-thread frame,
+        /// so a read never starts during a commit. Main thread only.
+        /// </summary>
+        /// <param name="key">The map's internal id.</param>
+        internal static bool IsReadingCapture(string key) =>
+            _reading != null && !_reading.IsCompleted &&
+            string.Equals(_readingKey, key, StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>Starts one read of a map's capture on a worker and records it for <see cref="IsReadingCapture"/>;
+        /// null when the pool would not take it. Main thread only.</summary>
+        private static Task<T> StartRead<T>(string key, Func<T> read)
+        {
+            try
+            {
+                var task = Task.Run(read);
+                _reading = task;
+                _readingKey = key;
+                return task;
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug($"QuestTree: the upload of {key} could not start a read ({ex.Message}).");
+                return null;
+            }
+        }
+
+        /// <summary>One file's bytes, or the reason there are none - read on a worker, so nothing here throws.</summary>
+        private sealed class ReadBytes
+        {
+            public byte[] Bytes;
+            public string Error;
+        }
+
+        /// <summary><see cref="File.ReadAllBytes"/> that never throws: the error is handed back, worded as the encode's
+        /// own catch words it, so the line the player reads is the one it always was.</summary>
+        private static ReadBytes SafeReadAllBytes(string path)
+        {
+            try
+            {
+                return new ReadBytes { Bytes = File.ReadAllBytes(path) };
+            }
+            catch (Exception ex)
+            {
+                return new ReadBytes { Error = $"{ex.GetType().Name}: {ex.Message}" };
+            }
+        }
+
+        /// <summary>A finished read's outcome, whatever became of its task.</summary>
+        private static ReadBytes ReadOutcome(Task<ReadBytes> task)
+        {
+            if (task == null) return new ReadBytes { Error = "InvalidOperationException: the read could not be started" };
+            if (task.IsFaulted || task.IsCanceled)
+                return new ReadBytes { Error = task.Exception?.GetBaseException().GetType().Name + ": " + (task.Exception?.GetBaseException().Message ?? "cancelled") };
+            return task.Result ?? new ReadBytes { Error = "InvalidOperationException: nothing was read" };
+        }
+
+        /// <summary>Log lines written on a worker and said on the main thread, in order - the SyncResult discipline (a
+        /// ManualLogSource from a pool thread interleaves with the frame it lands in). A buffer made <c>live</c> says
+        /// them at once, so a step shared by both kinds of caller has one body.</summary>
+        private sealed class LineBuffer
+        {
+            private readonly List<KeyValuePair<int, string>> _lines = new List<KeyValuePair<int, string>>();
+
+            public void Debug(string line) => _lines.Add(new KeyValuePair<int, string>(0, line));
+
+            public void Info(string line) => _lines.Add(new KeyValuePair<int, string>(1, line));
+
+            public void Warning(string line) => _lines.Add(new KeyValuePair<int, string>(2, line));
+
+            /// <summary>Says every buffered line at its level, in order, and forgets them. Main thread.</summary>
+            public void Replay()
+            {
+                foreach (var line in _lines)
+                {
+                    if (line.Key == 0) Plugin.LogSource?.LogDebug(line.Value);
+                    else if (line.Key == 1) Plugin.LogSource?.LogInfo(line.Value);
+                    else Plugin.LogSource?.LogWarning(line.Value);
+                }
+
+                _lines.Clear();
+            }
+
+            internal int Count => _lines.Count;
+        }
+
+        /// <summary>What <see cref="PrepareOffThread"/> read: the meta rewritten for the wire, the floors, sides and pages
+        /// on disk, the checked mesh bytes (null when none goes), and its lines.</summary>
+        private sealed class UploadPrep
+        {
+            public bool Ok;
+            public MapCaptureMetaDto Meta;
+            public List<FloorUpload> Floors;
+            public List<FloorUpload> Sides;
+            public List<FloorUpload> Pages;
+            public byte[] Mesh;
+            public readonly LineBuffer Lines = new LineBuffer();
+        }
+
+        /// <summary>
+        /// Everything the upload reads before its first post, on a worker (WP3 Phase A): the meta, the floors, the
+        /// sides, the mesh's bytes and hash, the atlas pages - the same steps in the same order as before, their lines
+        /// buffered. No Unity API in any of them. Never throws.
+        /// </summary>
+        /// <param name="key">The map's internal id.</param>
+        private static UploadPrep PrepareOffThread(string key)
+        {
+            var prep = new UploadPrep();
+            var say = prep.Lines;
+
+            try
+            {
+                if (!ReadCapture(key, out var meta, out var floors, say)) return prep;
+
+                // BEFORE the first post, and for every floor at once - see DescribeWire. The meta
+                // travels with every post and the host checks EVERY floor in it against the meta's
+                // own scale, so rewriting one floor at a time would make the first post describe no
+                // single projection and be refused outright.
+                if (!DescribeWire(key, meta, floors, say)) return prep;
+
+                // The SIDES, read and described for the wire before the first post for the reason the
+                // floors are: every post carries the meta, and the host checks each side in it against
+                // its own scale. A side whose picture is not on this disk is taken out of the meta here,
+                // so the host is never told to wait for it.
+                var sides = ReadSides(key, meta, say);
+
+                DescribeSidesForWire(key, meta, sides, say);
+
+                // The MESH, read and checked BEFORE the first post. Before, because the meta travels
+                // with every floor and a host that sees a mesh block HOLDS THE WHOLE SET until the file
+                // arrives - so a block this machine cannot honour has to be out of the meta before the
+                // meta is sent, or the capture is lost to a wait that never ends. Null with the block
+                // already stripped when there is nothing to offer.
+                var mesh = PrepareMesh(key, meta, say);
+
+                // The ATLAS pages, read AFTER the mesh is settled and before the first post: a page drapes
+                // the mesh's buildings and nothing else, so with no mesh to offer the meta names no pages
+                // (a host told about a page waits for it), and a page not on this disk is taken out of the
+                // meta here for the sides' reason.
+                var pages = ReadAtlas(key, meta, mesh != null, say);
+
+                prep.Meta = meta;
+                prep.Floors = floors;
+                prep.Sides = sides;
+                prep.Mesh = mesh;
+                prep.Pages = pages;
+                prep.Ok = true;
+            }
+            catch (Exception ex)
+            {
+                say.Debug($"QuestTree: the capture of {key} could not be read back for upload ({ex.Message}).");
+            }
+
+            return prep;
+        }
+
         /// <summary>Counts an upload of the map that REACHED the host against every live hold on it (WP3) - the
         /// campaign's "intermediate uploads".</summary>
         private static void CountLanded(string key)
@@ -1184,7 +1359,8 @@ namespace QuestTree.QuestGraph
         /// <param name="key">The map's internal id.</param>
         /// <param name="meta">The capture's meta, or null.</param>
         /// <param name="floors">The floors to post, in level order. Never null when this returns true.</param>
-        private static bool ReadCapture(string key, out MapCaptureMetaDto meta, out List<FloorUpload> floors)
+        /// <param name="say">Where its lines go - buffered on the upload's worker and said on the main thread (WP3 Phase A).</param>
+        private static bool ReadCapture(string key, out MapCaptureMetaDto meta, out List<FloorUpload> floors, LineBuffer say)
         {
             meta = null;
             floors = new List<FloorUpload>();
@@ -1201,7 +1377,7 @@ namespace QuestTree.QuestGraph
 
                 if (meta == null || meta.Extent == null || meta.Floors == null || meta.Floors.Count == 0)
                 {
-                    Plugin.LogSource?.LogDebug(
+                    say.Debug(
                         $"QuestTree: the capture meta for {key} has no floors to offer the host.");
                     return false;
                 }
@@ -1239,7 +1415,7 @@ namespace QuestTree.QuestGraph
             }
             catch (Exception ex)
             {
-                Plugin.LogSource?.LogDebug(
+                say.Debug(
                     $"QuestTree: the capture of {key} could not be read back for upload ({ex.Message}).");
                 meta = null;
                 floors = new List<FloorUpload>();
@@ -1274,7 +1450,8 @@ namespace QuestTree.QuestGraph
         /// <param name="key">The map's internal id.</param>
         /// <param name="meta">The meta being sent, rewritten in place.</param>
         /// <param name="floors">The floors to be posted, in level order.</param>
-        private static bool DescribeWire(string key, MapCaptureMetaDto meta, List<FloorUpload> floors)
+        /// <param name="say">Where its lines go - buffered on the upload's worker and said on the main thread (WP3 Phase A).</param>
+        private static bool DescribeWire(string key, MapCaptureMetaDto meta, List<FloorUpload> floors, LineBuffer say)
         {
             var width = 0;
             var height = 0;
@@ -1289,7 +1466,7 @@ namespace QuestTree.QuestGraph
 
             if (width <= 0 || height <= 0)
             {
-                Plugin.LogSource?.LogInfo(
+                say.Info(
                     $"QuestTree: the capture of {key} does not say how large its pictures are, so nothing about " +
                     "it could be described to the host - it is not offered.");
                 return false;
@@ -1347,7 +1524,7 @@ namespace QuestTree.QuestGraph
                 meta.PxPerMetre = (float)(width / metresX);
             }
 
-            Plugin.LogSource?.LogDebug(
+            say.Debug(
                 $"QuestTree: {key} is offered as {width}x{height} px at {meta.PxPerMetre:0.###} px/m, " +
                 $"{floors.Count} floor(s).");
 
@@ -1363,7 +1540,8 @@ namespace QuestTree.QuestGraph
         /// </summary>
         /// <param name="key">The map's internal id.</param>
         /// <param name="meta">The meta being offered; its <c>Sides</c> is trimmed to what will be sent.</param>
-        private static List<FloorUpload> ReadSides(string key, MapCaptureMetaDto meta)
+        /// <param name="say">Where its lines go - buffered on the upload's worker and said on the main thread (WP3 Phase A).</param>
+        private static List<FloorUpload> ReadSides(string key, MapCaptureMetaDto meta, LineBuffer say)
         {
             var sides = new List<FloorUpload>();
 
@@ -1406,7 +1584,7 @@ namespace QuestTree.QuestGraph
             }
             catch (Exception ex)
             {
-                Plugin.LogSource?.LogDebug(
+                say.Debug(
                     $"QuestTree: the side pictures of {key} could not be read back for upload ({ex.Message}) - " +
                     "the capture goes up without them.");
 
@@ -1434,7 +1612,8 @@ namespace QuestTree.QuestGraph
         /// <param name="key">The map's internal id.</param>
         /// <param name="meta">The meta being offered, for its extent.</param>
         /// <param name="sides">The sides to be posted.</param>
-        private static void DescribeSidesForWire(string key, MapCaptureMetaDto meta, List<FloorUpload> sides)
+        /// <param name="say">Where its lines go - buffered on the upload's worker and said on the main thread (WP3 Phase A).</param>
+        private static void DescribeSidesForWire(string key, MapCaptureMetaDto meta, List<FloorUpload> sides, LineBuffer say)
         {
             if (meta?.Extent == null) return;
 
@@ -1458,7 +1637,7 @@ namespace QuestTree.QuestGraph
                 side.Width = width;
                 side.Height = height;
 
-                Plugin.LogSource?.LogDebug(
+                say.Debug(
                     $"QuestTree: {key}'s {upload.Side} side is offered as {width}x{height} px at " +
                     $"{side.PxPerMetre:0.###} px/m.");
             }
@@ -1507,7 +1686,8 @@ namespace QuestTree.QuestGraph
         /// <param name="key">The map's internal id.</param>
         /// <param name="meta">The meta being offered; its <c>Atlas</c> is trimmed to what will be sent.</param>
         /// <param name="hasMesh">Whether a mesh will be offered with it.</param>
-        private static List<FloorUpload> ReadAtlas(string key, MapCaptureMetaDto meta, bool hasMesh)
+        /// <param name="say">Where its lines go - buffered on the upload's worker and said on the main thread (WP3 Phase A).</param>
+        private static List<FloorUpload> ReadAtlas(string key, MapCaptureMetaDto meta, bool hasMesh, LineBuffer say)
         {
             var pages = new List<FloorUpload>();
 
@@ -1546,7 +1726,7 @@ namespace QuestTree.QuestGraph
                 }
 
                 if (kept.Count < meta.Atlas.Count)
-                    Plugin.LogSource?.LogDebug(
+                    say.Debug(
                         $"QuestTree: {meta.Atlas.Count - kept.Count} of {key}'s {meta.Atlas.Count} atlas page(s) are " +
                         "not on this disk as the meta describes them - the capture goes up without those.");
 
@@ -1554,7 +1734,7 @@ namespace QuestTree.QuestGraph
             }
             catch (Exception ex)
             {
-                Plugin.LogSource?.LogDebug(
+                say.Debug(
                     $"QuestTree: the atlas pages of {key} could not be read back for upload ({ex.Message}) - " +
                     "the capture goes up without them.");
 
@@ -1793,7 +1973,9 @@ namespace QuestTree.QuestGraph
         /// </summary>
         /// <param name="key">The map's internal id, for the log lines.</param>
         /// <param name="floor">The floor to encode.</param>
-        private static bool Encode(string key, FloorUpload floor)
+        /// <param name="bytes">The picture's file, read on a worker (WP3 Phase A); null when it could not be read.</param>
+        /// <param name="readError">Why it could not be read, for the line.</param>
+        private static bool Encode(string key, FloorUpload floor, byte[] bytes, string readError)
         {
             Texture2D source = null;
             Texture2D scaled = null;
@@ -1802,7 +1984,15 @@ namespace QuestTree.QuestGraph
 
             try
             {
-                var bytes = File.ReadAllBytes(floor.Path);
+                // The read's failure, worded as this method's own catch words any failure (WP3 Phase A: the read moved
+                // to a worker, and the line the player reads did not change).
+                if (bytes == null)
+                {
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: {key} \"{floor.Name}\" could not be prepared for upload " +
+                        $"({readError ?? "IOException: the file could not be read"}) - it is not offered.");
+                    return false;
+                }
 
                 // The frame size from the header BEFORE the decode (review F49), as the Maps tab and the 3D view
                 // already check it: this decode is READABLE - twice the memory - on the main thread, so a small, very
@@ -2269,7 +2459,8 @@ namespace QuestTree.QuestGraph
         /// </summary>
         /// <param name="key">The map's internal id.</param>
         /// <param name="meta">The meta about to be offered. Its mesh block is stripped on any failure.</param>
-        private static byte[] PrepareMesh(string key, MapCaptureMetaDto meta)
+        /// <param name="say">Where its lines go - buffered on the upload's worker and said on the main thread (WP3 Phase A).</param>
+        private static byte[] PrepareMesh(string key, MapCaptureMetaDto meta, LineBuffer say)
         {
             var mesh = meta?.Mesh;
 
@@ -2320,7 +2511,7 @@ namespace QuestTree.QuestGraph
                     else
                     {
                         // The hash above, once (review F34: it was computed a second time for this line).
-                        Plugin.LogSource?.LogDebug(
+                        say.Debug(
                             $"QuestTree: {key}'s mesh is offered as {Mb(bytes.Length)} MB, sha " +
                             $"{hash.Substring(0, 12)}, {mesh.Cells:N0} cell(s) and {mesh.Triangles:N0} " +
                             "triangle(s).");
@@ -2336,7 +2527,7 @@ namespace QuestTree.QuestGraph
 
             meta.Mesh = null;
 
-            Plugin.LogSource?.LogInfo(
+            say.Info(
                 $"QuestTree: the capture of {key} is offered to the host WITHOUT its 3D mesh - {why}. The pictures " +
                 "still go up, and the map draws flat on the other machines until it is captured again.");
 
