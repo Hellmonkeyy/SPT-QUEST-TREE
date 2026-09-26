@@ -844,6 +844,53 @@ namespace QuestTree.QuestGraph
 
         /// <summary>WP2 (fixes 3): whether an over-served stored building may be re-targeted to this required target - never
         /// tried, or its last clean failure was at a target this one differs from by more than the shortfall.</summary>
+        /// <summary>WP2 (fixes 5): how far a new y range may pass the stored one and still be the stored one - under a
+        /// sixteen-bit quantum over any real range (~1.6 mm over 100 m); float noise in the measured range is far smaller.</summary>
+        internal const float YRangeTolerance = 1e-3f;
+
+        /// <summary>WP2 (fixes 5): the grid a range that really widens is snapped OUTWARD to, so it settles after one
+        /// widening rather than creeping at every stop.</summary>
+        internal const float YRangeSnap = 0.5f;
+
+        /// <summary>
+        /// WP2 (fixes 5, D4): the mesh's y range over the stored one. A new range inside the stored one - within
+        /// <see cref="YRangeTolerance"/> - keeps the stored range bit for bit (true: the stored height codes stay valid);
+        /// otherwise the union, snapped outward to <see cref="YRangeSnap"/> (false: the stored heights are requantised once).
+        /// </summary>
+        internal static bool KeepYRange(float storedMin, float storedMax, float newMin, float newMax, out float min, out float max)
+        {
+            if (storedMin <= newMin + YRangeTolerance && storedMax >= newMax - YRangeTolerance)
+            {
+                min = storedMin;
+                max = storedMax;
+                return true;
+            }
+
+            var low = Math.Min(storedMin, newMin);
+            var high = Math.Max(storedMax, newMax);
+            min = (float)(Math.Floor(low / YRangeSnap) * YRangeSnap);
+            max = (float)(Math.Ceiling(high / YRangeSnap) * YRangeSnap);
+            if (min > low) min -= YRangeSnap;       // a float that rounded up past the value
+            if (max < high) max += YRangeSnap;
+            return false;
+        }
+
+        /// <summary>
+        /// WP2 (fixes 5): a texture re-read, settled once the atlas has mapped it - it replaces the stored copy only when
+        /// it ended with at least one atlas range (a textured tile or a flat one the atlas draws). One that ended with
+        /// none is refused, and its stored row records the attempt (clean) and that a texture was tried, so it is not read
+        /// again until its target grows (<see cref="TextureDue"/>). True when the re-read is kept.
+        /// </summary>
+        internal static bool SettleTextureReread(Entry stored, int ranges, int target, int level)
+        {
+            if (ranges > 0) return true;
+            if (stored == null) return false;
+
+            RecordAttempt(stored, true, target, level);
+            stored.TextureTried = 1;
+            return false;
+        }
+
         /// <summary>WP2 (fixes 4): whether a row's attempt stands recorded - a clean one, or an unclean one past
         /// <see cref="MaxUncleanAttempts"/> in a row.</summary>
         internal static bool AttemptRecorded(Entry e, bool clean) => clean || (e != null && e.UncleanAttempts > MaxUncleanAttempts);

@@ -526,7 +526,9 @@ namespace QuestTree.QuestGraph
         /// (the recorded attempts - sidecar v2 - and the plan without double counts), "r4" since fixes 3 (clean attempts
         /// only, the union demand at stored sizes, re-target and texture attempts - sidecar v3), "r5" since fixes 4 (s_G over
         /// the new buildings with the stored ones at what they hold, unclean attempts counted - sidecar v4), so every index an
-        /// earlier WP2 build wrote is discarded once. Declared AFTER every static field of this class it reads (static initialisers run in
+        /// earlier WP2 build wrote is discarded once. Fixes 5 did NOT bump it: its rules read a stored r5 mesh as they find
+        /// it (a range kept within tolerance, a texture re-read settled after the atlas), and a bump would throw away every
+        /// accumulated mesh for nothing. Declared AFTER every static field of this class it reads (static initialisers run in
         /// textual order - NotBuildingLayerNames above it would otherwise still be null).
         /// </summary>
         internal static readonly string MeshRecipe = string.Join(";", new[]
@@ -1306,6 +1308,11 @@ namespace QuestTree.QuestGraph
                 Step(job, "the textures' log line", () => ReportAtlas(job));
             }
 
+            // WP2 (fixes 5): a texture re-read replaces its stored copy only if the atlas gave it a range - decided here,
+            // where the ranges are known, not at the store (a re-read with UVs is not a textured building)
+            if (job.Stored != null && job.File != null)
+                Step(job, "the texture re-reads", () => SettleTextureRereads(job));
+
             // --- the y range, and everything quantised over it -------------------------------------
             //
             // AFTER the buildings, not before them. The range is measured from what this file will
@@ -1727,6 +1734,9 @@ namespace QuestTree.QuestGraph
             /// <summary>WP2 (fixes): stored buildings with no atlas range re-read because their materials have a texture,
             /// and the ones of those that were replaced.</summary>
             internal int TextureRereads;
+
+            /// <summary>WP2 (fixes 5): texture re-reads that ended with no atlas range, refused after the atlas.</summary>
+            internal int TextureRefused;
 
             /// <summary>WP2 (fixes 2): a recorded attempt (a stored entry's triedTarget or triedLevel) changed the sidecar -
             /// it is written even when the mesh is Unchanged; and the LOD groups not tried again at an unchanged target.</summary>
@@ -2879,23 +2889,25 @@ namespace QuestTree.QuestGraph
             job.File.SetYRange(low, high);
 
             // WP2 (D4): the range only grows. A stored range that holds this one is kept bit for bit (the stored codes
-            // stay valid); otherwise the union, and the stored heights are requantised once.
+            // stay valid); otherwise the union, and the stored heights are requantised once. WP2 (fixes 5): "holds" within
+            // MapMeshIndex.YRangeTolerance - float noise in the measurement widened the same range at every stop and
+            // requantised every stored height - and a real widening is snapped outward to a 0.5 m grid, so it settles.
             if (job.Stored != null)
             {
                 var stored = job.Request.Base;
                 job.OldYMin = stored.YMin;
                 job.OldYMax = stored.YMax;
 
-                if (stored.YMin <= job.File.YMin && stored.YMax >= job.File.YMax)
+                var kept = MapMeshIndex.KeepYRange(stored.YMin, stored.YMax, job.File.YMin, job.File.YMax, out var min, out var max);
+                job.File.YMin = min;
+                job.File.YMax = max;
+
+                if (kept)
                 {
-                    job.File.YMin = stored.YMin;
-                    job.File.YMax = stored.YMax;
                     job.RangeKept = true;
                 }
                 else
                 {
-                    job.File.YMin = Math.Min(stored.YMin, job.File.YMin);
-                    job.File.YMax = Math.Max(stored.YMax, job.File.YMax);
                     job.RangeWidened = true;
                     job.RequantisedY = new ushort[stored.Buildings.Count][];
                 }
@@ -4099,7 +4111,17 @@ namespace QuestTree.QuestGraph
 
                 var info = job.Materials[id];
                 var row = info.Stored;
-                if (row == null) return true;
+
+                // WP2 (fixes 5): never placed - only a real texture the atlas would capture (a material with none, or its
+                // texture refused as a normal map, gets no textured tile from a re-read)
+                if (row == null)
+                {
+                    if (info.Texture != null && !info.NormalRefused) return true;
+                    continue;
+                }
+
+                // a normal map refused before is refused again
+                if ((row.Flags & MapMeshIndex.FlagNormalRefused) != 0) continue;
 
                 // WP2 (fixes 2): no room last time - only when a page could hold it now (fewer pages than the cap, or the
                 // packing short of the last page's end). WP2 (fixes 3): the TEXTURED group's cap - one page fewer when the
@@ -6796,6 +6818,37 @@ namespace QuestTree.QuestGraph
 
         /// <summary>WP2: new buildings taken back out of the file - every parallel list compacted in one pass, the totals
         /// and the ledger settled, and a replacement they made undone (the stored building stays).</summary>
+        /// <summary>
+        /// WP2 (fixes 5): each texture re-read that ended with no atlas range - its materials got no tile (transparent, a
+        /// cutout or white flat left, a normal map refused, a texture that did not capture) or the atlas did not run - is
+        /// taken out again (RemoveNew puts the stored copy back and returns its credit), and the stored row records the
+        /// attempt and that a texture was tried (MapMeshIndex.SettleTextureReread), so it is not re-read at every stop.
+        /// </summary>
+        private static void SettleTextureRereads(Job job)
+        {
+            var remove = new HashSet<int>();
+
+            for (var i = 0; i < job.File.Buildings.Count && i < job.NewCandidates.Count; i++)
+            {
+                var c = job.NewCandidates[i];
+                if (c == null || c.Kind != KindUpgrade || c.Reason != MapMeshIndex.ReasonTexture || c.Replaces == null) continue;
+
+                var ranges = job.File.Buildings[i].Ranges?.Count ?? 0;
+                var target = c.Target > 0 ? c.Target : TargetNow(job, c.Replaces.Meta);
+
+                if (MapMeshIndex.SettleTextureReread(c.Replaces.Meta, ranges, target, Math.Min(254, c.ReadLod))) continue;
+
+                remove.Add(i);
+                job.IndexChanged = true;
+            }
+
+            if (remove.Count == 0) return;
+
+            RemoveNew(job, remove);
+            job.RolledBack -= remove.Count;      // not a LOD roll-back: counted as texture re-reads refused
+            job.TextureRefused += remove.Count;
+        }
+
         private static void RemoveNew(Job job, HashSet<int> remove)
         {
             var file = job.File;
@@ -9608,7 +9661,9 @@ namespace QuestTree.QuestGraph
                 (job.ReliefNotFillable > 0 ? $", {N(job.ReliefNotFillable)} band(s) whose stored grid is another (not filled)" : "") +
                 (job.RolledBack > 0 ? $"; {N(job.RolledBack)} new building(s) rolled back (a LOD level not read whole)" : "") +
                 (job.UpgradesRefused > 0 ? $"; {N(job.UpgradesRefused)} re-read(s) gave nothing better than the stored copy, which stays" : "") +
-                (job.TextureRereads > 0 ? $"; {N(job.TextureRereads)} re-read for texture" : "") +
+                (job.TextureRereads > 0 ? $"; {N(job.TextureRereads)} re-read for texture" +
+                                          (job.TextureRefused > 0 ? $" ({N(job.TextureRefused)} got no atlas range - refused, not re-read until their target grows)" : "")
+                    : "") +
                 (job.GroupsNotRetried > 0 ? $"; {N(job.GroupsNotRetried)} LOD group(s) not tried at a finer level again (tried at this target before)" : "") +
                 (job.RetargetsFailed > 0 ? $"; {N(job.RetargetsFailed)} re-target(s) did not land" : "") +
                 (result.Unchanged ? "; unchanged - the stored mesh is kept" : "") + ".");
