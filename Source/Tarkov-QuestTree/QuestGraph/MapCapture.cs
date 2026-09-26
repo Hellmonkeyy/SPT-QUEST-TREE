@@ -9143,6 +9143,10 @@ namespace QuestTree.QuestGraph
                     return;
                 }
 
+                // WP3: before the first file is replaced - an upload of this map reading between two of its items sees
+                // that pictures under their names have changed (the supersede guard, MapTransfer.Overtaken).
+                Bump(plan.Key, shape: false);
+
                 // The floors the meta will name, and the files that are therefore NOT stale. A floor
                 // this capture could not take keeps whatever an earlier capture of it left on disk:
                 // see Carried, where the reason is that the alternative is throwing a set away.
@@ -9377,6 +9381,15 @@ namespace QuestTree.QuestGraph
                 if (File.Exists(path)) File.Delete(path);
                 File.Move(temp, path);
 
+                // WP3: in the frame the meta lands - a commit that changed what the meta DESCRIBES (extent, scale, floors,
+                // mesh, pages, side geometry) stops an upload of the older set at its next item rather than mixing the two.
+                var shape = ShapeSignature(meta);
+                if (!_shapes.TryGetValue(plan.Key, out var oldShape) || !string.Equals(oldShape, shape, StringComparison.Ordinal))
+                {
+                    Bump(plan.Key, shape: true);
+                    _shapes[plan.Key] = shape;
+                }
+
                 DropStalePictures(plan, keep);
 
                 Plugin.LogSource?.LogInfo(
@@ -9423,6 +9436,9 @@ namespace QuestTree.QuestGraph
             }
             catch (Exception ex)
             {
+                // WP3: a half-committed capture is, conservatively, a change of shape.
+                Bump(plan.Key, shape: true);
+
                 Plugin.LogSource?.LogWarning(
                     $"QuestTree: the capture of {plan.Key} has its pictures but no meta file " +
                     $"({ex.GetType().Name}: {ex.Message}) - it will be ignored until it is captured again.");
@@ -10666,6 +10682,81 @@ namespace QuestTree.QuestGraph
         }
 
         // --- driving a capture from outside ------------------------------------------------------
+
+        /// <summary>Per map: how many commits have replaced its files (Pixels), and how many of those changed what the
+        /// meta DESCRIBES - extent, scale, floor set and sizes, mesh, atlas pages, side geometry (Shape). Read by
+        /// MapTransfer's upload between frames (WP3, the supersede guard). Main thread only.</summary>
+        internal struct CommitStamp
+        {
+            public int Pixels;
+            public int Shape;
+        }
+
+        private static readonly Dictionary<string, CommitStamp> _commits =
+            new Dictionary<string, CommitStamp>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>The last meta's <see cref="ShapeSignature"/> per map, this session.</summary>
+        private static readonly Dictionary<string, string> _shapes =
+            new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>The map's commit counters now; zero for a map not committed this session.</summary>
+        /// <param name="key">The map's internal id.</param>
+        internal static CommitStamp CommitStampOf(string key) =>
+            key != null && _commits.TryGetValue(key, out var stamp) ? stamp : default;
+
+        /// <summary>Counts one commit of the map: its pictures (<paramref name="shape"/> false) or its shape.</summary>
+        private static void Bump(string key, bool shape)
+        {
+            if (string.IsNullOrEmpty(key)) return;
+
+            _commits.TryGetValue(key, out var stamp);
+
+            if (shape) stamp.Shape++;
+            else stamp.Pixels++;
+
+            _commits[key] = stamp;
+        }
+
+        /// <summary>
+        /// What a meta DESCRIBES, as text: two metas with the same signature describe pictures an upload can send
+        /// under either (WP3). The extent and scale, each floor's level, file and size, the mesh's file and sha, each
+        /// atlas page's number, file and sha, and each side's file, size, scale, origins and height range. A stop that
+        /// left the mesh unchanged keeps its sha (PART-05), so it is pixel-only here.
+        ///
+        /// Deliberately NOT in it: exposure (informational - no reader or host uses it), labels, capturedAt and the
+        /// capture count - carried by the meta the upload already holds, and corrected by the next upload.
+        /// </summary>
+        /// <param name="m">The meta just written.</param>
+        private static string ShapeSignature(CaptureMeta m)
+        {
+            string R(double v) => v.ToString("R", CultureInfo.InvariantCulture);
+
+            var b = new StringBuilder();
+
+            if (m.Extent != null)
+                b.Append(R(m.Extent.MinX)).Append(',').Append(R(m.Extent.MinZ)).Append(',')
+                 .Append(R(m.Extent.MaxX)).Append(',').Append(R(m.Extent.MaxZ));
+
+            b.Append('|').Append(R(m.PxPerMetre));
+
+            if (m.Floors != null)
+                foreach (var f in m.Floors.Where(f => f != null).OrderBy(f => f.Level))
+                    b.Append("|F").Append(f.Level).Append(':').Append(f.File).Append(':').Append(f.Width).Append('x').Append(f.Height);
+
+            if (m.Mesh != null) b.Append("|M").Append(m.Mesh.File).Append(':').Append(m.Mesh.Sha256);
+
+            if (m.Atlas != null)
+                foreach (var p in m.Atlas.Where(p => p != null).OrderBy(p => p.Page))
+                    b.Append("|A").Append(p.Page).Append(':').Append(p.File).Append(':').Append(p.Sha256);
+
+            if (m.Sides != null)
+                foreach (var s in m.Sides.Where(s => s != null).OrderBy(s => s.Dir, StringComparer.Ordinal))
+                    b.Append("|S").Append(s.Dir).Append(':').Append(s.File).Append(':').Append(s.Width).Append('x').Append(s.Height)
+                     .Append(':').Append(R(s.PxPerMetre)).Append(':').Append(R(s.OriginR)).Append(':').Append(R(s.OriginU))
+                     .Append(':').Append(R(s.YMin)).Append(':').Append(R(s.YMax));
+
+            return b.ToString();
+        }
 
         /// <summary>The capture installed in the current raid, remembered so the two members below do
         /// not scan the scene on every frame of a campaign's wait loop. Unity's == null is true for a

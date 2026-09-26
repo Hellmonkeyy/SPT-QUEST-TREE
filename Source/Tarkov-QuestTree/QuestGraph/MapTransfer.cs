@@ -382,7 +382,7 @@ namespace QuestTree.QuestGraph
 
             /// <summary>How many uploads of the map REACHED the host while the hold was live - the campaign's
             /// "intermediate uploads", 0 unless one was already past its last item boundary when the hold began.</summary>
-            internal int Landed { get; set; }
+            internal int Landed;
 
             internal bool Released;
         }
@@ -658,6 +658,11 @@ namespace QuestTree.QuestGraph
         {
             var clock = System.Diagnostics.Stopwatch.StartNew();
 
+            // WP3, the supersede guard: the map's commit counters when this upload read the capture, and whether the
+            // "newer pixels went up under this meta" line has been said.
+            var stamp0 = default(MapCapture.CommitStamp);
+            var pixelsSaid = false;
+
             try
             {
                 // One frame first (review F34): StartCoroutine runs this synchronously up to its first yield,
@@ -666,7 +671,9 @@ namespace QuestTree.QuestGraph
                 yield return null;
 
                 // Q6: this upload reads the newest capture on disk, so every request for this map queued before
-                // this frame is satisfied by it. A request queued AFTER it - a newer capture - stays queued.
+                // this frame is satisfied by it. A request queued AFTER it - a newer capture - stays queued. The commit
+                // counters are taken in the same frame (WP3), so "newer" means exactly a commit after this read.
+                stamp0 = MapCapture.CommitStampOf(key);
                 _pendingUploads.Remove(key);
 
                 if (!ReadCapture(key, out var meta, out var floors)) yield break;
@@ -718,6 +725,17 @@ namespace QuestTree.QuestGraph
                     // and an EncodeToJPG of a picture up to 4096 px on a side, which is the one part
                     // of this that cannot leave Unity's thread.
                     yield return null;
+
+                    // WP3: the supersede guard, at an item boundary - the previous post has completed, so nothing is
+                    // abandoned in flight (Q8: the map is asked for again, owed if held, else queued).
+                    var overtaken = Overtaken(key, stamp0, ref pixelsSaid);
+                    if (overtaken != null)
+                    {
+                        Plugin.LogSource?.LogInfo(
+                            $"QuestTree: the upload of {key} stopped - {overtaken}; the newer capture goes up instead.");
+                        TryStartUpload(key);
+                        yield break;
+                    }
 
                     if (!Encode(key, floor))
                     {
@@ -823,6 +841,17 @@ namespace QuestTree.QuestGraph
                     {
                         yield return null;
 
+                        // WP3: the supersede guard, at an item boundary - the previous post has completed, so nothing is
+                        // abandoned in flight (Q8: the map is asked for again, owed if held, else queued).
+                        var overtaken = Overtaken(key, stamp0, ref pixelsSaid);
+                        if (overtaken != null)
+                        {
+                            Plugin.LogSource?.LogInfo(
+                                $"QuestTree: the upload of {key} stopped - {overtaken}; the newer capture goes up instead.");
+                            TryStartUpload(key);
+                            yield break;
+                        }
+
                         // A side that cannot be encoded is still POSTED - empty. The host has already been
                         // told to expect it (every floor's meta named it), and an empty side post is how it
                         // is told to stop expecting it; leaving it unsent would hold the whole set until the
@@ -902,6 +931,17 @@ namespace QuestTree.QuestGraph
                     foreach (var page in pages)
                     {
                         yield return null;
+
+                        // WP3: the supersede guard, at an item boundary - the previous post has completed, so nothing is
+                        // abandoned in flight (Q8: the map is asked for again, owed if held, else queued).
+                        var overtaken = Overtaken(key, stamp0, ref pixelsSaid);
+                        if (overtaken != null)
+                        {
+                            Plugin.LogSource?.LogInfo(
+                                $"QuestTree: the upload of {key} stopped - {overtaken}; the newer capture goes up instead.");
+                            TryStartUpload(key);
+                            yield break;
+                        }
 
                         var encoded = Encode(key, page);
 
@@ -985,6 +1025,17 @@ namespace QuestTree.QuestGraph
                 // the lot. A mesh's worth of posts to a host that cannot use them is worth skipping.
                 if (posted > 0 && droppedSincePost == 0 && mesh != null)
                 {
+                    // WP3: the supersede guard, at an item boundary - the previous post has completed, so nothing is
+                    // abandoned in flight (Q8: the map is asked for again, owed if held, else queued).
+                    var overtakenAtMesh = Overtaken(key, stamp0, ref pixelsSaid);
+                    if (overtakenAtMesh != null)
+                    {
+                        Plugin.LogSource?.LogInfo(
+                            $"QuestTree: the upload of {key} stopped - {overtakenAtMesh}; the newer capture goes up instead.");
+                        TryStartUpload(key);
+                        yield break;
+                    }
+
                     // In PARTS when the mesh is past what one post can carry to a stock host - see
                     // MeshPartBytes. Each part is its own post under its own deadline; every part but the
                     // last must come back "holding part k of n", and anything else - a refusal, an old host,
@@ -1064,6 +1115,54 @@ namespace QuestTree.QuestGraph
                 // The next capture that finished while this one was going up (review F32).
                 StartNextPending();
             }
+        }
+
+        /// <summary>
+        /// The supersede guard (WP3): why the running upload of <paramref name="key"/> must stop at this item boundary,
+        /// or null to carry on. Three outcomes:
+        ///
+        /// - a commit since the upload read the capture changed what the meta describes (MapCapture's Shape counter):
+        ///   the pictures still to go would not fit the meta being sent - stop, and the newer capture goes up instead;
+        /// - a hold that PREEMPTS (a capture campaign) was taken on the map after this upload started: stop, and the
+        ///   campaign's one upload at its end is the only one;
+        /// - only pixels changed (the Pixels counter): carry on - the newer floor pixels go up under this meta, which
+        ///   still describes them exactly; said once, at Debug.
+        ///
+        /// Only ever called where the previous post has COMPLETED, so a stop never abandons a request in flight, and
+        /// never between two parts of a mesh.
+        /// </summary>
+        /// <param name="key">The map being uploaded.</param>
+        /// <param name="at">The map's commit counters when the upload read the capture.</param>
+        /// <param name="pixelsSaid">Whether the pixel-only line has been said for this upload.</param>
+        private static string Overtaken(string key, MapCapture.CommitStamp at, ref bool pixelsSaid)
+        {
+            var now = MapCapture.CommitStampOf(key);
+            if (now.Shape != at.Shape) return "a newer capture of it changed its mesh, sides, pages or extent";
+
+            PruneLapsedHolds();
+
+            foreach (var h in _holds)
+                if (h.PreemptsRunning && h.Since > _uploadStartedAt &&
+                    string.Equals(h.Key, key, StringComparison.OrdinalIgnoreCase))
+                    return $"a {h.Why} of it has started";
+
+            if (now.Pixels != at.Pixels && !pixelsSaid)
+            {
+                pixelsSaid = true;
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: a newer capture of {key} merged new floor pixels while it was going up - they go up " +
+                    "under this capture's meta, which still describes them exactly.");
+            }
+
+            return null;
+        }
+
+        /// <summary>Counts an upload of the map that REACHED the host against every live hold on it (WP3) - the
+        /// campaign's "intermediate uploads".</summary>
+        private static void CountLanded(string key)
+        {
+            foreach (var h in _holds)
+                if (string.Equals(h.Key, key, StringComparison.OrdinalIgnoreCase)) h.Landed++;
         }
 
         /// <summary>What the host's answer to one floor means for the rest of the upload.</summary>
@@ -2140,6 +2239,8 @@ namespace QuestTree.QuestGraph
             string key, int floors, long bytes, long meshBytes, System.Diagnostics.Stopwatch clock, int sides = 0,
             int pages = 0)
         {
+            CountLanded(key);
+
             Plugin.LogSource?.LogInfo(
                 $"QuestTree: capture of {key} uploaded to the host - {floors} floor(s)" +
                 $"{(sides > 0 ? $", {sides} side(s)" : "")}" +
@@ -2398,6 +2499,7 @@ namespace QuestTree.QuestGraph
                     Plugin.LogSource?.LogInfo(
                         $"QuestTree: the host already has this capture of {key}, or a newer one - its mesh is not " +
                         "needed.");
+                    CountLanded(key);   // WP3: on the host all the same (a ServedFlat answer is counted by Done)
                     return MeshVerdict.AlreadyServed;
                 }
 
