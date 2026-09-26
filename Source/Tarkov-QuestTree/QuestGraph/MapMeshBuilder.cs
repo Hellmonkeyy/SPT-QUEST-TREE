@@ -8724,6 +8724,31 @@ namespace QuestTree.QuestGraph
         internal static int Pack(int[] widths, int[] heights, int pageSize, int maxPages, int padding, int[] pages,
             int[] xs, int[] ys, int[] groups = null, int[] groupPageLimits = null)
         {
+            var state = AtlasPackState.Empty;
+            return PackFrom(ref state, widths, heights, pageSize, maxPages, padding, pages, xs, ys, groups, groupPageLimits);
+        }
+
+        /// <summary>
+        /// WP2: <see cref="Pack"/>, continuing a stored packing from <paramref name="state"/> - the same shelf rule and
+        /// the same sort, placing after the cursor on the state's page, then on new shelves, then on new pages - and
+        /// advancing the state to where this packing stopped. From <see cref="AtlasPackState.Empty"/> (page -1) it
+        /// starts at page 0 with exactly Pack's arithmetic, so the from-scratch build is byte-identical. Returns the
+        /// pages used, counting the state's own page.
+        /// </summary>
+        /// <param name="state">Where the stored packing stopped; advanced.</param>
+        /// <param name="widths">Each tile's inner width.</param>
+        /// <param name="heights">Each tile's inner height.</param>
+        /// <param name="pageSize">A page's side.</param>
+        /// <param name="maxPages">Pages allowed.</param>
+        /// <param name="padding">The border each tile keeps, pixels.</param>
+        /// <param name="pages">Filled: each tile's page, or -1.</param>
+        /// <param name="xs">Filled: each tile's inner x.</param>
+        /// <param name="ys">Filled: each tile's inner y.</param>
+        /// <param name="groups">Each tile's group, or null: lower groups are packed first.</param>
+        /// <param name="groupPageLimits">Pages each group may use (indexed by group), or null for maxPages.</param>
+        internal static int PackFrom(ref AtlasPackState state, int[] widths, int[] heights, int pageSize, int maxPages,
+            int padding, int[] pages, int[] xs, int[] ys, int[] groups = null, int[] groupPageLimits = null)
+        {
             var n = widths.Length;
             var order = new int[n];
             for (var i = 0; i < n; i++)
@@ -8743,11 +8768,13 @@ namespace QuestTree.QuestGraph
                 return c != 0 ? c : a.CompareTo(b);
             });
 
-            var page = 0;
-            var shelfY = 0;         // the current shelf's bottom
-            var shelfH = 0;         // its height (outer)
-            var cursor = 0;         // the next free x on it
-            var used = 0;
+            var fresh = state.Page < 0;
+            var page = fresh ? 0 : state.Page;
+            var shelfY = fresh ? 0 : state.ShelfY;      // the current shelf's bottom
+            var shelfH = fresh ? 0 : state.ShelfH;      // its height (outer)
+            var cursor = fresh ? 0 : state.Cursor;      // the next free x on it
+            var used = fresh ? 0 : state.Page + 1;
+            var placed = false;
 
             // WP8 (D4): with a JPEG-block gutter, every outer origin on the JPEG grid, so with the gutter a multiple of
             // it the inner origin is too and no 8 x 8 block straddles two tiles.
@@ -8794,7 +8821,10 @@ namespace QuestTree.QuestGraph
                 xs[i] = tCursor + padding;
                 ys[i] = tShelfY + padding;
                 used = Math.Max(used, page + 1);
+                placed = true;
             }
+
+            if (placed || !fresh) state = new AtlasPackState { Page = page, ShelfY = shelfY, ShelfH = shelfH, Cursor = cursor };
 
             return used;
         }
@@ -8953,6 +8983,196 @@ namespace QuestTree.QuestGraph
                 return new Encoded { Length = sink.Written, Sha256 = hex.ToString() };
             }
         }
+
+        /// <summary>WP2: decodes an atlas page's PNG file into a page buffer (the stream overload says how). False when
+        /// the file is missing, unreadable, or not exactly such a page.</summary>
+        /// <param name="path">The page's file.</param>
+        /// <param name="rgba">The page buffer, size x size x 4 bytes, row 0 at the bottom; overwritten.</param>
+        /// <param name="size">The page's side.</param>
+        internal static bool DecodeTo(string path, byte[] rgba, int size)
+        {
+            try
+            {
+                using (var stream = new System.IO.FileStream(path, System.IO.FileMode.Open, System.IO.FileAccess.Read,
+                           System.IO.FileShare.Read, 1 << 20))
+                    return DecodeTo(stream, rgba, size);
+            }
+            catch (System.IO.IOException)
+            {
+                return false;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// WP2: the inverse of <see cref="EncodeTo"/> - an RGBA8 PNG of exactly size x size into a page buffer, row 0 at
+        /// the bottom (the PNG's first row is the buffer's last), so a stored page can take new tiles and be encoded
+        /// again. Unity-free, run on a worker. Every chunk's CRC is checked; IHDR must say size x size, depth 8, colour
+        /// type 6, compression 0, filter 0, no interlace; the IDAT data is one zlib stream (header checked, no preset
+        /// dictionary) whose Adler-32 must match; each row's filter byte may be any of the five PNG filters (None, Sub,
+        /// Up, Average, Paeth), so a page written by anything still decodes. False on any mismatch - the caller
+        /// abandons the atlas rather than write a page it could not read.
+        /// </summary>
+        /// <param name="input">The PNG's bytes. Left open.</param>
+        /// <param name="rgba">The page buffer, size x size x 4 bytes; overwritten.</param>
+        /// <param name="size">The page's side.</param>
+        internal static bool DecodeTo(System.IO.Stream input, byte[] rgba, int size)
+        {
+            if (input == null || rgba == null || size <= 0 || rgba.Length < (long)size * size * 4) return false;
+
+            try
+            {
+                var signature = new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
+                var head = new byte[8];
+                if (!ReadFull(input, head, 8)) return false;
+                for (var i = 0; i < 8; i++)
+                    if (head[i] != signature[i]) return false;
+
+                var header = false;
+                var ended = false;
+                var idat = new System.IO.MemoryStream();
+                var tail = new byte[4];
+
+                while (!ended)
+                {
+                    if (!ReadFull(input, head, 8)) return false;
+
+                    var length = ReadBigEndian(head, 0);
+                    if (length > 1u << 30) return false;
+
+                    var type = new string(new[] { (char)head[4], (char)head[5], (char)head[6], (char)head[7] });
+                    var data = new byte[length];
+                    if (!ReadFull(input, data, (int)length)) return false;
+                    if (!ReadFull(input, tail, 4)) return false;
+
+                    var crc = 0xFFFFFFFFu;
+                    for (var i = 4; i < 8; i++) crc = Crc[(crc ^ head[i]) & 0xFF] ^ (crc >> 8);
+                    for (var i = 0; i < data.Length; i++) crc = Crc[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
+                    if ((crc ^ 0xFFFFFFFFu) != ReadBigEndian(tail, 0)) return false;
+
+                    switch (type)
+                    {
+                        case "IHDR":
+                            if (data.Length != 13 || ReadBigEndian(data, 0) != (uint)size || ReadBigEndian(data, 4) != (uint)size ||
+                                data[8] != 8 || data[9] != 6 || data[10] != 0 || data[11] != 0 || data[12] != 0)
+                                return false;
+                            header = true;
+                            break;
+                        case "IDAT":
+                            if (!header) return false;
+                            idat.Write(data, 0, data.Length);
+                            break;
+                        case "IEND":
+                            ended = true;
+                            break;
+                    }
+                }
+
+                if (!header || idat.Length < 6) return false;
+
+                var z = idat.GetBuffer();
+                var zLength = (int)idat.Length;
+
+                // the zlib header: deflate, a window the spec allows, the check bits, no preset dictionary
+                if ((z[0] & 0x0F) != 8 || (z[0] >> 4) > 7 || ((z[0] << 8) | z[1]) % 31 != 0 || (z[1] & 0x20) != 0) return false;
+
+                var stride = size * 4;
+                var row = new byte[stride + 1];
+                var prior = new byte[stride];
+                var current = new byte[stride];
+                uint a = 1, b = 0;
+
+                using (var compressed = new System.IO.MemoryStream(z, 2, zLength - 2, false))
+                using (var inflate = new System.IO.Compression.DeflateStream(compressed, System.IO.Compression.CompressionMode.Decompress))
+                {
+                    for (var y = 0; y < size; y++)
+                    {
+                        if (!ReadFull(inflate, row, row.Length)) return false;
+
+                        for (var i = 0; i < row.Length; i++)
+                        {
+                            a = (a + row[i]) % 65521;
+                            b = (b + a) % 65521;
+                        }
+
+                        if (!Unfilter(row[0], row, current, prior, stride)) return false;
+
+                        Buffer.BlockCopy(current, 0, rgba, (size - 1 - y) * stride, stride);
+
+                        var swap = prior;
+                        prior = current;
+                        current = swap;
+                    }
+
+                    // nothing may follow the last row inside the stream
+                    if (inflate.ReadByte() >= 0) return false;
+                }
+
+                return ReadBigEndian(z, zLength - 4) == ((b << 16) | a);
+            }
+            catch (System.IO.InvalidDataException)
+            {
+                return false;
+            }
+            catch (System.IO.IOException)
+            {
+                return false;
+            }
+        }
+
+        /// <summary>One row un-filtered (PNG's five filters, 4 bytes a pixel). False for an unknown filter.</summary>
+        private static bool Unfilter(byte filter, byte[] row, byte[] current, byte[] prior, int stride)
+        {
+            switch (filter)
+            {
+                case 0:
+                    Buffer.BlockCopy(row, 1, current, 0, stride);
+                    return true;
+                case 1:
+                    for (var i = 0; i < stride; i++) current[i] = (byte)(row[i + 1] + (i >= 4 ? current[i - 4] : 0));
+                    return true;
+                case 2:
+                    for (var i = 0; i < stride; i++) current[i] = (byte)(row[i + 1] + prior[i]);
+                    return true;
+                case 3:
+                    for (var i = 0; i < stride; i++)
+                        current[i] = (byte)(row[i + 1] + (((i >= 4 ? current[i - 4] : 0) + prior[i]) >> 1));
+                    return true;
+                case 4:
+                    for (var i = 0; i < stride; i++)
+                    {
+                        int left = i >= 4 ? current[i - 4] : 0, up = prior[i], corner = i >= 4 ? prior[i - 4] : 0;
+                        var p = left + up - corner;
+                        int pa = Math.Abs(p - left), pb = Math.Abs(p - up), pc = Math.Abs(p - corner);
+                        var predictor = pa <= pb && pa <= pc ? left : pb <= pc ? up : corner;
+                        current[i] = (byte)(row[i + 1] + predictor);
+                    }
+
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        private static bool ReadFull(System.IO.Stream stream, byte[] buffer, int count)
+        {
+            var done = 0;
+
+            while (done < count)
+            {
+                var n = stream.Read(buffer, done, count - done);
+                if (n <= 0) return false;
+                done += n;
+            }
+
+            return true;
+        }
+
+        private static uint ReadBigEndian(byte[] buffer, int at) =>
+            ((uint)buffer[at] << 24) | ((uint)buffer[at + 1] << 16) | ((uint)buffer[at + 2] << 8) | buffer[at + 3];
 
         /// <summary>Everything written to the output, hashed and counted on the way.</summary>
         private sealed class Hashed
@@ -9384,6 +9604,162 @@ namespace QuestTree.QuestGraph
             }
 
             return lo;
+        }
+
+        /// <summary>WP2: the bisection on its own - the largest factor in [0, 1] at which these buildings' stored total
+        /// fits the cap - for the part of a union that is still to be read.</summary>
+        /// <param name="basis">The unscaled bases.</param>
+        /// <param name="floors">Each building's floor, or null.</param>
+        /// <param name="sources">The source triangle counts.</param>
+        /// <param name="cap">What they may store together.</param>
+        internal static double ScaleFor(double[] basis, int[] floors, long[] sources, long cap) => Scale(basis, floors, sources, cap);
+
+        /// <summary>WP2: what <see cref="PlanUnion"/> decided.</summary>
+        internal sealed class UnionPlan
+        {
+            /// <summary>Each union building's target: a stored one's at <see cref="Scale"/> (what a re-target lands it
+            /// at), a new one's at <see cref="FlexScale"/>; never under its floor.</summary>
+            internal int[] Targets;
+
+            /// <summary>Each union building's pre-WP7 floor, over the UNION list (Q1).</summary>
+            internal int[] Floors;
+
+            /// <summary>The one scale over the union (s_G), the scale the new buildings are read at (s_Fit, at most s_G),
+            /// and the pre-WP7 rule's scale on the union.</summary>
+            internal double Scale;
+
+            internal double FlexScale;
+            internal double LegacyScale;
+
+            /// <summary>Stored buildings picked to lose their excess over their union target (D3) - only when the
+            /// planned cap binds over the union - and the triangles that frees.</summary>
+            internal bool[] Retarget;
+
+            internal long Freed;
+
+            /// <summary>What the stored buildings hold after the re-targets (the ledger's pre-load), and what the new
+            /// ones want at their targets.</summary>
+            internal long FixedCost;
+
+            internal long Want;
+
+            /// <summary>Whether the planned cap bound over the union.</summary>
+            internal bool Binds;
+        }
+
+        /// <summary>
+        /// WP2 (D3): the area plan over the UNION of the stored buildings and this build's new ones, with the live rule
+        /// (<see cref="Targets"/>) - one scale s_G over all of them, the floors over the union list (so Q1, no target
+        /// under its pre-WP7 floor, holds over the union). The stored buildings are FIXED: they are in the file
+        /// whatever s_G says. When what they hold plus what the new ones want at s_G passes the planned cap, the
+        /// over-served stored buildings - stored above min(source, their target at s_G) - are picked, largest excess
+        /// first, until their excess covers the overflow, and the new ones are read at s_Fit, the largest scale that
+        /// fits what is then left (never above s_G). With nothing stored this is <see cref="Targets"/> exactly (I0).
+        /// Unity-free.
+        /// </summary>
+        /// <param name="surfaces">Each union building's box surface, m2.</param>
+        /// <param name="footprints">Each one's footprint, m2.</param>
+        /// <param name="heights">Each one's box height, m.</param>
+        /// <param name="sources">Each one's source triangles.</param>
+        /// <param name="stored">A stored building's triangles, or -1 for a new one.</param>
+        /// <param name="extraFixed">Triangles stored buildings hold that are NOT in the plan (being replaced this
+        /// build): counted as fixed cost until the replacement stores.</param>
+        /// <param name="plannedCap">The planned cap: the map's cap x <see cref="MapMeshBuilder.BudgetShare"/>.</param>
+        internal static UnionPlan PlanUnion(double[] surfaces, double[] footprints, double[] heights, long[] sources, long[] stored,
+            long extraFixed, long plannedCap)
+        {
+            var n = sources.Length;
+            var plan = new UnionPlan { Retarget = new bool[n] };
+
+            plan.Targets = Targets(surfaces, footprints, heights, sources, plannedCap, out var scale, out var floors, out var legacyScale);
+            plan.Floors = floors;
+            plan.Scale = scale;
+            plan.FlexScale = scale;
+            plan.LegacyScale = legacyScale;
+
+            var fixedCost = Math.Max(0L, extraFixed);
+            var want = 0L;
+            var anyStored = false;
+
+            for (var i = 0; i < n; i++)
+            {
+                if (stored[i] >= 0)
+                {
+                    anyStored = true;
+                    fixedCost += stored[i];
+                }
+                else
+                {
+                    want += Math.Min(sources[i], plan.Targets[i]);
+                }
+            }
+
+            plan.FixedCost = fixedCost;
+            plan.Want = want;
+
+            // I0: nothing stored - the plan IS Targets, whatever the numbers (a list whose floors alone pass the cap
+            // keeps Targets' own answer rather than a second bisection's).
+            if (!anyStored && extraFixed <= 0) return plan;
+            if (fixedCost + want <= plannedCap) return plan;
+
+            plan.Binds = true;
+
+            // the over-served stored buildings, largest excess first
+            var need = fixedCost + want - plannedCap;
+            var excess = new long[n];
+            var order = new List<int>();
+
+            for (var i = 0; i < n; i++)
+            {
+                if (stored[i] < 0) continue;
+
+                excess[i] = stored[i] - Math.Min(sources[i], plan.Targets[i]);
+                if (excess[i] > 0) order.Add(i);
+            }
+
+            order.Sort((a, b) => excess[b] != excess[a] ? excess[b].CompareTo(excess[a]) : a.CompareTo(b));
+
+            foreach (var i in order)
+            {
+                if (plan.Freed >= need) break;
+
+                plan.Retarget[i] = true;
+                plan.Freed += excess[i];
+            }
+
+            fixedCost -= plan.Freed;
+            plan.FixedCost = fixedCost;
+
+            // the new buildings at the largest scale that fits what is left, never above s_G
+            var flex = new List<int>();
+            for (var i = 0; i < n; i++)
+                if (stored[i] < 0) flex.Add(i);
+
+            var basis = new double[flex.Count];
+            var flexFloors = new int[flex.Count];
+            var flexSources = new long[flex.Count];
+
+            for (var k = 0; k < flex.Count; k++)
+            {
+                var i = flex[k];
+                basis[k] = Basis(surfaces[i], footprints[i], heights[i]);
+                flexFloors[k] = floors[i];
+                flexSources[k] = sources[i];
+            }
+
+            var fit = Scale(basis, flexFloors, flexSources, Math.Max(0L, plannedCap - fixedCost));
+            plan.FlexScale = Math.Min(scale, fit);
+
+            want = 0L;
+            for (var k = 0; k < flex.Count; k++)
+            {
+                var i = flex[k];
+                plan.Targets[i] = Target(basis[k], plan.FlexScale, floors[i]);
+                want += Math.Min(sources[i], plan.Targets[i]);
+            }
+
+            plan.Want = want;
+            return plan;
         }
 
         /// <summary>What the map stores at a scale: each building's target (floored when floors are given), or
