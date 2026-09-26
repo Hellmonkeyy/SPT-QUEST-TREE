@@ -1298,7 +1298,7 @@ def check_mesh(meta, folder, key, extent, levels, errors, warnings):
 # that describes it wrongly (the rows disagree with the mesh, two rows of one identity, two levels of one LOD group) is
 # an ERROR - that is a builder bug the next capture would build on.
 INDEX_MAGIC = b"QTMI"
-INDEX_VERSION = 1               # MapMeshIndex.Version
+INDEX_VERSION = 2               # MapMeshIndex.Version (2: triedTarget/triedLevel, unplacedPages)
 INDEX_SUFFIX = "-mesh.index"    # MapMeshIndex.Suffix
 INDEX_MAX_RECIPE = 512
 INDEX_MAX_GAME = 128
@@ -1307,8 +1307,8 @@ INDEX_MAX_INFLATED = 64 * 1024 * 1024
 INDEX_SLACK = 0.25              # MapMeshIndex.IdentitySlackMetres
 INDEX_FLAT_PIXELS = 4           # MapMeshBuilder.AtlasFlatPixels
 INDEX_PADDING = 8               # MapMeshBuilder.AtlasPadding
-INDEX_MATERIAL = struct.Struct("<Q10iBBBBBfH")
-INDEX_BUILDING = struct.Struct("<Q4i6fQ3fiBBB3fifHB")
+INDEX_MATERIAL = struct.Struct("<Q10iBBBBBfHB")
+INDEX_BUILDING = struct.Struct("<Q4i6fQ3fiBBB3fifHiBB")
 
 
 def read_index(data):
@@ -1364,7 +1364,7 @@ def read_index(data):
         index["materials"].append({
             "key": v[0], "texW": v[1], "texH": v[2], "page": v[3], "x": v[4], "y": v[5], "w": v[6], "h": v[7],
             "flatPage": v[8], "flatX": v[9], "flatY": v[10], "flags": v[11], "mip": v[12], "avg": v[13:16],
-            "opaque": v[16], "capturedAt": v[17]})
+            "opaque": v[16], "capturedAt": v[17], "unplacedPages": v[18]})
     index["buildings"] = []
     for i in range(count(MESH_MAX_BUILDINGS, "buildings")):
         v = INDEX_BUILDING.unpack(cur.take(INDEX_BUILDING.size, f"building {i}"))
@@ -1376,7 +1376,7 @@ def read_index(data):
             "pathHash": v[0], "subFirst": v[1], "subEnd": v[2], "source": v[3], "meshVertices": v[4],
             "centre": v[5:8], "size": v[8:11], "groupHash": v[11], "groupPos": v[12:15], "groupKey": v[15],
             "levelIndex": v[16], "grade": v[17], "dup": v[18], "footprint": v[19], "surface": v[20], "height": v[21],
-            "stored": v[22], "centroid": v[23], "capturedAt": v[24], "keys": keys})
+            "stored": v[22], "centroid": v[23], "capturedAt": v[24], "triedTarget": v[25], "triedLevel": v[26], "keys": keys})
     if cur.at != len(body):
         raise MeshError(f"carries {len(body) - cur.at} byte(s) after its last building")
     return index

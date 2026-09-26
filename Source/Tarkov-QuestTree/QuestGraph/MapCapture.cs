@@ -893,6 +893,12 @@ namespace QuestTree.QuestGraph
         /// on the GameWorld). This component hangs off the GameWorld, so it goes with the raid anyway.</summary>
         private MapMeshBuilder.SceneCache _sceneCache;
 
+        /// <summary>WP2 (fixes 2): consecutive captures, per map this session, that carried the stored mesh for a
+        /// temporary reason, and the count at which that is said once at Warning.</summary>
+        private static readonly Dictionary<string, int> _carries = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+        private const int CarriesBeforeWarning = 3;
+
         /// <summary>WP2: seconds the capture waits for the stored mesh and its sidecar to load and check on a worker
         /// before it builds from scratch instead.</summary>
         private const double MeshBaseWaitSeconds = 20d;
@@ -1317,9 +1323,24 @@ namespace QuestTree.QuestGraph
                     // WP2 (fixes): a temporary refusal carries the stored mesh - WriteMeta names it as it is - rather than a
                     // from-scratch build replacing the union every earlier stop added to
                     if (plan.MeshBaseTemporary)
+                    {
                         Plugin.LogSource?.LogInfo(
                             $"QuestTree: {plan.Key}'s stored 3D mesh could not be added to this time ({plan.MeshBaseRefused}) - it is " +
                             "carried unchanged and no mesh is built at this stop.");
+
+                        // WP2 (fixes 2): said once, at Warning, when it keeps happening - accumulation has stopped for this map
+                        _carries.TryGetValue(plan.Key, out var carries);
+                        _carries[plan.Key] = ++carries;
+
+                        if (carries == CarriesBeforeWarning)
+                            Plugin.LogSource?.LogWarning(
+                                $"QuestTree: {plan.Key}'s stored 3D mesh has been carried {carries} times - {plan.MeshBaseRefused}; " +
+                                "accumulation has stopped. Set '3D map: rebuild from scratch on the next capture' to start over.");
+                    }
+                    else
+                    {
+                        _carries.Remove(plan.Key);
+                    }
                 }
 
                 // The 3D geometry, after the last picture and before the meta that will name it.
@@ -1425,6 +1446,22 @@ namespace QuestTree.QuestGraph
                         // and y range are the stored ones byte for byte - the stored mesh, sidecar and pages are carried
                         // (WriteMeta's CarriedMesh), not rewritten with a new date.
                         plan.MeshCarriedUnchanged = true;
+
+                        // WP2 (fixes 2): a recorded attempt changed the sidecar - it is written beside the carried mesh (its
+                        // sha is that mesh's), the mesh itself is not
+                        if (mesh.IndexChanged && mesh.Index != null)
+                        {
+                            try
+                            {
+                                Stage(Path.Combine(plan.Dir, MapMeshIndex.FileNameFor(plan.Key)), MapMeshIndex.ToBytes(mesh.Index));
+                                plan.IndexStagedAlone = true;
+                            }
+                            catch (Exception ex)
+                            {
+                                Forget(plan, MapMeshIndex.FileNameFor(plan.Key));
+                                Plugin.LogSource?.LogDebug($"QuestTree: {plan.Key}'s updated sidecar could not be staged ({ex.Message}).");
+                            }
+                        }
 
                         Plugin.LogSource?.LogInfo(
                             $"QuestTree: {plan.Key} built no new 3D geometry this time - the stored mesh is kept.");
@@ -7181,7 +7218,9 @@ namespace QuestTree.QuestGraph
                 if (why != null)
                 {
                     load.Refused = $"the index does not fit it - {why}";
-                    load.Temporary = why == MapMeshIndex.CullingChanged;
+                    // only "known when stored, unknown now" is this once; "unknown when stored, known now" rebuilds, and the
+                    // rebuilt index says known
+                    load.Temporary = why == MapMeshIndex.CullingChanged && index.CullingKnown && !cullingKnown;
                     return load;
                 }
 
@@ -7197,7 +7236,6 @@ namespace QuestTree.QuestGraph
                     if (path == null || !File.Exists(path))
                     {
                         load.Refused = $"atlas page {p} is missing";
-                        load.Temporary = true;
                         return load;
                     }
 
@@ -8367,6 +8405,21 @@ namespace QuestTree.QuestGraph
 
                 if (mesh != null && plan.Mesh == null) atlas = CarriedAtlas(plan);
 
+                // WP2 (fixes 2): the sidecar updated beside a carried mesh - committed only when that mesh is the one named
+                if (plan.IndexStagedAlone)
+                {
+                    try
+                    {
+                        if (mesh != null && plan.Mesh == null) Commit(Path.Combine(plan.Dir, MapMeshIndex.FileNameFor(plan.Key)));
+                        else Forget(plan, MapMeshIndex.FileNameFor(plan.Key));
+                    }
+                    catch (Exception ex)
+                    {
+                        Forget(plan, MapMeshIndex.FileNameFor(plan.Key));
+                        Plugin.LogSource?.LogDebug($"QuestTree: {plan.Key}'s updated sidecar could not be put in place ({ex.Message}).");
+                    }
+                }
+
                 if (atlas != null)
                     foreach (var page in atlas)
                         keep.Add(page.File);
@@ -9261,6 +9314,10 @@ namespace QuestTree.QuestGraph
 
             /// <summary>WP2: a sidecar was staged beside the staged mesh.</summary>
             public bool IndexStaged;
+
+            /// <summary>WP2 (fixes 2): a sidecar was staged beside the CARRIED mesh (the mesh unchanged, a recorded
+            /// attempt changed the index).</summary>
+            public bool IndexStagedAlone;
 
             /// <summary>Set on a SIDE VIEW's own plan only: which side it is and how it is framed, which is
             /// what sends PositionCamera down the side branch. Null on the capture's plan.</summary>

@@ -30,8 +30,9 @@ namespace QuestTree.QuestGraph
     internal sealed class MapMeshIndex
     {
         /// <summary>The layout's version. A change to the byte table below is a new number; the reader refuses others,
-        /// which only costs one from-scratch capture.</summary>
-        internal const int Version = 1;
+        /// which only costs one from-scratch capture. 2 (WP2 fixes 2): each building's triedTarget and triedLevel, each
+        /// material's unplacedPages.</summary>
+        internal const int Version = 2;
 
         /// <summary>The first four bytes inside the deflate block.</summary>
         internal const string Magic = "QTMI";
@@ -59,6 +60,13 @@ namespace QuestTree.QuestGraph
         internal const byte FlagNoTexture = 8;
         internal const byte FlagMipDeficient = 16;
         internal const byte FlagNormalRefused = 32;
+
+        /// <summary>WP2 (fixes 2): the material had no room in the atlas (every page it could use was full) - its row has
+        /// no tile, and <see cref="Tile.UnplacedPages"/> says how many pages there were when it was tried.</summary>
+        internal const byte FlagUnplaced = 64;
+
+        /// <summary>An entry's <see cref="Entry.TriedLevel"/> when no level was ever tried.</summary>
+        internal const byte NeverTried = 255;
 
         /// <summary>A tile's <see cref="Tile.Mip"/> when the texture was not streamed or its level was unknown.</summary>
         internal const byte MipUnknown = 255;
@@ -167,6 +175,10 @@ namespace QuestTree.QuestGraph
 
             internal ushort CapturedAt;
 
+            /// <summary>WP2 (fixes 2): the atlas's page count when the material found no room (FlagUnplaced), so its
+            /// buildings are not re-read for a texture until a page could hold it.</summary>
+            internal byte UnplacedPages;
+
             internal bool Captured => (Flags & FlagCaptured) != 0;
 
             /// <summary>Whether a stored textured tile deserves a second capture into the same rect: late, failed, or
@@ -241,6 +253,14 @@ namespace QuestTree.QuestGraph
 
             /// <summary>meta.captures of the capture that stored it.</summary>
             internal ushort CapturedAt;
+
+            /// <summary>WP2 (fixes 2): the target it was last read (or re-read) at - a read that could not do better than
+            /// what is stored is not tried again until the target grows past this by more than the shortfall - and the
+            /// finest LOD level its group tried (<see cref="NeverTried"/> for none): a finer level is not tried again
+            /// until the group reads a finer one still.</summary>
+            internal int TriedTarget;
+
+            internal byte TriedLevel = NeverTried;
 
             /// <summary>Each atlas range's material key, in the order of the mesh building's Ranges.</summary>
             internal ulong[] RangeMaterials = new ulong[0];
@@ -387,6 +407,7 @@ namespace QuestTree.QuestGraph
                         w.Write(t.AvgB);
                         w.Write(t.OpaqueShare);
                         w.Write(t.CapturedAt);
+                        w.Write(t.UnplacedPages);
                     }
 
                     w.Write(index.Buildings.Count);
@@ -417,6 +438,8 @@ namespace QuestTree.QuestGraph
                         w.Write(e.StoredTriangles);
                         w.Write(e.Centroid);
                         w.Write(e.CapturedAt);
+                        w.Write(e.TriedTarget);
+                        w.Write(e.TriedLevel);
                         w.Write((byte)e.RangeMaterials.Length);
                         foreach (var key in e.RangeMaterials) w.Write(key);
                     }
@@ -581,7 +604,7 @@ namespace QuestTree.QuestGraph
                     Key = r.ReadUInt64(), TexW = r.ReadInt32(), TexH = r.ReadInt32(), Page = r.ReadInt32(), X = r.ReadInt32(),
                     Y = r.ReadInt32(), W = r.ReadInt32(), H = r.ReadInt32(), FlatPage = r.ReadInt32(), FlatX = r.ReadInt32(),
                     FlatY = r.ReadInt32(), Flags = r.ReadByte(), Mip = r.ReadByte(), AvgR = r.ReadByte(), AvgG = r.ReadByte(),
-                    AvgB = r.ReadByte(), OpaqueShare = r.ReadSingle(), CapturedAt = r.ReadUInt16(),
+                    AvgB = r.ReadByte(), OpaqueShare = r.ReadSingle(), CapturedAt = r.ReadUInt16(), UnplacedPages = r.ReadByte(),
                 };
 
                 if (!keys.Add(t.Key)) throw new InvalidDataException($"material {t.Key:x16} is listed twice");
@@ -602,7 +625,7 @@ namespace QuestTree.QuestGraph
                     Gx = r.ReadSingle(), Gy = r.ReadSingle(), Gz = r.ReadSingle(), GroupKey = r.ReadInt32(),
                     LevelIndex = r.ReadByte(), Grade = r.ReadByte(), Dup = r.ReadByte(), Footprint = r.ReadSingle(),
                     Surface = r.ReadSingle(), Height = r.ReadSingle(), StoredTriangles = r.ReadInt32(), Centroid = r.ReadSingle(),
-                    CapturedAt = r.ReadUInt16(),
+                    CapturedAt = r.ReadUInt16(), TriedTarget = r.ReadInt32(), TriedLevel = r.ReadByte(),
                 };
 
                 if (e.StoredTriangles < 0) throw new InvalidDataException($"building {i} has a negative triangle count");
@@ -733,13 +756,21 @@ namespace QuestTree.QuestGraph
         /// something to gain, so a scene read twice reads nothing twice: stored CLUSTERED (sub-grade 3); stored at a
         /// COARSER level than the one its group reads now; or its target at the scale the re-read will use exceeds what
         /// is stored by more than <paramref name="shortfall"/> AND its source holds more than is stored. Over budget (1) and
-        /// as it is (2) are what the same source gives again, so they are not re-read. targetNow 0 leaves the shortfall out.
+        /// as it is (2) are what the same source gives again, so they are not re-read. targetNow 0 leaves the degraded and
+        /// shortfall tests out (they are judged once the plan knows the target). WP2 fixes 2: a building whose last read
+        /// was at a target (triedTarget) not grown past by the shortfall, or whose group already tried the level read now
+        /// (triedLevel), is not read again.
         /// </summary>
-        internal static int ReReadReason(byte storedGrade, int currentLod, long stored, long source, long targetNow, double shortfall)
+        internal static int ReReadReason(byte storedGrade, int currentLod, long stored, long source, long targetNow, double shortfall,
+            int triedTarget, byte triedLevel)
         {
-            if (SubOfGrade(storedGrade) >= 3) return ReasonDegraded;
-            if (LevelOfGrade(storedGrade) > currentLod) return ReasonLevel;
-            if (targetNow > 0 && source > stored && Math.Min(source, targetNow) > stored * (1d + shortfall)) return ReasonShortfall;
+            // WP2 (fixes 2): a read that could not do better is not repeated until its target grows (or, for a level, until
+            // the group reads a finer level than the one tried) - so a scene read twice reads nothing twice
+            var grown = targetNow > 0 && (triedTarget <= 0 || targetNow > triedTarget * (1d + shortfall));
+
+            if (SubOfGrade(storedGrade) >= 3 && grown) return ReasonDegraded;
+            if (LevelOfGrade(storedGrade) > currentLod && (triedLevel == NeverTried || currentLod < triedLevel)) return ReasonLevel;
+            if (grown && source > stored && Math.Min(source, targetNow) > stored * (1d + shortfall)) return ReasonShortfall;
             return ReasonNone;
         }
 
