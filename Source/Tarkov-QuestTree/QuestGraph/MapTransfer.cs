@@ -499,8 +499,222 @@ namespace QuestTree.QuestGraph
 
             // Started or Queued in practice; the gates are re-checked here.
             var outcome = TryStartUpload(hold.Key);
+
+            // Sharing turned off while it was held: the player does not want it offered, next session either.
+            if (outcome == UploadStart.SharingOff) OwedMarker.Remove(hold.Key);
+
             if (!_uploading) StartNextPending();
             return outcome;
+        }
+
+        /// <summary>Forgets every owed and queued map and the owed marker - a host that declined (Q7).</summary>
+        private static void ForgetOwed()
+        {
+            _pendingUploads.Clear();
+            _owed.Clear();
+            OwedMarker.Clear();
+        }
+
+        /// <summary>
+        /// The end of one upload routine's run, whatever the outcome - stored, refused, timed out, or stopped by the
+        /// guard (step 7): its map comes off the owed marker unless it is owed or queued again, which the guard's
+        /// re-request (Q8) or a newer capture made. So the marker records exactly "an upload was owed and never got to
+        /// finish running". A failure a running routine saw keeps its old meaning: it is not retried.
+        /// </summary>
+        /// <param name="key">The map the routine uploaded.</param>
+        private static void EndUpload(string key)
+        {
+            if (string.IsNullOrEmpty(key)) return;
+            if (_owed.Contains(key) || _pendingUploads.Contains(key)) return;
+
+            OwedMarker.Remove(key);
+        }
+
+        /// <summary>
+        /// <c>captures/.upload-owed</c> (WP3 step 7): the maps whose one upload was owed and had not finished running,
+        /// one key per line, UTF-8. It covers the game exiting before the upload at a campaign's end has run - the raid
+        /// ending does not need it, since the upload's coroutine runs on the plugin object. At the ROOT of the captures folder,
+        /// which MapCatalog.ScanFolder and check-capture.py skip (both list folders only), and dot-named so nothing
+        /// that lists entries shows it. The next session's sync re-offers what is still owed (SyncOffThread,
+        /// TryTakeSync). Best effort: a failure costs a Debug line. Writes on the main thread; the sync worker reads.
+        /// </summary>
+        internal static class OwedMarker
+        {
+            internal const string FileName = ".upload-owed";
+
+            /// <summary>The folder the marker lives in, for the client harness; nothing in the mod sets it.</summary>
+            internal static string RootForTests { get; set; }
+
+            private static string FilePath()
+            {
+                var root = RootForTests;
+
+                if (root == null)
+                {
+                    var modPath = Path.GetDirectoryName(typeof(MapTransfer).Assembly.Location);
+                    if (string.IsNullOrEmpty(modPath)) return null;
+                    root = Path.Combine(modPath, "captures");
+                }
+
+                return Path.Combine(root, FileName);
+            }
+
+            /// <summary>The owed map keys, each once (case-insensitive), in file order; empty when there is no marker
+            /// or it cannot be read. Any thread.</summary>
+            internal static List<string> Read()
+            {
+                var keys = new List<string>();
+
+                try
+                {
+                    var path = FilePath();
+                    if (path == null || !File.Exists(path)) return keys;
+
+                    foreach (var line in File.ReadAllLines(path))
+                    {
+                        var key = line.Trim();
+                        if (!IsUsableKey(key)) continue;
+                        if (keys.Any(k => string.Equals(k, key, StringComparison.OrdinalIgnoreCase))) continue;
+                        keys.Add(key);
+                    }
+                }
+                catch
+                {
+                    // Deliberately empty - an unreadable marker is one this session does not act on.
+                }
+
+                return keys;
+            }
+
+            /// <summary>Records a map as owed. Main thread.</summary>
+            internal static void Add(string key)
+            {
+                var keys = Read();
+                if (string.IsNullOrEmpty(key) || keys.Any(k => string.Equals(k, key, StringComparison.OrdinalIgnoreCase))) return;
+
+                keys.Add(key);
+                Write(keys);
+            }
+
+            /// <summary>Forgets a map. Main thread.</summary>
+            internal static void Remove(string key)
+            {
+                var keys = Read();
+                if (keys.RemoveAll(k => string.Equals(k, key, StringComparison.OrdinalIgnoreCase)) == 0) return;
+
+                Write(keys);
+            }
+
+            /// <summary>Forgets every map. Main thread.</summary>
+            internal static void Clear()
+            {
+                if (Read().Count > 0) Write(new List<string>());
+            }
+
+            /// <summary>Writes the list through a temporary file, or removes the marker when it is empty.</summary>
+            private static void Write(List<string> keys)
+            {
+                try
+                {
+                    var path = FilePath();
+                    if (path == null) return;
+
+                    if (keys.Count == 0)
+                    {
+                        if (File.Exists(path)) File.Delete(path);
+                        return;
+                    }
+
+                    Directory.CreateDirectory(Path.GetDirectoryName(path));
+
+                    var temp = path + ".tmp";
+                    File.WriteAllLines(temp, keys, new System.Text.UTF8Encoding(false));
+                    if (File.Exists(path)) File.Delete(path);
+                    File.Move(temp, path);
+                }
+                catch (Exception ex)
+                {
+                    Plugin.LogSource?.LogDebug($"QuestTree: the owed-upload marker could not be written ({ex.Message}).");
+                }
+            }
+        }
+
+        /// <summary>What the next session does with an owed map, from this machine's capture and the host's index.</summary>
+        internal enum OwedCall
+        {
+            /// <summary>The host has no set of it, or an older one: offer it.</summary>
+            Offer,
+
+            /// <summary>The host's set is this capture or a newer one - the host would answer "older than the set on
+            /// the host", so offering it is only a warning to read.</summary>
+            Served,
+
+            /// <summary>This machine has no readable capture of it any more: forget it.</summary>
+            Drop
+        }
+
+        /// <summary>
+        /// The owed map's fate, by capturedAt alone and by the same comparison <see cref="LocalCaptureIsNewer"/> makes:
+        /// the host's set is "this capture or newer" when its instant is equal or later; a host set with no instant
+        /// this side can parse, or no set at all, loses. Pure, so the client harness checks it.
+        /// </summary>
+        /// <param name="localCapturedAt">This machine's capture meta's capturedAt, or null when there is no meta.</param>
+        /// <param name="hostCapturedAt">The host's entry's capturedAt, or null.</param>
+        /// <param name="hostHasEntry">Whether the host's index has an entry for the map (or its alias).</param>
+        internal static OwedCall OwedVerdict(string localCapturedAt, string hostCapturedAt, bool hostHasEntry)
+        {
+            var ours = Timestamp(localCapturedAt);
+            if (!ours.HasValue) return OwedCall.Drop;
+            if (!hostHasEntry) return OwedCall.Offer;
+
+            var theirs = Timestamp(hostCapturedAt);
+            return theirs.HasValue && theirs.Value >= ours.Value ? OwedCall.Served : OwedCall.Offer;
+        }
+
+        /// <summary>The host's index entry for an owed map: its own key first, then its alias - the host folds the two
+        /// ids of a pair onto one (see <see cref="AliasOf"/>).</summary>
+        internal static MapIndexEntryDto OwedEntry(List<MapIndexEntryDto> maps, string key)
+        {
+            if (maps == null || string.IsNullOrEmpty(key)) return null;
+
+            var alias = AliasOf(key);
+
+            return maps.FirstOrDefault(e => e != null && string.Equals((e.Map ?? "").Trim(), key, StringComparison.OrdinalIgnoreCase))
+                   ?? (alias == null
+                       ? null
+                       : maps.FirstOrDefault(e => e != null && string.Equals((e.Map ?? "").Trim(), alias, StringComparison.OrdinalIgnoreCase)));
+        }
+
+        /// <summary>
+        /// The sync worker's half of step 7: each map on the owed marker, judged against the host's index (an index
+        /// that answered, even empty). Fills <see cref="SyncResult.OwedServed"/>, <see cref="SyncResult.OwedOffer"/> and
+        /// <see cref="SyncResult.OwedGone"/> for <see cref="TryTakeSync"/> to act on. Nothing static written.
+        /// </summary>
+        private static void DecideOwed(List<MapIndexEntryDto> maps, SyncResult result)
+        {
+            foreach (var key in OwedMarker.Read())
+            {
+                string ours = null;
+
+                try
+                {
+                    var path = OwnCaptureMeta(key);
+                    if (path != null) ours = JsonConvert.DeserializeObject<MapCaptureMetaDto>(File.ReadAllText(path))?.CapturedAt;
+                }
+                catch (Exception ex)
+                {
+                    result.Debug.Add($"QuestTree: the owed capture of {key} could not be read ({ex.Message}).");
+                }
+
+                var entry = OwedEntry(maps, key);
+
+                switch (OwedVerdict(ours, entry?.CapturedAt ?? entry?.Meta?.CapturedAt, entry != null))
+                {
+                    case OwedCall.Served: result.OwedServed.Add(key); break;
+                    case OwedCall.Offer: result.OwedOffer.Add(key); break;
+                    default: result.OwedGone.Add(key); break;
+                }
+            }
         }
 
         /// <summary>The player's sharing setting, read defensively - a failed config bind leaves the entry null,
@@ -537,11 +751,11 @@ namespace QuestTree.QuestGraph
             {
                 PruneLapsedHolds();
 
-                // A host that declined takes nothing more this session - the queue and the owed maps go with it (Q7).
+                // A host that declined takes nothing more this session - the queue, the owed maps and the marker go
+                // with it (Q7).
                 if (_uploadsDeclined)
                 {
-                    _pendingUploads.Clear();
-                    _owed.Clear();
+                    ForgetOwed();
                     return;
                 }
 
@@ -592,8 +806,12 @@ namespace QuestTree.QuestGraph
                 // even that.
                 if (!SharingOn()) return UploadStart.SharingOff;
 
-                // Already said no. Silent from here - see _uploadsDeclined.
-                if (_uploadsDeclined) return UploadStart.Declined;
+                // Already said no. Silent from here - see _uploadsDeclined. Nothing owed survives it (Q7).
+                if (_uploadsDeclined)
+                {
+                    ForgetOwed();
+                    return UploadStart.Declined;
+                }
 
                 PruneLapsedHolds();
 
@@ -605,6 +823,9 @@ namespace QuestTree.QuestGraph
 
                     foreach (var h in _holds)
                         if (string.Equals(h.Key, key, StringComparison.OrdinalIgnoreCase)) h.Deferred++;
+
+                    // Step 7: on disk too, so a game that exits before the one upload has run offers it next session.
+                    OwedMarker.Add(key);
 
                     Plugin.LogSource?.LogDebug(
                         $"QuestTree: the capture of {key} is held back from the host until the {HoldWhy(key)} ends " +
@@ -1106,6 +1327,9 @@ namespace QuestTree.QuestGraph
             {
                 _uploading = false;
                 _uploadingKey = null;
+
+                // Step 7: off the owed marker, unless it is owed or queued again.
+                EndUpload(key);
 
                 // The next capture that finished while this one was going up (review F32).
                 StartNextPending();
@@ -2947,6 +3171,17 @@ namespace QuestTree.QuestGraph
             foreach (var line in result.Info) Plugin.LogSource?.LogInfo(line);
             foreach (var line in result.Warnings) Plugin.LogSource?.LogWarning(line);
 
+            // WP3 step 7: the uploads the last session owed and never finished. A map owed or queued again THIS session
+            // is left alone - its own upload takes it off the marker.
+            try
+            {
+                TakeOwed(result);
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug($"QuestTree: the owed uploads could not be offered ({ex.Message}).");
+            }
+
             if (result.Landed <= 0) return true;
 
             try
@@ -2966,6 +3201,46 @@ namespace QuestTree.QuestGraph
             return true;
         }
 
+        /// <summary>The main thread's half of step 7: the marker loses what the host already has and what is gone
+        /// from this machine, and each map the host has an older set of, or none, is offered - one upload at a time,
+        /// through the queue.</summary>
+        private static void TakeOwed(SyncResult result)
+        {
+            bool Busy(string key) =>
+                _owed.Contains(key) || _pendingUploads.Contains(key) ||
+                string.Equals(_uploadingKey, key, StringComparison.OrdinalIgnoreCase);
+
+            foreach (var key in result.OwedServed)
+            {
+                if (Busy(key)) continue;
+
+                OwedMarker.Remove(key);
+                Plugin.LogSource?.LogDebug($"QuestTree: the host already has this machine's capture of {key}.");
+            }
+
+            foreach (var key in result.OwedGone)
+            {
+                if (Busy(key)) continue;
+
+                OwedMarker.Remove(key);
+                Plugin.LogSource?.LogDebug($"QuestTree: an upload of {key} was owed, but this machine has no capture of it any more.");
+            }
+
+            foreach (var key in result.OwedOffer)
+            {
+                if (Busy(key)) continue;
+
+                if (!SharingOn())
+                {
+                    Plugin.LogSource?.LogDebug($"QuestTree: {key}'s capture was not shared before the game closed, and sharing is off.");
+                    continue;
+                }
+
+                Plugin.LogSource?.LogInfo($"QuestTree: {key}'s capture was not shared before the game closed - offering it now.");
+                UploadCapture(key);
+            }
+        }
+
         /// <summary>What one sync did, for the main thread to apply. Log lines rather than logging -
         /// see <see cref="TryTakeSync"/>.</summary>
         private sealed class SyncResult
@@ -2977,6 +3252,18 @@ namespace QuestTree.QuestGraph
             /// <summary>How many maps' picture sets were written. Anything above zero means the
             /// reader has to look again.</summary>
             public int Landed;
+
+            /// <summary>Whether the host answered with an index this build reads, even an empty one (WP3 step 7).</summary>
+            public bool IndexRead;
+
+            /// <summary>Owed maps the host already has this capture of, or a newer one: off the marker.</summary>
+            public readonly List<string> OwedServed = new List<string>();
+
+            /// <summary>Owed maps the host has an older set of, or none: offered now.</summary>
+            public readonly List<string> OwedOffer = new List<string>();
+
+            /// <summary>Owed maps this machine has no readable capture of any more: off the marker.</summary>
+            public readonly List<string> OwedGone = new List<string>();
         }
 
         /// <summary>
@@ -2994,6 +3281,12 @@ namespace QuestTree.QuestGraph
                 if (root == null) return result;
 
                 var index = FetchIndex(result);
+
+                // WP3 step 7: the maps this machine owed the host when the game last closed, judged against an index that
+                // answered (even with nothing in it). No index - an old host, a host down - leaves the marker for the
+                // next session.
+                if (result.IndexRead) DecideOwed(index?.Maps, result);
+
                 if (index == null) return result;
 
                 long budget = 0;
@@ -3087,6 +3380,9 @@ namespace QuestTree.QuestGraph
                     $"{MapIndexDto.SupportedSchemaVersion} - its pictures are ignored. Update Quest Tracker to use them.");
                 return null;
             }
+
+            // An index this build reads, even an empty one: enough to judge the owed maps by (WP3 step 7).
+            result.IndexRead = true;
 
             if (index.Maps == null || index.Maps.Count == 0)
             {
