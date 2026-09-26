@@ -52,7 +52,8 @@ namespace QuestTree.QuestGraph
     /// a time and the buildings one renderer to a frame, each sized so no frame of ours is much over
     /// 30 ms - the player is standing in a raid while this runs. The whole building phase is capped
     /// at the request's <see cref="Request.BuildingSeconds"/> (what the capture's own clock leaves of
-    /// its budget) and <see cref="MaxBuildingTriangles"/> triangles, and says in its log line what it
+    /// its budget) and at the map's triangle cap - derived per build from what the buildings need and
+    /// what this machine's memory holds (<see cref="ApplyBudget"/>) - and says in its log line what it
     /// cut.
     ///
     /// MEMORY. The working set is deliberately small: the two NativeArrays a ray chunk needs are
@@ -60,15 +61,44 @@ namespace QuestTree.QuestGraph
     /// leaked TempJob allocation is a console warning every frame for the rest of the session); a
     /// band holds one float per cell while the y range is being measured and drops it the moment the
     /// cells are quantised; and a building's vertices go into ushort lists as they are read rather
-    /// than being kept as floats. The peak estimate is in the debug line at the end.
+    /// than being kept as floats. The peak estimate is in the info line at the end.
     /// </summary>
     internal static class MapMeshBuilder
     {
         // --- the constants phase 3-0 settled ------------------------------------------------------
 
-        /// <summary>Metres a relief cell covers. Two, as the probe settled it: 151k rays for Customs
-        /// in 45 ms, and a 2 m ground grid is finer than the 3-4 px/m the picture draped over it.</summary>
-        internal const float ReliefCellMetres = 2f;
+        /// <summary>The relief cell every extent gets when it fits the format's band cap at it: one metre
+        /// (WP7; was a fixed 2 m). Rollback: 2f.</summary>
+        internal const float PreferredReliefCellMetres = 1f;
+
+        /// <summary>The step the cell grows by when an extent does not fit <see cref="MapMeshFile.MaxCellsPerBand"/>
+        /// at the preferred cell: half a metre at a time, so a larger map degrades by as little as it must.</summary>
+        internal const float ReliefCellStepMetres = 0.5f;
+
+        /// <summary>
+        /// The relief cell for an extent, in metres - derived, never a per-map number:
+        /// max(preferred, sqrt(area / band cap) rounded up to the step), then one step more while
+        /// ceil(w / c) x ceil(h / c) is still over the band cap (the ceil on each axis can push the product past
+        /// area / c^2). Worked examples: 1118x539 m -> 1 m; 2.5x2.5 km -> 1.5 m; 4x4 km -> 2 m. Unity-free, so the
+        /// harness and tools/check-capture.py hold the same rule. A span that is not a positive number gets the
+        /// preferred cell, and Prepare refuses the grid as before.
+        /// </summary>
+        /// <param name="spanX">The extent's width, metres.</param>
+        /// <param name="spanZ">The extent's depth, metres.</param>
+        internal static float ReliefCellFor(double spanX, double spanZ)
+        {
+            if (!(spanX > 0d) || !(spanZ > 0d) || double.IsInfinity(spanX) || double.IsInfinity(spanZ))
+                return PreferredReliefCellMetres;
+
+            var area = spanX * spanZ;
+            var c = Math.Max(PreferredReliefCellMetres,
+                Math.Ceiling(Math.Sqrt(area / MapMeshFile.MaxCellsPerBand) / ReliefCellStepMetres) * ReliefCellStepMetres);
+
+            while (Math.Ceiling(spanX / c) * Math.Ceiling(spanZ / c) > MapMeshFile.MaxCellsPerBand)
+                c += ReliefCellStepMetres;
+
+            return (float)c;
+        }
 
         /// <summary>Rays cast in one frame. The probe's chunk size, measured at 45 ms for eight of
         /// them, so a chunk is single-digit milliseconds.</summary>
@@ -170,13 +200,63 @@ namespace QuestTree.QuestGraph
         /// groups.</summary>
         private const string ImpostorShaderMark = "Impostor";
 
-        /// <summary>Triangles kept across every building of one map: stage V's cap (user, 2026-09-23). It
-        /// is half of <see cref="MapMeshFile.MaxTriangles"/> (6 M), so the file's own caps are never the
-        /// thing that refuses a capture; the per-building limits and the ledger (<see cref="BudgetLedger"/>)
-        /// are what hold the total under it.</summary>
-        internal const int MaxBuildingTriangles = 3_000_000;
+        /// <summary>
+        /// The most triangles any build stores, whatever the machine: half of <see cref="MapMeshFile.MaxTriangles"/>
+        /// (40 M), so the file's own bound is never what refuses a capture. The map's cap is derived per build
+        /// (<see cref="ApplyBudget"/>): min(ceil(demand / <see cref="BudgetShare"/>), <see cref="MemoryCeiling()"/>,
+        /// this). Rollback: 3,000,000 (the pre-WP7 fixed cap).
+        /// </summary>
+        internal const long BuilderAbsoluteTriangles = 20_000_000;
 
-        /// <summary>The share of <see cref="MaxBuildingTriangles"/> the area budget plans with. The rest is
+        /// <summary>The least the memory ceiling ever is: the pre-WP7 fixed cap, so no machine gets less than
+        /// before. Rollback: 3,000,000.</summary>
+        internal const long MemoryFloorTriangles = 3_000_000;
+
+        /// <summary>Bytes a stored triangle costs the build in the raid: 12 of indices and 4 of pending material,
+        /// ~16 of vertex (x, z, float height, float UV at about one vertex a triangle), ~24 of atlas split copies
+        /// and ~10 serialised - about 64.</summary>
+        internal const long BytesPerTriangleInRaid = 64;
+
+        /// <summary>Bytes a triangle costs the 3D view on the GPU: 12 of indices plus ~1.2 vertices at 32 bytes,
+        /// ~50, 64 with margin.</summary>
+        internal const long BytesPerTriangleOnGpu = 64;
+
+        /// <summary>The share of RAM the build may fill (a sixteenth - the raid holds most of it) and of VRAM
+        /// the menu view may (an eighth). The only tuning numbers of the memory ceiling.</summary>
+        internal const long RamShare = 16;
+        internal const long VramShare = 8;
+
+        /// <summary>MAIN THREAD (SystemInfo). The most triangles this machine builds and draws. See
+        /// <see cref="MemoryCeiling(long, long)"/>.</summary>
+        internal static long MemoryCeiling() =>
+            MemoryCeiling(SystemInfo.systemMemorySize, SystemInfo.graphicsMemorySize);
+
+        /// <summary>
+        /// The memory ceiling from the machine's RAM and VRAM in MB: max(<see cref="MemoryFloorTriangles"/>,
+        /// min(RAM / 16 / 64 B, VRAM / 8 / 64 B)), the VRAM term dropped when the card reports none. 16 GB / 8 GB
+        /// -> 16,777,216; 8 GB / 4 GB -> 8,388,608; a card reporting 512 MB -> the floor. Unity-free.
+        /// </summary>
+        /// <param name="ramMb">SystemInfo.systemMemorySize.</param>
+        /// <param name="vramMb">SystemInfo.graphicsMemorySize; zero or less when unknown.</param>
+        internal static long MemoryCeiling(long ramMb, long vramMb)
+        {
+            var ram = Math.Max(0L, ramMb) << 20;
+            var vram = vramMb > 0 ? vramMb << 20 : 0L;
+            var byRam = ram / RamShare / BytesPerTriangleInRaid;
+            var byVram = vram > 0 ? vram / VramShare / BytesPerTriangleOnGpu : long.MaxValue;
+
+            return Math.Max(MemoryFloorTriangles, Math.Min(byRam, byVram));
+        }
+
+        /// <summary>The map's triangle cap (D6): min(ceil(demand / <see cref="BudgetShare"/>), the memory ceiling,
+        /// <see cref="BuilderAbsoluteTriangles"/>). Unity-free.</summary>
+        /// <param name="demand">What the buildings need (<see cref="AreaBudget.Demand"/>).</param>
+        /// <param name="memoryCeiling">This machine's <see cref="MemoryCeiling()"/>.</param>
+        internal static long CapFor(long demand, long memoryCeiling) =>
+            Math.Min((long)Math.Ceiling(Math.Max(0L, demand) / BudgetShare),
+                Math.Min(memoryCeiling, BuilderAbsoluteTriangles));
+
+        /// <summary>The share of the map's cap the area budget plans with. The rest is
         /// never reserved: it is the headroom a decimation's overshoot (up to its hard limit), a group's
         /// coarse fallback or a source stored as it is is paid from, so the buildings at the end of the list
         /// keep what the budget promised them.</summary>
@@ -1017,8 +1097,36 @@ namespace QuestTree.QuestGraph
             /// still in flight - is read once.</summary>
             internal readonly HashSet<Renderer> Claimed = new HashSet<Renderer>();
 
-            /// <summary>The map's triangle budget - see <see cref="BudgetLedger"/>.</summary>
-            internal readonly BudgetLedger Ledger = new BudgetLedger(MaxBuildingTriangles);
+            /// <summary>The map's triangle budget - see <see cref="BudgetLedger"/>. Replaced by ApplyBudget with one over
+            /// the derived cap; until then (and if the budget step fails) the pre-WP7 floor.</summary>
+            internal BudgetLedger Ledger = new BudgetLedger(MemoryFloorTriangles);
+
+            /// <summary>The map's triangle cap, derived by ApplyBudget (D6): what StoreWorld holds the total to.</summary>
+            internal long Cap = MemoryFloorTriangles;
+
+            /// <summary>What the budget's sources need (D4), this machine's memory ceiling (D5) and what it came
+            /// from, for the building line.</summary>
+            internal long Demand;
+            internal long MemoryCeiling;
+            internal int RamMb;
+            internal int VramMb;
+
+            /// <summary>The pre-WP7 rule's scale on the same list - the floor every later target keeps (D3).</summary>
+            internal double LegacyScale = 1d;
+
+            /// <summary>Budgeted buildings whose target is their pre-WP7 floor rather than their surface target.</summary>
+            internal int HeldAtFloor;
+
+            /// <summary>Stored buildings' world-box surface and their measured triangle area, m2 - the evidence
+            /// for whether the box basis over- or under-states real surfaces on a map.</summary>
+            internal double BoxSurface;
+            internal double MeasuredSurface;
+
+            /// <summary>Buildings left untextured because the atlas split would have passed a vertex cap.</summary>
+            internal int SplitOverCap;
+
+            /// <summary>The relief cell this build derived from its extent (<see cref="ReliefCellFor"/>).</summary>
+            internal float CellMetres = PreferredReliefCellMetres;
 
             /// <summary>The source just captured on the main thread, waiting to be launched.</summary>
             internal Source Captured;
@@ -1316,8 +1424,14 @@ namespace QuestTree.QuestGraph
             /// <summary>Triangles in this renderer's share of its mesh - the source's size.</summary>
             internal long SourceTriangles;
 
-            /// <summary>Its world bounds' footprint, x times z, in square metres.</summary>
+            /// <summary>Its world bounds' footprint, x times z, in square metres. The pre-WP7 floor's basis.</summary>
             internal double Footprint;
+
+            /// <summary>Its world bounds' surface, 2(wh + wd + hd), in square metres - the budget's basis (WP7).</summary>
+            internal double Surface;
+
+            /// <summary>The source's measured triangle area, m2, once a worker has placed it (0 until then).</summary>
+            internal double MeasuredSurface;
 
             /// <summary>The triangles it may be stored with (stage V's area budget); 0 until decided.</summary>
             internal int Target;
@@ -1455,6 +1569,10 @@ namespace QuestTree.QuestGraph
             internal bool OverLimit;
             internal bool SeamsRelaxed;
             internal long SourceTriangles;
+
+            /// <summary>The placed source's summed triangle area, m2 (WP7: the measured-surface evidence).</summary>
+            internal double SurfaceArea;
+
             internal int Dropped;
             internal long DecodedBytes;
             internal double WorkerMs;
@@ -1527,13 +1645,18 @@ namespace QuestTree.QuestGraph
             var spanX = request.MaxX - request.MinX;
             var spanZ = request.MaxZ - request.MinZ;
 
-            var width = (int)Math.Ceiling(spanX / ReliefCellMetres);
-            var height = (int)Math.Ceiling(spanZ / ReliefCellMetres);
+            // Derived from the extent (D8): 1 m wherever it fits the band cap, coarser by half a metre only
+            // where it does not - so no extent can throw here and lose the whole mesh.
+            job.CellMetres = ReliefCellFor(spanX, spanZ);
+
+            var width = (int)Math.Ceiling(spanX / job.CellMetres);
+            var height = (int)Math.Ceiling(spanZ / job.CellMetres);
 
             if (width <= 0 || height <= 0)
                 throw new InvalidOperationException(
-                    $"the extent is {spanX:0.0}x{spanZ:0.0} m, which is no grid at {ReliefCellMetres} m cells");
+                    $"the extent is {spanX:0.0}x{spanZ:0.0} m, which is no grid at {job.CellMetres} m cells");
 
+            // An assertion now: ReliefCellFor chose the cell so this cannot fire.
             if ((long)width * height > MapMeshFile.MaxCellsPerBand)
                 throw new InvalidOperationException(
                     $"{width}x{height} cells is over the format's cap of {MapMeshFile.MaxCellsPerBand:#,##0}");
@@ -1845,13 +1968,13 @@ namespace QuestTree.QuestGraph
         /// <param name="job">The build.</param>
         /// <param name="col">The column, 0 at the extent's MinX edge.</param>
         private static float CellCentreX(Job job, int col) =>
-            (float)(job.Request.MinX + (col + 0.5d) * ReliefCellMetres);
+            (float)(job.Request.MinX + (col + 0.5d) * job.CellMetres);
 
         /// <summary>The world z of a cell row's centre.</summary>
         /// <param name="job">The build.</param>
         /// <param name="row">The row, 0 at the extent's MinZ edge.</param>
         private static float CellCentreZ(Job job, int row) =>
-            (float)(job.Request.MinZ + (row + 0.5d) * ReliefCellMetres);
+            (float)(job.Request.MinZ + (row + 0.5d) * job.CellMetres);
 
         /// <summary>The relief's one log line: the grid, the rays, the time and the hit rate. The hit
         /// rate is the number to read - phase 3-0 measured 100 % on Customs from either end, and
@@ -1875,7 +1998,9 @@ namespace QuestTree.QuestGraph
             Plugin.LogSource?.LogInfo(
                 $"QuestTree: relief for {job.Request.Map} - {job.Bands.Count} band(s), " +
                 $"{(first == null ? 0 : first.Width)}x{(first == null ? 0 : first.Height)} cells at " +
-                $"{N(ReliefCellMetres)} m, {N(job.Rays)} rays in {N(job.ReliefClock.Elapsed.TotalMilliseconds)} ms, " +
+                $"{job.CellMetres.ToString("0.0#", CultureInfo.InvariantCulture)} m (derived from the {N(job.Request.MaxX - job.Request.MinX)} x " +
+                $"{N(job.Request.MaxZ - job.Request.MinZ)} m extent and the {N(MapMeshFile.MaxCellsPerBand)}-cell band cap), " +
+                $"{N(job.Rays)} rays in {N(job.ReliefClock.Elapsed.TotalMilliseconds)} ms, " +
                 $"{Pct(job.Hits, job.Rays)} hit; bands: {BandShares(job)}{BelowNotes(job)}.");
 
             // Said only when it happened, and per band: the evidence for whether InteriorMaxHits is
@@ -2073,7 +2198,7 @@ namespace QuestTree.QuestGraph
             job.File.Bands.Add(new MapMeshFile.ReliefBand
             {
                 Level = band.Source.Level,
-                CellMetres = ReliefCellMetres,
+                CellMetres = job.CellMetres,
                 Width = band.Width,
                 Height = band.Height,
                 Heights = band.Codes,
@@ -2691,6 +2816,7 @@ namespace QuestTree.QuestGraph
 
                     candidate.SourceTriangles = SubmeshTriangles(candidate);
                     candidate.Footprint = Math.Abs((double)candidate.Bounds.size.x * candidate.Bounds.size.z);
+                    candidate.Surface = BoxSurface(candidate.Bounds.size);
 
                     if (candidate.Group == null && candidate.SourceTriangles > MaxSourceTriangles) job.InputGuarded++;
                 }
@@ -2715,9 +2841,18 @@ namespace QuestTree.QuestGraph
             return triangles;
         }
 
-        /// <summary>The area budget over every candidate that is its group's source now: the targets,
-        /// scaled by one factor when the map's stored total would pass <see cref="BudgetShare"/> of
-        /// <see cref="MaxBuildingTriangles"/>, and each one RESERVED in the ledger. The share keeps the rest
+        /// <summary>A world box's surface, 2(wh + wd + hd), in square metres.</summary>
+        /// <param name="s">The box's size.</param>
+        internal static double BoxSurface(Vector3 s) => BoxSurface(s.x, s.y, s.z);
+
+        /// <summary>A box's surface from its three sides. Unity-free.</summary>
+        internal static double BoxSurface(double w, double h, double d) =>
+            2d * (Math.Abs(w * h) + Math.Abs(w * d) + Math.Abs(h * d));
+
+        /// <summary>The area budget over every candidate that is its group's source now: the targets at 20 per m2
+        /// of box surface with the pre-WP7 target as a floor, the map's cap DERIVED from what they need and what
+        /// this machine holds (D4-D6), scaled by one factor when the planned total would pass
+        /// <see cref="BudgetShare"/> of it, and each one RESERVED in the ledger. The share keeps the rest
         /// of the cap unreserved - the headroom a decimation's overshoot, a fallback's coarse level or an
         /// undecimated source is paid from. See <see cref="AreaBudget"/> and <see cref="BudgetLedger"/>.</summary>
         /// <param name="job">The build.</param>
@@ -2730,42 +2865,60 @@ namespace QuestTree.QuestGraph
                     IsSource(job, candidate))
                     sources.Add(candidate);
 
+            var surfaces = new double[sources.Count];
             var footprints = new double[sources.Count];
             var triangles = new long[sources.Count];
 
             for (var i = 0; i < sources.Count; i++)
             {
+                surfaces[i] = sources[i].Surface;
                 footprints[i] = sources[i].Footprint;
                 triangles[i] = sources[i].SourceTriangles;
             }
 
-            var cap = (long)(MaxBuildingTriangles * BudgetShare);
-            var targets = AreaBudget.Targets(footprints, triangles, cap, out var scale);
+            // D4-D6: what the buildings need at scale 1, what this machine holds, and the cap from both.
+            var legacy = AreaBudget.LegacyTargets(footprints, triangles, out _);
+            var demand = AreaBudget.Demand(surfaces, footprints, legacy, triangles);
+
+            job.RamMb = SystemInfo.systemMemorySize;
+            job.VramMb = SystemInfo.graphicsMemorySize;
+            job.MemoryCeiling = MemoryCeiling(job.RamMb, job.VramMb);
+            job.Demand = demand;
+
+            var cap = CapFor(demand, job.MemoryCeiling);
+            job.Cap = cap;
+
+            // Nothing is reserved yet (the budget runs before the pipeline), so the ledger is replaced whole.
+            job.Ledger = new BudgetLedger(cap);
+
+            var targets = AreaBudget.Targets(surfaces, footprints, triangles, (long)(cap * BudgetShare), out var scale,
+                out var floors, out var legacyScale);
 
             for (var i = 0; i < sources.Count; i++)
             {
                 sources[i].Target = targets[i];
                 sources[i].Reserved = Math.Min(triangles[i], targets[i]);
                 job.Ledger.Reserve(sources[i].Reserved);
+
+                if (floors[i] > AreaBudget.Scaled(AreaBudget.Basis(surfaces[i], footprints[i]), scale)) job.HeldAtFloor++;
             }
 
             job.BudgetScale = scale;
+            job.LegacyScale = legacyScale;
             job.Budgeted = job.Candidates.Count;
         }
 
         /// <summary>A candidate's target: the one the budget gave it, or - for a renderer that became a
-        /// source after the budget was set (a group switched to its coarse level) - its footprint at the
-        /// same density and scale.</summary>
+        /// source after the budget was set (a group switched to its coarse level) - its box surface at the
+        /// same density and scale, floored by the pre-WP7 rule on its footprint at that rule's scale.</summary>
         /// <param name="job">The build.</param>
         /// <param name="candidate">The candidate.</param>
         private static int TargetFor(Job job, Candidate candidate)
         {
             if (candidate.Target > 0) return candidate.Target;
 
-            var basis = Math.Min(AreaBudget.MaxTrianglesPerBuilding,
-                Math.Max(AreaBudget.MinTriangles, candidate.Footprint * AreaBudget.TrianglesPerSquareMetre));
-
-            candidate.Target = Math.Max(AreaBudget.MinTriangles, (int)(basis * job.BudgetScale));
+            candidate.Target = AreaBudget.Target(AreaBudget.Basis(candidate.Surface, candidate.Footprint), job.BudgetScale,
+                AreaBudget.LegacyTarget(candidate.Footprint, job.LegacyScale));
 
             return candidate.Target;
         }
@@ -2879,6 +3032,7 @@ namespace QuestTree.QuestGraph
                 Format = mesh.GetVertexAttributeFormat(VertexAttribute.Position),
                 Dimension = mesh.GetVertexAttributeDimension(VertexAttribute.Position),
                 Footprint = Math.Abs((double)size.x * size.z),
+                Surface = BoxSurface(size),
             };
 
             candidate.Stride = candidate.Stream >= 0 ? mesh.GetVertexBufferStride(candidate.Stream) : 0;
@@ -3094,7 +3248,14 @@ namespace QuestTree.QuestGraph
                 var code = StoreWorld(job, candidate, mesh);
                 job.Ledger.Settle(limit, code == Stored ? mesh.Triangles : 0);
                 settled = true;
-                if (code == Stored) committed = true;
+
+                if (code == Stored)
+                {
+                    committed = true;
+                    job.BoxSurface += candidate.Surface;
+                    job.MeasuredSurface += candidate.MeasuredSurface;
+                }
+
                 return code;
             }
 
@@ -3136,6 +3297,8 @@ namespace QuestTree.QuestGraph
 
                     return;
                 }
+
+                if (outcome != null && outcome.SurfaceArea > 0d) candidate.MeasuredSurface = outcome.SurfaceArea;
 
                 if (outcome != null)
                 {
@@ -3506,6 +3669,7 @@ namespace QuestTree.QuestGraph
             if (world == null) return outcome;
 
             outcome.SourceTriangles = world.Triangles;
+            outcome.SurfaceArea = MeshDecimator.Area(world.P, world.T);
 
             if (world.Triangles <= source.Limit)
             {
@@ -4094,7 +4258,7 @@ namespace QuestTree.QuestGraph
 
             // The ledger admitted this building and Apply checked any overshoot against the headroom, so
             // this cannot trip - it is the last line under the map's cap, not the budget itself.
-            if (job.Triangles + kept > MaxBuildingTriangles)
+            if (job.Triangles + kept > job.Cap)
             {
                 job.OverBudget++;
                 return Refused;
@@ -4945,6 +5109,17 @@ namespace QuestTree.QuestGraph
             var source = split.Source;
             var n = source.Length;
 
+            // The split adds vertices, and nothing else re-checks the caps before Validate would refuse the WHOLE
+            // file at write: past either, this building stays untextured (its projected textures) instead. The
+            // file's running total counts the splits already mapped, which ApplyAtlas adds all at once.
+            if (n > MapMeshFile.MaxVerticesPerBuilding ||
+                job.Vertices + job.SplitVertices + (n - (long)building.X.Length) > MapMeshFile.MaxVerticesTotal)
+            {
+                job.UntexturedBuildings++;
+                job.SplitOverCap++;
+                return;
+            }
+
             var x = new ushort[n];
             var z = new ushort[n];
             var y = new float[n];
@@ -5333,9 +5508,15 @@ namespace QuestTree.QuestGraph
 
             Plugin.LogSource?.LogInfo(
                 $"QuestTree: buildings for {job.Request.Map} - {N(job.Kept)} of {N(job.Candidates.Count)} " +
-                $"candidates kept, {N(job.Triangles)} triangles stored of the {N(MaxBuildingTriangles)} cap; " +
-                $"{Millions(job.SourceDecimated)} source triangles decimated ({N(job.Decimated)} buildings, " +
-                $"{AreaBudget.TrianglesPerSquareMetre.ToString("0.0", f1)}/m2, scaled x{job.BudgetScale.ToString("0.00", f1)}) in " +
+                $"candidates kept, {N(job.Triangles)} triangles stored of the {N(job.Cap)} cap (demand {N(job.Demand)}, " +
+                $"memory ceiling {N(job.MemoryCeiling)} from RAM {N(job.RamMb)} MB / VRAM {N(job.VramMb)} MB, absolute " +
+                $"{N(BuilderAbsoluteTriangles)}); {AreaBudget.TrianglesPerSquareMetre.ToString("0.0", f1)}/m2 of box surface, " +
+                $"scaled x{job.BudgetScale.ToString("0.00", f1)}, {N(job.HeldAtFloor)} building(s) held at their pre-WP7 floor; " +
+                $"surface: box {N(job.BoxSurface)} m2, triangles {N(job.MeasuredSurface)} m2 (ratio " +
+                $"{(job.BoxSurface > 0d ? job.MeasuredSurface / job.BoxSurface : 0d).ToString("0.00", f1)}), stored density " +
+                $"{(job.MeasuredSurface > 0d ? job.Triangles / job.MeasuredSurface : 0d).ToString("0.0", f1)} per m2" +
+                (job.SplitOverCap > 0 ? $", {N(job.SplitOverCap)} left untextured over a vertex cap after the atlas split" : "") +
+                $"; {Millions(job.SourceDecimated)} source triangles decimated ({N(job.Decimated)} buildings) in " +
                 $"{(job.WorkerMs / 1000d).ToString("0.0", f1)} s on up to {N(job.PeakWorkers)} worker(s), peak workspace " +
                 $"{(job.PeakWorkspaceBytes / (1024d * 1024d)).ToString("0.0", f1)} MB; " +
                 $"{N(job.FellBack)} building(s) fell back to the game's LOD, {N(job.StoredUndecimated)} stored " +
@@ -5371,7 +5552,7 @@ namespace QuestTree.QuestGraph
                 (job.ClusterTimedOut > 0 ? $" {N(job.ClusterTimedOut)} cluster(s) out of time." : "") +
                 (job.Request.Abort ? " ABORTED by the capture's watchdog - finished with what was stored." : "") +
                 (job.OverBudget > 0
-                    ? $" {N(job.OverBudget)} did not fit the {N(MaxBuildingTriangles)}-triangle budget."
+                    ? $" {N(job.OverBudget)} did not fit the {N(job.Cap)}-triangle budget."
                     : "") +
                 (job.Failed + job.Unstored > 0
                     ? $" {N(job.Failed)} worker(s) failed, {N(job.Unstored)} building(s) had no path left."
@@ -5514,9 +5695,16 @@ namespace QuestTree.QuestGraph
             var peak = relief + floats + job.RendererCount * 8L + job.PeakReadbackBytes +
                        result.BuildingBytes + candidates + buffers;
 
-            Plugin.LogSource?.LogDebug(
+            // WP7: said at Info, against the memory ceiling it rests on (D5: M triangles at 64 B, a sixteenth of
+            // RAM) - the check that the 64 B/triangle estimate holds on a real build.
+            var ceilingBytes = job.MemoryCeiling * BytesPerTriangleInRaid;
+
+            Plugin.LogSource?.LogInfo(
                 $"QuestTree: {job.Request.Map}'s mesh holds {file.Describe()}; peak working set about " +
                 $"{(peak / (1024d * 1024d)).ToString("0.0", CultureInfo.InvariantCulture)} MB " +
+                $"of the memory ceiling's {N(job.MemoryCeiling)} triangles x {N(BytesPerTriangleInRaid)} B = " +
+                $"{(ceilingBytes / (1024d * 1024d)).ToString("0", CultureInfo.InvariantCulture)} MB " +
+                $"({(ceilingBytes > 0 ? 100d * peak / ceilingBytes : 0d).ToString("0", CultureInfo.InvariantCulture)} % used) " +
                 $"(grids {N(relief + floats)} B, {N(job.RendererCount)} renderer(s) scanned, " +
                 $"{N(job.Candidates.Count)} candidate(s) held, stored buildings {N(result.BuildingBytes)} B, " +
                 $"pipeline peak {N(job.PeakPipelineBytes)} B over up to {N(job.PeakWorkers)} worker(s), " +
@@ -6144,8 +6332,8 @@ namespace QuestTree.QuestGraph
         /// trusted; under it the seams-relaxed retry runs.</summary>
         private const double AreaKept = 0.97;
 
-        /// <summary>A mesh's surface area.</summary>
-        private static double Area(float[] p, int[] t)
+        /// <summary>A mesh's surface area. Internal: MapMeshBuilder.Process measures each placed source with it.</summary>
+        internal static double Area(float[] p, int[] t)
         {
             if (p == null || t == null) return 0d;
 
@@ -7898,72 +8086,167 @@ namespace QuestTree.QuestGraph
     }
 
     /// <summary>
-    /// Stage V's triangle budget, by AREA: each building's target is its footprint times
-    /// <see cref="TrianglesPerSquareMetre"/>, held to [<see cref="MinTriangles"/>,
-    /// <see cref="MaxTrianglesPerBuilding"/>]; and when what the map would store - each building's
-    /// target, or its source when that is smaller, since a source under its target is stored as it is -
-    /// adds up to more than the cap, every target is scaled by ONE factor (floored at MinTriangles),
-    /// the largest factor that fits, found by bisection. One factor rather than largest-first, because
-    /// largest-first is what kept 276 of Customs' 12,906 candidates and dropped every mid-size structure.
+    /// The triangle budget (WP7): each building's basis is its world box's SURFACE times
+    /// <see cref="TrianglesPerSquareMetre"/>, held to [<see cref="MinTriangles"/>, <see cref="MaxTrianglesPerBuilding"/>];
+    /// its target is that basis scaled by ONE factor over the whole map, and never below the target the pre-WP7 rule
+    /// (6 per m2 of footprint, 60,000 a building, its own scale against 2,700,000) gives the same building on the same
+    /// list - so no building's target goes down, on any machine, on any map (Q1). What the map would store - each
+    /// building's target, or its source when that is smaller - is held to the cap by the largest factor that fits,
+    /// found by bisection. One factor rather than largest-first, because largest-first is what kept 276 of Customs'
+    /// 12,906 candidates and dropped every mid-size structure.
     ///
-    /// Unity-free so the harness proves the scaling sums to the cap on the shipped assembly.
+    /// Why surface: a 62 m pylon on a 5x15 m footprint was stored with 288 triangles by the footprint rule; its box
+    /// surface is 2,630 m2, a basis of 52,600. Unity-free so the harness proves the rules on the shipped assembly.
     /// </summary>
     internal static class AreaBudget
     {
-        internal const double TrianglesPerSquareMetre = 6.0;
-        internal const int MinTriangles = 24;
-        internal const int MaxTrianglesPerBuilding = 60_000;
+        /// <summary>What the basis is measured over. Rollback: <see cref="BasisArea.Footprint"/> with
+        /// TrianglesPerSquareMetre 6.0 and MaxTrianglesPerBuilding 60,000.</summary>
+        internal enum BasisArea
+        {
+            Surface,
+            Footprint
+        }
 
-        /// <summary>The targets, and the factor they were scaled by (1 when the map fits).</summary>
-        /// <param name="footprints">Each building's footprint in square metres.</param>
-        /// <param name="sources">Each building's source triangle count.</param>
-        /// <param name="cap">The map's triangle cap.</param>
-        /// <param name="scale">The factor applied to every target.</param>
-        internal static int[] Targets(double[] footprints, long[] sources, long cap, out double scale)
+        /// <summary>The basis in use. Static readonly so the choice is not a constant the compiler folds.</summary>
+        internal static readonly BasisArea BudgetBasis = BasisArea.Surface;
+
+        /// <summary>Triangles per m2 of box SURFACE (was 6.0 of footprint). Rollback: 6.0.</summary>
+        internal const double TrianglesPerSquareMetre = 20.0;
+
+        internal const int MinTriangles = 24;
+
+        /// <summary>A building's largest basis (was 60,000). Rollback: 60,000.</summary>
+        internal const int MaxTrianglesPerBuilding = 250_000;
+
+        /// <summary>The pre-WP7 rule, kept ONLY as each building's floor (never a cap).</summary>
+        internal const double LegacyTrianglesPerSquareMetre = 6.0;
+        internal const int LegacyMaxTrianglesPerBuilding = 60_000;
+
+        /// <summary>The pre-WP7 rule's planned cap: 0.9 x the old fixed 3,000,000.</summary>
+        internal const long LegacyPlannedCap = 2_700_000;
+
+        /// <summary>A building's unscaled basis (D2): clamp(20 x surface, 24, 250,000) - or the footprint under the
+        /// rollback basis.</summary>
+        /// <param name="surface">Its world box's surface, m2.</param>
+        /// <param name="footprint">Its world box's footprint, m2.</param>
+        internal static double Basis(double surface, double footprint)
+        {
+            var area = BudgetBasis == BasisArea.Surface ? surface : footprint;
+
+            return Math.Min(MaxTrianglesPerBuilding, Math.Max(MinTriangles, Math.Max(0d, area) * TrianglesPerSquareMetre));
+        }
+
+        /// <summary>The pre-WP7 basis: clamp(6 x footprint, 24, 60,000).</summary>
+        /// <param name="footprint">Its world box's footprint, m2.</param>
+        internal static double LegacyBasis(double footprint) =>
+            Math.Min(LegacyMaxTrianglesPerBuilding,
+                Math.Max(MinTriangles, Math.Max(0d, footprint) * LegacyTrianglesPerSquareMetre));
+
+        /// <summary>The pre-WP7 target at that rule's scale (D3).</summary>
+        internal static int LegacyTarget(double footprint, double legacyScale) => Scaled(LegacyBasis(footprint), legacyScale);
+
+        /// <summary>A basis at a scale, never under <see cref="MinTriangles"/>.</summary>
+        internal static int Scaled(double basis, double scale) => Math.Max(MinTriangles, (int)(basis * scale));
+
+        /// <summary>A target: the scaled basis, never under the building's floor.</summary>
+        internal static int Target(double basis, double scale, int floor) => Math.Max(floor, Scaled(basis, scale));
+
+        /// <summary>The pre-WP7 targets on this list (D3): the old rule, its constants and its own bisection against
+        /// <see cref="LegacyPlannedCap"/> - exactly what the build before WP7 would have given each building.</summary>
+        /// <param name="footprints">Each building's footprint, m2.</param>
+        /// <param name="sources">Each building's source triangles.</param>
+        /// <param name="legacyScale">The old rule's factor on this list.</param>
+        internal static int[] LegacyTargets(double[] footprints, long[] sources, out double legacyScale)
         {
             var n = footprints.Length;
             var basis = new double[n];
 
-            for (var i = 0; i < n; i++)
-                basis[i] = Math.Min(MaxTrianglesPerBuilding,
-                    Math.Max(MinTriangles, Math.Max(0d, footprints[i]) * TrianglesPerSquareMetre));
+            for (var i = 0; i < n; i++) basis[i] = LegacyBasis(footprints[i]);
 
-            scale = 1d;
-
-            if (Stored(basis, sources, 1d) > cap)
-            {
-                double lo = 0d, hi = 1d;
-
-                for (var step = 0; step < 50; step++)
-                {
-                    var mid = (lo + hi) * 0.5;
-                    if (Stored(basis, sources, mid) <= cap) lo = mid;
-                    else hi = mid;
-                }
-
-                scale = lo;
-            }
+            legacyScale = Scale(basis, null, sources, LegacyPlannedCap);
 
             var targets = new int[n];
-            for (var i = 0; i < n; i++) targets[i] = Target(basis[i], scale);
+            for (var i = 0; i < n; i++) targets[i] = Scaled(basis[i], legacyScale);
 
             return targets;
         }
 
-        /// <summary>What the map stores at a scale: each building's scaled target, or its source when
-        /// that is smaller.</summary>
-        /// <param name="basis">The unscaled targets.</param>
-        /// <param name="sources">The source triangle counts.</param>
-        /// <param name="scale">The factor.</param>
-        internal static long Stored(double[] basis, long[] sources, double scale)
+        /// <summary>
+        /// The targets with floors (D7): t_i(s) = max(floor_i, max(24, (int)(basis_i x s))), s the largest in [0, 1]
+        /// with the sum of min(src_i, t_i(s)) at most the cap. Monotone in s, and t_i(0) = floor_i, so a solution
+        /// exists whenever the floors alone fit - which the caller's cap guarantees (at least 0.9 x 3 M, or the whole
+        /// demand).
+        /// </summary>
+        /// <param name="surfaces">Each building's box surface, m2.</param>
+        /// <param name="footprints">Each building's footprint, m2.</param>
+        /// <param name="sources">Each building's source triangles.</param>
+        /// <param name="cap">The planned cap (the map's cap x <see cref="MapMeshBuilder.BudgetShare"/>).</param>
+        /// <param name="scale">The factor applied to every basis (1 when the map fits).</param>
+        /// <param name="floors">Each building's pre-WP7 target.</param>
+        /// <param name="legacyScale">The pre-WP7 rule's factor on this list.</param>
+        internal static int[] Targets(double[] surfaces, double[] footprints, long[] sources, long cap, out double scale,
+            out int[] floors, out double legacyScale)
+        {
+            floors = LegacyTargets(footprints, sources, out legacyScale);
+
+            var n = surfaces.Length;
+            var basis = new double[n];
+
+            for (var i = 0; i < n; i++) basis[i] = Basis(surfaces[i], footprints[i]);
+
+            scale = Scale(basis, floors, sources, cap);
+
+            var targets = new int[n];
+            for (var i = 0; i < n; i++) targets[i] = Target(basis[i], scale, floors[i]);
+
+            return targets;
+        }
+
+        /// <summary>What the buildings need (D4): the sum of min(source, max(floor, basis)) - the stored total at
+        /// scale 1, and never more than the sources.</summary>
+        internal static long Demand(double[] surfaces, double[] footprints, int[] floors, long[] sources)
         {
             var total = 0L;
 
-            for (var i = 0; i < basis.Length; i++) total += Math.Min(sources[i], Target(basis[i], scale));
+            for (var i = 0; i < sources.Length; i++)
+                total += Math.Min(sources[i], Math.Max(floors[i], (long)Basis(surfaces[i], footprints[i])));
 
             return total;
         }
 
-        private static int Target(double basis, double scale) => Math.Max(MinTriangles, (int)(basis * scale));
+        /// <summary>The largest factor in [0, 1] at which the stored total fits the cap: 1 when it fits unscaled,
+        /// else by 50 steps of bisection.</summary>
+        private static double Scale(double[] basis, int[] floors, long[] sources, long cap)
+        {
+            if (Stored(basis, floors, sources, 1d) <= cap) return 1d;
+
+            double lo = 0d, hi = 1d;
+
+            for (var step = 0; step < 50; step++)
+            {
+                var mid = (lo + hi) * 0.5;
+                if (Stored(basis, floors, sources, mid) <= cap) lo = mid;
+                else hi = mid;
+            }
+
+            return lo;
+        }
+
+        /// <summary>What the map stores at a scale: each building's target (floored when floors are given), or
+        /// its source when that is smaller.</summary>
+        /// <param name="basis">The unscaled bases.</param>
+        /// <param name="floors">Each building's floor, or null for none.</param>
+        /// <param name="sources">The source triangle counts.</param>
+        /// <param name="scale">The factor.</param>
+        internal static long Stored(double[] basis, int[] floors, long[] sources, double scale)
+        {
+            var total = 0L;
+
+            for (var i = 0; i < basis.Length; i++)
+                total += Math.Min(sources[i], floors != null ? Target(basis[i], scale, floors[i]) : Scaled(basis[i], scale));
+
+            return total;
+        }
     }
 }

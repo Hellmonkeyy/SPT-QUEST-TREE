@@ -65,7 +65,16 @@ those, exit 1 for an originR 0.5 m off, a non-orthogonal basis, a PNG one row ta
 missing side file, N carrying S's forward vector, an up vector negated (unit and orthogonal, but
 upside down), and a size that is not ceil(span * ppm).
 
-Usage:  python tools/check-capture.py [captures-root] [zones-folder]
+WP7 (dynamic budgets): the format's hard bounds are 40 M triangles / 80 M vertices, a building is at most
+1 M triangles (the host's rule), a file over the builder's absolute 20 M triangles or over 512 MiB is an
+ERROR (no build writes it, no host takes it), the inflate bound is computed from the meta's declared
+cells and triangles (the host's D14 rule, capped at 1 GiB), and every band's cell must be
+relief_cell_for(extent) - the builder's ReliefCellFor - except a 2 m band where the rule gives 1 m,
+which is a WARN "captured before WP7 at 2 m". With --compare OLD_ROOT, each map's buildings are matched
+by key against the same map's mesh under OLD_ROOT, and a key OLD has that NEW lacks, or a key NEW
+stores with fewer triangles, is an ERROR (WP7's Q1/Q2: no building loses detail).
+
+Usage:  python tools/check-capture.py [captures-root] [zones-folder] [--compare OLD_ROOT]
         defaults: C:\\Games\\SPT\\BepInEx\\plugins\\QuestTree\\captures
                   C:\\Games\\SPT\\SPT_Runtime\\user\\mods\\QuestTree\\zones
 """
@@ -78,9 +87,27 @@ import sys
 import zlib
 from pathlib import Path
 
-CAPTURES = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(
+def _arguments(argv):
+    """(positional arguments, --compare root or None). Kept positional for the two roots every caller
+    already passes; --compare OLD_ROOT may stand anywhere."""
+    positional, compare, k = [], None, 0
+    while k < len(argv):
+        if argv[k] == "--compare":
+            if k + 1 >= len(argv):
+                print("CAPTURE CHECK FAILED: --compare needs the OLD captures root after it")
+                sys.exit(1)
+            compare = Path(argv[k + 1])
+            k += 2
+            continue
+        positional.append(argv[k])
+        k += 1
+    return positional, compare
+
+
+_POSITIONAL, COMPARE = _arguments(sys.argv[1:])
+CAPTURES = Path(_POSITIONAL[0]) if len(_POSITIONAL) > 0 else Path(
     r"C:\Games\SPT\BepInEx\plugins\QuestTree\captures")
-ZONES = Path(sys.argv[2]) if len(sys.argv) > 2 else Path(
+ZONES = Path(_POSITIONAL[1]) if len(_POSITIONAL) > 1 else Path(
     r"C:\Games\SPT\SPT_Runtime\user\mods\QuestTree\zones")
 
 SCHEMA_VERSION = 1     # the capture-meta shape this script reads
@@ -100,17 +127,46 @@ MESH_MAX_BANDS = 8
 MESH_MAX_CELLS_PER_BAND = 4_000_000
 MESH_MAX_BUILDINGS = 20_000
 MESH_MAX_VERTICES_PER_BUILDING = 2_000_000
-MESH_MAX_VERTICES_TOTAL = 12_000_000   # stage V: was 4 M
-MESH_MAX_TRIANGLES = 6_000_000         # stage V: was 2 M (the building budget went 300 k -> 3 M)
+MESH_MAX_VERTICES_TOTAL = 80_000_000   # WP7: was 12 M (stage V: 4 M) - a hard bound, 2 x the triangle bound
+MESH_MAX_TRIANGLES = 40_000_000        # WP7: was 6 M - a hard bound, 2 x the builder's absolute
+MESH_BUILDER_ABSOLUTE = 20_000_000     # MapMeshBuilder.BuilderAbsoluteTriangles: no build stores more
+MESH_MAX_TRIANGLES_PER_BUILDING = 1_000_000  # MapMeshFile.MaxTrianglesPerBuilding, the host's per-building rule
+MESH_MAX_FILE_BYTES = 512 * 1024 * 1024      # the protocol absolute (MapStore.MeshAbsolute): no host takes more
 MESH_MAX_ATLAS_PAGES = 8               # MapMeshFile.MaxAtlasPages
 MESH_MAX_RANGES_PER_BUILDING = 64      # MapMeshFile.MaxRangesPerBuilding
 ATLAS_PAGE_SIZE = 4096                 # MapMeshFile.AtlasPageSize
 ATLAS_TILE_MAX = 256                   # MapMeshFile.AtlasTileMax
 ATLAS_TILE_ALIGN = 4                   # MapMeshFile.TileAlign (the viewer's DXT1 blocks)
-# What the file may inflate to. 8 bands of 4 M cells is 96 MB by the caps above; the bound exists so
-# a corrupt or hostile deflate stream cannot be expanded until this process dies, which is the same
-# reason MapMeshFile checks every count before it allocates.
-MESH_MAX_INFLATED_BYTES = 192 * 1024 * 1024
+# What the file may inflate to: the host's D14 rule from the meta's DECLARED counts - 3 B a cell, 42 B a
+# triangle (12 of indices, at most 3 vertices x 10 B), 2,328 B a building slot (counts and 64 ranges) for
+# up to 20,000 of them, plus 64 of header - capped at 1 GiB. The bound exists so a corrupt or hostile
+# deflate stream cannot be expanded until this process dies; a file that under-declares is refused by
+# the cell and triangle checks against the meta.
+MESH_MAX_INFLATED_BYTES = 1 << 30
+
+
+def inflate_bound(cells, triangles):
+    """The host's D14 inflate bound (MapStore) from a meta's declared cells and triangles."""
+    return min(MESH_MAX_INFLATED_BYTES, 64 + 3 * cells + 42 * triangles + 20_000 * 2_328)
+
+
+# The relief cell rule, identical to MapMeshBuilder.ReliefCellFor: 1 m wherever the extent fits
+# 4,000,000 cells a band at it, coarser by half a metre at a time only when it does not.
+RELIEF_PREFERRED_CELL = 1.0
+RELIEF_CELL_STEP = 0.5
+RELIEF_PRE_WP7_CELL = 2.0
+
+
+def relief_cell_for(span_x, span_z):
+    """The cell MapMeshBuilder.ReliefCellFor derives for an extent of span_x by span_z metres."""
+    if not (span_x > 0 and span_z > 0) or math.isinf(span_x) or math.isinf(span_z):
+        return RELIEF_PREFERRED_CELL
+    area = span_x * span_z
+    c = max(RELIEF_PREFERRED_CELL,
+            math.ceil(math.sqrt(area / MESH_MAX_CELLS_PER_BAND) / RELIEF_CELL_STEP) * RELIEF_CELL_STEP)
+    while math.ceil(span_x / c) * math.ceil(span_z / c) > MESH_MAX_CELLS_PER_BAND:
+        c += RELIEF_CELL_STEP
+    return c
 MESH_SUFFIX = "-mesh.bin"   # MapMeshFile.FileNameFor
 # The file's y range, which every height and vertex in it is quantised over. MapMeshBuilder takes it
 # from the ground's ray hits and lets buildings widen it by at most 100 m each way (YRangeMarginMetres),
@@ -375,7 +431,7 @@ def check_zone(key, extent, levels, errors, warnings):
     return column, number(zextent.get("rotation"))
 
 
-def inflate_mesh(data):
+def inflate_mesh(data, bound=MESH_MAX_INFLATED_BYTES):
     """The mesh file's bytes inflated, or a MeshError. The whole file is ONE raw-deflate block with
     the magic inside it (MapMeshFile.Write), so there is no header to read without inflating and
     zlib.decompressobj(-15) is the only way in.
@@ -385,11 +441,12 @@ def inflate_mesh(data):
     a stream that never ended is a truncation whatever its contents looked like."""
     un = zlib.decompressobj(-15)
     try:
-        out = un.decompress(data, MESH_MAX_INFLATED_BYTES + 1)
+        out = un.decompress(data, bound + 1)
     except zlib.error as exc:
         raise MeshError(f"is not a deflate stream ({exc})")
-    if len(out) > MESH_MAX_INFLATED_BYTES:
-        raise MeshError(f"inflates to more than {MESH_MAX_INFLATED_BYTES // 1048576} MB")
+    if len(out) > bound:
+        raise MeshError(f"inflates to more than {bound} bytes - the bound its meta's declared cells and "
+                        f"triangles allow")
     if not un.eof:
         raise MeshError(f"is a TRUNCATED deflate stream - it inflated {len(out)} byte(s) and then "
                         f"ran out mid-block")
@@ -430,11 +487,12 @@ class MeshCursor:
         return struct.unpack(f"<{count}I", self.take(4 * count, what)) if count else ()
 
 
-def read_mesh(data):
+def read_mesh(data, bound=MESH_MAX_INFLATED_BYTES):
     """The mesh file as a dict, or a MeshError naming the first thing that is wrong. Follows
     MapMeshFile.Write's byte table exactly, and checks every count against the format's own cap
-    BEFORE it reads the array behind it."""
-    body = inflate_mesh(data)
+    BEFORE it reads the array behind it. "keys" maps each building key to its triangles (summed if a
+    key repeats), for --compare."""
+    body = inflate_mesh(data, bound)
     cur = MeshCursor(body)
 
     magic = cur.take(4, "the magic")
@@ -458,6 +516,8 @@ def read_mesh(data):
         "buildings": 0,
         "cells": 0,
         "triangles": 0,
+        "maxBuilding": 0,
+        "keys": {},
     }
 
     if version != MESH_VERSION:
@@ -535,7 +595,12 @@ def read_mesh(data):
         if indices < 0 or indices % 3 != 0:
             raise MeshError(f"{where} (key {key}) claims {indices} indices, which is not a "
                             f"non-negative multiple of 3")
+        if indices // 3 > MESH_MAX_TRIANGLES_PER_BUILDING:
+            raise MeshError(f"{where} (key {key}) claims {indices // 3} triangles; the cap is "
+                            f"{MESH_MAX_TRIANGLES_PER_BUILDING} a building (the host refuses it)")
         mesh["triangles"] += indices // 3
+        mesh["maxBuilding"] = max(mesh["maxBuilding"], indices // 3)
+        mesh["keys"][key] = mesh["keys"].get(key, 0) + indices // 3
         if mesh["triangles"] > MESH_MAX_TRIANGLES:
             raise MeshError(f"claims {mesh['triangles']} triangles by {where}; the cap is "
                             f"{MESH_MAX_TRIANGLES}")
@@ -668,6 +733,11 @@ def check_mesh(meta, folder, key, extent, levels, errors, warnings):
         errors.append(f"{key}: mesh.sha256 {sha!r} is not 64 lower-case hex digits")
         return "mesh UNREADABLE"
 
+    if claimed_bytes > MESH_MAX_FILE_BYTES:
+        errors.append(f"{key}: mesh.bytes {claimed_bytes} is over {MESH_MAX_FILE_BYTES // 1048576} MiB - no "
+                      f"host takes a mesh that large (the one-body download's absolute)")
+        return "mesh TOO LARGE"
+
     data = path.read_bytes()
 
     if len(data) != claimed_bytes:
@@ -680,10 +750,29 @@ def check_mesh(meta, folder, key, extent, levels, errors, warnings):
                       f"{sha[:16]}... - this is not the mesh this meta describes")
 
     try:
-        mesh = read_mesh(data)
+        mesh = read_mesh(data, inflate_bound(claimed_cells, claimed_triangles))
     except MeshError as exc:
         errors.append(f"{key}: {rel} {exc}")
         return "mesh BROKEN"
+
+    meta["_meshKeys"] = mesh["keys"]
+
+    if mesh["triangles"] > MESH_BUILDER_ABSOLUTE:
+        errors.append(f"{key}: {rel} holds {mesh['triangles']} triangles, over the builder's absolute "
+                      f"{MESH_BUILDER_ABSOLUTE} - not a file this build wrote")
+
+    # The relief cell: derived from the extent by one rule, which this script holds too.
+    derived = relief_cell_for(mesh["maxX"] - mesh["minX"], mesh["maxZ"] - mesh["minZ"])
+    for band in mesh["bands"]:
+        if abs(band["cell"] - derived) <= 1e-6:
+            continue
+        if abs(band["cell"] - RELIEF_PRE_WP7_CELL) <= 1e-6 and abs(derived - RELIEF_PREFERRED_CELL) <= 1e-6:
+            warnings.append(f"{key}: {rel} band {band['level']} was captured before WP7 at 2 m - the rule now "
+                            f"gives {derived:g} m for this extent; the next capture samples it finer")
+        else:
+            errors.append(f"{key}: {rel} band {band['level']} has a {band['cell']:g} m cell but "
+                          f"relief_cell_for({mesh['maxX'] - mesh['minX']:g}, {mesh['maxZ'] - mesh['minZ']:g}) "
+                          f"is {derived:g} m - not what the builder derives for this extent")
 
     y_span = mesh["yMax"] - mesh["yMin"]
     if y_span > MESH_MAX_Y_SPAN:
@@ -731,13 +820,15 @@ def check_mesh(meta, folder, key, extent, levels, errors, warnings):
                       f"{claimed_triangles}")
 
     hit = sum(band["hit"] for band in mesh["bands"])
+    cell_text = ", ".join(sorted({f"{band['cell']:g}" for band in mesh["bands"]})) or "-"
     meta["_meshAtlasPages"] = mesh["atlasPages"]
 
     return (f"mesh {len(data) / 1048576:.2f} MB, {len(mesh['bands'])} band(s), "
             f"{mesh['cells']} cells ({(100 * hit / mesh['cells']) if mesh['cells'] else 0:.0f} % "
             f"hit), {mesh['buildings']} building(s), "
             f"{mesh['triangles']} triangles, {mesh['textured']} textured in {mesh['ranges']} range(s) "
-            f"over {mesh['atlasPages']} atlas page(s)")
+            f"over {mesh['atlasPages']} atlas page(s), per-building max {mesh['maxBuilding']} triangles, "
+            f"cell {cell_text} m")
 
 
 def png_is(path, width, height):
@@ -1097,6 +1188,65 @@ def check_capture(folder, errors, warnings):
             captured)
 
 
+def mesh_keys(folder):
+    """(keys -> triangles, None) for a capture folder's mesh, or (None, why)."""
+    metas = [p for p in sorted(folder.iterdir()) if p.is_file() and p.name.lower().endswith(".map.json")]
+    if len(metas) != 1:
+        return None, "no single meta"
+    meta, why = load_json(metas[0])
+    if not isinstance(meta, dict):
+        return None, why or "the meta is not an object"
+    block = meta.get("mesh")
+    if not isinstance(block, dict) or not isinstance(block.get("file"), str):
+        return None, "no mesh"
+    parts = Path(block["file"].replace("\\", "/"))
+    if parts.is_absolute() or ".." in parts.parts or not (folder / parts).is_file():
+        return None, f"mesh file {block['file']!r} not found"
+    cells, triangles = block.get("cells"), block.get("triangles")
+    bound = (inflate_bound(cells, triangles)
+             if isinstance(cells, int) and isinstance(triangles, int) and cells >= 0 and triangles >= 0
+             else MESH_MAX_INFLATED_BYTES)
+    try:
+        return read_mesh((folder / parts).read_bytes(), bound)["keys"], None
+    except MeshError as exc:
+        return None, str(exc)
+
+
+def compare(new_root, old_root, errors, warnings):
+    """--compare: per map present in both roots, every building key of OLD must be in NEW with at least
+    as many triangles (WP7 Q1/Q2). Returns the summary lines."""
+    lines = []
+    if not old_root.is_dir():
+        errors.append(f"--compare: no OLD captures folder at {old_root}")
+        return lines
+    for folder in sorted(p for p in new_root.iterdir() if p.is_dir()):
+        old_folder = old_root / folder.name
+        if not old_folder.is_dir():
+            warnings.append(f"{folder.name}: --compare has no {folder.name} under {old_root} - not compared")
+            continue
+        new_keys, why_new = mesh_keys(folder)
+        old_keys, why_old = mesh_keys(old_folder)
+        if old_keys is None:
+            warnings.append(f"{folder.name}: --compare cannot read the OLD mesh ({why_old}) - not compared")
+            continue
+        if new_keys is None:
+            errors.append(f"{folder.name}: --compare: OLD has a mesh and NEW's cannot be read ({why_new})")
+            continue
+        missing = sorted(k for k in old_keys if k not in new_keys)
+        fewer = sorted((k, old_keys[k], new_keys[k]) for k in old_keys
+                       if k in new_keys and new_keys[k] < old_keys[k])
+        if missing:
+            errors.append(f"{folder.name}: --compare: {len(missing)} building key(s) in OLD are absent from NEW "
+                          f"(first: {', '.join(str(k) for k in missing[:8])})")
+        if fewer:
+            errors.append(f"{folder.name}: --compare: {len(fewer)} building key(s) have fewer triangles in NEW "
+                          f"(first: {', '.join(f'{k} {o}->{n}' for k, o, n in fewer[:8])})")
+        lines.append(f"{folder.name}: compared {len(old_keys)} OLD key(s) with {len(new_keys)} NEW: "
+                     f"{len(missing)} missing, {len(fewer)} with fewer triangles, "
+                     f"{sum(new_keys.values())} vs {sum(old_keys.values())} triangles")
+    return lines
+
+
 def main():
     if not CAPTURES.is_dir():
         fail_hard(f"no captures folder at {CAPTURES} - pass one as the first argument")
@@ -1118,6 +1268,12 @@ def main():
         print(f"  {line}")
         print(f"{'':>4}captured {captured}")
     print()
+
+    if COMPARE is not None:
+        print(f"compare:  NEW {CAPTURES} against OLD {COMPARE}")
+        for line in compare(CAPTURES, COMPARE, errors, warnings):
+            print(f"  {line}")
+        print()
 
     for w in warnings:
         print(f"WARN   {w}")

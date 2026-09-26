@@ -2231,6 +2231,17 @@ namespace QuestTree.QuestGraph
         /// <param name="bytes">Its contents.</param>
         private static void Stage(string path, byte[] bytes) => File.WriteAllBytes(Staged(path), bytes);
 
+        /// <summary>Stages the first <paramref name="length"/> bytes of a buffer - a stream's own buffer, written
+        /// without copying it to an array of its exact size first. Same bytes on disk as <see cref="Stage(string, byte[])"/>.</summary>
+        /// <param name="path">The file these bytes are for.</param>
+        /// <param name="bytes">A buffer whose first <paramref name="length"/> bytes are the contents.</param>
+        /// <param name="length">How many bytes of it are the file.</param>
+        private static void Stage(string path, byte[] bytes, int length)
+        {
+            using (var stream = new FileStream(Staged(path), FileMode.Create, FileAccess.Write, FileShare.None, 1 << 16))
+                stream.Write(bytes, 0, length);
+        }
+
         /// <summary>Puts a staged file in place, and does nothing when none was staged - a floor
         /// whose sidecar could not be encoded, for instance.
         ///
@@ -7149,9 +7160,15 @@ namespace QuestTree.QuestGraph
             {
                 return Task.Run(() =>
                 {
-                    var bytes = MapMeshFile.ToBytes(file);
+                    // Into a pre-sized stream, kept as its own buffer and length: the same bytes and hash as
+                    // ToBytes, one copy instead of three (WP7 S9.2).
+                    using (var stream = MapMeshFile.ToStream(file))
+                    {
+                        var buffer = stream.GetBuffer();
+                        var length = (int)stream.Length;
 
-                    return new SerialisedMesh { Bytes = bytes, Sha256 = Sha256(bytes) };
+                        return new SerialisedMesh { Bytes = buffer, Length = length, Sha256 = Sha256(buffer, length) };
+                    }
                 });
             }
             catch (Exception ex)
@@ -7163,10 +7180,12 @@ namespace QuestTree.QuestGraph
             }
         }
 
-        /// <summary>A mesh file's bytes and their hash, as the worker hands them back.</summary>
+        /// <summary>A mesh file's bytes and their hash, as the worker hands them back. <see cref="Bytes"/> is the
+        /// stream's own buffer: only its first <see cref="Length"/> bytes are the file.</summary>
         private sealed class SerialisedMesh
         {
             public byte[] Bytes;
+            public int Length;
             public string Sha256;
         }
 
@@ -7200,9 +7219,10 @@ namespace QuestTree.QuestGraph
                 }
 
                 var bytes = serialised.Result.Bytes;
+                var length = serialised.Result.Length;
                 var sha = serialised.Result.Sha256;
 
-                Stage(Path.Combine(plan.Dir, plan.MeshFile), bytes);
+                Stage(Path.Combine(plan.Dir, plan.MeshFile), bytes, length);
 
                 // The bands that ended up in the file, for the one thing WriteMeta can check and this
                 // cannot: that they are exactly the floors the meta will name.
@@ -7213,7 +7233,7 @@ namespace QuestTree.QuestGraph
                 plan.Mesh = new CaptureMesh
                 {
                     File = plan.MeshFile,
-                    Bytes = bytes.Length,
+                    Bytes = length,
                     Version = MapMeshFile.Version,
                     Cells = mesh.Cells,
                     Triangles = mesh.Triangles,
@@ -7225,7 +7245,7 @@ namespace QuestTree.QuestGraph
                 // separately. The third number is what is actually on the disk.
                 plan.MeshNote =
                     $"{MB(mesh.ReliefBytes)} MB relief + {MB(mesh.BuildingBytes)} MB buildings, " +
-                    $"{MB(bytes.Length)} MB deflated, sha256 {ShortSha(sha)}";
+                    $"{MB(length)} MB deflated, sha256 {ShortSha(sha)}";
             }
             catch (Exception ex)
             {
@@ -7358,11 +7378,14 @@ namespace QuestTree.QuestGraph
         /// machine's Maps tab, or a client that downloaded the set from a host - can tell a mesh that
         /// belongs to a meta from one that was replaced under it.</summary>
         /// <param name="bytes">The bytes to hash.</param>
-        private static string Sha256(byte[] bytes)
+        private static string Sha256(byte[] bytes) => Sha256(bytes, bytes.Length);
+
+        /// <summary>The hash of a buffer's first <paramref name="length"/> bytes, as <see cref="Sha256(byte[])"/>.</summary>
+        private static string Sha256(byte[] bytes, int length)
         {
             using (var sha = System.Security.Cryptography.SHA256.Create())
             {
-                var hash = sha.ComputeHash(bytes);
+                var hash = sha.ComputeHash(bytes, 0, length);
                 var text = new StringBuilder(hash.Length * 2);
 
                 foreach (var b in hash) text.Append(b.ToString("x2", CultureInfo.InvariantCulture));

@@ -31,7 +31,7 @@ namespace QuestTree.QuestGraph
     ///
     /// Why quantised: a float32 x/y/z per vertex and a float32 per relief cell doubles the file for
     /// precision nothing can see. Over Customs' 559 m span sixteen bits is 8.5 mm a step, and over the
-    /// measured y range (-22..74 m on Customs) 1.5 mm - both far under the 2 m cell the relief is
+    /// measured y range (-22..74 m on Customs) 1.5 mm - both far under the 1 m cell the relief is
     /// sampled at and under the size of the pixels the result is drawn into. <see cref="NoHit"/> is
     /// the one reserved code: 0xFFFF means "no value here", which is why a real value saturates at
     /// <see cref="MaxQuantised"/> and never reaches 0xFFFF.
@@ -140,45 +140,55 @@ namespace QuestTree.QuestGraph
         // --- the caps -----------------------------------------------------------------------------
         //
         // Every one of these is checked on WRITE (a builder bug must not produce a file no reader will
-        // take) and again on READ, BEFORE the array behind the count is allocated. They are sized to
-        // the largest thing this mod can legitimately produce with a comfortable margin, not to the
-        // largest thing imaginable: their job is to make a corrupt or hostile count fail in one line
-        // instead of in the allocator.
+        // take) and again on READ, BEFORE the array behind the count is allocated. Since WP7 they are HARD
+        // BOUNDS that exist only to refuse hostile or corrupt files, set so they never bind a real build:
+        // the builder's cap is derived per build (MapMeshBuilder.ApplyBudget - from what the buildings need
+        // and the machine's memory, never over MapMeshBuilder.BuilderAbsoluteTriangles, 20 M). A reader that
+        // should hold less says so itself (Read's maxTriangles). The caps are not in the file: the file
+        // carries counts, and each reader holds them to its own compiled caps.
 
         /// <summary>Bands in one file. MapCapture's MaxFloors is 8 and a band is a floor, so 8.</summary>
         internal const int MaxBands = 8;
 
-        /// <summary>Cells in one band. Customs at 2 m is 151k; 4 M is a 4 km map at 1 m cells, well
-        /// past anything the capture will attempt, and 8 bands of it is 96 MB read - inside the
-        /// capture's 256 MiB working budget.</summary>
+        /// <summary>Cells in one band. Customs at 1 m is about 603k; 4 M is a 2 km square map at 1 m cells,
+        /// and MapMeshBuilder.ReliefCellFor coarsens the cell in half-metre steps so no extent passes it.
+        /// Eight bands of it is 96 MB read.</summary>
         internal const int MaxCellsPerBand = 4_000_000;
 
         /// <summary>Buildings in one file. Phase 3C keeps a few hundred per map by the triangle
         /// budget; 20,000 is room for a map made entirely of sheds.</summary>
         internal const int MaxBuildings = 20_000;
 
-        /// <summary>Vertices in one building.</summary>
+        /// <summary>Vertices in one building. A stored building is at most 1 M triangles
+        /// (<see cref="MaxTrianglesPerBuilding"/>), and the builder re-checks this after the atlas split.</summary>
         internal const int MaxVerticesPerBuilding = 2_000_000;
+
+        /// <summary>Triangles in one building: the builder's source guard (MapMeshBuilder.MaxSourceTriangles), which
+        /// no stored building passes - as it is, a building is at most its source; decimated or clustered, at most
+        /// its limit. Without it the 40 M total would let one hostile building ask for a 120 M-entry index array
+        /// (480 MB); with it, 12 MB. The host and both tools hold the same rule.</summary>
+        internal const int MaxTrianglesPerBuilding = 1_000_000;
 
         /// <summary>Vertices across every building in the file. NOT redundant with
         /// <see cref="MaxVerticesPerBuilding"/> and <see cref="MaxTriangles"/>, which between them
         /// leave a hole a hostile file walks straight through: 20,000 buildings each declaring 2 M
         /// vertices and NO triangles breaks neither of those caps and asks for 240 GB. Twelve million is
-        /// twice the triangle cap, which is more vertices than a triangle soup that size can use.
+        /// twice the triangle cap - the same ratio as before - and a 20 M-triangle build splits to at most
+        /// 60 M vertices (three a triangle after the atlas split).
         ///
-        /// Raised from 4 M with <see cref="MaxTriangles"/> at stage V, when the building budget went from
-        /// 300,000 to 3,000,000 triangles. The format's VERSION is unchanged - the byte layout is - but a
-        /// reader built before stage V carries the old caps and refuses a stage-V file with more than 2 M
-        /// triangles as over them. Accepted: nothing has been released with the old caps, and the refusal
-        /// is a named InvalidDataException, not a misread. A 12 M-vertex file is 72 MB of quantised
-        /// arrays read, inside the capture's working budget.</summary>
-        internal const int MaxVerticesTotal = 12_000_000;
+        /// Raised from 12 M with <see cref="MaxTriangles"/> at WP7 (and from 4 M at stage V). The format's
+        /// VERSION is unchanged - the byte layout is - so a reader built before WP7 carries the old caps and
+        /// refuses a WP7 file past 6 M triangles or 12 M vertices BY NAME, as an InvalidDataException, not a
+        /// misread; every file written before WP7 reads unchanged here. This holds because 1.19.0 is unreleased:
+        /// were it shipped before WP7, the version would go to 4.</summary>
+        internal const int MaxVerticesTotal = 80_000_000;
 
-        /// <summary>Triangles across every building in the file - stage V's building budget
-        /// (MapMeshBuilder.MaxBuildingTriangles, 3 M) with headroom, and the bound that keeps the index
-        /// arrays to 72 MB read. Was 2 M before stage V - see <see cref="MaxVerticesTotal"/> for what the
-        /// raise means for older readers.</summary>
-        internal const int MaxTriangles = 6_000_000;
+        /// <summary>Triangles across every building in the file: a hard bound, twice
+        /// MapMeshBuilder.BuilderAbsoluteTriangles (20 M), so it never binds a real build. At it a hostile file
+        /// reads ~1.4 GB, which is why a reader with a smaller budget passes its own bound to Read (the 3D view
+        /// passes what its graphics card holds). Was 6 M before WP7 - see <see cref="MaxVerticesTotal"/> for what
+        /// the raise means for older readers.</summary>
+        internal const int MaxTriangles = 40_000_000;
 
         /// <summary>The suffix that makes a file name a mesh file. Shared by
         /// <see cref="FileNameFor"/> and <see cref="IsMeshFileName"/> so the writer's name and the
@@ -186,8 +196,9 @@ namespace QuestTree.QuestGraph
         private const string Suffix = "-mesh.bin";
 
         /// <summary>Bytes read or written in one pass over a quantised array. 64 KiB is a multiple of
-        /// both element sizes, so a chunk never splits an element, and it keeps a 24 MB index array
-        /// from needing a 24 MB temporary beside it.</summary>
+        /// both element sizes, so a chunk never splits an element, and it keeps a building's index array
+        /// (at most 12 MB, by <see cref="MaxTrianglesPerBuilding"/>) from needing a temporary its size
+        /// beside it. The reader shares ONE such buffer across every array of a file.</summary>
         private const int ChunkBytes = 64 * 1024;
 
         // --- the header ---------------------------------------------------------------------------
@@ -475,8 +486,9 @@ namespace QuestTree.QuestGraph
             /// the same numbering the meta's floors and the zone file's floors carry.</summary>
             internal int Level;
 
-            /// <summary>The cell size in metres, 2 m as phase 3-0 settled it. Per band rather than per
-            /// file so a future capture can sample a small map finer without a version bump.</summary>
+            /// <summary>The cell size in metres: derived from the extent by MapMeshBuilder.ReliefCellFor since
+            /// WP7 (1 m wherever it fits, coarser in half-metre steps only past the band cap; files before WP7
+            /// carry 2 m). Per band, so any cell size reads everywhere without a version bump.</summary>
             internal float CellMetres;
 
             /// <summary>Columns, along +x. <c>ceil(span / CellMetres)</c>, so the grid covers the
@@ -987,6 +999,32 @@ namespace QuestTree.QuestGraph
             }
         }
 
+        /// <summary>
+        /// The whole file written into a stream PRE-SIZED from <see cref="ApproximateBytes"/> / 2, for a caller that
+        /// takes <see cref="MemoryStream.GetBuffer"/> and its <see cref="MemoryStream.Length"/> rather than a copy:
+        /// the same bytes as <see cref="ToBytes"/>, without the doubling growth and the final ToArray, which at WP7's
+        /// sizes peaked at about three times the file on top of the builder's arrays.
+        /// </summary>
+        /// <param name="file">The mesh to write.</param>
+        internal static MemoryStream ToStream(MapMeshFile file)
+        {
+            if (file == null) throw new ArgumentNullException(nameof(file));
+
+            var guess = Math.Max(ChunkBytes, file.ApproximateBytes() / 2);
+            var buffer = new MemoryStream((int)Math.Min(guess, int.MaxValue / 2));
+
+            try
+            {
+                Write(file, buffer);
+                return buffer;
+            }
+            catch
+            {
+                buffer.Dispose();
+                throw;
+            }
+        }
+
         /// <summary>Every rule the format promises a reader, checked before a byte is written: the
         /// ranges are finite and ordered, the grids' arrays are the length their width and height say,
         /// the levels are distinct, the indices are in range, and nothing is over a cap. Throws
@@ -1085,6 +1123,11 @@ namespace QuestTree.QuestGraph
                     throw new InvalidDataException(
                         $"building {i} (key {building.Key}) has {building.Indices.Length} indices, not a " +
                         "multiple of 3");
+
+                if (building.Indices.Length / 3 > MaxTrianglesPerBuilding)
+                    throw new InvalidDataException(
+                        $"building {i} (key {building.Key}) has {building.Indices.Length / 3:#,##0} triangles, over " +
+                        $"the cap of {MaxTrianglesPerBuilding:#,##0}");
 
                 for (var j = 0; j < building.Indices.Length; j++)
                     if (building.Indices[j] >= (uint)building.X.Length)
@@ -1349,6 +1392,10 @@ namespace QuestTree.QuestGraph
         /// <param name="maxTriangles">The caller's bound, already clamped to <see cref="MaxTriangles"/>.</param>
         private static MapMeshFile ReadBody(BinaryReader r, Stream raw, long maxTriangles)
         {
+            // One chunk buffer for every array of the file, rather than a fresh one per array (tens of
+            // thousands of them in a large file).
+            var chunk = new byte[ChunkBytes];
+
             var magic = r.ReadBytes(4);
 
             if (magic.Length != 4 ||
@@ -1428,7 +1475,7 @@ namespace QuestTree.QuestGraph
                         throw new InvalidDataException(
                             $"the mesh file has two level {band.Level} bands ({j} and {i})");
 
-                band.Heights = ReadUShorts(raw, (int)cells, $"band {i} (level {band.Level}) heights");
+                band.Heights = ReadUShorts(raw, chunk, (int)cells, $"band {i} (level {band.Level}) heights");
                 band.Distance = new byte[cells];
                 ReadExactly(raw, band.Distance, (int)cells, $"band {i} (level {band.Level}) distances");
 
@@ -1472,9 +1519,9 @@ namespace QuestTree.QuestGraph
                 if (verticesSoFar > 2L * maxTriangles)
                     throw new ReaderBoundException(verticesSoFar, "vertices", 2L * maxTriangles);
 
-                building.X = ReadUShorts(raw, vertexCount, $"building {i} (key {building.Key}) x");
-                building.Y = ReadUShorts(raw, vertexCount, $"building {i} (key {building.Key}) y");
-                building.Z = ReadUShorts(raw, vertexCount, $"building {i} (key {building.Key}) z");
+                building.X = ReadUShorts(raw, chunk, vertexCount, $"building {i} (key {building.Key}) x");
+                building.Y = ReadUShorts(raw, chunk, vertexCount, $"building {i} (key {building.Key}) y");
+                building.Z = ReadUShorts(raw, chunk, vertexCount, $"building {i} (key {building.Key}) z");
 
                 var indexCount = r.ReadInt32();
 
@@ -1482,6 +1529,13 @@ namespace QuestTree.QuestGraph
                     throw new InvalidDataException(
                         $"building {i} (key {building.Key}) claims {indexCount:#,##0} indices, which is not a " +
                         "non-negative multiple of 3");
+
+                // One building's own bound, before its index array is allocated (S4): the total alone would let
+                // one building ask for 40 M triangles of indices.
+                if (indexCount / 3 > MaxTrianglesPerBuilding)
+                    throw new InvalidDataException(
+                        $"building {i} (key {building.Key}) claims {indexCount / 3:#,##0} triangles; the cap is " +
+                        $"{MaxTrianglesPerBuilding:#,##0} a building");
 
                 trianglesSoFar += indexCount / 3;
 
@@ -1493,7 +1547,7 @@ namespace QuestTree.QuestGraph
                 if (trianglesSoFar > maxTriangles)
                     throw new ReaderBoundException(trianglesSoFar, "triangles", maxTriangles);
 
-                building.Indices = ReadUInts(raw, indexCount, $"building {i} (key {building.Key}) indices");
+                building.Indices = ReadUInts(raw, chunk, indexCount, $"building {i} (key {building.Key}) indices");
 
                 for (var j = 0; j < building.Indices.Length; j++)
                     if (building.Indices[j] >= (uint)vertexCount)
@@ -1509,8 +1563,8 @@ namespace QuestTree.QuestGraph
 
                 if (uvCount > 0)
                 {
-                    building.U = ReadUShorts(raw, uvCount, $"building {i} (key {building.Key}) u");
-                    building.V = ReadUShorts(raw, uvCount, $"building {i} (key {building.Key}) v");
+                    building.U = ReadUShorts(raw, chunk, uvCount, $"building {i} (key {building.Key}) u");
+                    building.V = ReadUShorts(raw, chunk, uvCount, $"building {i} (key {building.Key}) v");
                 }
 
                 var rangeCount = r.ReadInt32();
@@ -1593,9 +1647,10 @@ namespace QuestTree.QuestGraph
         /// <summary>A quantised ushort array off the inflated stream. Allocates only after the caller
         /// has checked the count against its cap.</summary>
         /// <param name="stream">The inflated stream.</param>
+        /// <param name="chunk">The file's shared read buffer.</param>
         /// <param name="count">Elements to read.</param>
         /// <param name="what">What this array is, for the exception.</param>
-        private static ushort[] ReadUShorts(Stream stream, int count, string what)
+        private static ushort[] ReadUShorts(Stream stream, byte[] chunk, int count, string what)
         {
             var values = new ushort[count];
             if (count == 0) return values;
@@ -1613,16 +1668,17 @@ namespace QuestTree.QuestGraph
                 return values;
             }
 
-            ReadRaw(stream, values, sizeof(ushort), count, what);
+            ReadRaw(stream, chunk, values, sizeof(ushort), count, what);
 
             return values;
         }
 
         /// <summary>An index array off the inflated stream. See <see cref="ReadUShorts"/>.</summary>
         /// <param name="stream">The inflated stream.</param>
+        /// <param name="chunk">The file's shared read buffer.</param>
         /// <param name="count">Elements to read.</param>
         /// <param name="what">What this array is, for the exception.</param>
-        private static uint[] ReadUInts(Stream stream, int count, string what)
+        private static uint[] ReadUInts(Stream stream, byte[] chunk, int count, string what)
         {
             var values = new uint[count];
             if (count == 0) return values;
@@ -1640,7 +1696,7 @@ namespace QuestTree.QuestGraph
                 return values;
             }
 
-            ReadRaw(stream, values, sizeof(uint), count, what);
+            ReadRaw(stream, chunk, values, sizeof(uint), count, what);
 
             return values;
         }
@@ -1648,14 +1704,14 @@ namespace QuestTree.QuestGraph
         /// <summary>A blittable array filled from the stream in 64 KiB chunks, on a little-endian
         /// machine.</summary>
         /// <param name="stream">The inflated stream.</param>
+        /// <param name="chunk">The caller's read buffer, shared across the file's arrays (any non-empty size).</param>
         /// <param name="values">The array to fill.</param>
         /// <param name="elementBytes">Bytes per element.</param>
         /// <param name="count">Elements to read.</param>
         /// <param name="what">What this array is, for the exception.</param>
-        private static void ReadRaw(Stream stream, Array values, int elementBytes, int count, string what)
+        private static void ReadRaw(Stream stream, byte[] chunk, Array values, int elementBytes, int count, string what)
         {
             var total = (long)count * elementBytes;
-            var chunk = new byte[(int)Math.Min(total, ChunkBytes)];
             var done = 0L;
 
             while (done < total)
