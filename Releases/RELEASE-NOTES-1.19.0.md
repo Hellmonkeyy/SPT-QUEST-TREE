@@ -406,6 +406,12 @@ is meant to be removed again.
   you will notice: a map set downloaded from a host keeps its extract labels as extracts (the label
   kind now travels on the wire), and the weapon solver's remembered builds are solved again once on
   the first boot of this version, because the solver is now version 12.
+- **Map transfers use their own HTTP client.** Every picture, atlas page and mesh post, up or down,
+  goes out as exactly one request with one deadline (30 s for a picture, 240 s for a mesh part or a
+  page) that aborts it - the same bytes SPT's own client would send, without its three silent retries
+  and its 100 s cut, which made a transfer needing more than 100 s impossible. The map index is still
+  asked through SPT's RequestHandler. A mod that patches RequestHandler or SPT's HTTP client to reroute
+  traffic (a proxy or relay mod) no longer sees map transfers; Fika does not do this.
 
 ## What has been seen on screen, and what has not
 

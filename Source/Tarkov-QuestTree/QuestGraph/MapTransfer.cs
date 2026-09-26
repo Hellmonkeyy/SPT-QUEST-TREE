@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Net.Http;
 using System.Threading.Tasks;
 using Newtonsoft.Json;
 using SPT.Common.Http;
@@ -110,7 +111,8 @@ namespace QuestTree.QuestGraph
         /// How much of a mesh one upload post carries. A stock SPT host runs on Kestrel with its default
         /// request limit of 30,000,000 bytes, and nothing in SPT raises it - measured on a real Kestrel
         /// (scratchpad kestrel-limit): a body of 32.5 MB is refused with "Request body too large", one of
-        /// 23.5 MB goes through. SPT's RequestHandler zlib-compresses every body, which brings the base64
+        /// 23.5 MB goes through. Every body is zlib-compressed on the way (TransferHttp sends what SPT's
+        /// RequestHandler would, at the same level), which brings the base64
         /// of an already-deflated mesh back to about 1.03 times the mesh, so ONE post can carry a mesh of
         /// roughly 28 MB and no more - and stage V's cap is 48. A mesh past this size is therefore sent in
         /// parts of this size (MapStore.HoldMeshPart joins them and checks the whole exactly as it checks a
@@ -177,27 +179,24 @@ namespace QuestTree.QuestGraph
         /// ceiling the zone file enforces.</summary>
         private const int MaxFloors = 8;
 
-        /// <summary>How long any one request may take. The same cap QuestDataClient applies, doubled:
-        /// these bodies are a megabyte of base64 rather than a few kilobytes of JSON.</summary>
+        /// <summary>Rollback for review F57: true sends every map transfer through <see cref="TransferHttp"/>,
+        /// false puts them back on SPT's RequestHandler (its retries and its 100 s timeout included).</summary>
+        private const bool DedicatedTransferClient = true;
+
+        /// <summary>How long a picture request may take, end to end - a floor or side up or down, and it is
+        /// ENFORCED: the request is aborted at it (TransferHttp), never retried.</summary>
         private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(30);
 
-        /// <summary>The upload's own per-request wait, in seconds, for the coroutine that polls it.
-        /// The same number as <see cref="RequestTimeout"/> - both are the deadline on one post, one
-        /// measured by the worker and one by the frames.</summary>
-        private const float RequestSeconds = 30f;
+        /// <summary>The deadline on a MESH-SIZED request - one mesh part up, one atlas page up or down, the whole
+        /// mesh down - aborted at it like every other. 240 s: 48 MB at 2 MB/s is 24 s of transfer, and a remote
+        /// host's slow uplink is the whole point of the transport. Before review F57 this was not what a
+        /// request actually got: SPT's own client cut every attempt at 100 s and sent it again up to three
+        /// times, so nothing needing more than 100 s ever landed and a failure took ~400 s to be reported.</summary>
+        private static readonly TimeSpan MeshRequestTimeout = TimeSpan.FromSeconds(240);
 
-        /// <summary>The deadline on a MESH request, in seconds - one upload part, or the whole download -
-        /// and eight times the others on purpose. A download is one 48 MB mesh as a 64 MB base64 body; an
-        /// upload part is 16 MiB; and on a remote host - which is the whole point of the transport - a slow
-        /// uplink makes 30 s a limit the body itself loses to rather than one the host has any say in: 48 MB
-        /// at 2 MB/s is 24 s of transfer before either end has done any work. Timing out here also costs
-        /// more than timing out on a floor: the host is holding the whole set waiting for the mesh, so a
-        /// deadline that is too short means the capture is never shared. 240 s since stage V (was 90 s).</summary>
-        private const float MeshRequestSeconds = 240f;
-
-        /// <summary>The worker's own deadline on the mesh post, matching
-        /// <see cref="MeshRequestSeconds"/>: one is measured in frames, the other in the request.</summary>
-        private static readonly TimeSpan MeshRequestTimeout = TimeSpan.FromSeconds(MeshRequestSeconds);
+        /// <summary>How far past its own deadline a blocking caller waits before it gives up on a request that
+        /// has not ended - a backstop only; the request aborts itself at the deadline.</summary>
+        private static readonly TimeSpan AbortGrace = TimeSpan.FromSeconds(10);
 
         /// <summary>How long the whole download may take before it gives up and leaves the rest for
         /// the next session. A worker that never returns is one the session can never retry.
@@ -405,26 +404,20 @@ namespace QuestTree.QuestGraph
                         continue;
                     }
 
-                    var task = StartPost(key, meta, floor);
+                    var task = StartPost(key, meta, floor, RequestTimeout);
                     if (task == null) yield break;
 
-                    var deadline = Time.realtimeSinceStartup + RequestSeconds;
-                    while (!task.IsCompleted && Time.realtimeSinceStartup < deadline) yield return null;
+                    // Bounded: the request aborts itself at RequestTimeout (review F57), so _uploading is held for
+                    // at most that - and a request this routine stopped waiting for is never still in flight
+                    // behind it, which is what the flag exists for: the next capture's upload must not run
+                    // beside this one, or the host would interleave two maps' posts.
+                    while (!task.IsCompleted) yield return null;
 
-                    if (!task.IsCompleted)
+                    if (TimedOut(task))
                     {
                         Plugin.LogSource?.LogInfo(
-                            $"QuestTree: the host did not answer within {RequestSeconds:0}s while {key} " +
+                            $"QuestTree: the host did not answer within {RequestTimeout.TotalSeconds:0}s while {key} " +
                             $"\"{floor.Name}\" was being offered - the rest of the capture is not sent.");
-
-                        // NOT out of here yet. The post is still in flight on a pool thread, and leaving
-                        // now would clear _uploading (the finally below) while it is: the next capture's
-                        // upload would then run beside it, and the host would interleave two maps' posts -
-                        // which is the one thing the flag exists to prevent. So the routine waits for the
-                        // request to end on its own (SPT's HTTP client times it out) and only then lets go.
-                        // Its late answer is not acted on: the player has been told this upload stopped.
-                        while (!task.IsCompleted) yield return null;
-
                         Observe(task);
                         yield break;
                     }
@@ -460,20 +453,17 @@ namespace QuestTree.QuestGraph
                 // still on its FloorUpload, so nothing is encoded again.
                 if (posted > 0 && droppedSincePost > 0 && lastPosted != null && !string.IsNullOrEmpty(lastPosted.Base64))
                 {
-                    var again = StartPost(key, meta, lastPosted);
+                    var again = StartPost(key, meta, lastPosted, RequestTimeout);
                     if (again == null) yield break;
 
-                    var deadline = Time.realtimeSinceStartup + RequestSeconds;
-                    while (!again.IsCompleted && Time.realtimeSinceStartup < deadline) yield return null;
+                    // Bounded by the request's own deadline - see the floor loop.
+                    while (!again.IsCompleted) yield return null;
 
-                    if (!again.IsCompleted)
+                    if (TimedOut(again))
                     {
                         Plugin.LogSource?.LogInfo(
-                            $"QuestTree: the host did not answer within {RequestSeconds:0}s while {key}'s trimmed set " +
+                            $"QuestTree: the host did not answer within {RequestTimeout.TotalSeconds:0}s while {key}'s trimmed set " +
                             "was being offered - the rest of the capture is not sent.");
-
-                        while (!again.IsCompleted) yield return null;
-
                         Observe(again);
                         yield break;
                     }
@@ -519,21 +509,17 @@ namespace QuestTree.QuestGraph
                                 "to go on without it.");
                         }
 
-                        var task = StartPost(key, meta, side);
+                        var task = StartPost(key, meta, side, RequestTimeout);
                         if (task == null) yield break;
 
-                        var deadline = Time.realtimeSinceStartup + RequestSeconds;
-                        while (!task.IsCompleted && Time.realtimeSinceStartup < deadline) yield return null;
+                        // Bounded by the request's own deadline - see the floor loop.
+                        while (!task.IsCompleted) yield return null;
 
-                        if (!task.IsCompleted)
+                        if (TimedOut(task))
                         {
                             Plugin.LogSource?.LogInfo(
-                                $"QuestTree: the host did not answer within {RequestSeconds:0}s while {key}'s " +
+                                $"QuestTree: the host did not answer within {RequestTimeout.TotalSeconds:0}s while {key}'s " +
                                 $"{side.Side} side was being offered - the rest of the capture is not sent.");
-
-                            // Waited out before letting go of _uploading - see the floor loop.
-                            while (!task.IsCompleted) yield return null;
-
                             Observe(task);
                             yield break;
                         }
@@ -598,7 +584,9 @@ namespace QuestTree.QuestGraph
                         }
 
                         // The MESH's deadline, not a picture's: a page is up to 6 MB, 8 MB of base64, and at
-                        // 30 s a link under ~2 Mbit/s would time out every page. And a page that does not get
+                        // 30 s a link under ~2 Mbit/s would time out every page - and since review F57 it is the
+                        // deadline the request really gets, aborted at it rather than cut by SPT's client at
+                        // 100 s and sent again. And a page that does not get
                         // through is DROPPED rather than ending the upload - the post is made again EMPTY,
                         // which tells the host to stop waiting for that page - because ending it here would
                         // leave the host holding the whole set, mesh unsent, until its stale sweep a day
@@ -607,22 +595,13 @@ namespace QuestTree.QuestGraph
 
                         for (var attempt = 0; attempt < 2; attempt++)
                         {
-                            task = StartPost(key, meta, page);
+                            task = StartPost(key, meta, page, MeshRequestTimeout);
                             if (task == null) break;
 
-                            var deadline = Time.realtimeSinceStartup + MeshRequestSeconds;
-                            while (!task.IsCompleted && Time.realtimeSinceStartup < deadline) yield return null;
-
-                            if (!task.IsCompleted)
-                            {
-                                // Said at the deadline and then WAITED OUT, as the mesh's post is: _uploading
-                                // must stay set while it is in flight, and a late answer is still an answer.
-                                Plugin.LogSource?.LogInfo(
-                                    $"QuestTree: the host has not answered within {MeshRequestSeconds:0}s while {key}'s " +
-                                    $"{page.Name} is being offered - still waiting for it.");
-
-                                while (!task.IsCompleted) yield return null;
-                            }
+                            // Bounded: the request ends by MeshRequestTimeout (review F57), so _uploading stays
+                            // set exactly while it is in flight. A timeout is a fault like any other here - the
+                            // line below names it - and the page is posted again empty.
+                            while (!task.IsCompleted) yield return null;
 
                             // Answered, or already the empty post: JudgeSide takes it from here.
                             if (!(task.IsFaulted || task.IsCanceled) || !encoded) break;
@@ -688,24 +667,11 @@ namespace QuestTree.QuestGraph
                         // pool that would not take the work. StartMeshPost has already said what happened.
                         if (task == null) yield break;
 
-                        var deadline = Time.realtimeSinceStartup + MeshRequestSeconds;
-                        while (!task.IsCompleted && Time.realtimeSinceStartup < deadline) yield return null;
-
-                        if (!task.IsCompleted)
-                        {
-                            // Said at the deadline, and then WAITED OUT rather than abandoned: the post is
-                            // still in flight, _uploading must stay set until it ends (see the floor loop's
-                            // timeout for why), and unlike a floor this answer is still worth hearing - a
-                            // 16 MiB body on a slow link can land after the deadline, and if it does the host
-                            // has that part. So the line below says it is late, and the verdict that follows
-                            // says how it ended.
-                            Plugin.LogSource?.LogInfo(
-                                $"QuestTree: the host has not answered within {MeshRequestSeconds:0}s while " +
-                                $"{(parts > 1 ? $"part {part + 1} of {parts} of " : "")}{key}'s {Mb(mesh.Length)} MB mesh " +
-                                "is being offered - still waiting for it before anything else is offered.");
-
-                            while (!task.IsCompleted) yield return null;
-                        }
+                        // Bounded: the part's request ends by MeshRequestTimeout (review F57) - landed, refused,
+                        // or aborted at the deadline with nothing left in flight - so _uploading stays set
+                        // exactly while it runs. A part that timed out is not "held", so the loop ends and
+                        // JudgeMesh says why ("no answer from ... within 240s").
+                        while (!task.IsCompleted) yield return null;
 
                         if (part < parts - 1 && MeshPartHeld(task)) continue;
 
@@ -1709,7 +1675,9 @@ namespace QuestTree.QuestGraph
         /// <param name="key">The map's internal id.</param>
         /// <param name="meta">The meta to send with this floor - see MapUploadRequest.Meta.</param>
         /// <param name="floor">The floor whose picture is ready.</param>
-        private static Task<string> StartPost(string key, MapCaptureMetaDto meta, FloorUpload floor)
+        /// <param name="deadline">When the request is aborted - <see cref="RequestTimeout"/> for a picture,
+        /// <see cref="MeshRequestTimeout"/> for an atlas page (review F57).</param>
+        private static Task<string> StartPost(string key, MapCaptureMetaDto meta, FloorUpload floor, TimeSpan deadline)
         {
             var request = new MapUploadRequest
             {
@@ -1733,11 +1701,7 @@ namespace QuestTree.QuestGraph
                 // them (see Encode), which is safe for exactly one reason: the coroutine waits for
                 // each post to finish before the next floor is touched, so no worker is ever reading
                 // it while the main thread writes it.
-                return Task.Run(async () =>
-                {
-                    var json = JsonConvert.SerializeObject(request);
-                    return await RequestHandler.PostJsonAsync(UploadRoute, json);
-                });
+                return Task.Run(() => Send(UploadRoute, JsonConvert.SerializeObject(request), deadline));
             }
             catch (Exception ex)
             {
@@ -2013,7 +1977,7 @@ namespace QuestTree.QuestGraph
                         DataBase64 = Convert.ToBase64String(bytes, offset, length)
                     };
 
-                    return await RequestHandler.PostJsonAsync(MeshRoute, JsonConvert.SerializeObject(request));
+                    return await Send(MeshRoute, JsonConvert.SerializeObject(request), MeshRequestTimeout);
                 });
             }
             catch (Exception ex)
@@ -4040,7 +4004,7 @@ namespace QuestTree.QuestGraph
 
         /// <summary>
         /// A stand-in for the host, for the client harness only: when set, <see cref="Post"/> hands the route and
-        /// body to it instead of SPT's RequestHandler, which cannot run outside the game. It is how the download's
+        /// body to it instead of the transfer client, which cannot run outside the game. It is how the download's
         /// failure rules (review F29: a floor or side that did not ARRIVE) are proven against answers the harness
         /// chooses - one floor served, the next timing out. Nothing in the mod sets it.
         /// </summary>
@@ -4049,8 +4013,8 @@ namespace QuestTree.QuestGraph
         /// <summary>A POST on this thread, with a deadline. For the worker only - it blocks.</summary>
         /// <param name="route">The route to ask.</param>
         /// <param name="body">The JSON body.</param>
-        /// <param name="timeout">How long to wait. <see cref="RequestTimeout"/> unless the answer is
-        /// megabytes, as a mesh's is.</param>
+        /// <param name="timeout">The request's deadline. <see cref="RequestTimeout"/> unless the answer is
+        /// megabytes, as a mesh's or an atlas page's is.</param>
         private static string Post(string route, string body, TimeSpan? timeout = null)
         {
             // The test seam - see PostForTests. Null in the game, always.
@@ -4058,15 +4022,120 @@ namespace QuestTree.QuestGraph
             if (seam != null) return seam(route, body);
 
             var deadline = timeout ?? RequestTimeout;
-            var request = RequestHandler.PostJsonAsync(route, body);
+            var request = Send(route, body, deadline);
 
-            if (!request.Wait(deadline))
+            // A backstop only: the request aborts itself at the deadline (review F57), so this wait ends with it.
+            if (!request.Wait(deadline + AbortGrace))
             {
                 Observe(request);
                 throw new TimeoutException($"no answer from {route} within {deadline.TotalSeconds:0}s");
             }
 
             return request.Result;
+        }
+
+        /// <summary>Every map-transfer POST (review F57). The task ENDS by the deadline - completed, faulted, or
+        /// faulted with TimeoutException - unless DedicatedTransferClient is off.</summary>
+        /// <param name="route">The route to post to.</param>
+        /// <param name="json">The JSON body.</param>
+        /// <param name="deadline">When the request is aborted.</param>
+        private static Task<string> Send(string route, string json, TimeSpan deadline) =>
+            DedicatedTransferClient
+                ? TransferHttp.PostJsonAsync(route, json, deadline)
+                : RequestHandler.PostJsonAsync(route, json);
+
+        /// <summary>Whether a finished request ended at its deadline.</summary>
+        /// <param name="task">The finished request.</param>
+        private static bool TimedOut(Task task) =>
+            task != null && task.IsFaulted && task.Exception?.GetBaseException() is TimeoutException;
+
+        /// <summary>
+        /// The HTTP client every map transfer goes through (review F57). Built the way SPT's own Client is - no
+        /// cookie container and the PHPSESSID header by hand, every certificate accepted (an SPT host's is
+        /// self-signed), the body a zlib stream at SPT's own level and the answer inflated only when it sniffs
+        /// as zlib - so the host sees exactly what RequestHandler would have sent. Two differences, and they
+        /// are the point: NO retry, and a deadline per request that ABORTS it. SPT's client re-sends any failed
+        /// request up to three more times, each under a 100 s default timeout, which made a 240 s transfer
+        /// impossible, a failure ~400 s long, and every request this class stopped waiting for a zombie that
+        /// kept the host reading and encoding in the background.
+        ///
+        /// Built on first use, never in MapTransfer's type initialiser: RequestHandler's static constructor
+        /// reads the game's command line, and the client harness loads MapTransfer with no game.
+        ///
+        /// No per-request log line, deliberately: the download worker must not touch statics beyond what it
+        /// returns, and every caller already logs every outcome.
+        /// </summary>
+        private static class TransferHttp
+        {
+            private static readonly Lazy<HttpClient> Client =
+                new Lazy<HttpClient>(Build, System.Threading.LazyThreadSafetyMode.ExecutionAndPublication);
+
+            private static HttpClient Build()
+            {
+                var handler = new HttpClientHandler
+                {
+                    UseCookies = false,
+                    ServerCertificateCustomValidationCallback = (message, certificate, chain, errors) => true
+                };
+
+                // Set ONCE, here - HttpClient refuses a change after its first request. A backstop above the
+                // longest per-request deadline; the deadline that actually applies is each request's own.
+                return new HttpClient(handler) { Timeout = MeshRequestTimeout + TimeSpan.FromSeconds(30) };
+            }
+
+            /// <summary>POSTs a JSON body and returns the answer's text, or throws. A TimeoutException naming the
+            /// route and the deadline when the deadline passed - the request is aborted then, not left running.</summary>
+            /// <param name="route">The route, appended to SPT's backend address.</param>
+            /// <param name="json">The JSON body.</param>
+            /// <param name="deadline">When the request is aborted. It starts after the compression, so it
+            /// measures the network alone.</param>
+            internal static async Task<string> PostJsonAsync(string route, string json, TimeSpan deadline)
+            {
+                var host = RequestHandler.Host;
+                if (string.IsNullOrEmpty(host)) throw new InvalidOperationException("SPT gave no backend address");
+
+                // SPT's own body: UTF-8, zlib at SPT's level (Maximum) - what SPT's Client sends, with no content
+                // type and no header saying it is compressed, so nothing depends on how the host's listener
+                // decides; and the level the MeshPartBytes arithmetic was measured on.
+                var body = SPT.Common.Utils.Zlib.Compress(
+                    System.Text.Encoding.UTF8.GetBytes(json), SPT.Common.Utils.ZlibCompression.Maximum);
+
+                using (var cts = new System.Threading.CancellationTokenSource(deadline))
+                using (var request = new HttpRequestMessage(HttpMethod.Post, new Uri(host + route)))
+                {
+                    request.Headers.Add("Cookie", "PHPSESSID=" + RequestHandler.SessionId);
+
+                    // A fresh connection per transfer: a pooled one the host has already closed fails on first
+                    // use, and SPT's retry is what used to hide that. A TCP/TLS handshake is nothing next to
+                    // megabytes.
+                    request.Headers.ConnectionClose = true;
+                    request.Content = new ByteArrayContent(body);
+
+                    try
+                    {
+                        // ResponseContentRead: the token covers reading the body too, which is then read from
+                        // the buffer.
+                        using (var response = await Client.Value
+                                   .SendAsync(request, HttpCompletionOption.ResponseContentRead, cts.Token)
+                                   .ConfigureAwait(false))
+                        {
+                            if (!response.IsSuccessStatusCode)
+                                throw new HttpRequestException($"Http response status code: {response.StatusCode}");
+
+                            var bytes = await response.Content.ReadAsByteArrayAsync().ConfigureAwait(false);
+                            if (SPT.Common.Utils.Zlib.IsCompressed(bytes)) bytes = SPT.Common.Utils.Zlib.Decompress(bytes);
+                            return bytes == null ? "" : System.Text.Encoding.UTF8.GetString(bytes);
+                        }
+                    }
+                    catch (Exception) when (cts.IsCancellationRequested)
+                    {
+                        // Whatever the handler threw once the deadline fired - Mono's reports an abort as a
+                        // cancellation or as a WebException(RequestCanceled) depending on where it was - it is
+                        // this deadline, and it is reported as one.
+                        throw new TimeoutException($"no answer from {route} within {deadline.TotalSeconds:0}s");
+                    }
+                }
+            }
         }
 
         /// <summary>
