@@ -178,8 +178,16 @@ namespace QuestTree.QuestGraph
         /// <summary>What a helper volume's name says.</summary>
         private static readonly string[] HelperNameMarks = { "Cube", "Portal", "Stencil", "Volume" };
 
-        /// <summary>Hidden renderers' paths logged per capture.</summary>
-        private const int HiddenSampleCount = 10;
+        /// <summary>Hidden renderers' paths logged per scene root, and the roots sampled (WP8 D6: per root rather than
+        /// the first ten, which were all IndoorTrigger volumes because of FindObjectsOfType's order).</summary>
+        private const int HiddenSamplesPerRoot = 2;
+
+        private const int HiddenSampleRoots = 8;
+
+        /// <summary>WP8 (D6) rollback: a switched-off renderer that a runtime culling system owns (Request.GameCulled)
+        /// is read like any other. False restores the pre-WP8 filter, where every switched-off renderer was hidden.
+        /// Static readonly so the choice is not a constant the compiler folds.</summary>
+        internal static readonly bool IncludeGameCulled = true;
 
         /// <summary>LOD groups mapped a frame (screen defect 4's duplicates).</summary>
         private const int LodGroupsPerFrame = 2_000;
@@ -556,6 +564,20 @@ namespace QuestTree.QuestGraph
             /// <summary>Whether the capture's culling scan worked, so "switched off" after the hold means hidden
             /// (stage W review, M2). False keeps the old behaviour: no renderer is skipped for being off.</summary>
             internal bool CullingKnown = true;
+
+            /// <summary>WP8 (D6): the baked-LOD PROXIES - every ScreenDistanceSwitcher's merged, auto-simplified hull of
+            /// its area (GetBakedLodRenderers). Never candidates, whatever their state: their detail is read instead.
+            /// Null for none.</summary>
+            internal HashSet<Renderer> ProxyRenderers;
+
+            /// <summary>WP8 (D6): renderers a runtime culling system owns - a switcher's content (proxies excluded) and
+            /// every Perfect Culling bake group's renderers. Switched off, they are hidden FROM THE PLAYER'S POSITION
+            /// (occlusion or distance), not from the map, so they are read like any other. Null for none.</summary>
+            internal HashSet<Renderer> GameCulled;
+
+            /// <summary>WP8 (D6): the part of <see cref="GameCulled"/> that came from the occlusion bake groups, for the
+            /// hidden line's split. Null for none.</summary>
+            internal HashSet<Renderer> OcclusionCulled;
         }
 
         /// <summary>What a build produced. <see cref="File"/> is null when nothing usable was
@@ -1254,8 +1276,18 @@ namespace QuestTree.QuestGraph
             internal int UntexturedBuildings;
             internal long TexturedTriangles;
 
-            /// <summary>Renderers skipped as never seen: off or inactive, shadow-only, helper volumes.</summary>
+            /// <summary>Renderers skipped as never seen: switched off by nothing the game culls with, shadow-only,
+            /// helper volumes.</summary>
             internal int HiddenSkipped;
+
+            /// <summary>WP8 (D6): the switched-off split by how (enabled false, or forceRenderingOff); switched-off
+            /// renderers read because a culling system owns them, split by which; baked-LOD proxies excluded.</summary>
+            internal int HiddenDisabled;
+
+            internal int HiddenForceOff;
+            internal int GameCulledBySwitcher;
+            internal int GameCulledByOcclusion;
+            internal int ProxySkipped;
 
             internal int ShadowOnlySkipped;
 
@@ -1285,9 +1317,9 @@ namespace QuestTree.QuestGraph
             internal int LodFallback;
             internal int LodInactive;
 
-            /// <summary>Paths of the first hidden renderers skipped (M2), and static-batch members whose UVs were
-            /// not read (M5).</summary>
-            internal readonly List<string> HiddenSamples = new List<string>();
+            /// <summary>Paths of hidden renderers skipped, the first few per scene root (M2; WP8 D6), their count by
+            /// root, and static-batch members whose UVs were not read (M5).</summary>
+            internal readonly Dictionary<string, List<string>> HiddenSamples = new Dictionary<string, List<string>>();
             internal readonly Dictionary<string, int> HiddenRoots = new Dictionary<string, int>();
 
             internal int StaticBatchUvSkipped;
@@ -2320,35 +2352,59 @@ namespace QuestTree.QuestGraph
         }
 
         /// <summary>
-        /// Whether a renderer is something the player never sees (screen defect 1, 2026-09-24): switched
-        /// off, on an inactive object, told not to render, or drawing only into the shadow map. The scan
-        /// runs INSIDE the scene hold, and the hold is the only thing that switches renderers on - every
-        /// component a DisablerCullingObject lists is on by now - so a renderer still off here was off
-        /// before the hold and is on no culling list: a hidden volume, not a building. The probe's cases:
-        /// SBG_Custom_Portals/Tamozhnya/ambient_portal (N)/Cube and MapGeneration/Cube (1) (Standard,
-        /// enabled no, 17-35 m boxes - stored as 12-triangle blank boxes; 208 such boxes were in the
-        /// 2026-09-24 Customs file), and tamozhnya/shadow (ShadowsOnly - a second roof on top of the
-        /// real one). Counted.
+        /// Whether a renderer is something the player never sees (screen defect 1, 2026-09-24): a baked-LOD
+        /// proxy, switched off by nothing the game culls with, or drawing only into the shadow map. Counted.
+        ///
+        /// The rule (WP8 D6), decided per renderer from what owns it, never from a map:
+        /// - a PROXY (a ScreenDistanceSwitcher's merged hull of its area, Request.ProxyRenderers) is never a
+        ///   candidate: its detail is read in its place;
+        /// - a renderer switched off (enabled false or forceRenderingOff) that a runtime culling system OWNS - a
+        ///   switcher's content or a Perfect Culling bake group's renderer (Request.GameCulled) - is hidden from
+        ///   the player's position, not from the map, and is read (<see cref="IncludeGameCulled"/>);
+        /// - one switched off that no system owns is a helper - the IndoorTrigger volumes, the portal cubes
+        ///   (SBG_Custom_Portals/Tamozhnya/ambient_portal (N)/Cube, 17-35 m blank boxes) - or a designer-disabled
+        ///   variant, and is skipped as before; tamozhnya/shadow (ShadowsOnly) is skipped too.
+        /// FindObjectsOfType never returns a renderer on an inactive object, so the old activeInHierarchy clause
+        /// could not fire and is gone.
         /// </summary>
         /// <param name="job">The build, for the counts.</param>
         /// <param name="renderer">The renderer.</param>
         private static bool Invisible(Job job, Renderer renderer)
         {
-            if (job.Request.CullingKnown &&
-                (!renderer.enabled || renderer.forceRenderingOff || !renderer.gameObject.activeInHierarchy))
+            var request = job.Request;
+
+            if (request.ProxyRenderers != null && request.ProxyRenderers.Contains(renderer))
             {
-                job.HiddenSkipped++;
-
-                // A handful of paths, once a capture: what a room-culling system (Streets, Labs) switches off
-                // would show here as real geometry.
-                if (job.HiddenSamples.Count < HiddenSampleCount)
-                    job.HiddenSamples.Add(HierarchyPath(renderer.transform));
-
-                // by the top of its hierarchy - the scene group it belongs to
-                var root = renderer.transform.root != null ? renderer.transform.root.name : "?";
-                job.HiddenRoots[root] = job.HiddenRoots.TryGetValue(root, out var seen) ? seen + 1 : 1;
-
+                job.ProxySkipped++;
                 return true;
+            }
+
+            if (request.CullingKnown && (!renderer.enabled || renderer.forceRenderingOff))
+            {
+                if (IncludeGameCulled && request.GameCulled != null && request.GameCulled.Contains(renderer))
+                {
+                    // Hidden from where the player stands, not from the map: read like any other.
+                    if (request.OcclusionCulled != null && request.OcclusionCulled.Contains(renderer))
+                        job.GameCulledByOcclusion++;
+                    else
+                        job.GameCulledBySwitcher++;
+                }
+                else
+                {
+                    job.HiddenSkipped++;
+                    if (renderer.enabled) job.HiddenForceOff++;
+                    else job.HiddenDisabled++;
+
+                    // by the top of its hierarchy - the scene group it belongs to - and a couple of paths from each
+                    var root = renderer.transform.root != null ? renderer.transform.root.name : "?";
+                    job.HiddenRoots[root] = job.HiddenRoots.TryGetValue(root, out var seen) ? seen + 1 : 1;
+
+                    if (!job.HiddenSamples.TryGetValue(root, out var samples))
+                        job.HiddenSamples[root] = samples = new List<string>();
+                    if (samples.Count < HiddenSamplesPerRoot) samples.Add(HierarchyPath(renderer.transform));
+
+                    return true;
+                }
             }
 
             if (renderer.shadowCastingMode == ShadowCastingMode.ShadowsOnly)
@@ -5631,7 +5687,7 @@ namespace QuestTree.QuestGraph
                 (job.DecimationStopped ? $"; decimation stopped at {job.DecimationStoppedWhy}" : "") +
                 $"; {N(job.InputGuarded)} over the {Millions(MaxSourceTriangles)} source guard, " +
                 $"{N(job.Oversized)} oversized, {N(job.HiddenSkipped + job.ShadowOnlySkipped + job.VolumeSkipped)} hidden " +
-                $"volumes skipped ({N(job.HiddenSkipped)} switched off or inactive, {N(job.ShadowOnlySkipped)} shadow-only, " +
+                $"volumes skipped ({N(job.HiddenSkipped)} switched off, {N(job.ShadowOnlySkipped)} shadow-only, " +
                 $"{N(job.VolumeSkipped)} untextured helper volumes), LOD map {N(job.LodsOf.Count)} group(s): " +
                 $"{N(job.LodUnmanaged)} candidate(s) under a group that lists none of them, {N(job.LodNotAncestor)} listed by a " +
                 $"group that is not their parent, {N(job.LodShared)} renderer(s) in two groups, {N(job.LodInactive)} inactive " +
@@ -5671,12 +5727,14 @@ namespace QuestTree.QuestGraph
                     : ""));
         }
 
-        /// <summary>The hidden renderers' sample paths, once a capture - what the "switched off" filter dropped,
-        /// for a map where a room-culling system might hide real geometry.</summary>
+        /// <summary>The hidden renderers, once a capture - what the "switched off" filter dropped, by scene root with
+        /// a couple of paths from each of the largest roots, and what it did NOT drop (WP8 D6): switched-off renderers
+        /// a culling system owns, read as game-culled, and the baked-LOD proxies excluded in their favour.</summary>
         /// <param name="job">The build.</param>
         private static void ReportHidden(Job job)
         {
-            if (job.HiddenSamples.Count == 0) return;
+            var included = job.GameCulledBySwitcher + job.GameCulledByOcclusion;
+            if (job.HiddenSkipped == 0 && included == 0 && job.ProxySkipped == 0) return;
 
             var roots = new List<KeyValuePair<string, int>>(job.HiddenRoots);
             roots.Sort((a, b) => b.Value.CompareTo(a.Value));
@@ -5684,10 +5742,20 @@ namespace QuestTree.QuestGraph
             var top = new List<string>();
             for (var i = 0; i < roots.Count && i < 12; i++) top.Add($"{roots[i].Key} {N(roots[i].Value)}");
 
+            var samples = new List<string>();
+            for (var i = 0; i < roots.Count && i < HiddenSampleRoots; i++)
+                if (job.HiddenSamples.TryGetValue(roots[i].Key, out var paths))
+                    samples.AddRange(paths);
+
             Plugin.LogSource?.LogInfo(
                 $"QuestTree: hidden renderers skipped on {job.Request.Map} - {N(job.HiddenSkipped)} that were building-sized " +
-                $"and inside the extent, by scene root: {string.Join(", ", top.ToArray())}; the first " +
-                $"{job.HiddenSamples.Count}: {string.Join(" | ", job.HiddenSamples.ToArray())}");
+                $"and inside the extent ({N(job.HiddenDisabled)} disabled, {N(job.HiddenForceOff)} forceRenderingOff), by " +
+                $"scene root: {(top.Count > 0 ? string.Join(", ", top.ToArray()) : "none")}; included as game-culled " +
+                $"{N(included)} (switcher content {N(job.GameCulledBySwitcher)}, occlusion groups {N(job.GameCulledByOcclusion)}), " +
+                $"proxies excluded {N(job.ProxySkipped)}" + (IncludeGameCulled ? "" : " (game-culled inclusion rolled back)") +
+                (samples.Count > 0
+                    ? $"; samples ({HiddenSamplesPerRoot} a root, top {HiddenSampleRoots} roots): {string.Join(" | ", samples.ToArray())}"
+                    : ""));
         }
 
         /// <summary>Stage W's log line: what the atlas captured, where it went and what fell back.</summary>

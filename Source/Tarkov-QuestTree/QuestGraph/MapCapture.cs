@@ -969,6 +969,14 @@ namespace QuestTree.QuestGraph
         private int[] _cullingOwner;
         private int[] _cullingObjectOwner;
 
+        /// <summary>WP8 (D6), for the mesh build: the baked-LOD proxies (never buildings), the renderers a runtime
+        /// culling system owns (read even when switched off), and the part of those from the occlusion bake groups.
+        /// Collected with the culling lists, once a capture; null when that failed.</summary>
+        private HashSet<Renderer> _proxyRenderers;
+
+        private HashSet<Renderer> _gameCulled;
+        private HashSet<Renderer> _occlusionCulled;
+
         /// <summary>The GameObjects the scene's distance culling DEACTIVATES, flattened out of the same
         /// culling objects, with room to remember which of them this capture switched on. Separate from
         /// the component list because they are switched with SetActive rather than an enabled flag, and
@@ -3529,6 +3537,9 @@ namespace QuestTree.QuestGraph
             _culling = null;
             _cullingWasEnabled = null;
             _cullingObjects = 0;
+            _proxyRenderers = null;
+            _gameCulled = null;
+            _occlusionCulled = null;
 
             if (!ForceCulling) return;
 
@@ -3566,10 +3577,14 @@ namespace QuestTree.QuestGraph
                 _cullingObjectsHeld = objectsToTurnOn.ToArray();
                 _cullingObjectWasActive = new bool[_cullingObjectsHeld.Length];
 
+                var found = clock.Elapsed.TotalMilliseconds;
+                var gameCulled = CollectGameCulled();
+
                 Plugin.LogSource?.LogDebug(
                     $"QuestTree: {_cullingObjects} culling object(s) hold {_culling.Length} renderer(s) and LOD " +
                     $"group(s) plus {_cullingObjectsHeld.Length} whole GameObject(s) the capture will force " +
-                    $"visible, found in {Ms(clock.Elapsed.TotalMilliseconds)} ms.");
+                    $"visible, found in {Ms(found)} ms; {gameCulled} in " +
+                    $"{Ms(clock.Elapsed.TotalMilliseconds - found)} ms.");
             }
             catch (Exception ex)
             {
@@ -3580,6 +3595,9 @@ namespace QuestTree.QuestGraph
                 _cullers = null;
                 _cullingOwner = null;
                 _cullingObjectOwner = null;
+                _proxyRenderers = null;
+                _gameCulled = null;
+                _occlusionCulled = null;
                 Plugin.LogSource?.LogWarning(
                     $"QuestTree: the scene's distance culling could not be read " +
                     $"({ex.GetType().Name}: {ex.Message}) - buildings whose roofs are switched off at this " +
@@ -3610,6 +3628,119 @@ namespace QuestTree.QuestGraph
                 if (item == null) continue;
                 into.Add(item);
             }
+        }
+
+        /// <summary>
+        /// WP8 (D6): the two runtime culling systems the hold does not touch, read once a capture for the mesh
+        /// build. EFT's baked-LOD <c>ScreenDistanceSwitcher</c> shows a merged, auto-simplified PROXY of its area
+        /// (<c>GetBakedLodRenderers</c>) when the area is far from the player's camera and switches the detail
+        /// off (forceRenderingOff, or enabled through its delegates); Perfect Culling's occlusion
+        /// (<c>PerfectCullingCrossSceneGroup.bakeGroups[].renderers</c>) switches renderers off by
+        /// <c>Renderer.enabled</c> from where the player stands. Proxies are never buildings; the rest is
+        /// GAME-CULLED - geometry hidden from a position, not from the map - and the build reads it even when it
+        /// is off. Each switcher and each bake group is taken inside its own guard, as TakeObjects does. Decided
+        /// per renderer from what owns it, never from a map. Returns the counts for the culling debug line.
+        /// </summary>
+        private string CollectGameCulled()
+        {
+            _proxyRenderers = new HashSet<Renderer>();
+            _gameCulled = new HashSet<Renderer>();
+            _occlusionCulled = new HashSet<Renderer>();
+
+            int switchers = 0, bakeGroups = 0, failed = 0;
+            var content = 0;
+
+            Koenigz.PerfectCulling.EFT.ScreenDistanceSwitcher[] found = null;
+
+            try
+            {
+                found = FindObjectsOfType<Koenigz.PerfectCulling.EFT.ScreenDistanceSwitcher>();
+            }
+            catch (Exception)
+            {
+                failed++;
+            }
+
+            if (found != null)
+            {
+                // Every proxy first: one switcher's content may hold another's hull.
+                foreach (var switcher in found)
+                {
+                    if (switcher == null) continue;
+
+                    try
+                    {
+                        foreach (var renderer in switcher.GetBakedLodRenderers())
+                            if (renderer != null) _proxyRenderers.Add(renderer);
+
+                        switchers++;
+                    }
+                    catch (Exception)
+                    {
+                        failed++;
+                    }
+                }
+
+                foreach (var switcher in found)
+                {
+                    if (switcher == null) continue;
+
+                    try
+                    {
+                        foreach (var renderer in switcher.GetComponentsInChildren<MeshRenderer>(true))
+                            if (renderer != null && !_proxyRenderers.Contains(renderer) && _gameCulled.Add(renderer))
+                                content++;
+                    }
+                    catch (Exception)
+                    {
+                        failed++;
+                    }
+                }
+            }
+
+            Koenigz.PerfectCulling.EFT.PerfectCullingCrossSceneGroup[] groups = null;
+
+            try
+            {
+                groups = FindObjectsOfType<Koenigz.PerfectCulling.EFT.PerfectCullingCrossSceneGroup>();
+            }
+            catch (Exception)
+            {
+                failed++;
+            }
+
+            if (groups != null)
+                foreach (var group in groups)
+                {
+                    if (group == null || group.bakeGroups == null) continue;
+
+                    foreach (var bake in group.bakeGroups)
+                    {
+                        try
+                        {
+                            if (bake?.renderers == null) continue;
+
+                            bakeGroups++;
+
+                            foreach (var renderer in bake.renderers)
+                            {
+                                if (renderer == null || _proxyRenderers.Contains(renderer)) continue;
+
+                                _gameCulled.Add(renderer);
+                                _occlusionCulled.Add(renderer);
+                            }
+                        }
+                        catch (Exception)
+                        {
+                            failed++;
+                        }
+                    }
+                }
+
+            return $"{switchers} baked-LOD switcher(s) with {_proxyRenderers.Count} proxy renderer(s) the mesh excludes and " +
+                   $"{content} content renderer(s), {bakeGroups} occlusion bake group(s) with {_occlusionCulled.Count} " +
+                   $"renderer(s) - {_gameCulled.Count} game-culled renderer(s) the mesh reads even when switched off" +
+                   (failed > 0 ? $", {failed} unreadable" : "");
         }
 
         /// <summary>Adds the renderers and LOD groups of one switch list to the flat array.</summary>
@@ -5555,6 +5686,9 @@ namespace QuestTree.QuestGraph
                 _cullers = null;
                 _cullingOwner = null;
                 _cullingObjectOwner = null;
+                _proxyRenderers = null;
+                _gameCulled = null;
+                _occlusionCulled = null;
                 _cullingObjects = 0;
                 _water = null;
                 _waterMaterials = null;
@@ -7048,6 +7182,11 @@ namespace QuestTree.QuestGraph
                 // The hidden-renderer filter trusts "switched off" only when the hold knows the culling lists; a
                 // capture whose culling scan failed keeps the old behaviour (stage W review, M2).
                 request.CullingKnown = _culling != null;
+
+                // WP8 (D6): the proxies the build never takes, and the game-culled renderers it reads even when off.
+                request.ProxyRenderers = _culling != null ? _proxyRenderers : null;
+                request.GameCulled = _culling != null ? _gameCulled : null;
+                request.OcclusionCulled = _culling != null ? _occlusionCulled : null;
 
                 if (request.Bands.Count == 0)
                 {
