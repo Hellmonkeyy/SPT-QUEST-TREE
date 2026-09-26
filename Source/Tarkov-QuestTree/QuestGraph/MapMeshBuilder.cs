@@ -249,12 +249,30 @@ namespace QuestTree.QuestGraph
         }
 
         /// <summary>The map's triangle cap (D6): min(ceil(demand / <see cref="BudgetShare"/>), the memory ceiling,
-        /// <see cref="BuilderAbsoluteTriangles"/>). Unity-free.</summary>
+        /// <see cref="BuilderAbsoluteTriangles"/>) - with a FLOOR (PART-03 review): the headroom the pre-WP7 build
+        /// had. Before WP7 the cap was a fixed 3 M and the headroom 3 M less what the old rule reserved; the
+        /// derived cap alone leaves a tenth of the demand, which on a small map (demand under ~2.7 M) is LESS
+        /// than before, and a source over the decimation guard with no coarse level is stored as it is only from
+        /// headroom - so it was clustered where the old build kept it whole (Q2 broken, and the 4c rollback not
+        /// the old cap). The floor is <see cref="MemoryFloorTriangles"/> plus (demand - what the old rule would
+        /// reserve), which makes the starting headroom never smaller than the old build's; it never lowers a
+        /// target (0.9 x cap >= demand still), never passes the memory ceiling (the floor is 3 M, which the
+        /// ceiling is at least), and costs only unused ledger room, since stored triangles never exceed the
+        /// sources. Unity-free.</summary>
         /// <param name="demand">What the buildings need (<see cref="AreaBudget.Demand"/>).</param>
+        /// <param name="legacyReserved">What the pre-WP7 rule would reserve on the same list: the sum over the
+        /// buildings of min(source, legacy target).</param>
         /// <param name="memoryCeiling">This machine's <see cref="MemoryCeiling()"/>.</param>
-        internal static long CapFor(long demand, long memoryCeiling) =>
-            Math.Min((long)Math.Ceiling(Math.Max(0L, demand) / BudgetShare),
-                Math.Min(memoryCeiling, BuilderAbsoluteTriangles));
+        internal static long CapFor(long demand, long legacyReserved, long memoryCeiling)
+        {
+            var d = Math.Max(0L, demand);
+            var derived = (long)Math.Ceiling(d / BudgetShare);
+            var floor = MemoryFloorTriangles + Math.Max(0L, d - Math.Max(0L, legacyReserved));
+            return Math.Min(Math.Max(derived, floor), Math.Min(memoryCeiling, BuilderAbsoluteTriangles));
+        }
+
+        /// <summary>CapFor with the old rule reserving the whole demand: the plain floor of 3 M.</summary>
+        internal static long CapFor(long demand, long memoryCeiling) => CapFor(demand, demand, memoryCeiling);
 
         /// <summary>The share of the map's cap the area budget plans with. The rest is
         /// never reserved: it is the headroom a decimation's overshoot (up to its hard limit), a group's
@@ -2885,7 +2903,11 @@ namespace QuestTree.QuestGraph
             job.MemoryCeiling = MemoryCeiling(job.RamMb, job.VramMb);
             job.Demand = demand;
 
-            var cap = CapFor(demand, job.MemoryCeiling);
+            // What the OLD rule would have reserved on this list, for the cap's headroom floor (see CapFor).
+            var legacyReserved = 0L;
+            for (var i = 0; i < sources.Count; i++) legacyReserved += Math.Min(triangles[i], legacy[i]);
+
+            var cap = CapFor(demand, legacyReserved, job.MemoryCeiling);
             job.Cap = cap;
 
             // Nothing is reserved yet (the budget runs before the pipeline), so the ledger is replaced whole.

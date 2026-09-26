@@ -4982,7 +4982,9 @@ namespace QuestTree.UI
 
             // The oblique cut needs the camera above it (see ApplyCut): dolly out until it is at least
             // MinCameraAboveCut over the cut, never past the furthest the dolly goes. sin(pitch) >= sin 15.
-            if (!float.IsNaN(_cutY))
+            // Only while the cut is the near plane (PART-03 review): the CutNone rollback draws uncut and must
+            // not dolly. The pushed-out distance is kept, as any dolly is - it is the view's own state.
+            if (CutMode == CutByNearPlane && !float.IsNaN(_cutY))
             {
                 var sin = Mathf.Sin(_pitch * Mathf.Deg2Rad);
                 var need = (_cutY + MinCameraAboveCut - target.y) / sin;

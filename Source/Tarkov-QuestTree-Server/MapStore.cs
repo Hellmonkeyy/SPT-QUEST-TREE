@@ -2346,7 +2346,8 @@ namespace QuestTreeServer
         {
             var clock = System.Diagnostics.Stopwatch.StartNew();
 
-            // Before the sets are read: ReadSet holds each stored meta's mesh to the mesh ceiling.
+            // Before the sets are read: the ceilings gate what is STAGED from now on (DropUnusableMesh on the
+            // upload paths); a set already stored is served whatever the disk has become since.
             if (!_ceilingsSized) SizeCeilings();
 
             _sets.Clear();
