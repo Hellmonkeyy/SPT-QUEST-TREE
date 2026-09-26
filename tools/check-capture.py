@@ -41,9 +41,26 @@ What it checks, per capture folder <key>/:
      the next capture cannot merge into that side). A <key>-side-*.png the meta does not list is a
      WARN.
 
+  6. (WP4) the pictures are compared by PIXELS, not bytes. Since 1.19.0 the client writes floors, sides and
+     distance sidecars with its own PNG encoder on a worker (QuestGraph/PngEncoder.cs), so the same pixels no
+     longer come out as Unity's bytes; the encoder is an implementation detail and nothing hashes these files.
+     Bytes are compared only where a meta records a hash (the mesh and the atlas pages). With --pixels every
+     floor and side the meta names must be 8-bit, colour type 6 (RGBA), not interlaced, every chunk's CRC must
+     hold and its IDAT stream must inflate completely (the Adler-32 included) to exactly height x (1 + width x 4)
+     bytes; every <key>-*.dist.png present must be colour type 2 (RGB) with R == G == B at every pixel (a channel
+     slip, or a sidecar written from the wrong array, breaks that). All ERRORs.
+     --compare-dir A B decodes every *.png present in both folders and requires the same width, height, colour
+     type and decoded rows - "pixels identical (bytes differ: encoder)" is the expected line for a verification
+     build's captures-verify/<key> against captures/<key>; the first differing row and column is an ERROR.
+     --compare ROOT_B together with --pixels does the same per capture key over the floors, sides and sidecars
+     both metas name (use it on two roots holding the SAME capture; two raids never draw the same pixels).
+     --png-info FILE prints a PNG's chunk list and IHDR. Decoding uses PIL when it is importable, else a
+     pure-Python decoder (every CRC, the Adler-32, the five filters) - about a minute per 10 Mpx floor.
+
 What it does NOT check, by design:
-  - the pixels. Whether the PNG is the right map, drawn the right way up, or blank, is exactly what
-    the eye is for; this only proves its dimensions are the ones the meta and the extent imply.
+  - what the pixels show. Whether the PNG is the right map, drawn the right way up, or blank, is exactly
+    what the eye is for; this proves its dimensions are the ones the meta and the extent imply, and with
+    --pixels that the file decodes completely in the format the client reads.
   - rotation beyond reporting a disagreement as a WARN (both sides are 0 in this release), tileSize,
     labels, timeOfDay, modVersion, and whether the client can actually load the file.
   - the extent itself. If the harvest measured a NavMesh box reaching under the map, capture, meta
@@ -96,6 +113,8 @@ never an ERROR - the capture is fine, and the next session's first Maps-tab open
 
 Usage:  python tools/check-capture.py [captures-root] [zones-folder] [--compare OLD_ROOT] [--mesh-quality]
                                       [--legacy-view] [--pixels]
+        python tools/check-capture.py --compare-dir FOLDER_A FOLDER_B
+        python tools/check-capture.py --png-info FILE
         defaults: C:\\Games\\SPT\\BepInEx\\plugins\\QuestTree\\captures
                   C:\\Games\\SPT\\SPT_Runtime\\user\\mods\\QuestTree\\zones
 """
@@ -109,10 +128,12 @@ import zlib
 from pathlib import Path
 
 def _arguments(argv):
-    """(positional arguments, --compare root or None, flags). Kept positional for the two roots every caller
-    already passes; --compare OLD_ROOT, --mesh-quality and --legacy-view may stand anywhere."""
+    """(positional arguments, --compare root or None, flags, --png-info file or None, --compare-dir (A, B) or
+    None). Kept positional for the two roots every caller already passes; every --flag, with the arguments it
+    takes, is taken out of argv first, so it may stand anywhere and the positional reads are unchanged."""
     positional, compare, k = [], None, 0
     flags = set()
+    png_info, compare_dir = None, None
     while k < len(argv):
         if argv[k] in ("--mesh-quality", "--legacy-view", "--pixels"):
             flags.add(argv[k])
@@ -125,12 +146,26 @@ def _arguments(argv):
             compare = Path(argv[k + 1])
             k += 2
             continue
+        if argv[k] == "--png-info":
+            if k + 1 >= len(argv):
+                print("CAPTURE CHECK FAILED: --png-info needs a PNG file after it")
+                sys.exit(1)
+            png_info = Path(argv[k + 1])
+            k += 2
+            continue
+        if argv[k] == "--compare-dir":
+            if k + 2 >= len(argv):
+                print("CAPTURE CHECK FAILED: --compare-dir needs two folders after it")
+                sys.exit(1)
+            compare_dir = (Path(argv[k + 1]), Path(argv[k + 2]))
+            k += 3
+            continue
         positional.append(argv[k])
         k += 1
-    return positional, compare, flags
+    return positional, compare, flags, png_info, compare_dir
 
 
-_POSITIONAL, COMPARE, _FLAGS = _arguments(sys.argv[1:])
+_POSITIONAL, COMPARE, _FLAGS, PNG_INFO, COMPARE_DIR = _arguments(sys.argv[1:])
 MESH_QUALITY = "--mesh-quality" in _FLAGS
 LEGACY_VIEW = "--legacy-view" in _FLAGS
 PIXELS = "--pixels" in _FLAGS
@@ -237,6 +272,221 @@ def png_size(path):
     if width == 0 or height == 0:
         return None, f"IHDR says {width}x{height}"
     return (width, height), None
+
+
+PNG_COLOUR_TYPES = {0: "grey", 2: "RGB", 3: "palette", 4: "grey+alpha", 6: "RGBA"}
+PNG_CHANNELS = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}
+
+
+def png_chunks(path):
+    """[(type, length, crc_ok, body)] for every chunk of a PNG, in file order. Raises ValueError on a missing
+    signature or a chunk that runs past the end of the file (truncation); a bad CRC is reported, not raised."""
+    data = Path(path).read_bytes()
+    if data[:8] != PNG_MAGIC:
+        raise ValueError("does not start with the PNG signature")
+    chunks, at = [], 8
+    while at < len(data):
+        if at + 12 > len(data):
+            raise ValueError(f"truncated: {len(data) - at} byte(s) after the last whole chunk")
+        length = struct.unpack(">I", data[at:at + 4])[0]
+        kind = data[at + 4:at + 8]
+        if at + 12 + length > len(data):
+            raise ValueError(f"truncated: chunk {kind.decode('latin-1')!r} at byte {at} declares {length} byte(s) "
+                             f"and the file ends first")
+        body = data[at + 8:at + 8 + length]
+        crc = struct.unpack(">I", data[at + 8 + length:at + 12 + length])[0]
+        chunks.append((kind.decode("latin-1"), length, zlib.crc32(kind + body) & 0xFFFFFFFF == crc, body))
+        at += 12 + length
+        if kind == b"IEND":
+            break
+    return chunks
+
+
+def png_info(path):
+    """--png-info FILE (WP4 step 0): the chunk list and the IHDR fields, one line each. Returns the exit code."""
+    try:
+        chunks = png_chunks(path)
+    except (OSError, ValueError) as exc:
+        print(f"{path}: {exc}")
+        return 1
+    print(f"{path}: {Path(path).stat().st_size:,} bytes, {len(chunks)} chunk(s)")
+    idat = [c for c in chunks if c[0] == "IDAT"]
+    bad = 0
+    for kind, length, crc_ok, body in chunks:
+        bad += 0 if crc_ok else 1
+        note = ""
+        if kind == "IHDR" and length == 13:
+            width, height, depth, colour, method, filtering, interlace = struct.unpack(">IIBBBBB", body)
+            note = (f"  {width}x{height}, bit depth {depth}, colour type {colour} "
+                    f"({PNG_COLOUR_TYPES.get(colour, '?')}), compression {method}, filter {filtering}, "
+                    f"interlace {interlace}")
+        elif kind == "IDAT":
+            if body is idat[0][3]:
+                note = (f"  (first of {len(idat)} IDAT, {sum(c[1] for c in idat):,} bytes in all; zlib header "
+                        f"{body[:2].hex(' ').upper()})" if len(body) >= 2 else "")
+            else:
+                continue
+        elif kind in ("gAMA", "sRGB", "pHYs", "iCCP", "cHRM", "tEXt", "zTXt", "iTXt", "tIME", "bKGD", "sBIT"):
+            note = f"  data {body[:40].hex(' ').upper()}" + (" ..." if len(body) > 40 else "")
+        print(f"  {kind}  {length:>10,} bytes  crc {'ok' if crc_ok else 'BAD'}{note}")
+    if chunks and chunks[-1][0] != "IEND":
+        print("  (no IEND)")
+        bad += 1
+    return 1 if bad else 0
+
+
+def png_structure(path):
+    """(width, height, bit depth, colour type, interlace, filtered scanlines) of a PNG: every chunk's CRC checked, IHDR
+    first and IEND last, the IDAT data concatenated and inflated COMPLETELY (zlib checks the Adler-32), nothing after the
+    zlib stream, and exactly the scanline bytes the IHDR implies. Raises ValueError with the reason."""
+    chunks = png_chunks(path)
+    if not chunks or chunks[0][0] != "IHDR" or chunks[0][1] != 13:
+        raise ValueError("the first chunk is not a 13-byte IHDR")
+    bad = [kind for kind, _, crc_ok, _ in chunks if not crc_ok]
+    if bad:
+        raise ValueError(f"the CRC of {bad[0]} is wrong")
+    if chunks[-1][0] != "IEND":
+        raise ValueError("no IEND - the file is cut short")
+    width, height, depth, colour, method, filtering, interlace = struct.unpack(">IIBBBBB", chunks[0][3])
+    if method != 0 or filtering != 0:
+        raise ValueError(f"compression {method} / filter method {filtering}")
+    data = b"".join(body for kind, _, _, body in chunks if kind == "IDAT")
+    if not data:
+        raise ValueError("no IDAT")
+    inflater = zlib.decompressobj()
+    try:
+        raw = inflater.decompress(data) + inflater.flush()
+    except zlib.error as exc:
+        raise ValueError(f"the IDAT stream does not inflate ({exc})") from exc
+    if not inflater.eof:
+        raise ValueError("the IDAT stream ends before its deflate stream does")
+    if inflater.unused_data:
+        raise ValueError(f"{len(inflater.unused_data)} byte(s) follow the zlib stream")
+    if interlace == 0 and colour in PNG_CHANNELS:
+        stride = (width * PNG_CHANNELS[colour] * depth + 7) // 8
+        if len(raw) != height * (stride + 1):
+            raise ValueError(f"the IDAT stream inflates to {len(raw):,} bytes, not the {height * (stride + 1):,} a "
+                             f"{width}x{height} picture needs")
+    return width, height, depth, colour, interlace, raw
+
+
+def _unfilter(raw, width, height, bpp):
+    """The five PNG filters undone: the rows top first, no filter bytes. Sub through C-level accumulate, Up through
+    map; Average and Paeth a byte at a time."""
+    from itertools import accumulate
+    from operator import add
+    stride = width * bpp
+    out = bytearray(height * stride)
+    prior = bytes(stride)
+    mask = (0xFF).__and__
+    for y in range(height):
+        base = y * (stride + 1)
+        kind = raw[base]
+        row = raw[base + 1:base + 1 + stride]
+        if kind == 0:
+            current = bytes(row)
+        elif kind == 1:
+            full = bytearray(stride)
+            for c in range(bpp):
+                full[c::bpp] = bytes(map(mask, accumulate(row[c::bpp])))
+            current = bytes(full)
+        elif kind == 2:
+            current = bytes(map(mask, map(add, row, prior)))
+        elif kind in (3, 4):
+            work = bytearray(row)
+            for i in range(stride):
+                left = work[i - bpp] if i >= bpp else 0
+                up = prior[i]
+                if kind == 3:
+                    work[i] = (work[i] + ((left + up) >> 1)) & 0xFF
+                else:
+                    work[i] = (work[i] + _paeth(left, up, prior[i - bpp] if i >= bpp else 0)) & 0xFF
+            current = bytes(work)
+        else:
+            raise ValueError(f"row {y} has filter type {kind}")
+        out[y * stride:(y + 1) * stride] = current
+        prior = current
+    return bytes(out)
+
+
+def png_decode_pure(path):
+    """(width, height, colour type, rows) - the rows top first, no filter bytes - for an 8-bit, non-interlaced RGB or
+    RGBA PNG, in pure Python (png_structure, then the five filters). Raises ValueError."""
+    width, height, depth, colour, interlace, raw = png_structure(path)
+    if depth != 8 or colour not in (2, 6) or interlace != 0:
+        raise ValueError(f"bit depth {depth}, colour type {colour}, interlace {interlace} - not an 8-bit RGB/RGBA "
+                         f"PNG")
+    return width, height, colour, _unfilter(raw, width, height, 4 if colour == 6 else 3)
+
+
+def png_decode(path):
+    """(width, height, colour type, rows top first) of an 8-bit RGB or RGBA PNG: PIL when it is importable, else the
+    pure-Python decoder (about a minute per 10 Mpx floor). Raises ValueError."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return png_decode_pure(path)
+    try:
+        with Image.open(path) as image:
+            image.load()
+            mode = image.mode
+            if mode not in ("RGBA", "RGB") or image.info.get("interlace"):
+                return png_decode_pure(path)
+            return image.width, image.height, 6 if mode == "RGBA" else 2, image.tobytes()
+    except (OSError, SyntaxError) as exc:
+        raise ValueError(str(exc)) from exc
+
+
+def compare_png(path_a, path_b, label, errors, lines):
+    """--compare-dir / --compare --pixels: two PNGs held to the same size, colour type and decoded rows."""
+    try:
+        a = png_decode(path_a)
+        b = png_decode(path_b)
+    except (OSError, ValueError) as exc:
+        errors.append(f"{label}: could not be decoded for the pixel comparison ({exc})")
+        return
+    if a[:3] != b[:3]:
+        errors.append(f"{label}: {a[0]}x{a[1]} colour type {a[2]} against {b[0]}x{b[1]} colour type {b[2]}")
+        return
+    if a[3] != b[3]:
+        bpp = 4 if a[2] == 6 else 3
+        at = next(i for i in range(len(a[3])) if a[3][i] != b[3][i])
+        row, col = divmod(at, a[0] * bpp)
+        errors.append(f"{label}: pixels differ - the first at row {row} (from the top), column {col // bpp}")
+        return
+    same = Path(path_a).read_bytes() == Path(path_b).read_bytes()
+    lines.append(f"{label}: pixels identical ({'bytes identical' if same else 'bytes differ: encoder'})")
+
+
+def compare_dirs(folder_a, folder_b):
+    """--compare-dir A B: every *.png present in both folders compared by pixels. Returns the exit code."""
+    errors, warnings, lines = [], [], []
+    for folder in (folder_a, folder_b):
+        if not folder.is_dir():
+            fail_hard(f"--compare-dir: no folder at {folder}")
+    a = {p.name.lower(): p for p in sorted(folder_a.iterdir()) if p.is_file() and p.suffix.lower() == ".png"}
+    b = {p.name.lower(): p for p in sorted(folder_b.iterdir()) if p.is_file() and p.suffix.lower() == ".png"}
+    common = sorted(set(a) & set(b))
+    for name in common:
+        compare_png(a[name], b[name], a[name].name, errors, lines)
+    for name in sorted(set(a) ^ set(b)):
+        where = folder_a if name in a else folder_b
+        warnings.append(f"{(a.get(name) or b.get(name)).name} is only in {where} - not compared")
+    print(f"compare-dir: {folder_a}")
+    print(f"        and: {folder_b}")
+    print("-" * 78)
+    for line in lines:
+        print(f"  {line}")
+    print()
+    for w in warnings:
+        print(f"WARN   {w}")
+    for e in errors:
+        print(f"ERROR  {e}")
+    if warnings or errors:
+        print()
+    print(f"{len(common)} picture(s) compared by pixels, {len(errors)} problem(s)"
+          + (f", {len(warnings)} warning(s)" if warnings else ""))
+    return 1 if errors else 0
 
 
 def load_json(path):
@@ -1615,6 +1865,56 @@ def check_pixels(meta, folder, key, errors, warnings):
         if direction in SIDE_DIRS and isinstance(side.get("file"), str):
             pairs.append((f"{key}: side {direction}", side["file"], f"{key}-side-{direction}.dist.png", False))
 
+    # WP4 (point 6): every picture the meta names is an 8-bit RGBA PNG whose stream inflates completely to the exact
+    # size, and every sidecar present is RGB with R == G == B - whatever encoder wrote them.
+    structured = 0
+    broken = set()     # refused here: the pair check below does not decode them again
+    for where, rel, _, _ in pairs:
+        parts = Path(rel.replace("\\", "/"))
+        if parts.is_absolute() or ".." in parts.parts or not (folder / parts).is_file():
+            continue
+        try:
+            _, _, depth, colour, interlace, _ = png_structure(folder / parts)
+        except (OSError, ValueError) as exc:
+            errors.append(f"{where}: {rel} {exc}")
+            broken.add((folder / parts).name.lower())
+            continue
+        if depth != 8 or colour != 6 or interlace != 0:
+            broken.add((folder / parts).name.lower())
+            errors.append(f"{where}: {rel} is bit depth {depth}, colour type {colour}, interlace {interlace} - a "
+                          f"picture is 8-bit RGBA (colour type 6), not interlaced")
+            continue
+        structured += 1
+
+    greys = 0
+    for dist in sorted(p for p in folder.iterdir() if p.is_file() and p.name.lower().endswith(".dist.png")):
+        try:
+            width, height, depth, colour, interlace, _ = png_structure(dist)
+        except (OSError, ValueError) as exc:
+            errors.append(f"{key}: {dist.name} {exc}")
+            broken.add(dist.name.lower())
+            continue
+        if depth != 8 or colour != 2 or interlace != 0:
+            broken.add(dist.name.lower())
+            errors.append(f"{key}: {dist.name} is bit depth {depth}, colour type {colour}, interlace {interlace} - a "
+                          f"distance sidecar is 8-bit RGB (colour type 2): the client's reader takes no other")
+            continue
+        try:
+            planes = read_png_planes(dist)
+        except (OSError, ValueError, zlib.error):
+            planes = None
+        if planes is None:
+            errors.append(f"{key}: {dist.name} could not be decoded for the grey check")
+            continue
+        red, green, blue = planes[2]
+        slip = next(((y, next(x for x in range(width) if not red[y][x] == green[y][x] == blue[y][x]))
+                     for y in range(height) if not red[y] == green[y] == blue[y]), None)
+        if slip is not None:
+            errors.append(f"{key}: {dist.name} is not grey - R, G and B differ at row {slip[0]} (from the top), column "
+                          f"{slip[1]}; a sidecar is one distance in three equal channels")
+            continue
+        greys += 1
+
     checked = empty = coloured = 0
     for where, rel, dist_name, is_floor in pairs:
         parts = Path(rel.replace("\\", "/"))
@@ -1622,6 +1922,8 @@ def check_pixels(meta, folder, key, errors, warnings):
             continue
         png, dist = folder / parts, folder / dist_name
         if not png.is_file() or not dist.is_file():
+            continue
+        if png.name.lower() in broken or dist.name.lower() in broken:
             continue
         size, _ = png_size(png)
         dist_size, dist_why = png_size(dist)
@@ -1633,7 +1935,11 @@ def check_pixels(meta, folder, key, errors, warnings):
                           f"{'floor' if is_floor else 'side'} is {size[0]}x{size[1]} - the merge would refuse the "
                           f"sidecar")
             continue
-        picture, sidecar = read_png_planes(png), read_png_planes(dist)
+        try:
+            picture, sidecar = read_png_planes(png), read_png_planes(dist)
+        except (OSError, ValueError, zlib.error) as exc:
+            errors.append(f"{where}: {rel} or {dist_name} could not be decoded for the pixel check ({exc})")
+            continue
         if picture is None or sidecar is None:
             errors.append(f"{where}: {rel if picture is None else dist_name} could not be decoded for the pixel check "
                           f"(not an 8-bit RGB/RGBA PNG)")
@@ -1665,7 +1971,8 @@ def check_pixels(meta, folder, key, errors, warnings):
                             f"(distance 255), the first at column {first[0]}, row {first[1]} from the top - either a merge "
                             f"into a picture that had no sidecar (DevelopBand keeps the colour with distance 255, and the "
                             f"next capture takes it whatever its distance), or a kept colour that lost its distance")
-    return f"pixels: {checked} picture(s) against their sidecars, {empty:,} px at dist 255, {coloured:,} with colour"
+    return (f"pixels: {structured} picture(s) decode completely as 8-bit RGBA, {greys} sidecar(s) grey RGB, "
+            f"{checked} picture(s) against their sidecars, {empty:,} px at dist 255, {coloured:,} with colour")
 
 
 def png_is(path, width, height):
@@ -2086,6 +2393,47 @@ def compare(new_root, old_root, errors, warnings):
     return lines
 
 
+def named_pictures(folder):
+    """{file name: label} for the floors, sides and sidecars a capture folder's meta names (sidecars by the client's
+    naming rule, when present)."""
+    metas = [p for p in sorted(folder.iterdir()) if p.is_file() and p.name.lower().endswith(".map.json")]
+    if len(metas) != 1:
+        return {}
+    meta, _ = load_json(metas[0])
+    if not isinstance(meta, dict):
+        return {}
+    key = folder.name
+    named = {}
+    for floor in meta.get("floors") or []:
+        if isinstance(floor, dict) and isinstance(floor.get("file"), str):
+            named[Path(floor["file"].replace("\\", "/")).name] = f"floor {floor.get('level')}"
+            if isinstance(floor.get("level"), int):
+                named[f"{key}-{floor['level']}.dist.png"] = f"floor {floor['level']} sidecar"
+    for side in meta.get("sides") or []:
+        if isinstance(side, dict) and isinstance(side.get("file"), str) and side.get("dir") in SIDE_DIRS:
+            named[Path(side["file"].replace("\\", "/")).name] = f"side {side['dir']}"
+            named[f"{key}-side-{side['dir']}.dist.png"] = f"side {side['dir']} sidecar"
+    return named
+
+
+def compare_pixels(new_root, old_root, errors, warnings):
+    """--compare ROOT_B --pixels (WP4): per capture key in both roots, the floors, sides and sidecars both metas name,
+    compared by pixels. Returns the lines."""
+    lines = []
+    if not old_root.is_dir():
+        return lines
+    for folder in sorted(p for p in new_root.iterdir() if p.is_dir()):
+        other = old_root / folder.name
+        if not other.is_dir():
+            continue
+        new_named, old_named = named_pictures(folder), named_pictures(other)
+        for name in sorted(set(new_named) & set(old_named)):
+            a, b = folder / name, other / name
+            if a.is_file() and b.is_file():
+                compare_png(a, b, f"{folder.name}: {new_named[name]} ({name})", errors, lines)
+    return lines
+
+
 OWED_MARKER = ".upload-owed"   # MapTransfer.OwedMarker.FileName (WP3 step 7)
 
 
@@ -2112,6 +2460,10 @@ def check_owed_marker(captures, warnings):
 
 
 def main():
+    if PNG_INFO is not None:
+        return png_info(PNG_INFO)
+    if COMPARE_DIR is not None:
+        return compare_dirs(*COMPARE_DIR)
     if not CAPTURES.is_dir():
         fail_hard(f"no captures folder at {CAPTURES} - pass one as the first argument")
 
@@ -2139,6 +2491,9 @@ def main():
         print(f"compare:  NEW {CAPTURES} against OLD {COMPARE}")
         for line in compare(CAPTURES, COMPARE, errors, warnings):
             print(f"  {line}")
+        if PIXELS:
+            for line in compare_pixels(CAPTURES, COMPARE, errors, warnings):
+                print(f"  {line}")
         print()
 
     for w in warnings:

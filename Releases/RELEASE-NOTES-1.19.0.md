@@ -213,6 +213,53 @@ Two tools check the claim on files:
   pixel with distance 255 is black and that each floor's sidecar is the floor's size. A set that was once
   merged into a picture with no sidecar also fails that check; this is older than the tile skip.
 
+**A capture's frames are shorter, and its files have the same pixels.** Two parts of a capture's main-thread
+work moved off the frame.
+
+- **The tile readback is asynchronous.** Each tile used to be copied back from the graphics card with ReadPixels,
+  which stalls the frame until the card has finished (10 to 61 ms a tile, measured). A tile is now resolved into
+  one of three single-sample copies of the render target, read back with AsyncGPUReadback, and averaged in a
+  later frame once its copy has landed. It is still one render and at most one average a frame, and every tile
+  is folded in before the water rule runs and before the scene is released. The half floats go through a table
+  built by Unity's own Mathf.HalfToFloat, so the numbers are that function's, bit for bit.
+- **The first tile of every session is read both ways.** The two results are compared bit for bit before the
+  new path is trusted. The Debug log says `asynchronous tile readback proven bit-identical to ReadPixels on
+  <format>/<msaa> (<n> samples)` once. A mismatch is a warning: the session goes back to ReadPixels, and that
+  tile's pixels come from ReadPixels. A readback that reports an error is rendered again the old way under the
+  same hold, and two errors in one capture also send the session back to ReadPixels.
+- **What it costs.** The ring is 96 MB of video memory and 96 MB of system memory, outside the capture's memory
+  budget. The budget itself is not changed, because it decides the picture's size. The capture header says
+  `readback async x3 (<format>)` or `readback ReadPixels (<why>)`. A Debug line per floor and side counts the
+  tiles read back, the waits, the errors and the averaging time.
+- **The PNGs are encoded on workers.** Floors, side views and distance sidecars are written by the mod's own
+  PNG encoder on a worker thread while the next floor or side renders. They are staged on the main thread
+  before anything reads them, in the same order and under the same commit rules. The first encode of each kind
+  in a session is decoded again on the worker and compared with every row it was made from. The captured line
+  ends `encoded off the main thread in N ms`.
+- **Unity's encoder is the fallback.** It encodes the same pixels whenever a file's encode failed, did not
+  finish in 30 s, failed that check (the rest of the session then uses Unity's), or came out over the 48 MB cap.
+  The cap is then judged on Unity's size, so the same floors are written as before. Each fallback is one line
+  naming the reason: `falls back to Unity's encoder (...)`.
+- **Pictures are compared by pixels, not bytes.** The files decode to exactly the pixels the old encoder's did.
+  A PNG decodes by its specification, so every reader in the mod, the upload's JPEGs and the host see the same
+  pixels, but the bytes are no longer Unity's. Nothing hashes these files. The mesh and the atlas pages, which
+  are hashed, are untouched.
+
+The switches are static readonly constants in MapCapture.cs:
+- `AsyncTileReadback`, `HalfTableEnabled` and `ManagedPngEncode` (on): each restores the old path exactly when off.
+- `VerifyEveryTileReadback` and `VerifyManagedPng` (off) are for a verification build. Every tile is also read with
+  ReadPixels and compared, and every file is also encoded by Unity into `BepInEx\plugins\QuestTree\captures-verify\<key>\`.
+- `AverageOnWorker` (off) is specified and not built. It would average the tiles on a worker.
+
+The checker compares pictures by pixels:
+- `python tools/check-capture.py --compare-dir FOLDER_A FOLDER_B` compares every PNG present in both folders by
+  its decoded pixels. `pixels identical (bytes differ: encoder)` is the expected line for a verification build's
+  `captures-verify\<key>` against `captures\<key>`. The first differing row and column is an error.
+- `--pixels` also checks that each picture is 8-bit RGBA and inflates completely to its exact size, and that each
+  sidecar is RGB with R = G = B at every pixel.
+- `--compare ROOT_B --pixels` compares the pictures both metas name, for two roots holding the same capture.
+  `--png-info FILE` prints a PNG's chunks.
+
 **The campaign keeps a journal.** Every run appends its stop lines to
 `captures\<key>\<key>.campaign.txt` beside the pictures, the last twenty runs of that map, because the
 game log is gone the moment the game restarts and the run that captured 11 of 16 stops had nothing left
@@ -451,7 +498,8 @@ is meant to be removed again.
   floor, over the 256 MB budget, so 3 px/m (199 MB)`); the earlier 932x896 m measurement of the same
   map settled at 3.5 px/m and 254 MB. Customs at 4 px/m is 239 MB on its 1118x539 m, inside the
   budget and untouched, which also keeps the sets already on disk mergeable. Outside that count
-  and small: the 34 MB half-float staging texture, one per capture, and the video memory the tile
+  and small: the 34 MB half-float staging texture, one per capture (with the asynchronous readback,
+  three 32 MB resolve targets and their three 32 MB arrays instead), and the video memory the tile
   target holds. Between floors everything the floor held is released and a collect runs by hand, the
   one place this mod does that, because these are large-object-heap allocations and the next floor
   asks for the same sizes a frame later.
@@ -606,4 +654,8 @@ the rest.
   `campaign done: 1 upload of <map> (N stops, 0 intermediate uploads).` and then exactly one
   `capture of <map> uploaded to the host`, with none between the campaign's start and that line. Start it normally instead and the client should say the
   host does not accept map pictures, once.
+- **The readback and the encoder.** After the first capture of a session, the Debug log should hold
+  `asynchronous tile readback proven bit-identical to ReadPixels on ...` once, and there should be no
+  `did not match ReadPixels` warning. The captured lines should end `encoded off the main thread in N ms`, and
+  no line should say `falls back to Unity's encoder`.
 - Everything that is not the map should be exactly as it was in 1.18.5.
