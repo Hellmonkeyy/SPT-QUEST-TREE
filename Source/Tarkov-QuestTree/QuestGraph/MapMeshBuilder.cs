@@ -3119,7 +3119,7 @@ namespace QuestTree.QuestGraph
                         if (outcome.Mesh.UV == null) job.ClusteredTextureless++;
                     }
                     else if (outcome != null && outcome.TimedOut) job.ClusterTimedOut++;
-                    else job.Unstored++;
+                    else if (outcome != null) job.Unstored++;   // a worker that threw is Failed only (review F04)
 
                     return;
                 }
