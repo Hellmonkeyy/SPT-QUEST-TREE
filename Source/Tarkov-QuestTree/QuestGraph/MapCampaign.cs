@@ -137,12 +137,35 @@ namespace QuestTree.QuestGraph
         /// <summary>The last stop's capture was still running when the campaign stopped waiting.</summary>
         private bool _stillCapturing;
 
+        /// <summary>The campaign's hold on its map's uploads (WP3), null when none is held: taken before the first
+        /// stop, released exactly once at the campaign's end - its finally, <see cref="RestoreWhenDone"/> or
+        /// <see cref="OnDestroy"/> - and that release is the campaign's one upload.</summary>
+        private MapTransfer.UploadHold _campaignHold;
+
+        /// <summary>The upload's part of the summary line and the Journal, set when the hold is released.</summary>
+        private string _campaignUploadNote = "";
+
+        /// <summary>The running campaign's map, stops and captures so far, for <see cref="OnDestroy"/>'s line - the one
+        /// end of a campaign that has no local variables to read them from.</summary>
+        private string _lastMap;
+
+        private int _lastStops;
+
+        private int _lastCaptured;
+
         /// <summary>Restores the player once the capture has cleared its flag - with no time backstop (review F45):
         /// the capture is bounded by its own caps and watchdog, and a restore while it runs would photograph the
         /// wrong place. The campaign stays "running" until then, so neither the key nor the automatic tick can start
-        /// something that the restore would then teleport out from under.</summary>
+        /// something that the restore would then teleport out from under.
+        ///
+        /// WP3: the campaign's hold is released HERE, after the wait - so the late capture writes its meta under the
+        /// hold, its map is owed, and the release uploads exactly once, including that capture (and a last-stop
+        /// verification build, which runs inside the capture).</summary>
         /// <param name="start">Where the campaign started.</param>
-        private IEnumerator RestoreWhenDone(Vector3 start)
+        /// <param name="map">The campaign's map.</param>
+        /// <param name="captured">Stops captured before the campaign stopped waiting.</param>
+        /// <param name="stops">Stops the campaign planned.</param>
+        private IEnumerator RestoreWhenDone(Vector3 start, string map, int captured, int stops)
         {
             try
             {
@@ -151,7 +174,66 @@ namespace QuestTree.QuestGraph
             finally
             {
                 Restore(start);
+                ReleaseCampaignHold(map, captured, stops, "campaign stopped");
                 _running = false;
+            }
+        }
+
+        /// <summary>
+        /// Ends the campaign's hold on its map's uploads and says what came of it (WP3): one upload of the map when a
+        /// capture of it was written during the campaign and sharing is on, else no upload and why. Idempotent - the
+        /// field is taken first - so the finally and <see cref="OnDestroy"/> can both call it.
+        /// </summary>
+        /// <param name="map">The campaign's map.</param>
+        /// <param name="captured">How many stops were captured.</param>
+        /// <param name="stops">How many stops the campaign planned.</param>
+        /// <param name="what">"campaign done", "campaign stopped" or "campaign ended with the raid".</param>
+        private void ReleaseCampaignHold(string map, int captured, int stops, string what)
+        {
+            var hold = _campaignHold;
+            _campaignHold = null;
+
+            // The rollback switch off, or already released.
+            if (hold == null)
+            {
+                _campaignUploadNote = "";
+                return;
+            }
+
+            var still = MapCapture.IsCapturing ? " while a capture is still running" : "";
+            MapTransfer.UploadStart outcome;
+
+            // Never throws: the callers are a finally and OnDestroy, and the lines after them (clearing _running) must run.
+            try
+            {
+                outcome = MapTransfer.ReleaseUploads(hold);
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug($"QuestTree: the campaign's upload hold on {map} could not be released ({ex.Message}).");
+                outcome = MapTransfer.UploadStart.NoHost;
+            }
+
+            var intermediate = hold.Landed;
+
+            switch (outcome)
+            {
+                case MapTransfer.UploadStart.Started:
+                case MapTransfer.UploadStart.Queued:
+                case MapTransfer.UploadStart.StillHeld:
+                    _campaignUploadNote = $", 1 upload at the end ({hold.Deferred} held back)";
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: {what}: 1 upload of {map} ({captured} stops, {intermediate} intermediate uploads){still}.");
+                    break;
+
+                default:
+                    var why = outcome == MapTransfer.UploadStart.SharingOff ? "sharing is off"
+                        : outcome == MapTransfer.UploadStart.Declined ? "this host declines map pictures"
+                        : outcome == MapTransfer.UploadStart.NoHost ? "no plugin object"
+                        : "no capture was written";
+                    _campaignUploadNote = $", no upload ({why})";
+                    Plugin.LogSource?.LogInfo($"QuestTree: {what}: no upload of {map} - {why} ({captured} stops).");
+                    break;
             }
         }
 
@@ -254,6 +336,25 @@ namespace QuestTree.QuestGraph
         {
             PollCampaignKey();
             PollAutoCapture();
+        }
+
+        /// <summary>
+        /// WP3: Unity abandons <see cref="Run"/> without its finally when the GameWorld goes (see Run's comment), so the
+        /// campaign's hold is released here or it would lapse unflushed. <see cref="MapTransfer.UploadCapture"/> starts
+        /// its coroutine on the PLUGIN object, which outlives the raid, so the one upload still runs, in the menu. A
+        /// capture cut off by the raid never reaches its meta, so what is owed is the last capture that did.
+        /// </summary>
+        private void OnDestroy()
+        {
+            try
+            {
+                if (_campaignHold != null)
+                    ReleaseCampaignHold(_lastMap ?? _campaignHold.Key, _lastCaptured, _lastStops, "campaign ended with the raid");
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug($"QuestTree: the campaign's upload hold could not be released ({ex.Message}).");
+            }
         }
 
         /// <summary>The campaign key. Refuses, saying why, while a campaign or a capture is already
@@ -581,6 +682,14 @@ namespace QuestTree.QuestGraph
             // stop with MeshVerifyLastStop on - so a timeout line names the number it used
             var waitUsed = MaxCaptureWaitSeconds;
 
+            // WP3: every capture of this map writes its meta under the hold and is owed rather than uploaded; the
+            // campaign's end releases it, and that is the one upload. Before the try, so every end of the try sees it.
+            _lastMap = map;
+            _lastStops = stops.Count;
+            _lastCaptured = 0;
+            _campaignUploadNote = "";
+            _campaignHold = MapTransfer.HoldUploads(this, map, "capture campaign", preempts: true);
+
             try
             {
                 for (var i = 0; i < stops.Count; i++)
@@ -696,6 +805,7 @@ namespace QuestTree.QuestGraph
                     }
 
                     captured++;
+                    _lastCaptured = captured;
 
                     Plugin.LogSource?.LogInfo(
                         $"QuestTree: campaign stop {i + 1} of {stops.Count} at {At(stop)} - captured.");
@@ -706,16 +816,22 @@ namespace QuestTree.QuestGraph
                 // A capture still running when the campaign gave up is NOT run out from under (review F45): the
                 // player stays at the stop until it clears, with no time backstop, before being moved back. Done
                 // in a coroutine of its own because a finally cannot wait.
+                //
+                // WP3: the campaign's one upload is released where the last capture is known to have ended - here, or
+                // in RestoreWhenDone after its wait - so that capture (and a last-stop verification build inside it)
+                // is under the hold.
                 if (_stillCapturing && MapCapture.IsCapturing)
                 {
                     Plugin.LogSource?.LogWarning(
                         $"QuestTree: the capture is still running past its own worst case of {Whole(waitUsed)} s - " +
                         "you are put back as soon as it finishes.");
-                    StartCoroutine(RestoreWhenDone(start));   // clears _running itself
+                    _campaignUploadNote = _campaignHold != null ? ", upload after the last capture ends" : "";
+                    StartCoroutine(RestoreWhenDone(start, map, captured, stops.Count));   // clears _running itself
                 }
                 else
                 {
                     Restore(start);
+                    ReleaseCampaignHold(map, captured, stops.Count, stopped == null ? "campaign done" : "campaign stopped");
                     _running = false;
                 }
 
@@ -729,7 +845,7 @@ namespace QuestTree.QuestGraph
                 _autoDueAt = Time.time;
 
                 var seconds = (clock.ElapsedMilliseconds / 1000d).ToString("0", CultureInfo.InvariantCulture);
-                var counts = $"{stops.Count} stop(s), {captured} captured, {skipped} skipped, {seconds} s.";
+                var counts = $"{stops.Count} stop(s), {captured} captured, {skipped} skipped, {seconds} s{_campaignUploadNote}.";
 
                 Plugin.LogSource?.LogInfo(stopped == null
                     ? $"QuestTree: capture campaign on {map} done - {counts}"

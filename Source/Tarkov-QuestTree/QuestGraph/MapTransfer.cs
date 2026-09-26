@@ -315,29 +315,242 @@ namespace QuestTree.QuestGraph
         /// the host would interleave two maps' floors.</summary>
         private static bool _uploading;
 
+        /// <summary>The map whose upload is running, or null - for the supersede guard and the hold's accounting (WP3).</summary>
+        private static string _uploadingKey;
+
+        /// <summary><see cref="Now"/> when the running upload started - a campaign hold taken after it preempts it (WP3).</summary>
+        private static float _uploadStartedAt;
+
         /// <summary>Captures that finished while another upload was running, offered one after another as each
-        /// upload ends (<see cref="StartNextPending"/>). Main thread only, like everything upload-side.</summary>
+        /// upload ends (<see cref="StartNextPending"/>). Main thread only, like everything upload-side.
+        ///
+        /// The queue's rules since WP3, with <see cref="_owed"/> beside it:
+        ///
+        /// Q1. A map is in at most one of <see cref="_owed"/> or this set. Both are sets, so at most one entry per
+        ///     map, and the total is bounded by the number of maps. Nothing piles up.
+        /// Q2. <see cref="UploadCapture"/> of a map while it is HELD adds it to <see cref="_owed"/>, never here.
+        /// Q3. <see cref="UploadCapture"/> of a map that is not held while an upload runs adds it here, as before.
+        /// Q4. <see cref="StartNextPending"/> never starts a held map: <see cref="TryStartUpload"/> moves it to
+        ///     <see cref="_owed"/>.
+        /// Q5. Releasing the last hold on an owed map starts or queues it exactly once.
+        /// Q6. An upload of a map satisfies every queued or owed request for it made before it read the capture:
+        ///     <see cref="UploadRoutine"/> takes the map out of this set in the frame it reads the capture, and it
+        ///     reads the newest state on disk, which includes every earlier capture.
+        /// Q7. A host that declined empties both sets (and, since the owed marker, the marker file).
+        /// Q8. An upload stopped by the supersede guard asks for its map again through
+        ///     <see cref="TryStartUpload"/>: owed if the map is held, queued here otherwise.
+        /// </summary>
         private static readonly HashSet<string> _pendingUploads = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        /// <summary>Offers the next queued capture, if any. Called as an upload ends.</summary>
+        /// <summary>WP3's rollback switch. False restores the behaviour before it exactly: <see cref="HoldUploads"/>
+        /// returns null, nothing is ever owed, and every capture uploads as its meta lands.</summary>
+        internal static readonly bool UploadOnceAtEnd = true;
+
+        /// <summary>A caller's claim that uploads of one map wait until it ends (WP3). Main thread only.
+        ///
+        /// Scoped to one map and to an owner object, so a hold whose owner was destroyed without releasing it
+        /// lapses by Unity's own null (<see cref="PruneLapsedHolds"/>) rather than holding the map for the rest
+        /// of the session.</summary>
+        internal sealed class UploadHold
+        {
+            internal UploadHold(UnityEngine.Object owner, string key, string why, bool preempts)
+            {
+                Owner = owner;
+                Key = key;
+                Why = why;
+                PreemptsRunning = preempts;
+                Since = Now();
+            }
+
+            /// <summary>Unity-null once destroyed: the hold lapses.</summary>
+            internal readonly UnityEngine.Object Owner;
+
+            internal readonly string Key;
+
+            /// <summary>"capture campaign" or "automatic capture", for the lines.</summary>
+            internal readonly string Why;
+
+            /// <summary>True for a campaign: an upload of the map that started before the hold is stopped at its
+            /// next item boundary (the supersede guard), so the campaign's one upload is the only one.</summary>
+            internal readonly bool PreemptsRunning;
+
+            /// <summary><see cref="Now"/> when the hold was taken.</summary>
+            internal readonly float Since;
+
+            /// <summary>How many <see cref="UploadCapture"/> calls this hold absorbed.</summary>
+            internal int Deferred;
+
+            /// <summary>How many uploads of the map REACHED the host while the hold was live - the campaign's
+            /// "intermediate uploads", 0 unless one was already past its last item boundary when the hold began.</summary>
+            internal int Landed { get; set; }
+
+            internal bool Released;
+        }
+
+        /// <summary>The live holds, in the order they were taken. Main thread only.</summary>
+        private static readonly List<UploadHold> _holds = new List<UploadHold>();
+
+        /// <summary>Maps whose upload was asked for while held, one entry per map, drained at release - see the
+        /// rules on <see cref="_pendingUploads"/>.</summary>
+        private static readonly HashSet<string> _owed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        /// <summary>What an attempt to start (or release) an upload came to.</summary>
+        internal enum UploadStart
+        {
+            Started,
+            Queued,
+            Deferred,
+            NothingOwed,
+            SharingOff,
+            Declined,
+            NoHost,
+            StillHeld
+        }
+
+        /// <summary>The clock the holds are stamped with: Unity's real time since start-up, which does not pause
+        /// with the game. A seam for the client harness, which has no Unity to ask; nothing in the mod sets it.</summary>
+        internal static Func<float> ClockForTests { get; set; }
+
+        private static float Now()
+        {
+            var seam = ClockForTests;
+            return seam != null ? seam() : Time.realtimeSinceStartup;
+        }
+
+        /// <summary>
+        /// Holds every upload of <paramref name="key"/> until the hold is released (WP3). While held,
+        /// <see cref="UploadCapture"/> records the map as owed instead of uploading it, and the release issues
+        /// exactly one upload of it. Null - holding nothing - with the rollback switch off, with no owner or no key.
+        /// </summary>
+        /// <param name="owner">The object whose life bounds the hold. Destroyed without a release, the hold lapses.</param>
+        /// <param name="key">The map's internal id.</param>
+        /// <param name="why">"capture campaign" or "automatic capture", for the lines.</param>
+        /// <param name="preempts">Whether an upload of the map already running is stopped at its next item.</param>
+        internal static UploadHold HoldUploads(UnityEngine.Object owner, string key, string why, bool preempts)
+        {
+            if (!UploadOnceAtEnd || owner == null || string.IsNullOrEmpty(key)) return null;
+
+            var hold = new UploadHold(owner, key, why, preempts);
+            _holds.Add(hold);
+
+            Plugin.LogSource?.LogDebug($"QuestTree: uploads of {key} are held until the {why} ends.");
+            return hold;
+        }
+
+        /// <summary>Whether a live hold covers the map. Call <see cref="PruneLapsedHolds"/> first.</summary>
+        internal static bool IsHeld(string key)
+        {
+            foreach (var h in _holds)
+                if (string.Equals(h.Key, key, StringComparison.OrdinalIgnoreCase)) return true;
+
+            return false;
+        }
+
+        /// <summary>
+        /// Drops holds whose owner was destroyed without releasing - a safety net; OnDestroy is the normal path. A
+        /// lapsed hold's owed map moves to <see cref="_pendingUploads"/> when nothing else holds it; it is NOT started
+        /// here (the callers start the queue themselves), which keeps this free of recursion.
+        /// </summary>
+        private static void PruneLapsedHolds()
+        {
+            for (var i = _holds.Count - 1; i >= 0; i--)
+            {
+                var h = _holds[i];
+
+                // Unity's == null: a destroyed owner counts as null.
+                if (h.Owner != null) continue;
+
+                _holds.RemoveAt(i);
+                h.Released = true;
+
+                Plugin.LogSource?.LogDebug($"QuestTree: the hold on {h.Key}'s uploads lapsed - its {h.Why} is gone.");
+
+                if (!IsHeld(h.Key) && _owed.Remove(h.Key)) _pendingUploads.Add(h.Key);
+            }
+        }
+
+        /// <summary>
+        /// Ends a hold. When no other hold covers its map and the map is owed, issues exactly one upload of it (Q5).
+        /// Idempotent: a campaign's finally and its OnDestroy may both call it.
+        /// </summary>
+        /// <param name="hold">The hold <see cref="HoldUploads"/> returned, or null.</param>
+        internal static UploadStart ReleaseUploads(UploadHold hold)
+        {
+            if (hold == null || hold.Released) return UploadStart.NothingOwed;
+
+            hold.Released = true;
+            _holds.Remove(hold);
+            PruneLapsedHolds();
+
+            // Another hold still covers the map - automatic capture's, say - and that release uploads it.
+            if (IsHeld(hold.Key))
+            {
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: the {hold.Why} on {hold.Key} has ended, but its uploads stay held until the {HoldWhy(hold.Key)} ends.");
+                return UploadStart.StillHeld;
+            }
+
+            if (!_owed.Remove(hold.Key))
+            {
+                var none = !SharingOn() ? UploadStart.SharingOff : _uploadsDeclined ? UploadStart.Declined : UploadStart.NothingOwed;
+                if (!_uploading) StartNextPending();   // a lapsed hold's maps, if any
+                return none;
+            }
+
+            // Started or Queued in practice; the gates are re-checked here.
+            var outcome = TryStartUpload(hold.Key);
+            if (!_uploading) StartNextPending();
+            return outcome;
+        }
+
+        /// <summary>The player's sharing setting, read defensively - a failed config bind leaves the entry null,
+        /// and the default is on.</summary>
+        private static bool SharingOn() =>
+            !(ModSettings.Ready && ModSettings.UploadCaptures != null && !ModSettings.UploadCaptures.Value);
+
+        /// <summary>What holds the map, for the lines: the first live hold's reason.</summary>
+        private static string HoldWhy(string key)
+        {
+            foreach (var h in _holds)
+                if (string.Equals(h.Key, key, StringComparison.OrdinalIgnoreCase)) return h.Why;
+
+            return "hold";
+        }
+
+        /// <summary>How many uploads of the map the live holds have absorbed - the most any one of them has.</summary>
+        private static int HoldDeferred(string key)
+        {
+            var most = 0;
+
+            foreach (var h in _holds)
+                if (string.Equals(h.Key, key, StringComparison.OrdinalIgnoreCase)) most = Math.Max(most, h.Deferred);
+
+            return most;
+        }
+
+        /// <summary>Offers the queued captures, one at a time: at most one is STARTED; a held one moves to
+        /// <see cref="_owed"/> (Q4) and one the setting refuses is dropped, and the loop goes on past both - the
+        /// review F32 leftover, where one such map stalled the rest of the queue. Called as an upload ends.</summary>
         private static void StartNextPending()
         {
             try
             {
-                var next = _pendingUploads.FirstOrDefault();
+                PruneLapsedHolds();
 
-                if (next == null) return;
-
-                _pendingUploads.Remove(next);
-
-                // A host that declined takes nothing more this session - the queue goes with it.
+                // A host that declined takes nothing more this session - the queue and the owed maps go with it (Q7).
                 if (_uploadsDeclined)
                 {
                     _pendingUploads.Clear();
+                    _owed.Clear();
                     return;
                 }
 
-                UploadCapture(next);
+                while (!_uploading && _pendingUploads.Count > 0)
+                {
+                    var next = _pendingUploads.First();
+                    _pendingUploads.Remove(next);
+                    TryStartUpload(next);
+                }
             }
             catch (Exception ex)
             {
@@ -360,19 +573,44 @@ namespace QuestTree.QuestGraph
         /// rather than dying with the GameWorld. Never throws.
         /// </summary>
         /// <param name="key">The map's internal id, which is also its capture folder's name.</param>
-        internal static void UploadCapture(string key)
+        internal static void UploadCapture(string key) => TryStartUpload(key);
+
+        /// <summary>
+        /// The body of <see cref="UploadCapture"/>, saying what it came to: the gates in their order (no key, the
+        /// setting, a host that declined), then the hold (WP3: a held map is OWED, not uploaded - Q2), then the
+        /// queue behind a running upload (Q3), then the start. Main thread only. Never throws.
+        /// </summary>
+        /// <param name="key">The map's internal id.</param>
+        private static UploadStart TryStartUpload(string key)
         {
             try
             {
-                if (string.IsNullOrEmpty(key)) return;
+                if (string.IsNullOrEmpty(key)) return UploadStart.NothingOwed;
 
                 // The player's choice, and the default is on: a host that does not want uploads
                 // refuses them itself, so the setting is for the player who does not want to offer
-                // even that. Read defensively - a failed config bind leaves the entry null.
-                if (ModSettings.Ready && ModSettings.UploadCaptures != null && !ModSettings.UploadCaptures.Value) return;
+                // even that.
+                if (!SharingOn()) return UploadStart.SharingOff;
 
                 // Already said no. Silent from here - see _uploadsDeclined.
-                if (_uploadsDeclined) return;
+                if (_uploadsDeclined) return UploadStart.Declined;
+
+                PruneLapsedHolds();
+
+                if (IsHeld(key))
+                {
+                    // Owed, and uploaded once when the last hold on it ends (Q2, Q5). Owed supersedes queued (Q1).
+                    _owed.Add(key);
+                    _pendingUploads.Remove(key);
+
+                    foreach (var h in _holds)
+                        if (string.Equals(h.Key, key, StringComparison.OrdinalIgnoreCase)) h.Deferred++;
+
+                    Plugin.LogSource?.LogDebug(
+                        $"QuestTree: the capture of {key} is held back from the host until the {HoldWhy(key)} ends " +
+                        $"({HoldDeferred(key)} so far).");
+                    return UploadStart.Deferred;
+                }
 
                 if (_uploading)
                 {
@@ -383,7 +621,7 @@ namespace QuestTree.QuestGraph
 
                     Plugin.LogSource?.LogDebug(
                         $"QuestTree: an upload is already running, so the capture of {key} waits and goes up when it ends.");
-                    return;
+                    return UploadStart.Queued;
                 }
 
                 var host = Plugin.Instance;
@@ -391,18 +629,23 @@ namespace QuestTree.QuestGraph
                 {
                     Plugin.LogSource?.LogDebug(
                         $"QuestTree: no plugin object to run the upload of {key} on - the capture stays on this machine.");
-                    return;
+                    return UploadStart.NoHost;
                 }
 
                 _uploading = true;
+                _uploadingKey = key;
+                _uploadStartedAt = Now();
                 host.StartCoroutine(UploadRoutine(key));
+                return UploadStart.Started;
             }
             catch (Exception ex)
             {
                 _uploading = false;
+                _uploadingKey = null;
                 Plugin.LogSource?.LogWarning(
                     $"QuestTree: the capture of {key} could not be offered to the host ({ex.GetType().Name}: {ex.Message}) " +
                     "- it is on this machine either way.");
+                return UploadStart.NoHost;
             }
         }
 
@@ -421,6 +664,10 @@ namespace QuestTree.QuestGraph
                 // and the caller is the frame that just finished writing the capture - so without it the read
                 // and hash of the mesh below (tens of MB, up to 512 MiB) landed in that same frame.
                 yield return null;
+
+                // Q6: this upload reads the newest capture on disk, so every request for this map queued before
+                // this frame is satisfied by it. A request queued AFTER it - a newer capture - stays queued.
+                _pendingUploads.Remove(key);
 
                 if (!ReadCapture(key, out var meta, out var floors)) yield break;
 
@@ -812,6 +1059,7 @@ namespace QuestTree.QuestGraph
             finally
             {
                 _uploading = false;
+                _uploadingKey = null;
 
                 // The next capture that finished while this one was going up (review F32).
                 StartNextPending();
