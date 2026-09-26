@@ -2421,11 +2421,17 @@ namespace QuestTree.QuestGraph
 
             if (job.Claimed.Contains(candidate.Renderer)) return false;
             if (!candidate.Coarse && !IsSource(job, candidate)) return false;
-            if (candidate.SourceTriangles <= 0 || candidate.SourceTriangles > MaxSourceTriangles) return false;
 
-            // Too many vertices to DECODE, whatever it is reduced to afterwards.
-            return candidate.Mesh.vertexCount <= MapMeshFile.MaxVerticesPerBuilding;
+            return Decodable(candidate);
         }
+
+        /// <summary>Whether a candidate's source can be decoded at all: some triangles, not more than
+        /// MaxSourceTriangles, and a vertex count the format can take. Wanted's size half, shared with
+        /// EnqueueCoarse so a fallback never queues what the read gate would refuse (review F01).</summary>
+        /// <param name="candidate">The candidate.</param>
+        private static bool Decodable(Candidate candidate) =>
+            candidate.SourceTriangles > 0 && candidate.SourceTriangles <= MaxSourceTriangles &&
+            candidate.Mesh != null && candidate.Mesh.vertexCount <= MapMeshFile.MaxVerticesPerBuilding;
 
         /// <summary>
         /// The most triangles this building may be stored with - its HARD LIMIT - taken from the ledger
@@ -2792,7 +2798,8 @@ namespace QuestTree.QuestGraph
             // every detail sibling with it. The caller stores or clusters this source instead (review F01).
             if (state.Coarse != null && state.Coarse.Contains(candidate.Renderer)) return false;
 
-            // The coarse candidates first; the group switches, and FellBack counts, only when one survives.
+            // The coarse candidates that would pass Wanted's size checks first; the group switches, and FellBack
+            // counts, only when one survives.
             var coarse = new List<Candidate>();
 
             foreach (var renderer in state.CoarseList)
@@ -2802,6 +2809,11 @@ namespace QuestTree.QuestGraph
                 Candidate made = null;
                 Step(job, "a coarse level", () => made = MakeCandidate(job, renderer));
                 if (made == null) continue;
+
+                // Wanted's size checks HERE, before the candidate counts (review F01): a coarse renderer the read gate
+                // would refuse - no determinable triangles (a static-batch share), too many - must not switch the group
+                // and cost it its detail.
+                if (!Decodable(made)) continue;
 
                 made.Group = candidate.Group;
                 made.Coarse = true;
