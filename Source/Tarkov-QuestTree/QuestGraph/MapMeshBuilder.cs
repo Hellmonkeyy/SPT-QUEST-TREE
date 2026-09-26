@@ -1584,6 +1584,9 @@ namespace QuestTree.QuestGraph
             /// <summary>Its world bounds' surface, 2(wh + wd + hd), in square metres - the budget's basis (WP7).</summary>
             internal double Surface;
 
+            /// <summary>Its world bounds' height, metres - the budget's storey floor (WP8 D2).</summary>
+            internal double Height;
+
             /// <summary>The source's measured triangle area, m2, once a worker has placed it (0 until then).</summary>
             internal double MeasuredSurface;
 
@@ -3070,6 +3073,7 @@ namespace QuestTree.QuestGraph
                     candidate.SourceTriangles = SubmeshTriangles(candidate);
                     candidate.Footprint = Math.Abs((double)candidate.Bounds.size.x * candidate.Bounds.size.z);
                     candidate.Surface = BoxSurface(candidate.Bounds.size);
+                    candidate.Height = Math.Abs((double)candidate.Bounds.size.y);
 
                     if (candidate.Group == null && candidate.SourceTriangles > MaxSourceTriangles) job.InputGuarded++;
                 }
@@ -3120,18 +3124,20 @@ namespace QuestTree.QuestGraph
 
             var surfaces = new double[sources.Count];
             var footprints = new double[sources.Count];
+            var heights = new double[sources.Count];
             var triangles = new long[sources.Count];
 
             for (var i = 0; i < sources.Count; i++)
             {
                 surfaces[i] = sources[i].Surface;
                 footprints[i] = sources[i].Footprint;
+                heights[i] = sources[i].Height;
                 triangles[i] = sources[i].SourceTriangles;
             }
 
             // D4-D6: what the buildings need at scale 1, what this machine holds, and the cap from both.
             var legacy = AreaBudget.LegacyTargets(footprints, triangles, out _);
-            var demand = AreaBudget.Demand(surfaces, footprints, legacy, triangles);
+            var demand = AreaBudget.Demand(surfaces, footprints, heights, legacy, triangles);
 
             job.RamMb = SystemInfo.systemMemorySize;
             job.VramMb = SystemInfo.graphicsMemorySize;
@@ -3148,7 +3154,7 @@ namespace QuestTree.QuestGraph
             // Nothing is reserved yet (the budget runs before the pipeline), so the ledger is replaced whole.
             job.Ledger = new BudgetLedger(cap);
 
-            var targets = AreaBudget.Targets(surfaces, footprints, triangles, (long)(cap * BudgetShare), out var scale,
+            var targets = AreaBudget.Targets(surfaces, footprints, heights, triangles, (long)(cap * BudgetShare), out var scale,
                 out var floors, out var legacyScale);
 
             for (var i = 0; i < sources.Count; i++)
@@ -3157,7 +3163,7 @@ namespace QuestTree.QuestGraph
                 sources[i].Reserved = Math.Min(triangles[i], targets[i]);
                 job.Ledger.Reserve(sources[i].Reserved);
 
-                if (floors[i] > AreaBudget.Scaled(AreaBudget.Basis(surfaces[i], footprints[i]), scale)) job.HeldAtFloor++;
+                if (floors[i] > AreaBudget.Scaled(AreaBudget.Basis(surfaces[i], footprints[i], heights[i]), scale)) job.HeldAtFloor++;
             }
 
             job.BudgetScale = scale;
@@ -3178,7 +3184,7 @@ namespace QuestTree.QuestGraph
         {
             if (candidate.Target > 0) return candidate.Target;
 
-            candidate.Target = AreaBudget.Target(AreaBudget.Basis(candidate.Surface, candidate.Footprint), job.BudgetScale,
+            candidate.Target = AreaBudget.Target(AreaBudget.Basis(candidate.Surface, candidate.Footprint, candidate.Height), job.BudgetScale,
                 AreaBudget.LegacyTarget(candidate.Footprint, job.LegacyScale));
 
             return candidate.Target;
@@ -3304,6 +3310,7 @@ namespace QuestTree.QuestGraph
                 Dimension = mesh.GetVertexAttributeDimension(VertexAttribute.Position),
                 Footprint = Math.Abs((double)size.x * size.z),
                 Surface = BoxSurface(size),
+                Height = Math.Abs((double)size.y),
             };
 
             candidate.Stride = candidate.Stream >= 0 ? mesh.GetVertexBufferStride(candidate.Stream) : 0;
@@ -5947,7 +5954,8 @@ namespace QuestTree.QuestGraph
                 $"QuestTree: buildings for {job.Request.Map} - {N(job.Kept)} of {N(job.Candidates.Count)} " +
                 $"candidates kept, {N(job.Triangles)} triangles stored of the {N(job.Cap)} cap (demand {N(job.Demand)}, " +
                 $"memory ceiling {N(job.MemoryCeiling)} from RAM {N(job.RamMb)} MB / VRAM {N(job.VramMb)} MB, absolute " +
-                $"{N(BuilderAbsoluteTriangles)}); {AreaBudget.TrianglesPerSquareMetre.ToString("0.0", f1)}/m2 of box surface, " +
+                $"{N(BuilderAbsoluteTriangles)}); {AreaBudget.TrianglesPerSquareMetre.ToString("0.0", f1)}/m2 of box surface " +
+                $"(at least {N(AreaBudget.TrianglesPerStorey)} a {AreaBudget.StoreyMetres.ToString("0", f1)} m storey), " +
                 $"scaled x{job.BudgetScale.ToString("0.00", f1)}, {N(job.HeldAtFloor)} building(s) held at their pre-WP7 floor; " +
                 $"surface: box {N(job.BoxSurface)} m2, triangles {N(job.MeasuredSurface)} m2 (ratio " +
                 $"{(job.BoxSurface > 0d ? job.MeasuredSurface / job.BoxSurface : 0d).ToString("0.00", f1)}), stored density " +
@@ -9005,15 +9013,41 @@ namespace QuestTree.QuestGraph
         /// <summary>The pre-WP7 rule's planned cap: 0.9 x the old fixed 3,000,000.</summary>
         internal const long LegacyPlannedCap = 2_700_000;
 
+        /// <summary>
+        /// WP8 (D2): the VISIBLE-surface term's density, as a share of <see cref="TrianglesPerSquareMetre"/> - WP8's
+        /// answer to the footprint rule starving tall and lattice structures: basis = max(footprint x density, visible
+        /// box surface (top and four sides, the box surface less the footprint) x density x this). It is SUBSUMED by
+        /// PART-03's rule: 20 per m2 of the WHOLE box surface is at least 5 per m2 of any part of it, so under the
+        /// surface basis this term never binds, and is kept only so the footprint rollback basis gets WP8's term too.
+        /// Rollback: 0.
+        /// </summary>
+        internal const double SurfacePerFootprint = 0.25;
+
+        /// <summary>WP8 (D2): the storey floor - a tall object's basis is at least this many triangles for every
+        /// <see cref="StoreyMetres"/> of its height. Under PART-03's surface basis it binds only for objects thinner
+        /// than ~0.15 m (no candidate that passes the size filter); under the footprint rollback it keeps a 62 m
+        /// chimney off the 24-triangle floor.</summary>
+        internal const int TrianglesPerStorey = 12;
+
+        internal const double StoreyMetres = 3.0;
+
         /// <summary>A building's unscaled basis (D2): clamp(20 x surface, 24, 250,000) - or the footprint under the
-        /// rollback basis.</summary>
+        /// rollback basis - raised by WP8 to the visible-surface term (<see cref="SurfacePerFootprint"/>, subsumed under
+        /// the surface basis) and the storey floor (<see cref="TrianglesPerStorey"/>). Both are max() terms, so no
+        /// basis is ever below PART-03's for the same building.</summary>
         /// <param name="surface">Its world box's surface, m2.</param>
         /// <param name="footprint">Its world box's footprint, m2.</param>
-        internal static double Basis(double surface, double footprint)
+        /// <param name="height">Its world box's height, m.</param>
+        internal static double Basis(double surface, double footprint, double height)
         {
             var area = BudgetBasis == BasisArea.Surface ? surface : footprint;
+            var visible = Math.Max(0d, surface - Math.Max(0d, footprint));
+            var storeys = TrianglesPerStorey * Math.Ceiling(Math.Max(0d, height) / StoreyMetres);
 
-            return Math.Min(MaxTrianglesPerBuilding, Math.Max(MinTriangles, Math.Max(0d, area) * TrianglesPerSquareMetre));
+            var basis = Math.Max(Math.Max(0d, area) * TrianglesPerSquareMetre,
+                visible * TrianglesPerSquareMetre * SurfacePerFootprint);
+
+            return Math.Min(MaxTrianglesPerBuilding, Math.Max(Math.Max(MinTriangles, storeys), basis));
         }
 
         /// <summary>The pre-WP7 basis: clamp(6 x footprint, 24, 60,000).</summary>
@@ -9059,20 +9093,21 @@ namespace QuestTree.QuestGraph
         /// </summary>
         /// <param name="surfaces">Each building's box surface, m2.</param>
         /// <param name="footprints">Each building's footprint, m2.</param>
+        /// <param name="heights">Each building's box height, m (WP8's storey floor).</param>
         /// <param name="sources">Each building's source triangles.</param>
         /// <param name="cap">The planned cap (the map's cap x <see cref="MapMeshBuilder.BudgetShare"/>).</param>
         /// <param name="scale">The factor applied to every basis (1 when the map fits).</param>
         /// <param name="floors">Each building's pre-WP7 target.</param>
         /// <param name="legacyScale">The pre-WP7 rule's factor on this list.</param>
-        internal static int[] Targets(double[] surfaces, double[] footprints, long[] sources, long cap, out double scale,
-            out int[] floors, out double legacyScale)
+        internal static int[] Targets(double[] surfaces, double[] footprints, double[] heights, long[] sources, long cap,
+            out double scale, out int[] floors, out double legacyScale)
         {
             floors = LegacyTargets(footprints, sources, out legacyScale);
 
             var n = surfaces.Length;
             var basis = new double[n];
 
-            for (var i = 0; i < n; i++) basis[i] = Basis(surfaces[i], footprints[i]);
+            for (var i = 0; i < n; i++) basis[i] = Basis(surfaces[i], footprints[i], heights[i]);
 
             scale = Scale(basis, floors, sources, cap);
 
@@ -9084,12 +9119,12 @@ namespace QuestTree.QuestGraph
 
         /// <summary>What the buildings need (D4): the sum of min(source, max(floor, basis)) - the stored total at
         /// scale 1, and never more than the sources.</summary>
-        internal static long Demand(double[] surfaces, double[] footprints, int[] floors, long[] sources)
+        internal static long Demand(double[] surfaces, double[] footprints, double[] heights, int[] floors, long[] sources)
         {
             var total = 0L;
 
             for (var i = 0; i < sources.Length; i++)
-                total += Math.Min(sources[i], Math.Max(floors[i], (long)Basis(surfaces[i], footprints[i])));
+                total += Math.Min(sources[i], Math.Max(floors[i], (long)Basis(surfaces[i], footprints[i], heights[i])));
 
             return total;
         }
