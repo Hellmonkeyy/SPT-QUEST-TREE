@@ -105,6 +105,13 @@ namespace QuestTree.QuestGraph
     /// calls - so a capture is a handful of short hitches on a key the player pressed, rather than
     /// one long freeze.
     ///
+    /// WP4 moved two of those off the frame: the tile readback is asynchronous (a ring of resolve targets and
+    /// AsyncGPUReadback, proven bit-identical to ReadPixels on the session's first tile), and the picture's and the
+    /// sidecar's PNGs are encoded on workers by <see cref="PngEncoder"/> while the next floor renders, then staged on
+    /// the main thread at a barrier (SettleEncodes, SettleSides). The files' pixels are the old ones; their bytes are
+    /// not Unity's, so pictures are compared by pixels, not bytes. Unity's encoder remains the fallback and the
+    /// rollback (ManagedPngEncode).
+    ///
     /// Memory is BUDGETED, not hoped for. One floor may work in CaptureMemoryBudgetBytes - 256 MB - of
     /// arrays and textures, at WorkingSetBytesPerPixel (26 B a pixel: the float buffer, the drawn mask,
     /// two sets of distances, the picture, the sidecar texture and, on a merge, the previous picture),
@@ -749,6 +756,32 @@ namespace QuestTree.QuestGraph
         /// package.ps1 respectively.</summary>
         private const int MaxFloorPngBytes = 48 * 1024 * 1024;
 
+        /// <summary>WP4 B2: rollback for the managed encode. False = EncodeToPNG on the main thread for every floor, side
+        /// and sidecar, exactly as before (the per-floor Texture2D, FinishFloor, WriteSidecar, FinishSide). Static
+        /// readonly, not const, for FillWaterCyan's reason.</summary>
+        private static readonly bool ManagedPngEncode = true;
+
+        /// <summary>WP4 B2, verification build only: every picture and sidecar is ALSO encoded by Unity, as the old build
+        /// did, into &lt;mod&gt;/captures-verify/&lt;key&gt;/ - outside the captures root, so no reader, sweep or checker run
+        /// sees it - for tools/check-capture.py --compare-dir. Off in a release.</summary>
+        private static readonly bool VerifyManagedPng = false;
+
+        /// <summary>WP4 B2: the managed encoder's row filter. Adaptive (libpng's heuristic) keeps the sizes near Unity's,
+        /// which matters only to the MaxFloorPngBytes cap - and that is judged on Unity's length anyway (SettlePicture).</summary>
+        private const PngEncoder.Filter PngFilter = PngEncoder.Filter.Adaptive;
+
+        /// <summary>WP4 B2: how long a settle waits, a frame at a time, for an encode before it falls back to Unity's
+        /// encoder for that file.</summary>
+        private const double EncodeWaitSeconds = 30d;
+
+        /// <summary>WP4 B2: a managed file failed its round trip this session - every later picture is encoded by Unity.</summary>
+        private static bool _managedPngOff;
+
+        /// <summary>WP4 B2: the first encode of each colour type per session carries the worker-side round trip.</summary>
+        private static bool _rgbaRoundTripped;
+
+        private static bool _rgbRoundTripped;
+
         /// <summary>How far a projected point may sit from where the meta's arithmetic puts it, in
         /// pixels, before the floor is abandoned. One pixel: the two calculations are of the same
         /// linear map and should agree to a rounding error, so anything visible is a real
@@ -1382,6 +1415,12 @@ namespace QuestTree.QuestGraph
 
                     while (tiles.MoveNext()) yield return tiles.Current;
 
+                    // WP4 B2, BARRIER 1: the previous floor's encode ran during this floor's hold and tiles (the overlap);
+                    // it is staged now, before this floor's MeasureFloor (which may refuse) and Develop (which reuses
+                    // the pool it was encoded from).
+                    var settle = SettleEncodes(plan, plan.Floors, floor);
+                    while (settle.MoveNext()) yield return settle.Current;
+
                     // FULL-floor pixels whenever the floor was planned or rendered (WP1 3.5): counting only the
                     // rendered ones would put a whole floor's develop and encode on a tile's pixels, estimate the
                     // sides long and shrink the mesh budget below the old path's.
@@ -1428,13 +1467,16 @@ namespace QuestTree.QuestGraph
                     if (!floor.Failed)
                     {
                         yield return null;
-                        FinishFloor(plan, floor);
+
+                        // WP4 B2: FinishFloor on the Texture path; on the managed path the picture's and the sidecar's
+                        // encodes start on workers and are staged at the next barrier.
+                        StartFloorEncode(plan, floor);
                     }
 
                     // The sidecar AFTER the picture, and only when the picture was written - see
                     // WriteSidecar, where the order is the whole of what makes a crash between the
-                    // two files survivable.
-                    if (!floor.Failed)
+                    // two files survivable. (The managed path keeps that order in SettleEncodes.)
+                    if (!floor.Failed && floor.PictureEncode == null)
                     {
                         yield return null;
                         WriteSidecar(plan, floor);
@@ -1460,6 +1502,14 @@ namespace QuestTree.QuestGraph
                     // milliseconds on the frame the player gets control back in.
                     if (!ReferenceEquals(floor, plan.Floors[plan.Floors.Count - 1])) GC.Collect();
                 }
+
+                // WP4 B2, BARRIER 2: every floor's encode staged before anything reads Bytes (BeginMesh's gate, WillBeNamed,
+                // the sides' gate) - and inside FloorSeconds, which counted the encodes before WP4 too. Then the pool goes,
+                // so the mesh phase sees the memory it saw before.
+                var settled = SettleEncodes(plan, plan.Floors, null);
+                while (settled.MoveNext()) yield return settled.Current;
+
+                plan.RgbaPool = null;
 
                 plan.FloorSeconds = floorsClock.Elapsed.TotalSeconds;
 
@@ -1721,6 +1771,14 @@ namespace QuestTree.QuestGraph
                 // worker - Windows refuses the delete and the rename, and a Commit that throws leaves the capture with
                 // its pictures but no meta. A read is at most one file, so this is frames; the bound only matters for a
                 // hung disk, and then the commit goes ahead as it always did.
+                // WP4 B2, BARRIER 5: a defensive no-op - nothing is committed while an encode is outstanding (a side view
+                // whose loop was abandoned after its encode started is staged here, as it would have been before).
+                var lastFloors = SettleEncodes(plan, plan.Floors, null);
+                while (lastFloors.MoveNext()) yield return lastFloors.Current;
+
+                var lastSides = SettleSides(plan, null, new SideTally());
+                while (lastSides.MoveNext()) yield return lastSides.Current;
+
                 var commitWait = Stopwatch.StartNew();
                 while (!plan.Refused && MapTransfer.IsReadingCapture(plan.Key) && commitWait.Elapsed.TotalSeconds < CommitWaitSeconds)
                     yield return null;
@@ -3102,84 +3160,9 @@ namespace QuestTree.QuestGraph
                 }
 
                 var png = floor.Texture.EncodeToPNG();
-                if (png == null || png.Length == 0)
-                {
-                    floor.Failed = true;
-                    Plugin.LogSource?.LogWarning(
-                        $"QuestTree: {plan.Key} \"{floor.Dto.Name}\" encoded to nothing and was not written.");
-                    return;
-                }
 
-                if (png.Length > MaxFloorPngBytes)
-                {
-                    // Not written rather than written and large: these files ship in the release zip
-                    // and are uploaded to Fika hosts, and a floor this size is a sign the picture is
-                    // noise rather than a map.
-                    floor.Failed = true;
-                    Plugin.LogSource?.LogInfo(
-                        $"QuestTree: {plan.Key} \"{floor.Dto.Name}\" encoded to {png.Length} bytes, over the " +
-                        $"{MaxFloorPngBytes / (1024 * 1024)} MB a floor may take - it was not written. Set Settings > " +
-                        "Map > Capture resolution to 2048 and capture again.");
-                    return;
-                }
-
-                // STAGED, not written: see Stage. It goes in place in WriteMeta, with every other
-                // floor of this capture, once the last of them has passed the light test.
-                Stage(Path.Combine(plan.Dir, floor.File), png);
-
-                floor.Bytes = png.Length;
-                plan.Bytes += png.Length;
-
-                var ms = floor.Clock?.Elapsed.TotalMilliseconds ?? 0d;
-                var pixels = plan.WidthPx * plan.HeightPx;
-
-                var line =
-                    $"QuestTree: captured {plan.Key} \"{floor.Dto.Name}\" {plan.WidthPx}x{plan.HeightPx} px " +
-                    $"({MetresPerPixel(plan.Ppm)} m/px), {TilesPhrase(plan, floor)}, {Ms(ms)} ms, exposure " +
-                    $"{E(floor.Exposure.Low)}..{E(floor.Exposure.High)} " +
-                    $"({(_hdr ? "half-float" : "8-bit")}, gamma {G(floor.Exposure.Gamma)}" +
-                    (floor.ReusedExposure ? ", kept from the first capture" : "") + ")";
-
-                if (floor.CyanFilled > 0 || floor.CyanDropped > 0)
-                {
-                    line += $", {floor.CyanFilled} cyan water pixels filled";
-                    if (floor.CyanDropped > 0) line += $" and {floor.CyanDropped} left as holes";
-                }
-
-                if (floor.Despeckled > 0) line += $", {floor.Despeckled} speckles medianed";
-                if (floor.Outside > 0) line += $", {Share(floor.Outside, pixels)} % outside the walkable area";
-
-                if (floor.Merged)
-                {
-                    line +=
-                        $", merged with the previous capture: {Share(floor.Filled, pixels)} % newly drawn, " +
-                        $"{Share(floor.Kept, pixels)} % kept, {Share(floor.StillEmpty, pixels)} % still empty.";
-                }
-                else if (floor.StillEmpty > 0)
-                {
-                    line +=
-                        $", {Share(floor.StillEmpty, pixels)} % of it not drawn - press the key again from " +
-                        "another part of the map and this capture fills in what that one could not see.";
-                }
-                else
-                {
-                    line += ".";
-                }
-
-                Plugin.LogSource?.LogInfo(line);
-
-                AuditLine(plan, floor);
-
-                // A merge that drew nothing new is not an error - the player pressed the key twice in
-                // the same spot, or somewhere with nothing left to add - but it is worth saying, since
-                // the picture on disk is exactly what it was.
-                if (floor.Merged && floor.Filled == 0)
-                {
-                    Plugin.LogSource?.LogInfo(
-                        $"QuestTree: nothing in {plan.Key} \"{floor.Dto.Name}\" was improved by this capture - every " +
-                        "pixel it drew was already there from closer. Try a spot further from where the last " +
-                        "captures were taken.");
-                }
+                // WP4 B2: everything after the encode is RecordFloor, shared with the managed path's settle.
+                RecordFloor(plan, floor, png == null ? 0 : png.Length, path => Stage(path, png), null, null);
             }
             catch (Exception ex)
             {
@@ -3187,6 +3170,413 @@ namespace QuestTree.QuestGraph
                 Plugin.LogSource?.LogWarning(
                     $"QuestTree: {plan.Key} \"{floor.Dto?.Name}\" could not be written " +
                     $"({ex.GetType().Name}: {ex.Message}).");
+            }
+        }
+
+        /// <summary>WP4 B2: the second half of FinishFloor, moved verbatim so the managed path's settle runs the same checks
+        /// and the same line on the same numbers: the empty test, the MaxFloorPngBytes cap, the stage, Bytes, the
+        /// "captured ..." line, the audit line and the "nothing improved" line. Throws on anything unexpected; the
+        /// caller's catch fails the floor.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="floor">The floor.</param>
+        /// <param name="length">The encoded file's length (0 = encoded to nothing).</param>
+        /// <param name="write">Stages the file at the path it is given.</param>
+        /// <param name="encodeMs">The floor clock to report, or null for the clock now (the synchronous path).</param>
+        /// <param name="encoded">Added inside the captured line's sentence (the managed path's timing), or null.</param>
+        private void RecordFloor(Plan plan, FloorPlan floor, long length, Action<string> write, double? encodeMs,
+            string encoded)
+        {
+            if (length == 0)
+            {
+                floor.Failed = true;
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: {plan.Key} \"{floor.Dto.Name}\" encoded to nothing and was not written.");
+                return;
+            }
+
+            if (length > MaxFloorPngBytes)
+            {
+                // Not written rather than written and large: these files ship in the release zip
+                // and are uploaded to Fika hosts, and a floor this size is a sign the picture is
+                // noise rather than a map.
+                floor.Failed = true;
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: {plan.Key} \"{floor.Dto.Name}\" encoded to {length} bytes, over the " +
+                    $"{MaxFloorPngBytes / (1024 * 1024)} MB a floor may take - it was not written. Set Settings > " +
+                    "Map > Capture resolution to 2048 and capture again.");
+                return;
+            }
+
+            // STAGED, not written: see Stage. It goes in place in WriteMeta, with every other
+            // floor of this capture, once the last of them has passed the light test.
+            write(Path.Combine(plan.Dir, floor.File));
+
+            floor.Bytes = length;
+            plan.Bytes += length;
+
+            var ms = encodeMs ?? floor.Clock?.Elapsed.TotalMilliseconds ?? 0d;
+            var pixels = plan.WidthPx * plan.HeightPx;
+
+            var line =
+                $"QuestTree: captured {plan.Key} \"{floor.Dto.Name}\" {plan.WidthPx}x{plan.HeightPx} px " +
+                $"({MetresPerPixel(plan.Ppm)} m/px), {TilesPhrase(plan, floor)}, {Ms(ms)} ms, exposure " +
+                $"{E(floor.Exposure.Low)}..{E(floor.Exposure.High)} " +
+                $"({(_hdr ? "half-float" : "8-bit")}, gamma {G(floor.Exposure.Gamma)}" +
+                (floor.ReusedExposure ? ", kept from the first capture" : "") + ")";
+
+            if (floor.CyanFilled > 0 || floor.CyanDropped > 0)
+            {
+                line += $", {floor.CyanFilled} cyan water pixels filled";
+                if (floor.CyanDropped > 0) line += $" and {floor.CyanDropped} left as holes";
+            }
+
+            if (floor.Despeckled > 0) line += $", {floor.Despeckled} speckles medianed";
+            if (floor.Outside > 0) line += $", {Share(floor.Outside, pixels)} % outside the walkable area";
+
+            if (floor.Merged)
+            {
+                line +=
+                    $", merged with the previous capture: {Share(floor.Filled, pixels)} % newly drawn, " +
+                    $"{Share(floor.Kept, pixels)} % kept, {Share(floor.StillEmpty, pixels)} % still empty.";
+            }
+            else if (floor.StillEmpty > 0)
+            {
+                line +=
+                    $", {Share(floor.StillEmpty, pixels)} % of it not drawn - press the key again from " +
+                    "another part of the map and this capture fills in what that one could not see.";
+            }
+            else
+            {
+                line += ".";
+            }
+
+            // WP4 B2: the managed path says so, inside the sentence.
+            if (encoded != null && line.EndsWith(".", StringComparison.Ordinal))
+                line = line.Substring(0, line.Length - 1) + encoded + ".";
+
+            Plugin.LogSource?.LogInfo(line);
+
+            AuditLine(plan, floor);
+
+            // A merge that drew nothing new is not an error - the player pressed the key twice in
+            // the same spot, or somewhere with nothing left to add - but it is worth saying, since
+            // the picture on disk is exactly what it was.
+            if (floor.Merged && floor.Filled == 0)
+            {
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: nothing in {plan.Key} \"{floor.Dto.Name}\" was improved by this capture - every " +
+                    "pixel it drew was already there from closer. Try a spot further from where the last " +
+                    "captures were taken.");
+            }
+        }
+
+        /// <summary>WP4 B2: FinishFloor's call site. The Texture path is FinishFloor, unchanged. The managed path starts
+        /// the picture's encode - and the sidecar's, since Dist is final after DevelopFinish - on workers; SettleEncodes
+        /// stages both at the next barrier, exactly as FinishFloor and WriteSidecar did.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="floor">The floor, developed.</param>
+        private void StartFloorEncode(Plan plan, FloorPlan floor)
+        {
+            if (floor.Rgba == null)
+            {
+                FinishFloor(plan, floor);
+                return;
+            }
+
+            if (floor.Exposure == null)
+            {
+                floor.Failed = true;
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: {plan.Key} \"{floor.Dto?.Name}\" has no developed picture to write.");
+                return;
+            }
+
+            floor.EncodeMs = floor.Clock?.Elapsed.TotalMilliseconds ?? 0d;
+            floor.PictureEncode = StartPng(floor.Rgba, plan.WidthPx, plan.HeightPx, rgba: true);
+
+            if (floor.Dist != null)
+            {
+                floor.SidecarSource = floor.Dist;
+                floor.SidecarEncode = StartPng(floor.Dist, plan.WidthPx, plan.HeightPx, rgba: false);
+            }
+        }
+
+        /// <summary>WP4 B2: one encode on a worker. A METHOD, so the worker's closure holds these parameters and nothing an
+        /// iterator later nulls - the atlas bug MapMeshBuilder records. Never faults: PngEncoder.Encode returns its errors,
+        /// and a Task.Run that throws comes back as a Result with the error.</summary>
+        /// <param name="source">The picture (Color32[], texture order) or the distances (byte[], texture order).</param>
+        /// <param name="w">Its width.</param>
+        /// <param name="h">Its height.</param>
+        /// <param name="rgba">A picture (colour type 6) rather than a sidecar (colour type 2).</param>
+        private static System.Threading.Tasks.Task<PngEncoder.Result> StartPng(Array source, int w, int h, bool rgba)
+        {
+            var roundTrip = rgba ? !_rgbaRoundTripped : !_rgbRoundTripped;
+
+            try
+            {
+                return System.Threading.Tasks.Task.Run(() => rgba
+                    ? PngEncoder.Encode(w, h, 6, PngFilter, RgbaRows((Color32[])source, w, h), roundTrip)
+                    : PngEncoder.Encode(w, h, 2, PngFilter, GreyRgbRows((byte[])source, w, h), roundTrip));
+            }
+            catch (Exception ex)
+            {
+                return System.Threading.Tasks.Task.FromResult(new PngEncoder.Result { Error = ex });
+            }
+        }
+
+        /// <summary>WP4 B2: the settled result of an encode, or null with the reason when it cannot be used as it is (not
+        /// finished in EncodeWaitSeconds, an error, or a round trip that failed - which turns the managed encoder off for
+        /// the session).</summary>
+        /// <param name="task">The encode.</param>
+        /// <param name="why">Why it cannot be used.</param>
+        private static PngEncoder.Result Settled(System.Threading.Tasks.Task<PngEncoder.Result> task, out string why)
+        {
+            why = null;
+
+            if (task == null)
+            {
+                why = "no encode was started";
+                return null;
+            }
+
+            if (!task.IsCompleted)
+            {
+                why = $"the managed encode did not finish in {EncodeWaitSeconds:0} s";
+                return null;
+            }
+
+            if (task.Status != System.Threading.Tasks.TaskStatus.RanToCompletion || task.Result == null)
+            {
+                why = $"the managed encode ended {task.Status}";
+                return null;
+            }
+
+            var result = task.Result;
+            if (result.Error == null) return result;
+
+            if (result.RoundTripFailed)
+            {
+                _managedPngOff = true;
+                why = $"its round trip failed - {result.Error.Message}; the managed encoder is off for this session";
+            }
+            else
+            {
+                why = $"the managed encode failed - {result.Error.GetType().Name}: {result.Error.Message}";
+            }
+
+            return null;
+        }
+
+        /// <summary>WP4 B2: Unity's encode of a developed picture, as the old build made it - a temporary RGBA32 texture of
+        /// the same pixels, EncodeToPNG, Destroy. The fallback and the verification copy.</summary>
+        /// <param name="pool">The picture, texture order, exactly width x height.</param>
+        /// <param name="width">Its width.</param>
+        /// <param name="height">Its height.</param>
+        private static byte[] UnityPicture(Color32[] pool, int width, int height)
+        {
+            Texture2D texture = null;
+
+            try
+            {
+                texture = new Texture2D(width, height, TextureFormat.RGBA32, mipChain: false);
+                texture.SetPixels32(pool);
+                return texture.EncodeToPNG();
+            }
+            finally
+            {
+                if (texture != null) Destroy(texture);
+            }
+        }
+
+        /// <summary>WP4 B2, VerifyManagedPng only: Unity's encode of a file written to captures-verify/&lt;key&gt;/, beside
+        /// (not in) the captures root, for tools/check-capture.py --compare-dir.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="name">The file's name.</param>
+        /// <param name="png">Unity's bytes.</param>
+        private static void VerifyCopy(Plan plan, string name, byte[] png)
+        {
+            if (!VerifyManagedPng || png == null || png.Length == 0 || string.IsNullOrEmpty(name)) return;
+
+            try
+            {
+                var root = CapturesRootDir();
+                if (root == null) return;
+
+                var dir = Path.Combine(Path.GetDirectoryName(root) ?? root, "captures-verify", plan.Key);
+                Directory.CreateDirectory(dir);
+                File.WriteAllBytes(Path.Combine(dir, Path.GetFileName(name)), png);
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug($"QuestTree: the verification copy of {name} could not be written ({ex.Message}).");
+            }
+        }
+
+        /// <summary>WP4 B2: an encode dropped without being staged - a refused capture, or a picture that was not written.</summary>
+        /// <param name="floor">The floor or side.</param>
+        private static void DropEncode(FloorPlan floor)
+        {
+            floor.PictureEncode = null;
+            floor.SidecarEncode = null;
+            floor.SidecarSource = null;
+            floor.Verdicts = null;
+            floor.AuditVerdicts = null;
+        }
+
+        /// <summary>WP4 B2, THE SETTLE (barriers 1, 2 and 5): waits, a frame at a time, for every floor of this plan (but
+        /// <paramref name="except"/>) whose encodes are still running, then stages them exactly as FinishFloor and
+        /// WriteSidecar did - picture first, then, a frame later and only when the picture was staged, its sidecar.
+        /// Nothing is staged once the plan is refused.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="floors">The floors.</param>
+        /// <param name="except">A floor not to wait for (the one being rendered), or null.</param>
+        private IEnumerator SettleEncodes(Plan plan, IEnumerable<FloorPlan> floors, FloorPlan except)
+        {
+            foreach (var floor in floors)
+            {
+                if (floor == null || floor == except || floor.PictureEncode == null) continue;
+
+                var clock = Stopwatch.StartNew();
+
+                while ((!floor.PictureEncode.IsCompleted || (floor.SidecarEncode != null && !floor.SidecarEncode.IsCompleted)) &&
+                       clock.Elapsed.TotalSeconds < EncodeWaitSeconds)
+                    yield return null;
+
+                if (plan.Refused)
+                {
+                    DropEncode(floor);
+                    continue;
+                }
+
+                // One file written a frame, as FinishFloor and WriteSidecar had.
+                SettlePicture(plan, floor);
+
+                yield return null;
+
+                if (!floor.Failed && floor.Bytes > 0) SettleSidecar(plan, floor);
+
+                DropEncode(floor);
+            }
+        }
+
+        /// <summary>WP4 B2: a floor's picture staged from its managed encode, or - on an error, a timeout, a failed round
+        /// trip, or a managed file over MaxFloorPngBytes - from Unity's encode of the same pixels (the pool still holds
+        /// them: the next floor's DevelopBegin comes after this barrier), with the cap judged on Unity's length, so the set
+        /// of floors written is the old set. Then RecordFloor: FinishFloor's checks and line.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="floor">The floor.</param>
+        private void SettlePicture(Plan plan, FloorPlan floor)
+        {
+            try
+            {
+                var result = Settled(floor.PictureEncode, out var why);
+
+                if (result != null && result.Length > MaxFloorPngBytes)
+                    why = $"the managed file is {result.Length} bytes, over the {MaxFloorPngBytes / (1024 * 1024)} MB a " +
+                          "floor may take - the cap is judged on Unity's encode";
+
+                if (why == null)
+                {
+                    if (result.RoundTripChecked) _rgbaRoundTripped = true;
+
+                    RecordFloor(plan, floor, result.Length, path => Stage(path, result.Parts, result.LastLength), floor.EncodeMs,
+                        $", encoded off the main thread in {Ms(result.Milliseconds)} ms");
+
+                    if (VerifyManagedPng && !floor.Failed)
+                        VerifyCopy(plan, floor.File, UnityPicture(plan.RgbaPool, plan.WidthPx, plan.HeightPx));
+
+                    return;
+                }
+
+                FallbackLine($"QuestTree: {plan.Key} \"{floor.Dto?.Name}\"", why);
+
+                var png = UnityPicture(plan.RgbaPool, plan.WidthPx, plan.HeightPx);
+                RecordFloor(plan, floor, png == null ? 0 : png.Length, path => Stage(path, png), floor.EncodeMs, null);
+
+                if (!floor.Failed) VerifyCopy(plan, floor.File, png);
+            }
+            catch (Exception ex)
+            {
+                floor.Failed = true;
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: {plan.Key} \"{floor.Dto?.Name}\" could not be written " +
+                    $"({ex.GetType().Name}: {ex.Message}).");
+            }
+        }
+
+        /// <summary>WP4 B2: the line a fallback to Unity's encoder writes - a Warning when the round trip failed (the
+        /// managed encoder is then off for the session), Info otherwise.</summary>
+        /// <param name="who">"QuestTree: key "floor"" or the side's or sidecar's equivalent.</param>
+        /// <param name="why">The reason.</param>
+        private static void FallbackLine(string who, string why)
+        {
+            var line = $"{who} falls back to Unity's encoder ({why}).";
+
+            if (_managedPngOff && why.Contains("round trip")) Plugin.LogSource?.LogWarning(line);
+            else Plugin.LogSource?.LogInfo(line);
+        }
+
+        /// <summary>WP4 B2: a picture's sidecar staged from its managed encode, or from Unity's (EncodeSidecar on the kept
+        /// SidecarSource) on an error or a timeout - WriteSidecar's rules and lines: no distances, or nothing encoded, or a
+        /// write that throws, sets DistStale (the old sidecar is then deleted at commit, review F09). Called only when the
+        /// picture was staged.</summary>
+        /// <param name="plan">The plan (a side's own plan for a side).</param>
+        /// <param name="floor">The floor or side.</param>
+        private static void SettleSidecar(Plan plan, FloorPlan floor)
+        {
+            var path = Path.Combine(plan.Dir, floor.DistFile);
+            var source = floor.SidecarSource;
+            var task = floor.SidecarEncode;
+
+            try
+            {
+                if (source == null)
+                {
+                    floor.DistStale = true;
+                    return;
+                }
+
+                var result = Settled(task, out var why);
+
+                if (why == null)
+                {
+                    if (result.RoundTripChecked) _rgbRoundTripped = true;
+
+                    Stage(path, result.Parts, result.LastLength);
+
+                    Plugin.LogSource?.LogDebug(
+                        $"QuestTree: {floor.DistFile} written, {result.Length} bytes.");
+
+                    if (VerifyManagedPng) VerifyCopy(plan, floor.DistFile, EncodeSidecar(plan, source));
+                    return;
+                }
+
+                FallbackLine($"QuestTree: the distance sidecar for {plan.Key} \"{floor.Dto?.Name}\"", why);
+
+                var png = EncodeSidecar(plan, source);
+
+                if (png == null || png.Length == 0)
+                {
+                    floor.DistStale = true;
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: the distance sidecar for {plan.Key} \"{floor.Dto.Name}\" could not be encoded - the " +
+                        "old one is removed with the picture's commit, so the next capture merges as if fresh.");
+                    return;
+                }
+
+                Stage(path, png);
+
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: {floor.DistFile} written, {png.Length} bytes.");
+
+                VerifyCopy(plan, floor.DistFile, png);
+            }
+            catch (Exception ex)
+            {
+                floor.DistStale = true;
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: the distance sidecar for {plan.Key} \"{floor.Dto?.Name}\" could not be written " +
+                    $"({ex.GetType().Name}: {ex.Message}) - the old one is removed with the picture's commit.");
             }
         }
 
@@ -3255,7 +3645,13 @@ namespace QuestTree.QuestGraph
         /// </summary>
         /// <param name="plan">The capture's plan.</param>
         /// <param name="floor">The floor whose distances are to be encoded.</param>
-        private static byte[] EncodeSidecar(Plan plan, FloorPlan floor)
+        private static byte[] EncodeSidecar(Plan plan, FloorPlan floor) => EncodeSidecar(plan, floor.Dist);
+
+        /// <summary>WP4 B2: <see cref="EncodeSidecar(Plan, FloorPlan)"/> from a given distance array - the managed path's
+        /// fallback, whose floor's Dist ReleaseTexture has already dropped (it keeps SidecarSource).</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="dist">The distances, texture order.</param>
+        private static byte[] EncodeSidecar(Plan plan, byte[] dist)
         {
             Texture2D grey = null;
 
@@ -3266,7 +3662,7 @@ namespace QuestTree.QuestGraph
                 var pixels = new Color32[plan.WidthPx * plan.HeightPx];
                 for (var i = 0; i < pixels.Length; i++)
                 {
-                    var step = floor.Dist[i];
+                    var step = dist[i];
                     pixels[i] = new Color32(step, step, step, 255);
                 }
 
@@ -3344,6 +3740,20 @@ namespace QuestTree.QuestGraph
         {
             using (var stream = new FileStream(Staged(path), FileMode.Create, FileAccess.Write, FileShare.None, 1 << 16))
                 stream.Write(bytes, 0, length);
+        }
+
+        /// <summary>WP4 B2: stages a managed encode's parts, in order, with one FileStream - on the main thread, as every
+        /// capture file is written (a worker never writes one, so DropStaged can never meet an open file).</summary>
+        /// <param name="path">The file these bytes are for.</param>
+        /// <param name="parts">The file in parts, each full but the last.</param>
+        /// <param name="lastLength">How many bytes of the last part are the file.</param>
+        private static void Stage(string path, List<byte[]> parts, int lastLength)
+        {
+            using (var stream = new FileStream(Staged(path), FileMode.Create, FileAccess.Write, FileShare.None, 1 << 16))
+            {
+                for (var i = 0; i < parts.Count; i++)
+                    stream.Write(parts[i], 0, i == parts.Count - 1 ? lastLength : parts[i].Length);
+            }
         }
 
         /// <summary>Puts a staged file in place, and does nothing when none was staged - a floor
@@ -6784,7 +7194,13 @@ namespace QuestTree.QuestGraph
                 // RGBA, not RGB: the walkable mask travels as the picture's alpha and EncodeToPNG keeps
                 // it. A quarter more memory than the eight-bit RGB it replaces - see the memory note on
                 // the class - and the only thing in the pipeline that changes.
-                floor.Texture = new Texture2D(plan.WidthPx, plan.HeightPx, TextureFormat.RGBA32, mipChain: false);
+                // WP4 B2: on the managed path the bands go into the plan's one pool (every column of every row is written
+                // below, so nothing of the previous floor survives), and a worker encodes it - no texture at all.
+                if (ManagedPngEncode && !_managedPngOff)
+                    floor.Rgba = plan.RgbaPool ?? (plan.RgbaPool = new Color32[plan.WidthPx * plan.HeightPx]);
+                else
+                    floor.Texture = new Texture2D(plan.WidthPx, plan.HeightPx, TextureFormat.RGBA32, mipChain: false);
+
                 floor.Block = new Color32[plan.WidthPx * floor.BandRows];
 
                 // One band's stretched luminance plus the filter's halo - 640 KB at 0.25 m/px, against
@@ -6943,7 +7359,10 @@ namespace QuestTree.QuestGraph
                     }
                 }
 
-                floor.Texture.SetPixels32(0, y0, plan.WidthPx, rows, Slice(block, plan.WidthPx * rows));
+                // WP4 B2: SetPixels32(0, y0, W, rows, c) stores c[r*W+col] at texel (col, y0+r), index (y0+r)*W+col - the
+                // same place Array.Copy puts it in the pool.
+                if (floor.Rgba != null) Array.Copy(block, 0, floor.Rgba, y0 * plan.WidthPx, plan.WidthPx * rows);
+                else floor.Texture.SetPixels32(0, y0, plan.WidthPx, rows, Slice(block, plan.WidthPx * rows));
                 floor.SmoothMs += clock.Elapsed.TotalMilliseconds;
                 return true;
             }
@@ -6965,7 +7384,8 @@ namespace QuestTree.QuestGraph
         {
             try
             {
-                floor.Texture.Apply(updateMipmaps: false);
+                // WP4 B2: the managed path uploads nothing - nothing on the GPU ever read this picture.
+                if (floor.Texture != null) floor.Texture.Apply(updateMipmaps: false);
             }
             catch (Exception ex)
             {
@@ -7755,10 +8175,17 @@ namespace QuestTree.QuestGraph
             floor.NeighbourLum = null;
             floor.NeighbourIndex = null;
             floor.Cyan = null;
-            floor.Verdicts = null;
             floor.TileMaxOld = null;
             floor.SkipZone = null;
-            floor.AuditVerdicts = null;
+            floor.Rgba = null;
+
+            // WP4 B2: the tile verdicts (a few dozen entries) outlive the floor while its encode runs - the settle's
+            // captured line (TilesPhrase) and audit line read them; DropEncode drops them.
+            if (floor.PictureEncode == null)
+            {
+                floor.Verdicts = null;
+                floor.AuditVerdicts = null;
+            }
 
             if (floor.Texture != null)
             {
@@ -8055,9 +8482,10 @@ namespace QuestTree.QuestGraph
                 $"for each as it is for a floor, up to about {SideSecondsEstimate(plan, yMin, yMax)} s; " +
                 $"y {F(yMin)}..{F(yMax)} m from {yFrom}.");
 
-            var sizes = new List<string>();
-            var scales = new HashSet<float>();
-            var rendered = 0;
+            // WP4 B2: the tally a side's settle adds to, whenever it runs.
+            var tally = new SideTally();
+            var sizes = tally.Sizes;
+            var scales = tally.Scales;
             var cut = 0;
 
             for (var i = 0; i < MapSideView.Directions.Length; i++)
@@ -8096,6 +8524,10 @@ namespace QuestTree.QuestGraph
 
                 while (tiles.MoveNext()) yield return tiles.Current;
 
+                // WP4 B2, BARRIER 3: the previous side's encode, which ran during this side's hold and tiles.
+                var settle = SettleSides(plan, view, tally);
+                while (settle.MoveNext()) yield return settle.Current;
+
                 if (!view.Floor.Failed)
                 {
                     yield return null;
@@ -8118,13 +8550,20 @@ namespace QuestTree.QuestGraph
                     while (develop.MoveNext()) yield return develop.Current;
                 }
 
-                if (!view.Floor.Failed)
+                if (!view.Floor.Failed && view.Floor.Rgba != null)
+                {
+                    yield return null;
+
+                    // WP4 B2: the managed path - the encodes start on workers, SettleSides stages them.
+                    StartSideEncode(plan, view);
+                }
+                else if (!view.Floor.Failed)
                 {
                     yield return null;
 
                     if (FinishSide(plan, view))
                     {
-                        rendered++;
+                        tally.Rendered++;
                         sizes.Add($"{view.Plan.WidthPx}x{view.Plan.HeightPx}");
                         scales.Add(view.Plan.Ppm);
 
@@ -8153,12 +8592,17 @@ namespace QuestTree.QuestGraph
 
             RestoreTopCamera();
 
+            // WP4 B2, BARRIER 4: every side's encode staged before the summary - plan.Sides and SideBytes complete
+            // before CommitSides.
+            var settleAll = SettleSides(plan, null, tally);
+            while (settleAll.MoveNext()) yield return settleAll.Current;
+
             var scale = scales.Count == 0
                 ? "at no scale"
                 : $"at {string.Join("/", scales.Select(Ppm).ToArray())} px/m";
 
             Plugin.LogSource?.LogInfo(
-                $"QuestTree: side views for {plan.Key} - {rendered} of {MapSideView.Directions.Length} rendered " +
+                $"QuestTree: side views for {plan.Key} - {tally.Rendered} of {MapSideView.Directions.Length} rendered " +
                 $"{scale} ({string.Join(", ", sizes.ToArray())}), " +
                 $"{(clock.Elapsed.TotalSeconds).ToString("0.0", CultureInfo.InvariantCulture)} s this stop.");
 
@@ -8682,54 +9126,213 @@ namespace QuestTree.QuestGraph
 
                 var png = floor.Texture.EncodeToPNG();
 
-                if (png == null || png.Length == 0 || png.Length > MaxFloorPngBytes)
-                {
-                    Plugin.LogSource?.LogWarning(
-                        $"QuestTree: {plan.Key} side view {view.Dir} encoded to {(png == null ? 0 : png.Length)} " +
-                        "bytes and was not written.");
-                    return false;
-                }
-
-                Stage(Path.Combine(plan.Dir, floor.File), png);
-
                 var drawn = 0;
                 foreach (var d in floor.Drawn) if (d) drawn++;
 
-                plan.SideBytes += png.Length;
-                plan.Sides.Add(new CaptureSide
+                // WP4 B2: everything after the encode is RecordSide, shared with the managed path's settle.
+                return RecordSide(plan, view, png == null ? 0 : png.Length, path => Stage(path, png), drawn, floor.Drawn.Length,
+                    null, null);
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: {plan.Key} side view {view.Dir} could not be written ({ex.GetType().Name}: " +
+                    $"{ex.Message}).");
+                return false;
+            }
+        }
+
+        /// <summary>WP4 B2: the second half of FinishSide, moved verbatim: the empty and cap test, the stage, SideBytes, the
+        /// plan.Sides entry (DistStale true until the sidecar is staged), the side's line and the audit line. False,
+        /// having said why, when it is not written. Throws on anything unexpected; the caller's catch says so.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="view">The side.</param>
+        /// <param name="length">The encoded file's length.</param>
+        /// <param name="write">Stages the file at the path it is given.</param>
+        /// <param name="drawn">Pixels this capture drew (counted before ReleaseTexture on the managed path).</param>
+        /// <param name="drawnOf">The side's pixel count.</param>
+        /// <param name="encodeMs">The side clock to report, or null for the clock now.</param>
+        /// <param name="encoded">Added to the line (the managed path's timing), or null.</param>
+        private static bool RecordSide(Plan plan, SideView view, long length, Action<string> write, int drawn, int drawnOf,
+            double? encodeMs, string encoded)
+        {
+            var floor = view.Floor;
+            var side = view.Plan;
+
+            if (length == 0 || length > MaxFloorPngBytes)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: {plan.Key} side view {view.Dir} encoded to {length} " +
+                    "bytes and was not written.");
+                return false;
+            }
+
+            write(Path.Combine(plan.Dir, floor.File));
+
+            plan.SideBytes += length;
+            plan.Sides.Add(new CaptureSide
+            {
+                Dir = view.Dir,
+                File = floor.File,
+                Width = side.WidthPx,
+                Height = side.HeightPx,
+                PxPerMetre = side.Ppm,
+                Forward = Floats(view.Forward),
+                Right = Floats(view.Right),
+                Up = Floats(view.Up),
+                OriginR = view.Frame[0],
+                OriginU = view.Frame[2],
+                YMin = view.YMin,
+                YMax = view.YMax,
+                DistStale = true,
+            });
+
+            Plugin.LogSource?.LogInfo(
+                $"QuestTree: side view {view.Dir} of {plan.Key} - {side.WidthPx}x{side.HeightPx} px at " +
+                $"{Ppm(side.Ppm)} px/m, {TilesPhrase(side, floor)}, {Share(drawn, drawnOf)} % drawn this capture, " +
+                $"{length} bytes, {Ms(encodeMs ?? floor.Clock?.Elapsed.TotalMilliseconds ?? 0d)} ms, " +
+                $"lit along f ({F((float)view.Forward[0])}, {F((float)view.Forward[1])}, " +
+                $"{F((float)view.Forward[2])}) at x{SideLightGain.ToString("0.00", CultureInfo.InvariantCulture)}" +
+                (floor.Merged
+                    ? $", merged: {Share(floor.Kept, drawnOf)} % of pixels kept from earlier, " +
+                      $"{Share(floor.Filled, drawnOf)} % newly drawn, " +
+                      $"{Share(floor.StillEmpty, drawnOf)} % still empty"
+                    : ", fresh (nothing earlier to merge into)") +
+                (floor.CyanFilled > 0 ? $", {floor.CyanFilled} cyan water pixels filled" : "") +
+                (floor.Despeckled > 0 ? $", {floor.Despeckled} speckles medianed" : "") + (encoded ?? "") + ".");
+
+            AuditLine(side, floor);
+
+            return true;
+        }
+
+        /// <summary>WP4 B2: what a side's settle adds to - CaptureSides' summary line.</summary>
+        private sealed class SideTally
+        {
+            public int Rendered;
+            public readonly List<string> Sizes = new List<string>();
+            public readonly HashSet<float> Scales = new HashSet<float>();
+        }
+
+        /// <summary>WP4 B2: FinishSide's call site on the managed path - the picture's and the sidecar's encodes start on
+        /// workers, and what the side's line needs from buffers ReleaseTexture is about to drop (the drawn count, the
+        /// clock) is kept on the floor. SettleSides stages them.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="view">The side, developed.</param>
+        private void StartSideEncode(Plan plan, SideView view)
+        {
+            var floor = view.Floor;
+            var side = view.Plan;
+
+            var drawn = 0;
+            if (floor.Drawn != null)
+                foreach (var d in floor.Drawn)
+                    if (d) drawn++;
+
+            floor.EncodeDrawn = drawn;
+            floor.EncodeDrawnOf = floor.Drawn?.Length ?? side.WidthPx * side.HeightPx;
+            floor.EncodeMs = floor.Clock?.Elapsed.TotalMilliseconds ?? 0d;
+            floor.PictureEncode = StartPng(floor.Rgba, side.WidthPx, side.HeightPx, rgba: true);
+
+            if (floor.Dist != null)
+            {
+                floor.SidecarSource = floor.Dist;
+                floor.SidecarEncode = StartPng(floor.Dist, side.WidthPx, side.HeightPx, rgba: false);
+            }
+
+            plan.PendingSides.Add(view);
+        }
+
+        /// <summary>WP4 B2, the sides' settle (barriers 3, 4 and 5): every pending side but <paramref name="except"/> waited
+        /// for a frame at a time, then staged as FinishSide did (picture, the plan.Sides entry, the counts), and a frame
+        /// later its sidecar as WriteSidecar did - with F09's DistStale carried to the entry, the same meaning as
+        /// before.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="except">The side being rendered, or null.</param>
+        /// <param name="tally">The summary line's counts.</param>
+        private IEnumerator SettleSides(Plan plan, SideView except, SideTally tally)
+        {
+            foreach (var view in plan.PendingSides.ToList())
+            {
+                if (view == null || view == except) continue;
+
+                var floor = view.Floor;
+                var clock = Stopwatch.StartNew();
+
+                while (floor.PictureEncode != null &&
+                       (!floor.PictureEncode.IsCompleted || (floor.SidecarEncode != null && !floor.SidecarEncode.IsCompleted)) &&
+                       clock.Elapsed.TotalSeconds < EncodeWaitSeconds)
+                    yield return null;
+
+                plan.PendingSides.Remove(view);
+
+                if (plan.Refused || floor.PictureEncode == null)
                 {
-                    Dir = view.Dir,
-                    File = floor.File,
-                    Width = side.WidthPx,
-                    Height = side.HeightPx,
-                    PxPerMetre = side.Ppm,
-                    Forward = Floats(view.Forward),
-                    Right = Floats(view.Right),
-                    Up = Floats(view.Up),
-                    OriginR = view.Frame[0],
-                    OriginU = view.Frame[2],
-                    YMin = view.YMin,
-                    YMax = view.YMax,
-                    DistStale = true,
-                });
+                    DropEncode(floor);
+                    view.Plan.RgbaPool = null;
+                    continue;
+                }
 
-                Plugin.LogSource?.LogInfo(
-                    $"QuestTree: side view {view.Dir} of {plan.Key} - {side.WidthPx}x{side.HeightPx} px at " +
-                    $"{Ppm(side.Ppm)} px/m, {TilesPhrase(side, floor)}, {Share(drawn, floor.Drawn.Length)} % drawn this capture, " +
-                    $"{png.Length} bytes, {Ms(floor.Clock?.Elapsed.TotalMilliseconds ?? 0d)} ms, " +
-                    $"lit along f ({F((float)view.Forward[0])}, {F((float)view.Forward[1])}, " +
-                    $"{F((float)view.Forward[2])}) at x{SideLightGain.ToString("0.00", CultureInfo.InvariantCulture)}" +
-                    (floor.Merged
-                        ? $", merged: {Share(floor.Kept, floor.Drawn.Length)} % of pixels kept from earlier, " +
-                          $"{Share(floor.Filled, floor.Drawn.Length)} % newly drawn, " +
-                          $"{Share(floor.StillEmpty, floor.Drawn.Length)} % still empty"
-                        : ", fresh (nothing earlier to merge into)") +
-                    (floor.CyanFilled > 0 ? $", {floor.CyanFilled} cyan water pixels filled" : "") +
-                    (floor.Despeckled > 0 ? $", {floor.Despeckled} speckles medianed" : "") + ".");
+                if (SettleSide(plan, view))
+                {
+                    tally.Rendered++;
+                    tally.Sizes.Add($"{view.Plan.WidthPx}x{view.Plan.HeightPx}");
+                    tally.Scales.Add(view.Plan.Ppm);
 
-                AuditLine(side, floor);
+                    // The sidecar AFTER the picture and only when the picture was written (see WriteSidecar), a frame
+                    // later.
+                    yield return null;
+                    SettleSidecar(view.Plan, floor);
 
-                return true;
+                    var staged = plan.Sides.LastOrDefault(s => s.Dir == view.Dir);
+                    if (staged != null) staged.DistStale = floor.DistStale;
+                }
+
+                DropEncode(floor);
+                view.Plan.RgbaPool = null;
+            }
+        }
+
+        /// <summary>WP4 B2: a side's picture staged from its managed encode, or from Unity's encode of the same pixels on an
+        /// error, a timeout, a failed round trip or a managed file over the cap (judged on Unity's length) - then
+        /// RecordSide. False when it was not written.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="view">The side.</param>
+        private static bool SettleSide(Plan plan, SideView view)
+        {
+            var floor = view.Floor;
+            var side = view.Plan;
+
+            try
+            {
+                var result = Settled(floor.PictureEncode, out var why);
+
+                if (result != null && result.Length > MaxFloorPngBytes)
+                    why = $"the managed file is {result.Length} bytes, over the {MaxFloorPngBytes / (1024 * 1024)} MB a " +
+                          "picture may take - the cap is judged on Unity's encode";
+
+                if (why == null)
+                {
+                    if (result.RoundTripChecked) _rgbaRoundTripped = true;
+
+                    var written = RecordSide(plan, view, result.Length, path => Stage(path, result.Parts, result.LastLength),
+                        floor.EncodeDrawn, floor.EncodeDrawnOf, floor.EncodeMs,
+                        $", encoded off the main thread in {Ms(result.Milliseconds)} ms");
+
+                    if (written && VerifyManagedPng)
+                        VerifyCopy(plan, floor.File, UnityPicture(side.RgbaPool, side.WidthPx, side.HeightPx));
+
+                    return written;
+                }
+
+                FallbackLine($"QuestTree: {plan.Key} side view {view.Dir}", why);
+
+                var png = UnityPicture(side.RgbaPool, side.WidthPx, side.HeightPx);
+                var fallback = RecordSide(plan, view, png == null ? 0 : png.Length, path => Stage(path, png), floor.EncodeDrawn,
+                    floor.EncodeDrawnOf, floor.EncodeMs, null);
+
+                if (fallback) VerifyCopy(plan, floor.File, png);
+                return fallback;
             }
             catch (Exception ex)
             {
@@ -11220,6 +11823,14 @@ namespace QuestTree.QuestGraph
             /// by construction, and a capture where they are not is one whose mesh
             /// tools/check-capture.py would refuse - so it is not written at all.</summary>
             public HashSet<int> MeshLevels;
+
+            /// <summary>WP4 B2: the developed picture of every floor of this plan in turn (all share WidthPx x HeightPx),
+            /// when ManagedPngEncode - in place of a Texture2D a floor. Kept until the last floor's encode is settled
+            /// (barrier 2), then dropped. A side's own plan has its own.</summary>
+            public Color32[] RgbaPool;
+
+            /// <summary>WP4 B2: side views whose encodes are running - settled by SettleSides (barriers 3, 4, 5).</summary>
+            public readonly List<SideView> PendingSides = new List<SideView>();
         }
 
         /// <summary>One floor's state while it is being captured.</summary>
@@ -11302,6 +11913,25 @@ namespace QuestTree.QuestGraph
 
             /// <summary>The sidecar could not be staged: the old one is deleted at commit (review F09).</summary>
             public bool DistStale;
+
+            /// <summary>WP4 B2: the developed picture when ManagedPngEncode (the plan's RgbaPool; replaces Texture).</summary>
+            public Color32[] Rgba;
+
+            /// <summary>WP4 B2: the picture's and the sidecar's encodes on workers, settled (staged) at a barrier.</summary>
+            public System.Threading.Tasks.Task<PngEncoder.Result> PictureEncode;
+
+            public System.Threading.Tasks.Task<PngEncoder.Result> SidecarEncode;
+
+            /// <summary>WP4 B2: Dist as handed to the sidecar's worker - kept for the Unity fallback, since ReleaseTexture
+            /// nulls Dist before the settle.</summary>
+            public byte[] SidecarSource;
+
+            /// <summary>WP4 B2: what the settle's log line needs from buffers ReleaseTexture drops first: the floor clock
+            /// at the encode's start, and for a side the drawn pixels and the pixel count.</summary>
+            public double EncodeMs;
+
+            public int EncodeDrawn;
+            public int EncodeDrawnOf;
 
             /// <summary>Whether the previous picture was merged into this one, and the three counts
             /// the log line reports: pixels this capture supplied, pixels kept from the previous
