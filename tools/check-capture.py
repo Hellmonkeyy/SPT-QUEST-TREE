@@ -74,7 +74,14 @@ which is a WARN "captured before WP7 at 2 m". With --compare OLD_ROOT, each map'
 by key against the same map's mesh under OLD_ROOT, and a key OLD has that NEW lacks, or a key NEW
 stores with fewer triangles, is an ERROR (WP7's Q1/Q2: no building loses detail).
 
-Usage:  python tools/check-capture.py [captures-root] [zones-folder] [--compare OLD_ROOT]
+WP8 (V.1): with --mesh-quality, each mesh also gets a "quality:" line - slivers, spikes and spike apexes, triangles
+per m2 of surface, faces by texture source by area (the viewer's WP8 rule; --legacy-view for the pre-WP8 one),
+atlas texel-density outliers, crease vertices, and on local PNG atlas pages the white flat, normal-map-like and
+wrap-seam tiles. Quality measures: every finding is a WARN (slivers over 4 %, spike apexes over 200, tri/m2 p10
+under 0.5, side pictures over 25 % of the area), never an ERROR. See mesh_quality for the definitions.
+
+Usage:  python tools/check-capture.py [captures-root] [zones-folder] [--compare OLD_ROOT] [--mesh-quality]
+                                      [--legacy-view]
         defaults: C:\\Games\\SPT\\BepInEx\\plugins\\QuestTree\\captures
                   C:\\Games\\SPT\\SPT_Runtime\\user\\mods\\QuestTree\\zones
 """
@@ -88,10 +95,15 @@ import zlib
 from pathlib import Path
 
 def _arguments(argv):
-    """(positional arguments, --compare root or None). Kept positional for the two roots every caller
-    already passes; --compare OLD_ROOT may stand anywhere."""
+    """(positional arguments, --compare root or None, flags). Kept positional for the two roots every caller
+    already passes; --compare OLD_ROOT, --mesh-quality and --legacy-view may stand anywhere."""
     positional, compare, k = [], None, 0
+    flags = set()
     while k < len(argv):
+        if argv[k] in ("--mesh-quality", "--legacy-view"):
+            flags.add(argv[k])
+            k += 1
+            continue
         if argv[k] == "--compare":
             if k + 1 >= len(argv):
                 print("CAPTURE CHECK FAILED: --compare needs the OLD captures root after it")
@@ -101,10 +113,12 @@ def _arguments(argv):
             continue
         positional.append(argv[k])
         k += 1
-    return positional, compare
+    return positional, compare, flags
 
 
-_POSITIONAL, COMPARE = _arguments(sys.argv[1:])
+_POSITIONAL, COMPARE, _FLAGS = _arguments(sys.argv[1:])
+MESH_QUALITY = "--mesh-quality" in _FLAGS
+LEGACY_VIEW = "--legacy-view" in _FLAGS
 CAPTURES = Path(_POSITIONAL[0]) if len(_POSITIONAL) > 0 else Path(
     r"C:\Games\SPT\BepInEx\plugins\QuestTree\captures")
 ZONES = Path(_POSITIONAL[1]) if len(_POSITIONAL) > 1 else Path(
@@ -123,6 +137,7 @@ PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 MESH_MAGIC = b"QTM1"
 MESH_VERSION = 3            # MapMeshFile.Version (stage W: 2 added the atlas; stage X: 3 wraps the tiles)
 MESH_NO_HIT = 0xFFFF        # MapMeshFile.NoHit
+MESH_MAX_QUANTISED = 0xFFFE  # MapMeshFile.MaxQuantised: a coordinate is min + (max - min) x code / this
 MESH_MAX_BANDS = 8
 MESH_MAX_CELLS_PER_BAND = 4_000_000
 MESH_MAX_BUILDINGS = 20_000
@@ -487,11 +502,12 @@ class MeshCursor:
         return struct.unpack(f"<{count}I", self.take(4 * count, what)) if count else ()
 
 
-def read_mesh(data, bound=MESH_MAX_INFLATED_BYTES):
+def read_mesh(data, bound=MESH_MAX_INFLATED_BYTES, keep=False):
     """The mesh file as a dict, or a MeshError naming the first thing that is wrong. Follows
     MapMeshFile.Write's byte table exactly, and checks every count against the format's own cap
     BEFORE it reads the array behind it. "keys" maps each building key to its triangles (summed if a
-    key repeats), for --compare."""
+    key repeats), for --compare. keep (WP8 --mesh-quality): every building's codes, indices, UV codes and
+    ranges are kept in "kept" for mesh_quality."""
     body = inflate_mesh(data, bound)
     cur = MeshCursor(body)
 
@@ -518,6 +534,7 @@ def read_mesh(data, bound=MESH_MAX_INFLATED_BYTES):
         "triangles": 0,
         "maxBuilding": 0,
         "keys": {},
+        "kept": [],
     }
 
     if version != MESH_VERSION:
@@ -587,9 +604,9 @@ def read_mesh(data, bound=MESH_MAX_INFLATED_BYTES):
             raise MeshError(f"claims {vertices_total} vertices by {where}; the cap is "
                             f"{MESH_MAX_VERTICES_TOTAL}")
 
-        cur.take(2 * count, f"{where}'s x")
+        xs = cur.take(2 * count, f"{where}'s x")
         ys = cur.u16s(count, f"{where}'s y")
-        cur.take(2 * count, f"{where}'s z")
+        zs = cur.take(2 * count, f"{where}'s z")
 
         indices = cur.i32(f"{where}'s index count")
         if indices < 0 or indices % 3 != 0:
@@ -626,8 +643,19 @@ def read_mesh(data, bound=MESH_MAX_INFLATED_BYTES):
         uvs = cur.i32(f"{where}'s UV count")
         if uvs not in (0, count):
             raise MeshError(f"{where} (key {key}) claims {uvs} UVs for {count} vertices")
-        if uvs:
-            cur.take(4 * uvs, f"{where}'s UVs")
+        uv_bytes = cur.take(4 * uvs, f"{where}'s UVs") if uvs else None
+        kept = None
+        if keep:
+            kept = {
+                "x": struct.unpack(f"<{count}H", xs) if count else (),
+                "y": ys,
+                "z": struct.unpack(f"<{count}H", zs) if count else (),
+                "indices": index_values,
+                "u": struct.unpack(f"<{uvs}H", uv_bytes[:2 * uvs]) if uvs else None,
+                "v": struct.unpack(f"<{uvs}H", uv_bytes[2 * uvs:]) if uvs else None,
+                "ranges": [],
+            }
+            mesh["kept"].append(kept)
 
         ranges = cur.i32(f"{where}'s atlas range count")
         if ranges < 0 or ranges > MESH_MAX_RANGES_PER_BUILDING:
@@ -661,6 +689,8 @@ def read_mesh(data, bound=MESH_MAX_INFLATED_BYTES):
                                 f"(after {end}) - ranges are ascending whole triangles inside the building")
             end = first + span
             mesh["textured"] += span // 3
+            if kept is not None:
+                kept["ranges"].append((page, first, span, tx, ty, tw, th, u_min, u_max, v_min, v_max))
             tag = k + 1
             for j in range(first, first + span):
                 vertex = index_values[j]
@@ -677,6 +707,419 @@ def read_mesh(data, bound=MESH_MAX_INFLATED_BYTES):
         raise MeshError(f"carries {len(body) - cur.at} byte(s) after its last building")
 
     return mesh
+
+
+# --- WP8 (V.1): the mesh-quality statistics --------------------------------------------------------------
+#
+# Quality measures, not format rules: every finding here is a WARN, never an ERROR. The definitions are
+# PART-04's V.1, the same for every map:
+#   sliver         a triangle whose longest edge e is at least 1 m and e^2 > 20 x 2A (longest edge over its
+#                  altitude past 20) - MeshDecimator.SliverAspect / SliverMetricMinEdge;
+#   spike          a triangle whose longest edge is over 15 m AND over 0.75 x its building's box diagonal;
+#   spike apex     a vertex (welded at 1 cm) every face of which is a sliver and whose shortest edge is over
+#                  max(3 m, 0.25 x the building's diagonal) - the stricter measure, blind to true long facets;
+#   tri/m2         a building's triangles over its triangles' area, for buildings of at least 50 m2;
+#   faces by source  the viewer's rule by AREA: an atlas range, else (with side pictures) top for n.y >= 0.5,
+#                  tint for n.y <= -0.35, a side within 40 degrees, else tint; --legacy-view applies the
+#                  pre-WP8 best-score rule. Ground skirts (faces the relief draws) are not told apart here;
+#   atlas density outliers  atlas area whose texel density is over 16x off its range's median;
+#   crease vertices  atlas vertices whose area-weighted smoothed normal is over 30 degrees off one of their
+#                  faces (a property of the FILE: the viewer's WP8 split fixes the shading, not this number);
+#   pages          on local PNG pages: flat (4 x 4) tiles whose mean is over 235 on every channel, tiles whose
+#                  mean looks like a normal map (B > 200, R and G within 40 of 128), and textured tiles whose
+#                  wrap seam is over 4x their interior gradient.
+QUALITY_SLIVER_ASPECT = 20.0
+QUALITY_SLIVER_MIN_EDGE = 1.0
+QUALITY_SPIKE_EDGE = 15.0
+QUALITY_SPIKE_DIAG = 0.75
+QUALITY_APEX_EDGE = 3.0
+QUALITY_APEX_DIAG = 0.25
+QUALITY_WELD = 0.01
+QUALITY_MIN_SURFACE = 50.0
+QUALITY_DENSITY_FACTOR = 16.0
+QUALITY_CREASE_COS = math.cos(math.radians(30))
+QUALITY_ROOF_Y = 0.5
+QUALITY_UNDERSIDE_Y = 0.35
+QUALITY_SIDE_COS = 0.766
+QUALITY_LEGACY_MIN_SCORE = 0.35
+QUALITY_WHITE = 235
+QUALITY_SEAM_FACTOR = 4.0
+QUALITY_WARN_SLIVERS = 4.0        # % of triangles
+QUALITY_WARN_APEXES = 200
+QUALITY_WARN_P10 = 0.5            # triangles per m2
+QUALITY_WARN_SIDE = 25.0          # % of the area
+
+
+def _percentile(sorted_values, p):
+    if not sorted_values:
+        return 0.0
+    k = (len(sorted_values) - 1) * p
+    lo = int(math.floor(k))
+    hi = min(lo + 1, len(sorted_values) - 1)
+    return sorted_values[lo] + (sorted_values[hi] - sorted_values[lo]) * (k - lo)
+
+
+def _face_source(nx, ny, nz, sides, legacy):
+    """0 top, 1 side, 2 tint for a face with unit normal (nx, ny, nz) and no atlas range - the viewer's
+    Prep.ViewFor. sides: the meta's side forward vectors (none: the tint build's |n.y| rule)."""
+    if not sides:
+        return 0 if abs(ny) >= QUALITY_ROOF_Y else 2
+    if legacy:
+        best, score = 0, ny
+        for fx, fy, fz in sides:
+            s = -(nx * fx + ny * fy + nz * fz)
+            if s > score:
+                best, score = 1, s
+        return 2 if score < QUALITY_LEGACY_MIN_SCORE else best
+    if ny >= QUALITY_ROOF_Y:
+        return 0
+    if ny <= -QUALITY_UNDERSIDE_Y:
+        return 2
+    hl = math.hypot(nx, nz)
+    if hl <= 1e-4:
+        return 2
+    hx, hz = nx / hl, nz / hl
+    for fx, fy, fz in sides:
+        dl = math.hypot(fx, fz)
+        if dl > 1e-6 and (hx * -fx + hz * -fz) / dl > QUALITY_SIDE_COS:
+            return 1
+    return 2
+
+
+def mesh_quality(mesh, sides=None, legacy=False):
+    """V.1's statistics over a mesh read with keep=True. Returns a dict."""
+    q = MESH_MAX_QUANTISED
+    min_x, min_z = mesh["minX"], mesh["minZ"]
+    sx = (mesh["maxX"] - mesh["minX"]) / q
+    sz = (mesh["maxZ"] - mesh["minZ"]) / q
+    y0 = mesh["yMin"]
+    sy = (mesh["yMax"] - mesh["yMin"]) / q
+    min_edge2 = QUALITY_SLIVER_MIN_EDGE * QUALITY_SLIVER_MIN_EDGE
+    spike2 = QUALITY_SPIKE_EDGE * QUALITY_SPIKE_EDGE
+    weld = 1.0 / QUALITY_WELD
+
+    triangles = slivers = spikes = apexes = 0
+    apex_buildings = 0
+    per_m2 = []
+    area_by = [0.0, 0.0, 0.0, 0.0]          # atlas, top, side, tint
+    density_area = density_outlier = 0.0
+    atlas_vertices = crease_vertices = roof_vertices = roof_crease = 0
+    tiles = {}
+
+    for b in mesh["kept"]:
+        xs = [min_x + sx * c for c in b["x"]]
+        ys = [y0 + sy * c for c in b["y"]]
+        zs = [min_z + sz * c for c in b["z"]]
+        n = len(xs)
+        idx = b["indices"]
+        count = len(idx) // 3
+        if n == 0 or count == 0:
+            continue
+        triangles += count
+        diag = math.sqrt((max(xs) - min(xs)) ** 2 + (max(ys) - min(ys)) ** 2 + (max(zs) - min(zs)) ** 2)
+        diag_spike2 = (QUALITY_SPIKE_DIAG * diag) ** 2
+        apex_edge = max(QUALITY_APEX_EDGE, QUALITY_APEX_DIAG * diag)
+
+        # welded vertex ids (1 cm), for the apexes
+        cells = {}
+        wid = [0] * n
+        for v in range(n):
+            k = (round(xs[v] * weld), round(ys[v] * weld), round(zs[v] * weld))
+            w = cells.get(k)
+            if w is None:
+                w = cells[k] = len(cells)
+            wid[v] = w
+        all_sliver = [True] * len(cells)
+        shortest = [float("inf")] * len(cells)
+        used = [False] * len(cells)
+
+        textured = bytearray(count)
+        for r in b["ranges"]:
+            for t in range(r[1] // 3, (r[1] + r[2]) // 3):
+                textured[t] = 1
+
+        area_total = 0.0
+        face_n = [None] * count
+        face_a = [0.0] * count
+
+        for t in range(count):
+            i0, i1, i2 = idx[3 * t], idx[3 * t + 1], idx[3 * t + 2]
+            ax, ay, az = xs[i0], ys[i0], zs[i0]
+            ux, uy, uz = xs[i1] - ax, ys[i1] - ay, zs[i1] - az
+            vx, vy, vz = xs[i2] - ax, ys[i2] - ay, zs[i2] - az
+            wx, wy, wz = vx - ux, vy - uy, vz - uz
+            e01 = ux * ux + uy * uy + uz * uz
+            e02 = vx * vx + vy * vy + vz * vz
+            e12 = wx * wx + wy * wy + wz * wz
+            cx, cy, cz = uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx
+            cross = math.sqrt(cx * cx + cy * cy + cz * cz)
+            area = 0.5 * cross
+            area_total += area
+            emax = e01 if e01 > e02 else e02
+            if e12 > emax:
+                emax = e12
+            sliver = emax >= min_edge2 and emax > QUALITY_SLIVER_ASPECT * cross
+            if sliver:
+                slivers += 1
+            if emax > spike2 and emax > diag_spike2:
+                spikes += 1
+
+            w0, w1, w2 = wid[i0], wid[i1], wid[i2]
+            for w, ea, eb in ((w0, e01, e02), (w1, e01, e12), (w2, e02, e12)):
+                used[w] = True
+                if not sliver:
+                    all_sliver[w] = False
+                m = ea if ea < eb else eb
+                if m < shortest[w]:
+                    shortest[w] = m
+
+            if cross > 1e-12:
+                nx, ny, nz = cx / cross, cy / cross, cz / cross
+            else:
+                nx, ny, nz = 0.0, 1.0, 0.0
+            face_n[t] = (nx, ny, nz, cx, cy, cz)
+            face_a[t] = area
+            if textured[t]:
+                area_by[0] += area
+            elif cross <= 1e-12:
+                area_by[1] += area
+            else:
+                area_by[1 + _face_source(nx, ny, nz, sides, legacy)] += area
+
+        apex2 = apex_edge * apex_edge
+        found = 0
+        for w in range(len(cells)):
+            if used[w] and all_sliver[w] and shortest[w] > apex2:
+                found += 1
+        apexes += found
+        if found:
+            apex_buildings += 1
+
+        if area_total >= QUALITY_MIN_SURFACE:
+            per_m2.append(count / area_total)
+
+        # the atlas: texel density per range, crease vertices, and the tiles for the page checks
+        if b["ranges"] and b["u"] is not None:
+            us, vs = b["u"], b["v"]
+            smooth = {}
+            for r in b["ranges"]:
+                page, first, span, tx, ty, tw, th, u0, u1, v0, v1 = r
+                tiles[(page, tx, ty, tw, th)] = True
+                du, dv = (u1 - u0) / 65535.0, (v1 - v0) / 65535.0
+                dens = []
+                for t in range(first // 3, (first + span) // 3):
+                    i0, i1, i2 = idx[3 * t], idx[3 * t + 1], idx[3 * t + 2]
+                    pu0, pv0 = u0 + du * us[i0], v0 + dv * vs[i0]
+                    uv = abs((u0 + du * us[i1] - pu0) * (v0 + dv * vs[i2] - pv0) -
+                             (u0 + du * us[i2] - pu0) * (v0 + dv * vs[i1] - pv0)) * 0.5 * tw * th
+                    a = face_a[t]
+                    if a > 0:
+                        dens.append((uv / a, a))
+                    fn = face_n[t]
+                    for v in (i0, i1, i2):
+                        s = smooth.get(v)
+                        if s is None:
+                            smooth[v] = [fn[3], fn[4], fn[5], [t]]
+                        else:
+                            s[0] += fn[3]
+                            s[1] += fn[4]
+                            s[2] += fn[5]
+                            s[3].append(t)
+                if dens:
+                    ordered = sorted(d for d, _ in dens)
+                    median = ordered[len(ordered) // 2]
+                    for d, a in dens:
+                        density_area += a
+                        if median > 0 and (d > QUALITY_DENSITY_FACTOR * median or d * QUALITY_DENSITY_FACTOR < median):
+                            density_outlier += a
+                        elif median <= 0 and d > 0:
+                            density_outlier += a
+            for v, (sx_, sy_, sz_, faces) in smooth.items():
+                length = math.sqrt(sx_ * sx_ + sy_ * sy_ + sz_ * sz_)
+                atlas_vertices += 1
+                roof = any(face_n[t][1] >= QUALITY_ROOF_Y for t in faces)
+                if roof:
+                    roof_vertices += 1
+                if length <= 1e-12:
+                    continue
+                if any((face_n[t][0] * sx_ + face_n[t][1] * sy_ + face_n[t][2] * sz_) / length < QUALITY_CREASE_COS
+                       for t in faces):
+                    crease_vertices += 1
+                    if roof:
+                        roof_crease += 1
+
+    per_m2.sort()
+    total_area = sum(area_by)
+    return {
+        "triangles": triangles,
+        "slivers": slivers,
+        "spikes": spikes,
+        "apexes": apexes,
+        "apexBuildings": apex_buildings,
+        "perM2": (per_m2[0] if per_m2 else 0.0, _percentile(per_m2, 0.10), _percentile(per_m2, 0.50)),
+        "perM2Buildings": len(per_m2),
+        "areaBy": [100.0 * a / total_area if total_area > 0 else 0.0 for a in area_by],
+        "densityOutliers": 100.0 * density_outlier / density_area if density_area > 0 else 0.0,
+        "creaseVertices": 100.0 * crease_vertices / atlas_vertices if atlas_vertices else 0.0,
+        "roofCrease": 100.0 * roof_crease / roof_vertices if roof_vertices else 0.0,
+        "tiles": sorted(tiles),
+    }
+
+
+def _paeth(a, b, c):
+    p = a + b - c
+    pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+    return a if pa <= pb and pa <= pc else (b if pb <= pc else c)
+
+
+def read_png_planes(path):
+    """A local 8-bit RGB/RGBA PNG as (width, height, [R rows, G rows, B rows]) with row 0 at the TOP, or None
+    for anything else. Stdlib only: the IDAT stream inflated, rows unfiltered - a fast path for Sub (the atlas
+    encoder's only filter) through C-level accumulate, the other four filters in plain Python."""
+    from itertools import accumulate
+    data = Path(path).read_bytes()
+    if data[:8] != PNG_MAGIC:
+        return None
+    at, width, height, colour, depth, idat = 8, 0, 0, 0, 0, []
+    while at + 8 <= len(data):
+        length = struct.unpack(">I", data[at:at + 4])[0]
+        kind = data[at + 4:at + 8]
+        body = data[at + 8:at + 8 + length]
+        if kind == b"IHDR":
+            width, height, depth, colour = struct.unpack(">IIBB", body[:10])
+        elif kind == b"IDAT":
+            idat.append(body)
+        elif kind == b"IEND":
+            break
+        at += 12 + length
+    if depth != 8 or colour not in (2, 6):
+        return None
+    bpp = 4 if colour == 6 else 3
+    raw = zlib.decompress(b"".join(idat))
+    stride = width * bpp
+    planes = [[], [], []]
+    mask = (0xFF).__and__
+    prior = bytes(stride)
+    for y in range(height):
+        base = y * (stride + 1)
+        kind = raw[base]
+        row = raw[base + 1:base + 1 + stride]
+        if kind == 1:
+            channels = [bytes(map(mask, accumulate(row[c::bpp]))) for c in range(bpp)]
+            full = bytearray(stride)
+            for c in range(bpp):
+                full[c::bpp] = channels[c]
+            row = bytes(full)
+        elif kind != 0:
+            out = bytearray(row)
+            for i in range(stride):
+                left = out[i - bpp] if i >= bpp else 0
+                up = prior[i]
+                if kind == 2:
+                    out[i] = (out[i] + up) & 0xFF
+                elif kind == 3:
+                    out[i] = (out[i] + ((left + up) >> 1)) & 0xFF
+                elif kind == 4:
+                    corner = prior[i - bpp] if i >= bpp else 0
+                    out[i] = (out[i] + _paeth(left, up, corner)) & 0xFF
+            row = bytes(out)
+        prior = row
+        for c in range(3):
+            planes[c].append(row[c::bpp])
+    return width, height, planes
+
+
+def page_checks(folder, meta, tiles):
+    """V.1's page checks over the tiles the ranges name, on the local PNG pages. Returns (white flat, normal-map
+    like, wrap seams over 4x, textured tiles) or None when no page is a readable PNG."""
+    pages = {}
+    for entry in meta.get("atlas") or []:
+        if isinstance(entry, dict) and isinstance(entry.get("page"), int) and isinstance(entry.get("file"), str):
+            path = folder / entry["file"]
+            if path.is_file() and path.suffix.lower() == ".png":
+                pages[entry["page"]] = path
+    if not pages:
+        return None
+    white = normal = seams = textured = 0
+    decoded = {}
+    for page, tx, ty, tw, th in tiles:
+        if page not in pages:
+            continue
+        if page not in decoded:
+            decoded[page] = read_png_planes(pages[page])
+        png = decoded[page]
+        if png is None:
+            continue
+        width, height, planes = png
+        # a tile rect is bottom-origin (Unity texture rows); the PNG's row 0 is the top
+        rows = [height - 1 - (ty + j) for j in range(th)]
+        if rows[0] >= height or rows[-1] < 0 or tx + tw > width:
+            continue
+        tile = [[planes[c][r][tx:tx + tw] for r in rows] for c in range(3)]
+        n = tw * th
+        means = [sum(sum(line) for line in tile[c]) / n for c in range(3)]
+        if tw <= 4 and th <= 4:
+            if min(means) > QUALITY_WHITE:
+                white += 1
+        if means[2] > 200 and abs(means[0] - 128) < 40 and abs(means[1] - 128) < 40:
+            normal += 1
+        if tw > 4 and th > 4:
+            textured += 1
+            seam = inner = 0.0
+            seam_n = inner_n = 0
+            for c in range(3):
+                lines = tile[c]
+                for line in lines:
+                    seam += abs(line[0] - line[-1])
+                    seam_n += 1
+                    inner += sum(abs(line[x] - line[x + 1]) for x in range(tw - 1))
+                    inner_n += tw - 1
+                top, bottom = lines[0], lines[-1]
+                seam += sum(abs(top[x] - bottom[x]) for x in range(tw))
+                seam_n += tw
+                for j in range(th - 1):
+                    a, b2 = lines[j], lines[j + 1]
+                    inner += sum(abs(a[x] - b2[x]) for x in range(tw))
+                    inner_n += tw
+            seam /= max(1, seam_n)
+            inner /= max(1, inner_n)
+            if seam > QUALITY_SEAM_FACTOR * inner and seam > 0:
+                seams += 1
+    return white, normal, seams, textured
+
+
+def quality_line(meta, folder, key, mesh, warnings):
+    """--mesh-quality: the quality line, and its WARNs."""
+    sides = []
+    for entry in meta.get("sides") or []:
+        f = entry.get("forward") if isinstance(entry, dict) else None
+        if isinstance(f, list) and len(f) == 3 and all(number(v) is not None for v in f):
+            sides.append(tuple(float(v) for v in f))
+    stats = mesh_quality(mesh, sides, LEGACY_VIEW)
+    tri = stats["triangles"]
+    pct = 100.0 * stats["slivers"] / tri if tri else 0.0
+    lo, p10, med = stats["perM2"]
+    atlas, top, side, tint = stats["areaBy"]
+    pages = page_checks(folder, meta, stats["tiles"])
+    line = (f"quality: slivers {stats['slivers']} ({pct:.1f} %), spikes {stats['spikes']}, spike apexes "
+            f"{stats['apexes']} in {stats['apexBuildings']} building(s), tri/m2 surface min {lo:.3f} / p10 {p10:.2f} "
+            f"/ median {med:.2f} over {stats['perM2Buildings']} building(s) >= {QUALITY_MIN_SURFACE:g} m2, faces by "
+            f"source (area, {'pre-WP8' if LEGACY_VIEW else 'WP8'} rule{'' if sides else ', no side pictures'}): atlas "
+            f"{atlas:.0f} / top {top:.0f} / side {side:.0f} / tint {tint:.0f} %, atlas density outliers "
+            f"{stats['densityOutliers']:.1f} %, crease vertices {stats['creaseVertices']:.1f} % (roof "
+            f"{stats['roofCrease']:.1f} %)")
+    if pages is not None:
+        line += (f", pages: white flat tiles {pages[0]}, normal-map-like tiles {pages[1]}, wrap seams > 4x "
+                 f"{pages[2]} of {pages[3]}")
+    if pct > QUALITY_WARN_SLIVERS:
+        warnings.append(f"{key}: slivers are {pct:.1f} % of the triangles, over {QUALITY_WARN_SLIVERS:g} %")
+    if stats["apexes"] > QUALITY_WARN_APEXES:
+        warnings.append(f"{key}: {stats['apexes']} spike apexes, over {QUALITY_WARN_APEXES}")
+    if stats["perM2Buildings"] and p10 < QUALITY_WARN_P10:
+        warnings.append(f"{key}: tri/m2 of surface p10 is {p10:.2f}, under {QUALITY_WARN_P10:g}")
+    if side > QUALITY_WARN_SIDE:
+        warnings.append(f"{key}: side pictures texture {side:.0f} % of the building area, over {QUALITY_WARN_SIDE:g} %")
+    return line
 
 
 def check_mesh(meta, folder, key, extent, levels, errors, warnings):
@@ -750,7 +1193,7 @@ def check_mesh(meta, folder, key, extent, levels, errors, warnings):
                       f"{sha[:16]}... - this is not the mesh this meta describes")
 
     try:
-        mesh = read_mesh(data, inflate_bound(claimed_cells, claimed_triangles))
+        mesh = read_mesh(data, inflate_bound(claimed_cells, claimed_triangles), keep=MESH_QUALITY)
     except MeshError as exc:
         errors.append(f"{key}: {rel} {exc}")
         return "mesh BROKEN"
@@ -823,12 +1266,15 @@ def check_mesh(meta, folder, key, extent, levels, errors, warnings):
     cell_text = ", ".join(sorted({f"{band['cell']:g}" for band in mesh["bands"]})) or "-"
     meta["_meshAtlasPages"] = mesh["atlasPages"]
 
+    quality = ("\n    " + quality_line(meta, folder, key, mesh, warnings)) if MESH_QUALITY else ""
+    mesh["kept"] = []
+
     return (f"mesh {len(data) / 1048576:.2f} MB, {len(mesh['bands'])} band(s), "
             f"{mesh['cells']} cells ({(100 * hit / mesh['cells']) if mesh['cells'] else 0:.0f} % "
             f"hit), {mesh['buildings']} building(s), "
             f"{mesh['triangles']} triangles, {mesh['textured']} textured in {mesh['ranges']} range(s) "
             f"over {mesh['atlasPages']} atlas page(s), per-building max {mesh['maxBuilding']} triangles, "
-            f"cell {cell_text} m")
+            f"cell {cell_text} m" + quality)
 
 
 def png_is(path, width, height):
