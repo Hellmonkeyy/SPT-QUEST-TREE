@@ -408,10 +408,12 @@ namespace QuestTree.QuestGraph
                     if (task == null) yield break;
 
                     // Bounded: the request aborts itself at RequestTimeout (review F57), so _uploading is held for
-                    // at most that - and a request this routine stopped waiting for is never still in flight
-                    // behind it, which is what the flag exists for: the next capture's upload must not run
-                    // beside this one, or the host would interleave two maps' posts.
-                    while (!task.IsCompleted) yield return null;
+                    // about that and never for SPT's retry chain. The backstop is for the one case the token does
+                    // not cover on Mono - a body that stalls after its headers runs to the socket's read timeout -
+                    // where the routine gives the request up and takes it as the deadline (GiveUp).
+                    var until = Time.realtimeSinceStartup + (float)(RequestTimeout + AbortGrace).TotalSeconds;
+                    while (!task.IsCompleted && Time.realtimeSinceStartup < until) yield return null;
+                    task = GiveUp(task, UploadRoute, RequestTimeout);
 
                     if (TimedOut(task))
                     {
@@ -456,8 +458,10 @@ namespace QuestTree.QuestGraph
                     var again = StartPost(key, meta, lastPosted, RequestTimeout);
                     if (again == null) yield break;
 
-                    // Bounded by the request's own deadline - see the floor loop.
-                    while (!again.IsCompleted) yield return null;
+                    // Bounded by the request's own deadline, backstopped - see the floor loop.
+                    var untilAgain = Time.realtimeSinceStartup + (float)(RequestTimeout + AbortGrace).TotalSeconds;
+                    while (!again.IsCompleted && Time.realtimeSinceStartup < untilAgain) yield return null;
+                    again = GiveUp(again, UploadRoute, RequestTimeout);
 
                     if (TimedOut(again))
                     {
@@ -512,8 +516,10 @@ namespace QuestTree.QuestGraph
                         var task = StartPost(key, meta, side, RequestTimeout);
                         if (task == null) yield break;
 
-                        // Bounded by the request's own deadline - see the floor loop.
-                        while (!task.IsCompleted) yield return null;
+                        // Bounded by the request's own deadline, backstopped - see the floor loop.
+                        var untilSide = Time.realtimeSinceStartup + (float)(RequestTimeout + AbortGrace).TotalSeconds;
+                        while (!task.IsCompleted && Time.realtimeSinceStartup < untilSide) yield return null;
+                        task = GiveUp(task, UploadRoute, RequestTimeout);
 
                         if (TimedOut(task))
                         {
@@ -598,10 +604,12 @@ namespace QuestTree.QuestGraph
                             task = StartPost(key, meta, page, MeshRequestTimeout);
                             if (task == null) break;
 
-                            // Bounded: the request ends by MeshRequestTimeout (review F57), so _uploading stays
-                            // set exactly while it is in flight. A timeout is a fault like any other here - the
-                            // line below names it - and the page is posted again empty.
-                            while (!task.IsCompleted) yield return null;
+                            // Bounded: the request ends by MeshRequestTimeout (review F57), backstopped as the
+                            // floor loop is. A timeout is a fault like any other here - the line below names it -
+                            // and the page is posted again empty.
+                            var untilPage = Time.realtimeSinceStartup + (float)(MeshRequestTimeout + AbortGrace).TotalSeconds;
+                            while (!task.IsCompleted && Time.realtimeSinceStartup < untilPage) yield return null;
+                            task = GiveUp(task, UploadRoute, MeshRequestTimeout);
 
                             // Answered, or already the empty post: JudgeSide takes it from here.
                             if (!(task.IsFaulted || task.IsCanceled) || !encoded) break;
@@ -668,10 +676,11 @@ namespace QuestTree.QuestGraph
                         if (task == null) yield break;
 
                         // Bounded: the part's request ends by MeshRequestTimeout (review F57) - landed, refused,
-                        // or aborted at the deadline with nothing left in flight - so _uploading stays set
-                        // exactly while it runs. A part that timed out is not "held", so the loop ends and
-                        // JudgeMesh says why ("no answer from ... within 240s").
-                        while (!task.IsCompleted) yield return null;
+                        // or aborted at the deadline - backstopped as the floor loop is. A part that timed out is
+                        // not "held", so the loop ends and JudgeMesh says why ("no answer from ... within 240s").
+                        var untilPart = Time.realtimeSinceStartup + (float)(MeshRequestTimeout + AbortGrace).TotalSeconds;
+                        while (!task.IsCompleted && Time.realtimeSinceStartup < untilPart) yield return null;
+                        task = GiveUp(task, MeshRoute, MeshRequestTimeout);
 
                         if (part < parts - 1 && MeshPartHeld(task)) continue;
 
@@ -4034,8 +4043,12 @@ namespace QuestTree.QuestGraph
             return request.Result;
         }
 
-        /// <summary>Every map-transfer POST (review F57). The task ENDS by the deadline - completed, faulted, or
-        /// faulted with TimeoutException - unless DedicatedTransferClient is off.</summary>
+        /// <summary>Every map-transfer POST (review F57). The task ends by the deadline - completed, faulted, or
+        /// faulted with TimeoutException - unless DedicatedTransferClient is off, with one exception the callers
+        /// backstop: on Mono the deadline's token aborts the request up to and including its headers, but a body
+        /// that stalls after them is read under the socket's own read timeout (300 s), which the token does not
+        /// cut short. Every wait on one of these tasks therefore gives up at the deadline plus AbortGrace
+        /// (<see cref="GiveUp"/>, and Post's Wait) rather than trusting the task to end.</summary>
         /// <param name="route">The route to post to.</param>
         /// <param name="json">The JSON body.</param>
         /// <param name="deadline">When the request is aborted.</param>
@@ -4043,6 +4056,20 @@ namespace QuestTree.QuestGraph
             DedicatedTransferClient
                 ? TransferHttp.PostJsonAsync(route, json, deadline)
                 : RequestHandler.PostJsonAsync(route, json);
+
+        /// <summary>A request still running past its deadline and grace, given up: the late task is observed
+        /// (its eventual fault is nobody's), and the caller gets a faulted task shaped exactly like a deadline
+        /// abort, so every path after it - the log line, JudgeMesh, the empty re-post - reads it as the timeout it
+        /// is. A task that has ended is returned as it is.</summary>
+        /// <param name="task">The request.</param>
+        /// <param name="route">Its route, for the message.</param>
+        /// <param name="deadline">Its deadline, for the message.</param>
+        private static Task<string> GiveUp(Task<string> task, string route, TimeSpan deadline)
+        {
+            if (task == null || task.IsCompleted) return task;
+            Observe(task);
+            return Task.FromException<string>(new TimeoutException($"no answer from {route} within {deadline.TotalSeconds:0}s"));
+        }
 
         /// <summary>Whether a finished request ended at its deadline.</summary>
         /// <param name="task">The finished request.</param>
