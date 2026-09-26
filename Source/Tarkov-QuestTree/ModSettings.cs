@@ -217,8 +217,8 @@ namespace QuestTree
         /// lettering the way DynamicMaps' artwork does. The fear behind the old default, that forty zone
         /// names would bury a big map in text, is answered by the Maps tab drawing them only from a zoom
         /// in: the wide view stays clean, and the names appear as you go looking for them. Extracts only
-        /// and None remain for anyone who disagrees. An existing config that still holds the old default
-        /// is moved onto this one once - see <see cref="MigrateMapLabels"/>.</summary>
+        /// and None remain for anyone who disagrees. New in 1.19.0, so there is no earlier value to carry
+        /// over.</summary>
         public static ConfigEntry<LabelMode> MapLabels { get; private set; }
 
         /// <summary>Whether a captured map opens in 3D where there is relief to draw, or stays the flat
@@ -230,12 +230,6 @@ namespace QuestTree
         /// setting is global rather than per map because it is a preference about how you like to read a
         /// map, not a property of one.</summary>
         public static ConfigEntry<MapViewMode> MapMode { get; private set; }
-
-        /// <summary>Whether the one-time move of <see cref="MapLabels"/> off its pre-1.19 default has
-        /// already run for this config file - see <see cref="MigrateMapLabels"/>. State rather than a
-        /// preference, so it is kept out of <see cref="Entries"/> and shows no row in the Settings
-        /// tab.</summary>
-        private static ConfigEntry<bool> MapLabelsMigrated { get; set; }
 
         /// <summary>Whether a finished capture is offered to the host this profile plays on - see
         /// QuestGraph/MapTransfer.cs. On by default because the HOST decides: a host that does not
@@ -573,43 +567,6 @@ namespace QuestTree
             }
         }
 
-        /// <summary>The label mode this setting defaulted to before 1.19.0, kept so the migration below can
-        /// tell an untouched old default from a deliberate choice - the same test
-        /// <see cref="MigrateColourScheme"/> makes on the colours.</summary>
-        private const LabelMode LegacyMapLabels = LabelMode.ExtractsOnly;
-
-        /// <summary>Moves an existing config onto the new "Map labels" default, once.
-        ///
-        /// 1.19.0 changed that default from extracts only to ALL names, because a captured picture carries
-        /// no hand-drawn lettering and the zone names are the only place names it has - and because the
-        /// Maps tab now draws them from a zoom in, so the wide view stays clean either way.
-        ///
-        /// WHO THIS COVERS (review F50): only configs written by the 1.19 TEST builds. "Map labels" was first
-        /// bound in stage C of 1.19 and no released version (1.15-1.18.x) ever wrote it, so on a real upgrade
-        /// the key is absent, Bind writes the new default, and this only sets its marker. Kept for the test-build
-        /// configs, which do hold the old default explicitly.
-        ///
-        /// Only a value that still equals the OLD DEFAULT moves, and only once - the marker entry goes
-        /// down whether anything moved or not. Someone who chose extracts only on purpose, or who chooses
-        /// it again after this has run, keeps it: this is a default catching up, not a preference being
-        /// overruled.</summary>
-        private static void MigrateMapLabels()
-        {
-            if (MapLabelsMigrated == null || MapLabels == null) return;
-            if (MapLabelsMigrated.Value) return;
-
-            MapLabelsMigrated.Value = true;
-
-            if (MapLabels.Value != LegacyMapLabels) return;
-
-            MapLabels.Value = LabelMode.All;
-
-            Plugin.LogSource?.LogInfo(
-                "QuestTree: 'Map labels' moved from extracts only to all names, the 1.19 default - a captured " +
-                "map's zone names appear as you zoom in, so the wide view stays as clean as it was. " +
-                "Settings > Map > Map labels puts it back, and this will not be changed again.");
-        }
-
         /// <summary>Rewrites one entry to its new default, but only if it still holds the old one.
         /// Returns 1 when it moved, so the caller can report how much it changed.</summary>
         private static int AdoptNewDefault(ConfigEntry<string> entry, string legacyValue)
@@ -903,17 +860,6 @@ namespace QuestTree
                 "artwork' and 'Extra map artwork rotation' - DO NOT APPLY in 3D: the picture is laid onto " +
                 "the ground by the captured coordinates it was measured over, so there is nothing left " +
                 "for a rotation or a mirror to correct.");
-
-            // Its own marker rather than the palette's version stamp, because the two migrations are
-            // unrelated and a config that has had one may not have had the other. Advanced, and out of
-            // Entries below, so the Settings tab shows no row for it: it is state, not a preference.
-            MapLabelsMigrated = config.Bind(
-                "Advanced", "Map labels default migrated", false,
-                "Whether the one-time move of 'Map labels' from its old default (extracts only) to its new " +
-                "one (all names) has already been offered to this file. Do not edit: the mod sets it once " +
-                "and will not touch your choice of labels again afterwards.");
-
-            MigrateMapLabels();
 
             UploadCaptures = config.Bind(
                 "Map", "Share captured maps", true,

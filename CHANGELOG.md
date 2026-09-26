@@ -55,8 +55,8 @@ treatment among them - and a set made under another recipe is replaced, not merg
 **A captured map's names are readable and its extracts are marked.** White text, the accent colour
 for an extract, on a nearly solid dark plate at a fixed size on screen whatever the zoom, a dot on
 the spot with the plate above it, a name that would land on one already drawn dropped, and zone
-names held back until there is room for them - which is why "Map labels" shows all of them by
-default now. Every extract carries an exit-sign-green diamond whatever the label setting says, since
+names held back until there is room for them - which is why the new "Map labels" setting defaults
+to all of them. Every extract carries an exit-sign-green diamond whatever the label setting says, since
 the names can be turned off and the extracts should not be; the legend names the diamond and the
 facts line counts them.
 

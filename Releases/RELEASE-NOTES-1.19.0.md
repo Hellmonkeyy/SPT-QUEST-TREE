@@ -124,9 +124,9 @@ Smaller things that are all lessons from a picture that came out wrong:
   says which recipe each was made under. That is how the black rain-era and building-less pictures get
   thrown away instead of being blended into good ones.
 - Place names come from the scene: the extraction points and the cleaned-up bot zone names. **Map
-  labels** shows all of them by default now - the zone names are held back until you zoom in, so the
-  wide view stays clean and nothing has to be switched off to get it. DynamicMaps' artwork keeps its
-  author's own labels whatever this is set to.
+  labels**, a new setting, shows all of them by default. The zone names are held back until you
+  zoom in, so the wide view stays clean and nothing has to be switched off to get it. DynamicMaps'
+  artwork keeps its author's own labels whatever this is set to.
 - **The names are readable over a photograph.** White text, or the accent colour for an extract, on a
   nearly solid dark plate; a fixed size on screen at any zoom rather than a size in map units; a small
   dot on the exact spot with the plate above it; a name that would land on one already drawn is
