@@ -2919,13 +2919,10 @@ namespace QuestTree.QuestGraph
 
         // --- the pipeline: main thread reads, workers place and reduce ------------------------------------
 
-        /// <summary>What <see cref="StoreWorld"/> answers: stored; refused for a reason no other mesh of the
-        /// building would change; refused for one of the vertex caps - which a cluster can fix.</summary>
+        /// <summary>What <see cref="StoreWorld"/> answers: stored, or refused (the reason is counted by StoreWorld itself - the vertex caps in RefusedBuildingVertices / RefusedFileVertices).</summary>
         private const int Stored = 0;
 
         private const int Refused = 1;
-
-        private const int RefusedVertices = 2;
 
         /// <summary>Applies the finished flights in the order they are found finished - at least one a
         /// frame, and more only while the frame's budget lasts - and hands their workspaces back. Called once
@@ -3219,12 +3216,6 @@ namespace QuestTree.QuestGraph
                 if (candidate.AsDetail && state != null && committed) state.DetailCommitted++;
             }
         }
-
-        /// <summary>Takes a limit back as pending after a store that settled it was refused, so the cluster
-        /// flight that follows owns it again. Always fits: the same amount was just returned.</summary>
-        /// <param name="job">The build.</param>
-        /// <param name="limit">The limit.</param>
-        private static void Retake(Job job, int limit) => job.Ledger.Pending += limit;
 
         /// <summary>
         /// A readable mesh's arrays out of Unity, into job.Captured: its vertices in one step and each of its
@@ -4077,7 +4068,7 @@ namespace QuestTree.QuestGraph
             if (vertices > MapMeshFile.MaxVerticesPerBuilding)
             {
                 job.RefusedBuildingVertices++;
-                return RefusedVertices;
+                return Refused;
             }
 
             // The format's building cap (M1): stop, rather than build a file Write refuses whole.
@@ -4099,7 +4090,7 @@ namespace QuestTree.QuestGraph
             if (job.Vertices + vertices > MapMeshFile.MaxVerticesTotal)
             {
                 job.RefusedFileVertices++;
-                return RefusedVertices;
+                return Refused;
             }
 
             var x = new ushort[vertices];
@@ -5361,8 +5352,8 @@ namespace QuestTree.QuestGraph
                     : "") +
                 (job.SwitchedMidRead > 0 ? $" {N(job.SwitchedMidRead)} detail read(s) discarded - the group switched to coarse." : "") +
                 (job.RefusedBuildingVertices + job.RefusedFileVertices > 0
-                    ? $" {N(job.RefusedBuildingVertices)} over the per-building vertex cap, {N(job.RefusedFileVertices)} over " +
-                      "the file's (each tried as a cluster)."
+                    ? $" {N(job.RefusedBuildingVertices)} refused over the per-building vertex cap, {N(job.RefusedFileVertices)} over " +
+                      "the file's (not stored; counted in 'no path left')."
                     : "") +
                 (job.ClusterTimedOut > 0 ? $" {N(job.ClusterTimedOut)} cluster(s) out of time." : "") +
                 (job.Request.Abort ? " ABORTED by the capture's watchdog - finished with what was stored." : "") +
