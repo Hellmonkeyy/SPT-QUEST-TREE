@@ -1327,6 +1327,30 @@ namespace QuestTree.QuestGraph
             /// <summary>Why decimation stopped, for the log line.</summary>
             internal string DecimationStoppedWhy;
 
+            /// <summary>WP8: the building-quality line's counts (ReportQuality): decimations run, reaching their target,
+            /// stopped at the error limit, relaxed (rollback only); refusals by kind; pinned corners; results not used
+            /// for their slivers or a hole; area and sliver area of the decimated sources and of what was stored from
+            /// them; and fall-backs by the level they fell back to (index 1, 2, 3 = LOD1, LOD2, LOD3 and coarser).</summary>
+            internal int DecimationRuns;
+
+            internal int DecimationsToTarget;
+            internal int StoppedAtError;
+            internal int RelaxedPasses;
+            internal long RefusedPlacement;
+            internal long RefusedFans;
+            internal long RefusedDistance;
+            internal long RefusedFlips;
+            internal long RefusedEdgeGrowth;
+            internal long RefusedSliver;
+            internal long PinnedCorners;
+            internal int SliversReverted;
+            internal int AreaLost;
+            internal double DecimatedSourceArea;
+            internal double DecimatedSourceSliverArea;
+            internal double StoredDecimatedArea;
+            internal double StoredDecimatedSliverArea;
+            internal readonly int[] FellBackTo = new int[4];
+
             /// <summary>Stored as the source, past the limit, from unreserved headroom (H3).</summary>
             internal int StoredUndecimated;
 
@@ -1522,6 +1546,9 @@ namespace QuestTree.QuestGraph
             internal List<Renderer> CoarseList;
             internal bool UsingCoarse;
 
+            /// <summary>The coarse level's index, for the fall-backs by level (WP8).</summary>
+            internal int CoarseLevel;
+
             /// <summary>Detail renderers stored or on a worker. A group may switch only while it is 0.</summary>
             internal int DetailCommitted;
         }
@@ -1625,6 +1652,30 @@ namespace QuestTree.QuestGraph
             internal bool OverLimit;
             internal bool SeamsRelaxed;
             internal long SourceTriangles;
+
+            /// <summary>WP8: the decimation's own account, for the building-quality line - whether one ran, reached
+            /// its target, stopped at the error limit or went relaxed (rollback only); its refusals and pinned
+            /// corners; its source's and output's area and sliver area; and why a result inside its limit was not
+            /// used: more slivers than its source (SliversReverted) or a hole (AreaLost, under
+            /// <see cref="MeshDecimator.AreaKept"/> of the source's area).</summary>
+            internal bool DecimationRan;
+
+            internal bool ReachedTarget;
+            internal bool StoppedByError;
+            internal bool Relaxed;
+            internal bool SliversReverted;
+            internal bool AreaLost;
+            internal int RefusedPlacement;
+            internal int RefusedFans;
+            internal int RefusedDistance;
+            internal int RefusedFlips;
+            internal int RefusedEdgeGrowth;
+            internal int RefusedSliver;
+            internal int PinnedCorners;
+            internal double SourceArea;
+            internal double SourceSliverArea;
+            internal double OutputArea;
+            internal double OutputSliverArea;
 
             /// <summary>The placed source's summed triangle area, m2 (WP7: the measured-surface evidence).</summary>
             internal double SurfaceArea;
@@ -2695,6 +2746,7 @@ namespace QuestTree.QuestGraph
 
             if (coarse >= 0 && lods[coarse].renderers != null)
             {
+                state.CoarseLevel = coarse;
                 state.CoarseList = new List<Renderer>();
 
                 foreach (var renderer in lods[coarse].renderers)
@@ -3061,6 +3113,7 @@ namespace QuestTree.QuestGraph
             if (coarse.Count == 0) return false;
 
             job.FellBack++;
+            job.FellBackTo[Math.Max(1, Math.Min(3, state.CoarseLevel))]++;
             state.UsingCoarse = true;
             foreach (var made in coarse) job.Extra.Enqueue(made);
 
@@ -3400,6 +3453,25 @@ namespace QuestTree.QuestGraph
 
                     if (outcome.Implausible) job.Implausible++;
                     if (outcome.SeamsRelaxed) job.SeamsRelaxed++;
+
+                    if (outcome.DecimationRan)
+                    {
+                        job.DecimationRuns++;
+                        if (outcome.ReachedTarget) job.DecimationsToTarget++;
+                        if (outcome.StoppedByError) job.StoppedAtError++;
+                        if (outcome.Relaxed) job.RelaxedPasses++;
+                        if (outcome.SliversReverted) job.SliversReverted++;
+                        if (outcome.AreaLost) job.AreaLost++;
+                        job.RefusedPlacement += outcome.RefusedPlacement;
+                        job.RefusedFans += outcome.RefusedFans;
+                        job.RefusedDistance += outcome.RefusedDistance;
+                        job.RefusedFlips += outcome.RefusedFlips;
+                        job.RefusedEdgeGrowth += outcome.RefusedEdgeGrowth;
+                        job.RefusedSliver += outcome.RefusedSliver;
+                        job.PinnedCorners += outcome.PinnedCorners;
+                        job.DecimatedSourceArea += outcome.SourceArea;
+                        job.DecimatedSourceSliverArea += outcome.SourceSliverArea;
+                    }
                     if (outcome.TimedOut) job.TimedOut++;
                     if (outcome.OverLimit) job.OverLimit++;
                 }
@@ -3413,6 +3485,8 @@ namespace QuestTree.QuestGraph
                     {
                         job.Decimated++;
                         job.SourceDecimated += outcome.SourceTriangles;
+                        job.StoredDecimatedArea += outcome.OutputArea;
+                        job.StoredDecimatedSliverArea += outcome.OutputSliverArea;
                     }
 
                     // A refusal here (the vertex caps, the building cap) is a plain refusal (review F18): the vertex
@@ -3784,17 +3858,24 @@ namespace QuestTree.QuestGraph
                 outcome.WorkspaceBytes = result.WorkspaceBytes;
                 outcome.TimedOut = result.TimedOut;
                 outcome.OverLimit = result.OverLimit;
+                Account(outcome, result, source.Target);
 
-                if (!result.TimedOut && result.Triangles != null && result.Triangles.Length >= 3 &&
-                    result.Triangles.Length / 3 <= source.Limit)
+                if (!result.TimedOut && result.Triangles != null && result.Triangles.Length >= 3)
                 {
-                    outcome.Mesh = new WorldMesh
+                    // WP8: a result with more slivers than its source, or a hole, is not stored however well it fits -
+                    // the building takes its next path (the area test was the seams-relaxed retry's trigger).
+                    if (result.SliversReverted) outcome.SliversReverted = true;
+                    else if (!MeshDecimator.AllowSeamRelaxedRetry && result.AreaShare < MeshDecimator.AreaKept) outcome.AreaLost = true;
+                    else if (result.Triangles.Length / 3 <= source.Limit)
                     {
-                        P = result.Positions, T = result.Triangles, Mirrored = world.Mirrored,
-                        UV = world.UV != null ? result.UV : null, TriMat = world.UV != null ? result.TriangleMaterial : null,
-                    };
-                    outcome.Decimated = true;
-                    return outcome;
+                        outcome.Mesh = new WorldMesh
+                        {
+                            P = result.Positions, T = result.Triangles, Mirrored = world.Mirrored,
+                            UV = world.UV != null ? result.UV : null, TriMat = world.UV != null ? result.TriangleMaterial : null,
+                        };
+                        outcome.Decimated = true;
+                        return outcome;
+                    }
                 }
             }
 
@@ -3803,6 +3884,29 @@ namespace QuestTree.QuestGraph
             outcome.Source = world;
 
             return outcome;
+        }
+
+        /// <summary>WP8: a decimation's account copied onto the outcome, for the building-quality line. Worker-safe.</summary>
+        /// <param name="outcome">The outcome.</param>
+        /// <param name="result">The decimation.</param>
+        /// <param name="target">The target it was run to.</param>
+        private static void Account(Outcome outcome, MeshDecimator.Result result, int target)
+        {
+            outcome.DecimationRan = true;
+            outcome.ReachedTarget = !result.TimedOut && result.Triangles != null && result.Triangles.Length / 3 <= target;
+            outcome.StoppedByError = result.StoppedByError;
+            outcome.Relaxed = result.Relaxed;
+            outcome.RefusedPlacement = result.RejectedPlacement;
+            outcome.RefusedFans = result.RejectedFans;
+            outcome.RefusedDistance = result.RejectedDistance;
+            outcome.RefusedFlips = result.RejectedFlips;
+            outcome.RefusedEdgeGrowth = result.RejectedEdgeGrowth;
+            outcome.RefusedSliver = result.RejectedSliver;
+            outcome.PinnedCorners = result.PinnedCorners;
+            outcome.SourceArea = result.SourceArea;
+            outcome.SourceSliverArea = result.SourceSliverArea;
+            outcome.OutputArea = result.OutputArea;
+            outcome.OutputSliverArea = result.OutputSliverArea;
         }
 
         /// <summary>A GPU source's vertex and index bytes as the (positions, triangles) pair the readable
@@ -5725,6 +5829,30 @@ namespace QuestTree.QuestGraph
                 (job.DroppedTriangles > 0
                     ? $" {N(job.DroppedTriangles)} triangle(s) reached outside the extent and were dropped."
                     : ""));
+
+            ReportQuality(job);
+        }
+
+        /// <summary>WP8 (V.2): the building-quality line, one a build - how the decimations ended, what they refused,
+        /// what fell back where, and the sliver share of the decimated sources against what was stored from them.
+        /// Relaxed passes and seams crossed are 0 unless a rollback switch is on.</summary>
+        /// <param name="job">The build.</param>
+        private static void ReportQuality(Job job)
+        {
+            var f1 = CultureInfo.InvariantCulture;
+            var s0 = job.DecimatedSourceArea > 0d ? job.DecimatedSourceSliverArea / job.DecimatedSourceArea * 100d : 0d;
+            var s1 = job.StoredDecimatedArea > 0d ? job.StoredDecimatedSliverArea / job.StoredDecimatedArea * 100d : 0d;
+
+            Plugin.LogSource?.LogInfo(
+                $"QuestTree: building quality for {job.Request.Map} - decimations {N(job.DecimationRuns)}: to target " +
+                $"{N(job.DecimationsToTarget)}, stopped at the error limit {N(job.StoppedAtError)}, relaxed " +
+                $"passes {N(job.RelaxedPasses)}, seams crossed {N(job.SeamsRelaxed)}; refused: placement clamped " +
+                $"{N(job.RefusedPlacement)}, fan {N(job.RefusedFans)}, distance {N(job.RefusedDistance)}, flip " +
+                $"{N(job.RefusedFlips)}, edge growth {N(job.RefusedEdgeGrowth)}, new sliver {N(job.RefusedSliver)}; pinned " +
+                $"corners {N(job.PinnedCorners)}; slivers reverted {N(job.SliversReverted)}, area lost {N(job.AreaLost)}; " +
+                $"fell back: as-is {N(job.StoredUndecimated)}, LOD1 {N(job.FellBackTo[1])}, LOD2 {N(job.FellBackTo[2])}, " +
+                $"LOD3+ {N(job.FellBackTo[3])}, clustered {N(job.ClusteredStored)}; sliver area {s0.ToString("0.0", f1)} % in " +
+                $"the sources, {s1.ToString("0.0", f1)} % stored.");
         }
 
         /// <summary>The hidden renderers, once a capture - what the "switched off" filter dropped, by scene root with
@@ -6275,22 +6403,28 @@ namespace QuestTree.QuestGraph
     ///      perpendicular to its face, weighted <see cref="BoundaryWeight"/> times, so openings and
     ///      silhouettes are the last things to go;
     ///   4. every edge into a min-HEAP by its NORMALISED cost - the quadric error over the plane weight
-    ///      absorbed, a mean squared distance in square metres - at the optimal point (the 3x3 solve), or
-    ///      at the MIDPOINT when the quadric is singular. Never an end: on a flat or ruled region every
-    ///      candidate costs nothing, ties went to one end, and that one vertex grew a fan of hundreds of
-    ///      faces that every later collapse walked - an n96 flat box took five seconds;
+    ///      absorbed, a mean squared distance in square metres - at the optimal point (the 3x3 solve) when it
+    ///      lies within <see cref="MaxPlacementFactor"/> edge lengths of the edge (WP8: an unbounded optimum
+    ///      slid metres along a crease, where neither the error nor the distance test can see it), else the
+    ///      best of midpoint, a and b (midpoint first, so a flat region's ties stay at the MIDPOINT and no one
+    ///      vertex grows a fan of hundreds of faces - an n96 flat box took five seconds). A CORNER (a boundary
+    ///      vertex whose boundary turns by more than 30 degrees, or an end or a junction) never moves, and a
+    ///      boundary vertex never moves off its boundary onto an interior point: the other end moves onto it;
     ///   5. collapse the cheapest VALID edge: both ends alive and unchanged; the link condition (no more
     ///      shared neighbours than shared faces) and its boundary form (two boundary vertices joined by
     ///      an INTERIOR edge would bridge an opening); the surviving vertex's fan no larger than
     ///      <see cref="MaxFan"/>; no surviving face degenerate; no face normal turned by more than 60
     ///      degrees (the flip test, which catches near-folds as well as inversions); and the new point
     ///      within 2 x the stop distance of every plane around it - the mean error alone can hide one
-    ///      feature moved a long way;
+    ///      feature moved a long way; no surviving edge longer than <see cref="EdgeGrowth"/> x the longest
+    ///      edge of the two fans before it (the spike guard); and no NEW sliver - a face thinner than
+    ///      <see cref="SliverAspect"/> - unless the fans already held one as thin (WP8);
     ///   6. stop at the target, or when the cheapest collapse's mean error passes
-    ///      (<see cref="MaxRelativeError"/> x bounds diagonal) squared - and then, because a target is a
-    ///      BUDGET the smallest buildings pay for, carry on with the error and distance limits relaxed
-    ///      until the count is within the HARD LIMIT (target x <see cref="HardLimitFactor"/> by default).
-    ///      A mesh that still cannot get there is reported so the caller can cluster it;
+    ///      (<see cref="MaxRelativeError"/> x bounds diagonal) squared - over the hard limit or not (WP8). The
+    ///      pre-WP8 RELAXED pass, which lifted the error, distance and fan limits until the count was within
+    ///      the HARD LIMIT, made the spikes and melted blobs and survives only as the
+    ///      <see cref="AllowRelaxedPass"/> rollback. A mesh over its limit is reported (OverLimit), with its
+    ///      sliver and area shares against its source's, for the caller's next path;
     ///   7. a TIME CAP measured on the worker.
     ///
     /// Winding is preserved: a collapse only moves corners and removes faces, never reorders a face.
@@ -6333,6 +6467,47 @@ namespace QuestTree.QuestGraph
         /// <summary>The heap's tie-break weight on an edge's squared length - see Push.</summary>
         private const double TieBreak = 1e-9;
 
+        /// <summary>WP8 rollback: the pre-WP8 decimator - the RELAXED pass (error, distance and fan limits lifted
+        /// until the hard limit), with none of WP8's guards (bounded placement, pinned corners, edge growth, new
+        /// slivers, the sliver post-pass). Static rather than const so the harness can prove the old behaviour and
+        /// the new side by side, the reason <c>rejectFlips</c> exists. Read once per run.</summary>
+        internal static bool AllowRelaxedPass = false;
+
+        /// <summary>WP8 rollback: the pre-WP8 seams-relaxed retry in <see cref="DecimateTextured"/>, which welded
+        /// across UV seams and material borders and smeared the atlas.</summary>
+        internal static bool AllowSeamRelaxedRetry = false;
+
+        /// <summary>A solved optimum further than this many edge lengths from the segment a-b is not believed.</summary>
+        internal const double MaxPlacementFactor = 0.5;
+
+        /// <summary>A collapse may not make any surviving edge longer than this times the longest edge of the two
+        /// fans before it.</summary>
+        internal const double EdgeGrowth = 2.0;
+
+        /// <summary>A face is a sliver when e_max^2 / (2 x area) exceeds this (= its longest edge over that edge's
+        /// altitude).</summary>
+        internal const double SliverAspect = 20d;
+
+        /// <summary>A collapse may create a sliver only when its fans already held one at least as thin (x this
+        /// factor). 1.0, not more: any factor above 1 compounds over a chain of collapses (20 -> 30 -> 45 ...). At
+        /// 1.0, by induction, no face is ever thinner than the thinnest SOURCE face in its region.</summary>
+        internal const double SliverWorsening = 1.0;
+
+        /// <summary>Faces with a longest edge under this, metres, are never called slivers by the collapse guard
+        /// (invisible at map scale).</summary>
+        internal const double SliverMinEdge = 0.25;
+
+        /// <summary>The post-pass's and the checker's sliver: longest edge at least this many metres.</summary>
+        internal const double SliverMetricMinEdge = 1.0;
+
+        /// <summary>A boundary vertex whose two boundary edges turn by more than this (cosine 0.866 = 30 degrees)
+        /// is a CORNER and never moves.</summary>
+        internal const double CornerCosine = 0.866;
+
+        /// <summary>Post-pass: a result whose sliver-area share exceeds its source's by more than this is
+        /// rejected (Result.SliversReverted) and the caller takes its next path.</summary>
+        internal const double SliverPostSlack = 0.03;
+
         /// <summary>What one decimation produced and what it cost.</summary>
         internal sealed class Result
         {
@@ -6357,6 +6532,32 @@ namespace QuestTree.QuestGraph
 
             /// <summary>Collapses refused because the two ends belong to different materials (stage W).</summary>
             internal int RejectedSeam;
+
+            /// <summary>WP8: solved optima further than <see cref="MaxPlacementFactor"/> edge lengths from their edge -
+            /// counted per EVALUATION (Cost, which every push calls), not per refusal: "placements clamped".</summary>
+            internal int RejectedPlacement;
+
+            /// <summary>WP8: collapses refused by the spike guard (<see cref="EdgeGrowth"/>) and for a new sliver.</summary>
+            internal int RejectedEdgeGrowth;
+
+            internal int RejectedSliver;
+
+            /// <summary>WP8: boundary corners, ends and junctions held in place.</summary>
+            internal int PinnedCorners;
+
+            /// <summary>WP8's post-pass: the source's and the output's area, their sliver area (faces thinner than
+            /// <see cref="SliverAspect"/> with a longest edge of at least <see cref="SliverMetricMinEdge"/>), the shares,
+            /// and whether the output's sliver share passed the source's by more than <see cref="SliverPostSlack"/> -
+            /// a result the caller must not store.</summary>
+            internal double SourceArea;
+
+            internal double SourceSliverArea;
+            internal double OutputArea;
+            internal double OutputSliverArea;
+            internal double SourceSliverShare;
+            internal double OutputSliverShare;
+            internal double AreaShare;
+            internal bool SliversReverted;
 
             /// <summary>Whether this result came from the RELAXED retry (DecimateTextured): seams and material
             /// borders were not boundaries, and a survivor kept its own material and UV.</summary>
@@ -6406,6 +6607,13 @@ namespace QuestTree.QuestGraph
             internal List<int>[] Vf = new List<int>[0];
             internal bool[] Dead = new bool[0];
             internal bool[] Boundary = new bool[0];
+
+            /// <summary>WP8: each boundary vertex's first two boundary neighbours and its boundary-edge count, and
+            /// whether it is pinned (a corner, an end or a junction).</summary>
+            internal int[] BNb0 = new int[0];
+            internal int[] BNb1 = new int[0];
+            internal byte[] BCount = new byte[0];
+            internal bool[] Pinned = new bool[0];
             internal int[] Stamp = new int[0];
             internal int[] Mark = new int[0];
             internal int Generation;
@@ -6443,8 +6651,9 @@ namespace QuestTree.QuestGraph
                 b += Heap.Length * 48L;
                 b += (SubUV.Length + UV.Length) * 8L + (SubMat.Length + VMat.Length) * 4L;
                 b += (SubId.Length + Next.Length + Rep.Length + F.Length + Stamp.Length + Mark.Length + Map.Length +
-                      Count.Length + LastFace.Length) * 4L;
-                b += FaceOk.Length + NormalState.Length + FaceDead.Length + Dead.Length + Boundary.Length + CornerGroup.Length;
+                      Count.Length + LastFace.Length + BNb0.Length + BNb1.Length) * 4L;
+                b += FaceOk.Length + NormalState.Length + FaceDead.Length + Dead.Length + Boundary.Length + CornerGroup.Length +
+                     BCount.Length + Pinned.Length;
                 b += Vf.Length * 48L + (Head.Count + Seen.Count) * 24L + Faces.Count * 4L;
                 return b;
             }
@@ -6523,7 +6732,10 @@ namespace QuestTree.QuestGraph
             var clock = Stopwatch.StartNew();
             var strict = DecimateWith(positions, triangles, target, hardLimit, timeCapMs, true, workspace, uvs, vertexMaterial);
 
-            if (uvs == null || strict.TimedOut) return strict;
+            // WP8: strict only. The retry welded across UV seams and material borders - a face bridging two charts
+            // is a streak - and its area test now lives in MapMeshBuilder.Process, where a hole is a reason to try the
+            // building's next path instead of a reason to relax. Kept below for the rollback.
+            if (!AllowSeamRelaxedRetry || uvs == null || strict.TimedOut) return strict;
 
             // The strict run either could not reach the limit, or reached it by letting whole material regions
             // collapse away - a region bounded by fixed borders shrinks to nothing in the relaxed phase and leaves
@@ -6548,9 +6760,50 @@ namespace QuestTree.QuestGraph
             return Area(relaxed.Positions, relaxed.Triangles) > kept ? relaxed : strict;
         }
 
-        /// <summary>The share of its surface a strict textured decimation must keep before its result is
-        /// trusted; under it the seams-relaxed retry runs.</summary>
-        private const double AreaKept = 0.97;
+        /// <summary>The share of its surface a decimation must keep before its result is trusted: under it
+        /// MapMeshBuilder.Process takes the building's next path (WP8; under the rollback, the seams-relaxed retry
+        /// runs).</summary>
+        internal const double AreaKept = 0.97;
+
+        /// <summary>WP8: a mesh's total area and the area of its SLIVERS - faces whose e_max^2 / (2 x area) passes
+        /// <see cref="SliverAspect"/> with a longest edge of at least <see cref="SliverMetricMinEdge"/> m, the
+        /// checker's definition. O(n).</summary>
+        /// <param name="p">x, y, z per vertex.</param>
+        /// <param name="t">Three indices per triangle.</param>
+        /// <param name="total">The area, m2.</param>
+        /// <param name="slivers">The slivers' area, m2.</param>
+        internal static void SliverArea(float[] p, int[] t, out double total, out double slivers)
+        {
+            total = 0d;
+            slivers = 0d;
+            if (p == null || t == null) return;
+
+            var n = p.Length / 3;
+            var minEdge2 = SliverMetricMinEdge * SliverMetricMinEdge;
+
+            for (var k = 0; k + 2 < t.Length; k += 3)
+            {
+                int a = t[k], b = t[k + 1], c = t[k + 2];
+                if (a < 0 || b < 0 || c < 0 || a >= n || b >= n || c >= n) continue;
+
+                double ux = p[b * 3] - p[a * 3], uy = p[b * 3 + 1] - p[a * 3 + 1], uz = p[b * 3 + 2] - p[a * 3 + 2];
+                double vx = p[c * 3] - p[a * 3], vy = p[c * 3 + 1] - p[a * 3 + 1], vz = p[c * 3 + 2] - p[a * 3 + 2];
+                double wx = vx - ux, wy = vy - uy, wz = vz - uz;
+                double nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+                var cross = Math.Sqrt(nx * nx + ny * ny + nz * nz);
+                var e2 = Math.Max(ux * ux + uy * uy + uz * uz, Math.Max(vx * vx + vy * vy + vz * vz, wx * wx + wy * wy + wz * wz));
+
+                total += 0.5 * cross;
+                if (e2 >= minEdge2 && e2 > SliverAspect * cross) slivers += 0.5 * cross;
+            }
+        }
+
+        /// <summary>WP8: the share of a mesh's area in slivers (see <see cref="SliverArea"/>), 0 for no area.</summary>
+        internal static double SliverAreaShare(float[] p, int[] t)
+        {
+            SliverArea(p, t, out var total, out var slivers);
+            return total > 0d ? slivers / total : 0d;
+        }
 
         /// <summary>A mesh's surface area. Internal: MapMeshBuilder.Process measures each placed source with it.</summary>
         internal static double Area(float[] p, int[] t)
@@ -6851,6 +7104,10 @@ namespace QuestTree.QuestGraph
             private double _maxError;
             private double _maxDistance;
             private bool _relaxed;
+
+            /// <summary>The pre-WP8 decimator (<see cref="AllowRelaxedPass"/>), read once for the run.</summary>
+            private readonly bool _legacy = AllowRelaxedPass;
+
             private readonly double[] _sum = new double[10];
 
             internal Work(float[] positions, int[] triangles, int target, int limit, double cap, bool rejectFlips,
@@ -6901,6 +7158,25 @@ namespace QuestTree.QuestGraph
                 _result.OverLimit = _live > _limit;
 
                 Output();
+                PostPass();
+            }
+
+            /// <summary>WP8's building-level post-pass: the source's and the output's area and sliver area, and the
+            /// verdict - an output whose sliver share passes its source's by more than <see cref="SliverPostSlack"/>
+            /// is not to be stored (off under the rollback).</summary>
+            private void PostPass()
+            {
+                SliverArea(_in, _tris, out var sourceArea, out var sourceSlivers);
+                SliverArea(_result.Positions, _result.Triangles, out var outputArea, out var outputSlivers);
+
+                _result.SourceArea = sourceArea;
+                _result.SourceSliverArea = sourceSlivers;
+                _result.OutputArea = outputArea;
+                _result.OutputSliverArea = outputSlivers;
+                _result.SourceSliverShare = sourceArea > 0d ? sourceSlivers / sourceArea : 0d;
+                _result.OutputSliverShare = outputArea > 0d ? outputSlivers / outputArea : 0d;
+                _result.AreaShare = sourceArea > 0d ? outputArea / sourceArea : 1d;
+                _result.SliversReverted = !_legacy && _result.OutputSliverShare > _result.SourceSliverShare + SliverPostSlack;
             }
 
             // --- 1. weld by corner, 2. degenerate and duplicate faces --------------------------------------
@@ -7140,6 +7416,10 @@ namespace QuestTree.QuestGraph
 
                 ws.Dead = Workspace.Grow(ws.Dead, m);
                 ws.Boundary = Workspace.Grow(ws.Boundary, m);
+                ws.BNb0 = Workspace.Grow(ws.BNb0, m);
+                ws.BNb1 = Workspace.Grow(ws.BNb1, m);
+                ws.BCount = Workspace.Grow(ws.BCount, m);
+                ws.Pinned = Workspace.Grow(ws.Pinned, m);
                 ws.Stamp = Workspace.Grow(ws.Stamp, m);
                 ws.Mark = Workspace.Grow(ws.Mark, m);
 
@@ -7147,6 +7427,8 @@ namespace QuestTree.QuestGraph
                 {
                     ws.Dead[v] = false;
                     ws.Boundary[v] = false;
+                    ws.BCount[v] = 0;
+                    ws.Pinned[v] = false;
                     ws.Stamp[v] = 0;
                     ws.Mark[v] = 0;
                 }
@@ -7255,6 +7537,34 @@ namespace QuestTree.QuestGraph
                         }
                 }
 
+                // WP8: the corners. A boundary vertex with other than two boundary edges is an end or a non-manifold
+                // junction; one whose two boundary edges turn by more than 30 degrees is a corner. Neither ever moves
+                // (Cost), so silhouettes and openings keep their shape. Before the pushes: Cost reads Pinned.
+                if (!_legacy)
+                    for (var v = 0; v < m; v++)
+                    {
+                        if (!ws.Boundary[v]) continue;
+
+                        if (ws.BCount[v] != 2)
+                        {
+                            ws.Pinned[v] = true;
+                            _result.PinnedCorners++;
+                            continue;
+                        }
+
+                        int n0 = ws.BNb0[v], n1 = ws.BNb1[v];
+                        double d1x = ws.P[v * 3] - ws.P[n0 * 3], d1y = ws.P[v * 3 + 1] - ws.P[n0 * 3 + 1], d1z = ws.P[v * 3 + 2] - ws.P[n0 * 3 + 2];
+                        double d2x = ws.P[n1 * 3] - ws.P[v * 3], d2y = ws.P[n1 * 3 + 1] - ws.P[v * 3 + 1], d2z = ws.P[n1 * 3 + 2] - ws.P[v * 3 + 2];
+                        var l1 = Math.Sqrt(d1x * d1x + d1y * d1y + d1z * d1z);
+                        var l2 = Math.Sqrt(d2x * d2x + d2y * d2y + d2z * d2z);
+
+                        if (l1 < 1e-12 || l2 < 1e-12 || (d1x * d2x + d1y * d2y + d1z * d2z) / (l1 * l2) < CornerCosine)
+                        {
+                            ws.Pinned[v] = true;
+                            _result.PinnedCorners++;
+                        }
+                    }
+
                 // every edge into the heap, sized for them and the pushes to come
                 if (ws.Heap.Length < edges + 1024) ws.Heap = new Workspace.Entry[edges + edges / 2 + 1024];
 
@@ -7285,6 +7595,15 @@ namespace QuestTree.QuestGraph
 
                 ws.Boundary[a] = true;
                 ws.Boundary[b] = true;
+
+                // WP8: each end's boundary neighbours (the first two) and its boundary-edge count, for the corners.
+                if (ws.BCount[a] == 0) ws.BNb0[a] = b;
+                else if (ws.BCount[a] == 1) ws.BNb1[a] = b;
+                if (ws.BCount[a] < byte.MaxValue) ws.BCount[a]++;
+
+                if (ws.BCount[b] == 0) ws.BNb0[b] = a;
+                else if (ws.BCount[b] == 1) ws.BNb1[b] = a;
+                if (ws.BCount[b] < byte.MaxValue) ws.BCount[b]++;
 
                 if (!Normal(ws.F[face * 3], ws.F[face * 3 + 1], ws.F[face * 3 + 2], out var nx, out var ny, out var nz)) return;
 
@@ -7328,8 +7647,11 @@ namespace QuestTree.QuestGraph
                 _ws.W[v] += w;
             }
 
-            /// <summary>The normalised cost of collapsing a-b and where the survivor goes: the quadric's
-            /// optimal point, or the MIDPOINT when it is singular.</summary>
+            /// <summary>The normalised cost of collapsing a-b and where the survivor goes: the quadric's optimal point
+            /// when it is solvable and (WP8) lies within <see cref="MaxPlacementFactor"/> edge lengths of the segment a-b,
+            /// else the best of the midpoint, a and b (the midpoint on a tie). A pinned end, or a boundary end whose other
+            /// end is interior, does not move: the survivor goes to IT. Two ends that must both stay cost +infinity and
+            /// never enter the heap. Under the rollback, the pre-WP8 rule: the optimum, unbounded, else the midpoint.</summary>
             private double Cost(int a, int b, out double x, out double y, out double z)
             {
                 var q = _sum;
@@ -7340,8 +7662,10 @@ namespace QuestTree.QuestGraph
 
                 var det = a11 * (a22 * a33 - a23 * a23) - a12 * (a12 * a33 - a23 * a13) + a13 * (a12 * a23 - a22 * a13);
                 var scale = Math.Abs(a11) + Math.Abs(a22) + Math.Abs(a33);
+                var p = _ws.P;
+                var solved = scale > 0 && Math.Abs(det) > 1e-9 * scale * scale * scale;
 
-                if (scale > 0 && Math.Abs(det) > 1e-9 * scale * scale * scale)
+                if (solved)
                 {
                     x = (b1 * (a22 * a33 - a23 * a23) - a12 * (b2 * a33 - a23 * b3) + a13 * (b2 * a23 - a22 * b3)) / det;
                     y = (a11 * (b2 * a33 - a23 * b3) - b1 * (a12 * a33 - a23 * a13) + a13 * (a12 * b3 - b2 * a13)) / det;
@@ -7349,18 +7673,92 @@ namespace QuestTree.QuestGraph
                 }
                 else
                 {
-                    var p = _ws.P;
                     x = (p[a * 3] + p[b * 3]) * 0.5;
                     y = (p[a * 3 + 1] + p[b * 3 + 1]) * 0.5;
                     z = (p[a * 3 + 2] + p[b * 3 + 2]) * 0.5;
                 }
 
-                var error = q[0] * x * x + 2 * q[1] * x * y + 2 * q[2] * x * z + 2 * q[3] * x +
-                            q[4] * y * y + 2 * q[5] * y * z + 2 * q[6] * y + q[7] * z * z + 2 * q[8] * z + q[9];
+                if (!_legacy)
+                {
+                    if (solved)
+                    {
+                        // The optimum's distance from the segment a-b: near-rank-2 quadrics (a crease plus planes that
+                        // are almost parallel) put it metres along the crease at almost no cost.
+                        double abx = p[b * 3] - p[a * 3], aby = p[b * 3 + 1] - p[a * 3 + 1], abz = p[b * 3 + 2] - p[a * 3 + 2];
+                        var l2 = abx * abx + aby * aby + abz * abz;
+                        var t = l2 > 1e-18
+                            ? Math.Max(0d, Math.Min(1d, ((x - p[a * 3]) * abx + (y - p[a * 3 + 1]) * aby + (z - p[a * 3 + 2]) * abz) / l2))
+                            : 0d;
+                        double dx = x - (p[a * 3] + t * abx), dy = y - (p[a * 3 + 1] + t * aby), dz = z - (p[a * 3 + 2] + t * abz);
+
+                        if (Math.Sqrt(dx * dx + dy * dy + dz * dz) > MaxPlacementFactor * Math.Sqrt(l2) + 1e-6)
+                        {
+                            solved = false;
+                            _result.RejectedPlacement++;
+                        }
+                    }
+
+                    var ws = _ws;
+                    var stayA = ws.Pinned[a] || (ws.Boundary[a] && !ws.Boundary[b]);
+                    var stayB = ws.Pinned[b] || (ws.Boundary[b] && !ws.Boundary[a]);
+
+                    if (stayA && stayB)
+                    {
+                        x = p[a * 3];
+                        y = p[a * 3 + 1];
+                        z = p[a * 3 + 2];
+                        return double.PositiveInfinity;
+                    }
+
+                    if (stayA)
+                    {
+                        x = p[a * 3];
+                        y = p[a * 3 + 1];
+                        z = p[a * 3 + 2];
+                    }
+                    else if (stayB)
+                    {
+                        x = p[b * 3];
+                        y = p[b * 3 + 1];
+                        z = p[b * 3 + 2];
+                    }
+                    else if (!solved)
+                    {
+                        // midpoint FIRST, so an exact tie keeps the midpoint (the anti-fan rationale in step 4)
+                        x = (p[a * 3] + p[b * 3]) * 0.5;
+                        y = (p[a * 3 + 1] + p[b * 3 + 1]) * 0.5;
+                        z = (p[a * 3 + 2] + p[b * 3 + 2]) * 0.5;
+                        var best = Error(q, x, y, z);
+
+                        var ea = Error(q, p[a * 3], p[a * 3 + 1], p[a * 3 + 2]);
+                        if (ea < best)
+                        {
+                            best = ea;
+                            x = p[a * 3];
+                            y = p[a * 3 + 1];
+                            z = p[a * 3 + 2];
+                        }
+
+                        var eb = Error(q, p[b * 3], p[b * 3 + 1], p[b * 3 + 2]);
+                        if (eb < best)
+                        {
+                            x = p[b * 3];
+                            y = p[b * 3 + 1];
+                            z = p[b * 3 + 2];
+                        }
+                    }
+                }
+
+                var error = Error(q, x, y, z);
                 var weight = _ws.W[a] + _ws.W[b];
 
                 return weight > 0d ? Math.Max(0d, error) / weight : Math.Max(0d, error);
             }
+
+            /// <summary>A summed quadric's error at a point.</summary>
+            private static double Error(double[] q, double x, double y, double z) =>
+                q[0] * x * x + 2 * q[1] * x * y + 2 * q[2] * x * z + 2 * q[3] * x +
+                q[4] * y * y + 2 * q[5] * y * z + 2 * q[6] * y + q[7] * z * z + 2 * q[8] * z + q[9];
 
             private void Push(int a, int b)
             {
@@ -7374,7 +7772,12 @@ namespace QuestTree.QuestGraph
                 // threshold this class uses (a 60 m edge adds 3.6e-6 m2 against a 1 m cube's 7.5e-5).
                 var p = ws.P;
                 double ex = p[a * 3] - p[b * 3], ey = p[a * 3 + 1] - p[b * 3 + 1], ez = p[a * 3 + 2] - p[b * 3 + 2];
-                var cost = Cost(a, b, out var x, out var y, out var z) + TieBreak * (ex * ex + ey * ey + ez * ez);
+                var cost = Cost(a, b, out var x, out var y, out var z);
+
+                // WP8: an edge whose two ends must both stay never collapses, so it never enters the heap.
+                if (double.IsPositiveInfinity(cost)) return;
+
+                cost += TieBreak * (ex * ex + ey * ey + ez * ez);
 
                 if (_hCount == ws.Heap.Length) Array.Resize(ref ws.Heap, ws.Heap.Length * 2);
 
@@ -7441,22 +7844,29 @@ namespace QuestTree.QuestGraph
                         // and only comes back when a neighbour collapses - so the heap can run dry short of the
                         // target with collapses still possible: a 32 x 32 cube stopped at 14 triangles. Refill
                         // from the live edges while the last round made progress; a round with none is done.
-                        var goal = _relaxed ? _limit : _target;
-
-                        // A round with no collapse while still over the HARD limit and not yet relaxed (every
-                        // cheap edge blocked by the fan or distance tests, which the relaxed pass lifts) is not
-                        // the end: go relaxed rather than stop over the limit (review F17).
-                        if (!_relaxed && sinceRefill == 0 && _live > _limit)
+                        if (_legacy)
                         {
-                            _relaxed = true;
-                            _result.Relaxed = true;
-                            sinceRefill = 1;
-                            Refill();
-                            if (_hCount == 0) break;
-                            continue;
-                        }
+                            var goal = _relaxed ? _limit : _target;
 
-                        if (_live <= goal || sinceRefill == 0) break;
+                            // A round with no collapse while still over the HARD limit and not yet relaxed (every
+                            // cheap edge blocked by the fan or distance tests, which the relaxed pass lifts) is not
+                            // the end: go relaxed rather than stop over the limit (review F17). Rollback only.
+                            if (!_relaxed && sinceRefill == 0 && _live > _limit)
+                            {
+                                _relaxed = true;
+                                _result.Relaxed = true;
+                                sinceRefill = 1;
+                                Refill();
+                                if (_hCount == 0) break;
+                                continue;
+                            }
+
+                            if (_live <= goal || sinceRefill == 0) break;
+                        }
+                        else if (_live <= _target || sinceRefill == 0)
+                        {
+                            break;
+                        }
 
                         sinceRefill = 0;
                         Refill();
@@ -7484,7 +7894,9 @@ namespace QuestTree.QuestGraph
                     {
                         _result.StoppedByError = true;
 
-                        if (_live <= _limit) break;
+                        // WP8: the error limit is where decimation stops, over the hard limit or not - the caller
+                        // takes the building's next path. Only the rollback carries on relaxed.
+                        if (!_legacy || _live <= _limit) break;
 
                         // The target is a budget: past the error limit, carry on - cheapest first still -
                         // until the hard limit. Rejected edges were dropped from the heap; every live edge
@@ -7514,10 +7926,15 @@ namespace QuestTree.QuestGraph
                         continue;
                     }
 
-                    // One pass over each fan for both the distance limit and the flip test, each face's normal
-                    // computed once.
-                    var verdict = Keeps(a, b, a, x, y, z);
-                    if (verdict == 0) verdict = Keeps(a, b, b, x, y, z);
+                    // WP8: the two fans' longest edge and thinnest face BEFORE the collapse, for the spike and sliver
+                    // guards.
+                    double maxEdge2Before = 0d, worstAspectBefore = 0d;
+                    if (!_legacy) FanShape(a, b, out maxEdge2Before, out worstAspectBefore);
+
+                    // One pass over each fan for the distance limit, the spike and sliver guards and the flip test,
+                    // each face's normal computed once.
+                    var verdict = Keeps(a, b, a, x, y, z, maxEdge2Before, worstAspectBefore);
+                    if (verdict == 0) verdict = Keeps(a, b, b, x, y, z, maxEdge2Before, worstAspectBefore);
 
                     if (verdict == 1)
                     {
@@ -7529,6 +7946,26 @@ namespace QuestTree.QuestGraph
                     {
                         _result.RejectedDistance++;
                         continue;
+                    }
+
+                    if (verdict == 3)
+                    {
+                        _result.RejectedEdgeGrowth++;
+                        continue;
+                    }
+
+                    if (verdict == 4)
+                    {
+                        _result.RejectedSliver++;
+                        continue;
+                    }
+
+                    // WP8: Merge keeps a; a pinned b must survive (its position is already b's - Cost put it there).
+                    if (!_legacy && ws.Pinned[b] && !ws.Pinned[a])
+                    {
+                        var swap = a;
+                        a = b;
+                        b = swap;
                     }
 
                     Merge(a, b, x, y, z);
@@ -7628,16 +8065,48 @@ namespace QuestTree.QuestGraph
                 return common <= shared;
             }
 
+            /// <summary>WP8: the longest edge (squared) and the thinnest face (e_max^2 / |cross|) among the live faces of
+            /// a's and b's fans, before their collapse.</summary>
+            private void FanShape(int a, int b, out double maxEdge2, out double worstAspect)
+            {
+                var ws = _ws;
+                var p = ws.P;
+                maxEdge2 = 0d;
+                worstAspect = 0d;
+
+                for (var side = 0; side < 2; side++)
+                    foreach (var f in ws.Vf[side == 0 ? a : b])
+                    {
+                        if (ws.FaceDead[f]) continue;
+
+                        int c0 = ws.F[f * 3], c1 = ws.F[f * 3 + 1], c2 = ws.F[f * 3 + 2];
+                        double ux = p[c1 * 3] - p[c0 * 3], uy = p[c1 * 3 + 1] - p[c0 * 3 + 1], uz = p[c1 * 3 + 2] - p[c0 * 3 + 2];
+                        double vx = p[c2 * 3] - p[c0 * 3], vy = p[c2 * 3 + 1] - p[c0 * 3 + 1], vz = p[c2 * 3 + 2] - p[c0 * 3 + 2];
+                        double wx = vx - ux, wy = vy - uy, wz = vz - uz;
+                        double nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+                        var e2 = Math.Max(ux * ux + uy * uy + uz * uz, Math.Max(vx * vx + vy * vy + vz * vz, wx * wx + wy * wy + wz * wz));
+                        var cross = Math.Sqrt(nx * nx + ny * ny + nz * nz);
+
+                        if (e2 > maxEdge2) maxEdge2 = e2;
+
+                        var aspect = cross > 1e-12 ? e2 / cross : double.PositiveInfinity;
+                        if (aspect > worstAspect) worstAspect = aspect;
+                    }
+            }
+
             /// <summary>
             /// Whether moving <paramref name="moving"/> to (x, y, z) keeps every surviving face around it good:
             /// 0 when it does, 1 when a face degenerates, turns by more than 60 degrees from its current normal
             /// or by more than 90 from its ORIGINAL one (the flip test, only while it is on - see Decimate - bar
             /// the degenerate case, refused always), 2 when the new point is further than the distance limit
             /// from a face's plane (only while the error limit is in force: the mean error's blind spot, one
-            /// feature moved a long way). ONE pass over the fan, each face's normal computed once, no
-            /// allocation.
+            /// feature moved a long way); WP8, bar the rollback: 3 when a face's longest edge passes
+            /// <see cref="EdgeGrowth"/> x the fans' longest before (a spike), 4 when a face becomes a sliver thinner
+            /// than <see cref="SliverAspect"/> and thinner than the fans' thinnest before. ONE pass over the fan,
+            /// each face's normal computed once, no allocation.
             /// </summary>
-            private int Keeps(int a, int b, int moving, double x, double y, double z)
+            private int Keeps(int a, int b, int moving, double x, double y, double z, double maxEdge2Before,
+                double worstAspectBefore)
             {
                 var ws = _ws;
                 var p = ws.P;
@@ -7670,6 +8139,21 @@ namespace QuestTree.QuestGraph
 
                     var length = Math.Sqrt(nx * nx + ny * ny + nz * nz);
                     if (length < 1e-12) return 1;
+
+                    if (!_legacy)
+                    {
+                        double wx = p2x - p1x, wy = p2y - p1y, wz = p2z - p1z;
+                        var e2 = Math.Max(ux * ux + uy * uy + uz * uz, Math.Max(vx * vx + vy * vy + vz * vz, wx * wx + wy * wy + wz * wz));
+
+                        // the spike guard: no single step more than doubles the local edge length
+                        if (e2 > EdgeGrowth * EdgeGrowth * maxEdge2Before) return 3;
+
+                        // no NEW sliver: one as thin as the fans already held is the source's own geometry
+                        var aspect = e2 / length;
+                        if (e2 >= SliverMinEdge * SliverMinEdge && aspect > SliverAspect &&
+                            aspect > SliverWorsening * worstAspectBefore)
+                            return 4;
+                    }
 
                     if (!_rejectFlips) continue;
 
@@ -7705,6 +8189,7 @@ namespace QuestTree.QuestGraph
                 for (var i = 0; i < 10; i++) ws.Q[a * 10 + i] += ws.Q[b * 10 + i];
                 ws.W[a] += ws.W[b];
                 ws.Boundary[a] |= ws.Boundary[b];
+                ws.Pinned[a] |= ws.Pinned[b];
 
                 var fa = ws.Vf[a];
 
