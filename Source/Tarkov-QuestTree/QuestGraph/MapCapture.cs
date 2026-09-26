@@ -2398,9 +2398,41 @@ namespace QuestTree.QuestGraph
             var temp = Staged(path);
             if (!File.Exists(temp)) return;
 
-            if (File.Exists(path)) File.Delete(path);
-            File.Move(temp, path);
+            if (!File.Exists(path))
+            {
+                File.Move(temp, path);
+                return;
+            }
+
+            // WP2 (fixes 3): no delete-then-move window - the old file steps aside to .old first, is deleted only once the
+            // new one is in place, and comes back when the move fails (the mesh, its index and every picture alike)
+            var old = path + OldSuffix;
+            if (File.Exists(old)) File.Delete(old);
+            File.Move(path, old);
+
+            try
+            {
+                File.Move(temp, path);
+            }
+            catch
+            {
+                try
+                {
+                    if (!File.Exists(path)) File.Move(old, path);
+                }
+                catch (Exception ex)
+                {
+                    Plugin.LogSource?.LogWarning($"QuestTree: {Path.GetFileName(path)} could not be put back from {OldSuffix}: {ex.Message}");
+                }
+
+                throw;
+            }
+
+            DeleteQuietly(old);
         }
+
+        /// <summary>WP2 (fixes 3): where a committed file's previous version waits while its replacement moves in.</summary>
+        private const string OldSuffix = ".old";
 
         /// <summary>Removes whatever this capture staged and is not going to commit. Called for every
         /// floor from <see cref="Cleanup"/>, so a refused, failed or abandoned capture leaves no

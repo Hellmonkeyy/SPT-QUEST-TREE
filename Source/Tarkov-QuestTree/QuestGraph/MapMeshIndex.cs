@@ -31,8 +31,8 @@ namespace QuestTree.QuestGraph
     {
         /// <summary>The layout's version. A change to the byte table below is a new number; the reader refuses others,
         /// which only costs one from-scratch capture. 2 (WP2 fixes 2): each building's triedTarget and triedLevel, each
-        /// material's unplacedPages.</summary>
-        internal const int Version = 2;
+        /// material's unplacedPages. 3 (WP2 fixes 3): each building's retargetTried and textureTried.</summary>
+        internal const int Version = 3;
 
         /// <summary>The first four bytes inside the deflate block.</summary>
         internal const string Magic = "QTMI";
@@ -262,6 +262,13 @@ namespace QuestTree.QuestGraph
 
             internal byte TriedLevel = NeverTried;
 
+            /// <summary>WP2 (fixes 3): the target a CLEAN re-target (in place or re-read) of it failed at, 0 for none - it is not
+            /// picked again until its required target moves past this by more than the shortfall (<see cref="RetargetDue"/>);
+            /// and whether a clean texture re-read of it was refused (1) - not repeated until its target grows.</summary>
+            internal int RetargetTried;
+
+            internal byte TextureTried;
+
             /// <summary>Each atlas range's material key, in the order of the mesh building's Ranges.</summary>
             internal ulong[] RangeMaterials = new ulong[0];
 
@@ -440,6 +447,8 @@ namespace QuestTree.QuestGraph
                         w.Write(e.CapturedAt);
                         w.Write(e.TriedTarget);
                         w.Write(e.TriedLevel);
+                        w.Write(e.RetargetTried);
+                        w.Write(e.TextureTried);
                         w.Write((byte)e.RangeMaterials.Length);
                         foreach (var key in e.RangeMaterials) w.Write(key);
                     }
@@ -626,6 +635,7 @@ namespace QuestTree.QuestGraph
                     LevelIndex = r.ReadByte(), Grade = r.ReadByte(), Dup = r.ReadByte(), Footprint = r.ReadSingle(),
                     Surface = r.ReadSingle(), Height = r.ReadSingle(), StoredTriangles = r.ReadInt32(), Centroid = r.ReadSingle(),
                     CapturedAt = r.ReadUInt16(), TriedTarget = r.ReadInt32(), TriedLevel = r.ReadByte(),
+                    RetargetTried = r.ReadInt32(), TextureTried = r.ReadByte(),
                 };
 
                 if (e.StoredTriangles < 0) throw new InvalidDataException($"building {i} has a negative triangle count");
@@ -773,6 +783,45 @@ namespace QuestTree.QuestGraph
             if (grown && source > stored && Math.Min(source, targetNow) > stored * (1d + shortfall)) return ReasonShortfall;
             return ReasonNone;
         }
+
+        /// <summary>
+        /// WP2 (fixes 3): records a read's attempt on a row - only a CLEAN one (the level read completed and the decimation,
+        /// when one was due, ran to its own stop: not skipped by the soft or hard cap, not timed out, not refused for want
+        /// of headroom or the over-budget pool, not aborted). An unclean read leaves the row as it was, so the next stop
+        /// tries it once more; a clean failure there records it. The tried target only grows and the tried level only gets
+        /// finer. level <see cref="NeverTried"/> records the target alone. True when the row changed.
+        /// </summary>
+        internal static bool RecordAttempt(Entry e, bool clean, int target, int level)
+        {
+            if (e == null || !clean) return false;
+
+            var changed = false;
+
+            if (target > e.TriedTarget)
+            {
+                e.TriedTarget = target;
+                changed = true;
+            }
+
+            var l = (byte)Math.Max(0, Math.Min(NeverTried, level));
+            if (l < e.TriedLevel)
+            {
+                e.TriedLevel = l;
+                changed = true;
+            }
+
+            return changed;
+        }
+
+        /// <summary>WP2 (fixes 3): whether an over-served stored building may be re-targeted to this required target - never
+        /// tried, or its last clean failure was at a target this one differs from by more than the shortfall.</summary>
+        internal static bool RetargetDue(long required, int retargetTried, double shortfall) =>
+            retargetTried <= 0 || Math.Abs(required - (long)retargetTried) > retargetTried * shortfall;
+
+        /// <summary>WP2 (fixes 3): whether a texture re-read may be tried - never refused before, or its target grew past
+        /// the one it was last read at by more than the shortfall.</summary>
+        internal static bool TextureDue(byte textureTried, long targetNow, int triedTarget, double shortfall) =>
+            textureTried == 0 || (targetNow > 0 && (triedTarget <= 0 || targetNow > triedTarget * (1d + shortfall)));
 
         /// <summary>
         /// WP2 (fixes, I6): whether a re-read may replace the stored copy. A changed signature always; a degraded or
