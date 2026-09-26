@@ -36,9 +36,10 @@ namespace QuestTree.UI
     ///     because EFT switches distant renderers off and a layer that looks free is then a statement
     ///     about where the player is standing;
     ///   - the directional light is disabled and is switched on ONLY inside the render bracket, and off
-    ///     again in a finally. A per-light culling mask is honoured in forward rendering and is not a
-    ///     guarantee under the deferred path this game uses, so the mask is not the safeguard: the light
-    ///     being off outside those two statements is;
+    ///     again in a finally. A per-light culling mask is honoured in forward rendering (the path this
+    ///     camera uses, for the oblique cut - see PrivateCameraPath) and is not a guarantee under the
+    ///     deferred path the game uses, so the mask is not the safeguard: the light being off outside
+    ///     those two statements is;
     ///   - scene fog is switched off for the render and restored in the same finally, because our
     ///     geometry is hundreds of metres across and the menu's fog would swallow it;
     ///   - <see cref="OnDisable"/> stops rendering entirely, and <see cref="OnDestroy"/> destroys every
@@ -272,37 +273,6 @@ namespace QuestTree.UI
             /// <summary>How many ground-skirt faces were left out as ground, for the log line. See
             /// Prep.GroundSkirt.</summary>
             public long GroundSkirtTriangles;
-
-            /// <summary>
-            /// The dollhouse cut: for each cut height, each building mesh of this entry clipped to what lies
-            /// below it (null when nothing does). Made the first time a mesh is drawn under that cut and kept
-            /// for as long as the entry - a map has a handful of floors, and stepping back to one already
-            /// seen costs nothing. Keyed by the HEIGHT and not the floor level, because the height comes from
-            /// the meta and an entry reused across a rescan could otherwise serve a cut made at the old one.
-            /// Destroyed with everything else by <see cref="DestroyBuilt"/>.
-            /// </summary>
-            public readonly Dictionary<float, Dictionary<Mesh, Mesh>> Cuts = new Dictionary<float, Dictionary<Mesh, Mesh>>();
-
-            /// <summary>The one cut height whose clipped copies this entry keeps and makes (NaN: none). Every
-            /// other height is dropped when a view chooses a new floor - see Map3DView.EnqueuePrecut - since at
-            /// three million triangles a clipped copy is most of a second copy of the buildings.</summary>
-            public float CurrentCut = float.NaN;
-
-            /// <summary>The floor level each kept cut height was made for, for the "cut dropped" line.</summary>
-            public readonly Dictionary<float, int> CutLevels = new Dictionary<float, int>();
-
-            /// <summary>Levels whose cut was dropped to keep one copy resident - stepping back to one of them
-            /// re-cuts it, and the log says so once.</summary>
-            public readonly HashSet<int> DroppedCutLevels = new HashSet<int>();
-
-            /// <summary>
-            /// The worker's arrays each uploaded mesh was made from - what the cut clips. Kept INSTEAD of the
-            /// mesh's own CPU copy: every mesh here is uploaded non-readable (UploadMeshData(true)), so the
-            /// geometry is resident once on the CPU (these arrays) and once on the GPU, exactly as before, and
-            /// the cut no longer reads a mesh back into fresh managed arrays for every chunk it clips - which was
-            /// around 15 MB of garbage per 250k-vertex chunk. Main thread only; cleared with the entry.
-            /// </summary>
-            public readonly Dictionary<Mesh, MeshData> Sources = new Dictionary<Mesh, MeshData>();
 
             /// <summary>A wall build for this entry is in flight - a worker, or its meshes being uploaded - by
             /// the view that started it. Abandoned with that view, which puts the entry back to waiting.</summary>
@@ -800,6 +770,9 @@ namespace QuestTree.UI
             _camera.useOcclusionCulling = false;
             _camera.allowMSAA = false;
 
+            // Forward, for the oblique cut: see PrivateCameraPath.
+            _camera.renderingPath = PrivateCameraPath;
+
             // Below every camera the game has, so even a frame in which this one were somehow enabled
             // would draw under the menu rather than over it.
             _camera.depth = -50f;
@@ -819,7 +792,8 @@ namespace QuestTree.UI
             // third of a megabyte and reads in a few milliseconds, but the panel must not wait on a
             // disk however fast it is - the same rule DynamicMapsLibrary's picture read follows.
             var path = _meshPath;
-            _loading = Task.Run(() => ReadFile(path));
+            var bound = _readBound = ViewerReadBound(out _readBoundVramMb);
+            _loading = Task.Run(() => ReadFile(path, bound));
 
             _restored = restore.HasValue;
 
@@ -870,7 +844,9 @@ namespace QuestTree.UI
         /// it is safe to keep across a rebuild and across a scene change - and it is dropped with the
         /// meshes by <see cref="DropCaches"/>.</summary>
         /// <param name="path">The mesh file.</param>
-        private static Loaded ReadFile(string path)
+        /// <param name="maxTriangles">The most triangles this machine will draw (<see cref="ViewerReadBound"/>).
+        /// A file past it is refused by the reader before its arrays are allocated.</param>
+        private static Loaded ReadFile(string path, long maxTriangles)
         {
             var stamp = File.GetLastWriteTimeUtc(path).Ticks;
 
@@ -883,7 +859,11 @@ namespace QuestTree.UI
             int generation;
             lock (CacheLock) generation = _cacheGeneration;
 
-            var parsed = MapMeshFile.Read(File.ReadAllBytes(path));
+            // Through a FileStream, not ReadAllBytes: the same bytes through the same reader, minus a
+            // compressed copy of the whole file on the large-object heap.
+            MapMeshFile parsed;
+            using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16))
+                parsed = MapMeshFile.Read(stream, maxTriangles);
 
             lock (CacheLock)
             {
@@ -900,6 +880,36 @@ namespace QuestTree.UI
 
             return new Loaded { File = parsed, Stamp = stamp };
         }
+
+        /// <summary>A graphics card's share the 3D view may fill with building triangles: a quarter of its
+        /// memory at 64 bytes a triangle - twice the builder's share (MapMeshBuilder.MemoryCeiling), so a file
+        /// built on a similar machine always fits.</summary>
+        private const long ViewerVramShare = 4;
+
+        /// <summary>GPU bytes per drawn triangle, for <see cref="ViewerReadBound"/>: 12 of indices plus ~1.2
+        /// vertices at 32 bytes, with margin.</summary>
+        private const long ViewerBytesPerTriangle = 64;
+
+        /// <summary>
+        /// MAIN THREAD (SystemInfo). The most building triangles this view reads:
+        /// min(MapMeshFile.MaxTriangles, VRAM / 4 / 64 B) - 33.5 M on an 8 GB card, 8.4 M on a 2 GB one - or the
+        /// format's own bound when the card does not say how much memory it has. Passed to MapMeshFile.Read,
+        /// which refuses a file past it before allocating it, and the flat map is drawn instead.
+        /// </summary>
+        private static long ViewerReadBound(out int vramMb)
+        {
+            try { vramMb = SystemInfo.graphicsMemorySize; } catch (Exception) { vramMb = 0; }
+
+            if (vramMb <= 0) return MapMeshFile.MaxTriangles;
+
+            var byVram = ((long)vramMb << 20) / ViewerVramShare / ViewerBytesPerTriangle;
+
+            return Math.Min(MapMeshFile.MaxTriangles, byVram);
+        }
+
+        /// <summary>This view's read bound and the VRAM it came from, for the refusal line.</summary>
+        private long _readBound;
+        private int _readBoundVramMb;
 
         private static readonly object CacheLock = new object();
         private static MapMeshFile _cachedFile;
@@ -1058,22 +1068,6 @@ namespace QuestTree.UI
             for (var i = 0; i < built.RoofsOnOtherFloors.Count; i++) { Discard(built.RoofsOnOtherFloors[i].Mesh); count++; }
             built.RoofsOnOtherFloors.Clear();
 
-            foreach (var cut in built.Cuts.Values)
-            {
-                foreach (var pair in cut)
-                {
-                    // A "self" entry - a mesh wholly below the cut is its own cut - is the source mesh,
-                    // destroyed once above with the list it belongs to. Destroying it here too would be the
-                    // double destroy the self entry exists to avoid.
-                    if (pair.Value == null || ReferenceEquals(pair.Key, pair.Value)) continue;
-                    Discard(pair.Value);
-                    count++;
-                }
-            }
-
-            built.Cuts.Clear();
-            built.Sources.Clear();
-
             Discard(built.SideFallback);
             built.SideFallback = null;
 
@@ -1127,15 +1121,7 @@ namespace QuestTree.UI
 
                 for (var i = 0; i < tint.Meshes.Count; i++)
                 {
-                    var mesh = tint.Meshes[i];
-
-                    // Its clipped copies go with it. Left in Cuts they would outlive the mesh they were cut
-                    // from - held until the whole entry went, one set per abandoned wall build, which is one
-                    // per repaint while walls upload (a ten-click model kept thirty).
-                    count += ForgetCuts(built, mesh);
-                    built.Sources.Remove(mesh);
-
-                    Discard(mesh);
+                    Discard(tint.Meshes[i]);
                     count++;
                 }
 
@@ -1146,27 +1132,6 @@ namespace QuestTree.UI
 
             built.Walls.Clear();
             built.Tints = 0;
-
-            return count;
-        }
-
-        /// <summary>Removes a source mesh from every cut height of its entry, destroying its clipped copies (not
-        /// a "self" entry, which is the mesh itself). Returns how many copies were destroyed.</summary>
-        private static int ForgetCuts(Built built, Mesh source)
-        {
-            var count = 0;
-
-            foreach (var cut in built.Cuts.Values)
-            {
-                if (!cut.TryGetValue(source, out var clipped)) continue;
-
-                cut.Remove(source);
-
-                if (clipped == null || ReferenceEquals(clipped, source)) continue;
-
-                Discard(clipped);
-                count++;
-            }
 
             return count;
         }
@@ -1380,7 +1345,9 @@ namespace QuestTree.UI
 
             _groundBand = _file.Band(_levels[_levels.Count - 1]);
             _groundFallbackY = FallbackGroundY();
-            _cutY = CutHeight();
+            var cut = CutHeight();
+            if (!SameCut(cut, _cutY)) _timeRender = true;
+            _cutY = cut;
 
             // Fitted ONCE per view: RebuildWithoutFailedSides comes back through here, and refitting then snapped
             // the player's zoom back and Finish saved the snapped distance (review F26).
@@ -1542,16 +1509,15 @@ namespace QuestTree.UI
 
                 var level = data.Level;
 
-                // The ground through MakeMesh, NOT Upload: nothing ever cuts it (Draw submits it whole; the peel
-                // leaves out the bands above instead), so keeping its worker arrays in Sources was a full CPU copy
-                // of every relief chunk held for the life of the entry (review F21).
+                // Every mesh through MakeMesh: nothing keeps a CPU copy of any of them. The dollhouse cut is the
+                // camera's oblique near plane (ApplyCut), which clips on the GPU and needs no arrays to clip from.
                 foreach (var mesh in data.Ground) _work.Enqueue(() => into.Ground.Add(MakeMesh(mesh)));
-                foreach (var mesh in data.Roofs) _work.Enqueue(() => into.Buildings.Add(Upload(into, mesh)));
+                foreach (var mesh in data.Roofs) _work.Enqueue(() => into.Buildings.Add(MakeMesh(mesh)));
 
                 foreach (var roof in data.RoofsElsewhere)
                 {
                     var item = roof;
-                    _work.Enqueue(() => into.RoofsOnOtherFloors.Add((item.Level, Upload(into, item.Data))));
+                    _work.Enqueue(() => into.RoofsOnOtherFloors.Add((item.Level, MakeMesh(item.Data))));
                 }
 
                 for (var slot = 0; slot < data.Sides.Length; slot++)
@@ -1573,7 +1539,7 @@ namespace QuestTree.UI
                                 };
                             }
 
-                            into.Sides[s].Meshes.Add(Upload(into, mesh));
+                            into.Sides[s].Meshes.Add(MakeMesh(mesh));
                         });
                     }
                 }
@@ -1601,7 +1567,7 @@ namespace QuestTree.UI
                                 into.Atlas.Add(group);
                             }
 
-                            group.Meshes.Add(Upload(into, mesh));
+                            group.Meshes.Add(MakeMesh(mesh));
                         });
                     }
                 }
@@ -1681,18 +1647,7 @@ namespace QuestTree.UI
                 if (frame.ElapsedMilliseconds >= (_ready ? BackgroundBudgetMs : FrameBudgetMs)) break;
             }
 
-            if (!_ready && _prepDone && _work.Count == 0 && !InitialWallsRunning())
-            {
-                if (!_precutQueued)
-                {
-                    _precutQueued = true;
-                    EnqueuePrecut();
-                }
-                else
-                {
-                    Finish();
-                }
-            }
+            if (!_ready && _prepDone && _work.Count == 0 && !InitialWallsRunning()) Finish();
 
             if (!_ready)
             {
@@ -1703,7 +1658,7 @@ namespace QuestTree.UI
 
         /// <summary>
         /// Main-thread work per frame while a build is uploading, in milliseconds. One unit is at most one
-        /// mesh of <see cref="MaxVerticesPerMesh"/> vertices uploaded (normals recalculated) or clipped, which
+        /// mesh of <see cref="MaxVerticesPerMesh"/> vertices uploaded, which
         /// measures tens of milliseconds - so a frame is at most this plus one unit, inside the 200 ms the
         /// panel may stall for.
         /// </summary>
@@ -1719,6 +1674,7 @@ namespace QuestTree.UI
         {
             _ready = true;
             _measureFirstFrame = true;
+            _timeRender = true;
             _buildClock.Stop();
 
             // The jobs this build used are no longer needed by it. See the collection in LateUpdate.
@@ -1738,6 +1694,8 @@ namespace QuestTree.UI
             var movedRoofs = 0L;
             var skirts = 0L;
             var atlasTriangles = 0L;
+
+            GroundAboveCut(out var groundAbove, out var groundMeasured);
 
             foreach (var floor in _floors)
             {
@@ -1802,7 +1760,7 @@ namespace QuestTree.UI
                 "QuestTree: 3D map for {0} - {1} band(s) {2:#,##0} cells -> {3:#,##0} triangles, " +
                 "{4:#,##0} buildings {5:#,##0} triangles ({11}), built in {6:#,##0} ms over {14} frame(s) " +
                 "(longest {15:#,##0} ms), meshes ~{16:#,##0} MB, textures resident ~{17:#,##0} MB, layer {7}, shader {8}, " +
-                "ground cutout: {9}{10}{12}{13}.",
+                "ground cutout: {9}{10}{12}{13}, path {18}.",
                 _mapKey, _levels.Count, cells, groundTriangles, buildings, buildingTriangles,
                 _buildClock.ElapsedMilliseconds, _drawLayer,
                 _flatColours ? _shaderName + " (flat colours, no picture)" : _shaderName,
@@ -1813,10 +1771,11 @@ namespace QuestTree.UI
                     : "",
                 wallNote,
                 sidesNote,
-                float.IsNaN(_cutY)
+                float.IsNaN(_cutY) || CutMode != CutByNearPlane
                     ? ""
-                    : string.Format(CultureInfo.InvariantCulture, ", cut at {0:0.0} m (level {1}) built in {2:#,##0} ms",
-                        _cutY, _selectedLevel, _cutMillis),
+                    : string.Format(CultureInfo.InvariantCulture,
+                        ", cut at {0:0.0} m (level {1}) by the camera's near plane, ground above the cut: {2:#,##0} of {3:#,##0} cells",
+                        _cutY, _selectedLevel, groundAbove, groundMeasured),
                 _buildFrames,
                 _longestFrameMs,
                 ResidentMeshBytes() / (1024d * 1024d),
@@ -1824,7 +1783,18 @@ namespace QuestTree.UI
                 // Every decoded picture in the shared cache (floors, sides), at 4 B a pixel plus a third for a mip
                 // chain, and every atlas tile cut so far (DXT1: half a byte a pixel plus a third). Tiles still
                 // waiting their paced cut are not in it yet; the TileStore logs its own total when it finishes.
-                (DynamicMapsLibrary.ResidentRasterBytes + TileStore.ResidentBytesAll) / (1024d * 1024d)));
+                (DynamicMapsLibrary.ResidentRasterBytes + TileStore.ResidentBytesAll) / (1024d * 1024d),
+                RenderingPathOf(_camera)));
+
+            // A floor switch whose entries were all cached: nothing was uploaded, and the cut is one matrix.
+            if (_reusedFloors)
+            {
+                Plugin.LogSource?.LogInfo(string.Format(
+                    CultureInfo.InvariantCulture,
+                    "QuestTree: 3D map floor switch for {0} to level {1} - ready in {2:#,##0} ms over {3} frame(s), " +
+                    "0 meshes uploaded, 0 clipped, cut {4}.",
+                    _mapKey, _selectedLevel, _buildClock.ElapsedMilliseconds, _buildFrames, CutText()));
+            }
 
             // ANNOUNCED, not just placed. The labels were culled when the viewport was built - against the
             // camera as it stood before the mesh landed, with the ground at the fallback height - and
@@ -1847,12 +1817,10 @@ namespace QuestTree.UI
 
             _preparing = null;
             _prepDone = false;
-            _precutQueued = false;
             _ready = false;
             _measureFirstFrame = false;
             _buildFrames = 0;
             _longestFrameMs = 0;
-            _cutMillis = 0;
             _reusedFloors = true;
 
             AbandonWalls();
@@ -1970,14 +1938,13 @@ namespace QuestTree.UI
         /// <summary>The drawn band levels of this build, lowest first.</summary>
         private List<int> _levels = new List<int>();
 
-        /// <summary>Units of main-thread work - a mesh uploaded, a mesh clipped - run by <see cref="Pump"/>.</summary>
+        /// <summary>Units of main-thread work - a mesh uploaded, a wall build landed - run by <see cref="Pump"/>.</summary>
         private readonly Queue<Action> _work = new Queue<Action>();
 
         private readonly Stopwatch _buildClock = new Stopwatch();
         private int _buildFrames;
         private long _longestFrameMs;
         private bool _prepDone;
-        private bool _precutQueued;
 
         /// <summary>The first build is finished and the view draws. Until then the backdrop shows.</summary>
         private bool _ready;
@@ -1999,63 +1966,8 @@ namespace QuestTree.UI
         /// <summary>The height buildings are cut at, or NaN for no cut. See <see cref="CutHeight"/>.</summary>
         private float _cutY = float.NaN;
 
-        /// <summary>How long the build spent cutting, for the log line.</summary>
-        private long _cutMillis;
-
-        /// <summary>
-        /// Queues the cut of every building mesh this view draws - one mesh per unit, like the upload - and
-        /// first DROPS every other cut its entries hold. Only the chosen floor's clipped copy is kept: at three
-        /// million building triangles a clipped copy is a second copy of most of the geometry, and one per floor
-        /// a player has visited would be several. Stepping back to a floor costs its clipping again, paced like
-        /// the rest. With no cut (the top floor chosen) every cut is dropped.
-        /// </summary>
-        private void EnqueuePrecut()
-        {
-            var seen = new HashSet<Built>();
-            var recut = false;
-
-            foreach (var floor in _floors)
-            {
-                var built = floor?.Meshes;
-                if (built == null || !seen.Add(built)) continue;
-
-                DropOtherCuts(built, _cutY);
-
-                built.CurrentCut = _cutY;
-                if (float.IsNaN(_cutY)) continue;
-
-                built.CutLevels[_cutY] = _selectedLevel;
-                recut |= built.DroppedCutLevels.Remove(_selectedLevel);
-
-                foreach (var mesh in BuildingMeshesOf(built))
-                {
-                    var source = mesh;
-                    _work.Enqueue(() =>
-                    {
-                        var clock = Stopwatch.StartNew();
-                        Under(built, source, _cutY);
-                        _cutMillis += clock.ElapsedMilliseconds;
-                    });
-                }
-            }
-
-            NoteRecut(recut);
-        }
-
-        /// <summary>Whether this view's precut is doing a level again whose cut was dropped earlier - said once,
-        /// because the blank view while it re-cuts is the one visible cost of keeping one cut resident.</summary>
-        private void NoteRecut(bool recut)
-        {
-            if (!recut || float.IsNaN(_cutY)) return;
-
-            Plugin.LogSource?.LogInfo(string.Format(
-                CultureInfo.InvariantCulture,
-                "QuestTree: 3D map re-cutting level {0} ({1:0.0} m) - its earlier cut was dropped to keep one resident.",
-                _selectedLevel, _cutY));
-        }
-
-        /// <summary>Every building mesh of an entry - roofs, roofs on other floors, wall tints, sides: what
-        /// the cut applies to. Not the ground.</summary>
+        /// <summary>Every building mesh of an entry - roofs, roofs on other floors, wall tints, sides, atlas
+        /// faces. Not the ground. For <see cref="ResidentMeshBytes"/>.</summary>
         private static IEnumerable<Mesh> BuildingMeshesOf(Built built)
         {
             foreach (var mesh in built.Buildings) yield return mesh;
@@ -2078,52 +1990,11 @@ namespace QuestTree.UI
             }
         }
 
-        /// <summary>Destroys every clipped copy an entry holds for a cut height other than
-        /// <paramref name="keep"/> (every one, when that is NaN), and says so once per height dropped.</summary>
-        private void DropOtherCuts(Built built, float keep)
-        {
-            if (built.Cuts.Count == 0) return;
-
-            var heights = new List<float>(built.Cuts.Keys);
-
-            foreach (var height in heights)
-            {
-                if (!float.IsNaN(keep) && height == keep) continue;
-
-                var meshes = 0;
-                var bytes = 0L;
-
-                foreach (var pair in built.Cuts[height])
-                {
-                    // Self entries are the source mesh itself (see Under) and stay; null is "nothing below".
-                    if (pair.Value == null || ReferenceEquals(pair.Key, pair.Value)) continue;
-
-                    bytes += MeshBytes(pair.Value, 1);
-                    Discard(pair.Value);
-                    meshes++;
-                }
-
-                built.Cuts.Remove(height);
-
-                built.CutLevels.TryGetValue(height, out var level);
-                built.CutLevels.Remove(height);
-                built.DroppedCutLevels.Add(level);
-
-                if (meshes > 0)
-                {
-                    Plugin.LogSource?.LogInfo(string.Format(
-                        CultureInfo.InvariantCulture,
-                        "QuestTree: 3D map cut dropped for level {0} ({1:0.0} m) - {2} mesh(es), ~{3:0.0} MB freed.",
-                        level, height, meshes, bytes / (1024d * 1024d)));
-                }
-            }
-        }
-
         /// <summary>
         /// Roughly what a mesh of ours costs in memory, in bytes: position, normal and UV per vertex (and a
-        /// colour under the flat shader), four bytes per index, times the copies held - TWO for a building mesh
-        /// (the GPU copy, and the worker's arrays the entry keeps for the cut), ONE for the ground (never cut, so
-        /// no arrays kept) and for a clipped copy (GPU only; nothing clips it again). An estimate for the log line, not an accounting.
+        /// colour under the flat shader), four bytes per index, times the copies held. Every mesh is held ONCE,
+        /// on the GPU: each is uploaded non-readable and nothing keeps its worker arrays, since the cut is the
+        /// camera's near plane and clips nothing on the CPU. An estimate for the log line, not an accounting.
         /// </summary>
         private static long MeshBytes(Mesh mesh, int copies)
         {
@@ -2137,8 +2008,8 @@ namespace QuestTree.UI
             return ((long)mesh.vertexCount * stride + indices * 4L) * copies;
         }
 
-        /// <summary>What this view's geometry holds resident: every mesh of every entry it draws, and the
-        /// clipped copies of the current cut. For the build line.</summary>
+        /// <summary>What this view's geometry holds resident: every mesh of every entry it draws, GPU only - no
+        /// CPU copy is kept of any mesh. For the build line.</summary>
         private long ResidentMeshBytes()
         {
             var total = 0L;
@@ -2150,15 +2021,14 @@ namespace QuestTree.UI
                 if (built == null || !seen.Add(built)) continue;
 
                 foreach (var mesh in built.Ground) total += MeshBytes(mesh, 1);
-                foreach (var mesh in BuildingMeshesOf(built)) total += MeshBytes(mesh, 2);
-
-                foreach (var cut in built.Cuts.Values)
-                    foreach (var pair in cut)
-                        if (pair.Value != null && !ReferenceEquals(pair.Key, pair.Value)) total += MeshBytes(pair.Value, 1);
+                foreach (var mesh in BuildingMeshesOf(built)) total += MeshBytes(mesh, 1);
             }
 
             return total;
         }
+
+        /// <summary>Two cut heights are the same cut (NaN is "no cut", equal to itself here).</summary>
+        private static bool SameCut(float a, float b) => float.IsNaN(a) ? float.IsNaN(b) : a == b;
 
         /// <summary>How far above the chosen floor's top the cut is made, in metres: enough to keep that
         /// floor's own ceiling slab and furniture-height geometry out of the cut, not so much that the
@@ -2195,292 +2065,133 @@ namespace QuestTree.UI
             var top = layer.GameBounds[0].Max.z;
 
             // The catalog files a floor with no height band as claiming every height (+-2000 m); a cut
-            // there cuts nothing and would only cost the clipping.
+            // there cuts nothing.
             if (float.IsNaN(top) || float.IsInfinity(top) || top >= 1000f) return float.NaN;
 
             return top + CutAboveFloor;
         }
 
+        // --- the dollhouse cut: the camera's oblique near plane -----------------------------------------
+
+        /// <summary>No cut at all: every drawn band is drawn whole. The rollback for <see cref="CutMode"/> - the
+        /// CPU precut this replaced comes back only by reverting WP7's viewer commit.</summary>
+        private const int CutNone = 0;
+
+        /// <summary>The cut is the private camera's near plane, made oblique so it lies along y = cut height:
+        /// the GPU clips every triangle there, exactly at the pixel. See <see cref="ApplyCut"/>.</summary>
+        private const int CutByNearPlane = 1;
+
+        /// <summary>How the dollhouse cut is made. Rollback: <see cref="CutNone"/>. Static readonly, not const, so
+        /// the test in <see cref="ApplyCut"/> is not a constant the compiler would call unreachable code.</summary>
+        private static readonly int CutMode = CutByNearPlane;
+
         /// <summary>
-        /// The mesh to draw for a building mesh under the current cut: itself when there is no cut, else its
-        /// clipped twin, made on first use and cached in the entry. Null when nothing of it is below the
-        /// cut. A dictionary lookup per draw call and no allocation once made - the clipping itself happens
-        /// once per mesh per cut height.
+        /// How far above the cut the camera is kept, in metres. An oblique near plane needs the camera on the
+        /// plane's negative side - above the cut - or it clips the wrong half; <see cref="Place"/> dollies out
+        /// until the camera is at least this far over it. At the lowest pitch that is about (band height + 0.8)
+        /// x 3.9 m from the floor's ground, which is under <see cref="MinDistance"/> for any ordinary storey.
         /// </summary>
-        private static Mesh Under(Built built, Mesh mesh, float cutY)
+        private const float MinCameraAboveCut = 0.5f;
+
+        /// <summary>The private camera's rendering path. Forward: the deferred lighting pass rebuilds positions
+        /// from depth with the parameters of an ordinary projection, which an oblique projection breaks (a
+        /// view-dependent shading error on Standard). The light is masked to the private layer and switched on
+        /// only inside the render bracket either way. Rollback: <see cref="RenderingPath.UsePlayerSettings"/>.</summary>
+        private const RenderingPath PrivateCameraPath = RenderingPath.Forward;
+
+        /// <summary>Frames drawn uncut because the camera was not above the cut - said once, in
+        /// <see cref="Release"/>.</summary>
+        private int _cutSkippedFrames;
+
+        /// <summary>The uncut-frames line is said once per view.</summary>
+        private bool _cutSkipLogged;
+
+        /// <summary>
+        /// The cut plane y = <paramref name="cutY"/> in the camera's space, as <see cref="Camera.CalculateObliqueMatrix"/>
+        /// takes it. In world space the plane is (0, -1, 0, cutY): its normal points DOWN, so a point's value
+        /// cutY - y is positive below the cut (kept) and negative above it (clipped), and the camera, above the
+        /// cut, is on the negative side - which is what an oblique near plane requires (its w in camera space
+        /// is cutY - y_camera, below zero). The view matrix is orthonormal, so the plane goes over as a point
+        /// and a normal.
+        /// </summary>
+        private Vector4 CutPlaneInCameraSpace(float cutY)
         {
-            if (mesh == null || float.IsNaN(cutY)) return mesh;
+            var view = _camera.worldToCameraMatrix;
+            var n = view.MultiplyVector(Vector3.down).normalized;
+            var p = view.MultiplyPoint(new Vector3(0f, cutY, 0f));
 
-            built.Cuts.TryGetValue(cutY, out var cut);
-
-            if (cut != null && cut.TryGetValue(mesh, out var clipped)) return clipped;
-
-            // Only the entry's CURRENT cut is ever made. A view asking for another height is a view on its
-            // way out (the one DiscardViewport destroyed, which gets one more LateUpdate) - it gets nothing
-            // for that frame rather than re-clip, and so resurrect, the copy the new view just dropped.
-            if (!(cutY == built.CurrentCut)) return null;
-
-            if (cut == null)
-            {
-                cut = new Dictionary<Mesh, Mesh>();
-                built.Cuts[cutY] = cut;
-            }
-
-            // Stored even when null - "nothing below the cut" is an answer, and without it a mesh entirely
-            // above would be clipped again every frame. A mesh wholly BELOW the cut is stored as ITSELF (a
-            // "self" entry): its cut is the mesh, and copying it would double its memory for nothing.
-            // DestroyBuilt skips self entries so the mesh is destroyed once, with the list it lives in.
-            // From the arrays the mesh was made from - the mesh itself is non-readable. An entry without them
-            // (none should exist) draws the mesh uncut rather than nothing.
-            if (!built.Sources.TryGetValue(mesh, out var data)) return mesh;
-
-            clipped = ClipBelow(mesh, data, cutY);
-            cut[mesh] = clipped;
-
-            return clipped;
+            return new Vector4(n.x, n.y, n.z, -Vector3.Dot(p, n));
         }
 
         /// <summary>
-        /// A mesh cut by the plane y = <paramref name="cutY"/>, keeping what is below it.
+        /// MAIN THREAD, inside the render bracket only. Replaces the projection's near plane with the cut plane,
+        /// so everything above the cut is clipped on the GPU. <see cref="Camera.CalculateObliqueMatrix"/> changes
+        /// only the projection's z row: x, y and w of every clip position - so the picture, the pins and the
+        /// labels - are those of the ordinary projection. Returns whether the matrix was set; the caller resets
+        /// it in its finally, so no other reader of the camera ever sees it.
         ///
-        /// Each triangle is clipped on its own. All three corners below: kept as it is. All above: dropped.
-        /// Otherwise the plane crosses two of its edges, at points found by interpolating along each edge:
-        ///   - ONE corner below (two above): the kept part is a smaller triangle - that corner and the two
-        ///     crossing points. One triangle out.
-        ///   - TWO corners below (one above): the kept part is a quadrilateral - the two corners and the two
-        ///     crossing points - split into two triangles.
-        /// The corners are taken in the triangle's own cyclic order, rotated so the odd one out comes first,
-        /// and the output keeps that order - so every output triangle faces the way its source did, which
-        /// matters because back faces are culled and the side pictures are chosen by facing.
-        ///
-        /// Crack-free across BOTH kinds of mesh. A crossing POINT is cached per geometric edge - keyed by its
-        /// two endpoint positions, quantised to 0.1 mm, in a canonical order (lexicographic on the quantised
-        /// position) and interpolated from the canonical low end - so every triangle that has that edge gets
-        /// that point to the bit, whether it shares vertex indices with its neighbour (the roofs) or only
-        /// positions (the walls and sides, whose vertices are unshared for their per-face normals). The
-        /// crossing VERTEX is still made per index pair, so an unshared mesh keeps its per-face normal at the
-        /// cut edge. A corner exactly on the plane counts as below.
-        ///
-        /// Normals are interpolated from the source's rather than recalculated, so a cut building is shaded
-        /// exactly like the uncut one; UVs and vertex colours are interpolated the same way.
+        /// A camera that is not above the cut (a band taller than <see cref="Place"/> can dolly past) draws
+        /// that frame uncut rather than broken, and the frame is counted.
         /// </summary>
-        /// <returns>The clipped mesh; the SOURCE itself when no vertex is above the plane; null when
-        /// nothing of the source is below it.</returns>
-        private static Mesh ClipBelow(Mesh source, MeshData data, float cutY)
+        private bool ApplyCut()
         {
-            // Wholly below: the bounds say so without touching a vertex. The bounds are exact for these
-            // meshes (SetTriangles computed them from the vertices), and "not above" is all that is asked.
-            if (source.bounds.max.y <= cutY) return source;
+            if (CutMode != CutByNearPlane || float.IsNaN(_cutY) || _camera == null) return false;
 
-            // The worker's arrays, read in place: no copy of the mesh is made to clip it.
-            var vertices = data.Vertices;
-            var triangles = data.Indices;
-
-            if (vertices == null || triangles == null || vertices.Length == 0) return null;
-
-            var normals = data.Normals;
-            var uvs = data.Uvs;
-            var colours = data.Colours;
-
-            var hasNormals = normals != null && normals.Length == vertices.Length;
-            var hasUvs = uvs != null && uvs.Length == vertices.Length;
-            var hasColours = colours != null && colours.Length == vertices.Length;
-
-            // One remap scratch for every clip, grown, never shrunk - the clip runs on the main thread only.
-            if (_clipRemap.Length < vertices.Length) _clipRemap = new int[vertices.Length];
-
-            var clip = new Clipper
+            if (!(_camera.transform.position.y > _cutY + 0.01f))
             {
-                Source = vertices,
-                Normals = hasNormals ? normals : null,
-                Uvs = hasUvs ? uvs : null,
-                Colours = hasColours ? colours : null,
-                CutY = cutY,
-                Remap = _clipRemap
-            };
+                _cutSkippedFrames++;
+                return false;
+            }
 
-            for (var i = 0; i < vertices.Length; i++) clip.Remap[i] = -1;
+            // From the camera's own perspective each time, so the aspect follows the render texture
+            // (EnsureRenderTexture) and the oblique matrix is never derived from the previous frame's.
+            _camera.ResetProjectionMatrix();
+            _camera.projectionMatrix = _camera.CalculateObliqueMatrix(CutPlaneInCameraSpace(_cutY));
 
-            for (var t = 0; t + 2 < triangles.Length; t += 3)
-                clip.Triangle(triangles[t], triangles[t + 1], triangles[t + 2]);
-
-            if (clip.Indices.Count == 0) return null;
-
-            var mesh = new Mesh { name = source.name + "-cut", indexFormat = IndexFormat.UInt32 };
-
-            mesh.SetVertices(clip.Vertices);
-            if (hasNormals) mesh.SetNormals(clip.OutNormals);
-            if (hasUvs) mesh.SetUVs(0, clip.OutUvs);
-            if (hasColours) mesh.SetColors(clip.OutColours);
-            mesh.SetTriangles(clip.Indices, 0, calculateBounds: true);
-
-            if (!hasNormals) mesh.RecalculateNormals();
-
-            // A clipped copy is never clipped again, so it keeps no CPU copy at all.
-            mesh.UploadMeshData(true);
-
-            return mesh;
+            return true;
         }
 
-        /// <summary>The clipper's remap scratch. See <see cref="ClipBelow"/>.</summary>
-        private static int[] _clipRemap = new int[0];
-
-        /// <summary>The working state of one <see cref="ClipBelow"/>.</summary>
-        private sealed class Clipper
+        /// <summary>
+        /// How much of the drawn relief rises above the cut: measured cells of the drawn bands whose height is
+        /// over <see cref="_cutY"/>, of all measured cells of those bands. The GPU plane clips the ground too
+        /// (the CPU cut never touched it), so terrain higher than the chosen floor's top no longer hides it -
+        /// intended, and said in the build line. O(cells), once per build, main thread.
+        /// </summary>
+        private void GroundAboveCut(out long above, out long measured)
         {
-            public Vector3[] Source;
-            public Vector3[] Normals;
-            public Vector2[] Uvs;
-            public Color32[] Colours;
-            public float CutY;
+            above = 0L;
+            measured = 0L;
 
-            /// <summary>Source vertex -> output vertex, -1 until used. Kept corners stay shared.</summary>
-            public int[] Remap;
+            if (float.IsNaN(_cutY) || _file == null) return;
 
-            /// <summary>Source edge (lower index, higher index) -> its crossing point's output vertex.</summary>
-            private readonly Dictionary<long, int> _crossings = new Dictionary<long, int>();
-
-            /// <summary>Geometric edge (quantised canonical endpoints) -> its crossing POSITION. See the
-            /// comment on ClipBelow: this is what makes the cut crack-free on unshared meshes.</summary>
-            private readonly Dictionary<(long, long, long, long, long, long), Vector3> _points =
-                new Dictionary<(long, long, long, long, long, long), Vector3>();
-
-            /// <summary>0.1 mm - far under the file's own quantisation step, far over float noise.</summary>
-            private const double PointQuantum = 1e4;
-
-            private static (long, long, long) Quantise(Vector3 v) => (
-                (long)Math.Round(v.x * PointQuantum),
-                (long)Math.Round(v.y * PointQuantum),
-                (long)Math.Round(v.z * PointQuantum));
-
-            private static int Compare((long, long, long) a, (long, long, long) b)
+            foreach (var level in _levels)
             {
-                var x = a.Item1.CompareTo(b.Item1);
-                if (x != 0) return x;
+                var band = _file.Band(level);
+                var heights = band?.Heights;
+                if (heights == null) continue;
 
-                var y = a.Item2.CompareTo(b.Item2);
-                return y != 0 ? y : a.Item3.CompareTo(b.Item3);
-            }
-
-            public readonly List<Vector3> Vertices = new List<Vector3>();
-            public readonly List<Vector3> OutNormals = new List<Vector3>();
-            public readonly List<Vector2> OutUvs = new List<Vector2>();
-            public readonly List<Color32> OutColours = new List<Color32>();
-            public readonly List<int> Indices = new List<int>();
-
-            private bool Below(int i) => Source[i].y <= CutY;
-
-            public void Triangle(int a, int b, int c)
-            {
-                var below = (Below(a) ? 1 : 0) + (Below(b) ? 1 : 0) + (Below(c) ? 1 : 0);
-
-                if (below == 0) return;
-
-                if (below == 3)
+                for (var i = 0; i < heights.Length; i++)
                 {
-                    Emit(Keep(a), Keep(b), Keep(c));
-                    return;
-                }
+                    var code = heights[i];
+                    if (code == MapMeshFile.NoHit) continue;
 
-                // Rotate (a, b, c) cyclically - which keeps the winding - so that the ODD corner is first:
-                // the one below when only one is, the one above when only one is.
-                var oddIsBelow = below == 1;
-
-                if (Below(b) == oddIsBelow) { var t = a; a = b; b = c; c = t; }
-                else if (Below(c) == oddIsBelow) { var t = a; a = c; c = b; b = t; }
-
-                if (oddIsBelow)
-                {
-                    // a below; b, c above: the triangle a, (a-b crossing), (a-c crossing).
-                    Emit(Keep(a), Cross(a, b), Cross(a, c));
-                }
-                else
-                {
-                    // a above; b, c below: the quad b, c, (c-a crossing), (a-b crossing), as two triangles
-                    // in the source's order b -> c -> ca -> ab.
-                    var ab = Cross(a, b);
-                    var ca = Cross(c, a);
-                    var kb = Keep(b);
-                    var kc = Keep(c);
-
-                    Emit(kb, kc, ca);
-                    Emit(kb, ca, ab);
+                    measured++;
+                    if (_file.HeightOf(code) > _cutY) above++;
                 }
             }
+        }
 
-            private void Emit(int x, int y, int z)
-            {
-                Indices.Add(x);
-                Indices.Add(y);
-                Indices.Add(z);
-            }
+        /// <summary>The cut for the log lines: its height, or "off".</summary>
+        private string CutText() =>
+            float.IsNaN(_cutY) || CutMode != CutByNearPlane
+                ? "off"
+                : _cutY.ToString("0.0", CultureInfo.InvariantCulture) + " m";
 
-            private int Keep(int i)
-            {
-                if (Remap[i] >= 0) return Remap[i];
-
-                Remap[i] = Add(Source[i],
-                    Normals != null ? Normals[i] : Vector3.up,
-                    Uvs != null ? Uvs[i] : Vector2.zero,
-                    Colours != null ? Colours[i] : new Color32(255, 255, 255, 255));
-
-                return Remap[i];
-            }
-
-            private int Cross(int i, int j)
-            {
-                // The VERTEX, per index pair: reused by the triangle on the other side of a shared-index edge.
-                var key = ((long)Math.Min(i, j) << 32) | (uint)Math.Max(i, j);
-
-                if (_crossings.TryGetValue(key, out var known)) return known;
-
-                // The canonical low end by POSITION (index as the tie-break for a degenerate edge), so every
-                // triangle with this geometric edge interpolates from the same end with the same t.
-                var qi = Quantise(Source[i]);
-                var qj = Quantise(Source[j]);
-                var order = Compare(qi, qj);
-
-                var lo = order < 0 || (order == 0 && i < j) ? i : j;
-                var hi = lo == i ? j : i;
-                var qlo = lo == i ? qi : qj;
-                var qhi = lo == i ? qj : qi;
-
-                var p = Source[lo];
-                var q = Source[hi];
-
-                // One end is at or below the plane and the other strictly above, so the difference is not zero.
-                var t = (CutY - p.y) / (q.y - p.y);
-
-                // The POSITION, per geometric edge: the first triangle to cut this edge fixes it for all.
-                var edge = (qlo.Item1, qlo.Item2, qlo.Item3, qhi.Item1, qhi.Item2, qhi.Item3);
-
-                if (!_points.TryGetValue(edge, out var point))
-                {
-                    point = new Vector3(p.x + (q.x - p.x) * t, CutY, p.z + (q.z - p.z) * t);
-                    _points[edge] = point;
-                }
-
-                var normal = Normals != null ? Vector3.Lerp(Normals[lo], Normals[hi], t) : Vector3.up;
-                if (normal.sqrMagnitude > 1e-12f) normal.Normalize();
-
-                var index = Add(
-                    point,
-                    normal,
-                    Uvs != null ? Vector2.Lerp(Uvs[lo], Uvs[hi], t) : Vector2.zero,
-                    Colours != null ? Color32.Lerp(Colours[lo], Colours[hi], t) : new Color32(255, 255, 255, 255));
-
-                _crossings[key] = index;
-                return index;
-            }
-
-            private int Add(Vector3 position, Vector3 normal, Vector2 uv, Color32 colour)
-            {
-                Vertices.Add(position);
-                OutNormals.Add(normal);
-                OutUvs.Add(uv);
-                OutColours.Add(colour);
-                return Vertices.Count - 1;
-            }
+        /// <summary>The path the private camera actually renders with, for the build line.</summary>
+        private static string RenderingPathOf(Camera camera)
+        {
+            try { return camera != null ? camera.actualRenderingPath.ToString() : "none"; }
+            catch (Exception) { return "unknown"; }
         }
 
         /// <summary>Whether the mesh's extent is the picture's. See <see cref="ExtentTolerance"/>.</summary>
@@ -3483,8 +3194,7 @@ namespace QuestTree.UI
             /// WORKER. Per-vertex normals: the sum of the (area-weighted) face normals of every triangle using the
             /// vertex, normalised - cross(v1 - v0, v2 - v0) for a triangle (v0, v1, v2), which is up for the
             /// ground's (a, c, b) winding, the winding that rendered lit. Computed HERE rather than by
-            /// Mesh.RecalculateNormals on the main thread, so the upload is cheaper and - the reason it matters -
-            /// the mesh and the cut clipped from these same arrays carry the same normals to the bit. A vertex no
+            /// Mesh.RecalculateNormals on the main thread, so the upload is cheaper. A vertex no
             /// triangle uses, or whose faces cancel, gets straight up.
             /// </summary>
             private static Vector3[] NormalsOf(Vector3[] vertices, int[] indices)
@@ -4552,18 +4262,10 @@ namespace QuestTree.UI
             if (data.Colours != null) mesh.SetColors(data.Colours);
             mesh.SetTriangles(data.Indices, 0, calculateBounds: true);
 
-            // Non-readable from here on: the CPU copy is the MeshData the entry keeps (Built.Sources), which
-            // the cut clips from. The bounds, which the cut's quick test reads, survive this.
+            // Non-readable: nothing reads it back. The cut is the camera's near plane, so no CPU copy of any
+            // mesh is kept, and the MeshData behind it is garbage once this unit returns.
             mesh.UploadMeshData(true);
 
-            return mesh;
-        }
-
-        /// <summary>MAIN THREAD. One prepared mesh uploaded into an entry, with its arrays kept for the cut.</summary>
-        private static Mesh Upload(Built into, MeshData data)
-        {
-            var mesh = MakeMesh(data);
-            into.Sources[mesh] = data;
             return mesh;
         }
 
@@ -4712,16 +4414,7 @@ namespace QuestTree.UI
 
                     _work.Enqueue(() => WallUnit(job, () =>
                     {
-                        var made = Upload(built, source);
-                        tints[bucket].Meshes.Add(made);
-
-                        // Cut as it arrives, when a cut is on: this view draws it next frame.
-                        if (!float.IsNaN(_cutY) && built.CurrentCut == _cutY)
-                        {
-                            var clock = Stopwatch.StartNew();
-                            Under(built, made, _cutY);
-                            _cutMillis += clock.ElapsedMilliseconds;
-                        }
+                        tints[bucket].Meshes.Add(MakeMesh(source));
                     }));
                 }
             }
@@ -4837,6 +4530,20 @@ namespace QuestTree.UI
                     if (_loading.IsFaulted)
                     {
                         var reason = _loading.Exception?.GetBaseException();
+
+                        // Past this machine's own bound (ViewerReadBound), not a broken file: said as what it is.
+                        if (reason is MapMeshFile.ReaderBoundException over)
+                        {
+                            Plugin.LogSource?.LogWarning(string.Format(
+                                CultureInfo.InvariantCulture,
+                                "QuestTree: the 3D relief of '{0}' has more detail ({1:#,##0} {2}) than this graphics " +
+                                "card can hold (bound {3:#,##0} triangles from {4:#,##0} MB of VRAM) - drawing the flat map.",
+                                _mapKey, over.Count, over.Unit, _readBound, _readBoundVramMb));
+
+                            _loading = null;
+                            Refuse("has more detail than this graphics card can hold");
+                            return;
+                        }
 
                         // InvalidDataException is the format's own refusal - a truncated file, a bad
                         // magic, a count past the caps it enforces on read. One line and the flat
@@ -4964,8 +4671,8 @@ namespace QuestTree.UI
 
                     Plugin.LogSource?.LogInfo(string.Format(
                         CultureInfo.InvariantCulture,
-                        "QuestTree: 3D map for {0} - first frame drawn in {1:0.0} ms, {2} draw call(s).",
-                        _mapKey, clock.Elapsed.TotalMilliseconds, _drawCalls));
+                        "QuestTree: 3D map for {0} - first frame drawn in {1:0.0} ms, render {2:0.0} ms, {3} draw call(s), cut {4}.",
+                        _mapKey, clock.Elapsed.TotalMilliseconds, _renderMs, _drawCalls, CutText()));
                 }
             }
             catch (Exception ex)
@@ -5028,11 +4735,12 @@ namespace QuestTree.UI
                 if (mesh != null) Submit(mesh, ground);
             }
 
-            // Every BUILDING mesh goes through Under(): itself with no cut, its clipped twin with one. The
-            // ground above is never cut - the peel already leaves out every band over the chosen floor.
+            // Every mesh is drawn whole: the dollhouse cut is the camera's oblique near plane (ApplyCut), which
+            // clips each triangle on the GPU at the cut height. The peel still leaves out every band over the
+            // chosen floor.
             for (var i = 0; i < meshes.Buildings.Count; i++)
             {
-                var mesh = Under(meshes, meshes.Buildings[i], _cutY);
+                var mesh = meshes.Buildings[i];
                 if (mesh != null) Submit(mesh, walls);
             }
 
@@ -5051,7 +4759,7 @@ namespace QuestTree.UI
 
                 if (material == null || (!_flatColours && material.mainTexture == null)) continue;
 
-                var mesh = Under(meshes, roof.Mesh, _cutY);
+                var mesh = roof.Mesh;
                 if (mesh != null) Submit(mesh, material);
             }
 
@@ -5066,7 +4774,7 @@ namespace QuestTree.UI
 
                 for (var i = 0; i < tint.Meshes.Count; i++)
                 {
-                    var mesh = Under(meshes, tint.Meshes[i], _cutY);
+                    var mesh = tint.Meshes[i];
                     if (mesh != null) Submit(mesh, material);
                 }
             }
@@ -5101,7 +4809,7 @@ namespace QuestTree.UI
 
                     for (var i = 0; i < atlas.Meshes.Count; i++)
                     {
-                        var mesh = Under(meshes, atlas.Meshes[i], _cutY);
+                        var mesh = atlas.Meshes[i];
                         if (mesh != null) Submit(mesh, draw);
                     }
                 }
@@ -5138,7 +4846,7 @@ namespace QuestTree.UI
 
                 for (var i = 0; i < side.Meshes.Count; i++)
                 {
-                    var mesh = Under(meshes, side.Meshes[i], _cutY);
+                    var mesh = side.Meshes[i];
                     if (mesh != null) Submit(mesh, draw);
                 }
             }
@@ -5223,13 +4931,23 @@ namespace QuestTree.UI
         private void RenderNow()
         {
             var fog = RenderSettings.fog;
+            var oblique = false;
 
             try
             {
                 RenderSettings.fog = false;
                 _light.enabled = true;
 
+                oblique = ApplyCut();
+
+                var clock = _timeRender ? Stopwatch.StartNew() : null;
                 _camera.Render();
+
+                if (clock != null)
+                {
+                    _renderMs = clock.Elapsed.TotalMilliseconds;
+                    _timeRender = false;
+                }
             }
             finally
             {
@@ -5239,8 +4957,20 @@ namespace QuestTree.UI
                 // is guarded separately for the same reason - one throwing must not skip the other.
                 try { RenderSettings.fog = fog; } catch (Exception) { /* nothing further to try */ }
                 try { if (_light != null) _light.enabled = false; } catch (Exception) { /* as above */ }
+
+                // The oblique projection lives ONLY inside this bracket: every other reader of the camera
+                // (TryProject, PanBy, the next ApplyCut) sees its own perspective, recomputed from the field of
+                // view, the aspect and the clip planes.
+                try { if (oblique && _camera != null) _camera.ResetProjectionMatrix(); } catch (Exception) { /* as above */ }
             }
         }
+
+        /// <summary>Time the next render, for the first-frame line. Set by <see cref="Finish"/> and whenever the
+        /// cut height changes, so the first frame after a floor switch is timed too.</summary>
+        private bool _timeRender;
+
+        /// <summary>The last timed render, in milliseconds.</summary>
+        private double _renderMs;
 
         /// <summary>Puts the camera where the orbit says, looking at the focus point on the ground.</summary>
         private void Place()
@@ -5249,6 +4979,15 @@ namespace QuestTree.UI
 
             var rotation = Quaternion.Euler(_pitch, _yaw, 0f);
             var target = new Vector3(_focus.x, GroundAt(_focus.x, _focus.y), _focus.y);
+
+            // The oblique cut needs the camera above it (see ApplyCut): dolly out until it is at least
+            // MinCameraAboveCut over the cut, never past the furthest the dolly goes. sin(pitch) >= sin 15.
+            if (!float.IsNaN(_cutY))
+            {
+                var sin = Mathf.Sin(_pitch * Mathf.Deg2Rad);
+                var need = (_cutY + MinCameraAboveCut - target.y) / sin;
+                if (need > _distance) _distance = Mathf.Min(need, MaxDistance());
+            }
 
             _camera.transform.position = target + rotation * new Vector3(0f, 0f, -_distance);
             _camera.transform.rotation = rotation;
@@ -5600,6 +5339,15 @@ namespace QuestTree.UI
         private void Release()
         {
             _broke = true;
+
+            if (_cutSkippedFrames > 0 && !_cutSkipLogged)
+            {
+                _cutSkipLogged = true;
+                Plugin.LogSource?.LogInfo(string.Format(
+                    CultureInfo.InvariantCulture,
+                    "QuestTree: 3D map drew {0} frame(s) uncut - the camera was not above the cut at {1:0.0} m.",
+                    _cutSkippedFrames, _cutY));
+            }
 
             // The picture-cache room reserved for this view's side pictures goes back first, whatever
             // else fails below: a reservation outliving its view raises the ceiling for good.

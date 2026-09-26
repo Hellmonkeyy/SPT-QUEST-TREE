@@ -27,7 +27,7 @@ namespace QuestTree.QuestGraph
     /// building its UVs and page ranges; stage X made the textures WRAP: each range carries its material's tile
     /// rect on its page and the raw-UV bounds its vertices' U/V are quantised over, and every vertex belongs to at
     /// most one range); a change to it is a new version number, and
-    /// <see cref="Read(Stream)"/> refuses a version it does not know rather than mis-reading it.
+    /// <see cref="Read(Stream, long)"/> refuses a version it does not know rather than mis-reading it.
     ///
     /// Why quantised: a float32 x/y/z per vertex and a float32 per relief cell doubles the file for
     /// precision nothing can see. Over Customs' 559 m span sixteen bits is 8.5 mm a step, and over the
@@ -370,7 +370,7 @@ namespace QuestTree.QuestGraph
 
         /// <summary>Points every band and building at this file, which is where they read the extent
         /// and the y range their coordinates are relative to. Called by <see cref="Write"/> and by
-        /// <see cref="Read(Stream)"/>, so a file that has been through either is bound; a BUILDER that
+        /// <see cref="Read(Stream, long)"/>, so a file that has been through either is bound; a BUILDER that
         /// fills the lists by hand calls it before using <see cref="Building.VertexAt"/> or
         /// <see cref="ReliefBand.TryHeightAt"/>.
         ///
@@ -1308,7 +1308,12 @@ namespace QuestTree.QuestGraph
         ///     exception type to handle.
         /// </summary>
         /// <param name="stream">The file's bytes. Left open.</param>
-        internal static MapMeshFile Read(Stream stream)
+        /// <param name="maxTriangles">The caller's own bound on building triangles (and twice it on vertices),
+        /// under the format's <see cref="MaxTriangles"/> - the 3D view passes what its graphics card can hold. A
+        /// file past it is refused with a <see cref="ReaderBoundException"/> before its arrays are allocated,
+        /// which is NOT an <see cref="InvalidDataException"/>: the file is fine, this machine will not draw it.
+        /// The default is the format's own bound, under which that exception is never thrown.</param>
+        internal static MapMeshFile Read(Stream stream, long maxTriangles = MaxTriangles)
         {
             if (stream == null) throw new ArgumentNullException(nameof(stream));
 
@@ -1317,7 +1322,7 @@ namespace QuestTree.QuestGraph
                 using (var deflate = new DeflateStream(stream, CompressionMode.Decompress, leaveOpen: true))
                 using (var r = new BinaryReader(deflate))
                 {
-                    return ReadBody(r, deflate);
+                    return ReadBody(r, deflate, Math.Max(0L, Math.Min(maxTriangles, MaxTriangles)));
                 }
             }
             catch (EndOfStreamException ex)
@@ -1337,11 +1342,12 @@ namespace QuestTree.QuestGraph
             }
         }
 
-        /// <summary>The body of <see cref="Read(Stream)"/>, once the deflate bracket is open.</summary>
+        /// <summary>The body of <see cref="Read(Stream, long)"/>, once the deflate bracket is open.</summary>
         /// <param name="r">Reads the scalars. Never reads ahead, so the raw arrays below can come
         /// straight off the same stream.</param>
         /// <param name="raw">The inflated stream, for the quantised arrays.</param>
-        private static MapMeshFile ReadBody(BinaryReader r, Stream raw)
+        /// <param name="maxTriangles">The caller's bound, already clamped to <see cref="MaxTriangles"/>.</param>
+        private static MapMeshFile ReadBody(BinaryReader r, Stream raw, long maxTriangles)
         {
             var magic = r.ReadBytes(4);
 
@@ -1462,6 +1468,10 @@ namespace QuestTree.QuestGraph
                         $"the mesh file's buildings claim {verticesSoFar:#,##0} vertices by building {i}; the " +
                         $"cap is {MaxVerticesTotal:#,##0}");
 
+                // Inside the format, past the caller's own bound: a file this machine will not hold.
+                if (verticesSoFar > 2L * maxTriangles)
+                    throw new ReaderBoundException(verticesSoFar, "vertices", 2L * maxTriangles);
+
                 building.X = ReadUShorts(raw, vertexCount, $"building {i} (key {building.Key}) x");
                 building.Y = ReadUShorts(raw, vertexCount, $"building {i} (key {building.Key}) y");
                 building.Z = ReadUShorts(raw, vertexCount, $"building {i} (key {building.Key}) z");
@@ -1479,6 +1489,9 @@ namespace QuestTree.QuestGraph
                     throw new InvalidDataException(
                         $"the mesh file claims {trianglesSoFar:#,##0} triangles by building {i}; the cap is " +
                         $"{MaxTriangles:#,##0}");
+
+                if (trianglesSoFar > maxTriangles)
+                    throw new ReaderBoundException(trianglesSoFar, "triangles", maxTriangles);
 
                 building.Indices = ReadUInts(raw, indexCount, $"building {i} (key {building.Key}) indices");
 
@@ -1549,6 +1562,32 @@ namespace QuestTree.QuestGraph
             file.Bind();
 
             return file;
+        }
+
+        /// <summary>
+        /// A file refused by <see cref="Read(Stream, long)"/> for being past the CALLER's bound, not the
+        /// format's: a readable file with more geometry than this machine will hold. Separate from
+        /// <see cref="InvalidDataException"/> (which is sealed, and means a broken file) so a caller can say
+        /// which of the two it was. <see cref="Count"/> is the running total at the building where it passed.
+        /// </summary>
+        internal sealed class ReaderBoundException : Exception
+        {
+            internal ReaderBoundException(long count, string unit, long bound)
+                : base($"the mesh file has {count:#,##0} {unit} by the time it passes this reader's bound of {bound:#,##0}")
+            {
+                Count = count;
+                Unit = unit;
+                Bound = bound;
+            }
+
+            /// <summary>The running total when the bound was passed.</summary>
+            internal long Count { get; }
+
+            /// <summary>"triangles" or "vertices".</summary>
+            internal string Unit { get; }
+
+            /// <summary>The bound it passed.</summary>
+            internal long Bound { get; }
         }
 
         /// <summary>A quantised ushort array off the inflated stream. Allocates only after the caller
