@@ -577,6 +577,10 @@ namespace QuestTree.QuestGraph
             var failures = 0;
             string stopped = null;
 
+            // the wait the stop in hand was given - MapCapture's worst case, plus the verification build's at the last
+            // stop with MeshVerifyLastStop on - so a timeout line names the number it used
+            var waitUsed = MaxCaptureWaitSeconds;
+
             try
             {
                 for (var i = 0; i < stops.Count; i++)
@@ -662,7 +666,9 @@ namespace QuestTree.QuestGraph
                     // MaxCaptureWaitSeconds. The timeout is recorded rather than acted on here: the
                     // line below re-asks WhyStop first, so that a player who died during the capture is
                     // reported as having died rather than as a slow capture.
-                    var waitUntil = Time.time + MaxCaptureWaitSeconds + (verify ? (float)MapCapture.VerifyExtraSeconds : 0f);
+                    var wait = MaxCaptureWaitSeconds + (verify ? (float)MapCapture.VerifyExtraSeconds : 0f);
+                    waitUsed = wait;
+                    var waitUntil = Time.time + wait;
                     var timedOut = false;
 
                     while (MapCapture.IsCapturing)
@@ -684,7 +690,7 @@ namespace QuestTree.QuestGraph
                     if (timedOut)
                     {
                         stopped =
-                            $"the capture at stop {i + 1} had not finished after {Whole(MaxCaptureWaitSeconds)} s";
+                            $"the capture at stop {i + 1} had not finished after {Whole(wait)} s";
                         _stillCapturing = true;
                         break;
                     }
@@ -703,7 +709,7 @@ namespace QuestTree.QuestGraph
                 if (_stillCapturing && MapCapture.IsCapturing)
                 {
                     Plugin.LogSource?.LogWarning(
-                        $"QuestTree: the capture is still running past its own worst case of {Whole(MaxCaptureWaitSeconds)} s - " +
+                        $"QuestTree: the capture is still running past its own worst case of {Whole(waitUsed)} s - " +
                         "you are put back as soon as it finishes.");
                     StartCoroutine(RestoreWhenDone(start));   // clears _running itself
                 }

@@ -12,15 +12,18 @@ Usage:
   python tools/compare-mesh.py A L                     each a capture folder (its meta's mesh) or a *-mesh.bin /
                                                        *-mesh.verify.bin file; the sidecars and atlas pages beside
                                                        them are found by name
-  --binding   the accumulation line said the union bound (area scale under x1.00): a building with fewer
-              triangles in A is DP1's price, a WARN, not a failure
+  --strict    a building with fewer triangles in A than in L fails (I2). Without it that is a WARN, as PART-05 says:
+              when the union binds (area scale under x1.00 in the accumulation line) it is DP1's price. Use --strict
+              for a comparison where the union did not bind.
 
 Reads the files with tools/check-capture.py's own read_mesh/read_index/read_png_planes (imported, not copied), so
 the two tools cannot disagree about the format. Stdlib only.
 
-Exit 1 on: a building of L absent from A (I1), a building with fewer triangles in A without --binding (I2), a relief
-cell L measured that A lacks or holds at another height (I3), a y range of A not holding L's (I4). Tiles blurrier in A
-(I5) are WARNs. The sidecars are optional: without them I1 matches by the mesh's 32-bit Key alone and I5 is skipped.
+Exit 1 on: a building of L absent from A (I1), a relief cell L measured that A lacks or holds at another height (I3),
+a y range of A not holding L's (I4), and with --strict a building with fewer triangles in A (I2). I2 without --strict
+and tiles blurrier in A (I5) are WARNs. Buildings are paired one to one - by identity (path hash, dup, centre within
+0.25 m) when both sidecars are there, else by Key with duplicates paired in file order - so a Key's half-metre rounding
+wobble is not a miss and two identical renderers are two buildings. Without the sidecars I5 is skipped.
 """
 
 import hashlib
@@ -111,40 +114,64 @@ def dequantise(code, low, high):
     return low + (high - low) * code / cc.MESH_MAX_QUANTISED
 
 
-def i1_buildings(a, l, errors, lines):
-    """I1: every building of L is in A - by its Key, counted with multiplicity (identical renderers are stored once
-    each), reported with the nearest A building of the same path hash when the sidecars are there."""
-    count_a, count_l = {}, {}
-    for key, _, _, _ in a["mesh"]["shapes"]:
-        count_a[key] = count_a.get(key, 0) + 1
-    for key, _, _, _ in l["mesh"]["shapes"]:
-        count_l[key] = count_l.get(key, 0) + 1
-    missing = {k: n - count_a.get(k, 0) for k, n in count_l.items() if n > count_a.get(k, 0)}
-    total = sum(missing.values())
+def pair(a, l):
+    """L's buildings paired one to one with A's: {L index: A index}. With both sidecars, by identity first - the same
+    path hash and dup with centres within 0.25 m - then by Key; without them by Key alone, the k-th occurrence of a Key in
+    L with the k-th in A (identical renderers are stored once each, so they are paired, not collapsed)."""
+    shapes_a, shapes_l = a["mesh"]["shapes"], l["mesh"]["shapes"]
+    free = set(range(len(shapes_a)))
+    pairs = {}
+    if a["index"] is not None and l["index"] is not None:
+        rows_a, rows_l = a["index"]["buildings"], l["index"]["buildings"]
+        by_identity = {}
+        for j, row in enumerate(rows_a):
+            by_identity.setdefault((row["pathHash"], row["dup"]), []).append(j)
+        for i, row in enumerate(rows_l):
+            for j in by_identity.get((row["pathHash"], row["dup"]), []):
+                if j in free and all(abs(p - q) <= cc.INDEX_SLACK for p, q in zip(rows_a[j]["centre"], row["centre"])):
+                    pairs[i] = j
+                    free.discard(j)
+                    break
+    by_key = {}
+    for j in sorted(free):
+        by_key.setdefault(shapes_a[j][0], []).append(j)
+    for i, shape in enumerate(shapes_l):
+        if i in pairs:
+            continue
+        candidates = by_key.get(shape[0])
+        if candidates:
+            pairs[i] = candidates.pop(0)
+    return pairs
+
+
+def i1_buildings(a, l, pairs, errors, lines):
+    """I1: every building of L is in A (pair), reported with the nearest A building of the same path hash when the
+    sidecars are there."""
+    missing = [i for i in range(len(l["mesh"]["shapes"])) if i not in pairs]
     lines.append(f"I1 buildings: L {len(l['mesh']['shapes']):,}, A {len(a['mesh']['shapes']):,}; "
-                 f"{total:,} of L's missing from A")
-    if not total:
+                 f"{len(missing):,} of L's missing from A")
+    if not missing:
         return
     notes = []
     if a["index"] is not None and l["index"] is not None:
         by_path = {}
         for row in a["index"]["buildings"]:
             by_path.setdefault(row["pathHash"], []).append(row)
-        for i, (key, _, _, _) in enumerate(l["mesh"]["shapes"]):
-            if key not in missing or len(notes) >= 8:
-                continue
+        for i in missing[:8]:
+            key = l["mesh"]["shapes"][i][0]
             row = l["index"]["buildings"][i]
             near = [((sum((p - q) ** 2 for p, q in zip(r["centre"], row["centre"]))) ** 0.5) for r in by_path.get(row["pathHash"], [])]
             notes.append(f"{key} (nearest A of its path: {min(near):.2f} m)" if near else f"{key} (no A building of its path)")
     else:
-        notes = [str(k) for k in list(missing)[:8]]
-    errors.append(f"I1: {total:,} building(s) of L are not in A - first: {', '.join(notes)}")
+        notes = [str(l["mesh"]["shapes"][i][0]) for i in missing[:8]]
+    errors.append(f"I1: {len(missing):,} building(s) of L are not in A - first: {', '.join(notes)}")
 
 
-def i2_triangles(a, l, binding, errors, warnings, lines):
-    """I2: no building of L has fewer triangles in A (unless the union bound - DP1)."""
-    ka, kl = a["mesh"]["keys"], l["mesh"]["keys"]
-    deltas = [(k, ka[k] - kl[k]) for k in kl if k in ka]
+def i2_triangles(a, l, pairs, strict, errors, warnings, lines):
+    """I2: no building of L has fewer triangles in A - per PAIRED building, so duplicate Keys are not collapsed. A WARN
+    (DP1: the union may bind) unless --strict."""
+    sa, sl = a["mesh"]["shapes"], l["mesh"]["shapes"]
+    deltas = [(sl[i][0], sa[j][2] - sl[i][2]) for i, j in sorted(pairs.items())]
     fewer = [(k, d) for k, d in deltas if d < 0]
     buckets = {"< -1000": 0, "-1000..-1": 0, "0": 0, "1..1000": 0, "> 1000": 0}
     for _, d in deltas:
@@ -152,13 +179,14 @@ def i2_triangles(a, l, binding, errors, warnings, lines):
     scales = ""
     if a["index"] is not None and l["index"] is not None:
         scales = f"; effective scale A x{effective_scale(a['index']):.2f}, L x{effective_scale(l['index']):.2f}"
-    lines.append(f"I2 triangles: {len(deltas):,} common key(s), A - L histogram " +
+    lines.append(f"I2 triangles: {len(deltas):,} paired building(s), A - L histogram " +
                  ", ".join(f"{k} {v:,}" for k, v in buckets.items()) +
                  f"; {len(fewer):,} fewer in A ({sum(d for _, d in fewer):,} triangles){scales}")
     if fewer:
         text = (f"I2: {len(fewer):,} building(s) have fewer triangles in A than in L (first: " +
                 ", ".join(f"{k} {d:+,}" for k, d in fewer[:8]) + ")")
-        (warnings if binding else errors).append(text + (" - the union bound (--binding): DP1's price" if binding else ""))
+        (errors if strict else warnings).append(
+            text + ("" if strict else " - DP1's price when the union bound; --strict fails it"))
 
 
 def effective_scale(index):
@@ -293,8 +321,8 @@ def i5_tiles(a, l, warnings, lines):
 
 
 def main(argv):
-    binding = "--binding" in argv
-    args = [x for x in argv if x != "--binding"]
+    strict = "--strict" in argv
+    args = [x for x in argv if x != "--strict"]
     if len(args) == 1:
         a, l = load(args[0]), load(args[0], verify=True)
     elif len(args) == 2:
@@ -304,8 +332,9 @@ def main(argv):
         return 2
 
     errors, warnings, lines = [], [], []
-    i1_buildings(a, l, errors, lines)
-    i2_triangles(a, l, binding, errors, warnings, lines)
+    pairs = pair(a, l)
+    i1_buildings(a, l, pairs, errors, lines)
+    i2_triangles(a, l, pairs, strict, errors, warnings, lines)
     i3_relief(a, l, errors, lines)
     i4_range(a, l, errors, lines)
     i5_tiles(a, l, warnings, lines)

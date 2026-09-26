@@ -521,13 +521,14 @@ namespace QuestTree.QuestGraph
         /// and WP8's guards and rollbacks, the level ladder and the read filters, the atlas's tile, gutter, cutout and
         /// texture-search rules, the relief's preferred cell, the not-building layers, the smallest real LOD level and
         /// the format's version - folded into one string the sidecar carries. Any difference refuses the stored mesh
-        /// and the capture rebuilds from scratch. The leading revision ("r1") is bumped by hand for a code change no
-        /// constant shows. Declared AFTER every static field of this class it reads (static initialisers run in
+        /// and the capture rebuilds from scratch. The leading revision is bumped by hand for a code change no constant
+        /// shows: "r2" since the WP2 fixes (the re-read rules, the LOD fallback, texture re-reads), so every index an
+        /// earlier WP2 build wrote is discarded once. Declared AFTER every static field of this class it reads (static initialisers run in
         /// textual order - NotBuildingLayerNames above it would otherwise still be null).
         /// </summary>
         internal static readonly string MeshRecipe = string.Join(";", new[]
         {
-            "r1", RecipePart(MapMeshFile.Version),
+            "r2", RecipePart(MapMeshFile.Version),
             RecipePart(AreaBudget.TrianglesPerSquareMetre), RecipePart(AreaBudget.MinTriangles),
             RecipePart(AreaBudget.MaxTrianglesPerBuilding), RecipePart(AreaBudget.TrianglesPerStorey),
             RecipePart(AreaBudget.StoreyMetres), AreaBudget.BudgetBasis.ToString(), RecipePart(AreaBudget.SurfacePerFootprint),
@@ -744,6 +745,9 @@ namespace QuestTree.QuestGraph
             /// <summary>WP2: why the stored mesh was refused, for the "rebuilt from scratch" line - null when no stored
             /// mesh was offered or it was taken.</summary>
             internal string BaseRefused = null;
+
+            /// <summary>WP2 (fixes): the stored mesh file's deflated size, for the base load's peak in the accumulating line.</summary>
+            internal long BaseFileBytes;
 
             /// <summary>WP2: the committed atlas page n's file, decoded when the page takes new tiles. Null: no page is
             /// decoded (every touched stored page is then refused and the atlas abandoned).</summary>
@@ -1138,14 +1142,21 @@ namespace QuestTree.QuestGraph
                         var take = false;
                         Step(job, "a building's size", () => take = Wanted(job, candidate));
 
-                        if (job.Stopped || !take) continue;
+                        if (job.Stopped || !take)
+                        {
+                            ReturnCredit(job, candidate);
+                            continue;
+                        }
 
                         // Past the soft cap a detail source over its target is not read at all: its group
                         // takes the coarse path, as it is, now.
                         if (job.DecimationStopped &&
                             candidate.SourceTriangles > TargetFor(job, candidate) &&
                             EnqueueNextLevel(job, candidate))
+                        {
+                            ReturnCredit(job, candidate);
                             continue;
+                        }
 
                         var limit = 0;
                         Step(job, "a building's admission", () => limit = Admit(job, candidate));
@@ -1153,6 +1164,7 @@ namespace QuestTree.QuestGraph
                         if (limit <= 0)
                         {
                             job.OverBudget++;
+                            ReturnCredit(job, candidate);
                             continue;
                         }
 
@@ -1195,6 +1207,7 @@ namespace QuestTree.QuestGraph
                         if (source == null || job.Request.Abort)
                         {
                             job.Ledger.Settle(limit, 0);
+                            ReturnCredit(job, candidate);
                             continue;
                         }
 
@@ -1204,6 +1217,7 @@ namespace QuestTree.QuestGraph
                         if (started == null)
                         {
                             job.Ledger.Settle(limit, 0);
+                            ReturnCredit(job, candidate);
                             continue;
                         }
 
@@ -1693,6 +1707,10 @@ namespace QuestTree.QuestGraph
             internal int LevelsDropped;
             internal int UpgradesRefused;
 
+            /// <summary>WP2 (fixes): stored buildings with no atlas range re-read because their materials have a texture,
+            /// and the ones of those that were replaced.</summary>
+            internal int TextureRereads;
+
             /// <summary>WP2: relief cells filled from the stored relief, and bands whose stored grid could not be used.</summary>
             internal int ReliefFilled;
 
@@ -1968,6 +1986,10 @@ namespace QuestTree.QuestGraph
             /// <summary>WP2: the stored building it was matched to, whatever its kind.</summary>
             internal StoredEntry Matched;
 
+            /// <summary>WP2 (fixes): why it is read again (MapMeshIndex.Reason*), which decides whether its result may
+            /// replace the stored copy (MapMeshIndex.ReplaceAccepted).</summary>
+            internal int Reason;
+
             /// <summary>The other transform worth trying when <see cref="Matrix"/> does not put the
             /// vertices inside the renderer's bounds, or null. Set only for a static batch, where the
             /// two candidates are world space and the renderer's own.</summary>
@@ -2224,6 +2246,10 @@ namespace QuestTree.QuestGraph
 
             internal int RetargetTarget;
             internal long PlannedNew;
+
+            /// <summary>WP2 (fixes): the plan's credit for its re-target has been settled - landed, failed or returned -
+            /// so no path settles it twice.</summary>
+            internal bool Settled;
         }
 
         /// <summary>WP2: the stored mesh's identities, looked up by path hash and by group path hash.</summary>
@@ -3349,6 +3375,9 @@ namespace QuestTree.QuestGraph
 
             if (job.Claimed.Contains(candidate.Renderer)) return false;
 
+            // WP2: a building stored unchanged is never read again, whatever else went wrong
+            if (candidate.Kind == KindSkip) return false;
+
             // Queued levels too (WP8 D3): a level queued before its group moved on again is no longer its source.
             if (!IsSource(job, candidate)) return false;
 
@@ -3708,11 +3737,21 @@ namespace QuestTree.QuestGraph
         /// <param name="job">The build.</param>
         private static void ApplyBudget(Job job)
         {
-            // WP2: onto a stored mesh, the plan is over the union of the stored buildings and the new ones.
+            // WP2: onto a stored mesh, the plan is over the union of the stored buildings and the new ones. A plan that
+            // throws half way is not left half applied (skipped candidates unclaimed, a ledger without the stored
+            // triangles): the stored mesh is refused and this build plans from scratch, as with no base at all.
             if (job.Stored != null)
             {
-                ApplyUnionBudget(job);
-                return;
+                try
+                {
+                    ApplyUnionBudget(job);
+                    return;
+                }
+                catch (Exception ex)
+                {
+                    job.Note("the plan over the stored mesh", ex);
+                    DropBase(job, $"its plan failed ({ex.GetType().Name}: {ex.Message})");
+                }
             }
 
             var sources = new List<Candidate>();
@@ -3856,9 +3895,13 @@ namespace QuestTree.QuestGraph
             // last: anything above that threw leaves the build from scratch
             job.Stored = stored;
 
+            // the load's transient peak: the file as read, and its arrays
+            var arrays = file.ApproximateBytes();
+
             Plugin.LogSource?.LogInfo(
                 $"QuestTree: accumulating onto capture {index.Captures}'s mesh: {N(file.Buildings.Count)} stored building(s), " +
-                $"{N(triangles)} triangles, {N(file.AtlasPages)} page(s)" +
+                $"{N(triangles)} triangles, {N(file.AtlasPages)} page(s); the load held {(request.BaseFileBytes / 1048576d).ToString("0.0", CultureInfo.InvariantCulture)} MB " +
+                $"deflated and holds {(arrays / 1048576d).ToString("0.0", CultureInfo.InvariantCulture)} MB of arrays" +
                 (sameBands ? "" : "; the floor bands' heights changed, so the stored relief is not reused and the stored buildings are re-levelled") +
                 ".");
         }
@@ -3942,18 +3985,63 @@ namespace QuestTree.QuestGraph
             if (!same)
             {
                 c.Kind = KindChanged;
+                c.Reason = MapMeshIndex.ReasonChanged;
                 c.Replaces = m;
                 return;
             }
 
-            if (m.Meta.Lod != CurrentLod(job, c) || MapMeshIndex.SubOfGrade(m.Meta.Grade) > GradeWithin)
+            // degraded (clustered) or a finer level now; the shortfall is judged after the union plan (ApplyUnionBudget)
+            var reason = MapMeshIndex.ReReadReason(m.Meta.Grade, CurrentLod(job, c), m.Meta.StoredTriangles, c.SourceTriangles, 0,
+                UpgradeShortfall);
+
+            // stored with no atlas range while its materials have a texture the atlas would use: read once more, for its UVs
+            if (reason == MapMeshIndex.ReasonNone && m.Meta.RangeMaterials.Length == 0 && TextureDeficient(job, c))
+                reason = MapMeshIndex.ReasonTexture;
+
+            if (reason != MapMeshIndex.ReasonNone)
             {
                 c.Kind = KindUpgrade;
+                c.Reason = reason;
                 c.Replaces = m;
                 return;
             }
 
             c.Kind = KindSkip;
+        }
+
+        /// <summary>
+        /// WP2 (fixes): whether a stored building with NO atlas range deserves a texture now - its mesh has UVs, and one of
+        /// its materials is one the atlas would draw it with: not in the stored atlas yet (never placed), or placed with a
+        /// captured textured tile it may use (a cutout only when opaque enough) or a flat tile that is not white. A
+        /// material whose stored tile the atlas leaves to the fallback (a cutout left, a white flat) is not, so such a
+        /// building is not read again at every stop. Registers the materials (MaterialId) as it asks.
+        /// </summary>
+        /// <param name="job">The build.</param>
+        /// <param name="c">The matched candidate.</param>
+        private static bool TextureDeficient(Job job, Candidate c)
+        {
+            if (c.UvStream < 0) return false;
+
+            var materials = c.Renderer.sharedMaterials;
+            if (materials == null) return false;
+
+            foreach (var material in materials)
+            {
+                var id = MaterialId(job, material);
+                if (id < 0) continue;
+
+                var info = job.Materials[id];
+                var row = info.Stored;
+                if (row == null) return true;
+
+                var textured = row.Captured && row.Page >= 0 && (!info.Cutout || row.OpaqueShare >= CutoutOpaqueShare);
+                var white = row.AvgR >= WhiteFlatLevel && row.AvgG >= WhiteFlatLevel && row.AvgB >= WhiteFlatLevel;
+                var flat = row.FlatPage >= 0 && !info.Cutout && !white;
+
+                if (textured || flat) return true;
+            }
+
+            return false;
         }
 
         /// <summary>WP2: a ladder level's renderer, queued by a fallback, against the stored mesh - true when it is
@@ -3980,9 +4068,20 @@ namespace QuestTree.QuestGraph
             m.SeenBy = c;
             c.Matched = m;
 
-            if (same && m.Meta.Lod == lod && MapMeshIndex.SubOfGrade(m.Meta.Grade) == GradeWithin) return true;
+            if (same)
+            {
+                // stored at a finer level than this queued one, or at this level with nothing to gain: it stays, not read
+                var reason = MapMeshIndex.ReReadReason(m.Meta.Grade, lod, m.Meta.StoredTriangles, c.SourceTriangles, 0, UpgradeShortfall);
+                if (m.Meta.Lod < lod || reason == MapMeshIndex.ReasonNone) return true;
 
-            c.Kind = same ? KindUpgrade : KindChanged;
+                c.Kind = KindUpgrade;
+                c.Reason = reason;
+                c.Replaces = m;
+                return false;
+            }
+
+            c.Kind = KindChanged;
+            c.Reason = MapMeshIndex.ReasonChanged;
             c.Replaces = m;
             return false;
         }
@@ -4059,7 +4158,8 @@ namespace QuestTree.QuestGraph
 
             var plan = PlanUnionOf(job, flex, upgrading, out var union, out var cap, out var demand);
 
-            // the shortfall: a stored building under its target now, whose renderer is a source here, is read again
+            // the shortfall: a stored building whose target at the scale a re-read WILL use (s_Fit) passes what is stored
+            // by more than UpgradeShortfall, and whose source holds more than is stored, is read again
             var converted = false;
             for (var k = 0; k < union.Count; k++)
             {
@@ -4067,10 +4167,14 @@ namespace QuestTree.QuestGraph
                 var c = e?.SeenBy;
                 if (c == null || c.Kind != KindSkip || c.QueuedLevel >= 0 || !IsSource(job, c)) continue;
 
-                var want = Math.Min((long)e.Meta.SourceTriangles, plan.Targets[k]);
-                if (e.Meta.StoredTriangles >= (1d - UpgradeShortfall) * want) continue;
+                var targetNow = AreaBudget.Target(AreaBudget.Basis(e.Meta.Surface, e.Meta.Footprint, e.Meta.Height), plan.FlexScale,
+                    plan.Floors[k]);
+                var reason = MapMeshIndex.ReReadReason(e.Meta.Grade, CurrentLod(job, c), e.Meta.StoredTriangles, e.Meta.SourceTriangles,
+                    targetNow, UpgradeShortfall);
+                if (reason != MapMeshIndex.ReasonShortfall) continue;
 
                 c.Kind = KindUpgrade;
+                c.Reason = reason;
                 c.Replaces = e;
                 flex.Add(c);
                 converted = true;
@@ -4116,6 +4220,7 @@ namespace QuestTree.QuestGraph
                 {
                     // re-read at source quality: its planned share moves from what is stored to what is reserved
                     present.Kind = KindUpgrade;
+                    present.Reason = MapMeshIndex.ReasonRetarget;
                     present.Replaces = e;
                     present.Retarget = true;
                     present.Target = e.RetargetTarget;
@@ -4132,16 +4237,20 @@ namespace QuestTree.QuestGraph
             // WP8 (D3): the over-budget pool, as on the from-scratch path
             job.OverBudgetPool = (long)(job.Cap * (1 - BudgetShare) * 0.5);
 
-            // the skipped: claimed, committed to their group's level, and off the list
+            // the skipped: off the list; a source (a member of the level its group reads) is claimed and committed, so the
+            // group never moves; a renderer of ANOTHER level is left unclaimed - a fallback to its level finds it stored
+            // (ClassifyQueued) and stops there instead of passing over it
             foreach (var c in job.Candidates)
             {
                 if (c.Kind != KindSkip) continue;
 
-                job.Claimed.Add(c.Renderer);
                 job.Skipped++;
 
-                if (c.Group != null && IsSource(job, c) && job.Groups.TryGetValue(c.Group, out var state) && state != null)
-                    state.Committed++;
+                if (IsSource(job, c))
+                {
+                    job.Claimed.Add(c.Renderer);
+                    if (c.Group != null && job.Groups.TryGetValue(c.Group, out var state) && state != null) state.Committed++;
+                }
 
                 // a skipped building whose stored tile was captured late, failed or from a coarse mip: its materials are
                 // registered, so the atlas can capture that tile again even when no new building uses it
@@ -4150,6 +4259,48 @@ namespace QuestTree.QuestGraph
 
             job.Candidates.RemoveAll(c => c.Kind == KindSkip);
             job.Budgeted = job.Candidates.Count;
+        }
+
+        /// <summary>WP2 (fixes): the stored mesh refused in the middle of the budget pass - everything it set undone, so
+        /// the build goes on from scratch (the stored mesh is then replaced by this build's, as a refused base always is).
+        /// Only before the building loop: nothing is claimed, committed or launched yet but what classification did.</summary>
+        /// <param name="job">The build.</param>
+        /// <param name="why">For the line.</param>
+        private static void DropBase(Job job, string why)
+        {
+            job.Stored = null;
+            job.StoredCount = 0;
+            job.StoredTriangles = 0;
+            job.StoredVertices = 0;
+            job.Triangles = 0;
+            job.Vertices = 0;
+            job.BandsSame = false;
+            job.StoredTiles = null;
+            job.PackState = AtlasPackState.Empty;
+            job.Skipped = 0;
+            job.RetargetQueue.Clear();
+            job.Claimed.Clear();
+            job.Met.Clear();
+
+            foreach (var c in job.Candidates)
+            {
+                c.Kind = KindNew;
+                c.Reason = MapMeshIndex.ReasonNone;
+                c.Replaces = null;
+                c.Matched = null;
+                c.Retarget = false;
+            }
+
+            foreach (var state in job.Groups.Values)
+            {
+                if (state == null) continue;
+                state.Committed = 0;
+                state.Stored = null;
+                state.StoredLod = int.MaxValue;
+            }
+
+            Plugin.LogSource?.LogWarning(
+                $"QuestTree: the 3D mesh of {job.Request.Map} is rebuilt from scratch - the stored mesh could not be planned: {why}.");
         }
 
         /// <summary>WP2: one item of the union plan - a stored building (fixed) or a candidate (flex).</summary>
@@ -4292,7 +4443,10 @@ namespace QuestTree.QuestGraph
             // WP2: a level's renderers already stored unchanged at that level count as readable (the level is chosen)
             // but are not read again; they are claimed and committed once it is.
             var next = NextLevel(state.Current, state.Levels.Count, state.Committed, current,
-                k => state.Levels[k].Set.Contains(candidate.Renderer),
+                // WP2 (fixes): never past the level a group is stored at - the walk stops there and keeps the stored copy
+                // rather than rolling forward to a coarser or blobbier result
+                k => state.Levels[k].Set.Contains(candidate.Renderer) ||
+                     (state.Stored != null && state.Levels[k].Lod > state.StoredLod),
                 k =>
                 {
                     made[k] = MakeLevel(job, state.Levels[k], group, k, out var stored);
@@ -4590,6 +4744,7 @@ namespace QuestTree.QuestGraph
             var limit = flight.Limit;
             var settled = false;
             var committed = false;
+            var clustered = false;
 
             var state = candidate.Group != null && job.Groups.TryGetValue(candidate.Group, out var s) ? s : null;
             if (candidate.AsSource && state != null) state.Committed--;
@@ -4626,6 +4781,7 @@ namespace QuestTree.QuestGraph
                 LaunchCluster(job, candidate, world, limit);
                 settled = true;         // handed on: the cluster flight settles it
                 committed = true;       // still in flight
+                clustered = true;
                 return true;
             }
 
@@ -4821,6 +4977,10 @@ namespace QuestTree.QuestGraph
             {
                 if (!settled) job.Ledger.Settle(limit, 0);
                 if (candidate.AsSource && state != null && committed) state.Committed++;
+
+                // WP2 (fixes): a present re-target that did not replace its stored copy - and is not on a cluster flight -
+                // gives back the plan's credit now, not after the loop
+                if (!clustered) ReturnCredit(job, candidate);
             }
         }
 
@@ -5743,12 +5903,17 @@ namespace QuestTree.QuestGraph
             var oldTriangles = replaced != null ? (long)replaced.Meta.StoredTriangles : 0L;
             var oldVertices = replaced != null ? (long)job.Request.Base.Buildings[replaced.Index].VertexCount : 0L;
 
-            // WP2 (I6): an upgrade that came out WORSE than the stored copy (its re-read fell to a coarser path) does not
-            // replace it - a stored building never degrades. A changed signature replaces whatever it is; a re-target
-            // is a deliberate reduction.
-            if (replaced != null && candidate.Kind == KindUpgrade && !candidate.Retarget && grade > replaced.Meta.Grade)
+            // WP2 (I6, fixes): a re-read replaces the stored copy only by its reason's rule (MapMeshIndex.ReplaceAccepted) - a
+            // stored building never degrades, a re-target never falls to a worse sub-grade, and a re-read that gives what
+            // is stored changes nothing (so a scene read twice is Unchanged). A changed signature replaces whatever it is.
+            var hasUv = world.UV != null && world.TriMat != null && world.UV.Length == vertices * 2 && world.TriMat.Length == kept;
+
+            if (replaced != null &&
+                !MapMeshIndex.ReplaceAccepted(candidate.Kind == KindChanged ? MapMeshIndex.ReasonChanged : candidate.Reason, grade,
+                    replaced.Meta.Grade, kept, replaced.Meta.StoredTriangles, hasUv))
             {
                 job.UpgradesRefused++;
+                ReturnCredit(job, candidate);
                 return Refused;
             }
 
@@ -5839,6 +6004,8 @@ namespace QuestTree.QuestGraph
             {
                 replaced.Drop = true;
                 if (!candidate.Retarget) job.Ledger.Drop(oldTriangles);
+                replaced.Settled = true;
+                if (candidate.Reason == MapMeshIndex.ReasonTexture) job.TextureRereads++;
 
                 if (candidate.Retarget) job.RetargetedRead++;
                 else if (candidate.Kind == KindChanged) job.Changed++;
@@ -5929,11 +6096,27 @@ namespace QuestTree.QuestGraph
             job.RetargetQueue.Count > 0 && !job.PastHard && !job.Request.Abort && !job.Stopped &&
             job.RetargetMs < RetargetSeconds * 1000d;
 
-        /// <summary>A re-target that did not land: what the plan credited for it goes back on the ledger.</summary>
+        /// <summary>A re-target that did not land: what the plan credited for it goes back on the ledger - once.</summary>
         private static void RetargetFailed(Job job, StoredEntry e)
         {
+            if (e.Settled) return;
+
+            e.Settled = true;
             job.RetargetsFailed++;
             job.Ledger.Stored += Math.Max(0L, e.Meta.StoredTriangles - e.PlannedNew);
+        }
+
+        /// <summary>WP2 (fixes): a present re-target re-read that did not replace its stored copy gives the plan's whole
+        /// credit for it back at once (its planned share moved to what was reserved, its excess was freed) - the stored
+        /// building is still in the file. Once; a no-op for any other candidate.</summary>
+        private static void ReturnCredit(Job job, Candidate c)
+        {
+            var e = c?.Replaces;
+            if (c == null || !c.Retarget || e == null || e.Drop || e.Settled) return;
+
+            e.Settled = true;
+            job.RetargetsFailed++;
+            job.Ledger.Stored += e.Meta.StoredTriangles;
         }
 
         /// <summary>
@@ -5948,6 +6131,33 @@ namespace QuestTree.QuestGraph
         {
             var file = job.Request.Base;
             var b = file.Buildings[e.Index];
+            var triangles = b.TriangleCount;
+
+            var target = Math.Max(AreaBudget.MinTriangles, e.RetargetTarget);
+            var limit = (int)Math.Min(e.Meta.StoredTriangles - 1L, (long)Math.Ceiling(target * MeshDecimator.HardLimitFactor));
+            if (limit < target) return null;
+
+            var lane = job.Workspaces.Count > 0 ? job.Workspaces.Pop() : new Lane();
+            var capMs = ClusterCapMs(triangles);
+
+            job.InFlightTriangles += triangles;
+
+            // WP2 (fixes): the stored building dequantised ON THE WORKER - plain arrays of a file nothing edits until
+            // the merge - so the main thread spends no step on it however large it is
+            return new Flight
+            {
+                RetargetOf = e,
+                Workspace = lane,
+                Triangles = triangles,
+                Bytes = b.VertexCount * 24L + triangles * 12L + triangles * DecimatorBytesPerTriangle,
+                Retarget = Task.Run(() => RetargetWork(file, b, target, limit, capMs, lane)),
+            };
+        }
+
+        /// <summary>WP2 (D3), worker: a stored building's world positions, per-range UVs and vertex materials, decimated
+        /// to its union target.</summary>
+        private static RetargetOutcome RetargetWork(MapMeshFile file, MapMeshFile.Building b, int target, int limit, double capMs, Lane lane)
+        {
             var triangles = b.TriangleCount;
             var ranges = b.Ranges ?? new List<MapMeshFile.AtlasRange>();
             var textured = ranges.Count > 0 && b.U != null && b.V != null;
@@ -5994,45 +6204,27 @@ namespace QuestTree.QuestGraph
                 }
             }
 
-            var target = Math.Max(AreaBudget.MinTriangles, e.RetargetTarget);
-            var limit = (int)Math.Min(e.Meta.StoredTriangles - 1L, (long)Math.Ceiling(target * MeshDecimator.HardLimitFactor));
-            if (limit < target) return null;
-
-            var lane = job.Workspaces.Count > 0 ? job.Workspaces.Pop() : new Lane();
             var positions = p.ToArray();
             var uvs = textured ? uv.ToArray() : null;
             var materials = textured ? material.ToArray() : null;
-            var capMs = ClusterCapMs(triangles);
 
-            job.InFlightTriangles += triangles;
+            var result = MeshDecimator.DecimateTextured(positions, tri, target, limit, capMs, lane.Decimator, uvs, materials);
+            var outcome = new RetargetOutcome { Milliseconds = result.Milliseconds };
 
-            return new Flight
+            if (result.TimedOut || result.Triangles == null || result.Triangles.Length < 3) outcome.Why = "timed out or empty";
+            else if (result.SliversReverted) outcome.Why = "more slivers than its source";
+            else if (result.AreaShare < MeshDecimator.AreaKept) outcome.Why = "a hole";
+            else if (result.Triangles.Length / 3 > limit) outcome.Why = "over its limit";
+            else
             {
-                RetargetOf = e,
-                Workspace = lane,
-                Triangles = triangles,
-                Bytes = positions.Length * 4L + tri.Length * 4L + triangles * DecimatorBytesPerTriangle,
-                Retarget = Task.Run(() =>
-                {
-                    var result = MeshDecimator.DecimateTextured(positions, tri, target, limit, capMs, lane.Decimator, uvs, materials);
-                    var outcome = new RetargetOutcome { Milliseconds = result.Milliseconds };
+                outcome.Usable = true;
+                outcome.Positions = result.Positions;
+                outcome.Triangles = result.Triangles;
+                outcome.UV = uvs != null ? result.UV : null;
+                outcome.TriangleRange = uvs != null ? result.TriangleMaterial : null;
+            }
 
-                    if (result.TimedOut || result.Triangles == null || result.Triangles.Length < 3) outcome.Why = "timed out or empty";
-                    else if (result.SliversReverted) outcome.Why = "more slivers than its source";
-                    else if (result.AreaShare < MeshDecimator.AreaKept) outcome.Why = "a hole";
-                    else if (result.Triangles.Length / 3 > limit) outcome.Why = "over its limit";
-                    else
-                    {
-                        outcome.Usable = true;
-                        outcome.Positions = result.Positions;
-                        outcome.Triangles = result.Triangles;
-                        outcome.UV = uvs != null ? result.UV : null;
-                        outcome.TriangleRange = uvs != null ? result.TriangleMaterial : null;
-                    }
-
-                    return outcome;
-                }),
-            };
+            return outcome;
         }
 
         /// <summary>
@@ -6046,6 +6238,20 @@ namespace QuestTree.QuestGraph
         private static void ApplyRetarget(Job job, Flight flight)
         {
             var e = flight.RetargetOf;
+
+            try
+            {
+                ApplyRetargetCore(job, flight, e);
+            }
+            finally
+            {
+                // a throw anywhere above - or any path that did not land - settles the plan's credit
+                if (!e.Settled && !job.Retargeted.ContainsKey(e.Index)) RetargetFailed(job, e);
+            }
+        }
+
+        private static void ApplyRetargetCore(Job job, Flight flight, StoredEntry e)
+        {
             RetargetOutcome o = null;
 
             if (flight.Retarget.IsFaulted || flight.Retarget.IsCanceled)
@@ -6130,12 +6336,15 @@ namespace QuestTree.QuestGraph
                 }
             }
 
-            job.Retargeted[e.Index] = new RetargetedBuilding
+            var landed = new RetargetedBuilding
             {
                 X = x, Z = z, YMetres = y, Indices = split.Indices, U = u, V = v, Ranges = newRanges, RangeKeys = keys.ToArray(),
                 Triangles = triangles, Centroid = (float)(sum / Math.Max(1, count)),
             };
 
+            // the bookkeeping last and together, so a throw above changes nothing
+            job.Retargeted[e.Index] = landed;
+            e.Settled = true;
             job.Ledger.Stored += triangles - e.PlannedNew;
             job.Triangles += triangles - (long)e.Meta.StoredTriangles;
             job.Vertices += count - (long)b.VertexCount;
@@ -6147,12 +6356,14 @@ namespace QuestTree.QuestGraph
         {
             while (job.RetargetQueue.Count > 0) RetargetFailed(job, job.RetargetQueue.Dequeue());
 
+            // anything still unsettled - a re-read never reached, a flight abandoned on the capture's abort
             foreach (var e in job.Stored.All)
-                if (e.Retarget && !e.Drop && !job.Retargeted.ContainsKey(e.Index) && e.SeenBy != null && e.SeenBy.Retarget)
-                {
-                    job.RetargetsFailed++;
-                    job.Ledger.Stored += e.Meta.StoredTriangles;
-                }
+            {
+                if (!e.Retarget || e.Settled || e.Drop || job.Retargeted.ContainsKey(e.Index)) continue;
+
+                if (e.SeenBy != null && e.SeenBy.Retarget) ReturnCredit(job, e.SeenBy);
+                else RetargetFailed(job, e);
+            }
         }
 
         // --- WP2 (2.7): one level per LOD group -------------------------------------------------------------------
@@ -6199,7 +6410,12 @@ namespace QuestTree.QuestGraph
 
                 if (newLod < storedLod)
                 {
-                    if (LevelComplete(job, pair.Key, state, newLod))
+                    // WP2 (fixes): finer, complete, and nothing of it clustered - a blob never replaces a stored level
+                    var blobby = false;
+                    foreach (var i in pair.Value)
+                        if (job.NewEntries[i].Lod == newLod && MapMeshIndex.SubOfGrade(job.NewEntries[i].Grade) >= GradeClustered) blobby = true;
+
+                    if (!blobby && LevelComplete(job, pair.Key, state, newLod))
                     {
                         keepLod = newLod;
                         job.GroupsToDetail++;
@@ -8141,6 +8357,10 @@ namespace QuestTree.QuestGraph
             foreach (var edit in result.RangeEdits)
                 if (edit.Page == page && edit.Building < file.Buildings.Count && edit.Range < file.Buildings[edit.Building].Ranges.Count)
                     file.Buildings[edit.Building].Ranges[edit.Range] = edit.Old;
+
+            // WP2 (fixes): the packing rewound past the failed page's new tiles, when that page is where it stopped - their
+            // rects are free again rather than dead space
+            if (index != null && index.Pack.Page == page) index.Pack = PackAfter(index, page);
         }
 
         /// <summary>WP2: <see cref="TruncateAtlas"/> with the sidecar kept in step - each building's range keys cut with
@@ -8179,7 +8399,36 @@ namespace QuestTree.QuestGraph
                 if (row.FlatPage >= pages) row.FlatPage = -1;
             }
 
-            if (index.Pack.Page >= pages) index.Pack = new AtlasPackState { Page = pages };
+            // the packing state on the last page that still holds a tile, on a new shelf over all of that page's tiles -
+            // not at the start of a page gone, which PackFrom would count as used and leave blank
+            if (index.Pack.Page >= pages) index.Pack = PackAfter(index, -1);
+        }
+
+        /// <summary>WP2 (fixes): a packing state that continues after every tile the sidecar still holds - on the last page
+        /// with a tile (or <paramref name="page"/> when given), a new shelf over that page's highest tile and gutter;
+        /// Empty when no tile remains.</summary>
+        /// <param name="index">The sidecar.</param>
+        /// <param name="page">The page to continue on, or -1 for the last page holding a tile.</param>
+        internal static AtlasPackState PackAfter(MapMeshIndex index, int page)
+        {
+            if (page < 0)
+                foreach (var row in index.Materials)
+                {
+                    if (row.Page >= 0) page = Math.Max(page, row.Page);
+                    if (row.FlatPage >= 0) page = Math.Max(page, row.FlatPage);
+                }
+
+            if (page < 0) return AtlasPackState.Empty;
+
+            var top = 0;
+            foreach (var row in index.Materials)
+            {
+                if (row.Page == page) top = Math.Max(top, row.Y + row.H + AtlasPadding);
+                if (row.FlatPage == page) top = Math.Max(top, row.FlatY + AtlasFlatPixels + AtlasPadding);
+            }
+
+            var align = AtlasPadding > 0 && AtlasPadding % AtlasPacker.JpegBlock == 0 ? AtlasPacker.JpegBlock : 1;
+            return new AtlasPackState { Page = page, ShelfY = (top + align - 1) / align * align, ShelfH = 0, Cursor = 0 };
         }
 
         /// <summary>Cuts a file's atlas to its first <paramref name="pages"/> pages: the count, and every range on a
@@ -9000,7 +9249,8 @@ namespace QuestTree.QuestGraph
                 (job.ReliefFilled > 0 ? $", {N(job.ReliefFilled)} cell(s) filled from the stored relief" : "") +
                 (job.ReliefNotFillable > 0 ? $", {N(job.ReliefNotFillable)} band(s) whose stored grid is another (not filled)" : "") +
                 (job.RolledBack > 0 ? $"; {N(job.RolledBack)} new building(s) rolled back (a LOD level not read whole)" : "") +
-                (job.UpgradesRefused > 0 ? $"; {N(job.UpgradesRefused)} re-read(s) came out worse than the stored copy, which stays" : "") +
+                (job.UpgradesRefused > 0 ? $"; {N(job.UpgradesRefused)} re-read(s) gave nothing better than the stored copy, which stays" : "") +
+                (job.TextureRereads > 0 ? $"; {N(job.TextureRereads)} re-read for texture" : "") +
                 (job.RetargetsFailed > 0 ? $"; {N(job.RetargetsFailed)} re-target(s) did not land" : "") +
                 (result.Unchanged ? "; unchanged - the stored mesh is kept" : "") + ".");
         }

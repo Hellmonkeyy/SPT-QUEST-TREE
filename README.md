@@ -319,7 +319,7 @@ mesh** (on; off rebuilds from scratch at every capture, the last one winning - t
 **3D map: rebuild from scratch on the next capture** (a one-shot that turns itself off once a mesh is
 written), and **3D map: verify the last campaign stop (debug)**, which at a campaign's last stop also
 builds the mesh from scratch into `<key>-mesh.verify.bin` for `python tools/compare-mesh.py
-captures\<key>` to hold the accumulated mesh to (every building present, none with fewer triangles,
+captures\<key>` to hold the accumulated mesh to (every building present - fewer triangles is a warning, a failure with `--strict` -
 the relief and the height range held, the textures as sharp). A change of the mod's mesh recipe, the
 game version, the map's rectangle, its floors or the render mask rebuilds from scratch once by itself.
 

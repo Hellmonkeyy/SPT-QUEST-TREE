@@ -302,13 +302,17 @@ namespace QuestTree.QuestGraph
                 return "the extent changed";
 
             if (RenderMask != renderMask) return "the render mask changed";
-            if (CullingKnown != cullingKnown) return "whether the culling lists are known changed";
+            if (CullingKnown != cullingKnown) return CullingChanged;
 
             if (Pages.Count != mesh.AtlasPages)
                 return $"it lists {Pages.Count} atlas page(s) where the mesh names {mesh.AtlasPages}";
 
             return null;
         }
+
+        /// <summary>Mismatch's reason when only the culling knowledge differs - a TEMPORARY refusal (a capture whose
+        /// culling scan failed this once), which the capture answers by carrying the stored mesh, not rebuilding it.</summary>
+        internal const string CullingChanged = "whether the culling lists are known changed";
 
         // --- writing ----------------------------------------------------------------------------------------------
 
@@ -710,6 +714,60 @@ namespace QuestTree.QuestGraph
 
             var stored = texW >> storedMip;
             return stored < tileW && (texW >> currentMip) > stored;
+        }
+
+        /// <summary>Why a present, unchanged stored building is read again (WP2 fixes): nothing, degraded (stored
+        /// clustered), a finer level read now, a shortfall against this build's target, no texture though its materials
+        /// have one, a re-target (D3), or a changed signature.</summary>
+        internal const int ReasonNone = 0;
+
+        internal const int ReasonDegraded = 1;
+        internal const int ReasonLevel = 2;
+        internal const int ReasonShortfall = 3;
+        internal const int ReasonTexture = 4;
+        internal const int ReasonRetarget = 5;
+        internal const int ReasonChanged = 6;
+
+        /// <summary>
+        /// WP2 (fixes): whether a present stored building whose signature is unchanged is read again - only when there is
+        /// something to gain, so a scene read twice reads nothing twice: stored CLUSTERED (sub-grade 3); stored at a
+        /// COARSER level than the one its group reads now; or its target at the scale the re-read will use exceeds what
+        /// is stored by more than <paramref name="shortfall"/> AND its source holds more than is stored. Over budget (1) and
+        /// as it is (2) are what the same source gives again, so they are not re-read. targetNow 0 leaves the shortfall out.
+        /// </summary>
+        internal static int ReReadReason(byte storedGrade, int currentLod, long stored, long source, long targetNow, double shortfall)
+        {
+            if (SubOfGrade(storedGrade) >= 3) return ReasonDegraded;
+            if (LevelOfGrade(storedGrade) > currentLod) return ReasonLevel;
+            if (targetNow > 0 && source > stored && Math.Min(source, targetNow) > stored * (1d + shortfall)) return ReasonShortfall;
+            return ReasonNone;
+        }
+
+        /// <summary>
+        /// WP2 (fixes, I6): whether a re-read may replace the stored copy. A changed signature always; a degraded or
+        /// finer-level re-read only at a strictly better grade and never clustered; a shortfall at no worse a grade and
+        /// with more triangles; a texture re-read at no worse a grade and textured; a re-target (a deliberate reduction)
+        /// never at a worse sub-grade or level - a present re-target that fell to as it is or clustered does not replace a
+        /// stored copy within its limit. A refused re-read leaves the stored building exactly as it was.
+        /// </summary>
+        internal static bool ReplaceAccepted(int reason, byte newGrade, byte storedGrade, long kept, long stored, bool textured)
+        {
+            switch (reason)
+            {
+                case ReasonChanged:
+                    return true;
+                case ReasonDegraded:
+                case ReasonLevel:
+                    return newGrade < storedGrade && SubOfGrade(newGrade) < 3;
+                case ReasonShortfall:
+                    return newGrade <= storedGrade && kept > stored;
+                case ReasonTexture:
+                    return newGrade <= storedGrade && textured;
+                case ReasonRetarget:
+                    return SubOfGrade(newGrade) <= SubOfGrade(storedGrade) && LevelOfGrade(newGrade) <= LevelOfGrade(storedGrade);
+                default:
+                    return newGrade <= storedGrade;
+            }
         }
 
         /// <summary>Whether two floats are within the identity slack.</summary>

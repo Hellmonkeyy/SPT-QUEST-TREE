@@ -937,11 +937,13 @@ namespace QuestTree.QuestGraph
         /// Each is measured in seconds, not tens of them.</summary>
         private const double FinishAllowanceSeconds = 60d;
 
-        /// <summary>The longest a capture can run with every cap in force (review F45): floors, mesh watchdog and
-        /// grace, the atlas encode wait, sides, and the uncapped finishing steps. 510 s with today's numbers. The
+        /// <summary>The longest a capture can run with every cap in force (review F45): floors, the stored mesh's load
+        /// (WP2), mesh watchdog and grace, the atlas encode wait, sides, and the uncapped finishing steps. 530 s with
+        /// today's numbers. The
         /// campaign waits this long for a stop, so a slow capture is never taken for a stuck one.</summary>
         internal const double WorstCaseSeconds =
             FloorPhaseSeconds * FloorPhaseOverrun +                 //  87.5
+            MeshBaseWaitSeconds +                                   //  20 (WP2: the stored mesh's load)
             MeshWatchdogSeconds + MeshWatchdogGraceSeconds +        // 215
             AtlasEncodeWaitSeconds +                                //  60
             SidePhaseSeconds * SidePhaseOverrun +                   //  87.5
@@ -1311,6 +1313,13 @@ namespace QuestTree.QuestGraph
                         yield return null;
 
                     TakeMeshBase(plan, baseLoad);
+
+                    // WP2 (fixes): a temporary refusal carries the stored mesh - WriteMeta names it as it is - rather than a
+                    // from-scratch build replacing the union every earlier stop added to
+                    if (plan.MeshBaseTemporary)
+                        Plugin.LogSource?.LogInfo(
+                            $"QuestTree: {plan.Key}'s stored 3D mesh could not be added to this time ({plan.MeshBaseRefused}) - it is " +
+                            "carried unchanged and no mesh is built at this stop.");
                 }
 
                 // The 3D geometry, after the last picture and before the meta that will name it.
@@ -1324,7 +1333,7 @@ namespace QuestTree.QuestGraph
                 //
                 // ReleaseScene is idempotent and Cleanup calls it too, so a raid that ends in the
                 // middle of the build leaves the scene as the game had it.
-                var mesh = plan.Refused || !plan.WantsMesh ? null : BeginMesh(plan);
+                var mesh = plan.Refused || !plan.WantsMesh || plan.MeshBaseTemporary ? null : BeginMesh(plan);
 
                 if (mesh != null)
                 {
@@ -2386,6 +2395,10 @@ namespace QuestTree.QuestGraph
                 {
                     var part = AtlasPartPath(plan, page);
                     if (File.Exists(part)) File.Delete(part);
+
+                    // WP2: and MeshVerifyLastStop's, which never reach a staged name
+                    var verify = Path.Combine(plan.Dir, VerifyAtlasName(plan.Key, page)) + ".part";
+                    if (File.Exists(verify)) File.Delete(verify);
                 }
                 catch (Exception ex)
                 {
@@ -7032,6 +7045,14 @@ namespace QuestTree.QuestGraph
             public float YLow = float.PositiveInfinity;
             public float YHigh = float.NegativeInfinity;
             public string Refused;
+
+            /// <summary>WP2 (fixes): the refusal is TEMPORARY - a slow load, a file locked or missing this once, the
+            /// culling lists unknown this once, a mesh over this machine's memory ceiling - so the capture CARRIES the
+            /// stored mesh (no build this stop) instead of rebuilding it from scratch and losing the campaign's union.</summary>
+            public bool Temporary;
+
+            /// <summary>The mesh file's deflated size, for the load's peak line.</summary>
+            public long Bytes;
         }
 
         /// <summary>
@@ -7047,6 +7068,7 @@ namespace QuestTree.QuestGraph
         {
             plan.MeshBase = null;
             plan.MeshBaseRefused = null;
+            plan.MeshBaseTemporary = false;
 
             try
             {
@@ -7077,6 +7099,15 @@ namespace QuestTree.QuestGraph
                     return null;
                 }
 
+                // PART-03's memory ceiling bounds what this machine loads: a mesh over it is carried as it is, not read
+                var ceiling = MapMeshBuilder.MemoryCeiling();
+                if (carried.Triangles > ceiling)
+                {
+                    plan.MeshBaseRefused = $"the stored mesh's {carried.Triangles:#,##0} triangles are over this machine's memory ceiling of {ceiling:#,##0}";
+                    plan.MeshBaseTemporary = true;
+                    return null;
+                }
+
                 var indexPath = Path.Combine(plan.Dir, MapMeshIndex.FileNameFor(plan.Key));
                 if (!File.Exists(indexPath))
                 {
@@ -7099,7 +7130,7 @@ namespace QuestTree.QuestGraph
                             page == null || !IsPlainFileName(page.File) ? null : Path.Combine(plan.Dir, page.File), page?.Sha256));
 
                 return Task.Run(() => LoadMeshBase(meshPath, bytes, sha, indexPath, recipe, game, minX, minZ, maxX, maxZ, mask,
-                    cullingKnown, pages));
+                    cullingKnown, pages, ceiling));
             }
             catch (Exception ex)
             {
@@ -7120,13 +7151,15 @@ namespace QuestTree.QuestGraph
         /// main thread is not charged for it. Any failure is a reason, never a throw.
         /// </summary>
         private static MeshBaseLoad LoadMeshBase(string meshPath, long bytes, string sha, string indexPath, string recipe, string game,
-            double minX, double minZ, double maxX, double maxZ, int mask, bool cullingKnown, List<KeyValuePair<string, string>> pages)
+            double minX, double minZ, double maxX, double maxZ, int mask, bool cullingKnown, List<KeyValuePair<string, string>> pages,
+            long maxTriangles)
         {
             var load = new MeshBaseLoad();
 
             try
             {
                 var data = File.ReadAllBytes(meshPath);
+                load.Bytes = data.Length;
                 if (data.Length != bytes)
                 {
                     load.Refused = $"the mesh is {data.Length} bytes where the meta says {bytes}";
@@ -7140,13 +7173,15 @@ namespace QuestTree.QuestGraph
                     return load;
                 }
 
-                var file = MapMeshFile.Read(data);
+                MapMeshFile file;
+                using (var stream = new MemoryStream(data, false)) file = MapMeshFile.Read(stream, maxTriangles);
                 var index = MapMeshIndex.Read(File.ReadAllBytes(indexPath));
 
                 var why = index.Mismatch(file, MapMeshIndex.ShaBytes(hex), recipe, game, minX, minZ, maxX, maxZ, mask, cullingKnown);
                 if (why != null)
                 {
                     load.Refused = $"the index does not fit it - {why}";
+                    load.Temporary = why == MapMeshIndex.CullingChanged;
                     return load;
                 }
 
@@ -7162,6 +7197,7 @@ namespace QuestTree.QuestGraph
                     if (path == null || !File.Exists(path))
                     {
                         load.Refused = $"atlas page {p} is missing";
+                        load.Temporary = true;
                         return load;
                     }
 
@@ -7190,6 +7226,19 @@ namespace QuestTree.QuestGraph
                 load.Index = index;
                 return load;
             }
+            catch (MapMeshFile.ReaderBoundException ex)
+            {
+                load.Refused = $"the stored mesh is over this machine's memory ceiling ({ex.Message})";
+                load.Temporary = true;
+                return load;
+            }
+            catch (Exception ex) when (ex is IOException && !(ex is InvalidDataException) || ex is UnauthorizedAccessException)
+            {
+                // a file locked by the Maps tab, an antivirus or a host sync: this once
+                load.Refused = $"the stored mesh or a page could not be opened ({ex.GetType().Name}: {ex.Message})";
+                load.Temporary = true;
+                return load;
+            }
             catch (Exception ex)
             {
                 load.Refused = $"the stored mesh or its index would not read ({ex.GetType().Name}: {ex.Message})";
@@ -7208,17 +7257,30 @@ namespace QuestTree.QuestGraph
                 if (load != null)
                 {
                     if (!load.IsCompleted)
+                    {
                         plan.MeshBaseRefused = $"the stored mesh did not load within {MeshBaseWaitSeconds:0} s";
+                        plan.MeshBaseTemporary = true;
+                    }
                     else if (load.IsFaulted || load.IsCanceled)
+                    {
                         plan.MeshBaseRefused = $"the stored mesh would not load ({load.Exception?.GetBaseException().Message ?? "cancelled"})";
+                        plan.MeshBaseTemporary = true;
+                    }
                     else if (load.Result.Refused != null)
+                    {
                         plan.MeshBaseRefused = load.Result.Refused;
+                        plan.MeshBaseTemporary = load.Result.Temporary;
+                    }
                     else
+                    {
                         plan.MeshBase = load.Result;
+                    }
                 }
 
                 if (plan.MeshBase == null && plan.MeshBaseRefused != null)
-                    Journal(plan.Key, $"3D mesh rebuilt from scratch - {plan.MeshBaseRefused}.");
+                    Journal(plan.Key, plan.MeshBaseTemporary
+                        ? $"3D mesh carried unchanged, not built this stop - {plan.MeshBaseRefused}."
+                        : $"3D mesh rebuilt from scratch - {plan.MeshBaseRefused}.");
             }
             catch (Exception ex)
             {
@@ -7439,6 +7501,7 @@ namespace QuestTree.QuestGraph
                 BaseYLow = plan.MeshBase?.YLow ?? float.PositiveInfinity,
                 BaseYHigh = plan.MeshBase?.YHigh ?? float.NegativeInfinity,
                 BaseRefused = plan.MeshBaseRefused,
+                BaseFileBytes = plan.MeshBase?.Bytes ?? 0L,
                 CaptureOrdinal = plan.Captures,
                 Game = plan.Game ?? "",
                 AtlasPagePath = page => Path.Combine(plan.Dir, MapMeshFile.AtlasFileNameFor(plan.Key, page)),
@@ -9186,6 +9249,9 @@ namespace QuestTree.QuestGraph
             public MeshBaseLoad MeshBase;
 
             public string MeshBaseRefused;
+
+            /// <summary>WP2 (fixes): the refusal is temporary - the stored mesh is carried and no mesh is built this stop.</summary>
+            public bool MeshBaseTemporary;
 
             /// <summary>WP2: Application.version + "|" + Application.unityVersion - the sidecar's game string.</summary>
             public string Game;
