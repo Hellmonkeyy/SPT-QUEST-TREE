@@ -839,11 +839,12 @@ namespace QuestTree
             CampaignKey = config.Bind(
                 "Map", "Capture the whole map key", new KeyboardShortcut(KeyCode.F9, KeyCode.LeftControl, KeyCode.LeftShift),
                 "Pressed inside a raid, this captures the WHOLE map without you walking it: it teleports " +
-                "you across a grid of standable spots 200 m apart, takes a capture at each, and returns you " +
-                "to where you pressed it. Start the raid with AI set to none - it does not disable bots, and " +
-                "it leaves you standing still for a second and a half at every stop. Customs is about 16 " +
-                "stops and a couple of minutes. Needs 'Harvest quest zones in raid' on, like the single " +
-                "capture key.");
+                "you across a grid of standable spots about 120 m apart, takes a capture at each, and returns " +
+                "you to where you pressed it. Start the raid with AI set to none - it does not disable bots, and " +
+                "it leaves you standing still for a second and a half at every stop and for the length of each " +
+                "capture. Customs is 9 x 5 cells of 115 x 100 m, about 33 stops once the cells with nowhere to " +
+                "stand are dropped; the 3D model is rebuilt at every stop. The log's closing line gives the " +
+                "campaign's real duration. Needs 'Harvest quest zones in raid' on, like the single capture key.");
 
             AutoCapture = config.Bind(
                 "Map", "Capture the map automatically while I play", false,

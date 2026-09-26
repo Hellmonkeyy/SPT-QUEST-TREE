@@ -8776,9 +8776,9 @@ namespace QuestTree.QuestGraph
         /// it takes its pictures exactly as any other capture does, but it builds the 3D mesh only for
         /// a map that has none yet - see <see cref="Plan.WantsMesh"/>. False, the default, for a
         /// campaign stop, which is a place somebody chose.</param>
-        /// <param name="buildMesh">False skips the 3D mesh for this capture (a campaign stop that is not its last:
-        /// the mesh is rebuilt whole by every capture that builds one, so only the last stop's survives - review
-        /// F46). The pictures and side views are taken either way.</param>
+        /// <param name="buildMesh">False skips the 3D mesh for this capture; the campaign passes true at every stop,
+        /// so the 3D model is rebuilt at every stop - whole, from what that stop has loaded, each build replacing
+        /// the last (review F46). The pictures and side views are taken either way.</param>
         public static bool TryStartCapture(bool automatic = false, bool buildMesh = true)
         {
             try

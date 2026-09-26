@@ -60,11 +60,12 @@ default now. Every extract carries an exit-sign-green diamond whatever the label
 the names can be turned off and the extracts should not be; the legend names the diamond and the
 facts line counts them.
 
-**Ctrl+Shift+F9 captures a whole map without you walking it.** One press plans a grid of stops 200 m
-apart, finds somewhere standable in each cell, teleports the player from stop to stop, captures at
-each and returns them to where they pressed it - about sixteen stops and a couple of minutes on
-Customs, and 200 m because that is inside the radius the streamer keeps loaded, which is what the
-nearest-capture-wins merge needs. It disables no bots and touches nothing but the player's position:
+**Ctrl+Shift+F9 captures a whole map without you walking it.** One press plans a grid of stops about
+120 m apart, finds somewhere standable in each cell, teleports the player from stop to stop, captures at
+each and returns them to where they pressed it - about 33 stops on Customs (9 x 5 cells of 115 x 100 m,
+the ones with nowhere to stand dropped), each a full capture, with the 3D model rebuilt at every stop;
+120 m because at 200 m the ground between stops was not covered well, and the nearest-capture-wins
+merge needs every pixel loaded at the stop nearest to it. It disables no bots and touches nothing but the player's position:
 start such a raid with AI set to none. "Capture the map automatically while I play" (off by default)
 does the same job as you walk, one capture every few seconds - 5 by default, 2 to 120 - once you
 have moved 15 m; it hitches every few seconds and is meant for a raid set aside for map-building.

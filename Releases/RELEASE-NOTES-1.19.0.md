@@ -142,12 +142,13 @@ Smaller things that are all lessons from a picture that came out wrong:
 
 ## Or capture a whole map without walking it
 
-**Ctrl+Shift+F9 runs a capture campaign.** One press plans a grid of stops 200 m apart across the
-map, finds somewhere standable in each cell, teleports you from one to the next, takes a capture at
-every stop, and puts you back exactly where you pressed it. Customs is about sixteen stops and a
-couple of minutes. 200 m is the spacing the merge wants: at half a metre to the pixel that is 400 px
-between stops, comfortably inside the region the game keeps loaded around a player, so every pixel of
-the map is, at some stop, both loaded and that stop's nearest - which is the pixel the merge keeps.
+**Ctrl+Shift+F9 runs a capture campaign.** One press plans a grid of stops about 120 m apart across the
+map, finds somewhere standable in each cell, teleports you from one to the next, takes a capture at every
+stop, and puts you back exactly where you pressed it. Customs is 9 x 5 cells of 115 x 100 m - about 33
+stops once the cells with nowhere to stand are dropped - and each stop is a full capture of the floors
+and side views, with the 3D model rebuilt at every stop. The log's closing line gives the campaign's
+real duration. 120 m because at 200 m the ground between stops was not covered well: every pixel of the
+map has to be, at some stop, both loaded and that stop's nearest - which is the pixel the merge keeps.
 
 **The campaign keeps a journal.** Every run appends its stop lines to
 `captures\<key>\<key>.campaign.txt` beside the pictures, the last twenty runs of that map, because the
@@ -156,7 +157,7 @@ to say why by the time anybody looked. Nothing reads it but a person: the upload
 both ignore it.
 
 **Start such a raid with AI set to none.** Nothing here disables bots, and a campaign is a player
-standing still for a second and a half at sixteen places on the map. It writes nothing to you but a
+standing still for a second and a half at some thirty places on the map. It writes nothing to you but a
 position, through the game's own teleport; it does not touch health or god mode, it is local to you on
 a Fika raid, and it stops itself if you die or the raid ends, saying which stop it got to.
 

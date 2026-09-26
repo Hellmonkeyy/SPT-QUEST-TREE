@@ -26,8 +26,9 @@ namespace QuestTree.QuestGraph
     /// of Customs meant a player physically crossing a kilometre of it, pressing the key every few
     /// hundred metres. That is the whole job here - the moving, not the rendering.
     ///
-    /// The merge is also what makes a grid of stops the right shape. A stop 200 m from its neighbour
-    /// is 400 px away at the 0.5 m/px a 4096-wide Customs capture works out to, and the region the
+    /// The merge is also what makes a grid of stops the right shape. A stop 120 m from its neighbour
+    /// (115 x 100 m on Customs' grid) is a little over 200 px away at the 0.5 m/px a 4096-wide Customs
+    /// capture works out to, and the region the
     /// streamer had loaded around each observed stop on Customs was far wider than that - so every
     /// pixel of the map is, at some stop, both LOADED and the nearest stop's own pixel, which is
     /// exactly the pixel the merge keeps. Cells further apart than the loaded radius would leave the
@@ -35,7 +36,7 @@ namespace QuestTree.QuestGraph
     ///
     /// What this deliberately does NOT do:
     ///   - it does not disable bots. Nothing here makes the player safe; a campaign run with AI on is
-    ///     a player standing still for a second and a half at eighteen places on the map. Start the
+    ///     a player standing still for a second and a half at some thirty places on the map. Start the
     ///     raid with AI set to none. Said in the setting's own description and in the Settings tab.
     ///   - it does not touch god mode, health, or any other player state. The only thing it writes to
     ///     the player is a position, through the game's own <c>Player.Teleport</c>.
@@ -52,12 +53,13 @@ namespace QuestTree.QuestGraph
     {
         /// <summary>Side of one campaign grid cell, in metres: one stop per cell, at its centre.
         ///
-        /// 200 m because of the merge rule and the streamer together. At 4096 px across a 1118 m
-        /// Customs the picture is about 0.5 m/px, so 200 m is ~400 px between stops - comfortably
-        /// inside the radius the streamer had loaded around a capture point on Customs, which is what
-        /// the nearest-capture-wins merge needs (see the class comment). It also keeps the number of
-        /// stops, and so the length of a campaign, sane: Customs' 1118x539 m extent is 6x3 = 18 cells
-        /// at this size, a few minutes of captures.</summary>
+        /// 120 m, down from 200 on 2026-09-24: at 200 m the ground between stops was not captured
+        /// well (user). The merge rule and the streamer still decide it: at 4096 px across a 1118 m
+        /// Customs the picture is about 0.5 m/px, so 120 m is ~240 px between stops - well inside the
+        /// radius the streamer had loaded around a capture point on Customs, which is what the
+        /// nearest-capture-wins merge needs (see the class comment). Customs' measured 1035x499 m is
+        /// 9x5 = 45 cells of 115x100 m at this size (33 stops once the cells with nowhere to stand are
+        /// dropped, on the 2026-09-25 run).</summary>
         internal const float CampaignCellMetres = 120f; // 200 until 2026-09-24: areas between stops were not being scanned properly (user)
 
         /// <summary>How far from a cell's centre a standable point may be found, in metres, on a grid
@@ -79,17 +81,17 @@ namespace QuestTree.QuestGraph
 
         /// <summary>Metres the player is put ABOVE the sampled point. The sample is a point ON the
         /// walkable surface, and materialising a capsule exactly there can leave it interpenetrating
-        /// the ground; two metres is clear of that and of the kerbs and debris a NavMesh is draped
+        /// the ground; the rise is clear of that and of the kerbs and debris a NavMesh is draped
         /// over.
         ///
-        /// Why two and not five. The game DOES see this as a fall - the claim that it does not was
+        /// Why so little and not five. The game DOES see this as a fall - the claim that it does not was
         /// wrong: <c>Player.Teleport</c> sets the transform and then calls
         /// <c>MovementContext.ResetFlying</c>, which re-bases the fall height to the NEW position,
-        /// which is this one, two metres up. <c>CheckFlying</c> then measures the drop from there to
+        /// which is this one, the rise up. <c>CheckFlying</c> then measures the drop from there to
         /// the ground and hands it to <c>ActiveHealthController.HandleFall</c>, which does nothing
         /// below the globals' <c>Health.Falling.SafeHeight</c> - 3 m on this server. So what the
-        /// teleport itself saves the player is the 500 m fall; the two metres are a real fall with a
-        /// metre of headroom, which is why this number stays small. Raising it to four would break
+        /// teleport itself saves the player is the 500 m fall; the rise is a real fall with
+        /// metres of headroom, which is why this number stays small. Raising it to four would break
         /// both of the player's legs at every stop.</summary>
         // Lowered from 2 m to 1 m on 2026-09-24: at 2 m the arrival point sat inside low ceilings
         // (sheds, walkways, the underside of stairs) at stop after stop, which is worse than the
@@ -401,7 +403,7 @@ namespace QuestTree.QuestGraph
             }
 
             // Cells are the extent divided by a whole number of them, so they can be a good deal
-            // smaller than the nominal 200 m; the search radius follows the cell it searches.
+            // smaller than the nominal 120 m; the search radius follows the cell it searches.
             var radius = SampleRadius(cells, stepX, stepZ);
 
             stops = Standable(cells, extent, start, radius, out var dropped);
@@ -415,8 +417,8 @@ namespace QuestTree.QuestGraph
                 return false;
             }
 
-            // The REAL spacing, not the nominal 200 m: the planner divides the measured rectangle into a
-            // whole number of cells, so the stops on Customs are 173 m apart one way and 166 m the
+            // The REAL spacing, not the nominal 120 m: the planner divides the measured rectangle into a
+            // whole number of cells, so the stops on Customs are 115 m apart one way and 100 m the
             // other, and this line is what a reader judges the plan by.
             Plugin.LogSource?.LogInfo(
                 $"QuestTree: capture campaign on {map} - {stops.Count} stop(s) on a {F(stepX)}x{F(stepZ)} m " +
@@ -444,7 +446,7 @@ namespace QuestTree.QuestGraph
         /// smaller of <see cref="CampaignSampleRadius"/> and <see cref="CampaignSampleShare"/> of the
         /// shorter side of a cell - counting only the axes that have more than one cell.
         ///
-        /// The cell, not the nominal 200 m, because the planner divides the rectangle into a whole
+        /// The cell, not the nominal 120 m, because the planner divides the rectangle into a whole
         /// number of cells and takes what that gives: a 210 m wide map is two 105 m columns, and a flat
         /// 60 m search from each centre reaches into the neighbour's half - two stops on the same patch
         /// of ground, one of the two captures paying for a photograph the other already took.
@@ -584,7 +586,7 @@ namespace QuestTree.QuestGraph
 
                     var stop = stops[i];
 
-                    // Two metres up, and nothing else touched: see CampaignTeleportRise for what the
+                    // One metre up, and nothing else touched: see CampaignTeleportRise for what the
                     // drop costs, and the class comment for what is deliberately NOT changed.
                     //
                     // A failure here is treated as the stop failing rather than as the campaign
@@ -622,11 +624,12 @@ namespace QuestTree.QuestGraph
                     stopped = WhyStop();
                     if (stopped != null) break;
 
-                    // The 3D mesh at EVERY stop - the user's decision (2026-09-24: "keep the mesh per stop, sides at
-                    // every stop"), made knowing the review's F46 point that each build replaces the last: a mesh from
-                    // the last stop alone would lose nothing in the relief, but the per-stop build keeps the atlas and
-                    // the side views framed on a mesh from the stop they were taken at, and the 180 s ceiling was
-                    // judged fine for it. buildMesh stays on TryStartCapture for a caller that wants otherwise.
+                    // The 3D model is rebuilt at EVERY stop - the user's decision (2026-09-24: "keep the mesh per stop,
+                    // sides at every stop"), kept on review F46: each build is whole, from what that stop has loaded, and
+                    // replaces the last, so the file on disk is the latest stop's. The side views take their y range from
+                    // the stored one and only widen it (review F13), so the rebuilds do not refuse their merge, and the
+                    // stop's wait is the capture's own worst case (MapCapture.WorstCaseSeconds, review F45). buildMesh
+                    // stays on TryStartCapture for a caller that wants otherwise.
                     if (!MapCapture.TryStartCapture(buildMesh: true))
                     {
                         skipped++;
@@ -1011,8 +1014,8 @@ namespace QuestTree.QuestGraph
     /// The grid: the rectangle handed in is divided into whole cells, at most
     /// <see cref="MapCampaign.CampaignCellMetres"/> across - ceil, so the cells are a little SMALLER
     /// than the nominal size rather than hanging over the edge of the map (Customs' measured 1035x499 m
-    /// becomes 6x3 cells of 173x166 m). Every stop is then the centre of its cell, which is inside that
-    /// rectangle by construction. The cells can be a good deal smaller than 200 m, which is why the
+    /// becomes 9x5 cells of 115x100 m). Every stop is then the centre of its cell, which is inside that
+    /// rectangle by construction. The cells can be a good deal smaller than CampaignCellMetres, which is why the
     /// step sizes are handed back: see <see cref="MapCampaign.SampleRadius"/>.
     ///
     /// The rectangle is the MEASURED one, not the padded extent the pictures are drawn to - the caller
