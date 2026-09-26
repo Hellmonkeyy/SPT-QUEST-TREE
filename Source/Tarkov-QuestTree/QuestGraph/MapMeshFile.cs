@@ -719,6 +719,16 @@ namespace QuestTree.QuestGraph
             /// future builder might.</summary>
             internal int Level;
 
+            /// <summary>WP8 (D3): how this building was stored - lower is better (MapMeshBuilder.GradeFor: its LOD level
+            /// and whether it was within its limit, over budget, as it is or clustered). IN MEMORY ONLY: not written,
+            /// not read (v3 is frozen; a v4 would carry it after Level). WP2's accumulation keys its merge on it.</summary>
+            internal byte Grade;
+
+            /// <summary>WP8 (D3): the building's LOD group identity (KeyFor of the group's path and reference point), or
+            /// its own <see cref="Key"/> with no group. IN MEMORY ONLY, like <see cref="Grade"/>: within one campaign,
+            /// for each GroupKey, the stops' buildings with the lowest grade win wholesale.</summary>
+            internal int GroupKey;
+
             /// <summary>Vertex x, quantised over the extent's x span. Same length as
             /// <see cref="Y"/> and <see cref="Z"/>.</summary>
             internal ushort[] X;

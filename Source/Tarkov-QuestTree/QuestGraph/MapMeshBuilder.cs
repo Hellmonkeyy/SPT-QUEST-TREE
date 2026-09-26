@@ -293,6 +293,72 @@ namespace QuestTree.QuestGraph
         /// - the stage-U rule - and counted in the log line as over the source guard.</summary>
         internal const int MaxSourceTriangles = 1_000_000;
 
+        /// <summary>WP8 (D3) rollback: the LEVEL LADDER - a building that cannot be stored within its limit takes the
+        /// strict decimation over budget, then its source as it is, then its group's NEXT level (LOD1 before LOD2),
+        /// never straight to the coarsest. False restores the pre-WP8 pair (level 0 and the coarsest real level) and
+        /// Apply's pre-WP8 order. Static readonly so the choice is not a constant the compiler folds.</summary>
+        internal static readonly bool LevelLadder = true;
+
+        /// <summary>WP8 (D3): the most a strict decimation over its limit, or a source stored as it is before a
+        /// coarser level, may have: this times the building's limit.</summary>
+        internal const int OverBudgetMaxFactor = 4;
+
+        /// <summary>WP8 (D3): how a building was stored, the low part of its GRADE (see <see cref="GradeFor"/>):
+        /// within its limit (decimated or not), a strict decimation over its limit from the pool, its source as it
+        /// is over its limit, or clustered.</summary>
+        internal const int GradeWithin = 0;
+
+        internal const int GradeOverBudget = 1;
+        internal const int GradeAsIs = 2;
+        internal const int GradeClustered = 3;
+
+        /// <summary>
+        /// WP8 (D3): a stored building's GRADE - lower is better: <c>sub</c> (0..3, see <see cref="GradeWithin"/>) for a
+        /// building read from its group's level 0 (or with no group), <c>10 + 4 x lod + sub</c> for one read from level
+        /// <c>lod</c> &gt;= 1. Held in memory on <see cref="MapMeshFile.Building.Grade"/> beside
+        /// <see cref="MapMeshFile.Building.GroupKey"/>; not serialised (v3 is frozen). THE RULE WP2's accumulation must
+        /// keep: within one campaign, for each GroupKey, the stops' buildings with the LOWEST grade win WHOLESALE and
+        /// every building of that group from a worse-graded stop is removed - so two levels of one group are never
+        /// stored together (their Keys differ, because their renderers do). Unity-free.
+        /// </summary>
+        /// <param name="lod">The LOD level the building was read from (0 for none).</param>
+        /// <param name="sub">How it was stored.</param>
+        internal static byte GradeFor(int lod, int sub)
+        {
+            sub = Math.Max(0, Math.Min(3, sub));
+            return (byte)(lod <= 0 ? sub : Math.Min(255, 10 + 4 * lod + sub));
+        }
+
+        /// <summary>
+        /// WP8 (D3): the level a group moves to when its current source cannot be stored - the decision of
+        /// EnqueueNextLevel with the Unity half (reading the level's renderers) behind two callbacks, so the harness
+        /// can hold it to its rules. -1 when the group may not move: something of the current level is stored or in
+        /// flight (Committed, the "never both levels" invariant), or the failing candidate is not its group's
+        /// current source. Levels are tried finest first after the current one; a level that holds the failing
+        /// renderer itself stops the walk (review F01: the shared-renderer authoring, where it is claimed and would
+        /// be lost with every sibling), and a level none of whose renderers would pass the read gate is skipped
+        /// (F01's size checks). Unity-free.
+        /// </summary>
+        /// <param name="current">The group's current level (an index into its ladder).</param>
+        /// <param name="levels">The ladder's length.</param>
+        /// <param name="committed">Renderers of the current level stored or in flight.</param>
+        /// <param name="currentSource">Whether the failing candidate is of the current level.</param>
+        /// <param name="holdsFailing">Whether ladder level k lists the failing renderer.</param>
+        /// <param name="readable">How many of ladder level k's renderers would pass the read gate.</param>
+        internal static int NextLevel(int current, int levels, int committed, bool currentSource, Func<int, bool> holdsFailing,
+            Func<int, int> readable)
+        {
+            if (committed > 0 || !currentSource) return -1;
+
+            for (var next = current + 1; next < levels; next++)
+            {
+                if (holdsFailing(next)) return -1;
+                if (readable(next) > 0) return next;
+            }
+
+            return -1;
+        }
+
         /// <summary>The largest source the quadric decimation is run on. Its workspace is ~470 bytes a
         /// source triangle (measured: 51.8 MB for 110,592) and it runs at 1-2 microseconds a triangle, so
         /// 120,000 is ~56 MB and well under the per-building cap; a larger source goes to its coarse level, or is stored as it is, or clustered -
@@ -852,9 +918,9 @@ namespace QuestTree.QuestGraph
 
                         // Past the soft cap a detail source over its target is not read at all: its group
                         // takes the coarse path, as it is, now.
-                        if (job.DecimationStopped && !candidate.Coarse &&
+                        if (job.DecimationStopped &&
                             candidate.SourceTriangles > TargetFor(job, candidate) &&
-                            EnqueueCoarse(job, candidate))
+                            EnqueueNextLevel(job, candidate))
                             continue;
 
                         var limit = 0;
@@ -893,10 +959,10 @@ namespace QuestTree.QuestGraph
                         var source = job.Captured;
                         job.Captured = null;
 
-                        // M1: a read takes frames, and a sibling's fallback may have switched the group to
-                        // its coarse level meanwhile - a detail read that is no longer its group's source is
-                        // discarded, or the building would be stored twice.
-                        if (source != null && !candidate.Coarse && !IsSource(job, candidate))
+                        // M1: a read takes frames, and a sibling's fallback may have moved the group to a
+                        // coarser level meanwhile (WP8: any level, queued ones too) - a read that is no longer its
+                        // group's source is discarded, or the building would be stored twice.
+                        if (source != null && !IsSource(job, candidate))
                         {
                             source = null;
                             job.SwitchedMidRead++;
@@ -1330,7 +1396,8 @@ namespace QuestTree.QuestGraph
             /// <summary>WP8: the building-quality line's counts (ReportQuality): decimations run, reaching their target,
             /// stopped at the error limit, relaxed (rollback only); refusals by kind; pinned corners; results not used
             /// for their slivers or a hole; area and sliver area of the decimated sources and of what was stored from
-            /// them; and fall-backs by the level they fell back to (index 1, 2, 3 = LOD1, LOD2, LOD3 and coarser).</summary>
+            /// them; strict decimations stored over their limit from the over-budget pool; and fall-backs by the level
+            /// they fell back to (index 1, 2, 3 = LOD1, LOD2, LOD3 and coarser).</summary>
             internal int DecimationRuns;
 
             internal int DecimationsToTarget;
@@ -1349,6 +1416,13 @@ namespace QuestTree.QuestGraph
             internal double DecimatedSourceSliverArea;
             internal double StoredDecimatedArea;
             internal double StoredDecimatedSliverArea;
+
+            /// <summary>WP8 (D3): strict decimations stored over their limit, the triangles they added, and the pool that
+            /// pays for them - half of the unreserved share of the cap, set by ApplyBudget.</summary>
+            internal int StoredOverBudget;
+
+            internal long OverBudgetExtra;
+            internal long OverBudgetPool;
             internal readonly int[] FellBackTo = new int[4];
 
             /// <summary>Stored as the source, past the limit, from unreserved headroom (H3).</summary>
@@ -1393,8 +1467,8 @@ namespace QuestTree.QuestGraph
 
             internal long SourceDecimated;
 
-            /// <summary>BUILDINGS (not renderers) that fell back to the game's coarse level: a decimation
-            /// that could not finish or fit, or an over-target building past the soft cap.</summary>
+            /// <summary>BUILDINGS (not renderers) that fell back to a coarser level of their group (WP8: the next one):
+            /// a decimation that could not finish or fit, or an over-target building past the soft cap.</summary>
             internal int FellBack;
 
             /// <summary>Groups whose most detailed level was over MaxSourceTriangles, plus plain renderers
@@ -1519,11 +1593,15 @@ namespace QuestTree.QuestGraph
             /// <summary>What the ledger holds reserved for it until it is reached.</summary>
             internal long Reserved;
 
-            /// <summary>Queued by a group's fallback: its group's coarse level, read as it is.</summary>
-            internal bool Coarse;
+            /// <summary>Queued by a group's fallback (WP8 D3): the ladder level it was queued for, or -1 for a
+            /// candidate from the list.</summary>
+            internal int QueuedLevel = -1;
 
-            /// <summary>Launched as its group's detail level - counted in GroupState.DetailCommitted.</summary>
-            internal bool AsDetail;
+            /// <summary>Launched as its group's current source - counted in GroupState.Committed.</summary>
+            internal bool AsSource;
+
+            /// <summary>The LOD level it was read from (0 with no group), for its grade.</summary>
+            internal int ReadLod;
 
             /// <summary>The other transform worth trying when <see cref="Matrix"/> does not put the
             /// vertices inside the renderer's bounds, or null. Set only for a static batch, where the
@@ -1532,25 +1610,41 @@ namespace QuestTree.QuestGraph
         }
 
         /// <summary>
-        /// A LOD group's two ways of being read, decided once. DETAIL is the group's most detailed level -
-        /// stage V's source, decimated to the area budget - when that level is real geometry and holds no
-        /// more than <see cref="MaxSourceTriangles"/>; COARSE is the stage-U rule, the last level that is
-        /// real geometry. A group starts on detail when it has one; a decimation that runs out of time, or
-        /// the phase cap, switches it to coarse - once, and only while none of its detail renderers has
-        /// been stored or is on a worker, so a building never arrives twice.
+        /// One usable level of a LOD group (WP8 D3): its LOD index, its renderers as a set and in order, and their
+        /// triangles.
+        /// </summary>
+        private sealed class LevelSet
+        {
+            internal int Lod;
+            internal HashSet<Renderer> Set;
+            internal List<Renderer> List;
+            internal long Triangles;
+        }
+
+        /// <summary>
+        /// A LOD group's LADDER (WP8 D3), decided once: every level that is real geometry - not an impostor, at least
+        /// <see cref="MinLodTriangles"/>, level 0 no more than <see cref="MaxSourceTriangles"/> - finest first, a level
+        /// with the same renderers as the one before it skipped. The group reads <see cref="Current"/>; a building of
+        /// it that cannot be stored moves the group to the NEXT level - once per step, and only while nothing of the
+        /// current level has been stored or is on a worker (<see cref="Committed"/>), so a building never arrives
+        /// twice. Under the <see cref="LevelLadder"/> rollback the ladder is the pre-WP8 pair: level 0 and the
+        /// coarsest real level.
         /// </summary>
         private sealed class GroupState
         {
-            internal HashSet<Renderer> Detail;
-            internal HashSet<Renderer> Coarse;
-            internal List<Renderer> CoarseList;
-            internal bool UsingCoarse;
+            internal readonly List<LevelSet> Levels = new List<LevelSet>();
 
-            /// <summary>The coarse level's index, for the fall-backs by level (WP8).</summary>
-            internal int CoarseLevel;
+            /// <summary>The level being read, an index into <see cref="Levels"/>.</summary>
+            internal int Current;
 
-            /// <summary>Detail renderers stored or on a worker. A group may switch only while it is 0.</summary>
-            internal int DetailCommitted;
+            /// <summary>Renderers of the current level stored or on a worker. The group may move only while it is 0.</summary>
+            internal int Committed;
+
+            /// <summary>The group's identity for WP2's grade rule: KeyFor(the group's path, its reference point).</summary>
+            internal int GroupKey;
+
+            /// <summary>Whether the group reads a coarser level than its first, for the log's wording.</summary>
+            internal bool UsingCoarse => Current > 0;
         }
 
         /// <summary>A source mesh in WORLD space, ready to store or decimate: x, y, z per vertex and three
@@ -1645,6 +1739,11 @@ namespace QuestTree.QuestGraph
         {
             internal WorldMesh Mesh;
             internal WorldMesh Source;
+
+            /// <summary>WP8 (D3): the strict decimation when it is over its limit by no more than
+            /// <see cref="OverBudgetMaxFactor"/> - offered to Apply's over-budget pool; null otherwise.</summary>
+            internal WorldMesh OverBudget;
+
             internal bool Decimated;
             internal bool Undecodable;
             internal bool Implausible;
@@ -2677,14 +2776,16 @@ namespace QuestTree.QuestGraph
             }
 
             if (job.Claimed.Contains(candidate.Renderer)) return false;
-            if (!candidate.Coarse && !IsSource(job, candidate)) return false;
+
+            // Queued levels too (WP8 D3): a level queued before its group moved on again is no longer its source.
+            if (!IsSource(job, candidate)) return false;
 
             return Decodable(candidate);
         }
 
         /// <summary>Whether a candidate's source can be decoded at all: some triangles, not more than
         /// MaxSourceTriangles, and a vertex count the format can take. Wanted's size half, shared with
-        /// EnqueueCoarse so a fallback never queues what the read gate would refuse (review F01).</summary>
+        /// EnqueueNextLevel so a fallback never queues what the read gate would refuse (review F01).</summary>
         /// <param name="candidate">The candidate.</param>
         private static bool Decodable(Candidate candidate) =>
             candidate.SourceTriangles > 0 && candidate.SourceTriangles <= MaxSourceTriangles &&
@@ -2714,9 +2815,8 @@ namespace QuestTree.QuestGraph
             return limit;
         }
 
-        /// <summary>Whether this renderer is its group's source right now: a member of the detail level
-        /// while the group reads detail, of the coarse level once it has switched. A renderer under no
-        /// group is its own source.</summary>
+        /// <summary>Whether this renderer is its group's source right now: a member of the level the group reads (WP8:
+        /// its ladder's current level). A renderer under no group is its own source.</summary>
         /// <param name="job">The build.</param>
         /// <param name="candidate">The candidate.</param>
         private static bool IsSource(Job job, Candidate candidate)
@@ -2724,14 +2824,12 @@ namespace QuestTree.QuestGraph
             if (candidate.Group == null) return true;
             if (!job.Groups.TryGetValue(candidate.Group, out var state) || state == null) return false;
 
-            var set = state.UsingCoarse ? state.Coarse : state.Detail;
-
-            return set != null && set.Contains(candidate.Renderer);
+            return state.Current < state.Levels.Count && state.Levels[state.Current].Set.Contains(candidate.Renderer);
         }
 
-        /// <summary>A group's state, decided the first time the group is met: its detail level when that
-        /// level is real geometry within <see cref="MaxSourceTriangles"/>, its coarse level by the stage-U
-        /// rule, and which of the two it starts on.</summary>
+        /// <summary>A group's state, decided the first time the group is met (WP8 D3): its LADDER - every level that is
+        /// real geometry, finest first (see <see cref="GroupState"/>) - read from level 0 when that is usable, else
+        /// from the finest that is; and its GroupKey for the grade rule.</summary>
         /// <param name="job">The build.</param>
         /// <param name="group">The LOD group.</param>
         private static GroupState StateOf(Job job, LODGroup group)
@@ -2742,43 +2840,66 @@ namespace QuestTree.QuestGraph
 
             // The levels MapLods read - GetLODs allocates the whole LOD array every call.
             if (!job.LodsOf.TryGetValue(group, out var lods)) lods = group.GetLODs();
-            var coarse = ChooseLevel(job, lods);
 
-            if (coarse >= 0 && lods[coarse].renderers != null)
+            var ladder = new List<LevelSet>();
+
+            for (var k = 0; lods != null && k < lods.Length; k++)
             {
-                state.CoarseLevel = coarse;
-                state.CoarseList = new List<Renderer>();
+                var renderers = lods[k].renderers;
+                if (renderers == null) continue;
 
-                foreach (var renderer in lods[coarse].renderers)
-                    if (renderer != null) state.CoarseList.Add(renderer);
+                var triangles = LevelTriangles(renderers, out var impostor, out var any);
+                if (!any) continue;
 
-                state.Coarse = new HashSet<Renderer>(state.CoarseList);
-            }
-
-            // Level 0 as the source when it is real geometry and small enough. When level 0 IS the coarse
-            // level (a one-level group), there is nothing coarser to fall back to - EnqueueCoarse sees the two
-            // sets are the same renderers.
-            if (lods != null && lods.Length > 0 && lods[0].renderers != null)
-            {
-                var triangles = LevelTriangles(lods[0].renderers, out var impostor);
-
-                if (!impostor && triangles >= MinLodTriangles)
+                // Counted apart, because they are different findings: an impostor level is a card with a picture of
+                // the building on it (the game ships AmplifyImpostors), while a thin level is real geometry reduced
+                // to a box.
+                if (impostor)
                 {
-                    if (triangles <= MaxSourceTriangles)
-                    {
-                        state.Detail = new HashSet<Renderer>();
-                        foreach (var renderer in lods[0].renderers)
-                            if (renderer != null) state.Detail.Add(renderer);
-                    }
-                    else
-                    {
-                        job.InputGuarded++;
-                    }
+                    job.ImpostorSkipped++;
+                    continue;
                 }
+
+                if (triangles < MinLodTriangles)
+                {
+                    job.ThinSkipped++;
+                    continue;
+                }
+
+                if (k == 0 && triangles > MaxSourceTriangles)
+                {
+                    job.InputGuarded++;
+                    continue;
+                }
+
+                var list = new List<Renderer>();
+                foreach (var renderer in renderers)
+                    if (renderer != null) list.Add(renderer);
+
+                var set = new HashSet<Renderer>(list);
+
+                // the one-level case: a level with the same renderers as the one before it is not a step
+                if (ladder.Count > 0 && ladder[ladder.Count - 1].Set.SetEquals(set)) continue;
+
+                ladder.Add(new LevelSet { Lod = k, Set = set, List = list, Triangles = triangles });
             }
 
-            state.UsingCoarse = state.Detail == null;
-            job.LevelRenderers += (state.Detail?.Count ?? 0) + (state.Coarse?.Count ?? 0);
+            // The rollback: the pre-WP8 pair - level 0 when usable, and the coarsest real level.
+            if (!LevelLadder && ladder.Count > 1)
+            {
+                var first = ladder[0];
+                var last = ladder[ladder.Count - 1];
+                ladder.Clear();
+                if (first.Lod == 0) ladder.Add(first);
+                ladder.Add(last);
+            }
+
+            state.Levels.AddRange(ladder);
+            foreach (var level in ladder) job.LevelRenderers += level.Set.Count;
+
+            state.GroupKey = MapMeshFile.Building.KeyFor(HierarchyPath(group.transform),
+                group.transform.TransformPoint(group.localReferencePoint));
+
             job.Groups[group] = state;
 
             return state;
@@ -2793,8 +2914,8 @@ namespace QuestTree.QuestGraph
 
         /// <summary>A level's triangles - each renderer's OWN share (review F16: a static-batch member's mesh is
         /// the whole batch, and counting it whole counted the batch once per member) - whether any material is an
-        /// impostor, and whether the level has any renderer at all. The one place both StateOf and ChooseLevel
-        /// count a level (review F05).</summary>
+        /// impostor, and whether the level has any renderer at all. The one place a level is counted (review
+        /// F05).</summary>
         /// <param name="renderers">The level's renderers.</param>
         /// <param name="impostor">Whether any material's shader is an impostor.</param>
         /// <param name="any">Whether any renderer is non-null.</param>
@@ -3041,6 +3162,10 @@ namespace QuestTree.QuestGraph
 
             job.BudgetScale = scale;
             job.LegacyScale = legacyScale;
+
+            // WP8 (D3): strict decimations over their limit are paid from half of the unreserved share; the other
+            // half stays for sources stored as they are and for the levels.
+            job.OverBudgetPool = (long)(job.Cap * (1 - BudgetShare) * 0.5);
             job.Budgeted = job.Candidates.Count;
         }
 
@@ -3064,60 +3189,69 @@ namespace QuestTree.QuestGraph
         private static bool FrameSpent(Job job) => job.FrameClock.Elapsed.TotalMilliseconds > FrameBudgetMs;
 
         /// <summary>
-        /// The building's fallback to the game's own coarse level of detail - the stage-U path: its group
-        /// switches to the coarse level and those renderers are QUEUED, ahead of the rest of the list, to be
-        /// read and stored as they are, through the same pipeline and the same frame budget as everything
-        /// else (they may sit earlier in the ordered list, already passed by as non-members). False when
-        /// there is nothing coarser that would not duplicate or reproduce this source: no group, a group
-        /// with a detail renderer already stored or still on a worker, or a group whose coarse level is its
-        /// detail level - the caller
-        /// then stores the source itself (undecimated or clustered), never nothing.
+        /// The building's fallback to its group's NEXT level (WP8 D3; the stage-U path went straight to the coarsest):
+        /// the group moves one step down its ladder and that level's renderers are QUEUED, ahead of the rest of the
+        /// list, to be read, decimated and stored through the same pipeline and frame budget as everything else.
+        /// False when the group may not move (see <see cref="NextLevel"/>): no group, something of the current level
+        /// stored or in flight, the failing renderer on the next level itself (review F01), or no coarser level with
+        /// a renderer the read gate would take - the caller then stores the source itself (as it is or clustered),
+        /// never nothing.
         /// </summary>
         /// <param name="job">The build.</param>
-        /// <param name="candidate">The candidate that could not be decimated.</param>
-        private static bool EnqueueCoarse(Job job, Candidate candidate)
+        /// <param name="candidate">The candidate that could not be stored.</param>
+        private static bool EnqueueNextLevel(Job job, Candidate candidate)
         {
-            if (candidate.Coarse || candidate.Group == null ||
-                !job.Groups.TryGetValue(candidate.Group, out var state) ||
-                state.UsingCoarse || state.DetailCommitted > 0 || state.CoarseList == null ||
-                (state.Detail != null && state.Detail.SetEquals(state.Coarse)))
+            if (candidate.Group == null || !job.Groups.TryGetValue(candidate.Group, out var state) || state == null ||
+                state.Current >= state.Levels.Count)
                 return false;
 
-            // The failing renderer is itself on the coarse level (the "shared renderer" authoring, LOD0 = {body,
-            // details}, LOD1 = {body}): it is claimed and will not be read again, so switching would lose it and
-            // every detail sibling with it. The caller stores or clusters this source instead (review F01).
-            if (state.Coarse != null && state.Coarse.Contains(candidate.Renderer)) return false;
+            var current = candidate.QueuedLevel >= 0
+                ? candidate.QueuedLevel == state.Current
+                : state.Levels[state.Current].Set.Contains(candidate.Renderer);
 
-            // The coarse candidates that would pass Wanted's size checks first; the group switches, and FellBack
-            // counts, only when one survives.
-            var coarse = new List<Candidate>();
+            var made = new Dictionary<int, List<Candidate>>();
+            var group = candidate.Group;
 
-            foreach (var renderer in state.CoarseList)
+            var next = NextLevel(state.Current, state.Levels.Count, state.Committed, current,
+                k => state.Levels[k].Set.Contains(candidate.Renderer),
+                k => (made[k] = MakeLevel(job, state.Levels[k], group, k)).Count);
+
+            if (next < 0) return false;
+
+            state.Current = next;
+            job.FellBack++;
+            job.FellBackTo[Math.Max(1, Math.Min(3, state.Levels[next].Lod))]++;
+
+            foreach (var c in made[next]) job.Extra.Enqueue(c);
+
+            return true;
+        }
+
+        /// <summary>A ladder level's renderers as queued candidates: each not yet claimed, through MakeCandidate's
+        /// filters and the read gate's size checks (review F01: a renderer the gate would refuse must not move the
+        /// group and cost it its current level).</summary>
+        /// <param name="job">The build.</param>
+        /// <param name="level">The level.</param>
+        /// <param name="group">Its group.</param>
+        /// <param name="index">Its index in the ladder.</param>
+        private static List<Candidate> MakeLevel(Job job, LevelSet level, LODGroup group, int index)
+        {
+            var made = new List<Candidate>();
+
+            foreach (var renderer in level.List)
             {
                 if (renderer == null || job.Claimed.Contains(renderer)) continue;
 
-                Candidate made = null;
-                Step(job, "a coarse level", () => made = MakeCandidate(job, renderer));
-                if (made == null) continue;
+                Candidate c = null;
+                Step(job, "a LOD level", () => c = MakeCandidate(job, renderer));
+                if (c == null || !Decodable(c)) continue;
 
-                // Wanted's size checks HERE, before the candidate counts (review F01): a coarse renderer the read gate
-                // would refuse - no determinable triangles (a static-batch share), too many - must not switch the group
-                // and cost it its detail.
-                if (!Decodable(made)) continue;
-
-                made.Group = candidate.Group;
-                made.Coarse = true;
-                coarse.Add(made);
+                c.Group = group;
+                c.QueuedLevel = index;
+                made.Add(c);
             }
 
-            if (coarse.Count == 0) return false;
-
-            job.FellBack++;
-            job.FellBackTo[Math.Max(1, Math.Min(3, state.CoarseLevel))]++;
-            state.UsingCoarse = true;
-            foreach (var made in coarse) job.Extra.Enqueue(made);
-
-            return true;
+            return made;
         }
 
         /// <summary>A candidate built on the spot for a group's coarse-level renderer, through the SAME
@@ -3178,45 +3312,6 @@ namespace QuestTree.QuestGraph
             candidate.SourceTriangles = SubmeshTriangles(candidate);
 
             return candidate;
-        }
-
-        /// <summary>The COARSE level - stage U's rule, and stage V's fallback - or -1 when no level of the group is
-        /// geometry. Counts the impostor levels it walked past, for the log line.</summary>
-        /// <param name="job">The build.</param>
-        /// <param name="lods">The group's levels, as GetLODs returned them.</param>
-        private static int ChooseLevel(Job job, LOD[] lods)
-        {
-            if (lods == null || lods.Length == 0) return -1;
-
-            for (var level = lods.Length - 1; level >= 0; level--)
-            {
-                var renderers = lods[level].renderers;
-                if (renderers == null) continue;
-
-                var triangles = LevelTriangles(renderers, out var impostor, out var any);
-
-                if (!any) continue;
-
-                // Counted apart, because they are different findings: an impostor level is a card with
-                // a picture of the building on it (the game ships AmplifyImpostors), while a thin level
-                // is real geometry that has been reduced to a box. A log line that added them up would
-                // report "18 impostor LODs" on a map that has none.
-                if (impostor)
-                {
-                    job.ImpostorSkipped++;
-                    continue;
-                }
-
-                if (triangles < MinLodTriangles)
-                {
-                    job.ThinSkipped++;
-                    continue;
-                }
-
-                return level;
-            }
-
-            return -1;
         }
 
         // --- reading a building ---------------------------------------------------------------------------
@@ -3293,11 +3388,16 @@ namespace QuestTree.QuestGraph
             job.Claimed.Add(candidate.Renderer);
             job.InFlightTriangles += source.SourceTriangles;
 
+            // Every level counts now (WP8 D3): the group may move on only while nothing of its current level is stored
+            // or in flight.
             if (candidate.Group != null && job.Groups.TryGetValue(candidate.Group, out var state) && state != null &&
-                !state.UsingCoarse && !candidate.Coarse)
+                state.Current < state.Levels.Count)
             {
-                state.DetailCommitted++;
-                candidate.AsDetail = true;
+                state.Committed++;
+                candidate.AsSource = true;
+                candidate.ReadLod = state.Levels[candidate.QueuedLevel >= 0 && candidate.QueuedLevel < state.Levels.Count
+                    ? candidate.QueuedLevel
+                    : state.Current].Lod;
             }
 
             // The estimate the peak line adds up: the source's own arrays, the worker's lists over it, and
@@ -3355,17 +3455,21 @@ namespace QuestTree.QuestGraph
         }
 
         /// <summary>
-        /// A finished flight, on the main thread: its counts, then the building - NEVER dropped for a
-        /// decimation that did not work (H3). Before the hard cap: the worker's mesh when it fits the
-        /// building's limit; else the game's coarse level when the group has one to switch to; else the
-        /// source as it is when the unreserved headroom holds its overshoot ("stored undecimated"); else a
-        /// cluster flight to the limit. Past the hard cap the drain is bounded: the source as it is if the
-        /// headroom holds it, else the coarse level, else ABANDONED and counted - no cluster is started.
+        /// A finished flight, on the main thread: its counts, then the building - NEVER dropped for a decimation that
+        /// did not work (H3). WP8 (D3), before the hard cap: the worker's mesh when it is within the building's limit;
+        /// else the strict decimation OVER its limit (at most <see cref="OverBudgetMaxFactor"/> x) when the headroom
+        /// AND the over-budget pool hold its overshoot; else the source as it is, bounded the same way and by the
+        /// headroom; else the group's NEXT level (LOD1 before LOD2, never straight to the coarsest); else the source
+        /// as it is when the headroom holds it at any size; else a cluster flight to the limit. Past the hard cap the
+        /// same order without the cluster, then ABANDONED and counted. Under the <see cref="LevelLadder"/> rollback,
+        /// the pre-WP8 order: the coarse level, the source as it is when the headroom holds it, the cluster.
         ///
-        /// The ledger is settled in a finally (L1) - a renderer destroyed under us throws from StoreWorld,
-        /// and that must not leak its pending limit - unless the limit was handed to a cluster flight. The
-        /// group's DetailCommitted counts detail renderers stored or in flight (L3): this flight's is taken
-        /// off on entry and put back only when it is stored or handed on.
+        /// The ledger is settled in a finally (L1) - a renderer destroyed under us throws from StoreWorld, and that
+        /// must not leak its pending limit - unless the limit was handed to a cluster flight; every store over the
+        /// limit is checked against the headroom first (the Settle doc). The group's Committed counts renderers of its
+        /// current level stored or in flight (L3): this flight's is taken off on entry and put back only when it is
+        /// stored or handed on - which is what keeps a group from moving while a level of it is stored. Every store
+        /// carries its GRADE (<see cref="GradeFor"/>).
         /// </summary>
         /// <param name="job">The build.</param>
         /// <param name="flight">The finished flight.</param>
@@ -3377,12 +3481,12 @@ namespace QuestTree.QuestGraph
             var committed = false;
 
             var state = candidate.Group != null && job.Groups.TryGetValue(candidate.Group, out var s) ? s : null;
-            if (candidate.AsDetail && state != null) state.DetailCommitted--;
+            if (candidate.AsSource && state != null) state.Committed--;
 
-            // Stores one mesh and settles for it; a refusal for the vertex caps is counted by StoreWorld.
-            int Store(WorldMesh mesh)
+            // Stores one mesh with its grade and settles for it; a refusal for the vertex caps is counted by StoreWorld.
+            int Store(WorldMesh mesh, int how)
             {
-                var code = StoreWorld(job, candidate, mesh);
+                var code = StoreWorld(job, candidate, mesh, GradeFor(candidate.ReadLod, how), state?.GroupKey);
                 job.Ledger.Settle(limit, code == Stored ? mesh.Triangles : 0);
                 settled = true;
 
@@ -3394,6 +3498,13 @@ namespace QuestTree.QuestGraph
                 }
 
                 return code;
+            }
+
+            // The source as it is, counted.
+            void AsIs(WorldMesh source)
+            {
+                if (Store(source, GradeAsIs) == Stored) job.StoredUndecimated++;
+                else job.Unstored++;
             }
 
             // The cluster path, once: never past the hard cap or on the capture's abort.
@@ -3424,7 +3535,7 @@ namespace QuestTree.QuestGraph
 
                 if (flight.Clustering)
                 {
-                    if (outcome?.Mesh != null && outcome.Mesh.Triangles <= limit && Store(outcome.Mesh) == Stored)
+                    if (outcome?.Mesh != null && outcome.Mesh.Triangles <= limit && Store(outcome.Mesh, GradeClustered) == Stored)
                     {
                         job.ClusteredStored++;
                         if (outcome.Mesh.UV == null) job.ClusteredTextureless++;
@@ -3472,6 +3583,7 @@ namespace QuestTree.QuestGraph
                         job.DecimatedSourceArea += outcome.SourceArea;
                         job.DecimatedSourceSliverArea += outcome.SourceSliverArea;
                     }
+
                     if (outcome.TimedOut) job.TimedOut++;
                     if (outcome.OverLimit) job.OverLimit++;
                 }
@@ -3479,7 +3591,7 @@ namespace QuestTree.QuestGraph
                 // 1. what the worker made, inside the limit
                 if (outcome?.Mesh != null)
                 {
-                    var code = Store(outcome.Mesh);
+                    var code = Store(outcome.Mesh, GradeWithin);
 
                     if (code == Stored && outcome.Decimated)
                     {
@@ -3501,53 +3613,103 @@ namespace QuestTree.QuestGraph
                 // Nothing to store at all - no geometry, no transform that fits: not a decimation failure.
                 if (outcome != null && outcome.Source == null) return;
 
-                // A worker that threw is counted as Failed and nothing else (review F04): its coarse level is still
+                // A worker that threw is counted as Failed and nothing else (review F04): its next level is still
                 // tried, but it is not a second time "a building with no path left".
                 if (outcome == null)
                 {
-                    EnqueueCoarse(job, candidate);
+                    EnqueueNextLevel(job, candidate);
                     return;
                 }
 
-                var source = outcome?.Source;
-                var fits = source != null && source.Triangles - (long)limit <= job.Ledger.Headroom;
+                var source = outcome.Source;
+                var fits = source.Triangles - (long)limit <= job.Ledger.Headroom;
 
-                if (!job.PastHard)
+                if (!LevelLadder)
                 {
-                    // 2. the game's coarse level
-                    if (EnqueueCoarse(job, candidate)) return;
-
-                    // 3. the source as it is, paid from what nobody was promised
-                    if (fits)
+                    // The pre-WP8 order (rollback).
+                    if (!job.PastHard)
                     {
-                        var code = Store(source);
+                        if (EnqueueNextLevel(job, candidate)) return;
 
-                        if (code == Stored) job.StoredUndecimated++;
-                        else job.Unstored++;
+                        if (fits)
+                        {
+                            AsIs(source);
+                            return;
+                        }
 
+                        if (!Cluster(source)) job.Unstored++;
                         return;
                     }
 
-                    // 4. the source clustered to its limit, on a worker
+                    if (fits && Store(source, GradeAsIs) == Stored)
+                    {
+                        job.StoredUndecimated++;
+                        return;
+                    }
+
+                    if (EnqueueNextLevel(job, candidate)) return;
+
+                    job.AbandonedAtHard++;
+                    return;
+                }
+
+                // 2. the strict decimation over its limit, paid from the over-budget pool and the headroom
+                var over = outcome.OverBudget;
+                if (over != null)
+                {
+                    var extra = over.Triangles - (long)limit;
+
+                    if (extra <= job.Ledger.Headroom && extra <= job.OverBudgetPool)
+                    {
+                        if (Store(over, GradeOverBudget) == Stored)
+                        {
+                            job.StoredOverBudget++;
+                            job.OverBudgetExtra += extra;
+                            job.OverBudgetPool -= extra;
+                            job.Decimated++;
+                            job.SourceDecimated += outcome.SourceTriangles;
+                            job.StoredDecimatedArea += outcome.OutputArea;
+                            job.StoredDecimatedSliverArea += outcome.OutputSliverArea;
+                        }
+                        else
+                        {
+                            job.Unstored++;
+                        }
+
+                        return;
+                    }
+                }
+
+                // 3. the source as it is, BEFORE any coarser level - bounded by the factor and the headroom
+                if (fits && source.Triangles <= (long)limit * OverBudgetMaxFactor)
+                {
+                    AsIs(source);
+                    return;
+                }
+
+                // 4. the group's NEXT level
+                if (EnqueueNextLevel(job, candidate)) return;
+
+                // 5. too big for the factor but inside the headroom: as it is, rather than a cluster
+                if (fits)
+                {
+                    AsIs(source);
+                    return;
+                }
+
+                // 6. the source clustered to its limit, on a worker - before the hard cap only; else abandoned
+                if (!job.PastHard)
+                {
                     if (!Cluster(source)) job.Unstored++;
                     return;
                 }
-
-                // Past the hard cap: bounded - as it is, else coarse, else abandoned.
-                if (fits && Store(source) == Stored)
-                {
-                    job.StoredUndecimated++;
-                    return;
-                }
-
-                if (EnqueueCoarse(job, candidate)) return;
 
                 job.AbandonedAtHard++;
             }
             finally
             {
                 if (!settled) job.Ledger.Settle(limit, 0);
-                if (candidate.AsDetail && state != null && committed) state.DetailCommitted++;
+                if (candidate.AsSource && state != null && committed) state.Committed++;
             }
         }
 
@@ -3862,20 +4024,25 @@ namespace QuestTree.QuestGraph
 
                 if (!result.TimedOut && result.Triangles != null && result.Triangles.Length >= 3)
                 {
+                    var mesh = new WorldMesh
+                    {
+                        P = result.Positions, T = result.Triangles, Mirrored = world.Mirrored,
+                        UV = world.UV != null ? result.UV : null, TriMat = world.UV != null ? result.TriangleMaterial : null,
+                    };
+                    var n = result.Triangles.Length / 3;
+
                     // WP8: a result with more slivers than its source, or a hole, is not stored however well it fits -
-                    // the building takes its next path (the area test was the seams-relaxed retry's trigger).
+                    // the building takes its next path (the area test was the seams-relaxed retry's trigger). One over
+                    // its limit by no more than OverBudgetMaxFactor is OFFERED to Apply's over-budget pool (D3).
                     if (result.SliversReverted) outcome.SliversReverted = true;
                     else if (!MeshDecimator.AllowSeamRelaxedRetry && result.AreaShare < MeshDecimator.AreaKept) outcome.AreaLost = true;
-                    else if (result.Triangles.Length / 3 <= source.Limit)
+                    else if (n <= source.Limit)
                     {
-                        outcome.Mesh = new WorldMesh
-                        {
-                            P = result.Positions, T = result.Triangles, Mirrored = world.Mirrored,
-                            UV = world.UV != null ? result.UV : null, TriMat = world.UV != null ? result.TriangleMaterial : null,
-                        };
+                        outcome.Mesh = mesh;
                         outcome.Decimated = true;
                         return outcome;
                     }
+                    else if (n <= (long)source.Limit * OverBudgetMaxFactor) outcome.OverBudget = mesh;
                 }
             }
 
@@ -4432,7 +4599,9 @@ namespace QuestTree.QuestGraph
         /// <param name="job">The build.</param>
         /// <param name="candidate">The candidate it is for.</param>
         /// <param name="world">The mesh, in world space.</param>
-        private static int StoreWorld(Job job, Candidate candidate, WorldMesh world)
+        /// <param name="grade">Its grade (<see cref="GradeFor"/>), held in memory on the building.</param>
+        /// <param name="groupKey">Its LOD group's key, or null with no group (the building's own Key then).</param>
+        private static int StoreWorld(Job job, Candidate candidate, WorldMesh world, byte grade, int? groupKey)
         {
             if (world?.P == null || world.T == null) return Refused;
 
@@ -4492,9 +4661,13 @@ namespace QuestTree.QuestGraph
 
             // Level and Y are filled by QuantiseBuildings once the y range and the file's bands exist; Y
             // is an empty array until then so nothing can mistake it for a quantised one.
+            var key = MapMeshFile.Building.KeyFor(HierarchyPath(candidate.Renderer.transform), candidate.Bounds.center);
+
             job.File.Buildings.Add(new MapMeshFile.Building
             {
-                Key = MapMeshFile.Building.KeyFor(HierarchyPath(candidate.Renderer.transform), candidate.Bounds.center),
+                Key = key,
+                Grade = grade,
+                GroupKey = groupKey ?? key,
                 Level = 0,
                 X = x,
                 Y = new ushort[0],
@@ -5808,7 +5981,7 @@ namespace QuestTree.QuestGraph
                     ? $" {N(job.Abandoned)} coarse fallback(s) abandoned at the drain deadline, a cap or an abort; " +
                       $"{N(job.AbandonedAtHard)} building(s) past the hard cap had no as-is room and no coarse level."
                     : "") +
-                (job.SwitchedMidRead > 0 ? $" {N(job.SwitchedMidRead)} detail read(s) discarded - the group switched to coarse." : "") +
+                (job.SwitchedMidRead > 0 ? $" {N(job.SwitchedMidRead)} read(s) discarded - the group moved to a coarser level." : "") +
                 (job.RefusedBuildingVertices + job.RefusedFileVertices > 0
                     ? $" {N(job.RefusedBuildingVertices)} refused over the per-building vertex cap, {N(job.RefusedFileVertices)} over " +
                       "the file's (not stored; counted in 'no path left')."
@@ -5845,7 +6018,8 @@ namespace QuestTree.QuestGraph
 
             Plugin.LogSource?.LogInfo(
                 $"QuestTree: building quality for {job.Request.Map} - decimations {N(job.DecimationRuns)}: to target " +
-                $"{N(job.DecimationsToTarget)}, stopped at the error limit {N(job.StoppedAtError)}, relaxed " +
+                $"{N(job.DecimationsToTarget)}, stopped at the error limit {N(job.StoppedAtError)} (stored over budget " +
+                $"{N(job.StoredOverBudget)}, +{N(job.OverBudgetExtra)} triangles, pool {N(job.OverBudgetPool)} left), relaxed " +
                 $"passes {N(job.RelaxedPasses)}, seams crossed {N(job.SeamsRelaxed)}; refused: placement clamped " +
                 $"{N(job.RefusedPlacement)}, fan {N(job.RefusedFans)}, distance {N(job.RefusedDistance)}, flip " +
                 $"{N(job.RefusedFlips)}, edge growth {N(job.RefusedEdgeGrowth)}, new sliver {N(job.RefusedSliver)}; pinned " +
