@@ -10,6 +10,7 @@ using System.Threading.Tasks;
 using EFT;
 using EFT.Interactive;
 using Newtonsoft.Json;
+using Unity.Collections;
 using UnityEngine;
 
 namespace QuestTree.QuestGraph
@@ -1018,6 +1019,16 @@ namespace QuestTree.QuestGraph
         /// managed cost of the readback now - see ReadSampleRow.</summary>
         private float[][] _sampleRows;
 
+        /// <summary>WP4 A0: Mathf.HalfToFloat for every ushort, computed BY Mathf.HalfToFloat once per session - so a
+        /// lookup is the icall's own answer, NaN payloads and denormals included, and the table and the icall give the
+        /// same float bits by construction. 256 KB, about a millisecond to build; it replaces four managed-to-native
+        /// transitions a sample (16.8 million a 2048 tile). See <see cref="HalfTableEnabled"/>.</summary>
+        private static float[] _halfTable;
+
+        /// <summary>Off switch for WP4 A0: false puts ReadSampleRow back on four Mathf.HalfToFloat icalls a sample.
+        /// Static readonly, not const, for the reason FillWaterCyan gives.</summary>
+        private static readonly bool HalfTableEnabled = true;
+
         /// <summary>The texture each tile is read back into, one tile wide and tall, reused for every
         /// tile of every floor. Half-float when the hardware will render one, so the pipeline's
         /// linear values arrive intact instead of clipped into eight bits.</summary>
@@ -2013,110 +2024,12 @@ namespace QuestTree.QuestGraph
                 // is ReadSampleRow below, which reads the CPU-side copy ReadPixels just filled.
                 _stage.ReadPixels(new Rect(0f, TileSize - th, tw, th), 0, 0);
 
-                // The floor buffer is kept in TEXTURE order - row 0 at the bottom, world -z - because
-                // that is the order SetPixels32 and EncodeToPNG want. sampleBase is this tile's first
-                // SAMPLE row in that order; it is a multiple of SupersampleFactor because the sample
-                // height, the tile size and py0 all are, which is what lets two sample rows be folded
-                // into one output row without any carry between tiles or bands.
-                var sampleBase = plan.SampleHeight - py0 - th;
-                var outCol0 = px0 / SupersampleFactor;
-                var outCols = tw / SupersampleFactor;
-
-                // Two sample rows at a time: one output row, and each output pixel's four samples are
-                // all in hand at once, so nothing has to be accumulated across frames. The rows come
-                // out of the staging texture's own memory - see ReadSampleRow.
-                {
-                    for (var row = 0; row + SupersampleFactor <= th; row += SupersampleFactor)
-                    {
-                        var outRow = (sampleBase + row) / SupersampleFactor;
-                        var pixelRow = outRow * plan.WidthPx + outCol0;
-
-                        for (var dy = 0; dy < SupersampleFactor; dy++) ReadSampleRow(row + dy, tw, _sampleRows[dy]);
-
-                        for (var outCol = 0; outCol < outCols; outCol++)
-                        {
-                            var r = 0f;
-                            var g = 0f;
-                            var b = 0f;
-                            var drawn = 0;
-
-                            for (var dy = 0; dy < SupersampleFactor; dy++)
-                            {
-                                var samples = _sampleRows[dy];
-                                var source = outCol * SupersampleFactor * 4;
-
-                                for (var dx = 0; dx < SupersampleFactor; dx++)
-                                {
-                                    var sampleAt = source + dx * 4;
-                                    var sample = new Color(
-                                        samples[sampleAt], samples[sampleAt + 1],
-                                        samples[sampleAt + 2], samples[sampleAt + 3]);
-
-                                    // The camera clears to (0,0,0,0) and draws nothing over a chunk the
-                                    // game has streamed out, so a sample with anything at all in any
-                                    // channel - alpha included, which opaque geometry writes as 1 - was
-                                    // drawn, and one that is four exact zeroes was not. Both signals
-                                    // together rather than either alone: a rendered sample in true black
-                                    // shadow has alpha, and a shader that writes no alpha still has
-                                    // colour.
-                                    // NOT A NUMBER is treated as not drawn, and this is the first of
-                                    // three places that stop it - see FillLuminance and Smooth for the
-                                    // other two. A half-float HDR render can hand back a NaN (a shader
-                                    // dividing by a zero-length vector is the usual way), it survives
-                                    // every comparison below by being false to all of them, and four
-                                    // stops of a Customs campaign died of one: it reached the smoothing
-                                    // filter, whose range-weight lookup casts a float to an int, and
-                                    // Mono's cast of a NaN is int.MinValue rather than the 0 a desktop
-                                    // .NET gives - an index a long way outside the array.
-                                    // Alpha is tested too, because alpha is half of the drawn test below:
-                                    // a NaN alpha is false to "a <= 0f", so a sample with three zero
-                                    // colour channels and a NaN alpha would count as DRAWN - an empty
-                                    // pixel recorded as a black one, in the mask the whole picture is
-                                    // composed against.
-                                    if (!IsFinite(sample.r) || !IsFinite(sample.g) || !IsFinite(sample.b) ||
-                                        !IsFinite(sample.a))
-                                    {
-                                        continue;
-                                    }
-
-                                    if (sample.r <= 0f && sample.g <= 0f && sample.b <= 0f && sample.a <= 0f)
-                                    {
-                                        continue;
-                                    }
-
-                                    r += sample.r;
-                                    g += sample.g;
-                                    b += sample.b;
-                                    drawn++;
-                                }
-                            }
-
-                            var index = pixelRow + outCol;
-                            var at = index * 3;
-
-                            // The mean of the DRAWN samples, not of all four: a pixel half covered by a
-                            // roof edge is the roof's colour rather than the roof mixed with the clear
-                            // colour, which would draw a dark fringe around everything.
-                            if (drawn > 0)
-                            {
-                                var inverse = 1f / drawn;
-                                floor.Pixels[at] = r * inverse;
-                                floor.Pixels[at + 1] = g * inverse;
-                                floor.Pixels[at + 2] = b * inverse;
-                                floor.Drawn[index] = true;
-                            }
-                            else
-                            {
-                                floor.Pixels[at] = 0f;
-                                floor.Pixels[at + 1] = 0f;
-                                floor.Pixels[at + 2] = 0f;
-                                floor.Drawn[index] = false;
-                            }
-                        }
-                    }
-                }
-
-                floor.Tiles++;
+                // WP4 A1: the average, shared with the asynchronous path - the staging texture's rows start at the
+                // tile's top row (see above), so rowOffset 0.
+                AverageTile(plan, floor, px0, py0, tw, th,
+                    _hdr ? _stage.GetPixelData<Half4>(0) : default,
+                    _hdr ? default : _stage.GetPixelData<Color32>(0),
+                    0);
             }
             catch (Exception ex)
             {
@@ -2131,6 +2044,132 @@ namespace QuestTree.QuestGraph
             }
         }
 
+        /// <summary>WP4 A1: one tile's samples folded into the floor - the average RenderTile always did, moved here
+        /// VERBATIM so the synchronous and the asynchronous readback run the same arithmetic on the same bits. The
+        /// only edited line is the row read, which takes its data and its row offset from the caller: the staging
+        /// texture holds the tile's top th rows at its rows 0..th-1 (rowOffset 0); a whole-target readback holds the
+        /// render target's own rows, the tile's top th being rows TileSize-th..TileSize-1 (rowOffset TileSize - th).
+        /// dataRow = rowOffset + row + dy is then the same render-target texel on both paths.
+        ///
+        /// Throws on anything unexpected; the caller's catch fails the floor with the "abandoned at tile" line.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="floor">The floor being rendered.</param>
+        /// <param name="px0">The tile's left edge, in samples.</param>
+        /// <param name="py0">The tile's top edge, in samples.</param>
+        /// <param name="tw">The tile's width inside the extent, in samples.</param>
+        /// <param name="th">The tile's height inside the extent, in samples.</param>
+        /// <param name="half">The samples when _hdr (row stride TileSize, row 0 at the bottom), else default.</param>
+        /// <param name="bytes">The samples when !_hdr (row stride TileSize, row 0 at the bottom), else default.</param>
+        /// <param name="rowOffset">The data row holding the tile's top sample row.</param>
+        private void AverageTile(Plan plan, FloorPlan floor, int px0, int py0, int tw, int th, NativeArray<Half4> half,
+            NativeArray<Color32> bytes, int rowOffset)
+        {
+            // The floor buffer is kept in TEXTURE order - row 0 at the bottom, world -z - because
+            // that is the order SetPixels32 and EncodeToPNG want. sampleBase is this tile's first
+            // SAMPLE row in that order; it is a multiple of SupersampleFactor because the sample
+            // height, the tile size and py0 all are, which is what lets two sample rows be folded
+            // into one output row without any carry between tiles or bands.
+            var sampleBase = plan.SampleHeight - py0 - th;
+            var outCol0 = px0 / SupersampleFactor;
+            var outCols = tw / SupersampleFactor;
+
+            // Two sample rows at a time: one output row, and each output pixel's four samples are
+            // all in hand at once, so nothing has to be accumulated across frames. The rows come
+            // out of the staging texture's own memory - see ReadSampleRow.
+            {
+                for (var row = 0; row + SupersampleFactor <= th; row += SupersampleFactor)
+                {
+                    var outRow = (sampleBase + row) / SupersampleFactor;
+                    var pixelRow = outRow * plan.WidthPx + outCol0;
+
+                    for (var dy = 0; dy < SupersampleFactor; dy++) ReadSampleRow(half, bytes, rowOffset + row + dy, tw, _sampleRows[dy]);
+
+                    for (var outCol = 0; outCol < outCols; outCol++)
+                    {
+                        var r = 0f;
+                        var g = 0f;
+                        var b = 0f;
+                        var drawn = 0;
+
+                        for (var dy = 0; dy < SupersampleFactor; dy++)
+                        {
+                            var samples = _sampleRows[dy];
+                            var source = outCol * SupersampleFactor * 4;
+
+                            for (var dx = 0; dx < SupersampleFactor; dx++)
+                            {
+                                var sampleAt = source + dx * 4;
+                                var sample = new Color(
+                                    samples[sampleAt], samples[sampleAt + 1],
+                                    samples[sampleAt + 2], samples[sampleAt + 3]);
+
+                                // The camera clears to (0,0,0,0) and draws nothing over a chunk the
+                                // game has streamed out, so a sample with anything at all in any
+                                // channel - alpha included, which opaque geometry writes as 1 - was
+                                // drawn, and one that is four exact zeroes was not. Both signals
+                                // together rather than either alone: a rendered sample in true black
+                                // shadow has alpha, and a shader that writes no alpha still has
+                                // colour.
+                                // NOT A NUMBER is treated as not drawn, and this is the first of
+                                // three places that stop it - see FillLuminance and Smooth for the
+                                // other two. A half-float HDR render can hand back a NaN (a shader
+                                // dividing by a zero-length vector is the usual way), it survives
+                                // every comparison below by being false to all of them, and four
+                                // stops of a Customs campaign died of one: it reached the smoothing
+                                // filter, whose range-weight lookup casts a float to an int, and
+                                // Mono's cast of a NaN is int.MinValue rather than the 0 a desktop
+                                // .NET gives - an index a long way outside the array.
+                                // Alpha is tested too, because alpha is half of the drawn test below:
+                                // a NaN alpha is false to "a <= 0f", so a sample with three zero
+                                // colour channels and a NaN alpha would count as DRAWN - an empty
+                                // pixel recorded as a black one, in the mask the whole picture is
+                                // composed against.
+                                if (!IsFinite(sample.r) || !IsFinite(sample.g) || !IsFinite(sample.b) ||
+                                    !IsFinite(sample.a))
+                                {
+                                    continue;
+                                }
+
+                                if (sample.r <= 0f && sample.g <= 0f && sample.b <= 0f && sample.a <= 0f)
+                                {
+                                    continue;
+                                }
+
+                                r += sample.r;
+                                g += sample.g;
+                                b += sample.b;
+                                drawn++;
+                            }
+                        }
+
+                        var index = pixelRow + outCol;
+                        var at = index * 3;
+
+                        // The mean of the DRAWN samples, not of all four: a pixel half covered by a
+                        // roof edge is the roof's colour rather than the roof mixed with the clear
+                        // colour, which would draw a dark fringe around everything.
+                        if (drawn > 0)
+                        {
+                            var inverse = 1f / drawn;
+                            floor.Pixels[at] = r * inverse;
+                            floor.Pixels[at + 1] = g * inverse;
+                            floor.Pixels[at + 2] = b * inverse;
+                            floor.Drawn[index] = true;
+                        }
+                        else
+                        {
+                            floor.Pixels[at] = 0f;
+                            floor.Pixels[at + 1] = 0f;
+                            floor.Pixels[at + 2] = 0f;
+                            floor.Drawn[index] = false;
+                        }
+                    }
+                }
+            }
+
+            floor.Tiles++;
+        }
+
         /// <summary>One row of the staging texture as plain floats, four to a pixel, read straight out
         /// of the texture's own memory.
         ///
@@ -2141,32 +2180,44 @@ namespace QuestTree.QuestGraph
         ///
         /// The branch is per ROW, not per pixel: two thousand pixels of the same format follow every
         /// test.</summary>
-        /// <param name="stageRow">The row of the staging texture, counting from its bottom.</param>
+        /// <param name="half">The tile's samples when _hdr (row stride TileSize), else default - the staging texture's
+        /// GetPixelData view, or a readback slot's own array (WP4 A1).</param>
+        /// <param name="bytes">The tile's samples when !_hdr (row stride TileSize), else default.</param>
+        /// <param name="dataRow">The row of THAT array, counting from its bottom.</param>
         /// <param name="samples">How many samples of that row to read.</param>
         /// <param name="into">The row buffer to fill, four floats a sample.</param>
-        private void ReadSampleRow(int stageRow, int samples, float[] into)
+        private void ReadSampleRow(NativeArray<Half4> half, NativeArray<Color32> bytes, int dataRow, int samples, float[] into)
         {
-            var from = stageRow * TileSize;
+            var from = dataRow * TileSize;
 
             if (_hdr)
             {
-                var data = _stage.GetPixelData<Half4>(0);
+                // WP4 A0: Mathf.HalfToFloat's own answers, looked up; null when HalfTableEnabled is off.
+                var table = _halfTable;
 
                 for (var x = 0; x < samples; x++)
                 {
-                    var sample = data[from + x];
+                    var sample = half[from + x];
                     var at = x * 4;
 
-                    into[at] = Mathf.HalfToFloat(sample.R);
-                    into[at + 1] = Mathf.HalfToFloat(sample.G);
-                    into[at + 2] = Mathf.HalfToFloat(sample.B);
-                    into[at + 3] = Mathf.HalfToFloat(sample.A);
+                    if (table != null)
+                    {
+                        into[at] = table[sample.R];
+                        into[at + 1] = table[sample.G];
+                        into[at + 2] = table[sample.B];
+                        into[at + 3] = table[sample.A];
+                    }
+                    else
+                    {
+                        into[at] = Mathf.HalfToFloat(sample.R);
+                        into[at + 1] = Mathf.HalfToFloat(sample.G);
+                        into[at + 2] = Mathf.HalfToFloat(sample.B);
+                        into[at + 3] = Mathf.HalfToFloat(sample.A);
+                    }
                 }
 
                 return;
             }
-
-            var bytes = _stage.GetPixelData<Color32>(0);
 
             for (var x = 0; x < samples; x++)
             {
@@ -2196,6 +2247,19 @@ namespace QuestTree.QuestGraph
             public ushort A;
         }
 #pragma warning restore CS0649
+
+        /// <summary>WP4 A0: the half-float table, built on first use on the main thread (BuildTarget, once _hdr is
+        /// known) and kept for the session; null when <see cref="HalfTableEnabled"/> is off.</summary>
+        private static float[] HalfTable()
+        {
+            if (!HalfTableEnabled) return null;
+            if (_halfTable != null) return _halfTable;
+
+            var table = new float[65536];
+            for (var i = 0; i < table.Length; i++) table[i] = Mathf.HalfToFloat((ushort)i);
+
+            return _halfTable = table;
+        }
 
         /// <summary>Encodes a developed floor, writes it and its distance sidecar, and says what the
         /// merge did. The last of the floor's three post-tile frames - measure, develop, encode - which
@@ -6388,6 +6452,9 @@ namespace QuestTree.QuestGraph
         private void BuildTarget()
         {
             _hdr = SystemInfo.SupportsRenderTextureFormat(RenderTextureFormat.ARGBHalf);
+
+            // WP4 A0: the table ReadSampleRow looks the half floats up in - Mathf.HalfToFloat's own answers.
+            if (_hdr) HalfTable();
 
             if (!_hdr)
             {
