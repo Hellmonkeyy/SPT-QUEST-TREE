@@ -323,10 +323,9 @@ namespace QuestTree.QuestGraph
         /// The trade, stated because it is real: for the second or so a floor takes, the player's own
         /// frames draw the distant geometry too (slower frames, and pop-in that undoes itself), and any
         /// water on the water layer is a flat blue sheet in them - the hold swaps its material rather than
-        /// hiding it, see HoldWater. And if the player walks INTO a culling collider during that
-        /// second, the game switches those components on while we hold them and the release switches
-        /// them back off - the roof over their head goes until they cross the collider again. A second
-        /// of that, on a key they pressed, against a picture with buildings in it.
+        /// hiding it, see HoldWater. A player who walks INTO a culling collider during the hold keeps
+        /// the roof over their head: the release asks each culler's own HasEntered before it switches
+        /// anything back off, and then has the cullers it touched re-apply their own state (review F07).
         ///
         /// Two limitations of the GameObject half of the hold, stated because neither is obvious from the
         /// code and both would look like a bug in a picture:
@@ -339,8 +338,8 @@ namespace QuestTree.QuestGraph
         /// 2. The pre-state is read at hold time, not at collect time. HoldScene reads activeSelf as it
         ///    switches each object and ReleaseScene puts back exactly that, so anything the GAME switched
         ///    between two floors is honoured. What is not honoured is a change made while the hold is on:
-        ///    the release puts the object back to what it was when the floor started, which is the
-        ///    walked-into-a-collider case above.</summary>
+        ///    the release puts the object back to what it was when the floor started, unless its culler
+        ///    says the player is inside it - and the culler's own ForceUpdate corrects the rest (review F07).</summary>
         private static readonly bool ForceCulling = true;
 
         /// <summary>The layer real water bodies live on. Layer 4 is Unity's own "Water", and EFT uses
@@ -963,7 +962,8 @@ namespace QuestTree.QuestGraph
         private bool[] _cullingWasEnabled;
 
         /// <summary>The culling objects, and which of them owns each component and each object in the flat lists
-        /// (review F07) - so the release can leave alone what belongs to a culler the player is now inside.</summary>
+        /// - so the release can ask each culler's own HasEntered, and have the ones it touched re-apply their
+        /// state (review F07).</summary>
         private DisablerCullingObject[] _cullers;
 
         private int[] _cullingOwner;
@@ -3989,24 +3989,41 @@ namespace QuestTree.QuestGraph
         /// switch off something it never switched on.
         ///
         /// Idempotent and never throws, because the floor loop calls it and <see cref="Cleanup"/> calls
-        /// it again: the counts are cleared here, so the second call has nothing to do.</summary>
+        /// it again: the counts are cleared here, so the second call has nothing to do.
+        ///
+        /// An entry whose culler says the player is inside it (its own HasEntered) is left on, and every
+        /// culler an entry of which was restored is then asked to re-apply its own state (ForceUpdate), so
+        /// the game - not a guess at its colliders - decides what a player who moved during the hold sees
+        /// (review F07).</summary>
         private void ReleaseScene()
         {
+            var cullers = _cullers;
+            var held = _cullingHeld > 0 || _cullingObjectsHeldCount > 0;   // the second (Cleanup) call has nothing
+            var asks = ReleaseAsksCullers && held && cullers != null;
+            var touched = asks ? new bool[cullers.Length] : null;
+            var all = false;
+            var keptOn = 0;
+
             try
             {
-                // The cullers the player is inside NOW (review F07): the mesh hold lasts a minute or two, and a
-                // player who walked into a building's collider meanwhile has had its geometry switched on by the
-                // game - putting back the hold-start snapshot would switch the roof off over their head until they
-                // crossed the collider again. Those entries are left as they are.
-                var inside = CullersHoldingPlayer();
-
                 if (_culling != null)
                 {
                     for (var i = 0; i < _cullingHeld && i < _culling.Length; i++)
                     {
                         var component = _culling[i];
                         if (component == null || _cullingWasEnabled[i]) continue;
-                        if (inside != null && _cullingOwner != null && i < _cullingOwner.Length && inside[_cullingOwner[i]]) continue;
+
+                        var owner = OwnerOf(_cullingOwner, i);
+                        if (touched != null && owner >= 0 && owner < touched.Length) touched[owner] = true;
+
+                        // The game's own answer (review F07): a culler whose triggers hold the player wants all of its
+                        // lists ON - HasEntered implies _enteredColliders.Count > 0, which is what the
+                        // ignore-inverse list follows too - so its entries stay as the hold left them.
+                        if (asks && Entered(cullers, owner))
+                        {
+                            keptOn++;
+                            continue;
+                        }
 
                         component.SetEnabledUniversal(false);
                     }
@@ -4018,8 +4035,15 @@ namespace QuestTree.QuestGraph
                     {
                         var item = _cullingObjectsHeld[i];
                         if (item == null || _cullingObjectWasActive[i]) continue;
-                        if (inside != null && _cullingObjectOwner != null && i < _cullingObjectOwner.Length &&
-                            inside[_cullingObjectOwner[i]]) continue;
+
+                        var owner = OwnerOf(_cullingObjectOwner, i);
+                        if (touched != null && owner >= 0 && owner < touched.Length) touched[owner] = true;
+
+                        if (asks && Entered(cullers, owner))
+                        {
+                            keptOn++;
+                            continue;
+                        }
 
                         // Guarded one by one for the same reason the hold is: OnDisable runs here.
                         try
@@ -4038,6 +4062,8 @@ namespace QuestTree.QuestGraph
             }
             catch (Exception ex)
             {
+                all = true;   // a partial restore: let the game re-apply every culler, not just the ones reached
+
                 Plugin.LogSource?.LogWarning(
                     $"QuestTree: the scene could not be put back after a floor ({ex.GetType().Name}: " +
                     $"{ex.Message}).");
@@ -4047,55 +4073,74 @@ namespace QuestTree.QuestGraph
                 _cullingHeld = 0;
                 _cullingObjectsHeldCount = 0;
                 ReleaseWater();
+
+                if (touched != null) Resync(cullers, touched, all, keptOn);
             }
         }
 
-        /// <summary>Which culling objects the player is inside right now - by each one's own enabled colliders
-        /// (ClosestPoint where the collider supports it, its bounds where it does not) - or null when there is no
-        /// player or no cullers. Guarded: a culler that will not answer counts as "not inside", which is the
-        /// release's old behaviour.</summary>
-        private bool[] CullersHoldingPlayer()
+        /// <summary>Rollback switch for review F07: false has the release restore the hold's snapshot exactly and
+        /// ask no culler anything (f1aa04f without its geometric test, which gave wrong answers both ways).</summary>
+        private static readonly bool ReleaseAsksCullers = true;
+
+        /// <summary>The culler that owns flat-list entry <paramref name="i"/>, or -1.</summary>
+        /// <param name="owners">The owner indices.</param>
+        /// <param name="i">The entry.</param>
+        private static int OwnerOf(int[] owners, int i) => owners != null && i < owners.Length ? owners[i] : -1;
+
+        /// <summary>Whether the game says the player is inside this culler - its own HasEntered, i.e. its trigger
+        /// colliders have reported the player and no inverse one has. False for no culler, or one that will not say.</summary>
+        /// <param name="cullers">The culling objects.</param>
+        /// <param name="owner">The culler's index.</param>
+        private static bool Entered(DisablerCullingObject[] cullers, int owner)
         {
+            if (cullers == null || owner < 0 || owner >= cullers.Length) return false;
+
             try
             {
-                var cullers = _cullers;
-                var player = _gameWorld?.MainPlayer;
-                if (cullers == null || cullers.Length == 0 || player == null) return null;
+                var culler = cullers[owner];
+                return culler != null && culler.HasEntered;
+            }
+            catch
+            {
+                return false;
+            }
+        }
 
-                var at = player.Transform.position;
-                var inside = new bool[cullers.Length];
+        /// <summary>Asks each culler this hold touched (or all of them) to re-apply its own state on its next
+        /// ManualUpdate (DisablerCullingObject.ForceUpdate - a flag): SetComponentsEnabled(HasEntered), with the
+        /// ignore-inverse list on _enteredColliders.Count > 0. So whatever the snapshot restore got wrong for a player
+        /// who moved during the hold - an inverse collider entered, a trigger crossed while the game's own worker
+        /// was mid-switch - the game corrects, exactly as it does whenever the player crosses a culler's trigger.</summary>
+        /// <param name="cullers">The culling objects.</param>
+        /// <param name="touched">Which of them had an entry the release switched or left on.</param>
+        /// <param name="all">True to ask every culler: the restore did not finish.</param>
+        /// <param name="keptOn">Entries left on for the player inside their culler, for the line.</param>
+        private static void Resync(DisablerCullingObject[] cullers, bool[] touched, bool all, int keptOn)
+        {
+            var asked = 0;
 
-                for (var c = 0; c < cullers.Length; c++)
+            for (var c = 0; c < cullers.Length; c++)
+            {
+                if (!all && (c >= touched.Length || !touched[c])) continue;
+
+                try
                 {
                     var culler = cullers[c];
                     if (culler == null) continue;
 
-                    try
-                    {
-                        foreach (var collider in culler.GetComponents<Collider>())
-                        {
-                            if (collider == null || !collider.enabled || !collider.bounds.Contains(at)) continue;
-
-                            var convex = !(collider is MeshCollider mesh) || mesh.convex;
-                            if (!convex || (collider.ClosestPoint(at) - at).sqrMagnitude < 1e-6f)
-                            {
-                                inside[c] = true;
-                                break;
-                            }
-                        }
-                    }
-                    catch
-                    {
-                        // not inside, as the release has always assumed
-                    }
+                    culler.ForceUpdate();
+                    asked++;
                 }
+                catch (Exception ex)
+                {
+                    Plugin.LogSource?.LogDebug($"QuestTree: a culling object would not take a re-check ({ex.Message}).");
+                }
+            }
 
-                return inside;
-            }
-            catch
-            {
-                return null;
-            }
+            Plugin.LogSource?.LogDebug(
+                $"QuestTree: the scene is let go - {asked} culling object(s) asked to re-apply their own state" +
+                (keptOn > 0 ? $", {keptOn} entry(ies) left on for the player inside their culler" : "") +
+                (all ? " (all of them: the restore did not finish)" : "") + ".");
         }
 
         // --- the water quads ---------------------------------------------------------------------
@@ -5466,6 +5511,9 @@ namespace QuestTree.QuestGraph
                 _cullingWasEnabled = null;
                 _cullingObjectsHeld = null;
                 _cullingObjectWasActive = null;
+                _cullers = null;
+                _cullingOwner = null;
+                _cullingObjectOwner = null;
                 _cullingObjects = 0;
                 _water = null;
                 _waterMaterials = null;
