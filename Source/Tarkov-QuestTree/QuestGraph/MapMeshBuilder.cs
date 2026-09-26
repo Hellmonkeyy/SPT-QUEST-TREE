@@ -524,13 +524,14 @@ namespace QuestTree.QuestGraph
         /// and the capture rebuilds from scratch. The leading revision is bumped by hand for a code change no constant
         /// shows: "r2" since the WP2 fixes (the re-read rules, the LOD fallback, texture re-reads), "r3" since fixes 2
         /// (the recorded attempts - sidecar v2 - and the plan without double counts), "r4" since fixes 3 (clean attempts
-        /// only, the union demand at stored sizes, re-target and texture attempts - sidecar v3), so every index an earlier
-        /// WP2 build wrote is discarded once. Declared AFTER every static field of this class it reads (static initialisers run in
+        /// only, the union demand at stored sizes, re-target and texture attempts - sidecar v3), "r5" since fixes 4 (s_G over
+        /// the new buildings with the stored ones at what they hold, unclean attempts counted - sidecar v4), so every index an
+        /// earlier WP2 build wrote is discarded once. Declared AFTER every static field of this class it reads (static initialisers run in
         /// textual order - NotBuildingLayerNames above it would otherwise still be null).
         /// </summary>
         internal static readonly string MeshRecipe = string.Join(";", new[]
         {
-            "r4", RecipePart(MapMeshFile.Version), RecipePart(MapMeshIndex.Version),
+            "r5", RecipePart(MapMeshFile.Version), RecipePart(MapMeshIndex.Version),
             RecipePart(AreaBudget.TrianglesPerSquareMetre), RecipePart(AreaBudget.MinTriangles),
             RecipePart(AreaBudget.MaxTrianglesPerBuilding), RecipePart(AreaBudget.TrianglesPerStorey),
             RecipePart(AreaBudget.StoreyMetres), AreaBudget.BudgetBasis.ToString(), RecipePart(AreaBudget.SurfacePerFootprint),
@@ -1160,11 +1161,16 @@ namespace QuestTree.QuestGraph
                         }
 
                         // Past the soft cap a detail source over its target is not read at all: its group
-                        // takes the coarse path, as it is, now.
+                        // takes the coarse path, as it is, now. WP2 (fixes 4): an unclean attempt - counted, not recorded.
+                        var skippedLod = SkippedLod(job, candidate);
                         if (job.DecimationStopped &&
                             candidate.SourceTriangles > TargetFor(job, candidate) &&
                             EnqueueNextLevel(job, candidate))
                         {
+                            if (skippedLod >= 0 && job.Groups.TryGetValue(candidate.Group, out var skipped) && skipped != null)
+                                skipped.UncleanLods.Add(skippedLod);
+                            candidate.CleanAttempt = false;
+                            RecordTried(job, candidate);
                             ReturnCredit(job, candidate);
                             continue;
                         }
@@ -2010,6 +2016,10 @@ namespace QuestTree.QuestGraph
 
             internal bool TextureWait;
 
+            /// <summary>WP2 (fixes 4): its attempt was recorded on its stored row already (RecordTried runs from more than one
+            /// place; an unclean attempt must be counted once).</summary>
+            internal bool AttemptRecorded;
+
             /// <summary>WP2: the stored building it was matched to, whatever its kind.</summary>
             internal StoredEntry Matched;
 
@@ -2289,6 +2299,10 @@ namespace QuestTree.QuestGraph
             /// so no path settles it twice. Fixes 2: for ANY building a candidate replaces - its triangles are out of the
             /// ledger's stored count while the replacement is pending, and settle once: replaced, or back on a failure.</summary>
             internal bool Settled;
+
+            /// <summary>WP2 (fixes 4): an attempt was recorded on it this build (its own re-read), so its group's unclean
+            /// finer level does not count a second one.</summary>
+            internal bool AttemptNoted;
 
             /// <summary>WP2 (fixes 2): the candidate reading it again this build (a re-read, a changed signature, a
             /// re-target), whose outcome settles it.</summary>
@@ -4448,25 +4462,35 @@ namespace QuestTree.QuestGraph
         private static void RecordTried(Job job, Candidate c)
         {
             var e = c?.Replaces;
-            if (e == null || e.Drop || c.Kind == KindChanged || !c.CleanAttempt) return;
+            if (e == null || e.Drop || c.Kind == KindChanged || c.AttemptRecorded) return;
 
+            c.AttemptRecorded = true;
+            e.AttemptNoted = true;
             var target = c.Target > 0 ? c.Target : TargetNow(job, e.Meta);
 
             if (c.Retarget)
             {
-                RecordRetarget(job, e, target);
+                if (c.CleanAttempt) RecordRetarget(job, e, target);
                 return;
             }
 
-            var changed = MapMeshIndex.RecordAttempt(e.Meta, true, target, Math.Min(254, c.ReadLod));
+            // WP2 (fixes 4): an unclean attempt is counted, and recorded once it is past MaxUncleanAttempts in a row
+            var changed = MapMeshIndex.RecordAttempt(e.Meta, c.CleanAttempt, target, Math.Min(254, c.ReadLod));
 
-            if (c.Reason == MapMeshIndex.ReasonTexture && e.Meta.TextureTried == 0)
+            if (c.Reason == MapMeshIndex.ReasonTexture && e.Meta.TextureTried == 0 && MapMeshIndex.AttemptRecorded(e.Meta, c.CleanAttempt))
             {
                 e.Meta.TextureTried = 1;
                 changed = true;
             }
 
             if (changed) job.IndexChanged = true;
+        }
+
+        /// <summary>WP2 (fixes 4): the LOD level a soft-cap fallback skips - its group's current level - or -1 for none.</summary>
+        private static int SkippedLod(Job job, Candidate c)
+        {
+            if (c?.Group == null || !job.Groups.TryGetValue(c.Group, out var state) || state == null) return -1;
+            return state.Current < state.Levels.Count ? state.Levels[state.Current].Lod : -1;
         }
 
         /// <summary>WP2 (fixes 3): a clean re-target that failed (in place or re-read) is recorded at the target it aimed for,
@@ -6303,6 +6327,8 @@ namespace QuestTree.QuestGraph
 
             // WP2 (fixes 2, 3): the target it was read at and its level - only when its read was clean (a source stored as it is
             // because the soft cap skipped its decimation, or after a time-out, stays untried and is read once more)
+            // WP2 (fixes 4): a replacement continues the count of the row it replaces
+            if (c.Replaces != null) e.UncleanAttempts = c.Replaces.Meta.UncleanAttempts;
             MapMeshIndex.RecordAttempt(e, c.CleanAttempt, TargetFor(job, c), Math.Min(254, c.ReadLod));
 
             if (c.Group != null && job.Groups.TryGetValue(c.Group, out var state) && state != null)
@@ -6312,7 +6338,7 @@ namespace QuestTree.QuestGraph
 
                 // the finest level its group read cleanly (a finer level that failed cleanly is tried; one skipped by the soft
                 // cap's fallback, or read uncleanly, is not)
-                if (state.CleanLod != int.MaxValue) MapMeshIndex.RecordAttempt(e, true, 0, Math.Min(254, state.CleanLod));
+                if (state.CleanLod != int.MaxValue && state.CleanLod < e.TriedLevel) e.TriedLevel = (byte)Math.Min(254, state.CleanLod);
                 e.Gx = state.GroupPosition.x;
                 e.Gy = state.GroupPosition.y;
                 e.Gz = state.GroupPosition.z;
@@ -6714,7 +6740,7 @@ namespace QuestTree.QuestGraph
             // a time-out or a squeezed limit is unclean): otherwise the group stays untried and the next stop reads it once more
             foreach (var state in job.Groups.Values)
             {
-                if (state?.Stored == null || state.CleanLod == int.MaxValue) continue;
+                if (state?.Stored == null) continue;
 
                 var kept = state.Stored.FindAll(s => !s.Drop);
                 if (kept.Count == 0) continue;
@@ -6722,16 +6748,23 @@ namespace QuestTree.QuestGraph
                 var storedLod = int.MaxValue;
                 foreach (var s in kept) storedLod = Math.Min(storedLod, s.Meta.Lod);
 
-                if (state.CleanLod >= storedLod) continue;
-
-                var unclean = false;
+                var uncleanLod = int.MaxValue;
                 foreach (var lod in state.UncleanLods)
-                    if (lod < storedLod) unclean = true;
-                if (unclean) continue;
+                    if (lod < storedLod) uncleanLod = Math.Min(uncleanLod, lod);
+
+                if (state.CleanLod >= storedLod && uncleanLod == int.MaxValue) continue;
+
+                // WP2 (fixes 4): an unclean finer level is COUNTED on the stored rows (recorded once past MaxUncleanAttempts
+                // in a row) - a row whose own re-read was counted this build is not counted twice
+                var clean = uncleanLod == int.MaxValue;
+                var level = clean ? state.CleanLod : Math.Min(uncleanLod, state.CleanLod);
 
                 foreach (var s in kept)
-                    if (MapMeshIndex.RecordAttempt(s.Meta, true, TargetNow(job, s.Meta), Math.Min(254, state.CleanLod)))
+                {
+                    if (!clean && s.AttemptNoted) continue;
+                    if (MapMeshIndex.RecordAttempt(s.Meta, clean, TargetNow(job, s.Meta), Math.Min(254, level)))
                         job.IndexChanged = true;
+                }
             }
         }
 
@@ -12827,6 +12860,53 @@ namespace QuestTree.QuestGraph
             // I0: nothing stored - the plan IS Targets, whatever the numbers (a list whose floors alone pass the cap
             // keeps Targets' own answer rather than a second bisection's).
             if (!anyStored && extraFixed <= 0) return plan;
+
+            // WP2 (fixes 4): s_G is solved over the NEW buildings against what the stored ones leave of the planned cap - each
+            // stored building counts what it holds, never re-scaled up to its target (a coarse or clustered one under its
+            // target leaves the rest to the new ones), and an over-served one no more than its target at s (its excess is
+            // what a re-target frees, below). The floors stay the union's (Q1).
+            {
+                var all = new double[n];
+                for (var i = 0; i < n; i++) all[i] = Basis(surfaces[i], footprints[i], heights[i]);
+
+                long Total(double s)
+                {
+                    var total = Math.Max(0L, extraFixed);
+                    for (var i = 0; i < n; i++)
+                    {
+                        var at = Math.Min(sources[i], (long)Target(all[i], s, floors[i]));
+                        total += stored[i] >= 0 ? Math.Min(stored[i], at) : Math.Max(carried != null ? carried[i] : 0L, at);
+                    }
+
+                    return total;
+                }
+
+                if (Total(1d) <= plannedCap) scale = 1d;
+                else
+                {
+                    double lo = 0d, hi = 1d;
+                    for (var step = 0; step < 50; step++)
+                    {
+                        var mid = (lo + hi) * 0.5;
+                        if (Total(mid) <= plannedCap) lo = mid;
+                        else hi = mid;
+                    }
+
+                    scale = lo;
+                }
+
+                plan.Scale = scale;
+                plan.FlexScale = scale;
+
+                want = 0L;
+                for (var i = 0; i < n; i++)
+                {
+                    plan.Targets[i] = Target(all[i], scale, floors[i]);
+                    if (stored[i] < 0) want += Math.Max(carried != null ? carried[i] : 0L, Math.Min(sources[i], plan.Targets[i]));
+                }
+
+                plan.Want = want;
+            }
 
             // WP2 (fixes 3): the stored buildings are what they hold, all of it inside the cap; only what the new ones want
             // keeps the budget's share (the headroom their decimations overshoot into) - it binds when

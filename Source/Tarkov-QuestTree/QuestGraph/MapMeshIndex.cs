@@ -31,8 +31,13 @@ namespace QuestTree.QuestGraph
     {
         /// <summary>The layout's version. A change to the byte table below is a new number; the reader refuses others,
         /// which only costs one from-scratch capture. 2 (WP2 fixes 2): each building's triedTarget and triedLevel, each
-        /// material's unplacedPages. 3 (WP2 fixes 3): each building's retargetTried and textureTried.</summary>
-        internal const int Version = 3;
+        /// material's unplacedPages. 3 (WP2 fixes 3): each building's retargetTried and textureTried. 4 (WP2 fixes 4): each
+        /// building's uncleanAttempts.</summary>
+        internal const int Version = 4;
+
+        /// <summary>WP2 (fixes 4): how many unclean attempts in a row leave a row untried - the next one is recorded as if it
+        /// were clean, so a building whose decimation or cluster always times out is not read at every stop.</summary>
+        internal const int MaxUncleanAttempts = 3;
 
         /// <summary>The first four bytes inside the deflate block.</summary>
         internal const string Magic = "QTMI";
@@ -269,6 +274,10 @@ namespace QuestTree.QuestGraph
 
             internal byte TextureTried;
 
+            /// <summary>WP2 (fixes 4): the unclean attempts in a row since its last clean read (see
+            /// <see cref="MaxUncleanAttempts"/>), 0 after a clean one.</summary>
+            internal byte UncleanAttempts;
+
             /// <summary>Each atlas range's material key, in the order of the mesh building's Ranges.</summary>
             internal ulong[] RangeMaterials = new ulong[0];
 
@@ -449,6 +458,7 @@ namespace QuestTree.QuestGraph
                         w.Write(e.TriedLevel);
                         w.Write(e.RetargetTried);
                         w.Write(e.TextureTried);
+                        w.Write(e.UncleanAttempts);
                         w.Write((byte)e.RangeMaterials.Length);
                         foreach (var key in e.RangeMaterials) w.Write(key);
                     }
@@ -635,7 +645,7 @@ namespace QuestTree.QuestGraph
                     LevelIndex = r.ReadByte(), Grade = r.ReadByte(), Dup = r.ReadByte(), Footprint = r.ReadSingle(),
                     Surface = r.ReadSingle(), Height = r.ReadSingle(), StoredTriangles = r.ReadInt32(), Centroid = r.ReadSingle(),
                     CapturedAt = r.ReadUInt16(), TriedTarget = r.ReadInt32(), TriedLevel = r.ReadByte(),
-                    RetargetTried = r.ReadInt32(), TextureTried = r.ReadByte(),
+                    RetargetTried = r.ReadInt32(), TextureTried = r.ReadByte(), UncleanAttempts = r.ReadByte(),
                 };
 
                 if (e.StoredTriangles < 0) throw new InvalidDataException($"building {i} has a negative triangle count");
@@ -790,12 +800,31 @@ namespace QuestTree.QuestGraph
         /// of headroom or the over-budget pool, not aborted). An unclean read leaves the row as it was, so the next stop
         /// tries it once more; a clean failure there records it. The tried target only grows and the tried level only gets
         /// finer. level <see cref="NeverTried"/> records the target alone. True when the row changed.
+        /// WP2 (fixes 4): an unclean attempt is counted; the one after <see cref="MaxUncleanAttempts"/> in a row is recorded
+        /// anyway (so a building that always times out is read at most that many times more), and a clean one resets the
+        /// count.
         /// </summary>
         internal static bool RecordAttempt(Entry e, bool clean, int target, int level)
         {
-            if (e == null || !clean) return false;
+            if (e == null) return false;
 
             var changed = false;
+
+            if (!clean)
+            {
+                if (e.UncleanAttempts < byte.MaxValue)
+                {
+                    e.UncleanAttempts++;
+                    changed = true;
+                }
+
+                if (e.UncleanAttempts <= MaxUncleanAttempts) return changed;
+            }
+            else if (e.UncleanAttempts != 0)
+            {
+                e.UncleanAttempts = 0;
+                changed = true;
+            }
 
             if (target > e.TriedTarget)
             {
@@ -815,6 +844,10 @@ namespace QuestTree.QuestGraph
 
         /// <summary>WP2 (fixes 3): whether an over-served stored building may be re-targeted to this required target - never
         /// tried, or its last clean failure was at a target this one differs from by more than the shortfall.</summary>
+        /// <summary>WP2 (fixes 4): whether a row's attempt stands recorded - a clean one, or an unclean one past
+        /// <see cref="MaxUncleanAttempts"/> in a row.</summary>
+        internal static bool AttemptRecorded(Entry e, bool clean) => clean || (e != null && e.UncleanAttempts > MaxUncleanAttempts);
+
         internal static bool RetargetDue(long required, int retargetTried, double shortfall) =>
             retargetTried <= 0 || Math.Abs(required - (long)retargetTried) > retargetTried * shortfall;
 

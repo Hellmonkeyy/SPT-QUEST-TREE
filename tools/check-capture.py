@@ -1298,7 +1298,8 @@ def check_mesh(meta, folder, key, extent, levels, errors, warnings):
 # that describes it wrongly (the rows disagree with the mesh, two rows of one identity, two levels of one LOD group) is
 # an ERROR - that is a builder bug the next capture would build on.
 INDEX_MAGIC = b"QTMI"
-INDEX_VERSION = 3               # MapMeshIndex.Version (2: triedTarget/triedLevel, unplacedPages; 3: retargetTried/textureTried)
+INDEX_VERSION = 4               # MapMeshIndex.Version (2: triedTarget/triedLevel, unplacedPages; 3: retargetTried/textureTried;
+                                # 4: uncleanAttempts)
 INDEX_SUFFIX = "-mesh.index"    # MapMeshIndex.Suffix
 INDEX_MAX_RECIPE = 512
 INDEX_MAX_GAME = 128
@@ -1308,7 +1309,7 @@ INDEX_SLACK = 0.25              # MapMeshIndex.IdentitySlackMetres
 INDEX_FLAT_PIXELS = 4           # MapMeshBuilder.AtlasFlatPixels
 INDEX_PADDING = 8               # MapMeshBuilder.AtlasPadding
 INDEX_MATERIAL = struct.Struct("<Q10iBBBBBfHB")
-INDEX_BUILDING = struct.Struct("<Q4i6fQ3fiBBB3fifHiBiBB")
+INDEX_BUILDING = struct.Struct("<Q4i6fQ3fiBBB3fifHiBiBBB")
 
 
 def read_index(data):
@@ -1377,7 +1378,7 @@ def read_index(data):
             "centre": v[5:8], "size": v[8:11], "groupHash": v[11], "groupPos": v[12:15], "groupKey": v[15],
             "levelIndex": v[16], "grade": v[17], "dup": v[18], "footprint": v[19], "surface": v[20], "height": v[21],
             "stored": v[22], "centroid": v[23], "capturedAt": v[24], "triedTarget": v[25], "triedLevel": v[26],
-            "retargetTried": v[27], "textureTried": v[28], "keys": keys})
+            "retargetTried": v[27], "textureTried": v[28], "uncleanAttempts": v[29], "keys": keys})
     if cur.at != len(body):
         raise MeshError(f"carries {len(body) - cur.at} byte(s) after its last building")
     return index

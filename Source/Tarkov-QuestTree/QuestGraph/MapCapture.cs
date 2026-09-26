@@ -2434,6 +2434,69 @@ namespace QuestTree.QuestGraph
         /// <summary>WP2 (fixes 3): where a committed file's previous version waits while its replacement moves in.</summary>
         private const string OldSuffix = ".old";
 
+        /// <summary>
+        /// WP2 (fixes 4): a commit interrupted between its two moves leaves the file under <see cref="OldSuffix"/> and nothing
+        /// under its own name. Before anything decides on the earlier capture's files, each one the meta names with a hash -
+        /// the mesh and every atlas page by their sha256, the index by the mesh sha it is bound to - that is missing while
+        /// its .old is there and matches is moved back. Anything else is left to <see cref="DropStalePictures"/>. Only a
+        /// missing file is ever looked at, so a normal load pays a File.Exists per file.
+        /// </summary>
+        private static void RestoreOld(Plan plan, CaptureMeta meta)
+        {
+            if (meta == null || plan?.Dir == null) return;
+
+            var mesh = meta.Mesh;
+            if (mesh != null && IsPlainFileName(mesh.File) && !string.IsNullOrEmpty(mesh.Sha256))
+            {
+                RestoreOld(Path.Combine(plan.Dir, mesh.File), bytes => string.Equals(Sha256(bytes), mesh.Sha256, StringComparison.OrdinalIgnoreCase));
+                RestoreOld(Path.Combine(plan.Dir, MapMeshIndex.FileNameFor(plan.Key)),
+                    bytes => MapMeshIndex.SameBytes(MapMeshIndex.Read(bytes).MeshSha, MapMeshIndex.ShaBytes(mesh.Sha256)));
+            }
+
+            if (meta.Atlas == null) return;
+
+            foreach (var page in meta.Atlas)
+            {
+                if (page == null || !IsPlainFileName(page.File) || string.IsNullOrEmpty(page.Sha256)) continue;
+                RestoreOld(Path.Combine(plan.Dir, page.File), bytes => string.Equals(Sha256(bytes), page.Sha256, StringComparison.OrdinalIgnoreCase));
+            }
+        }
+
+        /// <summary>WP2 (fixes 4): one file moved back from its .old when it is missing and the .old passes the check.</summary>
+        private static void RestoreOld(string path, Func<byte[], bool> matches)
+        {
+            try
+            {
+                if (File.Exists(path)) return;
+
+                var old = path + OldSuffix;
+                if (!File.Exists(old)) return;
+
+                bool ok;
+                try
+                {
+                    ok = matches(File.ReadAllBytes(old));
+                }
+                catch
+                {
+                    ok = false;
+                }
+
+                if (!ok)
+                {
+                    Plugin.LogSource?.LogDebug($"QuestTree: {Path.GetFileName(old)} is not the file the meta names - left for the sweep.");
+                    return;
+                }
+
+                File.Move(old, path);
+                Plugin.LogSource?.LogInfo($"QuestTree: {Path.GetFileName(path)} was put back from {OldSuffix} (a commit was interrupted).");
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug($"QuestTree: {Path.GetFileName(path)} could not be put back from {OldSuffix} ({ex.Message}).");
+            }
+        }
+
         /// <summary>Removes whatever this capture staged and is not going to commit. Called for every
         /// floor from <see cref="Cleanup"/>, so a refused, failed or abandoned capture leaves no
         /// temporaries behind; a no-op for a file already committed.</summary>
@@ -2666,6 +2729,9 @@ namespace QuestTree.QuestGraph
                         return null;
                     }
                 }
+
+                // WP2 (fixes 4): a file an interrupted commit left under .old is put back before anything looks for it
+                RestoreOld(plan, meta);
 
                 return meta;
             }
@@ -7161,6 +7227,8 @@ namespace QuestTree.QuestGraph
                     return null;
                 }
 
+                RestoreOld(plan, plan.Previous);
+
                 var carried = CarriedMesh(plan, null);
                 if (carried == null)
                 {
@@ -7755,6 +7823,8 @@ namespace QuestTree.QuestGraph
         {
             var previous = plan.Previous?.Atlas;
             if (previous == null || previous.Count == 0) return null;
+
+            RestoreOld(plan, plan.Previous);
 
             try
             {
@@ -8662,6 +8732,17 @@ namespace QuestTree.QuestGraph
                 {
                     File.Delete(index);
                     Plugin.LogSource?.LogDebug($"QuestTree: removed {Path.GetFileName(index)}, the sidecar of a mesh {plan.Key} no longer names.");
+                }
+
+                // WP2 (fixes 4): what an interrupted commit left under .old and the load did not put back - this map's only
+                foreach (var file in Directory.GetFiles(plan.Dir, "*" + OldSuffix))
+                {
+                    var name = Path.GetFileName(file);
+                    if (!name.StartsWith(plan.Key + "-", StringComparison.OrdinalIgnoreCase) &&
+                        !name.StartsWith(plan.Key + ".", StringComparison.OrdinalIgnoreCase)) continue;
+
+                    File.Delete(file);
+                    Plugin.LogSource?.LogDebug($"QuestTree: removed {name}, left by an interrupted commit.");
                 }
             }
             catch (Exception ex)
