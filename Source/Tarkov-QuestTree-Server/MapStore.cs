@@ -533,7 +533,8 @@ namespace QuestTreeServer
                 var floor = meta.Floors.FirstOrDefault(f => f.Level == request.Level);
 
                 if (floor == null)
-                    return Reject(key, $"level {request.Level} is not one of the {meta.Floors.Count} floors the meta names");
+                    return Reject(key, $"level {request.Level} is not one of the {meta.Floors.Count} floors the meta names",
+                        MapUploadResponse.CodeUnknownLevel);
 
                 var claimedFormat = Format(request.Format);
 
@@ -608,7 +609,8 @@ namespace QuestTreeServer
                         return new MapUploadResponse
                         {
                             Outcome = "stored",
-                            Reason = SideNote(sideDir ?? SideLabel(request.Side), "older than the set on the host", "")
+                            Reason = SideNote(sideDir ?? SideLabel(request.Side), "older than the set on the host", ""),
+                            Dropped = true
                         };
 
                     // An atlas page likewise, for the same reason.
@@ -616,7 +618,8 @@ namespace QuestTreeServer
                         return new MapUploadResponse
                         {
                             Outcome = "stored",
-                            Reason = PageNote(PageLabel(request.Atlas), "older than the set on the host", "")
+                            Reason = PageNote(PageLabel(request.Atlas), "older than the set on the host", ""),
+                            Dropped = true
                         };
 
                     return Reject(key, "older than the set on the host");
@@ -898,12 +901,12 @@ namespace QuestTreeServer
                         $"picture set for '{key}' captured {Clip(meta.CapturedAt, MaxFreeTextLength)} - waiting for " +
                         $"{waitingFor}.");
 
-                    return new MapUploadResponse
+                    return Piece(new MapUploadResponse
                     {
                         Outcome = "stored",
                         Reason = Note($"waiting for {waitingFor}"),
                         FloorsHeld = staged.Count
-                    };
+                    });
                 }
 
                 // Every floor is here. If the meta names a MESH, the set is still incomplete: it is
@@ -917,12 +920,12 @@ namespace QuestTreeServer
                         $"Quest Tracker: holding all {staged.Count} floor(s) of the map picture set for '{key}' " +
                         $"captured {Clip(meta.CapturedAt, MaxFreeTextLength)} - waiting for its mesh.");
 
-                    return new MapUploadResponse
+                    return Piece(new MapUploadResponse
                     {
                         Outcome = "stored",
                         Reason = Note("waiting for the mesh"),
                         FloorsHeld = staged.Count
-                    };
+                    });
                 }
 
                 // Claimed under the lock, released by CompleteSet under the lock: from here until the
@@ -946,15 +949,28 @@ namespace QuestTreeServer
 
                 // A dropped side or page that happened to be the last piece still says it was dropped.
                 completed.Reason = Note(meshNote);
+
+                // The same decision as a field (review F02): the words above are for a person, and a client
+                // branches on this. Null when the meta declared no mesh, as the words are then silent too.
+                completed.MeshKept = declaredMesh ? ready.Mesh != null : (bool?)null;
             }
 
-            return completed;
+            return Piece(completed);
 
             // The answer's reason with this post's own drop in front of it, when it was one - a side's or a
             // page's, in the words the client reads for each.
             string Note(string rest) => isAtlas
                 ? PageNote(PageLabel(request.Atlas), pageRefusal, rest)
                 : SideNote(sideDir, sideRefusal, rest);
+
+            // The drop Note puts into words, as a field (review F02): set on every side or page answer that
+            // carries a Note, left null on a floor post's.
+            MapUploadResponse Piece(MapUploadResponse r)
+            {
+                if (isAtlas) r.Dropped = pageRefusal != null;
+                else if (isSide) r.Dropped = sideRefusal != null;
+                return r;
+            }
         }
 
         /// <summary>What this host holds, answered from memory: a client asks for this on every Maps
@@ -1536,7 +1552,9 @@ namespace QuestTreeServer
                         return new MapMeshUploadResponse
                         {
                             Accepted = true,
-                            Reason = $"holding part {count} of {parts}"
+                            Reason = $"holding part {count} of {parts}",
+                            PartsHeld = count,
+                            Parts = parts
                         };
 
                     // Every part is here. The folder is CLAIMED for the join - so no other post writes into it
@@ -4565,11 +4583,11 @@ namespace QuestTreeServer
         /// not be able to fill a rolling log and rotate the real diagnostics away. WARNING, not Info:
         /// unlike a preset decline, nobody pressed a button for this - a refused picture is a capture
         /// the host will never serve, and it should be visible on a default install.</summary>
-        private MapUploadResponse Reject(string map, string reason)
+        private MapUploadResponse Reject(string map, string reason, string code = "")
         {
             WarnOnce(map, reason);
 
-            return new MapUploadResponse { Outcome = "rejected", Reason = reason };
+            return new MapUploadResponse { Outcome = "rejected", Reason = reason, Code = code };
         }
 
         /// <summary>Refuses one mesh post, logged by the same deduped path a refused picture takes: the

@@ -322,6 +322,22 @@ namespace QuestTree.QuestGraph
 
         /// <summary>How many floors of this map the host now holds, for the finishing line.</summary>
         [JsonProperty("floorsHeld")] public int FloorsHeld { get; set; }
+
+        /// <summary>The refusal as a code to branch on (review F02): "" when there is none, NULL from a host too
+        /// old to send the field - which is exactly when the reason's words are read instead.</summary>
+        [JsonProperty("code")] public string Code { get; set; }
+
+        /// <summary>On an answer that completes a set whose meta declared a mesh: whether the host serves it
+        /// with the mesh. Null otherwise, and from a host too old to say.</summary>
+        [JsonProperty("meshKept")] public bool? MeshKept { get; set; }
+
+        /// <summary>On a side or atlas-page post's answer: whether the host dropped that piece and went on
+        /// without it. Null for a floor post, and from a host too old to say.</summary>
+        [JsonProperty("dropped")] public bool? Dropped { get; set; }
+
+        /// <summary>The level a floor post named is not in its own meta - what a host from before sides answers
+        /// a side post with. The same text as the server's constant; tools/check-dtos.py holds them equal.</summary>
+        public const string CodeUnknownLevel = "unknown-level";
     }
 
     /// <summary>One map the host holds a picture set for.</summary>
@@ -466,6 +482,13 @@ namespace QuestTree.QuestGraph
         [JsonProperty("served")] public bool Served { get; set; }
 
         [JsonProperty("reason")] public string Reason { get; set; }
+
+        /// <summary>On a part the host is holding: how many parts it holds (review F02). 0 on every other
+        /// answer, and from a host too old to send it - see MapTransfer.IsMeshPartHeld.</summary>
+        [JsonProperty("partsHeld")] public int PartsHeld { get; set; }
+
+        /// <summary>How many parts the mesh comes in, on the same answers as <see cref="PartsHeld"/>.</summary>
+        [JsonProperty("parts")] public int Parts { get; set; }
     }
 
     /// <summary>Which map's mesh to send down. The body of POST /questtree/maps/meshfile.</summary>

@@ -184,10 +184,12 @@ def fail_hard(message):
     sys.exit(1)
 
 
-# The host's REASON TEXT the client branches on (review F02): the map routes answer in English, and the
-# client reads four decisions out of those words. Each pair is (the literal as the client matches it, a
-# fragment of the server line that must still produce it). A rewording on either side fails this check
-# instead of silently turning "an old host" into "a real refusal", or "part held" into "mesh refused".
+# The host's REASON TEXT the client still reads (review F02). Every decision the client takes from a map
+# route's answer now comes from an explicit field (SHARED_FIELDS below); these words are the FALLBACK for a
+# host from before those fields, and are kept so a 1.19 test-build host is still read right. Each pair is
+# (the literal as the client matches it, a fragment of the server line that must still produce it). A
+# rewording on either side fails this check instead of silently turning "an old host" into "a real
+# refusal", or "part held" into "mesh refused", for exactly the hosts the fallback exists for.
 SHARED_REASONS = [
     # MapTransfer.LevelRefusal - a host from before sides/pages refusing a side/page post by its level.
     ('"is not one of"', 'is not one of the {meta.Floors.Count} floors the meta names'),
@@ -198,7 +200,26 @@ SHARED_REASONS = [
     # MapTransfer.JudgeSide - a side or page the host dropped and went on without.
     ('"side was dropped"', '$"the {dir ?? "unnamed"} side was dropped ({refusal})"'),
     ('"was dropped"', 'var note = $"{label} was dropped ({refusal})";'),
+    # MapTransfer.JudgeMesh - "already served" rather than "shared flat". Only picks a sentence, never a
+    # protocol step, but a rewording would still put the wrong sentence in the player's log.
+    ('MeshAlreadyHeldReason = "older than the set on the host"', 'AlreadyServed('),
 ]
+
+# The explicit fields that carry those decisions (review F02): each pair is (the client READING the field in
+# MapTransfer.cs, the server WRITING it in MapStore.cs). A field declared on both DTOs but never set by the
+# host, or never read by the client, passes the property comparison and still decides nothing - this is
+# the check that it is wired end to end.
+SHARED_FIELDS = [
+    ("response.Parts > 0",                 "Parts = parts"),
+    ("response.PartsHeld",                 "PartsHeld = count"),
+    ("MapUploadResponse.CodeUnknownLevel", "MapUploadResponse.CodeUnknownLevel"),
+    ("response.MeshKept",                  "MeshKept = declaredMesh"),
+    ("response.Dropped",                   "Dropped = "),
+]
+
+# A code the two halves compare as a string (review F02). The property comparison ignores constants, and a
+# drifted code would be exactly the silent failure F02 is about, so every one is held equal here.
+CODE_CONST_RE = re.compile(r'const\s+string\s+(Code\w+)\s*=\s*"([^"]*)"')
 
 
 def check_shared_reasons(errors):
@@ -215,13 +236,59 @@ def check_shared_reasons(errors):
         if produced not in server:
             errors.append(f"shared reason text: MapStore.cs no longer writes {produced!r}, which the client "
                           f"matches with {matched} - the client would misread the host's answer")
+    # The server fragment must still PRODUCE the text, not only name the helper that sends it.
+    if '"older than the set on the host"' not in server:
+        errors.append("shared reason text: MapStore.cs no longer writes \"older than the set on the host\", "
+                      "which the client's MeshAlreadyHeldReason matches")
     return checked
+
+
+def check_shared_fields(errors):
+    """Each explicit field must be read by the client's MapTransfer.cs and written by MapStore.cs."""
+    root = Path(__file__).resolve().parent.parent
+    client = (root / "Source" / "Tarkov-QuestTree" / "QuestGraph" / "MapTransfer.cs").read_text(encoding="utf-8-sig")
+    server = (root / "Source" / "Tarkov-QuestTree-Server" / "MapStore.cs").read_text(encoding="utf-8-sig")
+    checked = 0
+    for read, written in SHARED_FIELDS:
+        checked += 1
+        if read not in client:
+            errors.append(f"explicit field: the client no longer reads {read!r} in MapTransfer.cs - the "
+                          f"decision it carried falls back to the host's words, or is gone")
+        if written not in server:
+            errors.append(f"explicit field: MapStore.cs no longer writes {written!r}, which the client reads "
+                          f"as {read!r} - every answer would look like a host too old to send it")
+    return checked
+
+
+def check_shared_constants(errors):
+    """Every Code* constant must be declared on both DTO files with the same value."""
+    def codes(paths):
+        found = {}
+        for path in paths:
+            for name, value in CODE_CONST_RE.findall(path.read_text(encoding="utf-8-sig")):
+                found[name] = value
+        return found
+
+    server, client = codes(SERVER_FILES), codes(CLIENT_FILES)
+    for name in sorted(set(server) | set(client)):
+        if name not in client:
+            errors.append(f"code constant {name} = \"{server[name]}\" is sent by the server and has no client "
+                          f"copy - the client cannot branch on it")
+        elif name not in server:
+            errors.append(f"code constant {name} = \"{client[name]}\" is matched by the client and never "
+                          f"declared by the server")
+        elif server[name] != client[name]:
+            errors.append(f"code constant {name}: server \"{server[name]}\" vs client \"{client[name]}\" - "
+                          f"the client would never recognise the host's code")
+    return len(set(server) & set(client))
 
 
 def main():
     server, client = parse(SERVER_FILES), parse(CLIENT_FILES)
     errors, warnings, compared = [], [], 0
     reasons = check_shared_reasons(errors)
+    fields = check_shared_fields(errors)
+    consts = check_shared_constants(errors)
 
     print("server wire type                mirrored by")
     print("-" * 78)
@@ -282,7 +349,8 @@ def main():
               f"mirrors, {len(warnings)} warning(s).")
         return 1
 
-    print(f"{compared} wire types compared, 0 drift; {reasons} shared reason texts agree"
+    print(f"{compared} wire types compared, 0 drift; {reasons} shared reason texts agree, "
+          f"{fields} explicit fields wired, {consts} codes agree"
           + (f" ({len(warnings)} warning(s))" if warnings else ""))
     return 0
 

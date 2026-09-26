@@ -1350,6 +1350,23 @@ namespace QuestTreeServer
         /// <summary>How many floors of this set the host is holding, so the client can show progress
         /// and tell a lost post from a slow one.</summary>
         [JsonPropertyName("floorsHeld")] public int FloorsHeld { get; set; }
+
+        /// <summary>The refusal as a code the client branches on, "" when there is none - the reason stays the
+        /// words a person reads (review F02). Always written, so a client can tell "no code" from a host too old
+        /// to send one (which omits the field).</summary>
+        [JsonPropertyName("code")] public string Code { get; set; } = "";
+
+        /// <summary>On an answer that COMPLETES a set whose meta declared a mesh: whether the set is served with
+        /// it. Null otherwise.</summary>
+        [JsonPropertyName("meshKept")] public bool? MeshKept { get; set; }
+
+        /// <summary>On a side or atlas-page post's answer: whether that piece was dropped and the set goes on
+        /// without it. Null for a floor post.</summary>
+        [JsonPropertyName("dropped")] public bool? Dropped { get; set; }
+
+        /// <summary>The level a floor post named is not in its own meta - what a host from before sides answers
+        /// a side post with.</summary>
+        public const string CodeUnknownLevel = "unknown-level";
     }
 
     /// <summary>One complete set the host holds.</summary>
@@ -1513,6 +1530,13 @@ namespace QuestTreeServer
 
         /// <summary>Why not, or what is still missing. Printed by the client as given.</summary>
         [JsonPropertyName("reason")] public string Reason { get; set; } = "";
+
+        /// <summary>On a part the host is holding: how many parts it holds and how many the mesh comes in. Both 0
+        /// on every other answer, and from a host too old to send them (review F02).</summary>
+        [JsonPropertyName("partsHeld")] public int PartsHeld { get; set; }
+
+        /// <summary>How many parts the mesh comes in - see <see cref="PartsHeld"/>.</summary>
+        [JsonPropertyName("parts")] public int Parts { get; set; }
     }
 
     /// <summary>Which map's mesh to send down. The body of POST /questtree/maps/meshfile - a POST for

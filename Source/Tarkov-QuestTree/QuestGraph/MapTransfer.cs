@@ -429,7 +429,7 @@ namespace QuestTree.QuestGraph
                         yield break;
                     }
 
-                    var verdict = Judge(key, floor, task, out var held, out var completeReason);
+                    var verdict = Judge(key, floor, task, out var held, out var completeReason, out var meshKept);
                     if (verdict == Verdict.Stop) yield break;
 
                     posted++;
@@ -447,7 +447,7 @@ namespace QuestTree.QuestGraph
                         // any host drops one its meta cannot describe), or it already had the mesh staged
                         // from an earlier attempt of the same capture - in all three, sending the mesh now
                         // would be up to 48 MB the host has no place for. Only the middle one is news.
-                        SayIfMeshWasNotKept(key, mesh, completeReason);
+                        SayIfMeshWasNotKept(key, mesh, meshKept, completeReason);
                         Done(key, Math.Max(posted, held), bytes, 0, clock);
                         yield break;
                     }
@@ -478,14 +478,14 @@ namespace QuestTree.QuestGraph
                         yield break;
                     }
 
-                    var verdict = Judge(key, lastPosted, again, out var held, out var completeReason);
+                    var verdict = Judge(key, lastPosted, again, out var held, out var completeReason, out var meshKept);
                     if (verdict == Verdict.Stop) yield break;
 
                     droppedSincePost = 0;
 
                     if (verdict == Verdict.Complete)
                     {
-                        SayIfMeshWasNotKept(key, mesh, completeReason);
+                        SayIfMeshWasNotKept(key, mesh, meshKept, completeReason);
                         Done(key, Math.Max(posted, held), bytes, 0, clock);
                         yield break;
                     }
@@ -542,7 +542,7 @@ namespace QuestTree.QuestGraph
                         // now has it or has dropped it, and nothing after this needs to name it again.
                         if (!encoded) meta.Sides?.Remove(side.SideEntry);
 
-                        var verdict = JudgeSide(key, side, task, out var sideReason);
+                        var verdict = JudgeSide(key, side, task, out var sideReason, out var sideMeshKept);
 
                         if (verdict == SideVerdict.Stop) yield break;
 
@@ -564,7 +564,7 @@ namespace QuestTree.QuestGraph
 
                         if (verdict == SideVerdict.Complete)
                         {
-                            SayIfMeshWasNotKept(key, mesh, sideReason);
+                            SayIfMeshWasNotKept(key, mesh, sideMeshKept, sideReason);
                             Done(key, posted, bytes, 0, clock, sidesPosted);
                             yield break;
                         }
@@ -641,7 +641,7 @@ namespace QuestTree.QuestGraph
 
                         if (!encoded) meta.Atlas?.Remove(page.AtlasEntry);
 
-                        var verdict = JudgeSide(key, page, task, out var pageReason);
+                        var verdict = JudgeSide(key, page, task, out var pageReason, out var pageMeshKept);
 
                         if (verdict == SideVerdict.Stop) yield break;
 
@@ -656,7 +656,7 @@ namespace QuestTree.QuestGraph
 
                         if (verdict == SideVerdict.Complete)
                         {
-                            SayIfMeshWasNotKept(key, mesh, pageReason);
+                            SayIfMeshWasNotKept(key, mesh, pageMeshKept, pageReason);
                             Done(key, posted, bytes, 0, clock, sidesPosted, pagesPosted);
                             yield break;
                         }
@@ -1189,7 +1189,8 @@ namespace QuestTree.QuestGraph
         ///
         /// A host that knows sides never refuses a post over its SIDE - it drops the side, says so in the
         /// reason (logged here at Info), and answers as usual. So a refusal of a side post means one of two
-        /// different things, and <see cref="ClassifySide"/> tells them apart by the host's own words:
+        /// different things, and <see cref="ClassifySide"/> tells them apart by the host's code (review F02), or by its
+        /// own words from a host too old to send one:
         ///
         /// - the level refusal ("level -2147483648 is not one of the N floors the meta names") is a host
         ///   from before sides, reading the post as a floor of a level no floor has (see SideLevel). Debug,
@@ -1199,9 +1200,11 @@ namespace QuestTree.QuestGraph
         ///   first version's mistake: the client then posted the whole mesh into a set the host would never
         ///   complete.
         /// </summary>
-        private static SideVerdict JudgeSide(string key, FloorUpload side, Task<string> task, out string reason)
+        private static SideVerdict JudgeSide(
+            string key, FloorUpload side, Task<string> task, out string reason, out bool? meshKept)
         {
             reason = "";
+            meshKept = null;
 
             string reply;
 
@@ -1225,6 +1228,7 @@ namespace QuestTree.QuestGraph
             var verdict = ClassifySide(response);
 
             reason = response?.Reason ?? "";
+            meshKept = response?.MeshKept;
 
             switch (verdict)
             {
@@ -1253,11 +1257,15 @@ namespace QuestTree.QuestGraph
 
                 default:
                     // The host dropped this side or page and went on - the one thing about either worth a
-                    // line. The host's words: "the E side was dropped (...)", "atlas page 3 was dropped (...)".
-                    if (response.Reason != null &&
-                        response.Reason.IndexOf(side.Atlas != null ? "page " : "side was dropped",
-                            StringComparison.OrdinalIgnoreCase) >= 0 &&
-                        response.Reason.IndexOf("was dropped", StringComparison.OrdinalIgnoreCase) >= 0)
+                    // line. Its own field when it sent one (review F02); from a host before the field, its
+                    // words: "the E side was dropped (...)", "atlas page 3 was dropped (...)".
+                    var dropped = response.Dropped ??
+                                  (response.Reason != null &&
+                                   response.Reason.IndexOf(side.Atlas != null ? "page " : "side was dropped",
+                                       StringComparison.OrdinalIgnoreCase) >= 0 &&
+                                   response.Reason.IndexOf("was dropped", StringComparison.OrdinalIgnoreCase) >= 0);
+
+                    if (dropped)
                         Plugin.LogSource?.LogInfo(
                             $"QuestTree: the host went on without {key}'s {What(side)}{Because(response.Reason)}.");
 
@@ -1296,6 +1304,13 @@ namespace QuestTree.QuestGraph
                     return SideVerdict.Declined;
 
                 case "rejected":
+                    // The code when the host sends one (review F02); only a host from before codes gets its
+                    // words read. In practice only a host from before SIDES gives the level refusal - a current
+                    // host routes a side post to its side branch before it looks at levels - so the text path
+                    // stays for as long as 1.19 test-build hosts matter.
+                    if (response.Code != null)
+                        return response.Code == MapUploadResponse.CodeUnknownLevel ? SideVerdict.NoSides : SideVerdict.Stop;
+
                     return (response.Reason ?? "").IndexOf(LevelRefusal, StringComparison.OrdinalIgnoreCase) >= 0
                         ? SideVerdict.NoSides
                         : SideVerdict.Stop;
@@ -1738,11 +1753,15 @@ namespace QuestTree.QuestGraph
         /// <param name="task">The finished post.</param>
         /// <param name="floorsHeld">How many floors of this map the host says it now holds.</param>
         /// <param name="reason">The host's reason text, for the caller's log line ("" when none).</param>
+        /// <param name="meshKept">On a completing answer, whether the host says it kept the declared mesh;
+        /// null when it did not say (review F02).</param>
         private static Verdict Judge(
-            string key, FloorUpload floor, Task<string> task, out int floorsHeld, out string reason)
+            string key, FloorUpload floor, Task<string> task, out int floorsHeld, out string reason,
+            out bool? meshKept)
         {
             floorsHeld = 0;
             reason = "";
+            meshKept = null;
 
             string reply;
 
@@ -1776,6 +1795,7 @@ namespace QuestTree.QuestGraph
 
             floorsHeld = response.FloorsHeld;
             reason = response.Reason ?? "";
+            meshKept = response.MeshKept;
 
             switch (response.Outcome.Trim().ToLowerInvariant())
             {
@@ -1928,10 +1948,18 @@ namespace QuestTree.QuestGraph
 
         /// <summary>Whether a part post came back as one the host is holding - "accepted, not served,
         /// holding part k of n" - which is the only answer that lets the next part go. Pure, so the client
-        /// harness can hold it to the host's real answer.</summary>
-        internal static bool IsMeshPartHeld(MapMeshUploadResponse response) =>
-            response != null && response.Accepted && !response.Served &&
-            (response.Reason ?? "").StartsWith("holding part", StringComparison.OrdinalIgnoreCase);
+        /// harness can hold it to the host's real answer. The host's numbers when it sends them (review F02);
+        /// its words only from a host before them.</summary>
+        internal static bool IsMeshPartHeld(MapMeshUploadResponse response)
+        {
+            if (response == null || !response.Accepted || response.Served) return false;
+
+            // A host that says it in numbers (review F02).
+            if (response.Parts > 0) return response.PartsHeld > 0 && response.PartsHeld < response.Parts;
+
+            // A 1.19 test-build host from before the numbers: its words.
+            return (response.Reason ?? "").StartsWith("holding part", StringComparison.OrdinalIgnoreCase);
+        }
 
         /// <summary><see cref="IsMeshPartHeld"/> over a finished post. False for anything that is not the
         /// server half's reply - an old host's HTML, a failed request - which the caller then hands to
@@ -2113,10 +2141,12 @@ namespace QuestTree.QuestGraph
         /// </summary>
         /// <param name="key">The map's internal id.</param>
         /// <param name="mesh">The mesh this upload was holding for its last post, or null.</param>
+        /// <param name="meshKept">The completing answer's own field, null from a host that did not send it
+        /// (review F02).</param>
         /// <param name="reason">The completing answer's reason.</param>
-        private static void SayIfMeshWasNotKept(string key, byte[] mesh, string reason)
+        private static void SayIfMeshWasNotKept(string key, byte[] mesh, bool? meshKept, string reason)
         {
-            if (!MeshWasNotKept(mesh != null, reason)) return;
+            if (!MeshWasNotKept(mesh?.Length ?? 0, meshKept, reason)) return;
 
             Plugin.LogSource?.LogInfo(
                 $"QuestTree: the host stored the capture of {key} without its 3D mesh{Because(reason)} - it never " +
@@ -2129,6 +2159,29 @@ namespace QuestTree.QuestGraph
         /// against the host's real answers.</summary>
         internal static bool MeshWasNotKept(bool meshPending, string reason) =>
             meshPending && (reason ?? "").IndexOf("with its 3D mesh", StringComparison.OrdinalIgnoreCase) < 0;
+
+        /// <summary>With the host's own field when it sent one; its words when it did not; and for a host from
+        /// before stage V, which says neither, the one thing its behaviour decides: it dropped a mesh past its
+        /// 12 MB at the meta and kept one under it (review F02).</summary>
+        /// <param name="meshBytes">The size of the mesh this upload was holding, 0 when none.</param>
+        /// <param name="meshKept">The completing answer's field, null when the host did not send it.</param>
+        /// <param name="reason">The completing answer's reason.</param>
+        internal static bool MeshWasNotKept(long meshBytes, bool? meshKept, string reason)
+        {
+            if (meshBytes <= 0) return false;
+            if (meshKept.HasValue) return !meshKept.Value;
+
+            var text = reason ?? "";
+            if (text.IndexOf("with its 3D mesh", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                text.IndexOf("without its 3D mesh", StringComparison.OrdinalIgnoreCase) < 0) return false;
+            if (text.IndexOf("without its 3D mesh", StringComparison.OrdinalIgnoreCase) >= 0) return true;
+
+            return meshBytes > PreStageVMeshBytes;
+        }
+
+        /// <summary>The mesh size past which a host from before stage V dropped a mesh at the meta - what
+        /// <see cref="MeshWasNotKept(long, bool?, string)"/> falls back on when the host says nothing.</summary>
+        private const int PreStageVMeshBytes = 12 * 1024 * 1024;
 
         /// <summary>A byte array's SHA-256 as lower-case hex - the same value MapCapture.Sha256 wrote
         /// into the meta, computed here rather than shared because that one is private to the writer and
