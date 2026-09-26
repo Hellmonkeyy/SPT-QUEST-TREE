@@ -12,6 +12,8 @@ using EFT.Interactive;
 using Newtonsoft.Json;
 using Unity.Collections;
 using UnityEngine;
+using UnityEngine.Experimental.Rendering;
+using UnityEngine.Rendering;
 
 namespace QuestTree.QuestGraph
 {
@@ -120,6 +122,12 @@ namespace QuestTree.QuestGraph
     /// all: the managed arrays GetPixels used to hand back - 16 bytes a pixel for a staging band, four
     /// for a whole decoded picture - which is what fragmented the heap in the first place. Every
     /// readback now goes through GetPixelData, a view of the texture's own memory.
+    ///
+    /// WP4: with the asynchronous tile readback (AsyncTileReadback) the staging texture is not allocated at all;
+    /// in its place, and in the same outside-the-budget category, are ReadbackRing slots - each a 32 MiB
+    /// single-sample resolve target (VRAM) and a 32 MiB native array (16 and 16 eight-bit), 96 + 96 MiB at 3 slots.
+    /// The budget model is deliberately not changed: it decides the pixels per metre, and so every file. The
+    /// session's first tile proves the readback bit-identical to ReadPixels before it is trusted (VerifyNow).
     ///
     /// Between floors, ReleaseTexture frees everything the floor held and GC.Collect runs once, a frame
     /// later so that Unity's deferred Destroy of the picture has happened first - the one place this mod
@@ -1013,6 +1021,108 @@ namespace QuestTree.QuestGraph
         private Light _light;
 
         private RenderTexture _rt;
+
+        /// <summary>WP4 A2: rollback for the asynchronous tile readback. False = every tile goes through RenderTile's
+        /// ReadPixels exactly as before (the ring is never built). Static readonly, not const, for FillWaterCyan's
+        /// reason.</summary>
+        private static readonly bool AsyncTileReadback = true;
+
+        /// <summary>WP4 A2, verification build only: every tile is ALSO read with ReadPixels and compared bit for bit
+        /// (VerifyNow on every tile, one Debug line each), and the staging texture is kept. Off in a release.</summary>
+        private static readonly bool VerifyEveryTileReadback = false;
+
+        /// <summary>WP4 A3, SPECIFIED BUT NOT BUILT, off: AverageTile on a worker per consumed slot. It touches no
+        /// Unity API once A0's table is in (Mathf.HalfToFloat is thread-safe anyway) and writes only its tile's own
+        /// disjoint rows and columns of Pixels and Drawn, so it could run as a Task per slot with the slot staying in
+        /// flight until the task ends - each task with its own two sample rows, the drain waiting for the tasks, and
+        /// Cleanup waiting for them before the NativeArrays are disposed. It is not the default: it reads a
+        /// NativeArray off the main thread (legal only because the player compiles the safety checks out), and A0 is
+        /// expected to take most of the average's cost. Build it only if the per-floor Debug line shows averaging
+        /// above about 20 ms a tile with the half table on. Setting it true today changes nothing but one Debug
+        /// line.</summary>
+        private static readonly bool AverageOnWorker = false;
+
+        /// <summary>WP4 A2: resolve targets and readback buffers in the ring. Each slot is a non-multisampled,
+        /// depth-less copy of the render target's format - 32 MiB of VRAM (16 MiB eight-bit) - and a 32 MiB
+        /// Allocator.Persistent NativeArray, so 3 slots cost 96 MiB VRAM and 96 MiB native memory, and the 32 MiB
+        /// staging texture is not allocated on this path (net +64 MiB CPU). Outside the 26 B/px model, in the same
+        /// category as the staging texture: Budget, WorkingSet and CaptureMemoryBudgetBytes are NOT changed (they decide
+        /// the pixel size, and so every file). 3 rather than 2 because with one render a frame, 2 stalls whenever a
+        /// readback takes two frames; the per-floor Debug line counts the waits, so 2 is a one-line change made from
+        /// numbers.</summary>
+        private const int ReadbackRing = 3;
+
+        /// <summary>WP4 A2: frames the end-of-pass drain polls before it waits for the oldest readback outright.</summary>
+        private const int ReadbackDrainFrames = 8;
+
+        /// <summary>WP4 A2: readback errors in one capture after which the session goes back to ReadPixels. Each error's
+        /// tile is re-rendered synchronously under the same hold, so an error never costs a pixel.</summary>
+        private const int ReadbackErrorLimit = 2;
+
+        /// <summary>WP4 A2: one slot of the readback ring - the resolve target a tile is copied into, the array its
+        /// readback lands in, and the tile it holds while it is in flight.</summary>
+        private sealed class ReadbackSlot
+        {
+            /// <summary>Non-MSAA, no depth, the render target's graphicsFormat.</summary>
+            public RenderTexture Target;
+
+            /// <summary>Allocator.Persistent, TileSize*TileSize, when _hdr.</summary>
+            public NativeArray<Half4> Half;
+
+            /// <summary>Allocator.Persistent, TileSize*TileSize, when !_hdr.</summary>
+            public NativeArray<Color32> Bytes;
+
+            public AsyncGPUReadbackRequest Request;
+
+            /// <summary>Request issued, not yet consumed or abandoned.</summary>
+            public bool InFlight;
+
+            /// <summary>A wait for its request threw: never reused, and its array is left allocated rather than freed
+            /// under a copy that may still land in it.</summary>
+            public bool Broken;
+
+            public Plan Plan;
+            public FloorPlan Floor;
+            public int Tile;
+            public int Px0;
+            public int Py0;
+            public int Tw;
+            public int Th;
+        }
+
+        /// <summary>WP4 A2: the ring, or null for the synchronous path (switch off, no device support, a format the
+        /// path does not read, or the allocation refused - BuildRing says which in the capture header).</summary>
+        private ReadbackSlot[] _ring;
+
+        /// <summary>WP4 A2: the slots in flight, oldest first. Consumed strictly in this order (FIFO).</summary>
+        private readonly Queue<ReadbackSlot> _inFlight = new Queue<ReadbackSlot>();
+
+        /// <summary>WP4 A2: tiles of the current pass whose readback reported an error, re-rendered synchronously after
+        /// the drain, still under the pass's scene hold.</summary>
+        private readonly List<int> _retryTiles = new List<int>();
+
+        /// <summary>WP4 A2: session-wide - the first-tile proof failed, or ReadbackErrorLimit was reached; every later
+        /// tile of the session reads with ReadPixels.</summary>
+        private static bool _asyncReadbackOff;
+
+        /// <summary>WP4 A2: the "graphicsFormat/msaa" (ProvenKey) the first-tile proof passed on this session.</summary>
+        private static string _asyncReadbackProven;
+
+        /// <summary>WP4 A2: what the capture header says about the readback - "async x3 (format)" or "ReadPixels (why)".</summary>
+        private string _readbackNote;
+
+        /// <summary>WP4 A2: readback errors this capture (against ReadbackErrorLimit).</summary>
+        private int _readbackErrors;
+
+        /// <summary>WP4 A2: the per-floor Debug line's numbers, reset by RenderTiles.</summary>
+        private int _floorAsync;
+
+        private int _floorWaits;
+        private int _floorErrors;
+        private int _floorAveraged;
+        private int _floorMismatches;
+        private double _floorWaitMs;
+        private double _floorAverageMs;
 
         /// <summary>Two rows of samples, reused by every tile of every floor: one per row of a
         /// supersample block, four floats a sample. 2048 samples is 32 KB a row, which is the entire
@@ -2010,6 +2120,10 @@ namespace QuestTree.QuestGraph
                 var th = Math.Min(TileSize, plan.SampleHeight - py0);
                 if (tw <= 0 || th <= 0) return;
 
+                // WP4 A2: the staging texture exists only while the synchronous path may need it - made here on
+                // demand (a retry, or a session the proof or the error limit turned back to ReadPixels).
+                EnsureStage();
+
                 PositionCamera(plan, floor, px0, py0);
                 RenderOnce();
 
@@ -2026,10 +2140,15 @@ namespace QuestTree.QuestGraph
 
                 // WP4 A1: the average, shared with the asynchronous path - the staging texture's rows start at the
                 // tile's top row (see above), so rowOffset 0.
+                var averaging = Stopwatch.StartNew();
+
                 AverageTile(plan, floor, px0, py0, tw, th,
                     _hdr ? _stage.GetPixelData<Half4>(0) : default,
                     _hdr ? default : _stage.GetPixelData<Color32>(0),
                     0);
+
+                _floorAverageMs += averaging.Elapsed.TotalMilliseconds;
+                _floorAveraged++;
             }
             catch (Exception ex)
             {
@@ -2042,6 +2161,704 @@ namespace QuestTree.QuestGraph
             {
                 RenderTexture.active = previousActive;
             }
+        }
+
+        /// <summary>WP4 A2: the staging texture, made when it is not there. The synchronous path's only buffer: built
+        /// by BuildTarget when the ring is not, by VerifyNow for the proof, and by RenderTile for a retry or a session
+        /// turned back to ReadPixels.</summary>
+        private void EnsureStage()
+        {
+            if (_stage != null) return;
+
+            _stage = new Texture2D(
+                TileSize, TileSize,
+                _hdr ? TextureFormat.RGBAHalf : TextureFormat.RGBA32,
+                mipChain: false);
+        }
+
+        /// <summary>WP4 A2: the readback ring, or false - with the reason in <paramref name="note"/> - for the
+        /// synchronous path. Only the two sample layouts ReadSampleRow reads, and what the staging texture has always
+        /// held, are accepted: R,G,B,A halves or R,G,B,A bytes, checked on the target's graphicsFormat rather than on
+        /// the RenderTextureFormat's historical name.</summary>
+        /// <param name="note">"async x3 (format)" or "ReadPixels (why)", for the capture header.</param>
+        private bool BuildRing(out string note)
+        {
+            _ring = null;
+            _inFlight.Clear();
+            _retryTiles.Clear();
+            _readbackErrors = 0;
+
+            if (AverageOnWorker)
+                Plugin.LogSource?.LogDebug(
+                    "QuestTree: AverageOnWorker (WP4 A3) is specified but not built in this version - tiles are averaged " +
+                    "on the main thread.");
+
+            if (!AsyncTileReadback)
+            {
+                note = "ReadPixels (async off by switch)";
+                return false;
+            }
+
+            if (_asyncReadbackOff)
+            {
+                note = "ReadPixels (async turned off earlier this session)";
+                return false;
+            }
+
+            if (!SystemInfo.supportsAsyncGPUReadback)
+            {
+                note = "ReadPixels (no AsyncGPUReadback on this device)";
+                return false;
+            }
+
+            if (_rt == null || !_rt.IsCreated())
+            {
+                note = "ReadPixels (the target is created on first use)";
+                return false;
+            }
+
+            var format = _rt.graphicsFormat;
+            var readable = _hdr
+                ? format == GraphicsFormat.R16G16B16A16_SFloat
+                : format == GraphicsFormat.R8G8B8A8_UNorm || format == GraphicsFormat.R8G8B8A8_SRGB;
+
+            if (!readable)
+            {
+                note = $"ReadPixels (target is {format}, not a layout the async path reads)";
+                return false;
+            }
+
+            if (_msaa == 1 && SystemInfo.copyTextureSupport == CopyTextureSupport.None)
+            {
+                note = "ReadPixels (no CopyTexture for a single-sample target)";
+                return false;
+            }
+
+            var slots = new ReadbackSlot[ReadbackRing];
+
+            try
+            {
+                for (var i = 0; i < slots.Length; i++)
+                {
+                    // Same size, graphicsFormat and sRGB-ness as the render target; one sample, no depth.
+                    var d = _rt.descriptor;
+                    d.msaaSamples = 1;
+                    d.depthBufferBits = 0;
+                    d.bindMS = false;
+                    d.useMipMap = false;
+                    d.autoGenerateMips = false;
+
+                    var target = new RenderTexture(d) { name = "QuestTreeCaptureResolve" + i };
+                    slots[i] = new ReadbackSlot { Target = target };
+
+                    if (!target.Create()) throw new InvalidOperationException("a resolve target would not create");
+
+                    if (_hdr)
+                        slots[i].Half = new NativeArray<Half4>(TileSize * TileSize, Allocator.Persistent,
+                            NativeArrayOptions.UninitializedMemory);
+                    else
+                        slots[i].Bytes = new NativeArray<Color32>(TileSize * TileSize, Allocator.Persistent,
+                            NativeArrayOptions.UninitializedMemory);
+                }
+            }
+            catch (Exception ex)
+            {
+                FreeSlots(slots);
+                note = $"ReadPixels (ring refused: {ex.GetType().Name}: {ex.Message})";
+                return false;
+            }
+
+            _ring = slots;
+            note = $"async x{ReadbackRing} ({format})";
+            return true;
+        }
+
+        /// <summary>WP4 A2: frees slots that never had a request - BuildRing's refusal path.</summary>
+        /// <param name="slots">The slots, some possibly null.</param>
+        private static void FreeSlots(ReadbackSlot[] slots)
+        {
+            foreach (var slot in slots)
+            {
+                if (slot == null) continue;
+
+                try
+                {
+                    if (slot.Half.IsCreated) slot.Half.Dispose();
+                    if (slot.Bytes.IsCreated) slot.Bytes.Dispose();
+
+                    if (slot.Target != null)
+                    {
+                        slot.Target.Release();
+                        Destroy(slot.Target);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Plugin.LogSource?.LogDebug($"QuestTree: a readback slot could not be freed ({ex.Message}).");
+                }
+            }
+        }
+
+        /// <summary>WP4 A2: the MSAA target's samples into a ring slot's single-sample target. The hardware resolve -
+        /// the same one ReadPixels triggers internally on a multisampled active target - or, for one sample, a raw
+        /// texel copy. Never Blit: a shader pass samples, and exactness would then hang on filtering and precision.</summary>
+        /// <param name="target">The slot's resolve target.</param>
+        private void ResolveInto(RenderTexture target)
+        {
+            if (_msaa > 1) _rt.ResolveAntiAliasedSurface(target);
+            else Graphics.CopyTexture(_rt, 0, 0, target, 0, 0);
+        }
+
+        /// <summary>WP4 A2: the proof's key - a proof holds for one format and one sample count.</summary>
+        private string ProvenKey() => $"{_rt.graphicsFormat}/{_msaa}";
+
+        /// <summary>WP4 A2: renders one tile, resolves it into a ring slot and asks for it back - the first half of
+        /// RenderTile. The tile's pixels arrive in a later frame through ConsumeSlot, except while the session's proof
+        /// is outstanding (or VerifyEveryTileReadback), when VerifyNow completes and consumes it in this frame. A throw
+        /// fails the floor exactly as RenderTile's catch does.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="floor">The floor being rendered.</param>
+        /// <param name="tile">The tile's index, row-major from the top-left.</param>
+        /// <param name="slot">A free slot.</param>
+        private void SubmitTile(Plan plan, FloorPlan floor, int tile, ReadbackSlot slot)
+        {
+            var previousActive = RenderTexture.active;
+
+            try
+            {
+                var tileX = tile % plan.TilesX;
+                var tileY = tile / plan.TilesX;
+                var px0 = tileX * TileSize;
+                var py0 = tileY * TileSize;
+                var tw = Math.Min(TileSize, plan.SampleWidth - px0);
+                var th = Math.Min(TileSize, plan.SampleHeight - py0);
+                if (tw <= 0 || th <= 0) return;
+
+                PositionCamera(plan, floor, px0, py0);
+                RenderOnce();
+                ResolveInto(slot.Target);
+
+                var verify = VerifyEveryTileReadback || _asyncReadbackProven != ProvenKey();
+
+                // The overload with no format and no region: the whole target in its own format, no conversion. A
+                // clipped edge tile reads a few MB it does not need, which is harmless.
+                if (_hdr) slot.Request = AsyncGPUReadback.RequestIntoNativeArray(ref slot.Half, slot.Target, 0);
+                else slot.Request = AsyncGPUReadback.RequestIntoNativeArray(ref slot.Bytes, slot.Target, 0);
+
+                slot.InFlight = true;
+                slot.Plan = plan;
+                slot.Floor = floor;
+                slot.Tile = tile;
+                slot.Px0 = px0;
+                slot.Py0 = py0;
+                slot.Tw = tw;
+                slot.Th = th;
+                _inFlight.Enqueue(slot);
+
+                if (verify) VerifyNow(slot);
+            }
+            catch (Exception ex)
+            {
+                floor.Failed = true;
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: {plan.Key} \"{floor.Dto?.Name}\" was abandoned at tile {tile + 1} of " +
+                    $"{plan.TileCount} ({ex.GetType().Name}: {ex.Message}).");
+            }
+            finally
+            {
+                RenderTexture.active = previousActive;
+            }
+        }
+
+        /// <summary>WP4 A2, the self-check - always on, once per session per format and sample count: the old read of
+        /// the SAME render (ReadPixels of the still-bound target into the staging texture), the readback waited for,
+        /// and every sample of the tile compared bit for bit. Equal: the key is proven, the staging texture goes
+        /// (unless VerifyEveryTileReadback) and the tile is averaged from the readback. Not equal, or a readback error:
+        /// the session goes back to ReadPixels and THIS tile is averaged from the staging texture - so the output is the
+        /// old build's whichever way the check goes.</summary>
+        /// <param name="slot">The slot just submitted (the only one in flight).</param>
+        private void VerifyNow(ReadbackSlot slot)
+        {
+            EnsureStage();
+
+            RenderTexture.active = _rt;
+            _stage.ReadPixels(new Rect(0f, TileSize - slot.Th, slot.Tw, slot.Th), 0, 0);
+
+            slot.Request.WaitForCompletion();
+
+            var error = slot.Request.hasError;
+            var mismatches = error ? -1 : SameSamples(slot);
+
+            if (mismatches == 0)
+            {
+                var first = _asyncReadbackProven != ProvenKey();
+                _asyncReadbackProven = ProvenKey();
+
+                if (first)
+                    Plugin.LogSource?.LogDebug(
+                        $"QuestTree: asynchronous tile readback proven bit-identical to ReadPixels on {ProvenKey()} " +
+                        $"({(long)slot.Tw * slot.Th} samples).");
+                else
+                    Plugin.LogSource?.LogDebug(
+                        $"QuestTree: tile {slot.Tile + 1} readback matched ReadPixels ({(long)slot.Tw * slot.Th} samples).");
+
+                if (!VerifyEveryTileReadback && _stage != null)
+                {
+                    var stage = _stage;
+                    _stage = null;
+                    Destroy(stage);
+                }
+
+                ConsumeSlot(slot, fromStage: false);
+                return;
+            }
+
+            _asyncReadbackOff = true;
+            if (mismatches > 0) _floorMismatches += mismatches;
+
+            Plugin.LogSource?.LogWarning(
+                $"QuestTree: the asynchronous tile readback did not match ReadPixels on {ProvenKey()} " +
+                (error
+                    ? "(the readback reported an error)"
+                    : $"({mismatches} of {(long)slot.Tw * slot.Th} samples differ)") +
+                " - captures go back to ReadPixels for this session.");
+
+            ConsumeSlot(slot, fromStage: true);
+        }
+
+        /// <summary>WP4 A2: how many of the tile's samples differ between the slot (the whole target, rows from the
+        /// bottom, the tile's top th rows at TileSize-th..) and the staging texture (those rows at 0..th-1) - the two
+        /// paths' own indexing, so a flip or an offset is caught. Compared as raw bits: four ushorts, or four bytes.</summary>
+        /// <param name="slot">The completed slot.</param>
+        private int SameSamples(ReadbackSlot slot)
+        {
+            var differ = 0;
+            var offset = TileSize - slot.Th;
+
+            if (_hdr)
+            {
+                var stage = _stage.GetPixelData<Half4>(0);
+
+                for (var r = 0; r < slot.Th; r++)
+                {
+                    var a = (offset + r) * TileSize;
+                    var b = r * TileSize;
+
+                    for (var x = 0; x < slot.Tw; x++)
+                    {
+                        var p = slot.Half[a + x];
+                        var q = stage[b + x];
+                        if (p.R != q.R || p.G != q.G || p.B != q.B || p.A != q.A) differ++;
+                    }
+                }
+
+                return differ;
+            }
+
+            var bytes = _stage.GetPixelData<Color32>(0);
+
+            for (var r = 0; r < slot.Th; r++)
+            {
+                var a = (offset + r) * TileSize;
+                var b = r * TileSize;
+
+                for (var x = 0; x < slot.Tw; x++)
+                {
+                    var p = slot.Bytes[a + x];
+                    var q = bytes[b + x];
+                    if (p.r != q.r || p.g != q.g || p.b != q.b || p.a != q.a) differ++;
+                }
+            }
+
+            return differ;
+        }
+
+        /// <summary>WP4 A2: the second half of RenderTile - one completed slot averaged into its floor, then freed. A
+        /// readback error is counted, its tile goes on the retry list, and ReadbackErrorLimit turns the session back to
+        /// ReadPixels. An abandoned floor (failed, or its buffers gone) only frees the slot.</summary>
+        /// <param name="slot">The oldest slot in flight (FIFO), or the verify slot just enqueued.</param>
+        /// <param name="fromStage">Average from the staging texture (the proof failed) rather than the slot.</param>
+        private void ConsumeSlot(ReadbackSlot slot, bool fromStage)
+        {
+            RemoveFromQueue(slot);
+            slot.InFlight = false;
+
+            var plan = slot.Plan;
+            var floor = slot.Floor;
+            slot.Plan = null;
+            slot.Floor = null;
+
+            if (floor == null || plan == null || floor.Failed || floor.Pixels == null) return;
+
+            if (!fromStage && slot.Request.hasError)
+            {
+                ReadbackFailed(slot.Tile);
+                return;
+            }
+
+            var clock = Stopwatch.StartNew();
+
+            try
+            {
+                if (fromStage)
+                    AverageTile(plan, floor, slot.Px0, slot.Py0, slot.Tw, slot.Th,
+                        _hdr ? _stage.GetPixelData<Half4>(0) : default,
+                        _hdr ? default : _stage.GetPixelData<Color32>(0),
+                        0);
+                else
+                {
+                    AverageTile(plan, floor, slot.Px0, slot.Py0, slot.Tw, slot.Th, slot.Half, slot.Bytes, TileSize - slot.Th);
+                    _floorAsync++;
+                }
+
+                _floorAveraged++;
+            }
+            catch (Exception ex)
+            {
+                floor.Failed = true;
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: {plan.Key} \"{floor.Dto?.Name}\" was abandoned at tile {slot.Tile + 1} of " +
+                    $"{plan.TileCount} ({ex.GetType().Name}: {ex.Message}).");
+            }
+
+            _floorAverageMs += clock.Elapsed.TotalMilliseconds;
+        }
+
+        /// <summary>WP4 A2: one failed readback - counted, its tile put on the retry list (re-rendered synchronously
+        /// after the drain), and at ReadbackErrorLimit in one capture the session goes back to ReadPixels.</summary>
+        /// <param name="tile">The tile whose readback failed.</param>
+        private void ReadbackFailed(int tile)
+        {
+            _readbackErrors++;
+            _floorErrors++;
+            _retryTiles.Add(tile);
+
+            if (_readbackErrors < ReadbackErrorLimit || _asyncReadbackOff) return;
+
+            _asyncReadbackOff = true;
+            Plugin.LogSource?.LogWarning(
+                $"QuestTree: {_readbackErrors} asynchronous tile readbacks failed in this capture - captures go back to " +
+                "ReadPixels for this session (every failed tile is rendered again).");
+        }
+
+        /// <summary>WP4 A2: takes a slot off the in-flight queue - the head in every call but VerifyNow's, where it is
+        /// the only entry.</summary>
+        /// <param name="slot">The slot.</param>
+        private void RemoveFromQueue(ReadbackSlot slot)
+        {
+            if (_inFlight.Count == 0) return;
+
+            if (ReferenceEquals(_inFlight.Peek(), slot))
+            {
+                _inFlight.Dequeue();
+                return;
+            }
+
+            var rest = _inFlight.Where(s => !ReferenceEquals(s, slot)).ToList();
+            _inFlight.Clear();
+            foreach (var s in rest) _inFlight.Enqueue(s);
+        }
+
+        /// <summary>WP4 A2: the oldest slot in flight consumed when its readback has completed (polled, never waited
+        /// for) - at most one average a frame. False when nothing was consumed.</summary>
+        private bool ConsumeOldestIfDone()
+        {
+            if (_inFlight.Count == 0) return false;
+
+            var head = _inFlight.Peek();
+            head.Request.Update();
+            if (!head.Request.done) return false;
+
+            ConsumeSlot(head, fromStage: false);
+            return true;
+        }
+
+        /// <summary>WP4 A2: waits for the oldest slot in flight - never longer than ReadPixels' own stall - and consumes
+        /// it. A wait that throws marks the slot broken and abandons it.</summary>
+        private void WaitOldest()
+        {
+            var head = _inFlight.Peek();
+            var clock = Stopwatch.StartNew();
+
+            try
+            {
+                head.Request.WaitForCompletion();
+            }
+            catch (Exception ex)
+            {
+                head.Broken = true;
+                RemoveFromQueue(head);
+                head.InFlight = false;
+
+                var live = head.Floor != null && !head.Floor.Failed && head.Floor.Pixels != null;
+                head.Plan = null;
+                head.Floor = null;
+
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: a tile readback would not be waited for ({ex.Message}) - its slot is retired and its tile " +
+                    "rendered again.");
+
+                if (live) ReadbackFailed(head.Tile);
+                return;
+            }
+            finally
+            {
+                _floorWaits++;
+                _floorWaitMs += clock.Elapsed.TotalMilliseconds;
+            }
+
+            ConsumeSlot(head, fromStage: false);
+        }
+
+        /// <summary>WP4 A2: the first ring slot not in flight and not broken, or null.</summary>
+        private ReadbackSlot FreeSlot()
+        {
+            if (_ring == null) return null;
+
+            foreach (var slot in _ring)
+                if (slot != null && !slot.InFlight && !slot.Broken) return slot;
+
+            return null;
+        }
+
+        /// <summary>WP4 A2: every slot in flight waited for (guarded) and freed WITHOUT being consumed - a cut or failed
+        /// floor. A wait that throws leaves its slot broken rather than free.</summary>
+        private void AbandonInFlight()
+        {
+            while (_inFlight.Count > 0)
+            {
+                var slot = _inFlight.Dequeue();
+
+                try
+                {
+                    slot.Request.WaitForCompletion();
+                }
+                catch (Exception ex)
+                {
+                    slot.Broken = true;
+                    Plugin.LogSource?.LogDebug($"QuestTree: an abandoned tile readback would not be waited for ({ex.Message}).");
+                }
+
+                slot.InFlight = false;
+                slot.Plan = null;
+                slot.Floor = null;
+            }
+        }
+
+        /// <summary>WP4 A2: the ring given back - called by Cleanup before anything else is freed. A slot in flight is
+        /// waited for first: its destination is OUR NativeArray, and freeing it under a pending copy would be a GPU to
+        /// CPU write into freed memory (the rule MapMeshBuilder states for its GraphicsBuffers). A wait that throws
+        /// leaves that 32 MB array allocated rather than freed under it. Safe twice.</summary>
+        private void ReleaseRing()
+        {
+            if (_ring == null)
+            {
+                _inFlight.Clear();
+                _retryTiles.Clear();
+                return;
+            }
+
+            foreach (var slot in _ring)
+            {
+                if (slot == null) continue;
+
+                var safeToFree = !slot.Broken;
+
+                if (slot.InFlight)
+                {
+                    try
+                    {
+                        slot.Request.WaitForCompletion();
+                    }
+                    catch (Exception ex)
+                    {
+                        safeToFree = false;
+                        Plugin.LogSource?.LogDebug(
+                            $"QuestTree: a tile readback would not be waited for ({ex.Message}) - its 32 MB buffer is left " +
+                            "allocated rather than freed under it.");
+                    }
+
+                    slot.InFlight = false;
+                }
+
+                try
+                {
+                    if (safeToFree)
+                    {
+                        if (slot.Half.IsCreated) slot.Half.Dispose();
+                        if (slot.Bytes.IsCreated) slot.Bytes.Dispose();
+                    }
+
+                    if (slot.Target != null)
+                    {
+                        slot.Target.Release();
+                        Destroy(slot.Target);
+                        slot.Target = null;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Plugin.LogSource?.LogDebug($"QuestTree: a readback slot could not be freed ({ex.Message}).");
+                }
+
+                slot.Plan = null;
+                slot.Floor = null;
+            }
+
+            _ring = null;
+            _inFlight.Clear();
+            _retryTiles.Clear();
+        }
+
+        /// <summary>WP4 A2: one pass over a list of tiles - the first pass or a batch of the water rule's late ones -
+        /// through the readback ring: one render a frame, as before; each tile's pixels averaged in the frame its
+        /// readback is found complete, at most ONE average a frame; a full ring with nothing complete waits for the
+        /// oldest (never longer than ReadPixels' own stall); then the drain, and then - still inside the caller's scene
+        /// hold - a synchronous re-render of any tile whose readback failed. With no ring, or the session turned back
+        /// to ReadPixels, every tile goes through RenderTile exactly as before. Every tile the pass rendered is in
+        /// Pixels and Drawn when it returns, which the water rule needs.</summary>
+        /// <param name="plan">The plan (a side's own plan for a side).</param>
+        /// <param name="floor">The floor or side.</param>
+        /// <param name="tiles">The tiles, in order.</param>
+        /// <param name="overrun">Asked before every render; true fails the floor.</param>
+        private IEnumerator RenderPass(Plan plan, FloorPlan floor, List<int> tiles, Func<bool> overrun)
+        {
+            // Nothing of an earlier pass can still be here (each drains), except after a throw it did not survive.
+            if (_inFlight.Count > 0) AbandonInFlight();
+            _retryTiles.Clear();
+
+            for (var k = 0; k < tiles.Count; k++)
+            {
+                var tile = tiles[k];
+
+                if (overrun())
+                {
+                    floor.Failed = true;
+                    break;
+                }
+
+                if (_ring == null || _asyncReadbackOff)
+                {
+                    RenderTile(plan, floor, tile);
+                    if (floor.Failed) break;
+
+                    // The whole point of the coroutine: one render and one readback per frame, never two.
+                    yield return null;
+                    continue;
+                }
+
+                var consumed = ConsumeOldestIfDone();
+                var slot = FreeSlot();
+
+                if (slot == null && !consumed && _inFlight.Count > 0)
+                {
+                    // Ring full and nothing finished: wait for the oldest.
+                    WaitOldest();
+                    slot = FreeSlot();
+                }
+
+                // Every slot retired (each wait threw): nothing can be submitted again this session.
+                if (slot == null && _inFlight.Count == 0 && !_asyncReadbackOff)
+                {
+                    _asyncReadbackOff = true;
+                    Plugin.LogSource?.LogWarning(
+                        "QuestTree: every asynchronous tile readback slot was retired - captures go back to ReadPixels for " +
+                        "this session.");
+                }
+
+                if (floor.Failed) break;
+
+                // An error just turned the session back to ReadPixels: this tile goes the synchronous way.
+                if (_asyncReadbackOff)
+                {
+                    k--;
+                    continue;
+                }
+
+                if (slot == null)
+                {
+                    // Consumed one this frame and the ring is still full: the render waits a frame (a backpressure
+                    // frame - counted with the waits).
+                    _floorWaits++;
+                    yield return null;
+                    k--;
+                    continue;
+                }
+
+                SubmitTile(plan, floor, tile, slot);
+                if (floor.Failed) break;
+
+                yield return null;
+            }
+
+            // THE DRAIN - before the caller runs the water rule or releases the scene, so every tile is folded in and
+            // a retry below still renders under the same hold.
+            var frames = 0;
+            var drained = false;
+
+            while (_inFlight.Count > 0)
+            {
+                if (floor.Failed)
+                {
+                    AbandonInFlight();
+                    break;
+                }
+
+                if (ConsumeOldestIfDone())
+                {
+                    drained = true;
+                    if (_inFlight.Count > 0) yield return null;
+                    continue;
+                }
+
+                if (++frames > ReadbackDrainFrames)
+                {
+                    WaitOldest();
+                    drained = true;
+                    if (_inFlight.Count > 0) yield return null;
+                    continue;
+                }
+
+                yield return null;
+            }
+
+            // The last average had its frame; a retry render or the caller's water rule gets the next one.
+            if (drained) yield return null;
+
+            foreach (var tile in _retryTiles.ToArray())
+            {
+                if (floor.Failed) break;
+
+                if (overrun())
+                {
+                    floor.Failed = true;
+                    break;
+                }
+
+                RenderTile(plan, floor, tile);
+                if (floor.Failed) break;
+
+                yield return null;
+            }
+
+            _retryTiles.Clear();
+        }
+
+        /// <summary>WP4 A2: the per-floor and per-side Debug line, after the last pass's drain.</summary>
+        /// <param name="plan">The plan (a side's own plan for a side).</param>
+        /// <param name="floor">The floor or side.</param>
+        private void ReadbackLine(Plan plan, FloorPlan floor)
+        {
+            if (_floorAveraged == 0 && _floorErrors == 0) return;
+
+            var perTile = _floorAveraged > 0 ? _floorAverageMs / _floorAveraged : 0d;
+
+            Plugin.LogSource?.LogDebug(
+                $"QuestTree: {plan.Key} \"{floor.Dto?.Name}\" tiles: {_floorAsync} read back async, {_floorWaits} waited on " +
+                $"({Ms(_floorWaitMs)} ms), {_floorErrors} readback error(s) re-rendered, averaging {Ms(_floorAverageMs)} ms " +
+                $"({perTile.ToString("0.0", CultureInfo.InvariantCulture)} ms a tile, half table " +
+                $"{(_hdr && HalfTableEnabled ? "on" : "off")})" +
+                (VerifyEveryTileReadback ? $", verified against ReadPixels: {_floorMismatches} mismatches" : "") + ".");
         }
 
         /// <summary>WP4 A1: one tile's samples folded into the floor - the average RenderTile always did, moved here
@@ -5586,8 +6403,10 @@ namespace QuestTree.QuestGraph
         /// tiles are rendered late until it finds none; then the release. With no plan every tile renders under one
         /// hold, exactly the old loop.
         ///
-        /// An asynchronous readback pipeline takes the same two lists: TilesToRender first, then the water rule's
-        /// late tiles - and the water rule needs every first-pass tile folded into Pixels and Drawn before it runs.
+        /// WP4 A2: both lists go through RenderPass - the asynchronous readback ring when there is one, RenderTile
+        /// otherwise - which drains before it returns, so the water rule finds every first-pass tile folded into Pixels
+        /// and Drawn, and a failed readback is re-rendered synchronously still under this hold. The per-floor readback
+        /// Debug line (ReadbackLine) is written before the release.
         /// </summary>
         /// <param name="plan">The plan (a side's own plan for a side).</param>
         /// <param name="floor">The floor or side.</param>
@@ -5613,20 +6432,14 @@ namespace QuestTree.QuestGraph
                 yield return null;
             }
 
-            foreach (var tile in TilesToRender(plan, floor))
-            {
-                if (overrun())
-                {
-                    floor.Failed = true;
-                    break;
-                }
+            // WP4 A2: the per-floor readback numbers start here.
+            _floorAsync = _floorWaits = _floorErrors = _floorAveraged = _floorMismatches = 0;
+            _floorWaitMs = _floorAverageMs = 0d;
 
-                RenderTile(plan, floor, tile);
-                if (floor.Failed) break;
-
-                // The whole point of the coroutine: one render and one readback per frame, never two.
-                yield return null;
-            }
+            // The first pass - one render a frame, through the readback ring when there is one (RenderPass), drained
+            // before the water rule reads the pixels and before the release.
+            var first = RenderPass(plan, floor, TilesToRender(plan, floor).ToList(), overrun);
+            while (first.MoveNext()) yield return first.Current;
 
             // The water rule (WP1 2.6), still under the hold. In audit mode it only reports, into the skip zones.
             if (!floor.Failed && floor.Verdicts != null)
@@ -5661,22 +6474,14 @@ namespace QuestTree.QuestGraph
                             yield return null;
                         }
 
-                        foreach (var tile in late)
-                        {
-                            if (overrun())
-                            {
-                                floor.Failed = true;
-                                break;
-                            }
-
-                            RenderTile(plan, floor, tile);
-                            if (floor.Failed) break;
-
-                            yield return null;
-                        }
+                        // The late tiles through the same pass, drained before the rule looks again.
+                        var pass = RenderPass(plan, floor, late, overrun);
+                        while (pass.MoveNext()) yield return pass.Current;
                     }
                 }
             }
+
+            ReadbackLine(plan, floor);
 
             if (held) ReleaseScene();
         }
@@ -6404,6 +7209,9 @@ namespace QuestTree.QuestGraph
 
             note = $"{note}, {SupersampleFactor}x supersampled, msaa {_msaa}";
 
+            // WP4 A2: how the tiles are read back - "async x3 (R16G16B16A16_SFloat)" or "ReadPixels (why)".
+            note = $"{note}, readback {_readbackNote}";
+
             // Named in the header because they are the two settings that decide whether the picture has
             // buildings in it and whether its ground is smooth - see RenderOnce - and a capture that came
             // back wrong should say on the record what it was rendered under.
@@ -6512,10 +7320,9 @@ namespace QuestTree.QuestGraph
                 _msaa = 1;
             }
 
-            _stage = new Texture2D(
-                TileSize, TileSize,
-                _hdr ? TextureFormat.RGBAHalf : TextureFormat.RGBA32,
-                mipChain: false);
+            // WP4 A2: the readback ring when the device and the target allow it; the staging texture only for the
+            // synchronous path (it is made on demand later for the proof and any retry).
+            if (!BuildRing(out _readbackNote)) EnsureStage();
 
             _sampleRows = new float[SupersampleFactor][];
             for (var i = 0; i < _sampleRows.Length; i++) _sampleRows[i] = new float[TileSize * 4];
@@ -6528,7 +7335,8 @@ namespace QuestTree.QuestGraph
             BuildReflection();
 
             Plugin.LogSource?.LogDebug(
-                $"QuestTree: capture target {_rt.format} with {_msaa}x multisampling, staging {_stage.format}, " +
+                $"QuestTree: capture target {_rt.format} with {_msaa}x multisampling, staging " +
+                $"{(_stage != null ? _stage.format.ToString() : "none (async)")}, " +
                 $"{SupersampleFactor}x{SupersampleFactor} samples a pixel, colour space " +
                 $"{QualitySettings.activeColorSpace}, gamma encoding " +
                 $"{(_needsGamma ? "applied by us" : "already in the data")}.");
@@ -6778,6 +7586,9 @@ namespace QuestTree.QuestGraph
                 // disposing the build's iterator is what runs the finally that waits for it and
                 // releases the buffer. A no-op once the build has finished.
                 DisposeMeshBuild();
+
+                // WP4 A2: and the tile readbacks - a slot in flight is waited for before its array is freed.
+                ReleaseRing();
 
                 // Then, and before anything is freed: a raid that ended between a floor's first and
                 // last tile left the scene's culling forced on and its water off, and this is the only
