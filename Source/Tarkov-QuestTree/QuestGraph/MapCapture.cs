@@ -134,7 +134,8 @@ namespace QuestTree.QuestGraph
     /// in its place, and in the same outside-the-budget category, are ReadbackRing slots - each a 32 MiB
     /// single-sample resolve target (VRAM) and a 32 MiB native array (16 and 16 eight-bit), 96 + 96 MiB at 3 slots.
     /// The budget model is deliberately not changed: it decides the pixels per metre, and so every file. The
-    /// session's first tile proves the readback bit-identical to ReadPixels before it is trusted (VerifyNow).
+    /// session's first tile that can tell a correct readback from a flipped or offset one (Discriminates) proves the
+    /// readback bit-identical to ReadPixels before it is trusted (VerifyNow); until then every tile is checked.
     ///
     /// Between floors, ReleaseTexture frees everything the floor held and GC.Collect runs once, a frame
     /// later so that Unity's deferred Destroy of the picture has happened first - the one place this mod
@@ -1035,9 +1036,10 @@ namespace QuestTree.QuestGraph
         private const double CommitWaitSeconds = 10d;
 
         /// <summary>The longest a capture can run with every cap in force (review F45): floors, the stored mesh's load
-        /// (WP2), mesh watchdog and grace, the atlas encode wait, sides, the uncapped finishing steps, and the wait for an
-        /// upload's read before the commit (WP3). 540 s with today's numbers. The
-        /// campaign waits this long for a stop, so a slow capture is never taken for a stuck one.</summary>
+        /// (WP2), mesh watchdog and grace, the atlas encode wait, sides, the uncapped finishing steps, the wait for an
+        /// upload's read before the commit (WP3), and the two encode settles no phase cap covers (WP4: the last floor's
+        /// and the last side's managed encodes, each waited for up to EncodeWaitSeconds after its phase). 600 s with
+        /// today's numbers. The campaign waits this long for a stop, so a slow capture is never taken for a stuck one.</summary>
         internal const double WorstCaseSeconds =
             FloorPhaseSeconds * FloorPhaseOverrun +                 //  87.5
             MeshBaseWaitSeconds +                                   //  20 (WP2: the stored mesh's load)
@@ -1045,7 +1047,8 @@ namespace QuestTree.QuestGraph
             AtlasEncodeWaitSeconds +                                //  60
             SidePhaseSeconds * SidePhaseOverrun +                   //  87.5
             FinishAllowanceSeconds +                                //  60
-            CommitWaitSeconds;                                      //  10 (WP3: an upload's read before the commit)
+            CommitWaitSeconds +                                     //  10 (WP3: an upload's read before the commit)
+            2 * EncodeWaitSeconds;                                  //  60 (WP4: the last floor's and last side's settle)
 
         private Camera _camera;
 
@@ -1140,6 +1143,15 @@ namespace QuestTree.QuestGraph
 
         /// <summary>WP4 A2: the "graphicsFormat/msaa" (ProvenKey) the first-tile proof passed on this session.</summary>
         private static string _asyncReadbackProven;
+
+        /// <summary>WP4 A2 (review): tiles that matched ReadPixels but could not PROVE anything - all zero, or equal to
+        /// their own vertical mirror, which a flipped or row-offset readback matches too. Such a tile is consumed from the
+        /// verified data and the proof stays open; the next tile is verified again. After ReadbackProofTiles of them in a
+        /// session one Info line says so - and every tile goes on being verified. Unproven is never trusted.</summary>
+        private const int ReadbackProofTiles = 8;
+
+        private static int _proofTilesTried;
+        private static bool _proofTilesSaid;
 
         /// <summary>WP4 A2: what the capture header says about the readback - "async x3 (format)" or "ReadPixels (why)".</summary>
         private string _readbackNote;
@@ -2241,9 +2253,8 @@ namespace QuestTree.QuestGraph
         /// <param name="note">"async x3 (format)" or "ReadPixels (why)", for the capture header.</param>
         private bool BuildRing(out string note)
         {
-            _ring = null;
-            _inFlight.Clear();
-            _retryTiles.Clear();
+            // Anything a previous capture left (Cleanup always runs, but a ring is never dropped unreleased).
+            ReleaseRing();
             _readbackErrors = 0;
 
             if (AverageOnWorker)
@@ -2373,14 +2384,19 @@ namespace QuestTree.QuestGraph
         /// <summary>WP4 A2: renders one tile, resolves it into a ring slot and asks for it back - the first half of
         /// RenderTile. The tile's pixels arrive in a later frame through ConsumeSlot, except while the session's proof
         /// is outstanding (or VerifyEveryTileReadback), when VerifyNow completes and consumes it in this frame. A throw
-        /// fails the floor exactly as RenderTile's catch does.</summary>
+        /// in the render fails the floor exactly as RenderTile's catch does. A throw in the steps only the asynchronous
+        /// path has - the resolve, the request, the proof - turns the session back to ReadPixels (one Warning), abandons
+        /// the slots in flight (their tiles go on the retry list) and returns false: the caller renders THIS tile again
+        /// through RenderTile, under the same hold, and the floor survives.</summary>
         /// <param name="plan">The capture's plan.</param>
         /// <param name="floor">The floor being rendered.</param>
         /// <param name="tile">The tile's index, row-major from the top-left.</param>
         /// <param name="slot">A free slot.</param>
-        private void SubmitTile(Plan plan, FloorPlan floor, int tile, ReadbackSlot slot)
+        /// <returns>False when the tile must be rendered again synchronously.</returns>
+        private bool SubmitTile(Plan plan, FloorPlan floor, int tile, ReadbackSlot slot)
         {
             var previousActive = RenderTexture.active;
+            var rendered = false;
 
             try
             {
@@ -2390,10 +2406,12 @@ namespace QuestTree.QuestGraph
                 var py0 = tileY * TileSize;
                 var tw = Math.Min(TileSize, plan.SampleWidth - px0);
                 var th = Math.Min(TileSize, plan.SampleHeight - py0);
-                if (tw <= 0 || th <= 0) return;
+                if (tw <= 0 || th <= 0) return true;
 
                 PositionCamera(plan, floor, px0, py0);
                 RenderOnce();
+                rendered = true;
+
                 ResolveInto(slot.Target);
 
                 var verify = VerifyEveryTileReadback || _asyncReadbackProven != ProvenKey();
@@ -2414,13 +2432,28 @@ namespace QuestTree.QuestGraph
                 _inFlight.Enqueue(slot);
 
                 if (verify) VerifyNow(slot);
+                return true;
             }
             catch (Exception ex)
             {
-                floor.Failed = true;
-                Plugin.LogSource?.LogWarning(
-                    $"QuestTree: {plan.Key} \"{floor.Dto?.Name}\" was abandoned at tile {tile + 1} of " +
-                    $"{plan.TileCount} ({ex.GetType().Name}: {ex.Message}).");
+                if (!rendered)
+                {
+                    floor.Failed = true;
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: {plan.Key} \"{floor.Dto?.Name}\" was abandoned at tile {tile + 1} of " +
+                        $"{plan.TileCount} ({ex.GetType().Name}: {ex.Message}).");
+                    return true;
+                }
+
+                if (!_asyncReadbackOff)
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: the asynchronous tile readback failed at {plan.Key} \"{floor.Dto?.Name}\" tile " +
+                        $"{tile + 1} ({ex.GetType().Name}: {ex.Message}) - captures go back to ReadPixels for this session; " +
+                        "the tile is rendered again.");
+
+                _asyncReadbackOff = true;
+                AbandonForRetry();
+                return false;
             }
             finally
             {
@@ -2428,10 +2461,23 @@ namespace QuestTree.QuestGraph
             }
         }
 
-        /// <summary>WP4 A2, the self-check - always on, once per session per format and sample count: the old read of
-        /// the SAME render (ReadPixels of the still-bound target into the staging texture), the readback waited for,
-        /// and every sample of the tile compared bit for bit. Equal: the key is proven, the staging texture goes
-        /// (unless VerifyEveryTileReadback) and the tile is averaged from the readback. Not equal, or a readback error:
+        /// <summary>WP4 A2 (review): every slot in flight abandoned (AbandonInFlight), each live tile among them put on the
+        /// retry list - so turning the session back to ReadPixels mid-pass costs no pixel.</summary>
+        private void AbandonForRetry()
+        {
+            foreach (var slot in _inFlight)
+                if (slot.Floor != null && !slot.Floor.Failed && slot.Floor.Pixels != null && !_retryTiles.Contains(slot.Tile))
+                    _retryTiles.Add(slot.Tile);
+
+            AbandonInFlight();
+        }
+
+        /// <summary>WP4 A2, the self-check - always on, until it passes once per session per format and sample count: the
+        /// old read of the SAME render (ReadPixels of the still-bound target into the staging texture), the readback
+        /// waited for, and every sample of the tile compared bit for bit. Equal on a tile that Discriminates: the key is
+        /// proven, the staging texture goes (unless VerifyEveryTileReadback) and the tile is averaged from the readback.
+        /// Equal on one that does not (empty, or its own vertical mirror): averaged from the verified readback, the proof
+        /// left open for the next tile (ReadbackProofTiles). Not equal, or a readback error:
         /// the session goes back to ReadPixels and THIS tile is averaged from the staging texture - so the output is the
         /// old build's whichever way the check goes.</summary>
         /// <param name="slot">The slot just submitted (the only one in flight).</param>
@@ -2446,6 +2492,25 @@ namespace QuestTree.QuestGraph
 
             var error = slot.Request.hasError;
             var mismatches = error ? -1 : SameSamples(slot);
+
+            // A match on a tile that cannot tell a correct readback from a flipped or row-offset one proves nothing:
+            // the tile is consumed from the (verified) data, and the proof stays open for the next tile.
+            if (mismatches == 0 && _asyncReadbackProven != ProvenKey() && !Discriminates(slot))
+            {
+                _proofTilesTried++;
+
+                if (_proofTilesTried >= ReadbackProofTiles && !_proofTilesSaid)
+                {
+                    _proofTilesSaid = true;
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: no tile of {_proofTilesTried} could prove the asynchronous tile readback on " +
+                        $"{ProvenKey()} (each was empty or its own vertical mirror) - every tile goes on being checked " +
+                        "against ReadPixels until one can.");
+                }
+
+                ConsumeSlot(slot, fromStage: false);
+                return;
+            }
 
             if (mismatches == 0)
             {
@@ -2482,6 +2547,69 @@ namespace QuestTree.QuestGraph
                 " - captures go back to ReadPixels for this session.");
 
             ConsumeSlot(slot, fromStage: true);
+        }
+
+        /// <summary>WP4 A2 (review): whether this tile can PROVE the readback - it is not all zero, and some row r differs
+        /// from row th-1-r, so a flipped or row-offset readback of it could not match. Read on the staging texture's data
+        /// (ReadPixels' own), rows 0..th-1, columns 0..tw-1.</summary>
+        /// <param name="slot">The verified slot (its Tw and Th).</param>
+        private bool Discriminates(ReadbackSlot slot)
+        {
+            var tw = slot.Tw;
+            var th = slot.Th;
+            var nonZero = false;
+            var asymmetric = false;
+
+            if (_hdr)
+            {
+                var data = _stage.GetPixelData<Half4>(0);
+
+                for (var r = 0; r < th && !(nonZero && asymmetric); r++)
+                {
+                    var a = r * TileSize;
+                    var b = (th - 1 - r) * TileSize;
+
+                    for (var x = 0; x < tw; x++)
+                    {
+                        var p = data[a + x];
+                        if (!nonZero && (p.R | p.G | p.B | p.A) != 0) nonZero = true;
+
+                        if (!asymmetric)
+                        {
+                            var q = data[b + x];
+                            if (p.R != q.R || p.G != q.G || p.B != q.B || p.A != q.A) asymmetric = true;
+                        }
+
+                        if (nonZero && asymmetric) break;
+                    }
+                }
+
+                return nonZero && asymmetric;
+            }
+
+            var bytes = _stage.GetPixelData<Color32>(0);
+
+            for (var r = 0; r < th && !(nonZero && asymmetric); r++)
+            {
+                var a = r * TileSize;
+                var b = (th - 1 - r) * TileSize;
+
+                for (var x = 0; x < tw; x++)
+                {
+                    var p = bytes[a + x];
+                    if (!nonZero && (p.r | p.g | p.b | p.a) != 0) nonZero = true;
+
+                    if (!asymmetric)
+                    {
+                        var q = bytes[b + x];
+                        if (p.r != q.r || p.g != q.g || p.b != q.b || p.a != q.a) asymmetric = true;
+                    }
+
+                    if (nonZero && asymmetric) break;
+                }
+            }
+
+            return nonZero && asymmetric;
         }
 
         /// <summary>WP4 A2: how many of the tile's samples differ between the slot (the whole target, rows from the
@@ -2843,10 +2971,14 @@ namespace QuestTree.QuestGraph
                     continue;
                 }
 
-                SubmitTile(plan, floor, tile, slot);
+                var submitted = SubmitTile(plan, floor, tile, slot);
                 if (floor.Failed) break;
 
                 yield return null;
+
+                // The asynchronous steps threw and the session went back to ReadPixels: this tile again, the
+                // synchronous way, next frame (one render a frame).
+                if (!submitted) k--;
             }
 
             // THE DRAIN - before the caller runs the water rule or releases the scene, so every tile is folded in and

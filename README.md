@@ -370,10 +370,15 @@ work moved off the frame.
   is folded in before the water rule runs and before the scene is released. The half floats go through a table
   built by Unity's own Mathf.HalfToFloat, so the numbers are that function's, bit for bit.
 - **The first tile of every session is read both ways.** The two results are compared bit for bit before the
-  new path is trusted. The Debug log says `asynchronous tile readback proven bit-identical to ReadPixels on
-  <format>/<msaa> (<n> samples)` once. A mismatch is a warning: the session goes back to ReadPixels, and that
-  tile's pixels come from ReadPixels. A readback that reports an error is rendered again the old way under the
-  same hold, and two errors in one capture also send the session back to ReadPixels.
+  new path is trusted. A tile only counts as proof when it could tell a correct readback from a flipped or
+  shifted one: it is not empty, and it is not its own vertical mirror. Until such a tile comes, every tile is
+  checked, and after eight that cannot prove anything one Info line says so. The Debug log says `asynchronous
+  tile readback proven bit-identical to ReadPixels on <format>/<msaa> (<n> samples)` once. A mismatch is a
+  warning: the session goes back to ReadPixels, and that tile's pixels come from ReadPixels. A readback that
+  reports an error is rendered again the old way under the same hold, and two errors in one capture also send
+  the session back to ReadPixels. If the resolve, the request or the check itself throws, the session goes back
+  to ReadPixels with one warning, and that tile and any still in flight are rendered again the old way, so the
+  floor is kept.
 - **What it costs.** The ring is 96 MB of video memory and 96 MB of system memory, outside the capture's memory
   budget. The budget itself is not changed, because it decides the picture's size. The capture header says
   `readback async x3 (<format>)` or `readback ReadPixels (<why>)`. A Debug line per floor and side counts the
