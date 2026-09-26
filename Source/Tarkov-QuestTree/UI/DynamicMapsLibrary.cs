@@ -1315,8 +1315,9 @@ namespace QuestTree.UI
 
             // The frame size from the header BEFORE decoding: a small, very compressible file (a hostile host's
             // copy, a hand-placed one) could otherwise become a 256 MiB - 1 GiB texture in one frame (review F49).
-            // Nothing we write is over 4096 on a side; anything past MaxPictureSide, or with no header we can
-            // read, is refused like a picture that will not decode.
+            // A capture is at most 8192 on a side (MapCapture.Resolution clamps the setting), a host copy 2048
+            // and an atlas page 4096; anything past MaxPictureSide, or with no header we can read, is refused
+            // like a picture that will not decode.
             if (!PictureSize(bytes, out var declaredWidth, out var declaredHeight) ||
                 declaredWidth > MaxPictureSide || declaredHeight > MaxPictureSide)
             {
@@ -1405,17 +1406,9 @@ namespace QuestTree.UI
             }
         }
 
-        /// <summary>
-        /// What a decoded picture costs, from the format the texture ENDED UP in rather than from the
-        /// one it was constructed with or the file's extension: our captures are RGBA PNGs and decode
-        /// to RGBA32 at four bytes a pixel (39 MiB for a 3262x3136 floor, the largest the capture's
-        /// memory budget allows), a host's JPEG and any PNG without an alpha channel decode to RGB24 -
-        /// counted at four as well, since D3D11 stores it as RGBA. A mipmapped page or side adds a third.
-        ///
-        /// An unrecognised format is counted at four, so the number in the log is never optimistic.
-        /// </summary>
-        /// <summary>The longest side a map picture may have before it is decoded. See BuildRasterSprite.</summary>
-        private const int MaxPictureSide = 8192;
+        /// <summary>The longest side a map picture may have before it is decoded - see BuildRasterSprite,
+        /// MapTransfer.Encode and MapCapture.LoadPicture.</summary>
+        internal const int MaxPictureSide = 8192;
 
         /// <summary>A PNG's (IHDR) or JPEG's (frame header) width and height, read without decoding; false for
         /// anything else.</summary>
@@ -1439,6 +1432,15 @@ namespace QuestTree.UI
             return QuestGraph.MapTransfer.JpegSize(bytes, out width, out height);
         }
 
+        /// <summary>
+        /// What a decoded picture costs, from the format the texture ENDED UP in rather than from the
+        /// one it was constructed with or the file's extension: our captures are RGBA PNGs and decode
+        /// to RGBA32 at four bytes a pixel (39 MiB for a 3262x3136 floor, the largest the capture's
+        /// memory budget allows), a host's JPEG and any PNG without an alpha channel decode to RGB24 -
+        /// counted at four as well, since D3D11 stores it as RGBA. A mipmapped page or side adds a third.
+        ///
+        /// An unrecognised format is counted at four, so the number in the log is never optimistic.
+        /// </summary>
         private static long TextureBytes(Texture2D texture)
         {
             var bytesPerPixel = texture.format switch

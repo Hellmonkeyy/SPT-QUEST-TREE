@@ -1388,6 +1388,21 @@ namespace QuestTree.QuestGraph
             {
                 var bytes = File.ReadAllBytes(floor.Path);
 
+                // The frame size from the header BEFORE the decode (review F49), as the Maps tab and the 3D view
+                // already check it: this decode is READABLE - twice the memory - on the main thread, so a small, very
+                // compressible file hand-copied into the capture folder must not become a gigabyte in one frame. A
+                // page is the builder's size; a floor or side at most a capture's own ceiling.
+                var sideLimit = floor.Atlas != null ? MaxAtlasPixels : QuestTree.UI.DynamicMapsLibrary.MaxPictureSide;
+
+                if (!QuestTree.UI.DynamicMapsLibrary.PictureSize(bytes, out var declaredWidth, out var declaredHeight) ||
+                    declaredWidth > sideLimit || declaredHeight > sideLimit)
+                {
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: {key} \"{floor.Name}\" is not a PNG or JPEG of at most {sideLimit} px a side " +
+                        $"({declaredWidth}x{declaredHeight}) and is not offered to the host.");
+                    return false;
+                }
+
                 // RGBA, not RGB: the picture on disk carries the walkable mask in its alpha and the
                 // composite below needs it. LoadImage reformats to suit the PNG anyway; asking for RGBA
                 // is what stops the alpha being dropped on the way in.

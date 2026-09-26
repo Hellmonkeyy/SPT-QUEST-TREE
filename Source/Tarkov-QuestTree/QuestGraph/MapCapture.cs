@@ -2632,11 +2632,32 @@ namespace QuestTree.QuestGraph
             {
                 if (!File.Exists(path)) return null;
 
+                var bytes = File.ReadAllBytes(path);
+
+                // The header before the decode (review F49): this file has to be exactly this capture's size, so any
+                // other size - or no readable header - is refused before a texture is made, rather than after a
+                // decode of whatever size the file claims.
+                if (!QuestTree.UI.DynamicMapsLibrary.PictureSize(bytes, out var declaredWidth, out var declaredHeight))
+                {
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: {plan.Key} \"{floor.Dto.Name}\" has a {what} that is not a readable image - " +
+                        "this capture draws over it.");
+                    return null;
+                }
+
+                if (declaredWidth != plan.WidthPx || declaredHeight != plan.HeightPx)
+                {
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: {plan.Key} \"{floor.Dto.Name}\" has a {what} of {declaredWidth}x{declaredHeight} px " +
+                        $"where this capture is {plan.WidthPx}x{plan.HeightPx} - this capture draws over it.");
+                    return null;
+                }
+
                 // RGBA32 asked for; LoadImage reformats to suit the PNG anyway, which is why the two
                 // copies below both check what they actually got.
                 texture = new Texture2D(2, 2, TextureFormat.RGBA32, mipChain: false);
 
-                if (!texture.LoadImage(File.ReadAllBytes(path)))
+                if (!texture.LoadImage(bytes))
                 {
                     Plugin.LogSource?.LogInfo(
                         $"QuestTree: {plan.Key} \"{floor.Dto.Name}\" has a {what} that is not a readable image - " +
@@ -2646,6 +2667,7 @@ namespace QuestTree.QuestGraph
                     return null;
                 }
 
+                // Kept as a belt behind the header check above: the decode's own size.
                 if (texture.width != plan.WidthPx || texture.height != plan.HeightPx)
                 {
                     Plugin.LogSource?.LogInfo(
