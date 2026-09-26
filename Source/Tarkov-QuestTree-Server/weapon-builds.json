@@ -1,8 +1,8 @@
 {
   "SchemaVersion": 1,
-  "SolverVersion": 11,
-  "Generation": 852288,
-  "Items": "B7FB839F0FB05E27E29B1D35F26310FDCF6329142D420104E78A69ACF46D139B",
+  "SolverVersion": 12,
+  "Generation": 1743631,
+  "Items": "4D78ED126606DE5475956245446EEBC92E69DEA936EDCD0F6469F0DDA932C74B",
   "Builds": {
     "17332CC29F5F084A3ACF701F1D0161F5B08A6B47B8F13EFBB0E470F73FDF6D0E": {
       "Parts": [
@@ -14,9 +14,15 @@
         },
         {
           "Slot": "mod_tactical_003",
-          "Template": "5cc9c20cd7f00c001336c65d",
+          "Template": "672e2e75ecdecad1471639ad",
           "Depth": 2,
           "Parent": 0
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "56083a334bdc2dc8488b4571",
+          "Depth": 1,
+          "Parent": -1
         },
         {
           "Slot": "mod_barrel",
@@ -35,22 +41,15 @@
           "Template": "55d484b44bdc2d1d4e8b456d",
           "Depth": 1,
           "Parent": -1
-        },
-        {
-          "Slot": "mod_stock",
-          "Template": "56083a334bdc2dc8488b4571",
-          "Depth": 1,
-          "Parent": -1
         }
       ],
       "Changes": 3,
-      "Cost": 45212,
+      "Cost": 40954,
       "PerPurchase": 10000,
-      "Attempts": 14181,
+      "Attempts": 11042,
       "Floor": 6,
-      "Nodes": 150088,
+      "Nodes": 213715,
       "Binding": [
-        "ergonomics",
         "recoil",
         "height",
         "width"
@@ -77,14 +76,14 @@
           "Parent": 1
         },
         {
-          "Slot": "mod_magazine",
-          "Template": "55d482194bdc2d1d4e8b456b",
-          "Depth": 1,
-          "Parent": -1
+          "Slot": "mod_tactical_000",
+          "Template": "672e2e75645f9ad09f4b949d",
+          "Depth": 3,
+          "Parent": 1
         },
         {
           "Slot": "mod_pistol_grip",
-          "Template": "6087e663132d4d12c81fd96b",
+          "Template": "5947fa2486f77425b47c1a9b",
           "Depth": 1,
           "Parent": -1
         },
@@ -93,14 +92,20 @@
           "Template": "57dc334d245977597164366f",
           "Depth": 1,
           "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "55d482194bdc2d1d4e8b456b",
+          "Depth": 1,
+          "Parent": -1
         }
       ],
-      "Changes": 4,
-      "Cost": 85075,
+      "Changes": 5,
+      "Cost": 84530,
       "PerPurchase": 10000,
-      "Attempts": 935,
+      "Attempts": 4334,
       "Floor": 3,
-      "Nodes": 596953,
+      "Nodes": 880541,
       "Binding": [
         "ergonomics",
         "magazine capacity",
@@ -130,9 +135,15 @@
         },
         {
           "Slot": "mod_tactical_000",
-          "Template": "5cc9c20cd7f00c001336c65d",
+          "Template": "672e2e75ecdecad1471639ad",
           "Depth": 4,
           "Parent": 2
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5926d3c686f77410de68ebc8",
+          "Depth": 2,
+          "Parent": 0
         },
         {
           "Slot": "mod_handguard",
@@ -147,32 +158,25 @@
           "Parent": 0
         },
         {
-          "Slot": "mod_stock",
-          "Template": "5926d3c686f77410de68ebc8",
-          "Depth": 2,
-          "Parent": 0
+          "Slot": "mod_charge",
+          "Template": "5926c32286f774616e42de99",
+          "Depth": 1,
+          "Parent": -1
         },
         {
           "Slot": "mod_magazine",
           "Template": "5a351711c4a282000b1521a4",
           "Depth": 1,
           "Parent": -1
-        },
-        {
-          "Slot": "mod_charge",
-          "Template": "5926c32286f774616e42de99",
-          "Depth": 1,
-          "Parent": -1
         }
       ],
       "Changes": 8,
-      "Cost": 163395,
+      "Cost": 159137,
       "PerPurchase": 10000,
-      "Attempts": 14180,
+      "Attempts": 11029,
       "Floor": 7,
-      "Nodes": 213758,
+      "Nodes": 229586,
       "Binding": [
-        "ergonomics",
         "recoil",
         "magazine capacity",
         "effective distance"
@@ -194,7 +198,7 @@
         },
         {
           "Slot": "mod_tactical_000",
-          "Template": "5d10b49bd7ad1a1a560708b0",
+          "Template": "672e2e75ecdecad1471639ad",
           "Depth": 3,
           "Parent": 1
         },
@@ -206,12 +210,12 @@
         },
         {
           "Slot": "mod_scope",
-          "Template": "62811f461d5df4475f46a332",
+          "Template": "5aa66c72e5b5b00016327c93",
           "Depth": 1,
           "Parent": -1
         },
         {
-          "Slot": "mod_scope",
+          "Slot": "mod_scope_000",
           "Template": "5aa66be6e5b5b0214e506e97",
           "Depth": 2,
           "Parent": 4
@@ -230,11 +234,11 @@
         }
       ],
       "Changes": 3,
-      "Cost": 129571,
+      "Cost": 117871,
       "PerPurchase": 10000,
-      "Attempts": 14181,
+      "Attempts": 8565,
       "Floor": 5,
-      "Nodes": 116546,
+      "Nodes": 193263,
       "Binding": [
         "recoil",
         "effective distance"
@@ -250,27 +254,21 @@
         },
         {
           "Slot": "mod_muzzle",
-          "Template": "5fbe7618d6fa9c00c571bb6c",
+          "Template": "5d1f819086f7744b355c219b",
           "Depth": 2,
           "Parent": 0
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5cff9e84d7ad1a049e54ed55",
+          "Depth": 3,
+          "Parent": 1
         },
         {
           "Slot": "mod_gas_block",
           "Template": "5a34fbadc4a28200741e230a",
           "Depth": 2,
           "Parent": 0
-        },
-        {
-          "Slot": "mod_stock",
-          "Template": "5c0faeddd174af02a962601f",
-          "Depth": 1,
-          "Parent": -1
-        },
-        {
-          "Slot": "mod_stock_000",
-          "Template": "602e620f9b513876d4338d9a",
-          "Depth": 2,
-          "Parent": 3
         },
         {
           "Slot": "mod_scope",
@@ -282,7 +280,7 @@
           "Slot": "mod_scope",
           "Template": "5b3b99475acfc432ff4dcbee",
           "Depth": 2,
-          "Parent": 5
+          "Parent": 4
         },
         {
           "Slot": "mod_pistol_grip",
@@ -295,17 +293,22 @@
           "Template": "5a329052c4a28200741e22d3",
           "Depth": 1,
           "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5b0800175acfc400153aebd4",
+          "Depth": 1,
+          "Parent": -1
         }
       ],
       "Changes": 5,
-      "Cost": 160543,
+      "Cost": 159884,
       "PerPurchase": 10000,
-      "Attempts": 9820,
+      "Attempts": 4093,
       "Floor": 6,
-      "Nodes": 717695,
+      "Nodes": 1482062,
       "Binding": [
         "ergonomics",
-        "recoil",
         "effective distance"
       ]
     },
@@ -325,13 +328,13 @@
         },
         {
           "Slot": "mod_muzzle",
-          "Template": "696fc5ed64572d85f30aac10",
+          "Template": "672e2e754f01ef56b4aa66a3",
           "Depth": 3,
           "Parent": 1
         },
         {
           "Slot": "mod_gas_block",
-          "Template": "63d3ce281fe77d0f2801859e",
+          "Template": "5ae30e795acfc408fb139a0b",
           "Depth": 3,
           "Parent": 1
         },
@@ -349,25 +352,13 @@
         },
         {
           "Slot": "mod_scope",
-          "Template": "2322ee962f6c77a1284abc1e",
+          "Template": "6477772ea8a38bb2050ed4db",
           "Depth": 2,
           "Parent": 0
         },
         {
           "Slot": "mod_stock",
-          "Template": "5649be884bdc2d79388b4577",
-          "Depth": 1,
-          "Parent": -1
-        },
-        {
-          "Slot": "mod_stock_000",
-          "Template": "602e620f9b513876d4338d9a",
-          "Depth": 2,
-          "Parent": 7
-        },
-        {
-          "Slot": "mod_pistol_grip",
-          "Template": "6761b213607f9a6f79017d46",
+          "Template": "591aef7986f774139d495f03",
           "Depth": 1,
           "Parent": -1
         },
@@ -382,54 +373,29 @@
           "Template": "69f0d28ca0c7d37d9130aab8",
           "Depth": 1,
           "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "55d4b9964bdc2d1d4e8b456e",
+          "Depth": 1,
+          "Parent": -1
         }
       ],
-      "Changes": 6,
-      "Cost": 251810,
+      "Changes": 4,
+      "Cost": 147647,
       "PerPurchase": 10000,
-      "Attempts": 1222,
+      "Attempts": 10779,
       "Floor": 8,
-      "Nodes": 505060,
+      "Nodes": 1144557,
       "Binding": [
         "ergonomics",
         "recoil",
-        "weight",
         "magazine capacity",
         "effective distance"
       ]
     },
     "479337BA3D7C28AD6EE2121C25BCD2D87894D87E34E94FEF217DC37F735A39AE": {
       "Parts": [
-        {
-          "Slot": "mod_handguard",
-          "Template": "5a788068c5856700137e4c8f",
-          "Depth": 1,
-          "Parent": -1
-        },
-        {
-          "Slot": "mod_mount_000",
-          "Template": "669a6a4a525be1d2d004b8eb",
-          "Depth": 2,
-          "Parent": 0
-        },
-        {
-          "Slot": "mod_tactical",
-          "Template": "560d657b4bdc2da74d8b4572",
-          "Depth": 3,
-          "Parent": 1
-        },
-        {
-          "Slot": "mod_foregrip",
-          "Template": "5b7be4895acfc400170e2dd5",
-          "Depth": 2,
-          "Parent": 0
-        },
-        {
-          "Slot": "mod_foregrip",
-          "Template": "6984b690b457c5047e0c01fa",
-          "Depth": 3,
-          "Parent": 3
-        },
         {
           "Slot": "mod_barrel",
           "Template": "5a787f7ac5856700177af660",
@@ -440,13 +406,37 @@
           "Slot": "mod_muzzle",
           "Template": "5c0111ab0db834001966914d",
           "Depth": 2,
-          "Parent": 5
+          "Parent": 0
         },
         {
           "Slot": "mod_muzzle",
-          "Template": "59fb137a86f7740adb646af1",
+          "Template": "58272d7f2459774f6311ddfd",
           "Depth": 3,
-          "Parent": 6
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "5a788068c5856700137e4c8f",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_mount_001",
+          "Template": "6269220d70b6c02e665f2635",
+          "Depth": 2,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_tactical",
+          "Template": "672e2e75ecdecad1471639ad",
+          "Depth": 3,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "672e2e75f3418d66159240f8",
+          "Depth": 2,
+          "Parent": 3
         },
         {
           "Slot": "mod_stock",
@@ -461,24 +451,18 @@
           "Parent": -1
         }
       ],
-      "Changes": 7,
-      "Cost": 148722,
+      "Changes": 6,
+      "Cost": 84720,
       "PerPurchase": 10000,
-      "Attempts": 14216,
+      "Attempts": 10829,
       "Floor": 8,
-      "Nodes": 477715,
+      "Nodes": 143739,
       "Binding": [
-        "ergonomics"
+        "recoil"
       ]
     },
     "E203FB2ADD8B635C53332392407E0D84AB4120E0AF3AD80F9E04639C6369793B": {
       "Parts": [
-        {
-          "Slot": "mod_muzzle",
-          "Template": "5a9fbacda2750c00141e080f",
-          "Depth": 1,
-          "Parent": -1
-        },
         {
           "Slot": "mod_magazine",
           "Template": "59d6272486f77466146386ff",
@@ -495,25 +479,13 @@
           "Slot": "mod_handguard",
           "Template": "5cbda392ae92155f3c17c39f",
           "Depth": 2,
-          "Parent": 2
+          "Parent": 1
         },
         {
           "Slot": "mod_foregrip",
           "Template": "59f8a37386f7747af3328f06",
           "Depth": 3,
-          "Parent": 3
-        },
-        {
-          "Slot": "mod_stock",
-          "Template": "688cbdc341e2a57a8f0c1c6c",
-          "Depth": 1,
-          "Parent": -1
-        },
-        {
-          "Slot": "mod_stock",
-          "Template": "5894a13e86f7742405482982",
-          "Depth": 2,
-          "Parent": 5
+          "Parent": 2
         },
         {
           "Slot": "mod_reciever",
@@ -525,7 +497,25 @@
           "Slot": "mod_scope",
           "Template": "6477772ea8a38bb2050ed4db",
           "Depth": 2,
-          "Parent": 7
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "59bffc1f86f77435b128b872",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "672e2e75e8c2736e43530008",
+          "Depth": 2,
+          "Parent": 6
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "59d6514b86f774171a068a08",
+          "Depth": 1,
+          "Parent": -1
         },
         {
           "Slot": "mod_pistol_grip",
@@ -534,15 +524,14 @@
           "Parent": -1
         }
       ],
-      "Changes": 8,
-      "Cost": 263033,
+      "Changes": 7,
+      "Cost": 177124,
       "PerPurchase": 10000,
-      "Attempts": 168,
+      "Attempts": 4093,
       "Floor": 6,
-      "Nodes": 480630,
+      "Nodes": 1168940,
       "Binding": [
         "ergonomics",
-        "recoil",
         "effective distance"
       ]
     },
@@ -612,9 +601,9 @@
       "Changes": 9,
       "Cost": 201185,
       "PerPurchase": 10000,
-      "Attempts": 14218,
+      "Attempts": 26103,
       "Floor": 10,
-      "Nodes": 102069,
+      "Nodes": 115507,
       "Binding": [
         "ergonomics",
         "magazine capacity",
@@ -632,7 +621,7 @@
         },
         {
           "Slot": "mod_reciever",
-          "Template": "5d2c772c48f0355d95672c25",
+          "Template": "5d2c76ed48f03532f2136169",
           "Depth": 1,
           "Parent": -1
         },
@@ -644,13 +633,13 @@
         },
         {
           "Slot": "mod_stock",
-          "Template": "5beec8b20db834001961942a",
+          "Template": "688c9df121038434840a1e06",
           "Depth": 1,
           "Parent": -1
         },
         {
           "Slot": "mod_stock",
-          "Template": "602e620f9b513876d4338d9a",
+          "Template": "5894a13e86f7742405482982",
           "Depth": 2,
           "Parent": 3
         },
@@ -674,17 +663,23 @@
         },
         {
           "Slot": "mod_pistol_grip",
-          "Template": "6087e663132d4d12c81fd96b",
+          "Template": "5f6341043ada5942720e2dc5",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_charge",
+          "Template": "6130ca3fd92c473c77020dbd",
           "Depth": 1,
           "Parent": -1
         }
       ],
-      "Changes": 7,
-      "Cost": 188043,
+      "Changes": 8,
+      "Cost": 176120,
       "PerPurchase": 10000,
-      "Attempts": 935,
+      "Attempts": 2197,
       "Floor": 3,
-      "Nodes": 490813,
+      "Nodes": 1199825,
       "Binding": [
         "ergonomics",
         "magazine capacity",
@@ -701,8 +696,8 @@
           "Parent": -1
         },
         {
-          "Slot": "mod_stock",
-          "Template": "6878ccf4181ac8a5b5077236",
+          "Slot": "mod_pistol_grip",
+          "Template": "5a69a2ed8dc32e000d46d1f1",
           "Depth": 1,
           "Parent": -1
         },
@@ -731,12 +726,6 @@
           "Parent": 4
         },
         {
-          "Slot": "mod_pistol_grip",
-          "Template": "57c44fa82459772d2d75e415",
-          "Depth": 1,
-          "Parent": -1
-        },
-        {
           "Slot": "mod_magazine",
           "Template": "5a9e81fba2750c00164f6b11",
           "Depth": 1,
@@ -750,12 +739,13 @@
         }
       ],
       "Changes": 6,
-      "Cost": 175758,
+      "Cost": 171012,
       "PerPurchase": 10000,
-      "Attempts": 936,
+      "Attempts": 4327,
       "Floor": 7,
-      "Nodes": 95545,
+      "Nodes": 100770,
       "Binding": [
+        "ergonomics",
         "recoil",
         "magazine capacity"
       ]
@@ -844,9 +834,9 @@
       "Changes": 11,
       "Cost": 206212,
       "PerPurchase": 10000,
-      "Attempts": 917,
+      "Attempts": 10833,
       "Floor": 10,
-      "Nodes": 454543,
+      "Nodes": 938644,
       "Binding": [
         "ergonomics",
         "recoil",
@@ -919,11 +909,11 @@
         }
       ],
       "Changes": 4,
-      "Cost": 105267,
+      "Cost": 107980,
       "PerPurchase": 10000,
-      "Attempts": 14215,
+      "Attempts": 26100,
       "Floor": 8,
-      "Nodes": 529934,
+      "Nodes": 582912,
       "Binding": [
         "recoil",
         "effective distance"
@@ -987,11 +977,11 @@
         }
       ],
       "Changes": 8,
-      "Cost": 323963,
+      "Cost": 244403,
       "PerPurchase": 10000,
-      "Attempts": 14214,
+      "Attempts": 26099,
       "Floor": 10,
-      "Nodes": 71868,
+      "Nodes": 175568,
       "Binding": [
         "ergonomics",
         "effective distance"
@@ -1067,11 +1057,11 @@
         }
       ],
       "Changes": 9,
-      "Cost": 307534,
+      "Cost": 266325,
       "PerPurchase": 10000,
-      "Attempts": 14204,
+      "Attempts": 26089,
       "Floor": 10,
-      "Nodes": 118742,
+      "Nodes": 134377,
       "Binding": [
         "recoil",
         "magazine capacity"
@@ -1087,7 +1077,7 @@
         },
         {
           "Slot": "mod_barrel",
-          "Template": "55d3632e4bdc2d972f8b4569",
+          "Template": "672e2e75e04c9aca3536136b",
           "Depth": 2,
           "Parent": 0
         },
@@ -1110,12 +1100,6 @@
           "Parent": 1
         },
         {
-          "Slot": "mod_handguard",
-          "Template": "5b2cfa535acfc432ff4db7a0",
-          "Depth": 2,
-          "Parent": 0
-        },
-        {
           "Slot": "mod_scope",
           "Template": "5a1ead28fcdbcb001912fa9f",
           "Depth": 2,
@@ -1125,7 +1109,13 @@
           "Slot": "mod_scope",
           "Template": "5a1eaa87fcdbcb001865f75e",
           "Depth": 3,
-          "Parent": 6
+          "Parent": 5
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "5b2cfa535acfc432ff4db7a0",
+          "Depth": 2,
+          "Parent": 0
         },
         {
           "Slot": "mod_stock",
@@ -1134,8 +1124,14 @@
           "Parent": -1
         },
         {
+          "Slot": "mod_stock_000",
+          "Template": "672e2e7533a70f23dfe4c8bb",
+          "Depth": 2,
+          "Parent": 8
+        },
+        {
           "Slot": "mod_stock_003",
-          "Template": "698b338649b46ae2d0092e82",
+          "Template": "698b3592e700c6d632003753",
           "Depth": 2,
           "Parent": 8
         },
@@ -1146,27 +1142,25 @@
           "Parent": -1
         },
         {
-          "Slot": "mod_pistol_grip",
-          "Template": "ebd108b0a8c45420f7624a3f",
+          "Slot": "mod_magazine",
+          "Template": "59c1383d86f774290a37e0ca",
           "Depth": 1,
           "Parent": -1
         },
         {
-          "Slot": "mod_magazine",
-          "Template": "69f0d28ca0c7d37d9130aab8",
+          "Slot": "mod_pistol_grip",
+          "Template": "55d4b9964bdc2d1d4e8b456e",
           "Depth": 1,
           "Parent": -1
         }
       ],
-      "Changes": 9,
-      "Cost": 1410978,
+      "Changes": 10,
+      "Cost": 767024,
       "PerPurchase": 10000,
-      "Attempts": 219,
+      "Attempts": 928,
       "Floor": 12,
-      "Nodes": 565596,
+      "Nodes": 958030,
       "Binding": [
-        "ergonomics",
-        "recoil",
         "magazine capacity"
       ]
     },
@@ -1236,9 +1230,9 @@
       "Changes": 6,
       "Cost": 174253,
       "PerPurchase": 10000,
-      "Attempts": 921,
+      "Attempts": 12801,
       "Floor": 6,
-      "Nodes": 617938,
+      "Nodes": 1062928,
       "Binding": [
         "ergonomics",
         "magazine capacity",
@@ -1247,12 +1241,6 @@
     },
     "7ABE9CDE0B4B413B39F35DBB6BB3F1D0CD062A49C3D5F7DB370249DE8E8468CB": {
       "Parts": [
-        {
-          "Slot": "mod_tactical",
-          "Template": "5a7b483fe899ef0016170d15",
-          "Depth": 1,
-          "Parent": -1
-        },
         {
           "Slot": "mod_pistol_grip",
           "Template": "5c00076d0db834001d23ee1f",
@@ -1275,7 +1263,13 @@
           "Slot": "mod_muzzle",
           "Template": "5c6beec32e221601da3578f2",
           "Depth": 2,
-          "Parent": 3
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_tactical",
+          "Template": "5cc9c20cd7f00c001336c65d",
+          "Depth": 1,
+          "Parent": -1
         },
         {
           "Slot": "mod_magazine",
@@ -1285,11 +1279,11 @@
         }
       ],
       "Changes": 6,
-      "Cost": 90765,
+      "Cost": 79579,
       "PerPurchase": 10000,
-      "Attempts": 14216,
+      "Attempts": 4092,
       "Floor": 4,
-      "Nodes": 43583,
+      "Nodes": 48234,
       "Binding": [
         "ergonomics",
         "magazine capacity"
@@ -1355,9 +1349,9 @@
       "Changes": 7,
       "Cost": 136492,
       "PerPurchase": 10000,
-      "Attempts": 14216,
+      "Attempts": 26100,
       "Floor": 4,
-      "Nodes": 250005,
+      "Nodes": 286047,
       "Binding": [
         "ergonomics",
         "recoil",
@@ -1428,7 +1422,7 @@
           "Parent": 8
         },
         {
-          "Slot": "mod_tactical_001",
+          "Slot": "mod_tactical_000",
           "Template": "5c06595c0db834001a66af6c",
           "Depth": 3,
           "Parent": 8
@@ -1453,11 +1447,11 @@
         }
       ],
       "Changes": 10,
-      "Cost": 289111,
+      "Cost": 265921,
       "PerPurchase": 10000,
-      "Attempts": 935,
+      "Attempts": 10824,
       "Floor": 13,
-      "Nodes": 364000,
+      "Nodes": 562237,
       "Binding": [
         "ergonomics",
         "weight",
@@ -1554,9 +1548,9 @@
       "Changes": 10,
       "Cost": 244572,
       "PerPurchase": 10000,
-      "Attempts": 14214,
+      "Attempts": 26096,
       "Floor": 14,
-      "Nodes": 327463,
+      "Nodes": 459508,
       "Binding": [
         "magazine capacity",
         "effective distance"
@@ -1628,9 +1622,9 @@
       "Changes": 9,
       "Cost": 185472,
       "PerPurchase": 10000,
-      "Attempts": 8555,
+      "Attempts": 20432,
       "Floor": 5,
-      "Nodes": 644480,
+      "Nodes": 1555604,
       "Binding": [
         "recoil",
         "magazine capacity",
@@ -1639,18 +1633,6 @@
     },
     "9F71E8656ED700FE8FEE8A9DA189F9B5D1203FC3EC29922D05AA854DE403EC0A": {
       "Parts": [
-        {
-          "Slot": "mod_mount_001",
-          "Template": "5ef369b08cef260c0642acaf",
-          "Depth": 1,
-          "Parent": -1
-        },
-        {
-          "Slot": "mod_tactical",
-          "Template": "560d657b4bdc2da74d8b4572",
-          "Depth": 2,
-          "Parent": 0
-        },
         {
           "Slot": "mod_pistol_grip",
           "Template": "5ef366938cef260c0642acad",
@@ -1667,13 +1649,25 @@
           "Slot": "mod_muzzle",
           "Template": "5ef61964ec7f42238c31e0c1",
           "Depth": 2,
-          "Parent": 3
+          "Parent": 1
         },
         {
           "Slot": "mod_sight_rear",
           "Template": "5e81ee4dcb2b95385c177582",
           "Depth": 2,
-          "Parent": 3
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_mount_001",
+          "Template": "5ef369b08cef260c0642acaf",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_tactical",
+          "Template": "5cc9c20cd7f00c001336c65d",
+          "Depth": 2,
+          "Parent": 4
         },
         {
           "Slot": "mod_barrel",
@@ -1694,24 +1688,24 @@
           "Parent": -1
         },
         {
-          "Slot": "mod_hammer",
-          "Template": "5e81c550763d9f754677befd",
+          "Slot": "mod_catch",
+          "Template": "5e81c539cb2b95385c177553",
           "Depth": 1,
           "Parent": -1
         },
         {
-          "Slot": "mod_catch",
-          "Template": "5e81c539cb2b95385c177553",
+          "Slot": "mod_hammer",
+          "Template": "5e81c550763d9f754677befd",
           "Depth": 1,
           "Parent": -1
         }
       ],
       "Changes": 4,
-      "Cost": 69731,
+      "Cost": 55558,
       "PerPurchase": 10000,
-      "Attempts": 14216,
+      "Attempts": 4092,
       "Floor": 10,
-      "Nodes": 49590,
+      "Nodes": 52144,
       "Binding": [
         "ergonomics",
         "magazine capacity",
@@ -1802,9 +1796,9 @@
       "Changes": 7,
       "Cost": 213226,
       "PerPurchase": 10000,
-      "Attempts": 14213,
+      "Attempts": 26090,
       "Floor": 10,
-      "Nodes": 659046,
+      "Nodes": 994211,
       "Binding": [
         "ergonomics",
         "recoil",
@@ -1846,7 +1840,7 @@
         },
         {
           "Slot": "mod_foregrip",
-          "Template": "5b7be4895acfc400170e2dd5",
+          "Template": "672e2e757e294bf6e5ecb944",
           "Depth": 3,
           "Parent": 1
         },
@@ -1857,7 +1851,7 @@
           "Parent": 5
         },
         {
-          "Slot": "mod_mount_001",
+          "Slot": "mod_mount_000",
           "Template": "669a6a4a525be1d2d004b8eb",
           "Depth": 3,
           "Parent": 1
@@ -1923,24 +1917,24 @@
           "Parent": 16
         },
         {
-          "Slot": "mod_charge",
-          "Template": "5df8e085bb49d91fb446d6a8",
+          "Slot": "mod_magazine",
+          "Template": "5a3501acc4a282000d72293a",
           "Depth": 1,
           "Parent": -1
         },
         {
-          "Slot": "mod_magazine",
-          "Template": "5a3501acc4a282000d72293a",
+          "Slot": "mod_charge",
+          "Template": "5df8e085bb49d91fb446d6a8",
           "Depth": 1,
           "Parent": -1
         }
       ],
       "Changes": 11,
-      "Cost": 657133,
+      "Cost": 654635,
       "PerPurchase": 10000,
-      "Attempts": 934,
+      "Attempts": 4296,
       "Floor": 18,
-      "Nodes": 503480,
+      "Nodes": 927060,
       "Binding": [
         "ergonomics",
         "effective distance"
@@ -1955,8 +1949,14 @@
           "Parent": -1
         },
         {
+          "Slot": "mod_tactical_001",
+          "Template": "672e2e75ecdecad1471639ad",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
           "Slot": "mod_tactical_000",
-          "Template": "544909bb4bdc2d6f028b4577",
+          "Template": "672e2e75645f9ad09f4b949d",
           "Depth": 2,
           "Parent": 0
         },
@@ -1968,9 +1968,9 @@
         },
         {
           "Slot": "mod_pistolgrip_000",
-          "Template": "57e3dba62459770f0c32322b",
+          "Template": "59e62cc886f77440d40b52a1",
           "Depth": 2,
-          "Parent": 2
+          "Parent": 3
         },
         {
           "Slot": "mod_barrel",
@@ -1982,7 +1982,7 @@
           "Slot": "mod_muzzle",
           "Template": "6492ef63cfcf7c89e701abf1",
           "Depth": 2,
-          "Parent": 4
+          "Parent": 5
         },
         {
           "Slot": "mod_scope",
@@ -1994,7 +1994,7 @@
           "Slot": "mod_tactical",
           "Template": "5cf639aad7f00c065703d455",
           "Depth": 2,
-          "Parent": 6
+          "Parent": 7
         },
         {
           "Slot": "mod_magazine",
@@ -2004,20 +2004,18 @@
         },
         {
           "Slot": "mod_pistolgrip",
-          "Template": "5f6341043ada5942720e2dc5",
+          "Template": "64cbad529f7cf7f75c077fd5",
           "Depth": 1,
           "Parent": -1
         }
       ],
       "Changes": 9,
-      "Cost": 209192,
+      "Cost": 186822,
       "PerPurchase": 10000,
-      "Attempts": 935,
+      "Attempts": 4320,
       "Floor": 9,
-      "Nodes": 298473,
-      "Binding": [
-        "ergonomics"
-      ]
+      "Nodes": 441210,
+      "Binding": []
     },
     "33225F622D6CA86CC2D2B1A8B03CCF44CFDB2308A844AF206B406D86A048E4BF": {
       "Parts": [
@@ -2037,9 +2035,9 @@
       "Changes": 1,
       "Cost": 12940,
       "PerPurchase": 10000,
-      "Attempts": 14216,
+      "Attempts": 26095,
       "Floor": 1,
-      "Nodes": 4403,
+      "Nodes": 4407,
       "Binding": [
         "ergonomics"
       ]
@@ -2053,28 +2051,16 @@
           "Parent": -1
         },
         {
-          "Slot": "mod_scope",
-          "Template": "58491f3324597764bc48fa02",
-          "Depth": 2,
-          "Parent": 0
-        },
-        {
           "Slot": "mod_barrel",
           "Template": "55d3632e4bdc2d972f8b4569",
           "Depth": 2,
           "Parent": 0
         },
         {
-          "Slot": "mod_muzzle",
-          "Template": "69694eed0d2309811a0fd1d3",
-          "Depth": 3,
-          "Parent": 2
-        },
-        {
           "Slot": "mod_gas_block",
-          "Template": "63d3ce281fe77d0f2801859e",
+          "Template": "5ae30e795acfc408fb139a0b",
           "Depth": 3,
-          "Parent": 2
+          "Parent": 1
         },
         {
           "Slot": "mod_handguard",
@@ -2086,17 +2072,29 @@
           "Slot": "mod_handguard",
           "Template": "637f57a68d137b27f70c4968",
           "Depth": 3,
-          "Parent": 5
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "58491f3324597764bc48fa02",
+          "Depth": 2,
+          "Parent": 0
         },
         {
           "Slot": "mod_stock",
-          "Template": "591aef7986f774139d495f03",
+          "Template": "5649be884bdc2d79388b4577",
           "Depth": 1,
           "Parent": -1
         },
         {
+          "Slot": "mod_stock_000",
+          "Template": "672e2e7533a70f23dfe4c8bb",
+          "Depth": 2,
+          "Parent": 6
+        },
+        {
           "Slot": "mod_pistol_grip",
-          "Template": "5a339805c4a2826c6e06d73d",
+          "Template": "5c0e2ff6d174af02a1659d4a",
           "Depth": 1,
           "Parent": -1
         },
@@ -2107,37 +2105,18 @@
           "Parent": -1
         }
       ],
-      "Changes": 5,
-      "Cost": 92147,
+      "Changes": 3,
+      "Cost": 66149,
       "PerPurchase": 10000,
-      "Attempts": 934,
+      "Attempts": 10764,
       "Floor": 9,
-      "Nodes": 555165,
+      "Nodes": 1263440,
       "Binding": [
-        "ergonomics",
-        "recoil"
+        "ergonomics"
       ]
     },
     "6C4F49F8F7E933CC9417DD8A44CBDA16F76B69D092CA175C37347A9623978EDD": {
       "Parts": [
-        {
-          "Slot": "mod_barrel",
-          "Template": "5df256570dee1b22f862e9c4",
-          "Depth": 1,
-          "Parent": -1
-        },
-        {
-          "Slot": "mod_muzzle",
-          "Template": "6a158e63060f61ca2c03e096",
-          "Depth": 2,
-          "Parent": 0
-        },
-        {
-          "Slot": "mod_muzzle",
-          "Template": "6a158e4abf497aade10030e0",
-          "Depth": 3,
-          "Parent": 1
-        },
         {
           "Slot": "mod_stock",
           "Template": "5df35e59c41b2312ea3334d5",
@@ -2148,31 +2127,31 @@
           "Slot": "mod_handguard",
           "Template": "5df25d3bfd6b4e6e2276dc9a",
           "Depth": 2,
-          "Parent": 3
+          "Parent": 0
         },
         {
           "Slot": "mod_bipod",
           "Template": "5888961624597754281f93f3",
           "Depth": 3,
-          "Parent": 4
+          "Parent": 1
         },
         {
           "Slot": "mod_foregrip",
           "Template": "5df36948bb49d91fb446d5ad",
           "Depth": 3,
-          "Parent": 4
+          "Parent": 1
         },
         {
           "Slot": "mod_pistol_grip",
           "Template": "5df38a5fb74cd90030650cb6",
           "Depth": 2,
-          "Parent": 3
+          "Parent": 0
         },
         {
           "Slot": "mod_stock_axis",
           "Template": "5df35ddddfc58d14537c2036",
           "Depth": 2,
-          "Parent": 3
+          "Parent": 0
         },
         {
           "Slot": "mod_mount",
@@ -2184,11 +2163,29 @@
           "Slot": "mod_scope",
           "Template": "5aa66c72e5b5b00016327c93",
           "Depth": 2,
-          "Parent": 9
+          "Parent": 6
         },
         {
           "Slot": "mod_scope_000",
           "Template": "5aa66be6e5b5b0214e506e97",
+          "Depth": 3,
+          "Parent": 7
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "5df256570dee1b22f862e9c4",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5d1f819086f7744b355c219b",
+          "Depth": 2,
+          "Parent": 9
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5cff9e84d7ad1a049e54ed55",
           "Depth": 3,
           "Parent": 10
         },
@@ -2200,11 +2197,11 @@
         }
       ],
       "Changes": 5,
-      "Cost": 366347,
+      "Cost": 192331,
       "PerPurchase": 10000,
-      "Attempts": 14216,
+      "Attempts": 4092,
       "Floor": 12,
-      "Nodes": 116444,
+      "Nodes": 167380,
       "Binding": [
         "magazine capacity"
       ]
@@ -2293,11 +2290,10 @@
       "Changes": 12,
       "Cost": 260582,
       "PerPurchase": 10000,
-      "Attempts": 934,
+      "Attempts": 10831,
       "Floor": 15,
-      "Nodes": 69996,
+      "Nodes": 104577,
       "Binding": [
-        "ergonomics",
         "magazine capacity"
       ]
     },
@@ -2343,9 +2339,9 @@
       "Changes": 4,
       "Cost": 68063,
       "PerPurchase": 10000,
-      "Attempts": 1025,
+      "Attempts": 12891,
       "Floor": 6,
-      "Nodes": 65710,
+      "Nodes": 69960,
       "Binding": [
         "magazine capacity"
       ]
@@ -2377,8 +2373,8 @@
           "Parent": 2
         },
         {
-          "Slot": "mod_handguard",
-          "Template": "66993149558c59581e03c028",
+          "Slot": "mod_pistol_grip",
+          "Template": "669946c157df3e2b4e0a0dc5",
           "Depth": 1,
           "Parent": -1
         },
@@ -2389,8 +2385,8 @@
           "Parent": -1
         },
         {
-          "Slot": "mod_pistol_grip",
-          "Template": "669946c157df3e2b4e0a0dc5",
+          "Slot": "mod_handguard",
+          "Template": "66993149558c59581e03c028",
           "Depth": 1,
           "Parent": -1
         }
@@ -2398,9 +2394,9 @@
       "Changes": 5,
       "Cost": 129271,
       "PerPurchase": 10000,
-      "Attempts": 933,
+      "Attempts": 10825,
       "Floor": 5,
-      "Nodes": 103879,
+      "Nodes": 60813,
       "Binding": [
         "ergonomics",
         "recoil",
@@ -2449,9 +2445,9 @@
       "Changes": 3,
       "Cost": 86281,
       "PerPurchase": 10000,
-      "Attempts": 1025,
+      "Attempts": 12889,
       "Floor": 6,
-      "Nodes": 59237,
+      "Nodes": 61321,
       "Binding": [
         "magazine capacity"
       ]
@@ -2510,9 +2506,9 @@
       "Changes": 4,
       "Cost": 91802,
       "PerPurchase": 10000,
-      "Attempts": 14199,
+      "Attempts": 26062,
       "Floor": 6,
-      "Nodes": 287424,
+      "Nodes": 256419,
       "Binding": [
         "ergonomics",
         "magazine capacity"
@@ -2570,17 +2566,17 @@
         },
         {
           "Slot": "mod_foregrip",
-          "Template": "665d5d9e338229cfd6078da1",
+          "Template": "672e2e7503876d1630af50b0",
           "Depth": 3,
           "Parent": 7
         }
       ],
       "Changes": 8,
-      "Cost": 135986,
+      "Cost": 134385,
       "PerPurchase": 10000,
-      "Attempts": 934,
+      "Attempts": 4320,
       "Floor": 8,
-      "Nodes": 314208,
+      "Nodes": 414049,
       "Binding": [
         "magazine capacity"
       ]
@@ -2669,9 +2665,9 @@
       "Changes": 7,
       "Cost": 150183,
       "PerPurchase": 10000,
-      "Attempts": 14199,
+      "Attempts": 26063,
       "Floor": 14,
-      "Nodes": 100024,
+      "Nodes": 103717,
       "Binding": [
         "ergonomics",
         "magazine capacity"
@@ -2743,9 +2739,9 @@
       "Changes": 5,
       "Cost": 97688,
       "PerPurchase": 10000,
-      "Attempts": 14200,
+      "Attempts": 26064,
       "Floor": 10,
-      "Nodes": 34169,
+      "Nodes": 39327,
       "Binding": [
         "ergonomics",
         "magazine capacity"
@@ -2781,9 +2777,9 @@
       "Changes": 2,
       "Cost": 36925,
       "PerPurchase": 10000,
-      "Attempts": 14200,
+      "Attempts": 26064,
       "Floor": 4,
-      "Nodes": 31057,
+      "Nodes": 33820,
       "Binding": []
     },
     "7F2150537B1E8E134BA651DBA6800FD76C63F127A7E38CF06BDAD4895D55FBF4": {
@@ -2862,11 +2858,11 @@
         }
       ],
       "Changes": 6,
-      "Cost": 187898,
+      "Cost": 180120,
       "PerPurchase": 10000,
-      "Attempts": 14199,
+      "Attempts": 26059,
       "Floor": 11,
-      "Nodes": 237920,
+      "Nodes": 274299,
       "Binding": [
         "ergonomics",
         "magazine capacity"
@@ -2938,9 +2934,9 @@
       "Changes": 4,
       "Cost": 151412,
       "PerPurchase": 10000,
-      "Attempts": 14200,
+      "Attempts": 26060,
       "Floor": 12,
-      "Nodes": 333931,
+      "Nodes": 378629,
       "Binding": [
         "ergonomics",
         "magazine capacity"
@@ -3009,20 +3005,14 @@
           "Parent": 8
         },
         {
-          "Slot": "mod_foregrip",
-          "Template": "5b7be4895acfc400170e2dd5",
+          "Slot": "mod_tactical_000",
+          "Template": "672e2e75ebb3b5f3e2cb6291",
           "Depth": 3,
           "Parent": 7
         },
         {
           "Slot": "mod_foregrip",
-          "Template": "655dccfdbdcc6b5df71382b6",
-          "Depth": 4,
-          "Parent": 10
-        },
-        {
-          "Slot": "mod_mount_000",
-          "Template": "6269220d70b6c02e665f2635",
+          "Template": "67341526d1587cba81586e7f",
           "Depth": 3,
           "Parent": 7
         },
@@ -3033,12 +3023,12 @@
           "Parent": -1
         }
       ],
-      "Changes": 9,
-      "Cost": 183736,
+      "Changes": 8,
+      "Cost": 172186,
       "PerPurchase": 10000,
-      "Attempts": 935,
+      "Attempts": 11019,
       "Floor": 11,
-      "Nodes": 282625,
+      "Nodes": 526614,
       "Binding": [
         "ergonomics",
         "magazine capacity"
@@ -3096,11 +3086,11 @@
         }
       ],
       "Changes": 6,
-      "Cost": 184028,
+      "Cost": 175345,
       "PerPurchase": 10000,
-      "Attempts": 14200,
+      "Attempts": 26063,
       "Floor": 7,
-      "Nodes": 8070,
+      "Nodes": 8304,
       "Binding": [
         "ergonomics",
         "magazine capacity"
@@ -3170,11 +3160,11 @@
         }
       ],
       "Changes": 7,
-      "Cost": 211224,
+      "Cost": 204643,
       "PerPurchase": 10000,
-      "Attempts": 14199,
+      "Attempts": 26061,
       "Floor": 10,
-      "Nodes": 172684,
+      "Nodes": 235730,
       "Binding": [
         "ergonomics",
         "magazine capacity"
@@ -3210,9 +3200,9 @@
       "Changes": 3,
       "Cost": 74412,
       "PerPurchase": 10000,
-      "Attempts": 14200,
+      "Attempts": 26063,
       "Floor": 3,
-      "Nodes": 9370,
+      "Nodes": 9404,
       "Binding": [
         "ergonomics",
         "magazine capacity"
@@ -3278,9 +3268,9 @@
       "Changes": 8,
       "Cost": 136289,
       "PerPurchase": 10000,
-      "Attempts": 14199,
+      "Attempts": 26062,
       "Floor": 8,
-      "Nodes": 33189,
+      "Nodes": 44861,
       "Binding": [
         "ergonomics",
         "magazine capacity"
@@ -3358,9 +3348,9 @@
       "Changes": 10,
       "Cost": 183995,
       "PerPurchase": 10000,
-      "Attempts": 14199,
+      "Attempts": 26062,
       "Floor": 10,
-      "Nodes": 38944,
+      "Nodes": 52896,
       "Binding": [
         "ergonomics",
         "magazine capacity"
@@ -3436,11 +3426,11 @@
         }
       ],
       "Changes": 6,
-      "Cost": 189098,
+      "Cost": 186808,
       "PerPurchase": 10000,
-      "Attempts": 14196,
+      "Attempts": 26057,
       "Floor": 11,
-      "Nodes": 120254,
+      "Nodes": 145946,
       "Binding": [
         "ergonomics",
         "magazine capacity"
@@ -3528,11 +3518,11 @@
         }
       ],
       "Changes": 12,
-      "Cost": 309161,
+      "Cost": 308372,
       "PerPurchase": 10000,
-      "Attempts": 14198,
+      "Attempts": 26057,
       "Floor": 14,
-      "Nodes": 148179,
+      "Nodes": 154450,
       "Binding": [
         "ergonomics",
         "magazine capacity"
@@ -3592,9 +3582,9 @@
       "Changes": 6,
       "Cost": 193702,
       "PerPurchase": 10000,
-      "Attempts": 14199,
+      "Attempts": 26060,
       "Floor": 7,
-      "Nodes": 39787,
+      "Nodes": 51154,
       "Binding": [
         "magazine capacity"
       ]
@@ -3683,9 +3673,9 @@
       "Changes": 12,
       "Cost": 336015,
       "PerPurchase": 10000,
-      "Attempts": 14198,
+      "Attempts": 26057,
       "Floor": 11,
-      "Nodes": 108945,
+      "Nodes": 129551,
       "Binding": [
         "ergonomics",
         "magazine capacity"
@@ -3791,11 +3781,11 @@
         }
       ],
       "Changes": 14,
-      "Cost": 307406,
+      "Cost": 300825,
       "PerPurchase": 10000,
-      "Attempts": 14199,
+      "Attempts": 26058,
       "Floor": 15,
-      "Nodes": 73292,
+      "Nodes": 114069,
       "Binding": [
         "ergonomics",
         "magazine capacity"
@@ -3828,30 +3818,24 @@
           "Parent": 2
         },
         {
+          "Slot": "mod_tactical_000",
+          "Template": "672e2e75645f9ad09f4b949d",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
           "Slot": "mod_magazine",
           "Template": "5caf1109ae9215753c44119f",
           "Depth": 1,
           "Parent": -1
-        },
-        {
-          "Slot": "mod_sight_rear",
-          "Template": "5bc09a18d4351e003562b68e",
-          "Depth": 1,
-          "Parent": -1
-        },
-        {
-          "Slot": "mod_sight_front",
-          "Template": "5c18b90d2e2216152142466b",
-          "Depth": 1,
-          "Parent": -1
         }
       ],
-      "Changes": 6,
-      "Cost": 181510,
+      "Changes": 5,
+      "Cost": 167122,
       "PerPurchase": 10000,
-      "Attempts": 935,
+      "Attempts": 10824,
       "Floor": 5,
-      "Nodes": 126540,
+      "Nodes": 190205,
       "Binding": [
         "ergonomics",
         "magazine capacity"
@@ -3975,11 +3959,11 @@
         }
       ],
       "Changes": 16,
-      "Cost": 417010,
+      "Cost": 375637,
       "PerPurchase": 10000,
-      "Attempts": 14197,
+      "Attempts": 26054,
       "Floor": 18,
-      "Nodes": 216069,
+      "Nodes": 248549,
       "Binding": [
         "ergonomics",
         "magazine capacity"
@@ -4006,12 +3990,6 @@
           "Parent": 1
         },
         {
-          "Slot": "mod_muzzle",
-          "Template": "69694eed0d2309811a0fd1d3",
-          "Depth": 3,
-          "Parent": 1
-        },
-        {
           "Slot": "mod_handguard",
           "Template": "5c0e2f5cd174af02a012cfc9",
           "Depth": 2,
@@ -4019,7 +3997,7 @@
         },
         {
           "Slot": "mod_sight_rear",
-          "Template": "55d5f46a4bdc2d1b198b4567",
+          "Template": "5ae30bad5acfc400185c2dc4",
           "Depth": 2,
           "Parent": 0
         },
@@ -4031,15 +4009,9 @@
         },
         {
           "Slot": "mod_stock_000",
-          "Template": "66f4a8d75a44076e9b2909d2",
+          "Template": "672e2e7533a70f23dfe4c8bb",
           "Depth": 2,
-          "Parent": 6
-        },
-        {
-          "Slot": "mod_pistol_grip",
-          "Template": "ebd108b0a8c45420f7624a3f",
-          "Depth": 1,
-          "Parent": -1
+          "Parent": 5
         },
         {
           "Slot": "mod_charge",
@@ -4049,20 +4021,25 @@
         },
         {
           "Slot": "mod_magazine",
-          "Template": "6a1579afcbb8d0c82606c541",
+          "Template": "55d4887d4bdc2d962f8b4570",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5c0e2ff6d174af02a1659d4a",
           "Depth": 1,
           "Parent": -1
         }
       ],
-      "Changes": 5,
-      "Cost": 95065,
+      "Changes": 3,
+      "Cost": 38767,
       "PerPurchase": 10000,
-      "Attempts": 1203,
+      "Attempts": 10817,
       "Floor": 7,
-      "Nodes": 453013,
+      "Nodes": 1014862,
       "Binding": [
         "ergonomics",
-        "recoil",
         "magazine capacity"
       ]
     },
@@ -4088,7 +4065,7 @@
         },
         {
           "Slot": "mod_mount_000",
-          "Template": "665d5d9e338229cfd6078da1",
+          "Template": "672e2e7503876d1630af50b0",
           "Depth": 2,
           "Parent": 1
         },
@@ -4130,14 +4107,13 @@
         }
       ],
       "Changes": 2,
-      "Cost": 40073,
+      "Cost": 38472,
       "PerPurchase": 10000,
-      "Attempts": 931,
+      "Attempts": 10819,
       "Floor": 4,
-      "Nodes": 629500,
+      "Nodes": 1575204,
       "Binding": [
         "ergonomics",
-        "recoil",
         "weight",
         "magazine capacity",
         "effective distance"
@@ -4170,20 +4146,20 @@
           "Parent": 2
         },
         {
-          "Slot": "mod_foregrip",
-          "Template": "5fc0f9b5d724d907e2077d82",
+          "Slot": "mod_tactical_000",
+          "Template": "672e2e75645f9ad09f4b949d",
           "Depth": 3,
           "Parent": 3
         },
         {
-          "Slot": "mod_stock",
-          "Template": "627254cc9c563e6e442c398f",
+          "Slot": "mod_pistol_grip",
+          "Template": "6761b213607f9a6f79017d46",
           "Depth": 2,
           "Parent": 2
         },
         {
-          "Slot": "mod_pistol_grip",
-          "Template": "5a339805c4a2826c6e06d73d",
+          "Slot": "mod_stock",
+          "Template": "627254cc9c563e6e442c398f",
           "Depth": 2,
           "Parent": 2
         },
@@ -4195,7 +4171,7 @@
         },
         {
           "Slot": "mod_scope",
-          "Template": "5aa66c72e5b5b00016327c93",
+          "Template": "61713cc4d8e3106d9806c109",
           "Depth": 2,
           "Parent": 7
         },
@@ -4207,17 +4183,17 @@
         },
         {
           "Slot": "mod_magazine",
-          "Template": "5d25a4a98abbc30b917421a4",
+          "Template": "5ce69cbad7f00c00b61c5098",
           "Depth": 1,
           "Parent": -1
         }
       ],
       "Changes": 10,
-      "Cost": 294664,
+      "Cost": 293880,
       "PerPurchase": 10000,
-      "Attempts": 577,
+      "Attempts": 4300,
       "Floor": 6,
-      "Nodes": 505466,
+      "Nodes": 1466597,
       "Binding": [
         "ergonomics",
         "weight",
@@ -4241,9 +4217,15 @@
         },
         {
           "Slot": "mod_muzzle",
-          "Template": "5fbe7618d6fa9c00c571bb6c",
+          "Template": "5fbc22ccf24b94483f726483",
           "Depth": 3,
           "Parent": 1
+        },
+        {
+          "Slot": "mod_muzzle_001",
+          "Template": "5fbe760793164a5b6278efc8",
+          "Depth": 4,
+          "Parent": 2
         },
         {
           "Slot": "mod_gas_block",
@@ -4259,25 +4241,13 @@
         },
         {
           "Slot": "mod_sight_front",
-          "Template": "55d4af3a4bdc2d972f8b456f",
+          "Template": "696808315966cfdf3708c74c",
           "Depth": 3,
-          "Parent": 4
+          "Parent": 5
         },
         {
           "Slot": "mod_stock",
           "Template": "68badb6458dbe419740b1520",
-          "Depth": 1,
-          "Parent": -1
-        },
-        {
-          "Slot": "mod_stock_000",
-          "Template": "68badc0366a72211fe004bc7",
-          "Depth": 2,
-          "Parent": 6
-        },
-        {
-          "Slot": "mod_pistol_grip",
-          "Template": "5d025cc1d7ad1a53845279ef",
           "Depth": 1,
           "Parent": -1
         },
@@ -4292,14 +4262,20 @@
           "Template": "68a63b73c92ee33ffa01bf57",
           "Depth": 1,
           "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5d025cc1d7ad1a53845279ef",
+          "Depth": 1,
+          "Parent": -1
         }
       ],
       "Changes": 5,
-      "Cost": 132096,
+      "Cost": 92069,
       "PerPurchase": 10000,
-      "Attempts": 931,
+      "Attempts": 10819,
       "Floor": 7,
-      "Nodes": 547589,
+      "Nodes": 1360723,
       "Binding": [
         "ergonomics",
         "magazine capacity"
@@ -4363,7 +4339,7 @@
         },
         {
           "Slot": "mod_stock_000",
-          "Template": "66f4a8d75a44076e9b2909d2",
+          "Template": "672e2e7533a70f23dfe4c8bb",
           "Depth": 3,
           "Parent": 8
         },
@@ -4393,11 +4369,11 @@
         }
       ],
       "Changes": 6,
-      "Cost": 208492,
+      "Cost": 180591,
       "PerPurchase": 10000,
-      "Attempts": 933,
+      "Attempts": 4312,
       "Floor": 10,
-      "Nodes": 396327,
+      "Nodes": 821118,
       "Binding": [
         "weight",
         "magazine capacity",
@@ -4456,11 +4432,11 @@
         }
       ],
       "Changes": 6,
-      "Cost": 148397,
+      "Cost": 122576,
       "PerPurchase": 10000,
-      "Attempts": 908,
+      "Attempts": 4308,
       "Floor": 3,
-      "Nodes": 627483,
+      "Nodes": 1697636,
       "Binding": [
         "ergonomics",
         "recoil",
@@ -4478,13 +4454,13 @@
         },
         {
           "Slot": "mod_handguard",
-          "Template": "55d459824bdc2d892f8b4573",
+          "Template": "647de824196bf69818044c93",
           "Depth": 2,
           "Parent": 0
         },
         {
-          "Slot": "mod_tactical_003",
-          "Template": "5a7b483fe899ef0016170d15",
+          "Slot": "mod_scope",
+          "Template": "672e2e75ecdecad1471639ad",
           "Depth": 3,
           "Parent": 1
         },
@@ -4502,7 +4478,7 @@
         },
         {
           "Slot": "mod_sight_rear",
-          "Template": "55d5f46a4bdc2d1b198b4567",
+          "Template": "5ae30bad5acfc400185c2dc4",
           "Depth": 2,
           "Parent": 0
         },
@@ -4514,15 +4490,15 @@
         },
         {
           "Slot": "mod_stock_000",
-          "Template": "66f4a8d75a44076e9b2909d2",
+          "Template": "672e2e75b74647fc82da299c",
           "Depth": 2,
           "Parent": 6
         },
         {
-          "Slot": "mod_stock_003",
-          "Template": "6984b82c5aab442620032fe8",
-          "Depth": 2,
-          "Parent": 6
+          "Slot": "mod_charge",
+          "Template": "55d44fd14bdc2d962f8b456e",
+          "Depth": 1,
+          "Parent": -1
         },
         {
           "Slot": "mod_magazine",
@@ -4532,25 +4508,2915 @@
         },
         {
           "Slot": "mod_pistol_grip",
-          "Template": "55d4b9964bdc2d1d4e8b456e",
+          "Template": "5c0e2ff6d174af02a1659d4a",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 4,
+      "Cost": 66248,
+      "PerPurchase": 10000,
+      "Attempts": 10407,
+      "Floor": 9,
+      "Nodes": 1394920,
+      "Binding": [
+        "ergonomics",
+        "recoil"
+      ]
+    },
+    "3694959DBE08E78B5407CD4427D54108C14C52BE712554592FE0289CD3336093": {
+      "Parts": [
+        {
+          "Slot": "mod_magazine",
+          "Template": "59d6272486f77466146386ff",
           "Depth": 1,
           "Parent": -1
         },
         {
-          "Slot": "mod_charge",
-          "Template": "55d44fd14bdc2d962f8b456e",
+          "Slot": "mod_gas_block",
+          "Template": "5cf656f2d7f00c06585fb6eb",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "6087e663132d4d12c81fd96b",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "6761779c48fa5c377e06fc3f",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_mount_000",
+          "Template": "57486e672459770abd687134",
           "Depth": 1,
           "Parent": -1
         }
       ],
       "Changes": 5,
-      "Cost": 129571,
+      "Cost": 144253,
       "PerPurchase": 10000,
-      "Attempts": 14154,
-      "Floor": 9,
-      "Nodes": 585717,
+      "Attempts": 11019,
+      "Floor": 5,
+      "Nodes": 176298,
+      "Binding": []
+    },
+    "2C6FE2DDAEDEC754215322211A8F06CFF53330AC1024AFD613F9488D035D76D1": {
+      "Parts": [
+        {
+          "Slot": "mod_reciever",
+          "Template": "5c0e2f26d174af02a9625114",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "672e2e75e04c9aca3536136b",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "5ae30e795acfc408fb139a0b",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5c0fafb6d174af02a96260ba",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "5ae30db85acfc408fb139a05",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "637f57a68d137b27f70c4968",
+          "Depth": 3,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_sight_rear",
+          "Template": "5ae30bad5acfc400185c2dc4",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "55d4b9964bdc2d1d4e8b456e",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5c0faeddd174af02a962601f",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock_000",
+          "Template": "55d4ae6c4bdc2d8b2f8b456e",
+          "Depth": 2,
+          "Parent": 8
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "55d4887d4bdc2d962f8b4570",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_charge",
+          "Template": "5c0faf68d174af02a96260b8",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 9,
+      "Cost": 114532,
+      "PerPurchase": 10000,
+      "Attempts": 4092,
+      "Floor": 11,
+      "Nodes": 551765,
       "Binding": [
+        "weight",
+        "magazine capacity"
+      ]
+    },
+    "1CB8650D60F80C8B875E728497C5C1B40DB31DDCDDC412236DB17F4E9608C456": {
+      "Parts": [
+        {
+          "Slot": "mod_mount_000",
+          "Template": "5947db3f86f77447880cf76f",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_tactical",
+          "Template": "591c4e1186f77410354b316e",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5cbdb1b0ae9215000d50e105",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5649ad3f4bdc2df8348b4585",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "5cbdaf89ae9215000e5b9c94",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "59c6633186f7740cf0493bb9",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "5cbda9f4ae9215000e5b9bfc",
+          "Depth": 2,
+          "Parent": 5
+        },
+        {
+          "Slot": "mod_sight_rear",
+          "Template": "628a7b23b0f75035732dd565",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "5649af094bdc2df8348b4586",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 6,
+      "Cost": 77979,
+      "PerPurchase": 10000,
+      "Attempts": 4327,
+      "Floor": 6,
+      "Nodes": 104026,
+      "Binding": [
+        "ergonomics"
+      ]
+    },
+    "D32A9E6515AC64E7B7421C3D338835C901BFC1BCC69E43EAEA9225A407164269": {
+      "Parts": [
+        {
+          "Slot": "mod_barrel",
+          "Template": "6698c8ab29e062525d0ad8ab",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "6698c9aa36ba38d29101770f",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_mount_000",
+          "Template": "6698c90829e062525d0ad8ad",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "57ae0171245977343c27bfcf",
+          "Depth": 2,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "66993149558c59581e03c028",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_mount_001",
+          "Template": "6698c8f4710a4525fe0e9e57",
+          "Depth": 2,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_tactical",
+          "Template": "672e2e75ecdecad1471639ad",
+          "Depth": 3,
+          "Parent": 5
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "66992713ae08c5c29e0c4f97",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "669946c157df3e2b4e0a0dc5",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "6698c9e07356874dfe0a0b88",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 7,
+      "Cost": 92351,
+      "PerPurchase": 10000,
+      "Attempts": 4322,
+      "Floor": 7,
+      "Nodes": 109366,
+      "Binding": [
+        "recoil",
+        "weight"
+      ]
+    },
+    "D656AEB82286A47447E52CCDAEFC12B48419E78F50DB641EB4F87EA2B4F4B42A": {
+      "Parts": [
+        {
+          "Slot": "mod_reciever",
+          "Template": "6193d382ed0429009f543e65",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_sight_front",
+          "Template": "6194f35c18a3974e5e7421e6",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_trigger",
+          "Template": "6193d3cded0429009f543e6a",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_hammer",
+          "Template": "6193d3be7c6c7b169525f0da",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_catch",
+          "Template": "6193d5d4f8ee7e52e4210a1b",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "6193d338de3cdf1d2614a6fc",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "6194ef39de3cdf1d2614a768",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 0,
+      "Cost": 0,
+      "PerPurchase": 10000,
+      "Attempts": 4327,
+      "Floor": 5,
+      "Nodes": 42808,
+      "Binding": [
+        "recoil",
+        "weight",
+        "magazine capacity",
+        "effective distance"
+      ]
+    },
+    "CDB7E02BCA861E49E411789588DF3CA203625F3A54703BEFD62DDCAE64209FB4": {
+      "Parts": [
+        {
+          "Slot": "mod_gas_block",
+          "Template": "65ae4f57e343f0acc00824da",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "57ae0171245977343c27bfcf",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_tactical",
+          "Template": "6267c6396b642f77f56f5c1c",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_flashlight",
+          "Template": "57d17c5e2459775a5c57d17d",
+          "Depth": 3,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "5c87ca002e221600114cb150",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5998517986f7746017232f7e",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "599860ac86f77436b225ed1a",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "59985a8086f77414ec448d1a",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5998597786f77414ea6da093",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 5,
+      "Cost": 75913,
+      "PerPurchase": 10000,
+      "Attempts": 4284,
+      "Floor": 7,
+      "Nodes": 870485,
+      "Binding": [
+        "ergonomics",
+        "recoil",
+        "magazine capacity",
+        "width"
+      ]
+    },
+    "34E0323919E111E87A690DC14459B9693D2B93C6DFCC136C0430556AB4E0D82D": {
+      "Parts": [
+        {
+          "Slot": "mod_barrel",
+          "Template": "634eff66517ccc8a960fc735",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_mount_001",
+          "Template": "593d1fa786f7746da62d61ac",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "5649a2464bdc2d91118b45a8",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "57ae0171245977343c27bfcf",
+          "Depth": 4,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_tactical_000",
+          "Template": "672e2e75ecdecad1471639ad",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "593d490386f7745ee97a1555",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_mount_000",
+          "Template": "634f05a21f9f536910079b56",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "634f036a517ccc8a960fc746",
+          "Depth": 3,
+          "Parent": 6
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5afd7ded5acfc40017541f5e",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5afd7e095acfc40017541f61",
+          "Depth": 2,
+          "Parent": 8
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5fbbaa86f9986c4cff3fe5f6",
+          "Depth": 3,
+          "Parent": 9
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5afd7e445acfc4001637e35a",
+          "Depth": 2,
+          "Parent": 8
+        },
+        {
+          "Slot": "mod_mount",
+          "Template": "587e08ee245977446b4410cf",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "5cf638cbd7f00c06595bc936",
+          "Depth": 2,
+          "Parent": 12
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "634f06262e5def262d0b30ca",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "587df583245977373c4f1129",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 12,
+      "Cost": 253627,
+      "PerPurchase": 10000,
+      "Attempts": 4300,
+      "Floor": 10,
+      "Nodes": 695052,
+      "Binding": [
+        "ergonomics",
+        "recoil",
+        "weight",
+        "magazine capacity",
+        "effective distance"
+      ]
+    },
+    "BC11010585D7598110123D6256404FB0BC435451236A6586D68D69A56C2B3458": {
+      "Parts": [
+        {
+          "Slot": "mod_gas_block",
+          "Template": "59d64ec286f774171d1e0a42",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "6389f1dfc879ce63f72fc43e",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_tactical",
+          "Template": "672e2e75ecdecad1471639ad",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "5dff77c759400025ea5150cf",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "5dff772da3651922b360bf91",
+          "Depth": 4,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_stock_akms",
+          "Template": "6761763448fa5c377e06fc39",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5bfe86df0db834001b734685",
+          "Depth": 2,
+          "Parent": 5
+        },
+        {
+          "Slot": "mod_pistol_grip_akms",
+          "Template": "5a0071d486f77404e23a12b2",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "59d6507c86f7741b846413a2",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5cc9ad73d7f00c000e2579d4",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "5a0060fc86f7745793204432",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 7,
+      "Cost": 110670,
+      "PerPurchase": 10000,
+      "Attempts": 4024,
+      "Floor": 6,
+      "Nodes": 1195504,
+      "Binding": [
+        "ergonomics",
+        "recoil",
+        "weight",
+        "effective distance"
+      ]
+    },
+    "A6071AAA10422C5B4BDF2BD1D555E06EF3DA00A24D6B8EBFF3331A2D2B6AA50F": {
+      "Parts": [
+        {
+          "Slot": "mod_gas_block",
+          "Template": "59d64ec286f774171d1e0a42",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "5cbda392ae92155f3c17c39f",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_tactical_000",
+          "Template": "6267c6396b642f77f56f5c1c",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_flashlight",
+          "Template": "57d17c5e2459775a5c57d17d",
+          "Depth": 4,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5a9fbacda2750c00141e080f",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_mount_001",
+          "Template": "57486e672459770abd687134",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock_akms",
+          "Template": "6761763448fa5c377e06fc39",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "672e2e7533a70f23dfe4c8bb",
+          "Depth": 2,
+          "Parent": 6
+        },
+        {
+          "Slot": "mod_stock_001",
+          "Template": "698b358b49b46ae2d0092e86",
+          "Depth": 2,
+          "Parent": 6
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "59e5f5a486f7746c530b3ce2",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "59d6507c86f7741b846413a2",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip_akms",
+          "Template": "5a0071d486f77404e23a12b2",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 9,
+      "Cost": 200802,
+      "PerPurchase": 10000,
+      "Attempts": 3943,
+      "Floor": 8,
+      "Nodes": 1230714,
+      "Binding": [
+        "magazine capacity"
+      ]
+    },
+    "371F59CC4A08D79075C177DCB5D5DE9B2D56963D70AD19F4A89E852315A64615": {
+      "Parts": [
+        {
+          "Slot": "mod_gas_block",
+          "Template": "59c6633186f7740cf0493bb9",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "647dba3142c479dde701b654",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "672e2e75ecdecad1471639ad",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "655dccfdbdcc6b5df71382b6",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_sight_rear",
+          "Template": "5bf3f59f0db834001a6fa060",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5ac50c185acfc400163398d4",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "6764139c44b3c96e7b0e2f7b",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5f633f791b231926f2329f13",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5649ade84bdc2d1b2b8b4587",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "5ac50da15acfc4001718d287",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 6,
+      "Cost": 93630,
+      "PerPurchase": 10000,
+      "Attempts": 3469,
+      "Floor": 4,
+      "Nodes": 1379100,
+      "Binding": [
+        "ergonomics",
+        "recoil",
+        "effective distance"
+      ]
+    },
+    "388AC1F54591FF364D42B355536048C8C1489DCB9E2D123838CE95A6021E113A": {
+      "Parts": [
+        {
+          "Slot": "mod_mount_000",
+          "Template": "5947db3f86f77447880cf76f",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "59c6633186f7740cf0493bb9",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "647dba3142c479dde701b654",
+          "Depth": 2,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "5c791e872e2216001219c40a",
+          "Depth": 3,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "672e2e754f01ef56b4aa66a3",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5f6341043ada5942720e2dc5",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "5ac50da15acfc4001718d287",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "5ac66c5d5acfc4001718d314",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5ac50c185acfc400163398d4",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 5,
+      "Cost": 117882,
+      "PerPurchase": 10000,
+      "Attempts": 3479,
+      "Floor": 5,
+      "Nodes": 1028799,
+      "Binding": [
+        "ergonomics",
+        "recoil",
+        "magazine capacity"
+      ]
+    },
+    "DCBC4478B0B6C6F522EFEC89B38511A64D2A1437AF2819AE37659474965A536A": {
+      "Parts": [
+        {
+          "Slot": "mod_gas_block",
+          "Template": "59c6633186f7740cf0493bb9",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "5efaf417aeb21837e749c7f2",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_tactical_002",
+          "Template": "6644920d49817dc7d505ca71",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "672e2e75ecdecad1471639ad",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "672e2e7546454a975e0b7a3b",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "5d2c76ed48f03532f2136169",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "6477772ea8a38bb2050ed4db",
+          "Depth": 2,
+          "Parent": 5
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5ac72e945acfc43f3b691116",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5947fa2486f77425b47c1a9b",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "55d481904bdc2d8c2f8b456a",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5ac50c185acfc400163398d4",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 8,
+      "Cost": 149534,
+      "PerPurchase": 10000,
+      "Attempts": 4165,
+      "Floor": 6,
+      "Nodes": 1255828,
+      "Binding": [
+        "ergonomics",
+        "recoil",
+        "weight",
+        "magazine capacity",
+        "effective distance"
+      ]
+    },
+    "7F412FF2A8C878C02D0F5169AD9B2F89D633FAD41AD4A6F0F2CEE3C52AE08304": {
+      "Parts": [
+        {
+          "Slot": "mod_magazine",
+          "Template": "59d6272486f77466146386ff",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "5d2c772c48f0355d95672c25",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "5c0517910db83400232ffee5",
+          "Depth": 2,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5cf50fc5d7f00c056c53f83c",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "672e2e7533a70f23dfe4c8bb",
+          "Depth": 2,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_stock_001",
+          "Template": "698b3592e700c6d632003753",
+          "Depth": 2,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "59c6633186f7740cf0493bb9",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "5648b1504bdc2d9d488b4584",
+          "Depth": 2,
+          "Parent": 6
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5ac72e7d5acfc40016339a02",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5649ade84bdc2d1b2b8b4587",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 6,
+      "Cost": 147426,
+      "PerPurchase": 10000,
+      "Attempts": 3794,
+      "Floor": 3,
+      "Nodes": 1271976,
+      "Binding": [
+        "ergonomics",
+        "recoil",
+        "weight",
+        "effective distance"
+      ]
+    },
+    "05F3444D9A758A0E28B581DF04C2A15157F432F8F001349D172712CF8DF48720": {
+      "Parts": [
+        {
+          "Slot": "mod_gas_block",
+          "Template": "59c6633186f7740cf0493bb9",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "5cbda392ae92155f3c17c39f",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_tactical_000",
+          "Template": "57d17e212459775a1179a0f5",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_flashlight",
+          "Template": "57d17c5e2459775a5c57d17d",
+          "Depth": 4,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "59d6272486f77466146386ff",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5cf50fc5d7f00c056c53f83c",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock_001",
+          "Template": "698b3592e700c6d632003753",
+          "Depth": 2,
+          "Parent": 5
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "672e2e750cd8dfd1fee34a08",
+          "Depth": 2,
+          "Parent": 5
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5649ade84bdc2d1b2b8b4587",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_sight_rear",
+          "Template": "5ac733a45acfc400192630e2",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "5ac50da15acfc4001718d287",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 7,
+      "Cost": 114775,
+      "PerPurchase": 10000,
+      "Attempts": 4215,
+      "Floor": 6,
+      "Nodes": 1275653,
+      "Binding": [
+        "ergonomics",
+        "recoil",
+        "effective distance"
+      ]
+    },
+    "40E181CE0495728680529DD56268D743CE1D46538D09D786BFDA450E51C56DF0": {
+      "Parts": [
+        {
+          "Slot": "mod_scope",
+          "Template": "622b3c081b89c677a33bcda6",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_sight_front",
+          "Template": "623166e08c43374ca1567195",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_sight_rear",
+          "Template": "6231670f0b8aa5472d060095",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "6477772ea8a38bb2050ed4db",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "622b38c56762c718e457e246",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "69694eed0d2309811a0fd1d3",
+          "Depth": 2,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "622b327b267a1b13a44abea3",
+          "Depth": 2,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "67069d8dad91f3a63c0bc2b4",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "655dccfdbdcc6b5df71382b6",
+          "Depth": 2,
+          "Parent": 7
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "682b861888721c164979159f",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_mount",
+          "Template": "622f039199f4ea1a4d6c9a17",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "622f140da5958f63c67f1735",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 9,
+      "Cost": 138046,
+      "PerPurchase": 10000,
+      "Attempts": 3659,
+      "Floor": 7,
+      "Nodes": 1240968,
+      "Binding": [
+        "ergonomics",
+        "recoil",
+        "magazine capacity",
+        "effective distance"
+      ]
+    },
+    "105484F58696EF4EB7CC0EAD62F44B1E7ED8959E0D7C437C45E2F552B7D6F2AF": {
+      "Parts": [
+        {
+          "Slot": "mod_reciever",
+          "Template": "5d4405aaa4b9361e6a4e6bd3",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "672e2e75e04c9aca3536136b",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "5ae30e795acfc408fb139a0b",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "57c69dd424597774c03b7bbc",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "5b3b99475acfc432ff4dcbee",
+          "Depth": 3,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "5c0e2f5cd174af02a012cfc9",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5649be884bdc2d79388b4577",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock_000",
+          "Template": "672e2e7533a70f23dfe4c8bb",
+          "Depth": 2,
+          "Parent": 6
+        },
+        {
+          "Slot": "mod_stock_003",
+          "Template": "698b338649b46ae2d0092e82",
+          "Depth": 2,
+          "Parent": 6
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "55802f5d4bdc2dac148b458f",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_charge",
+          "Template": "5d44334ba4b9362b346d1948",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "5aaa5dfee5b5b000140293d3",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 7,
+      "Cost": 158111,
+      "PerPurchase": 10000,
+      "Attempts": 4173,
+      "Floor": 7,
+      "Nodes": 1037096,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity",
+        "effective distance",
+        "height"
+      ]
+    },
+    "74539368E6A19341BB3852BE284A4221FB03C93A50A7F98846BBDC0730611C51": {
+      "Parts": [
+        {
+          "Slot": "mod_mount_001",
+          "Template": "6710cea62bb09af72f0e6bf8",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_tactical_003",
+          "Template": "57d17c5e2459775a5c57d17d",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5cf50fc5d7f00c056c53f83c",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "672e2e7533a70f23dfe4c8bb",
+          "Depth": 2,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_stock_001",
+          "Template": "698b338649b46ae2d0092e82",
+          "Depth": 2,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "576169e62459773c69055191",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5649ade84bdc2d1b2b8b4587",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_mount_000",
+          "Template": "5947db3f86f77447880cf76f",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "5a966f51a2750c00156aacf6",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 7,
+      "Cost": 121113,
+      "PerPurchase": 10000,
+      "Attempts": 4219,
+      "Floor": 4,
+      "Nodes": 1435479,
+      "Binding": [
+        "magazine capacity",
+        "effective distance"
+      ]
+    },
+    "B9C5EE7CCF9C43F75A92615621E46C7A3D1FFC45BECA9C668A7FF9FC00912D11": {
+      "Parts": [
+        {
+          "Slot": "mod_handguard",
+          "Template": "674fe57721a9aa6be6045b96",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_mount",
+          "Template": "674fe89a4472d471fb0f07d8",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_sight_front",
+          "Template": "674fe8dd362ea1f88b0e2792",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "672e2e7546454a975e0b7a3b",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_tactical_000",
+          "Template": "672e2e75ecdecad1471639ad",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "676017fe8cfeeba9f707c8d6",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_mount_000",
+          "Template": "6113d6c3290d254f5e6b27db",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "59fb137a86f7740adb646af1",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "651580dc71a4f10aec4b6056",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "674fe8f6f34d761ab8020cc8",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "57616ca52459773c69055192",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 4,
+      "Cost": 53300,
+      "PerPurchase": 10000,
+      "Attempts": 4321,
+      "Floor": 6,
+      "Nodes": 1371421,
+      "Binding": [
+        "ergonomics",
+        "recoil",
+        "magazine capacity",
+        "height"
+      ]
+    },
+    "31F1211590A4C7C64D086E32D0487914DC6DD214CDD63F1D87E91FDDC8C141CC": {
+      "Parts": [
+        {
+          "Slot": "mod_handguard",
+          "Template": "682315b0f8d8f8681e0744b0",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_mount_002",
+          "Template": "689c8b454b91399db3085f2a",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_tactical",
+          "Template": "689c887cd18a3665b8045743",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_mount_001",
+          "Template": "6269220d70b6c02e665f2635",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_tactical",
+          "Template": "5c5952732e2216398b5abda2",
+          "Depth": 3,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_mount_000",
+          "Template": "6269220d70b6c02e665f2635",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_tactical",
+          "Template": "672e2e75645f9ad09f4b949d",
+          "Depth": 3,
+          "Parent": 5
+        },
+        {
+          "Slot": "mod_tactical",
+          "Template": "672e2e75645f9ad09f4b949d",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "67341526d1587cba81586e7f",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "64c196ad26a15b84aa07132f",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "564ca99c4bdc2d16268b4589",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "649ec2f3961514b22506b111",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_sight_rear",
+          "Template": "649ec2da59cbb3c813042dca",
+          "Depth": 2,
+          "Parent": 11
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "6087e663132d4d12c81fd96b",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "649ec107961514b22506b10c",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_charge",
+          "Template": "6130ca3fd92c473c77020dbd",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 13,
+      "Cost": 268478,
+      "PerPurchase": 10000,
+      "Attempts": 4291,
+      "Floor": 12,
+      "Nodes": 1068220,
+      "Binding": [
+        "ergonomics",
+        "recoil",
+        "magazine capacity",
+        "effective distance",
+        "width"
+      ]
+    },
+    "7976BBA21753C6C89D7E66A433CEC9F25D61DE4D30BF417C1C641A41243ACB71": {
+      "Parts": [
+        {
+          "Slot": "mod_reciever",
+          "Template": "5beec91a0db834001961942d",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "591c4efa86f7741030027726",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_tactical",
+          "Template": "591c4e1186f77410354b316e",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "5beec3e30db8340019619424",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_tactical_000",
+          "Template": "672e2e75ecdecad1471639ad",
+          "Depth": 2,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "672e2e756bdff59d722213c9",
+          "Depth": 2,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "5beec2820db834001b095426",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5cc9a96cd7f00c011c04e04a",
+          "Depth": 2,
+          "Parent": 6
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5beec8ea0db834001a6f9dbf",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "5bed625c0db834001c062946",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock_001",
+          "Template": "6761779c48fa5c377e06fc3f",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 8,
+      "Cost": 196711,
+      "PerPurchase": 10000,
+      "Attempts": 2577,
+      "Floor": 7,
+      "Nodes": 859634,
+      "Binding": [
+        "ergonomics",
         "recoil"
+      ]
+    },
+    "4816FA9AC05DC2F5A024839947A916D4B6FBD4F721CFC94721CC502913A6683B": {
+      "Parts": [
+        {
+          "Slot": "mod_reciever",
+          "Template": "5d2c770c48f0354b4a07c100",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "6272874a6c47bd74f92e2087",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5c6bf4aa2e2216001219b0ae",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "628a83c29179c324ed269508",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_mount_001",
+          "Template": "5b7be47f5acfc400170e2dd2",
+          "Depth": 2,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_tactical",
+          "Template": "626becf9582c3e319310b837",
+          "Depth": 3,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_tactical_000",
+          "Template": "544909bb4bdc2d6f028b4577",
+          "Depth": 2,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_stock_000",
+          "Template": "628a6678ccaab13006640e49",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5649be884bdc2d79388b4577",
+          "Depth": 2,
+          "Parent": 7
+        },
+        {
+          "Slot": "mod_stock_000",
+          "Template": "672e2e75b74647fc82da299c",
+          "Depth": 3,
+          "Parent": 8
+        },
+        {
+          "Slot": "mod_stock_003",
+          "Template": "698b338649b46ae2d0092e82",
+          "Depth": 3,
+          "Parent": 8
+        },
+        {
+          "Slot": "mod_sight_rear",
+          "Template": "5bf3f59f0db834001a6fa060",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 9,
+      "Cost": 179031,
+      "PerPurchase": 10000,
+      "Attempts": 2706,
+      "Floor": 8,
+      "Nodes": 884428,
+      "Binding": [
+        "weight",
+        "effective distance",
+        "width"
+      ]
+    },
+    "748B2976EAE9F1795DC441641D9C0343388CA752D60E7E8351B32FA68A1505D2": {
+      "Parts": [
+        {
+          "Slot": "mod_scope",
+          "Template": "57ae0171245977343c27bfcf",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "685009b24c99357a3da143e4",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "672e2e757e294bf6e5ecb944",
+          "Depth": 2,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "655dccfdbdcc6b5df71382b6",
+          "Depth": 3,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "628a665a86cbd9750d2ff5e5",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock_000",
+          "Template": "5b0e794b5acfc47a877359b2",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5947fa2486f77425b47c1a9b",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "6764139c44b3c96e7b0e2f7b",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 6,
+      "Cost": 92961,
+      "PerPurchase": 10000,
+      "Attempts": 4262,
+      "Floor": 5,
+      "Nodes": 522537,
+      "Binding": [
+        "ergonomics"
+      ]
+    },
+    "F6DE3A01F0A95D3A0EA78EAA427C0FDC301C233597C9783387AB38FF5BA032DA": {
+      "Parts": [
+        {
+          "Slot": "mod_mount_004",
+          "Template": "5947db3f86f77447880cf76f",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_tactical",
+          "Template": "591c4e1186f77410354b316e",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "57c44dd02459772d2e0ae249",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_mount_000",
+          "Template": "59eb7ebe86f7740b373438ce",
+          "Depth": 2,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_tactical_000",
+          "Template": "6267c6396b642f77f56f5c1c",
+          "Depth": 3,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_flashlight",
+          "Template": "59d790f486f77403cb06aec6",
+          "Depth": 4,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_tactical_001",
+          "Template": "672e2e75ebb3b5f3e2cb6291",
+          "Depth": 3,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "672e2e755898793d805ec2c3",
+          "Depth": 3,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "6878ccf4181ac8a5b5077236",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock_000",
+          "Template": "5bfe86df0db834001b734685",
+          "Depth": 2,
+          "Parent": 8
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "57c44fa82459772d2d75e415",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "65118f531b90b4fc77015083",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "651178336cad06c37c049eb4",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 10,
+      "Cost": 206632,
+      "PerPurchase": 10000,
+      "Attempts": 4304,
+      "Floor": 7,
+      "Nodes": 546331,
+      "Binding": [
+        "ergonomics",
+        "recoil",
+        "weight",
+        "magazine capacity"
+      ]
+    },
+    "CF7E5808EF278CF7229B89AF1FB72415AED6B41089E729DE35503C6DA2803AF4": {
+      "Parts": [
+        {
+          "Slot": "mod_mount_000",
+          "Template": "67069cbbb29a2cd33803338c",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_tactical",
+          "Template": "5d2369418abbc306c62e0c80",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "5c0517910db83400232ffee5",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "6565bb7eb4b12a56eb04b084",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "57838f0b2459774a256959b2",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "57838c962459774a1651ec63",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "578395402459774a256959b5",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_charge",
+          "Template": "6130ca3fd92c473c77020dbd",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "578395e82459774a0e553c7b",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 4,
+      "Cost": 103312,
+      "PerPurchase": 10000,
+      "Attempts": 4321,
+      "Floor": 5,
+      "Nodes": 809069,
+      "Binding": [
+        "ergonomics",
+        "recoil",
+        "weight",
+        "magazine capacity",
+        "effective distance"
+      ]
+    },
+    "3ECD60770B3417E95AE2C58AC8EBD476A5C11346E301BC29FE5A74C0FD2A4622": {
+      "Parts": [
+        {
+          "Slot": "mod_reciever",
+          "Template": "606587a88900dc2d9a55b659",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "60658776f2cb2e02a42ace2b",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5fbe7618d6fa9c00c571bb6c",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "6065dc8a132d4d12c81fd8e3",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "591c4efa86f7741030027726",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "6065880c132d4d12c81fd8da",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_mount_001",
+          "Template": "6269220d70b6c02e665f2635",
+          "Depth": 3,
+          "Parent": 5
+        },
+        {
+          "Slot": "mod_tactical",
+          "Template": "5b07dd285acfc4001754240d",
+          "Depth": 4,
+          "Parent": 6
+        },
+        {
+          "Slot": "mod_stock_001",
+          "Template": "5649be884bdc2d79388b4577",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock_000",
+          "Template": "672e2e75b74647fc82da299c",
+          "Depth": 2,
+          "Parent": 8
+        },
+        {
+          "Slot": "mod_stock_003",
+          "Template": "698b358b49b46ae2d0092e86",
+          "Depth": 2,
+          "Parent": 8
+        },
+        {
+          "Slot": "mod_charge",
+          "Template": "606587bd6d0bd7580617bacc",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "59d6272486f77466146386ff",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "55802f5d4bdc2dac148b458f",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 7,
+      "Cost": 189481,
+      "PerPurchase": 10000,
+      "Attempts": 305,
+      "Floor": 11,
+      "Nodes": 903758,
+      "Binding": [
+        "magazine capacity"
+      ]
+    },
+    "EFFB9DA595DFD312DD6F8D4CC7281C717EC67A7CB9B5C66F332B85FE2FFD6BC2": {
+      "Parts": [
+        {
+          "Slot": "mod_reciever",
+          "Template": "6165aeedfaa1272e431521e3",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "6183b0711cb55961fa0fdcad",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5cf78496d7f00c065703d6ca",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_muzzle_001",
+          "Template": "5cf78720d7f00c06595bc93e",
+          "Depth": 4,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_muzzle_000",
+          "Template": "5c878e9d2e2216000f201903",
+          "Depth": 4,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_mount_001",
+          "Template": "61816dfa6ef05c2ce828f1ad",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_tactical_000",
+          "Template": "644a3df63b0b6f03e101e065",
+          "Depth": 3,
+          "Parent": 5
+        },
+        {
+          "Slot": "mod_mount_000",
+          "Template": "61816df1d3a39d50044c139e",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "66ffc20ba73a7bce3d0b45ab",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "672e2e7533a70f23dfe4c8bb",
+          "Depth": 2,
+          "Parent": 8
+        },
+        {
+          "Slot": "mod_stock_001",
+          "Template": "698b338649b46ae2d0092e82",
+          "Depth": 2,
+          "Parent": 8
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "6183d53f1cb55961fa0fdcda",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "672e2e75a8d84451e1b9d793",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_charge",
+          "Template": "6181688c6c780c1e710c9b04",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 8,
+      "Cost": 191786,
+      "PerPurchase": 10000,
+      "Attempts": 1462,
+      "Floor": 11,
+      "Nodes": 1093378,
+      "Binding": [
+        "ergonomics",
+        "weight",
+        "magazine capacity"
+      ]
+    },
+    "90D2E932D4B93DF3181013F6125B003BD7AC4125DED7FBC2AC392E3D6F0BDA00": {
+      "Parts": [
+        {
+          "Slot": "mod_handguard",
+          "Template": "5a329052c4a28200741e22d3",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_mount_002",
+          "Template": "5c0102aa0db834001b734ba1",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_tactical",
+          "Template": "56def37dd2720bec348b456a",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5649be884bdc2d79388b4577",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock_000",
+          "Template": "672e2e7533a70f23dfe4c8bb",
+          "Depth": 2,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_stock_003",
+          "Template": "698b3592e700c6d632003753",
+          "Depth": 2,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "5a34fae7c4a2826c6e06d760",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "5a34fbadc4a28200741e230a",
+          "Depth": 2,
+          "Parent": 6
+        },
+        {
+          "Slot": "mod_sight_rear",
+          "Template": "6a1578658d059ca69c0a7853",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5a339805c4a2826c6e06d73d",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "6761770e48fa5c377e06fc3c",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 7,
+      "Cost": 146810,
+      "PerPurchase": 10000,
+      "Attempts": 4242,
+      "Floor": 9,
+      "Nodes": 1302564,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
+    },
+    "9CFD3A05FDC08686D6D0340C019A810FB1583179A5C3718216424BE6DCD1BC71": {
+      "Parts": [
+        {
+          "Slot": "mod_reciever",
+          "Template": "61713a8fd92c473c770214a4",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "61703001d92c473c77021497",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_tactical_002",
+          "Template": "672e2e75ecdecad1471639ad",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "672e2e7546454a975e0b7a3b",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "5a37ca54c4a282000d72296a",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_scope_001",
+          "Template": "58d268fc86f774111273f8c2",
+          "Depth": 3,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_scope_000",
+          "Template": "617151c1d92c473c770214ab",
+          "Depth": 3,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "61702be9faa1272e431522c3",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "61702f1b67085e45ef140b26",
+          "Depth": 3,
+          "Parent": 7
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "617153016c780c1e710c9a2f",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock_000",
+          "Template": "617154aa1cb55961fa0fdb3b",
+          "Depth": 2,
+          "Parent": 9
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "6193dcd0f8ee7e52e4210a28",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_charge",
+          "Template": "61702d8a67085e45ef140b24",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "617130016c780c1e710c9a24",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 7,
+      "Cost": 216114,
+      "PerPurchase": 10000,
+      "Attempts": 4296,
+      "Floor": 13,
+      "Nodes": 1099335,
+      "Binding": [
+        "recoil",
+        "weight",
+        "magazine capacity"
+      ]
+    },
+    "DD8051838D241BA0E7527CA365FD7C0786588C7D610D953473365F7A983A2B65": {
+      "Parts": [
+        {
+          "Slot": "mod_reciever",
+          "Template": "5df8e4080b92095fd441e594",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "57c69dd424597774c03b7bbc",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "5a37cb10c4a282329a73b4e7",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "5dfa397fb11454561e39246c",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5a34fd2bc4a282329a73b4c5",
+          "Depth": 3,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "684ae9d928526b5c284aacb6",
+          "Depth": 4,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "6065dc8a132d4d12c81fd8e3",
+          "Depth": 3,
+          "Parent": 3
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "6932aec6cccd2b808a043856",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "5cda9bcfd7f00c0c0b53e900",
+          "Depth": 3,
+          "Parent": 7
+        },
+        {
+          "Slot": "mod_tactical_003",
+          "Template": "6644920d49817dc7d505ca71",
+          "Depth": 3,
+          "Parent": 7
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5c793fc42e221600114ca25d",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock_000",
+          "Template": "5fc2369685fd526b824a5713",
+          "Depth": 2,
+          "Parent": 10
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "59db3a1d86f77429e05b4e92",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_charge",
+          "Template": "5df8e085bb49d91fb446d6a8",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "5a3501acc4a282000d72293a",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 6,
+      "Cost": 213913,
+      "PerPurchase": 10000,
+      "Attempts": 4090,
+      "Floor": 12,
+      "Nodes": 863940,
+      "Binding": [
+        "ergonomics",
+        "recoil",
+        "magazine capacity",
+        "height"
+      ]
+    },
+    "5B2B1857D3892088450630744D0A8BC5B86F6FC4F692C0764A4CB97BA7885A19": {
+      "Parts": [
+        {
+          "Slot": "mod_reciever",
+          "Template": "6529119424cbe3c74a05e5bb",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "652910565ae2ae97b80fdf35",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5fbe7618d6fa9c00c571bb6c",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "652910bc24cbe3c74a05e5b9",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "652910ef50dc782999054b97",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_mount_001",
+          "Template": "669a6a4a525be1d2d004b8eb",
+          "Depth": 3,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_tactical",
+          "Template": "6272379924e29f06af4d5ecb",
+          "Depth": 4,
+          "Parent": 5
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "6567e751a715f85433025998",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "6567e7681265c8a131069b0f",
+          "Depth": 3,
+          "Parent": 7
+        },
+        {
+          "Slot": "mod_stock_000",
+          "Template": "58ac1bf086f77420ed183f9f",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5649be884bdc2d79388b4577",
+          "Depth": 2,
+          "Parent": 9
+        },
+        {
+          "Slot": "mod_stock_000",
+          "Template": "672e2e7533a70f23dfe4c8bb",
+          "Depth": 3,
+          "Parent": 10
+        },
+        {
+          "Slot": "mod_stock_003",
+          "Template": "698b338649b46ae2d0092e82",
+          "Depth": 3,
+          "Parent": 10
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "65293c38fc460e50a509cb25",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "652911675ae2ae97b80fdf3c",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_charge",
+          "Template": "6529109524cbe3c74a05e5b7",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 7,
+      "Cost": 166407,
+      "PerPurchase": 10000,
+      "Attempts": 4308,
+      "Floor": 12,
+      "Nodes": 847065,
+      "Binding": [
+        "ergonomics",
+        "magazine capacity"
+      ]
+    },
+    "8B8AAD9B42CE010AB97F5E3B74B7DB66631C452BB1FB8DCD9B59D36EE8C79582": {
+      "Parts": [
+        {
+          "Slot": "mod_reciever",
+          "Template": "5fc278107283c4046c581489",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_handguard",
+          "Template": "5fc235db2770a0045c59c683",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_mount_002",
+          "Template": "671126b049e181972e0681fa",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_bipod",
+          "Template": "5888961624597754281f93f3",
+          "Depth": 4,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "5aa66a9be5b5b0214e506e89",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "5aa66be6e5b5b0214e506e97",
+          "Depth": 3,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_barrel",
+          "Template": "5fc23678ab884124df0cd590",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5fc23636016cce60e8341b05",
+          "Depth": 3,
+          "Parent": 6
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "5fc2360f900b1d5091531e19",
+          "Depth": 3,
+          "Parent": 6
+        },
+        {
+          "Slot": "mod_stock_001",
+          "Template": "5649be884bdc2d79388b4577",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock_000",
+          "Template": "672e2e75b74647fc82da299c",
+          "Depth": 2,
+          "Parent": 9
+        },
+        {
+          "Slot": "mod_stock_003",
+          "Template": "698b3592e700c6d632003753",
+          "Depth": 2,
+          "Parent": 9
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "5fc23426900b1d5091531e15",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "57c55efc2459772d2c6271e7",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 6,
+      "Cost": 177933,
+      "PerPurchase": 10000,
+      "Attempts": 212,
+      "Floor": 10,
+      "Nodes": 1209498,
+      "Binding": [
+        "weight",
+        "magazine capacity"
+      ]
+    },
+    "39F5E7044DA7C911A9458954DBAF1332BB99B044B91510CFC7E46085B659D9ED": {
+      "Parts": [
+        {
+          "Slot": "mod_mount_000",
+          "Template": "5c82342f2e221644f31c060e",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_tactical",
+          "Template": "57f3a5ae2459772b0e0bf19e",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "5ac50c185acfc400163398d4",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "55d481904bdc2d8c2f8b456a",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "5cf656f2d7f00c06585fb6eb",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "615d8f5dd92c473c770212ef",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "5ac50da15acfc4001718d287",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5649ade84bdc2d1b2b8b4587",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 5,
+      "Cost": 105070,
+      "PerPurchase": 10000,
+      "Attempts": 4318,
+      "Floor": 4,
+      "Nodes": 1500407,
+      "Binding": [
+        "ergonomics",
+        "recoil",
+        "weight",
+        "magazine capacity"
+      ]
+    },
+    "C34AB9647722609A48DCF1297B60752E4FA71B6B48F1407D695A7EC3BCEF0A4F": {
+      "Parts": [
+        {
+          "Slot": "mod_mount",
+          "Template": "5a27b281c4a28200741e1e52",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_mount",
+          "Template": "5a27b3d0c4a282000d721ec1",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5a27b6bec4a282000e496f78",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_tactical_000",
+          "Template": "560d657b4bdc2da74d8b4572",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "59f99a7d86f7745b134aa97b",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 4,
+      "Cost": 104243,
+      "PerPurchase": 10000,
+      "Attempts": 8645,
+      "Floor": 4,
+      "Nodes": 25828,
+      "Binding": [
+        "magazine capacity"
+      ]
+    },
+    "AACB20A4FE6782A096A860AFF82F04FF785F06246A22DC85CB7294E3DAA83EDD": {
+      "Parts": [
+        {
+          "Slot": "mod_handguard",
+          "Template": "637ba19df7ca6372bf2613d7",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_mount_000",
+          "Template": "62ed189fb3608410ef5a2bfc",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_tactical",
+          "Template": "560d657b4bdc2da74d8b4572",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_pistolgrip",
+          "Template": "637ba29bf7ca6372bf2613db",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "62e27a7865f0b1592a49e17b",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_mount",
+          "Template": "62ff9920fe938a24c90c10d2",
+          "Depth": 2,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_tactical",
+          "Template": "62ff9faffe938a24c90c10df",
+          "Depth": 3,
+          "Parent": 5
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "62e292e7b6c0ee2f230cee00",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "62e2a7138e1ac9380579c122",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "62e153bcdb1a5c41971c1b5b",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 8,
+      "Cost": 148609,
+      "PerPurchase": 10000,
+      "Attempts": 8645,
+      "Floor": 6,
+      "Nodes": 186067,
+      "Binding": [
+        "ergonomics",
+        "recoil",
+        "magazine capacity",
+        "effective distance"
+      ]
+    },
+    "2FE2B2E2DA04F2BD587D30686DD495373BDB7ECFE83A41D6B70559680C33D9ED": {
+      "Parts": [
+        {
+          "Slot": "mod_barrel",
+          "Template": "5c471cb32e221602b177afaa",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5c471bfc2e221602b21d4e17",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5e01e9e273d8eb11426f5bc3",
+          "Depth": 3,
+          "Parent": 1
+        },
+        {
+          "Slot": "mod_muzzle",
+          "Template": "5e01ea19e9dc277128008c0b",
+          "Depth": 4,
+          "Parent": 2
+        },
+        {
+          "Slot": "mod_mount",
+          "Template": "5e569a132642e66b0b68015c",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_tactical_000",
+          "Template": "56def37dd2720bec348b456a",
+          "Depth": 3,
+          "Parent": 4
+        },
+        {
+          "Slot": "mod_gas_block",
+          "Template": "5c471c842e221615214259b5",
+          "Depth": 2,
+          "Parent": 0
+        },
+        {
+          "Slot": "mod_mount_001",
+          "Template": "5dfcd0e547101c39625f66f9",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "6171407e50224f204c1da3c5",
+          "Depth": 2,
+          "Parent": 7
+        },
+        {
+          "Slot": "mod_scope_002",
+          "Template": "5a33b2c9c4a282000c5a9511",
+          "Depth": 3,
+          "Parent": 8
+        },
+        {
+          "Slot": "mod_scope",
+          "Template": "5a32aa8bc4a2826c6e06d737",
+          "Depth": 4,
+          "Parent": 9
+        },
+        {
+          "Slot": "mod_scope_000",
+          "Template": "5b3b99475acfc432ff4dcbee",
+          "Depth": 3,
+          "Parent": 8
+        },
+        {
+          "Slot": "mod_tactical",
+          "Template": "672e2e75645f9ad09f4b949d",
+          "Depth": 2,
+          "Parent": 7
+        },
+        {
+          "Slot": "mod_foregrip",
+          "Template": "5fc0f9cbd6fa9c00c571bb90",
+          "Depth": 2,
+          "Parent": 7
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "6197b229af1f5202c57a9bea",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_stock",
+          "Template": "627254cc9c563e6e442c398f",
+          "Depth": 2,
+          "Parent": 14
+        },
+        {
+          "Slot": "mod_reciever",
+          "Template": "5dfce88fe9dc277128008b2e",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_magazine",
+          "Template": "5c88f24b2e22160bc12c69a6",
+          "Depth": 1,
+          "Parent": -1
+        },
+        {
+          "Slot": "mod_pistol_grip",
+          "Template": "5c471be12e221602b66cd9ac",
+          "Depth": 1,
+          "Parent": -1
+        }
+      ],
+      "Changes": 15,
+      "Cost": 348184,
+      "PerPurchase": 10000,
+      "Attempts": 4279,
+      "Floor": 14,
+      "Nodes": 829249,
+      "Binding": [
+        "ergonomics",
+        "recoil",
+        "weight",
+        "magazine capacity",
+        "effective distance"
       ]
     }
   }

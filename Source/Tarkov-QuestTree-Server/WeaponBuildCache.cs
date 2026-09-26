@@ -54,6 +54,12 @@ namespace QuestTreeServer
         // same promise in the same way. The carry-over branch keeps the builds and re-measures them, so an
         // existing install loses no work: every build is still legal, still verified before use, and the
         // search starts from it rather than from nothing.
+        //
+        // 12: the search was tightened in four places. Rebuild resets its tree and locks named parts together
+        // with their ancestors; the incumbent build is measured rather than assumed; a prune pass may only
+        // lower the price, never trade it for fewer parts; and the cache key and the fingerprint are built
+        // invariant-culture. For the same reason 10 and 11 give, a history solved under 11 can differ from
+        // what 12 finds, and the carry-over branch keeps the builds and re-measures them.
         private const int CurrentSolver = 12;
 
         /// <summary>Shape of the file itself, for the day a field is added.</summary>

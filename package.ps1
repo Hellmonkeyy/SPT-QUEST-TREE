@@ -67,6 +67,11 @@
 #                                       stamp, build count and trader/flea/unpriced split either side
 #                                       of the copy so a worse training run is visible)
 #         .\package.ps1 -SkipBuild      stage and verify what bin\ already holds
+#
+# Before tagging (review F52) - when CurrentSolver or CurrentSchema in WeaponBuildCache.cs changed since
+# the last seed: build this commit and install its server half into the SPT install; start SPT.Server
+# once and let it finish its weapon-build pass ("carried over from a different solver", then the solve
+# and verify summary); stop it; run .\package.ps1 -RefreshBuilds and commit the seed it copied.
 
 param(
     [string]$SptPath = "C:\Games\SPT",
@@ -151,6 +156,15 @@ function SeedFacts($path) {
     return ($out -join " ")
 }
 
+# The solver and schema the CODE is at, read before the refresh so the refresh can refuse a stale install
+# cache (review F52); the seed's own stamp is read again after it, since the refresh rewrites the file.
+$cacheSource = Get-Content -Raw (Join-Path $server "WeaponBuildCache.cs")
+$seedText = Get-Content -Raw (Join-Path $server "weapon-builds.json")
+$solverConst = [regex]::Match($cacheSource, 'private const int CurrentSolver = ([0-9]+);').Groups[1].Value
+$schemaConst = [regex]::Match($cacheSource, 'private const int CurrentSchema = ([0-9]+);').Groups[1].Value
+$solverSeed = [regex]::Match($seedText, '"SolverVersion":\s*([0-9]+)').Groups[1].Value
+$schemaSeed = [regex]::Match($seedText, '"SchemaVersion":\s*([0-9]+)').Groups[1].Value
+
 if ($RefreshBuilds) {
     $seedPath = Join-Path $server "weapon-builds.json"
     $installSeed = Join-Path $SptPath "SPT_Runtime\user\mods\QuestTree\cache\weapon-builds.json"
@@ -163,6 +177,15 @@ if ($RefreshBuilds) {
     $serverRunning = @(Get-Process -Name "SPT.Server" -ErrorAction SilentlyContinue)
     if ($serverRunning.Count -gt 0) {
         Fail "SPT.Server.exe is running (pid $(($serverRunning | ForEach-Object { $_.Id }) -join ', ')) - it rewrites cache\weapon-builds.json as it trains, so a copy taken now can be half-written. Stop the server yourself and re-run; nothing has been copied."
+    }
+
+    # NOT a cache from a server that never booted on this code (review F52). Copied anyway, the stale file
+    # would overwrite the repo seed and only then fail the stamp gate below - leaving the seed worse than
+    # before and the reason one gate further down than the cause.
+    $installText = Get-Content -Raw $installSeed
+    $installSolver = [regex]::Match($installText, '"SolverVersion":\s*([0-9]+)').Groups[1].Value
+    if ($installSolver -ne $solverConst) {
+        Fail "the install's cache\weapon-builds.json is stamped solver $installSolver but this code is solver $solverConst - the server at $SptPath has not booted on this build. Install this commit's server half, start SPT.Server once and let it finish its weapon-build pass, stop it, and re-run -RefreshBuilds. Nothing has been copied."
     }
 
     # Before AND after, for both files, because the interesting failure is not a copy that breaks - it
@@ -181,16 +204,14 @@ if ($RefreshBuilds) {
 # The cache's SolverVersion is what decides whether a boot trusts the shipped builds or re-opens
 # every one of them ("carried over from a different solver"). 1.13.2 shipped a seed still stamped 9
 # after the bump to 10, and every install paid the carry-over on every boot until it was noticed in
-# a log. The seed is a plain JSON file and the constants are plain source: compare them here.
-$cacheSource = Get-Content -Raw (Join-Path $server "WeaponBuildCache.cs")
+# a log. The seed is a plain JSON file and the constants are plain source: compare them here. The code's
+# constants were read above the refresh; the seed is read again, because the refresh may have rewritten it.
 $seedText = Get-Content -Raw (Join-Path $server "weapon-builds.json")
-$solverConst = [regex]::Match($cacheSource, 'private const int CurrentSolver = ([0-9]+);').Groups[1].Value
-$schemaConst = [regex]::Match($cacheSource, 'private const int CurrentSchema = ([0-9]+);').Groups[1].Value
 $solverSeed = [regex]::Match($seedText, '"SolverVersion":\s*([0-9]+)').Groups[1].Value
 $schemaSeed = [regex]::Match($seedText, '"SchemaVersion":\s*([0-9]+)').Groups[1].Value
 if ($solverConst -eq "" -or $solverSeed -eq "") { Fail "could not read CurrentSolver from WeaponBuildCache.cs or SolverVersion from weapon-builds.json" }
 if ($solverConst -ne $solverSeed -or $schemaConst -ne $schemaSeed) {
-    Fail "the shipped weapon-builds.json is stamped solver $solverSeed / schema $schemaSeed but the code is $solverConst / $schemaConst - every install would re-open all its builds on every boot. Boot a server on the new code once and copy its cache over the seed."
+    Fail "the shipped weapon-builds.json is stamped solver $solverSeed / schema $schemaSeed but the code is $solverConst / $schemaConst - every install would re-open all its builds on every boot. RELEASE STEP: install this commit's server half into $SptPath, start SPT.Server once and let it finish its weapon-build pass, stop it, then run .\package.ps1 -RefreshBuilds and commit Source\Tarkov-QuestTree-Server\weapon-builds.json."
 }
 Write-Host "Shipped build history is stamped solver $solverSeed / schema $schemaSeed, matching the code." -ForegroundColor Green
 
