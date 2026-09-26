@@ -269,16 +269,17 @@ per-map budget is 132 MB: eight floors and four sides at 2.5 MB, eight pages at 
 6 MB of margin; the host's whole store is 1.5 GB - all eleven maps at that ceiling, though not a
 twelfth set beside them.
 
-**A throwaway diagnostic key ships in this build**, said out loud because it is not a feature: a bare
-**F10** is the mesh probe of the 3D experiments. In a raid it writes
+**A throwaway diagnostic ships in this build, with no key bound**, said out loud because it is not a
+feature: the mesh probe of the 3D experiments, which does nothing until you give it a key under F12 >
+**Advanced > Mesh probe key (throwaway)**. Once bound, in a raid it writes
 `BepInEx\plugins\QuestTree\captures\<map>.meshprobe.txt` - whether the game's own meshes can be read
 back off the graphics card, and how much of the map its colliders cover from where you stand - and in
 the menu `captures\menu.meshprobe.txt`, listing the loaded shaders, cameras and layers, with a small
 test view in the bottom-left corner until the key is pressed again (it swallows clicks inside its own
 512 px square while it is up). Nothing in the mod depends on it. It reads up to twenty scene meshes
 and asks the graphics card for a copy of one, modifying none of them; the readback test has to
-complete once in the menu before a raid will run it. It lives in the F12 menu under **Advanced > Mesh
-probe key (throwaway)**, is kept out of the in-game Settings tab, and is meant to be removed again.
+complete once in the menu before a raid will run it. It is kept out of the in-game Settings tab and
+is meant to be removed again.
 
 ## Under the hood
 

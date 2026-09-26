@@ -288,8 +288,9 @@ captured map carries our own credit line naming the build, the date and the raid
   gate rather than the 1.5 MB picture gate; the payload warning counts pages with the meshes; and
   `tools/check-maps-pack.py` checks every page's JPEG size and sha256 against its meta, that pages sit
   only beside a mesh, and that no page file goes unnamed.
-- **A throwaway diagnostic key ships with this release**, which is worth saying out loud because it
-  is not a feature: a bare **F10** is the mesh probe of the 3D map experiments, and it writes
+- **A throwaway diagnostic ships unbound with this release**, which is worth saying out loud because
+  it is not a feature: the mesh probe of the 3D map experiments, which does nothing until it is bound
+  under F12 > **Advanced > Mesh probe key (throwaway)**. Once bound it writes
   `BepInEx\plugins\QuestTree\captures\<map>.meshprobe.txt` in a raid - whether the game's own meshes
   can be read back off the graphics card, and how much of the map its colliders cover from where you
   stand - and `captures\menu.meshprobe.txt` in the menu, where it lists the loaded shaders, cameras
@@ -300,8 +301,8 @@ captured map carries our own credit line naming the build, the date and the raid
   (`Mesh.set_vertexBufferTarget` into d3d11), so nothing in this mod writes those any more and the
   readback test now has to complete once in the menu before a raid will run it; in the menu the test
   view lives until the second press and swallows clicks inside its own 512 px square. It is meant to
-  be removed again. It lives in the F12 menu under **Advanced > Mesh probe key (throwaway)** and is
-  deliberately kept out of the in-game Settings tab.
+  be removed again. It ships unbound - bind it under F12 > **Advanced > Mesh probe key (throwaway)** -
+  and is deliberately kept out of the in-game Settings tab.
 ---
 
 # Quest Tracker 1.18.5

@@ -244,15 +244,16 @@ namespace QuestTree
         /// Settings tab shows no row for it; it lives in the F12 menu and the cfg file only. Delete this
         /// entry, its bind and MeshProbe.cs together.
         ///
-        /// A bare F10, and tested with <see cref="ShortcutDown(KeyboardShortcut)"/> so the keys a raid
-        /// holds do not block it - though a bare binding means Ctrl, Shift or Alt held WILL, since those
-        /// are the keys a shortcut is made of.
+        /// UNBOUND by default (review F43). A bare F10 fired a GPU readback pass in the menu and left a
+        /// click-eating overlay up. Bind it under F12 > Advanced to use it; it is tested with
+        /// <see cref="ShortcutDown(KeyboardShortcut)"/> so the keys a raid holds do not block it, though a
+        /// bare binding still refuses while Ctrl, Shift or Alt is held.
         ///
         /// The SECTION AND NAME CHANGED with the rename ("Roof probe key (throwaway)" -> "Mesh probe key
         /// (throwaway)"), and that is deliberate rather than incidental. Bind never overwrites a value
         /// already in the cfg file, so under the old name a cfg written by an earlier build would have kept
         /// its Ctrl+F10 - the binding whose modifier is exactly what stopped the first two presses of the
-        /// old probe from firing. A new name is a new entry, so this one is written fresh as a bare F10 and
+        /// old probe from firing. A new name is a new entry, so this one is written fresh, now unbound, and
         /// the old line is left orphaned in the cfg, which BepInEx ignores. MeshProbe.Install prints the
         /// bound key at raid start and the menu watcher at plugin load, so which one is live can be read
         /// rather than assumed.</summary>
@@ -907,12 +908,8 @@ namespace QuestTree
 
             // THROWAWAY, to be deleted with QuestGraph/MeshProbe.cs. Its own section so it sits away
             // from the real settings, and kept out of Entries below so the Settings tab shows nothing.
-            // A BARE F10, no modifier: this is a key pressed a handful of times, in a raid and a menu
-            // visit set aside for the experiment. Nothing in a raid or the menu uses F10, and the probe
-            // changes nothing that outlives the frame if it is hit by mistake.
+            // Unbound by default - see ProbeKey.
             ProbeKey = config.Bind(
-                // Unbound by default (review F43): a bare F10 fired a GPU readback pass in the menu and left a
-                // click-eating overlay up until it was pressed again. A config that already has F10 keeps it.
                 "Advanced", "Mesh probe key (throwaway)", KeyboardShortcut.Empty,
                 "Debug only, and temporary. It is the diagnostic key of the 3D map experiments: pressed in a " +
                 "raid it measures whether the game's meshes can be read back off the GPU and how much of the " +

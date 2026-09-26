@@ -650,9 +650,11 @@ around it.
 | `Ctrl+Q` | Open or close the tracker from anywhere in the menu (rebindable in F12) |
 | `Ctrl+F9` | In a raid: take this map's picture for the Maps tab (rebindable in F12) |
 | `Ctrl+Shift+F9` | In a raid: capture the whole map, stop by stop, and return you (rebindable in F12) |
-| `F10` | In a raid or the menu: the mesh probe, a diagnostic and temporary key - see below |
+| (unbound) | The mesh probe: a temporary diagnostic that does nothing until you bind it - see below |
 
-**`F10` is not a feature.** It is the diagnostic key of the 3D map experiments: pressed in a raid it
+**The mesh probe is not a feature, and it ships with no key.** Bind one in the F12 menu under
+**Advanced > Mesh probe key (throwaway)** to use it (a bare key such as F10 works, and Ctrl, Shift or
+Alt held will block a bare binding). It is the diagnostic key of the 3D map experiments: pressed in a raid it
 measures whether the game's own meshes can be read back off the graphics card and how much of the map
 its colliders actually cover, and pressed in the menu it lists the loaded shaders, cameras and layers
 and puts a small test view in the corner of the screen (press again to close it). It writes
@@ -662,11 +664,11 @@ nothing": it reads up to twenty of the scene's meshes and asks the graphics card
 without modifying any of them - an earlier version of it modified a mesh's buffer targets and put
 them back, and the restoring write crashed the game outright, so nothing in this mod writes those any
 more; in the menu the test view is a 512x512 panel in the bottom-left corner that stays until you
-press the key again and swallows any click inside it while it is there. Press it once in the **menu**
+press the key again and swallows any click inside it while it is there. Press the key once in the **menu**
 before you press it in a raid: the readback test only runs in a raid once it has completed in the
-menu, where a crash costs nothing. It is meant to be removed again. Rebind it, or clear it, in the
-F12 menu under **Advanced > Mesh probe key (throwaway)**; the in-game Settings tab deliberately does
-not list it.
+menu, where a crash costs nothing. It is meant to be removed again. Clear it again in the F12 menu
+under **Advanced > Mesh probe key (throwaway)**; the in-game Settings tab deliberately does not list
+it.
 
 **The keys are split by view.** `F`, `M`, `X`, `C` and `/` are the tree's, and only fire there: on
 **Maps** the only keys are `F` and `[` `]`, and on **Do next**, **Items**, **Kappa** and **Settings**
