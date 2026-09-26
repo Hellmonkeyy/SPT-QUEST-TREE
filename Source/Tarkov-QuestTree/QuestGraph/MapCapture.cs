@@ -1235,47 +1235,38 @@ namespace QuestTree.QuestGraph
                         continue;
                     }
 
-                    // The scene's distance culling forced visible and its water hidden for the whole
-                    // floor, rather than around each render: see ForceCulling for the measurement that
-                    // decides it and for what the player's own frames look like meanwhile. Never
-                    // throws, and the release below runs however the tiles went - including a floor
-                    // abandoned at its first tile - while Cleanup releases it again for a raid that
-                    // ends mid-floor.
-                    HoldScene();
+                    // WP1: the previous picture and sidecar BEFORE the tiles when there is one to merge into, and the
+                    // tile plan made from them - see LoadAndPlan. Nothing at all with the switch off or on a fresh
+                    // capture, and then the loads stay in Develop, as before.
+                    var loading = LoadAndPlan(plan, floor);
+                    while (loading.MoveNext()) yield return loading.Current;
 
-                    // Its own frame, like every other step here: the hold is the one pass over all
-                    // twenty-seven thousand components, and putting it in the same frame as the first
-                    // tile's render and readback would make that frame the longest of the capture.
-                    yield return null;
-
-                    for (var tile = 0; tile < plan.TileCount; tile++)
+                    // The tiles, the water rule and the scene hold around them - see RenderTiles. The floor phase's
+                    // overrun (review F45) is asked before every render, late water tiles included.
+                    var tiles = RenderTiles(plan, floor, () =>
                     {
                         // A floor still rendering well past the budget is abandoned too - half a floor is not a
                         // picture - at a margin, so the one floor that started in time normally finishes.
-                        if (floorsClock.Elapsed.TotalSeconds > FloorPhaseSeconds * FloorPhaseOverrun)
-                        {
-                            floor.Failed = true;
-                            floorsCut++;
-                            break;
-                        }
+                        if (floorsClock.Elapsed.TotalSeconds <= FloorPhaseSeconds * FloorPhaseOverrun) return false;
 
-                        RenderTile(plan, floor, tile);
-                        if (floor.Failed) break;
+                        floorsCut++;
+                        return true;
+                    });
 
-                        // The whole point of the coroutine: one render and one readback per frame,
-                        // never two.
-                        yield return null;
-                    }
+                    while (tiles.MoveNext()) yield return tiles.Current;
 
-                    ReleaseScene();
-
-                    if (floor.Tiles > 0) plan.FloorPixels += (long)plan.WidthPx * plan.HeightPx;
+                    // FULL-floor pixels whenever the floor was planned or rendered (WP1 3.5): counting only the
+                    // rendered ones would put a whole floor's develop and encode on a tile's pixels, estimate the
+                    // sides long and shrink the mesh budget below the old path's.
+                    if (floor.Tiles > 0 || floor.TilesOwned + floor.TilesOutside > 0)
+                        plan.FloorPixels += (long)plan.WidthPx * plan.HeightPx;
 
                     // The water quads go before the exposure is measured, not just before the merge:
                     // a flat cyan pool is one of the brightest things in a capture, and the rain
                     // capture's 98th percentile was read off exactly this kind of object. Painting
-                    // them out first means the exposure describes the map.
-                    if (!floor.Failed)
+                    // them out first means the exposure describes the map. A planned floor that rendered no tile
+                    // has no drawn pixel and so no water (WP1).
+                    if (!floor.Failed && (floor.Verdicts == null || floor.Tiles > 0))
                     {
                         var inpaint = Inpaint(plan, floor);
                         while (inpaint.MoveNext()) yield return inpaint.Current;
@@ -2249,7 +2240,7 @@ namespace QuestTree.QuestGraph
 
                 var line =
                     $"QuestTree: captured {plan.Key} \"{floor.Dto.Name}\" {plan.WidthPx}x{plan.HeightPx} px " +
-                    $"({MetresPerPixel(plan.Ppm)} m/px), {floor.Tiles} tiles, {Ms(ms)} ms, exposure " +
+                    $"({MetresPerPixel(plan.Ppm)} m/px), {TilesPhrase(plan, floor)}, {Ms(ms)} ms, exposure " +
                     $"{E(floor.Exposure.Low)}..{E(floor.Exposure.High)} " +
                     $"({(_hdr ? "half-float" : "8-bit")}, gamma {G(floor.Exposure.Gamma)}" +
                     (floor.ReusedExposure ? ", kept from the first capture" : "") + ")";
@@ -2281,6 +2272,8 @@ namespace QuestTree.QuestGraph
                 }
 
                 Plugin.LogSource?.LogInfo(line);
+
+                AuditLine(plan, floor);
 
                 // A merge that drew nothing new is not an error - the player pressed the key twice in
                 // the same spot, or somewhere with nothing left to add - but it is worth saying, since
@@ -3240,12 +3233,48 @@ namespace QuestTree.QuestGraph
                 // pixel by pixel when identical light became identical bytes in both. What this
                 // capture's own percentiles are for on a merge is the light test below - the one
                 // thing the stored exposure cannot survive is the sun having moved.
-                var measured = Measure(plan, floor);
+                var skipping = floor.Verdicts != null && !TileSkipAudit && floor.TilesOwned + floor.TilesOutside > 0;
+
+                // WP1 (2.10): nothing rendered - every tile owned by a closer capture (or outside the mask). No pixel
+                // can be taken, so the exposure only has to be the one the pictures on disk were developed with,
+                // and the develop reproduces them; there is nothing to measure the light with.
+                if (stored != null && skipping && floor.Tiles == 0)
+                {
+                    floor.Exposure = stored;
+                    floor.ReusedExposure = true;
+
+                    Plugin.LogSource?.LogDebug(
+                        $"QuestTree: {plan.Key} \"{floor.Dto.Name}\" rendered no tile - every one is owned by a closer " +
+                        "capture or outside the walkable mask - so it keeps its stored exposure with no light test.");
+                    return;
+                }
+
+                var measured = Measure(plan, floor, out var empty);
+
+                if (TileSkipAudit && stored != null && floor.Verdicts != null) AuditLight(plan, floor, stored, measured);
 
                 if (measured == null)
                 {
-                    // Nothing this render can contribute: Measure has said which of the two ways it
-                    // came back empty. On a merge the floor's earlier picture is kept and the meta
+                    // WP1 (2.10): the rendered tiles drew nothing, so nothing of this capture can be taken either -
+                    // the same exact case as no tile rendered.
+                    if (empty && stored != null && skipping)
+                    {
+                        floor.Exposure = stored;
+                        floor.ReusedExposure = true;
+
+                        Plugin.LogSource?.LogDebug(
+                            $"QuestTree: {plan.Key} \"{floor.Dto.Name}\" - its {floor.Tiles} rendered tile(s) drew nothing " +
+                            "to measure, so it keeps its stored exposure with no light test.");
+                        return;
+                    }
+
+                    if (empty)
+                        Plugin.LogSource?.LogWarning(
+                            $"QuestTree: {plan.Key} \"{floor.Dto.Name}\" came back with no drawn pixels at all and was not " +
+                            "written.");
+
+                    // Nothing this render can contribute: Measure (or the line above) has said which of the
+                    // ways it came back empty. On a merge the floor's earlier picture is kept and the meta
                     // goes on naming it - see Carried - so a dark basement that fails here costs
                     // nothing that was already captured.
                     floor.Failed = true;
@@ -3322,15 +3351,24 @@ namespace QuestTree.QuestGraph
         /// <param name="plan">The capture's plan.</param>
         /// <param name="floor">The floor being measured; its pixel buffer is read and nothing is
         /// written.</param>
-        private ExposureResult Measure(Plan plan, FloorPlan floor)
+        /// <param name="empty">True when no drawn pixel was sampled at all - the caller says so (WP1: or keeps
+        /// the stored exposure when the rendered tiles simply drew nothing).</param>
+        /// <param name="onlyRendered">WP1 audit mode only: sample only pixels whose tile has this verdict
+        /// Render. Null samples every pixel, which is what the capture does.</param>
+        /// <param name="quiet">WP1 audit mode's second measurement: say nothing.</param>
+        private ExposureResult Measure(Plan plan, FloorPlan floor, out bool empty, TileVerdict[] onlyRendered = null,
+            bool quiet = false)
         {
             var pixels = floor.Pixels;
             var count = plan.WidthPx * plan.HeightPx;
 
+            empty = false;
+
             if (pixels == null)
             {
-                Plugin.LogSource?.LogWarning(
-                    $"QuestTree: {plan.Key} \"{floor.Dto.Name}\" has no pixels to expose.");
+                if (!quiet)
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: {plan.Key} \"{floor.Dto.Name}\" has no pixels to expose.");
                 return null;
             }
 
@@ -3345,16 +3383,18 @@ namespace QuestTree.QuestGraph
                 // the whole point of a percentile is that it describes the CONTENT.
                 if (drawn != null && !drawn[i]) continue;
 
+                if (onlyRendered != null &&
+                    onlyRendered[TileOf(plan, i % plan.WidthPx, i / plan.WidthPx)] != TileVerdict.Render) continue;
+
                 var at = i * 3;
                 var luminance = Luminance(pixels[at], pixels[at + 1], pixels[at + 2]);
                 if (IsFinite(luminance)) samples.Add(luminance);
             }
 
+            // The warning is the caller's (WP1): a planned floor whose rendered tiles drew nothing is not a failure.
             if (samples.Count == 0)
             {
-                Plugin.LogSource?.LogWarning(
-                    $"QuestTree: {plan.Key} \"{floor.Dto.Name}\" came back with no drawn pixels at all and was not " +
-                    "written.");
+                empty = true;
                 return null;
             }
 
@@ -3379,9 +3419,10 @@ namespace QuestTree.QuestGraph
             // multi-floor map the other floors are decided on their own pixels.
             if (high < MinUsableHigh)
             {
-                Plugin.LogSource?.LogWarning(
-                    $"QuestTree: {plan.Key} \"{floor.Dto.Name}\" rendered too dark to be a map (p98 {E(high)}) - " +
-                    "nothing was written. Heavy weather or night; try again in daylight.");
+                if (!quiet)
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: {plan.Key} \"{floor.Dto.Name}\" rendered too dark to be a map (p98 {E(high)}) - " +
+                        "nothing was written. Heavy weather or night; try again in daylight.");
                 return null;
             }
 
@@ -3392,19 +3433,21 @@ namespace QuestTree.QuestGraph
                 low = samples[0];
                 high = samples[samples.Count - 1];
 
-                Plugin.LogSource?.LogDebug(
-                    $"QuestTree: {plan.Key} \"{floor.Dto.Name}\" has almost no tonal range " +
-                    $"({E(low)}..{E(high)}) - stretching its full range instead of its percentiles.");
+                if (!quiet)
+                    Plugin.LogSource?.LogDebug(
+                        $"QuestTree: {plan.Key} \"{floor.Dto.Name}\" has almost no tonal range " +
+                        $"({E(low)}..{E(high)}) - stretching its full range instead of its percentiles.");
             }
 
             if (high - low < MinExposureRange)
             {
                 // The check that can fail, and the one that catches a black render: a floor with no
                 // range at all is not a picture of anything.
-                Plugin.LogSource?.LogWarning(
-                    $"QuestTree: {plan.Key} \"{floor.Dto.Name}\" is a single flat tone " +
-                    $"({E(low)}..{E(high)}) - nothing was drawn, so it was not written. If every floor says " +
-                    "this, the capture camera is rendering nothing at all.");
+                if (!quiet)
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: {plan.Key} \"{floor.Dto.Name}\" is a single flat tone " +
+                        $"({E(low)}..{E(high)}) - nothing was drawn, so it was not written. If every floor says " +
+                        "this, the capture camera is rendering nothing at all.");
                 return null;
             }
 
@@ -3440,11 +3483,17 @@ namespace QuestTree.QuestGraph
         {
             yield return null;
 
+            // WP1 (2.9): a floor that rendered no tile after a load before the tiles has no drawn pixel, so none is
+            // taken and no band needs the luminance buffer or the smoothing - the picture is the same at any band
+            // height, so it goes in PixelBandRows at a time.
+            floor.BandRows = floor.Tiles == 0 && floor.PreviousLoaded ? PixelBandRows : DevelopBandRows;
+
             if (!DevelopBegin(plan, floor)) yield break;
 
             // The previous picture and its sidecar, a file to a frame: each is a PNG decode of a
-            // floor-sized image plus the GetPixels32 that copies it out of the texture.
-            if (plan.Previous != null)
+            // floor-sized image plus the GetPixels32 that copies it out of the texture. Loaded here unless
+            // the tile plan loaded them before the tiles (WP1).
+            if (plan.Previous != null && !floor.PreviousLoaded)
             {
                 yield return null;
                 LoadPreviousColour(plan, floor);
@@ -3458,7 +3507,7 @@ namespace QuestTree.QuestGraph
 
             floor.Merged = floor.PreviousColour != null;
 
-            for (var y0 = 0; y0 < plan.HeightPx; y0 += DevelopBandRows)
+            for (var y0 = 0; y0 < plan.HeightPx; y0 += floor.BandRows)
             {
                 yield return null;
                 if (!DevelopBand(plan, floor, y0)) yield break;
@@ -5425,6 +5474,373 @@ namespace QuestTree.QuestGraph
         private static IEnumerable<int> TilesToRender(Plan plan, FloorPlan floor) =>
             Enumerable.Range(0, plan.TileCount).Where(t => Renders(floor, t));
 
+        /// <summary>WP1: the previous picture and sidecar BEFORE the tiles, when there is one to merge into, and the
+        /// tile plan made from them. The tile plan is the merge's own question and needs both; they were loaded in
+        /// Develop until now - same files, same calls, one frame each - and the memory model
+        /// (WorkingSetBytesPerPixel) already counts both. Nothing with the switch off or on a fresh capture: the
+        /// loads then stay in Develop and every tile renders.</summary>
+        /// <param name="plan">The plan (a side's own plan for a side).</param>
+        /// <param name="floor">The floor or side, its buffers allocated.</param>
+        private IEnumerator LoadAndPlan(Plan plan, FloorPlan floor)
+        {
+            if (!TileSkipEnabled || plan.Previous == null) yield break;
+
+            yield return null;
+            LoadPreviousColour(plan, floor);
+
+            if (floor.PreviousColour != null)
+            {
+                yield return null;
+                LoadPreviousDist(plan, floor);
+            }
+
+            floor.PreviousLoaded = true;
+
+            var planning = PlanTiles(plan, floor);
+            while (planning.MoveNext()) yield return planning.Current;
+        }
+
+        /// <summary>
+        /// WP1: THE tile loop of one floor or side - the one place the renders are iterated. The scene is held only
+        /// when something will be rendered (a floor every tile of which is owned costs no pass over the culling
+        /// lists at all); then the first pass over TilesToRender, one render and one readback per frame, a skipped
+        /// tile costing no render and no frame; then the water rule (PromoteNearWater), still under the hold, whose
+        /// tiles are rendered late until it finds none; then the release. With no plan every tile renders under one
+        /// hold, exactly the old loop.
+        ///
+        /// An asynchronous readback pipeline takes the same two lists: TilesToRender first, then the water rule's
+        /// late tiles - and the water rule needs every first-pass tile folded into Pixels and Drawn before it runs.
+        /// </summary>
+        /// <param name="plan">The plan (a side's own plan for a side).</param>
+        /// <param name="floor">The floor or side.</param>
+        /// <param name="overrun">Asked before every render: true when the phase budget is past its margin (it
+        /// counts the cut itself); the floor is then failed and the loop stops.</param>
+        private IEnumerator RenderTiles(Plan plan, FloorPlan floor, Func<bool> overrun)
+        {
+            // The scene's distance culling forced visible and its water hidden for the whole floor, rather than
+            // around each render: see ForceCulling for the measurement that decides it and for what the player's own
+            // frames look like meanwhile. Never throws, and the release below runs however the tiles went -
+            // including a floor abandoned at its first tile - while Cleanup releases it again for a raid that ends
+            // mid-floor.
+            var held = false;
+
+            if (TilesToRender(plan, floor).Any())
+            {
+                HoldScene();
+                held = true;
+
+                // Its own frame, like every other step here: the hold is the one pass over all twenty-seven thousand
+                // components, and putting it in the same frame as the first tile's render and readback would make
+                // that frame the longest of the capture.
+                yield return null;
+            }
+
+            foreach (var tile in TilesToRender(plan, floor))
+            {
+                if (overrun())
+                {
+                    floor.Failed = true;
+                    break;
+                }
+
+                RenderTile(plan, floor, tile);
+                if (floor.Failed) break;
+
+                // The whole point of the coroutine: one render and one readback per frame, never two.
+                yield return null;
+            }
+
+            // The water rule (WP1 2.6), still under the hold. In audit mode it only reports, into the skip zones.
+            if (!floor.Failed && floor.Verdicts != null)
+            {
+                if (TileSkipAudit)
+                {
+                    try
+                    {
+                        BuildSkipZone(plan, floor, PromoteNearWater(plan, floor, true));
+                    }
+                    catch (Exception ex)
+                    {
+                        floor.SkipZone = null;
+                        floor.AuditVerdicts = null;
+                        Plugin.LogSource?.LogDebug(
+                            $"QuestTree: {plan.Key} \"{floor.Dto?.Name}\" tile-skip audit abandoned ({ex.GetType().Name}: " +
+                            $"{ex.Message}).");
+                    }
+                }
+                else
+                {
+                    while (!floor.Failed)
+                    {
+                        var late = WaterTiles(plan, floor);
+                        if (late.Count == 0) break;
+
+                        // Unreachable in practice - water needs a rendered tile - but a late render is never unheld.
+                        if (!held)
+                        {
+                            HoldScene();
+                            held = true;
+                            yield return null;
+                        }
+
+                        foreach (var tile in late)
+                        {
+                            if (overrun())
+                            {
+                                floor.Failed = true;
+                                break;
+                            }
+
+                            RenderTile(plan, floor, tile);
+                            if (floor.Failed) break;
+
+                            yield return null;
+                        }
+                    }
+                }
+            }
+
+            if (held) ReleaseScene();
+        }
+
+        /// <summary>WP1: PromoteNearWater, guarded - when the ring scan throws, every skipped tile is promoted, which
+        /// is the old output.</summary>
+        /// <param name="plan">The plan.</param>
+        /// <param name="floor">The floor or side.</param>
+        private static List<int> WaterTiles(Plan plan, FloorPlan floor)
+        {
+            try
+            {
+                return PromoteNearWater(plan, floor, false);
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: {plan.Key} \"{floor.Dto?.Name}\" water rule abandoned ({ex.GetType().Name}: {ex.Message}) - " +
+                    "every skipped tile is rendered.");
+
+                var all = new List<int>();
+
+                for (var tile = 0; tile < plan.TileCount; tile++)
+                {
+                    if (floor.Verdicts[tile] == TileVerdict.Render) continue;
+
+                    if (floor.Verdicts[tile] == TileVerdict.OwnedByCloser) floor.TilesOwned--;
+                    else floor.TilesOutside--;
+
+                    floor.Verdicts[tile] = TileVerdict.Render;
+                    floor.TilesPromoted++;
+                    all.Add(tile);
+                }
+
+                return all;
+            }
+        }
+
+        /// <summary>
+        /// WP1 (2.6): the skipped tiles that must be rendered after all because a drawn water pixel lies within
+        /// InpaintReach of their edge: its fill (Mean) could read their pixels, and a filled pixel is read in turn by
+        /// the smoothing of a pixel this capture takes. Checked on the float buffer in its CURRENT orientation (a
+        /// side's camera orientation - this runs before MirrorSide), in the ring around each skipped tile only.
+        /// Marks them Render and returns them (report=false); called until it returns none, because a tile rendered
+        /// late can bring water of its own near another. report=true (audit) only returns them.
+        /// </summary>
+        /// <param name="plan">The plan.</param>
+        /// <param name="floor">The floor or side, its first-pass tiles rendered.</param>
+        /// <param name="report">Only report, change nothing.</param>
+        private static List<int> PromoteNearWater(Plan plan, FloorPlan floor, bool report)
+        {
+            var promoted = new List<int>();
+            if (!FillWaterCyan || floor.Verdicts == null || floor.Pixels == null || floor.Drawn == null) return promoted;
+
+            for (var tile = 0; tile < plan.TileCount; tile++)
+            {
+                if (floor.Verdicts[tile] == TileVerdict.Render) continue;
+
+                TileRect(plan, tile, false, out var c0, out var n, out var r0, out var m);
+                Dilate(plan, c0, n, r0, m, InpaintReach, out var a0, out var a1, out var b0, out var b1);
+
+                var found = false;
+
+                for (var row = b0; row < b1 && !found; row++)
+                {
+                    var inside = row >= r0 && row < r0 + m;
+
+                    for (var col = a0; col < a1; col++)
+                    {
+                        // The tile itself is skipped over: its own pixels are not drawn.
+                        if (inside && col >= c0 && col < c0 + n)
+                        {
+                            col = c0 + n - 1;
+                            continue;
+                        }
+
+                        var i = row * plan.WidthPx + col;
+                        if (!floor.Drawn[i]) continue;
+
+                        var at = i * 3;
+                        if (!IsWaterCyan(floor.Pixels[at], floor.Pixels[at + 1], floor.Pixels[at + 2])) continue;
+
+                        found = true;
+                        break;
+                    }
+                }
+
+                if (found) promoted.Add(tile);
+            }
+
+            if (!report)
+            {
+                foreach (var tile in promoted)
+                {
+                    if (floor.Verdicts[tile] == TileVerdict.OwnedByCloser) floor.TilesOwned--;
+                    else floor.TilesOutside--;
+
+                    floor.Verdicts[tile] = TileVerdict.Render;
+                    floor.TilesPromoted++;
+                }
+            }
+
+            return promoted;
+        }
+
+        /// <summary>WP1 audit mode (2.11): the verdicts with the would-be water promotions set to Render
+        /// (AuditVerdicts), and SkipZone - per pixel, bit 1 over every owned tile dilated by TileSkipHalo, bit 2 over
+        /// every outside one - in the contract's orientation, which is the one DevelopBand indexes. 1 byte a pixel,
+        /// audit mode only.</summary>
+        /// <param name="plan">The plan.</param>
+        /// <param name="floor">The floor or side.</param>
+        /// <param name="wouldPromote">The tiles the water rule would have rendered late.</param>
+        private static void BuildSkipZone(Plan plan, FloorPlan floor, List<int> wouldPromote)
+        {
+            floor.SkipZone = null;
+            floor.AuditVerdicts = null;
+            if (floor.Verdicts == null) return;
+
+            var verdicts = (TileVerdict[])floor.Verdicts.Clone();
+            foreach (var tile in wouldPromote) verdicts[tile] = TileVerdict.Render;
+
+            var zone = new byte[plan.WidthPx * plan.HeightPx];
+
+            for (var tile = 0; tile < plan.TileCount; tile++)
+            {
+                if (verdicts[tile] == TileVerdict.Render) continue;
+
+                var bit = verdicts[tile] == TileVerdict.OwnedByCloser ? (byte)1 : (byte)2;
+
+                TileRect(plan, tile, true, out var c0, out var n, out var r0, out var m);
+                Dilate(plan, c0, n, r0, m, TileSkipHalo, out var a0, out var a1, out var b0, out var b1);
+
+                for (var row = b0; row < b1; row++)
+                {
+                    var i = row * plan.WidthPx + a0;
+                    for (var col = a0; col < a1; col++, i++) zone[i] |= bit;
+                }
+            }
+
+            floor.SkipZone = zone;
+            floor.AuditVerdicts = verdicts;
+        }
+
+        /// <summary>WP1 audit mode (2.11): the light test judged twice - on every tile (what the capture uses, since
+        /// audit renders every tile) and on the tiles the skip would have rendered - and one line with both verdicts,
+        /// a Warning when they differ.</summary>
+        /// <param name="plan">The plan.</param>
+        /// <param name="floor">The floor.</param>
+        /// <param name="stored">The stored exposure.</param>
+        /// <param name="measured">Measure over every tile.</param>
+        private void AuditLight(Plan plan, FloorPlan floor, ExposureResult stored, ExposureResult measured)
+        {
+            try
+            {
+                if (floor.AuditVerdicts == null) return;
+
+                var subset = Measure(plan, floor, out _, floor.AuditVerdicts, true);
+
+                var all = LightVerdict(measured, stored, out var allHigh, out var allDrift);
+                var rendered = LightVerdict(subset, stored, out var subHigh, out var subDrift);
+
+                var line =
+                    $"QuestTree: {plan.Key} \"{floor.Dto?.Name}\" tile-skip audit, light test: all tiles p98 {allHigh} " +
+                    $"(drift {allDrift} %) -> {all}; rendered tiles only p98 {subHigh} (drift {subDrift} %) -> {rendered}";
+
+                if (all == rendered) Plugin.LogSource?.LogInfo(line + ".");
+                else Plugin.LogSource?.LogWarning(line + " - the verdicts DIFFER.");
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: {plan.Key} \"{floor.Dto?.Name}\" tile-skip audit of the light test abandoned " +
+                    $"({ex.GetType().Name}: {ex.Message}).");
+            }
+        }
+
+        /// <summary>WP1 audit: what MeasureFloor would decide from one measurement - accept, refuse (drift past
+        /// MaxExposureDrift), or fail (no usable picture: empty, too dark, or flat).</summary>
+        /// <param name="measured">The measurement, or null.</param>
+        /// <param name="stored">The stored exposure.</param>
+        /// <param name="high">Its p98, for the line.</param>
+        /// <param name="drift">Its drift in percent, for the line.</param>
+        private static string LightVerdict(ExposureResult measured, ExposureResult stored, out string high, out string drift)
+        {
+            if (measured == null)
+            {
+                high = "-";
+                drift = "-";
+                return "fail (no usable picture)";
+            }
+
+            var d = IsFinite(measured.High) && IsFinite(stored.High) && stored.High > 0f
+                ? Math.Abs(measured.High / stored.High - 1f)
+                : 0f;
+
+            high = E(measured.High);
+            drift = (d * 100f).ToString("0", CultureInfo.InvariantCulture);
+
+            return d > MaxExposureDrift ? "refuse" : "accept";
+        }
+
+        /// <summary>WP1 audit mode (2.11): the line FinishFloor and FinishSide add - what the skip would have
+        /// skipped, and the pixels this capture took inside those tiles' halos. Any of those is a broken premise:
+        /// a Warning with INCONSISTENT.</summary>
+        /// <param name="plan">The plan (a side's own plan for a side).</param>
+        /// <param name="floor">The floor or side.</param>
+        private static void AuditLine(Plan plan, FloorPlan floor)
+        {
+            if (!TileSkipAudit || floor.AuditVerdicts == null || floor.Verdicts == null) return;
+
+            var owned = floor.AuditVerdicts.Count(v => v == TileVerdict.OwnedByCloser);
+            var outside = floor.AuditVerdicts.Count(v => v == TileVerdict.OutsideMask);
+            var water = Enumerable.Range(0, plan.TileCount)
+                .Count(i => floor.Verdicts[i] != TileVerdict.Render && floor.AuditVerdicts[i] == TileVerdict.Render);
+
+            var line =
+                $"QuestTree: tile-skip audit for {plan.Key} \"{floor.Dto?.Name}\" - {owned + outside} of {plan.TileCount} tiles " +
+                $"would be skipped ({owned} owned, {outside} outside, {water} re-rendered for water); pixels this capture " +
+                $"took inside them: {floor.AuditOwnedTaken} owned-zone, {floor.AuditOutsideVisible} visible outside-zone - ";
+
+            if (floor.AuditOwnedTaken + floor.AuditOutsideVisible > 0) Plugin.LogSource?.LogWarning(line + "INCONSISTENT.");
+            else Plugin.LogSource?.LogInfo(line + "consistent.");
+        }
+
+        /// <summary>WP1 (2.12): the tiles part of a floor's or side's captured line - how many of the tiles were
+        /// rendered and, with a tile plan outside audit mode, why the others were not.</summary>
+        /// <param name="plan">The plan (a side's own plan for a side).</param>
+        /// <param name="floor">The floor or side.</param>
+        private static string TilesPhrase(Plan plan, FloorPlan floor) =>
+            floor.Verdicts != null && !TileSkipAudit
+                ? $"rendered {floor.Tiles} of {plan.TileCount} tiles (skipped {floor.TilesOwned} owned by closer captures, " +
+                  $"{floor.TilesOutside} outside the walkable mask" +
+                  (floor.TilesPromoted > 0 ? $", {floor.TilesPromoted} rendered late for water at their edge" : "") + ")"
+                : $"rendered {floor.Tiles} of {plan.TileCount} tiles";
+
+        /// <summary>WP1: the tile holding a floor pixel (texture row, 0 at the bottom) - TileRect inverted.</summary>
+        /// <param name="plan">The plan.</param>
+        /// <param name="col">The column.</param>
+        /// <param name="row">The texture row.</param>
+        private static int TileOf(Plan plan, int col, int row) =>
+            (plan.HeightPx - 1 - row) * SupersampleFactor / TileSize * plan.TilesX + col * SupersampleFactor / TileSize;
+
         /// <summary>The development's first step: the checks, the floor's eight-bit texture, and the
         /// two buffers every band works from. False, having failed the floor and said why, when there
         /// is nothing to develop.</summary>
@@ -5447,15 +5863,16 @@ namespace QuestTree.QuestGraph
                 // it. A quarter more memory than the eight-bit RGB it replaces - see the memory note on
                 // the class - and the only thing in the pipeline that changes.
                 floor.Texture = new Texture2D(plan.WidthPx, plan.HeightPx, TextureFormat.RGBA32, mipChain: false);
-                floor.Block = new Color32[plan.WidthPx * DevelopBandRows];
+                floor.Block = new Color32[plan.WidthPx * floor.BandRows];
 
                 // One band's stretched luminance plus the filter's halo - 640 KB at 0.25 m/px, against
                 // the 116 MB a second full float buffer would have cost. See Smooth.
                 // Wanted by the smoothing AND by the despeckle, which measures its neighbours on the
                 // same stretched luminance.
-                if (SmoothingEnabled || DespeckleEnabled)
+                // Not for a floor that drew nothing (WP1 2.9): only a taken pixel reads it, and there is none.
+                if ((SmoothingEnabled || DespeckleEnabled) && !(floor.Tiles == 0 && floor.PreviousLoaded))
                 {
-                    floor.LumBand = new float[plan.WidthPx * (DevelopBandRows + SmoothingRadius * 2)];
+                    floor.LumBand = new float[plan.WidthPx * (floor.BandRows + SmoothingRadius * 2)];
                     floor.NeighbourLum = new float[8];
                     floor.NeighbourIndex = new int[8];
                 }
@@ -5497,7 +5914,7 @@ namespace QuestTree.QuestGraph
                 var gamma = floor.Exposure.Gamma;
                 var scale = 1f / (floor.Exposure.High - floor.Exposure.Low);
 
-                var rows = Math.Min(DevelopBandRows, plan.HeightPx - y0);
+                var rows = Math.Min(floor.BandRows, plan.HeightPx - y0);
 
                 var clock = Stopwatch.StartNew();
                 var lumFrom = floor.LumBand != null ? FillLuminance(plan, floor, y0, rows, low, scale) : 0;
@@ -5550,6 +5967,15 @@ namespace QuestTree.QuestGraph
                         // there or it saw the spot from closer. Everything else keeps what was
                         // there, which for a first capture is black.
                         var take = CaptureMerge.Takes(drawn, distance, oldDrawn, oldDistance);
+
+                        // WP1 audit mode: a pixel taken inside the halo of a tile the plan would have skipped is a
+                        // broken premise - never, for an owned tile; never visible, for an outside one.
+                        if (floor.SkipZone != null && take)
+                        {
+                            var zone = floor.SkipZone[index];
+                            if ((zone & 1) != 0) floor.AuditOwnedTaken++;
+                            if ((zone & 2) != 0 && (reach > 0f || oldPixel.a > 0)) floor.AuditOutsideVisible++;
+                        }
 
                         // A pixel nothing has drawn is TRANSPARENT rather than black, for the same reason
                         // the out-of-bounds skirt is: a hole should read as no picture, not as a dark
@@ -5632,8 +6058,8 @@ namespace QuestTree.QuestGraph
                 // it on a large floor, and this is the number that decides SmoothingBandRows.
                 Plugin.LogSource?.LogDebug(
                     $"QuestTree: {plan.Key} \"{floor.Dto?.Name}\" developed in {Ms(floor.SmoothMs)} ms of " +
-                    $"main-thread work over {(plan.HeightPx + DevelopBandRows - 1) / DevelopBandRows} band(s) of " +
-                    $"{DevelopBandRows} rows" +
+                    $"main-thread work over {(plan.HeightPx + floor.BandRows - 1) / Math.Max(1, floor.BandRows)} band(s) of " +
+                    $"{floor.BandRows} rows" +
                     (SmoothingEnabled
                         ? $", the {SmoothingRadius * 2 + 1}x{SmoothingRadius * 2 + 1} bilateral filter included."
                         : ", with no smoothing."));
@@ -6720,29 +7146,24 @@ namespace QuestTree.QuestGraph
 
                 plan.SideFloor = view.Floor;
 
-                // As for a floor: the scene's culling forced and its water flat for the whole side,
-                // released after its last tile however the tiles went.
-                HoldScene();
+                // WP1: as for a floor - the side's previous picture and sidecar (<key>-side-<dir>.png and its
+                // .dist.png) and the tile plan before the tiles, when the side merges.
+                var loading = LoadAndPlan(view.Plan, view.Floor);
+                while (loading.MoveNext()) yield return loading.Current;
 
-                yield return null;
-
-                for (var tile = 0; tile < view.Plan.TileCount; tile++)
+                // As for a floor: the scene's culling forced and its water flat for the side's rendered tiles,
+                // released after its last tile however the tiles went. The water rule runs in the camera's
+                // orientation, before MirrorSide.
+                var tiles = RenderTiles(view.Plan, view.Floor, () =>
                 {
                     // A side still rendering well past the budget is abandoned, as a floor is (review F45).
-                    if (clock.Elapsed.TotalSeconds > SidePhaseSeconds * SidePhaseOverrun)
-                    {
-                        view.Floor.Failed = true;
-                        cut++;
-                        break;
-                    }
+                    if (clock.Elapsed.TotalSeconds <= SidePhaseSeconds * SidePhaseOverrun) return false;
 
-                    RenderTile(view.Plan, view.Floor, tile);
-                    if (view.Floor.Failed) break;
+                    cut++;
+                    return true;
+                });
 
-                    yield return null;
-                }
-
-                ReleaseScene();
+                while (tiles.MoveNext()) yield return tiles.Current;
 
                 if (!view.Floor.Failed)
                 {
@@ -6750,7 +7171,7 @@ namespace QuestTree.QuestGraph
                     MirrorSide(plan, view);
                 }
 
-                if (!view.Floor.Failed)
+                if (!view.Floor.Failed && (view.Floor.Verdicts == null || view.Floor.Tiles > 0))
                 {
                     var inpaint = Inpaint(view.Plan, view.Floor);
                     while (inpaint.MoveNext()) yield return inpaint.Current;
@@ -7363,7 +7784,7 @@ namespace QuestTree.QuestGraph
 
                 Plugin.LogSource?.LogInfo(
                     $"QuestTree: side view {view.Dir} of {plan.Key} - {side.WidthPx}x{side.HeightPx} px at " +
-                    $"{Ppm(side.Ppm)} px/m, {floor.Tiles} tiles, {Share(drawn, floor.Drawn.Length)} % drawn, " +
+                    $"{Ppm(side.Ppm)} px/m, {TilesPhrase(side, floor)}, {Share(drawn, floor.Drawn.Length)} % drawn this capture, " +
                     $"{png.Length} bytes, {Ms(floor.Clock?.Elapsed.TotalMilliseconds ?? 0d)} ms, " +
                     $"lit along f ({F((float)view.Forward[0])}, {F((float)view.Forward[1])}, " +
                     $"{F((float)view.Forward[2])}) at x{SideLightGain.ToString("0.00", CultureInfo.InvariantCulture)}" +
@@ -7374,6 +7795,8 @@ namespace QuestTree.QuestGraph
                         : ", fresh (nothing earlier to merge into)") +
                     (floor.CyanFilled > 0 ? $", {floor.CyanFilled} cyan water pixels filled" : "") +
                     (floor.Despeckled > 0 ? $", {floor.Despeckled} speckles medianed" : "") + ".");
+
+                AuditLine(side, floor);
 
                 return true;
             }
@@ -9966,17 +10389,32 @@ namespace QuestTree.QuestGraph
             /// of it is undrawn. Built once when the sidecar is loaded. Null without a sidecar.</summary>
             public byte[] TileMaxOld;
 
-            /// <summary>WP1: counts for the log lines - skipped as owned and skipped as outside.</summary>
+            /// <summary>WP1: the previous picture and sidecar were loaded before the tiles; Develop must not load
+            /// again.</summary>
+            public bool PreviousLoaded;
+
+            /// <summary>WP1: counts for the log lines - skipped as owned, skipped as outside, and skipped ones
+            /// rendered after all because water lay within the inpaint's reach of their edge.</summary>
             public int TilesOwned;
 
             public int TilesOutside;
 
+            public int TilesPromoted;
+
+            /// <summary>WP1 (2.9): rows developed per frame for this floor - DevelopBandRows, or PixelBandRows when
+            /// no tile was rendered after a load before the tiles, so nothing can be taken. Set by Develop.</summary>
+            public int BandRows;
+
             /// <summary>WP1 audit mode only: per pixel, bit 1 = inside an owned tile's halo, bit 2 = inside an
-            /// outside tile's halo; and the verdicts with the would-be water promotions set to Render. Null
-            /// otherwise.</summary>
+            /// outside tile's halo; the verdicts with the would-be water promotions set to Render; and the
+            /// violations DevelopBand counted. Null / 0 otherwise.</summary>
             public byte[] SkipZone;
 
             public TileVerdict[] AuditVerdicts;
+
+            public int AuditOwnedTaken;
+
+            public int AuditOutsideVisible;
         }
 
         // --- the meta file ---------------------------------------------------------------------
