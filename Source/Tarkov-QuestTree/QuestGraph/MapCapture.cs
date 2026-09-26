@@ -484,6 +484,50 @@ namespace QuestTree.QuestGraph
         /// <summary>Rows developed in one frame: fewer when every pixel costs a 5x5 window.</summary>
         private static int DevelopBandRows => SmoothingEnabled ? SmoothingBandRows : PixelBandRows;
 
+        /// <summary>WP1: the rollback switch for tile skipping. Off = exactly the f1aa04f path: the previous picture
+        /// loaded in Develop, every tile rendered, the scene held for every floor. Static readonly, not const - see
+        /// FillWaterCyan for why a const switch cannot be flipped.</summary>
+        private static readonly bool TileSkipEnabled = true;
+
+        /// <summary>WP1: whether a tile whose only takeable pixels are transparent either way (walkable mask 0 AND
+        /// alpha 0 on disk) is skipped too. The one class that is NOT byte-identical: the RGB under alpha 0 and the
+        /// sidecar at those pixels keep the older values. Merge only. Off: only the byte-identical OwnedByCloser
+        /// class ships (the maintainer's decision, PART-00 section 5 item 4).</summary>
+        private static readonly bool TileSkipOutsideMask = false;
+
+        /// <summary>WP1: shadow mode for verification - decide every verdict, render EVERY tile anyway (the old
+        /// output), and count what the skip would have changed: see BuildSkipZone, AuditLight and the audit line in
+        /// FinishFloor / FinishSide. Off in a release.</summary>
+        private static readonly bool TileSkipAudit = false;
+
+        /// <summary>WP1: metres taken off a tile's closed-form minimum distance before it becomes a step, so the
+        /// per-tile bound is a lower bound of DevelopBand's float arithmetic whatever the rounding.</summary>
+        private const double TileSkipSlackMetres = 0.05d;
+
+        /// <summary>WP1: main-thread milliseconds of tile planning per frame before it yields.</summary>
+        private const double TilePlanSliceMs = 8d;
+
+        /// <summary>WP1: pixels around a tile the development reads for a pixel it TAKES - the bilateral window and
+        /// the despeckle's neighbours. A taken pixel farther than this from an unrendered tile cannot see it.</summary>
+        private static int TileSkipHalo =>
+            Math.Max(SmoothingEnabled ? SmoothingRadius : 0, DespeckleEnabled ? 1 : 0);
+
+        /// <summary>WP1: how far one water pixel's fill reads - half the largest inpaint window (Mean).</summary>
+        private static readonly int InpaintReach = InpaintWindows.Max() / 2;
+
+        /// <summary>WP1: what the tile loop does with one tile.</summary>
+        private enum TileVerdict : byte
+        {
+            /// <summary>Rendered.</summary>
+            Render = 0,
+
+            /// <summary>No pixel of the tile or its halo could be taken by CaptureMerge.Takes.</summary>
+            OwnedByCloser = 1,
+
+            /// <summary>Pixels could be taken, but every one is transparent in the result either way.</summary>
+            OutsideMask = 2,
+        }
+
         /// <summary>Most managed and texture memory one floor of a capture may work in. Two hundred and
         /// fifty-six megabytes.
         ///
@@ -5034,6 +5078,353 @@ namespace QuestTree.QuestGraph
             floor.Despeckled++;
         }
 
+        // --- WP1: the shared arithmetic of the merge, and the tile plan built on it ------------------------
+
+        /// <summary>Every column's squared X distance from the capturing player, in DevelopBand's float arithmetic
+        /// (DevelopBegin's buffer; the tile plan builds the same one).</summary>
+        /// <param name="plan">The capture's plan.</param>
+        private static float[] BuildDxSquared(Plan plan)
+        {
+            var dx2 = new float[plan.WidthPx];
+
+            for (var col = 0; col < plan.WidthPx; col++)
+            {
+                var dx = (float)(plan.Extent.MinX + (col + 0.5d) / plan.Ppm) - plan.From.x;
+                dx2[col] = dx * dx;
+            }
+
+            return dx2;
+        }
+
+        /// <summary>One texture row's squared Z distance from the capturing player, in DevelopBand's float
+        /// arithmetic. Texture row 0 is the BOTTOM of the picture, which is the extent's -z edge; image row 0 is its
+        /// top - see RenderTile for the same conversion.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="textureRow">The row, 0 at the bottom.</param>
+        private static float RowDzSquared(Plan plan, int textureRow)
+        {
+            var worldZ = (float)(plan.Extent.MaxZ - (plan.HeightPx - 1 - textureRow + 0.5d) / plan.Ppm);
+            var dz = worldZ - plan.From.y;
+            return dz * dz;
+        }
+
+        /// <summary>The step this capture writes for a DRAWN pixel - DevelopBand's distance term. THE HOOK for a
+        /// side view: its pixels are not at (x, z) = (column, row), so its distance is to the ground point the pixel
+        /// looks at (SideSteps); a side's plan carries its SideView, a floor's does not.</summary>
+        /// <param name="plan">The capture's plan (a side's own plan for a side).</param>
+        /// <param name="dxSquared">BuildDxSquared's buffer; unused for a side.</param>
+        /// <param name="dzSquared">RowDzSquared of the row; unused for a side.</param>
+        /// <param name="col">The column.</param>
+        /// <param name="textureRow">The row, 0 at the bottom.</param>
+        private static byte NewStep(Plan plan, float[] dxSquared, float dzSquared, int col, int textureRow) =>
+            plan.Side != null ? SideSteps(plan, col, textureRow) : Steps(Mathf.Sqrt(dxSquared[col] + dzSquared));
+
+        /// <summary>What the picture on disk has at one pixel: its recorded step, its colour, and whether it has a
+        /// pixel there at all - the SIDECAR is the authority whenever there is one, the colour test only for a
+        /// picture written before sidecars existed. DevelopBand's rule; the tile plan asks the same method.</summary>
+        /// <param name="previous">The previous picture, or null.</param>
+        /// <param name="previousDist">Its sidecar, or null.</param>
+        /// <param name="index">The pixel.</param>
+        /// <param name="oldDrawn">Whether the picture on disk has a pixel there.</param>
+        /// <param name="oldDistance">Its recorded step, or DistanceEmpty.</param>
+        /// <param name="oldPixel">Its colour, or default.</param>
+        private static void OldState(Color32[] previous, byte[] previousDist, int index,
+            out bool oldDrawn, out byte oldDistance, out Color32 oldPixel)
+        {
+            oldDistance = previousDist != null && previous != null ? previousDist[index] : DistanceEmpty;
+            oldPixel = previous != null ? previous[index] : default(Color32);
+            oldDrawn = previous != null && (previousDist != null
+                ? oldDistance != DistanceEmpty
+                : oldPixel.r > 0 || oldPixel.g > 0 || oldPixel.b > 0);
+        }
+
+        /// <summary>A tile's rect in OUTPUT pixels: columns col0..col0+cols-1 and texture rows row0..row0+rows-1
+        /// (row 0 = bottom). contract=true gives a side's rect in the contract's (mirrored) columns, which is the
+        /// orientation of its previous picture, its sidecar and SideSteps; false gives the camera's, which is the
+        /// orientation of the float buffer until MirrorSide. Floors are the same either way. RenderTile's tile
+        /// arithmetic in closed form.</summary>
+        /// <param name="plan">The plan.</param>
+        /// <param name="tile">The tile index, row-major from the top-left.</param>
+        /// <param name="contract">Contract (true) or camera (false) columns; floors ignore it.</param>
+        /// <param name="col0">First column.</param>
+        /// <param name="cols">Column count.</param>
+        /// <param name="row0">First texture row.</param>
+        /// <param name="rows">Row count.</param>
+        private static void TileRect(Plan plan, int tile, bool contract, out int col0, out int cols, out int row0, out int rows)
+        {
+            var px0 = tile % plan.TilesX * TileSize;
+            var py0 = tile / plan.TilesX * TileSize;
+            var tw = Math.Max(0, Math.Min(TileSize, plan.SampleWidth - px0));
+            var th = Math.Max(0, Math.Min(TileSize, plan.SampleHeight - py0));
+
+            cols = tw / SupersampleFactor;
+            rows = th / SupersampleFactor;
+            row0 = (plan.SampleHeight - py0 - th) / SupersampleFactor;
+
+            var cameraCol0 = px0 / SupersampleFactor;
+            col0 = contract && plan.Side != null ? plan.WidthPx - cameraCol0 - cols : cameraCol0;
+        }
+
+        /// <summary>A rect grown by a number of pixels on every side (Chebyshev) and clipped to the picture, as the
+        /// half-open ranges a0..a1-1 and b0..b1-1.</summary>
+        /// <param name="plan">The plan.</param>
+        /// <param name="col0">First column.</param>
+        /// <param name="cols">Column count.</param>
+        /// <param name="row0">First row.</param>
+        /// <param name="rows">Row count.</param>
+        /// <param name="by">Pixels to grow by.</param>
+        /// <param name="a0">First column of the result.</param>
+        /// <param name="a1">One past its last column.</param>
+        /// <param name="b0">First row of the result.</param>
+        /// <param name="b1">One past its last row.</param>
+        private static void Dilate(Plan plan, int col0, int cols, int row0, int rows, int by,
+            out int a0, out int a1, out int b0, out int b1)
+        {
+            a0 = Math.Max(0, col0 - by);
+            a1 = Math.Min(plan.WidthPx, col0 + cols + by);
+            b0 = Math.Max(0, row0 - by);
+            b1 = Math.Min(plan.HeightPx, row0 + rows + by);
+        }
+
+        /// <summary>Per tile, the largest previous step over the tile and its halo (255 = something there is
+        /// undrawn). One pass over the sidecar's bytes, about W*H reads; the bound in TileWorth needs nothing
+        /// else.</summary>
+        /// <param name="plan">The plan.</param>
+        /// <param name="floor">The floor or side, with its previous picture and sidecar loaded.</param>
+        private static void SummariseTiles(Plan plan, FloorPlan floor)
+        {
+            floor.TileMaxOld = null;
+
+            var dist = floor.PreviousDist;
+            if (dist == null || floor.PreviousColour == null) return;
+
+            var max = new byte[plan.TileCount];
+
+            for (var tile = 0; tile < plan.TileCount; tile++)
+            {
+                TileRect(plan, tile, true, out var c0, out var n, out var r0, out var m);
+                Dilate(plan, c0, n, r0, m, TileSkipHalo, out var a0, out var a1, out var b0, out var b1);
+
+                byte best = 0;
+
+                for (var row = b0; row < b1 && best != DistanceEmpty; row++)
+                {
+                    var i = row * plan.WidthPx + a0;
+
+                    for (var col = a0; col < a1; col++, i++)
+                    {
+                        var v = dist[i];
+                        if (v <= best) continue;
+
+                        best = v;
+                        if (v == DistanceEmpty) break;
+                    }
+                }
+
+                max[tile] = best;
+            }
+
+            floor.TileMaxOld = max;
+        }
+
+        /// <summary>A lower bound of NewStep over every pixel centre of cols a0..a1-1, rows b0..b1-1 (contract
+        /// orientation). Floors: the closed-form distance from plan.From to the rectangle of pixel centres. Sides:
+        /// GroundPointOf is affine, so the rect's image is the parallelogram of its four corner centres, inside
+        /// their XZ bounding box - the distance to that box is no larger than to any ground point. The slack covers
+        /// float rounding; Steps is monotone non-decreasing, so the result is at most every pixel's step.</summary>
+        /// <param name="plan">The plan.</param>
+        /// <param name="a0">First column.</param>
+        /// <param name="a1">One past the last column.</param>
+        /// <param name="b0">First texture row.</param>
+        /// <param name="b1">One past the last row.</param>
+        private static byte LowerStep(Plan plan, int a0, int a1, int b0, int b1)
+        {
+            double xLo, xHi, zLo, zHi;
+
+            if (plan.Side == null)
+            {
+                xLo = plan.Extent.MinX + (a0 + 0.5d) / plan.Ppm;
+                xHi = plan.Extent.MinX + (a1 - 1 + 0.5d) / plan.Ppm;
+                zLo = plan.Extent.MaxZ - (plan.HeightPx - 1 - b0 + 0.5d) / plan.Ppm;
+                zHi = plan.Extent.MaxZ - (plan.HeightPx - 1 - (b1 - 1) + 0.5d) / plan.Ppm;
+            }
+            else
+            {
+                xLo = zLo = double.PositiveInfinity;
+                xHi = zHi = double.NegativeInfinity;
+
+                var v = plan.Side;
+
+                foreach (var c in new[] { a0, a1 - 1 })
+                foreach (var r in new[] { b0, b1 - 1 })
+                {
+                    MapSideView.GroundPointOf(v.Right, v.Up, v.Frame[0], v.Frame[2], plan.Ppm, plan.HeightPx, v.YMin,
+                        c + 0.5d, plan.HeightPx - r - 0.5d, out var x, out var z);
+
+                    xLo = Math.Min(xLo, x);
+                    xHi = Math.Max(xHi, x);
+                    zLo = Math.Min(zLo, z);
+                    zHi = Math.Max(zHi, z);
+                }
+            }
+
+            var dx = Math.Max(0d, Math.Max(xLo - plan.From.x, plan.From.x - xHi));
+            var dz = Math.Max(0d, Math.Max(zLo - plan.From.y, plan.From.y - zHi));
+
+            return Steps((float)Math.Max(0d, Math.Sqrt(dx * dx + dz * dz) - TileSkipSlackMetres));
+        }
+
+        /// <summary>
+        /// Whether a tile has to be rendered. The rule is the merge's own (CaptureMerge.Takes, as DevelopBand calls
+        /// it), asked of every pixel of the tile and of the TileSkipHalo pixels around it that the development reads
+        /// for a pixel it takes, assuming this capture would DRAW every one of them - the one thing it cannot know
+        /// without rendering, and the assumption that makes "not takeable" safe:
+        ///   Render        - some pixel could be taken and could be visible;
+        ///   OwnedByCloser - no pixel could be taken: the picture on disk has each from as close or closer;
+        ///   OutsideMask   - pixels could be taken, but each is transparent in the result whichever capture
+        ///                   supplies it (walkable weight 0 here, alpha 0 on disk). Only with TileSkipOutsideMask
+        ///                   and a walkable mask.
+        /// Always Render on a fresh capture or when the previous picture did not load.
+        /// </summary>
+        /// <param name="plan">The plan.</param>
+        /// <param name="floor">The floor or side, its previous picture loaded.</param>
+        /// <param name="tile">The tile.</param>
+        private static TileVerdict TileWorth(Plan plan, FloorPlan floor, int tile)
+        {
+            var previous = floor.PreviousColour;
+            if (!TileSkipEnabled || plan.Previous == null || previous == null) return TileVerdict.Render;
+
+            TileRect(plan, tile, true, out var col0, out var cols, out var row0, out var rows);
+            if (cols <= 0 || rows <= 0) return TileVerdict.Render;
+
+            Dilate(plan, col0, cols, row0, rows, TileSkipHalo, out var a0, out var a1, out var b0, out var b1);
+
+            var previousDist = floor.PreviousDist;
+
+            // 1. The bound: every step this capture could write here is at least the largest step on disk, and
+            //    nothing on disk here is undrawn - so Takes is false for every pixel.
+            if (previousDist != null && floor.TileMaxOld != null)
+            {
+                var maxOld = floor.TileMaxOld[tile];
+                if (maxOld != DistanceEmpty && LowerStep(plan, a0, a1, b0, b1) >= maxOld) return TileVerdict.OwnedByCloser;
+            }
+
+            // 2. Exact: DevelopBand's own distance and Takes, pixel by pixel, stopping at the first visible one.
+            var masked = TileSkipOutsideMask && plan.Reach != null;
+            var anyTakeable = false;
+
+            for (var row = b0; row < b1; row++)
+            {
+                var dzSquared = plan.Side == null ? RowDzSquared(plan, row) : 0f;
+                var index = row * plan.WidthPx + a0;
+
+                for (var col = a0; col < a1; col++, index++)
+                {
+                    OldState(previous, previousDist, index, out var oldDrawn, out var oldDistance, out var oldPixel);
+                    var distance = NewStep(plan, floor.DxSquared, dzSquared, col, row);
+                    if (!CaptureMerge.Takes(true, distance, oldDrawn, oldDistance)) continue;
+
+                    if (!masked) return TileVerdict.Render;
+                    anyTakeable = true;
+
+                    // Visible if taken: Grade's alpha is 0 only at reach 0 or below; kept, it would be the old alpha.
+                    if (oldPixel.a > 0 || ReachAt(plan, col, row) > 0f) return TileVerdict.Render;
+                }
+            }
+
+            return anyTakeable ? TileVerdict.OutsideMask : TileVerdict.OwnedByCloser;
+        }
+
+        /// <summary>The tile plan of one floor or side: the verdict of every tile, time-sliced at TilePlanSliceMs,
+        /// every step guarded so an exception gives "render everything". Needs the previous picture and sidecar
+        /// loaded; leaves Verdicts null (render every tile) on a fresh capture, with the switch off, or when the
+        /// previous picture did not load.</summary>
+        /// <param name="plan">The plan (a side's own plan for a side).</param>
+        /// <param name="floor">The floor or side.</param>
+        private IEnumerator PlanTiles(Plan plan, FloorPlan floor)
+        {
+            floor.Verdicts = null;
+            if (!TileSkipEnabled || plan.Previous == null || floor.PreviousColour == null) yield break;
+
+            var clock = Stopwatch.StartNew();
+
+            if (!PlanStep(plan, floor, () =>
+                {
+                    if (plan.Side == null) floor.DxSquared = BuildDxSquared(plan);
+                    SummariseTiles(plan, floor);
+                }))
+                yield break;
+
+            var verdicts = new TileVerdict[plan.TileCount];
+            var slice = Stopwatch.StartNew();
+
+            for (var tile = 0; tile < plan.TileCount; tile++)
+            {
+                var t = tile;
+                if (!PlanStep(plan, floor, () => verdicts[t] = TileWorth(plan, floor, t))) yield break;
+
+                if (slice.Elapsed.TotalMilliseconds > TilePlanSliceMs)
+                {
+                    yield return null;
+                    slice.Restart();
+                }
+            }
+
+            floor.Verdicts = verdicts;
+            floor.TilesOwned = verdicts.Count(v => v == TileVerdict.OwnedByCloser);
+            floor.TilesOutside = verdicts.Count(v => v == TileVerdict.OutsideMask);
+
+            Plugin.LogSource?.LogDebug(
+                $"QuestTree: {plan.Key} \"{floor.Dto?.Name}\" tile plan: {plan.TileCount - floor.TilesOwned - floor.TilesOutside} " +
+                $"of {plan.TileCount} to render, {floor.TilesOwned} owned by closer captures [{TileList(verdicts, TileVerdict.OwnedByCloser)}], " +
+                $"{floor.TilesOutside} outside the walkable mask [{TileList(verdicts, TileVerdict.OutsideMask)}], planned in " +
+                $"{Ms(clock.Elapsed.TotalMilliseconds)} ms.");
+        }
+
+        /// <summary>One guarded planning step; false (having logged at Debug and left Verdicts null, which renders
+        /// every tile) when it threw.</summary>
+        /// <param name="plan">The plan.</param>
+        /// <param name="floor">The floor or side.</param>
+        /// <param name="step">The step.</param>
+        private static bool PlanStep(Plan plan, FloorPlan floor, Action step)
+        {
+            try
+            {
+                step();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                floor.Verdicts = null;
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: {plan.Key} \"{floor.Dto?.Name}\" tile plan abandoned ({ex.GetType().Name}: " +
+                    $"{ex.Message}) - every tile is rendered.");
+                return false;
+            }
+        }
+
+        /// <summary>The indices of the tiles with one verdict, comma-separated - what the offline compare tool
+        /// (tools/compare-captures.py --skipped) is given.</summary>
+        /// <param name="v">The verdicts.</param>
+        /// <param name="which">The verdict to list.</param>
+        private static string TileList(TileVerdict[] v, TileVerdict which) =>
+            string.Join(",", Enumerable.Range(0, v.Length).Where(i => v[i] == which)
+                .Select(i => i.ToString(CultureInfo.InvariantCulture)).ToArray());
+
+        /// <summary>THE tile decision: whether the loop renders this tile. True in audit mode, with no plan, and
+        /// for a Render verdict (a water promotion sets one).</summary>
+        /// <param name="floor">The floor or side.</param>
+        /// <param name="tile">The tile.</param>
+        private static bool Renders(FloorPlan floor, int tile) =>
+            TileSkipAudit || floor.Verdicts == null || floor.Verdicts[tile] == TileVerdict.Render;
+
+        /// <summary>The tiles the first pass renders, in index order - the one list the tile loop walks (an
+        /// asynchronous readback pipeline consumes the same list, then the water rule's late ones).</summary>
+        /// <param name="plan">The plan.</param>
+        /// <param name="floor">The floor or side.</param>
+        private static IEnumerable<int> TilesToRender(Plan plan, FloorPlan floor) =>
+            Enumerable.Range(0, plan.TileCount).Where(t => Renders(floor, t));
+
         /// <summary>The development's first step: the checks, the floor's eight-bit texture, and the
         /// two buffers every band works from. False, having failed the floor and said why, when there
         /// is nothing to develop.</summary>
@@ -5071,13 +5462,7 @@ namespace QuestTree.QuestGraph
 
                 // The squared X distance of every column from the player, once for the whole floor
                 // rather than once per pixel: the per-pixel work is then one add and one square root.
-                floor.DxSquared = new float[plan.WidthPx];
-
-                for (var col = 0; col < plan.WidthPx; col++)
-                {
-                    var dx = (float)(plan.Extent.MinX + (col + 0.5d) / plan.Ppm) - plan.From.x;
-                    floor.DxSquared[col] = dx * dx;
-                }
+                floor.DxSquared = BuildDxSquared(plan);
 
                 return true;
             }
@@ -5123,9 +5508,7 @@ namespace QuestTree.QuestGraph
 
                     // Texture row 0 is the BOTTOM of the picture, which is the extent's -z edge;
                     // image row 0 is its top. See RenderTile for the same conversion.
-                    var worldZ = (float)(plan.Extent.MaxZ - (plan.HeightPx - 1 - textureRow + 0.5d) / plan.Ppm);
-                    var dz = worldZ - plan.From.y;
-                    var dzSquared = dz * dz;
+                    var dzSquared = RowDzSquared(plan, textureRow);
 
                     var pixelRow = textureRow * plan.WidthPx;
                     var target = row * plan.WidthPx;
@@ -5140,11 +5523,7 @@ namespace QuestTree.QuestGraph
                         // distance is to the ground point the pixel looks at - SideSteps - and everything
                         // else about the merge below is the floors' own code, unchanged. A side's plan
                         // carries its SideView; a floor's does not.
-                        var distance = drawn
-                            ? (plan.Side != null
-                                ? SideSteps(plan, col, textureRow)
-                                : Steps(Mathf.Sqrt(dxSquared[col] + dzSquared)))
-                            : DistanceEmpty;
+                        var distance = drawn ? NewStep(plan, dxSquared, dzSquared, col, textureRow) : DistanceEmpty;
 
                         // Sampled for EVERY pixel, not only the ones this capture supplies: the mask is a
                         // property of the map, so the share it dims is a fact about the picture rather
@@ -5155,12 +5534,6 @@ namespace QuestTree.QuestGraph
 
                         floor.Dist[index] = distance;
 
-                        var oldDistance = previousDist != null && previous != null
-                            ? previousDist[index]
-                            : DistanceEmpty;
-
-                        var oldPixel = previous != null ? previous[index] : default(Color32);
-
                         // Whether the picture on disk has a pixel here, and the SIDECAR is the
                         // authority whenever there is one. A pixel the grade took to pure black is a
                         // real pixel of real shadow - everything at or below the exposure's low
@@ -5169,10 +5542,9 @@ namespace QuestTree.QuestGraph
                         // overwrite one taken from 50 m, and would throw that pixel's recorded
                         // distance away the first time a later capture happened not to draw it. The
                         // colour test is only for a picture written before sidecars existed, where
-                        // black is the only signal there is.
-                        var oldDrawn = previous != null && (previousDist != null
-                            ? oldDistance != DistanceEmpty
-                            : oldPixel.r > 0 || oldPixel.g > 0 || oldPixel.b > 0);
+                        // black is the only signal there is. OldState is that rule; the tile plan (WP1) asks
+                        // the same method.
+                        OldState(previous, previousDist, index, out var oldDrawn, out var oldDistance, out var oldPixel);
 
                         // Take this capture's pixel when it drew one AND either nothing better is
                         // there or it saw the spot from closer. Everything else keeps what was
@@ -6026,6 +6398,10 @@ namespace QuestTree.QuestGraph
             floor.NeighbourLum = null;
             floor.NeighbourIndex = null;
             floor.Cyan = null;
+            floor.Verdicts = null;
+            floor.TileMaxOld = null;
+            floor.SkipZone = null;
+            floor.AuditVerdicts = null;
 
             if (floor.Texture != null)
             {
@@ -9581,6 +9957,26 @@ namespace QuestTree.QuestGraph
             public int Tiles;
             public long Bytes;
             public bool Failed;
+
+            /// <summary>WP1: per tile, what the loop does with it; null = render every tile (fresh capture, switch
+            /// off, no usable previous picture, or the planning threw).</summary>
+            public TileVerdict[] Verdicts;
+
+            /// <summary>WP1: per tile, the largest previous sidecar step over the tile and its halo; 255 when any
+            /// of it is undrawn. Built once when the sidecar is loaded. Null without a sidecar.</summary>
+            public byte[] TileMaxOld;
+
+            /// <summary>WP1: counts for the log lines - skipped as owned and skipped as outside.</summary>
+            public int TilesOwned;
+
+            public int TilesOutside;
+
+            /// <summary>WP1 audit mode only: per pixel, bit 1 = inside an owned tile's halo, bit 2 = inside an
+            /// outside tile's halo; and the verdicts with the would-be water promotions set to Render. Null
+            /// otherwise.</summary>
+            public byte[] SkipZone;
+
+            public TileVerdict[] AuditVerdicts;
         }
 
         // --- the meta file ---------------------------------------------------------------------
