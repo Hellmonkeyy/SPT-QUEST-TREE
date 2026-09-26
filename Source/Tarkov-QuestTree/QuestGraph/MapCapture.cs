@@ -2113,7 +2113,11 @@ namespace QuestTree.QuestGraph
 
             try
             {
-                if (floor.Dist == null) return;
+                if (floor.Dist == null)
+                {
+                    floor.DistStale = true;
+                    return;
+                }
 
                 var png = EncodeSidecar(plan, floor);
 
@@ -2306,6 +2310,23 @@ namespace QuestTree.QuestGraph
             catch (Exception ex)
             {
                 Plugin.LogSource?.LogDebug($"QuestTree: {Path.GetFileName(path)} could not be removed ({ex.Message}).");
+            }
+        }
+
+        /// <summary>Deletes a file if it is there, and says whether it is gone - DeleteQuietly for a caller
+        /// that warns when a stale file stays (review F09).</summary>
+        /// <param name="path">The file.</param>
+        private static bool DeleteOrWarn(string path)
+        {
+            try
+            {
+                if (File.Exists(path)) File.Delete(path);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug($"QuestTree: {Path.GetFileName(path)} could not be removed ({ex.Message}).");
+                return false;
             }
         }
 
@@ -5893,6 +5914,9 @@ namespace QuestTree.QuestGraph
                         // Develop filled in the contract's orientation - MirrorSide ran before it.
                         yield return null;
                         WriteSidecar(view.Plan, view.Floor);
+
+                        var staged = plan.Sides.LastOrDefault(s => s.Dir == view.Dir);
+                        if (staged != null) staged.DistStale = view.Floor.DistStale;
                     }
                 }
 
@@ -6398,6 +6422,7 @@ namespace QuestTree.QuestGraph
                     OriginU = view.Frame[2],
                     YMin = view.YMin,
                     YMax = view.YMax,
+                    DistStale = true,
                 });
 
                 Plugin.LogSource?.LogInfo(
@@ -6516,7 +6541,19 @@ namespace QuestTree.QuestGraph
                         // next time, never a wrong one (see WriteSidecar).
                         try
                         {
-                            Commit(Path.Combine(plan.Dir, SideDistFileName(plan.Key, dir)));
+                            var dist = Path.Combine(plan.Dir, SideDistFileName(plan.Key, dir));
+
+                            // Mirrors WriteMeta's floor rule (review F09): no sidecar staged this capture means the old one
+                            // describes a different picture, and its distances would keep this picture's empty pixels empty.
+                            if (written.DistStale)
+                            {
+                                Forget(plan, SideDistFileName(plan.Key, dir));
+                                if (!DeleteOrWarn(dist))
+                                    Plugin.LogSource?.LogWarning(
+                                        $"QuestTree: {plan.Key} side view {dir}'s old distance sidecar could not be removed - the " +
+                                        "next capture of that side may keep some of its empty pixels empty.");
+                            }
+                            else Commit(dist);
                         }
                         catch (Exception ex)
                         {
@@ -7206,7 +7243,13 @@ namespace QuestTree.QuestGraph
                         Commit(Path.Combine(plan.Dir, floor.File));
                         if (!string.IsNullOrEmpty(floor.DistFile))
                         {
-                            if (floor.DistStale) DeleteQuietly(Path.Combine(plan.Dir, floor.DistFile));
+                            if (floor.DistStale)
+                            {
+                                if (!DeleteOrWarn(Path.Combine(plan.Dir, floor.DistFile)))
+                                    Plugin.LogSource?.LogWarning(
+                                        $"QuestTree: {plan.Key} \"{floor.Dto?.Name}\"'s old distance sidecar could not be " +
+                                        "removed - the next capture of that floor may keep some of its empty pixels empty.");
+                            }
                             else Commit(Path.Combine(plan.Dir, floor.DistFile));
                         }
                     }
@@ -8484,6 +8527,12 @@ namespace QuestTree.QuestGraph
             /// <summary>The box's y range: the mesh's, or the bands' widened when no mesh was built.</summary>
             [JsonProperty("yMin")] public float YMin { get; set; }
             [JsonProperty("yMax")] public float YMax { get; set; }
+
+            /// <summary>Not in the meta. True until this capture has STAGED the side's distance sidecar: a side
+            /// whose sidecar was not written gets the old one deleted at commit rather than kept beside a picture it
+            /// does not describe (review F09). Carried sides (read back from the meta) are never committed, so the
+            /// default of a deserialised entry does not matter.</summary>
+            [JsonIgnore] public bool DistStale { get; set; }
         }
 
         /// <summary>The mesh file the capture wrote, as the meta describes it. The JSON names here are

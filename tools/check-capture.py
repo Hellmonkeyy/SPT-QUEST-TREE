@@ -87,6 +87,7 @@ SCHEMA_VERSION = 1     # the capture-meta shape this script reads
 MAX_PNG_BYTES = 48 * 1024 * 1024  # MapCapture.MaxFloorPngBytes: 0.25 m/px floors run 10-25 MB
 PIXEL_TOLERANCE = 1     # px, on each axis, against ceil(span * pxPerMetre)
 EDGE_TOLERANCE = 0.5    # m, on each of the four edges, against the zone file's extent
+SIDECAR_STALE_SECONDS = 15  # s: a picture and its distance sidecar are staged one frame apart (review F09)
 PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 
 # The mesh file's format, from Source\Tarkov-QuestTree\QuestGraph\MapMeshFile.cs - that class's
@@ -205,7 +206,7 @@ def check_extent(meta, errors, key):
     return edges["minX"], edges["minZ"], edges["maxX"], edges["maxZ"]
 
 
-def check_floors(meta, folder, key, extent, px_per_metre, errors):
+def check_floors(meta, folder, key, extent, px_per_metre, errors, warnings):
     """Validates every floor against its PNG and the extent. Returns (levels, pixels, bytes):
     the set of floor levels, the first floor's "WxH" for the summary line, total PNG bytes."""
     floors = meta.get("floors")
@@ -294,6 +295,15 @@ def check_floors(meta, folder, key, extent, px_per_metre, errors):
             if abs(png_h - want_h) > PIXEL_TOLERANCE:
                 errors.append(f"{where}: {rel} is {png_h} px high but the extent's "
                               f"{max_z - min_z:g} m at {px_per_metre:g} px/m wants {want_h}")
+
+        # The floor's distance sidecar, when there is one, has to be from the same capture as its picture
+        # (review F09): a sidecar the capture could not write is deleted at commit, never left behind.
+        if isinstance(level, int) and not isinstance(level, bool):
+            dist_name = f"{key}-{level}.dist.png"
+            dist_path = folder / dist_name
+            if dist_path.is_file() and dist_path.stat().st_mtime < png.stat().st_mtime - SIDECAR_STALE_SECONDS:
+                warnings.append(f"{where}: {dist_name} is {png.stat().st_mtime - dist_path.stat().st_mtime:.0f} s "
+                                f"older than its picture - a sidecar from an earlier capture (review F09)")
 
     return levels, pixels or "-", total
 
@@ -932,6 +942,9 @@ def check_sides(meta, folder, key, extent, errors, warnings):
             elif dist_size != (width, height):
                 errors.append(f"{where}: {dist_name} is {dist_size[0]}x{dist_size[1]} but the side is "
                               f"{width}x{height} - the merge would refuse it")
+            elif dist_path.stat().st_mtime < path.stat().st_mtime - SIDECAR_STALE_SECONDS:
+                warnings.append(f"{where}: {dist_name} is {path.stat().st_mtime - dist_path.stat().st_mtime:.0f} s older "
+                                f"than its picture - a sidecar from an earlier capture (review F09)")
 
         ppm = number(side.get("pxPerMetre"))
         if ppm is None or not (0 < ppm <= SIDE_MAX_PPM + 1e-6):
@@ -1057,7 +1070,7 @@ def check_capture(folder, errors, warnings):
         px_per_metre = None
 
     extent = check_extent(meta, errors, key)
-    levels, pixels, total = check_floors(meta, folder, key, extent, px_per_metre, errors)
+    levels, pixels, total = check_floors(meta, folder, key, extent, px_per_metre, errors, warnings)
 
     mesh = check_mesh(meta, folder, key, extent, levels, errors, warnings)
     atlas = check_atlas(meta, folder, key, errors, warnings)
