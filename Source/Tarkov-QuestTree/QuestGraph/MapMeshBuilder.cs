@@ -513,6 +513,68 @@ namespace QuestTree.QuestGraph
             "LevelBorder", "TransparentCollider"
         };
 
+        // --- WP2: accumulation ------------------------------------------------------------------------------------
+
+        /// <summary>
+        /// WP2: everything whose change would make a stored building or tile differ from what this build makes - the
+        /// budget's density, clamps, storey floor and caps, the source and decimation guards, the decimator's constants
+        /// and WP8's guards and rollbacks, the level ladder and the read filters, the atlas's tile, gutter, cutout and
+        /// texture-search rules, the relief's preferred cell, the not-building layers, the smallest real LOD level and
+        /// the format's version - folded into one string the sidecar carries. Any difference refuses the stored mesh
+        /// and the capture rebuilds from scratch. The leading revision ("r1") is bumped by hand for a code change no
+        /// constant shows. Declared AFTER every static field of this class it reads (static initialisers run in
+        /// textual order - NotBuildingLayerNames above it would otherwise still be null).
+        /// </summary>
+        internal static readonly string MeshRecipe = string.Join(";", new[]
+        {
+            "r1", RecipePart(MapMeshFile.Version),
+            RecipePart(AreaBudget.TrianglesPerSquareMetre), RecipePart(AreaBudget.MinTriangles),
+            RecipePart(AreaBudget.MaxTrianglesPerBuilding), RecipePart(AreaBudget.TrianglesPerStorey),
+            RecipePart(AreaBudget.StoreyMetres), AreaBudget.BudgetBasis.ToString(), RecipePart(AreaBudget.SurfacePerFootprint),
+            RecipePart(AreaBudget.LegacyTrianglesPerSquareMetre), RecipePart(AreaBudget.LegacyMaxTrianglesPerBuilding),
+            RecipePart(AreaBudget.LegacyPlannedCap),
+            RecipePart(BuilderAbsoluteTriangles), RecipePart(MemoryFloorTriangles), RecipePart(BudgetShare),
+            RecipePart(MaxSourceTriangles), RecipePart(MaxDecimatedSource), RecipePart(OverBudgetMaxFactor),
+            RecipePart(DecimateBuildingMs),
+            RecipePart(MeshDecimator.WeldMetres), RecipePart(MeshDecimator.OpposedCosine), RecipePart(MeshDecimator.BoundaryWeight),
+            RecipePart(MeshDecimator.MaxRelativeError), RecipePart(MeshDecimator.MaxDistanceFactor),
+            RecipePart(MeshDecimator.FlipCosine), RecipePart(MeshDecimator.MaxFan), RecipePart(MeshDecimator.HardLimitFactor),
+            RecipePart(MeshDecimator.UvSeam), RecipePart(MeshDecimator.MaxPlacementFactor), RecipePart(MeshDecimator.EdgeGrowth),
+            RecipePart(MeshDecimator.SliverAspect), RecipePart(MeshDecimator.SliverWorsening), RecipePart(MeshDecimator.SliverMinEdge),
+            RecipePart(MeshDecimator.SliverMetricMinEdge), RecipePart(MeshDecimator.CornerCosine),
+            RecipePart(MeshDecimator.SliverPostSlack), RecipePart(MeshDecimator.AreaKept),
+            RecipePart(MeshDecimator.AllowRelaxedPass), RecipePart(MeshDecimator.AllowSeamRelaxedRetry),
+            RecipePart(LevelLadder), RecipePart(IncludeGameCulled), RecipePart(WideTextureSearch), RecipePart(CutoutOpaqueShare),
+            RecipePart(AtlasTileMax), RecipePart(AtlasPadding), RecipePart(WhiteFlatLevel), RecipePart(AtlasFlatPixels),
+            RecipePart(PreferredReliefCellMetres), RecipePart(ReliefCellStepMetres), RecipePart(MinLodTriangles),
+            RecipePart(MinBuildingLongSide), RecipePart(MinBuildingHeight), RecipePart(CentreMargin),
+            RecipePart(HiddenVolumeMetres), RecipePart(MaxBuildingHeight),
+            string.Join(",", NotBuildingLayerNames),
+        });
+
+        /// <summary>One number of the recipe, invariant and round-trippable.</summary>
+        private static string RecipePart(double value) => value.ToString("R", CultureInfo.InvariantCulture);
+
+        /// <summary>One switch of the recipe.</summary>
+        private static string RecipePart(bool value) => value ? "1" : "0";
+
+        /// <summary>WP2: a stored building re-read when its renderer is a candidate again and it holds fewer than
+        /// (1 - this) x min(its source, its target now) - it was stored under a tighter budget than this build's.</summary>
+        internal const double UpgradeShortfall = 0.05;
+
+        /// <summary>WP2 (D3): worker seconds a build may spend re-decimating ABSENT over-served stored buildings in place,
+        /// when the derived cap binds over the union.</summary>
+        internal const double RetargetSeconds = 10d;
+
+        /// <summary>WP2 candidate kinds (Classify): not stored; stored and unchanged (not read again); stored but
+        /// degraded or under its target now (re-read, replacing it); stored but its geometry signature changed (re-read,
+        /// replacing it).</summary>
+        private const int KindNew = 0;
+
+        private const int KindSkip = 1;
+        private const int KindUpgrade = 2;
+        private const int KindChanged = 3;
+
         /// <summary>The tallest a building's world bounds may be, in metres. Nothing on any EFT map is
         /// three hundred metres tall; what IS that tall is a renderer whose bounds mean "everywhere" -
         /// see <see cref="SizeVerdict"/>.</summary>
@@ -665,6 +727,38 @@ namespace QuestTree.QuestGraph
             /// <summary>WP8 (D6): the part of <see cref="GameCulled"/> that came from the occlusion bake groups, for the
             /// hidden line's split. Null for none.</summary>
             internal HashSet<Renderer> OcclusionCulled;
+
+            /// <summary>WP2: the stored mesh and its identity sidecar, read and checked by the capture
+            /// (MapCapture.StartMeshBase). Null takes the from-scratch path, which is the pre-WP2 build exactly and writes
+            /// a fresh sidecar.</summary>
+            internal MapMeshFile Base = null;
+
+            internal MapMeshIndex BaseIndex = null;
+
+            /// <summary>WP2: the lowest and highest height of every stored building vertex, metres - measured on the
+            /// base-load worker so the main thread is not charged for it; +/- infinity when there is none.</summary>
+            internal float BaseYLow = float.PositiveInfinity;
+
+            internal float BaseYHigh = float.NegativeInfinity;
+
+            /// <summary>WP2: why the stored mesh was refused, for the "rebuilt from scratch" line - null when no stored
+            /// mesh was offered or it was taken.</summary>
+            internal string BaseRefused = null;
+
+            /// <summary>WP2: the committed atlas page n's file, decoded when the page takes new tiles. Null: no page is
+            /// decoded (every touched stored page is then refused and the atlas abandoned).</summary>
+            internal Func<int, string> AtlasPagePath = null;
+
+            /// <summary>WP2: meta.captures of this capture - the provenance stamp on the sidecar rows it adds.</summary>
+            internal int CaptureOrdinal = 1;
+
+            /// <summary>WP2: Application.version + "|" + Application.unityVersion, read by the capture on the main thread;
+            /// the sidecar's game string.</summary>
+            internal string Game = "";
+
+            /// <summary>WP2 (7): the raid's LOD map and path hashes, kept across this raid's builds (see
+            /// <see cref="CacheFor"/>). Null keeps them for this build only, as before.</summary>
+            internal SceneCache Scene = null;
         }
 
         /// <summary>What a build produced. <see cref="File"/> is null when nothing usable was
@@ -693,6 +787,39 @@ namespace QuestTree.QuestGraph
             /// when the build returns. The capture waits for them after releasing the scene and settles them
             /// (SettleAtlas) before it serialises the mesh. Null or empty: no atlas.</summary>
             internal List<AtlasPageJob> AtlasPages;
+
+            /// <summary>WP2: the sidecar for <see cref="File"/>, in the same building order; its mesh sha is set by the
+            /// capture's serialiser and its pages' shas by <see cref="SettleAccumulated"/>.</summary>
+            internal MapMeshIndex Index;
+
+            /// <summary>WP2: nothing was added, replaced or re-targeted, no tile or page changed, the y range and every
+            /// relief byte are the stored mesh's - the capture carries the stored files instead of rewriting them.</summary>
+            internal bool Unchanged;
+
+            /// <summary>WP2: whether the build accumulated onto a stored mesh (its atlas settles page by page), how many
+            /// pages that mesh had, and the stored buildings that open <see cref="File"/>'s list.</summary>
+            internal bool Accumulated;
+
+            internal int BasePages;
+            internal int StoredKept;
+
+            /// <summary>WP2: per page, whether this build encoded it (rewritten or new).</summary>
+            internal bool[] PageRewritten;
+
+            /// <summary>WP2: the counts for the capture's lines.</summary>
+            internal int Kept;
+
+            internal int Added;
+            internal int Replaced;
+            internal int Skipped;
+            internal int Retargeted;
+
+            /// <summary>WP2: what a page that fails to settle must undo - the new tiles placed on it, the stored tiles
+            /// re-captured on it (with their rows before), and the stored ranges switched to a tile on it (with the range
+            /// before) - and the packing state the stored mesh had.</summary>
+            internal List<PlacedTile> Placed = new List<PlacedTile>();
+
+            internal List<RangeEdit> RangeEdits = new List<RangeEdit>();
         }
 
         /// <summary>One atlas page handed to its encoder: the page, its tiles, the file it streams to, and the
@@ -715,6 +842,55 @@ namespace QuestTree.QuestGraph
             internal string Sha256;
         }
 
+        /// <summary>WP2: a tile this build wrote on a page: a new one (Old null) at its rect, or a stored one captured
+        /// again into its own rect (Old = its row before).</summary>
+        internal sealed class PlacedTile
+        {
+            internal int Page;
+            internal ulong Key;
+            internal bool Flat;
+            internal int X;
+            internal int Y;
+            internal MapMeshIndex.Tile Old;
+        }
+
+        /// <summary>WP2: a stored building's range switched from its material's flat tile to its textured tile, now
+        /// captured - its index in the merged file, the range, and the range before.</summary>
+        internal sealed class RangeEdit
+        {
+            internal int Building;
+            internal int Range;
+            internal int Page;
+            internal MapMeshFile.AtlasRange Old;
+        }
+
+        /// <summary>
+        /// WP2 (7): what a raid's builds share - the LOD map (every group's levels, renderer to group) and every
+        /// transform's path hash - so the pass over tens of thousands of LOD groups and the path hashing run once a
+        /// raid instead of once a stop. Keyed on the GameWorld and the recipe: a new world or another recipe gets a new
+        /// cache (<see cref="CacheFor"/>). A group the streamer adds later is read when a build first meets it; a
+        /// destroyed one simply never matches again.
+        /// </summary>
+        internal sealed class SceneCache
+        {
+            internal object World;
+            internal string Recipe;
+            internal readonly Dictionary<Renderer, LODGroup> LodOf = new Dictionary<Renderer, LODGroup>();
+            internal readonly Dictionary<LODGroup, LOD[]> LodsOf = new Dictionary<LODGroup, LOD[]>();
+            internal readonly HashSet<LODGroup> Mapped = new HashSet<LODGroup>();
+            internal readonly Dictionary<Transform, ulong> PathHashes = new Dictionary<Transform, ulong>();
+            internal int Builds;
+        }
+
+        /// <summary>WP2 (7): the cache for this world - the one given when it is for the same world and recipe, else a
+        /// new one.</summary>
+        /// <param name="cache">The capture's cache so far, or null.</param>
+        /// <param name="world">The raid's GameWorld.</param>
+        internal static SceneCache CacheFor(SceneCache cache, object world) =>
+            cache != null && world != null && ReferenceEquals(cache.World, world) && cache.Recipe == MeshRecipe
+                ? cache
+                : new SceneCache { World = world, Recipe = MeshRecipe };
+
         /// <summary>One building's atlas mapping, held beside it until the phase completes (ApplyAtlas).</summary>
         private sealed class AtlasMapped
         {
@@ -726,6 +902,9 @@ namespace QuestTree.QuestGraph
             internal ushort[] V;
             internal List<MapMeshFile.AtlasRange> Ranges;
             internal long Triangles;
+
+            /// <summary>WP2: each range's material key, for the sidecar.</summary>
+            internal ulong[] RangeKeys;
         }
 
         // --- the build ------------------------------------------------------------------------------
@@ -746,6 +925,10 @@ namespace QuestTree.QuestGraph
             var wall = Stopwatch.StartNew();
 
             if (!Step(job, "the mesh's header", () => Prepare(job))) yield break;
+
+            // WP2: the stored mesh this build adds to - a throw here leaves job.Stored null, which is the from-scratch
+            // build exactly.
+            Step(job, "the stored mesh", () => LoadBase(job));
 
             // --- the relief -----------------------------------------------------------------------
             //
@@ -860,7 +1043,7 @@ namespace QuestTree.QuestGraph
             // the drain deadline; past that - or at a format cap, or on the capture's abort - whatever is
             // still queued is abandoned and counted, so the loop can never wait on a queue nothing drains.
 
-            if (job.WantsBuildings && job.Candidates.Count > 0)
+            if (job.WantsBuildings && (job.Candidates.Count > 0 || job.RetargetQueue.Count > 0))
             {
                 job.FrameClock.Restart();
 
@@ -906,12 +1089,32 @@ namespace QuestTree.QuestGraph
                         }
 
                     if (BuildingLoop.Done(flights.Count, job.Extra.Count, next, job.Candidates.Count, job.Stopped,
-                            job.PastHard, job.Request.Abort))
+                            job.PastHard, job.Request.Abort) && !RetargetsWaiting(job))
                         break;
 
                     // 3. submit, while there is a worker, frame budget and something to read that fits
                     while (flights.Count < MaxWorkers && !FrameSpent(job))
                     {
+                        // WP2 (D3): the absent over-served stored buildings first - what they free is already credited
+                        // to the new ones, so it is paid back before the list is read.
+                        if (RetargetsWaiting(job) && (flights.Count == 0 || job.InFlightTriangles < MaxInFlightTriangles))
+                        {
+                            var entry = job.RetargetQueue.Dequeue();
+                            Flight retarget = null;
+                            Step(job, "re-targeting a stored building", () => retarget = LaunchRetarget(job, entry));
+
+                            if (retarget == null)
+                            {
+                                RetargetFailed(job, entry);
+                                continue;
+                            }
+
+                            flights.Add(retarget);
+                            if (flights.Count > job.PeakWorkers) job.PeakWorkers = flights.Count;
+                            Track(job, flights);
+                            continue;
+                        }
+
                         var from = BuildingLoop.Next(job.Stopped, job.PastHard, job.PastDrain || job.Request.Abort,
                             job.Extra.Count, next, job.Candidates.Count);
 
@@ -1021,6 +1224,15 @@ namespace QuestTree.QuestGraph
                     flights.Clear();
                 }
 
+                // WP2: what the loop left of the stored mesh's plan settled, then each LOD group with stored buildings
+                // resolved to ONE level (a finer level read whole replaces the stored coarse one; a partial one is rolled
+                // back) - before the atlas, so nothing rolled back is textured.
+                if (job.Stored != null)
+                {
+                    Step(job, "the re-targets' settlement", () => SettleRetargets(job));
+                    Step(job, "the LOD upgrades", () => ResolveGroupUpgrades(job));
+                }
+
                 Step(job, "the buildings' log line", () => ReportBuildings(job));
                 Step(job, "the hidden renderers' line", () => ReportHidden(job));
             }
@@ -1030,8 +1242,8 @@ namespace QuestTree.QuestGraph
             // After the buildings (it maps what was stored) and inside the same hold (the textures are the
             // scene's). A few tiles a frame; each page encoded on a worker.
 
-            if (job.WantsBuildings && job.File != null && job.File.Buildings.Count > 0 && job.Request.AtlasPartPath != null &&
-                !job.Request.Abort)
+            if (job.WantsBuildings && job.File != null && (job.File.Buildings.Count > 0 || job.StoredOnlyMaterials > 0) &&
+                job.Request.AtlasPartPath != null && !job.Request.Abort)
             {
                 job.FrameClock.Restart();
                 var atlasRun = BuildAtlas(job, result);
@@ -1080,6 +1292,11 @@ namespace QuestTree.QuestGraph
             {
                 var band = job.Bands[i];
 
+                // WP2 (D2): cells this cast left empty take the stored relief's, and the distance byte the closer
+                // observation - in metres, so before the band is quantised.
+                if (job.Stored != null && band.Quantised == 0)
+                    Step(job, $"the stored relief of \"{band.Source.Name}\"", () => FillFromBase(job, band));
+
                 while (band.Quantised < band.Cells)
                 {
                     if (!Step(job, $"quantising \"{band.Source.Name}\"", () => QuantiseChunk(job, band))) break;
@@ -1101,6 +1318,15 @@ namespace QuestTree.QuestGraph
 
             job.PendingY.Clear();
 
+            // WP2 (D4): a widened range requantises the stored buildings' heights once, into arrays of their own - the
+            // stored ones are not changed until the merge, so a throw before it leaves the base as it was.
+            while (job.RangeWidened && job.RequantisedY != null && job.RequantisedUpTo < job.Request.Base.Buildings.Count)
+            {
+                if (!Step(job, "the stored buildings' heights", () => RequantiseChunk(job))) break;
+
+                yield return null;
+            }
+
             Step(job, "the mesh", () => Finish(job, result));
         }
 
@@ -1119,6 +1345,12 @@ namespace QuestTree.QuestGraph
 
                 SoftSeconds = Math.Max(MinBuildingSeconds, request.BuildingSeconds);
                 HardSeconds = HardSecondsFor(SoftSeconds);
+
+                // WP2 (7): the raid's LOD map and path hashes when the capture keeps them, else this build's own.
+                var scene = request.Scene;
+                LodOf = scene?.LodOf ?? new Dictionary<Renderer, LODGroup>();
+                LodsOf = scene?.LodsOf ?? new Dictionary<LODGroup, LOD[]>();
+                PathHashes = scene?.PathHashes ?? new Dictionary<Transform, ulong>();
             }
 
             internal readonly Request Request;
@@ -1388,9 +1620,96 @@ namespace QuestTree.QuestGraph
 
             internal int LodMapped;
 
-            internal readonly Dictionary<Renderer, LODGroup> LodOf = new Dictionary<Renderer, LODGroup>();
+            internal readonly Dictionary<Renderer, LODGroup> LodOf;
 
-            internal readonly Dictionary<LODGroup, LOD[]> LodsOf = new Dictionary<LODGroup, LOD[]>();
+            internal readonly Dictionary<LODGroup, LOD[]> LodsOf;
+
+            /// <summary>WP2 (7): groups read by this build, and groups found already mapped by an earlier build of this raid.</summary>
+            internal int LodRead;
+
+            internal int LodReused;
+
+            /// <summary>WP2: every transform's path hash (the raid's, with a scene cache), and how many were already known.</summary>
+            internal readonly Dictionary<Transform, ulong> PathHashes;
+
+            internal int PathHashesAtStart;
+
+            /// <summary>WP2: the stored mesh's identities (null on the from-scratch path), what it holds, and whether this
+            /// build's bands are the ones it was built with.</summary>
+            internal StoredIndex Stored;
+
+            internal long StoredTriangles;
+            internal long StoredVertices;
+            internal int StoredCount;
+            internal bool BandsSame;
+
+            /// <summary>WP2: the stored mesh's range was kept bit for bit, or widened (the stored heights requantised).</summary>
+            internal bool RangeKept;
+
+            internal bool RangeWidened;
+            internal float OldYMin;
+            internal float OldYMax;
+
+            /// <summary>WP2: the stored buildings' heights requantised over a widened range, and how far that has got.</summary>
+            internal ushort[][] RequantisedY;
+
+            internal int RequantisedUpTo;
+
+            /// <summary>WP2: the sidecar row of each NEW building, its LOD group and its candidate - parallel to
+            /// File.Buildings until the merge.</summary>
+            internal readonly List<MapMeshIndex.Entry> NewEntries = new List<MapMeshIndex.Entry>();
+
+            internal readonly List<LODGroup> NewGroups = new List<LODGroup>();
+            internal readonly List<Candidate> NewCandidates = new List<Candidate>();
+            internal readonly Dictionary<ulong, List<MapMeshIndex.Entry>> NewByPath = new Dictionary<ulong, List<MapMeshIndex.Entry>>();
+
+            /// <summary>WP2: every candidate the build met - the list's and the ladder's queued ones - for the group
+            /// upgrades' completeness test.</summary>
+            internal readonly List<Candidate> Met = new List<Candidate>();
+
+            /// <summary>WP2: the scale the new buildings are read at (s_Fit; the budget's own scale on the from-scratch
+            /// path).</summary>
+            internal double FlexScale = 1d;
+
+            internal bool UnionBinds;
+
+            /// <summary>WP2 (D3): absent over-served stored buildings to re-decimate in place, their re-decimated
+            /// geometry, the worker time spent, and what was freed.</summary>
+            internal readonly Queue<StoredEntry> RetargetQueue = new Queue<StoredEntry>();
+
+            internal readonly Dictionary<int, RetargetedBuilding> Retargeted = new Dictionary<int, RetargetedBuilding>();
+            internal double RetargetMs;
+            internal int RetargetsFailed;
+            internal int RetargetsPlanned;
+
+            /// <summary>WP2: what this build did to the stored mesh, for the accumulation line.</summary>
+            internal int Skipped;
+
+            internal int Upgraded;
+            internal int Changed;
+            internal int GroupsToDetail;
+            internal int RetargetedRead;
+            internal int RolledBack;
+            internal int LevelsDropped;
+            internal int UpgradesRefused;
+
+            /// <summary>WP2: relief cells filled from the stored relief, and bands whose stored grid could not be used.</summary>
+            internal int ReliefFilled;
+
+            internal int ReliefNotFillable;
+
+            /// <summary>WP2: the atlas's continuation - the packing state, the stored materials by key, the pages this
+            /// build encodes, and its counts.</summary>
+            internal AtlasPackState PackState = AtlasPackState.Empty;
+
+            internal Dictionary<ulong, MapMeshIndex.Tile> StoredTiles;
+            internal bool[] TouchedPages;
+            internal int StoredOnlyMaterials;
+            internal int MaterialsReused;
+            internal int TilesNew;
+            internal int TilesUpgraded;
+            internal readonly List<PlacedTile> Placed = new List<PlacedTile>();
+            internal readonly List<RangeEdit> RangeEdits = new List<RangeEdit>();
 
             /// <summary>Candidates under a group that none of its levels lists (now their own building),
             /// candidates whose group is not their ancestor, and renderers two groups list.</summary>
@@ -1548,6 +1867,11 @@ namespace QuestTree.QuestGraph
             internal ushort[] Codes;
             internal byte[] Distance;
 
+            /// <summary>WP2: the cells filled from the stored relief (this cast left them empty), and how many.</summary>
+            internal bool[] FromBase;
+
+            internal int Filled;
+
             internal int Cells => Width * Height;
         }
 
@@ -1630,6 +1954,20 @@ namespace QuestTree.QuestGraph
             /// <summary>The LOD level it was read from (0 with no group), for its grade.</summary>
             internal int ReadLod;
 
+            /// <summary>WP2: the ladder level it was read from (the sidecar's levelIndex).</summary>
+            internal int ReadLevel;
+
+            /// <summary>WP2: its path hash (and its group's), its kind against the stored mesh (Classify), the stored
+            /// building it replaces when read, whether that is a re-target (D3), and its dup among identical renderers.</summary>
+            internal ulong PathHash;
+
+            internal int Kind;
+            internal StoredEntry Replaces;
+            internal bool Retarget;
+
+            /// <summary>WP2: the stored building it was matched to, whatever its kind.</summary>
+            internal StoredEntry Matched;
+
             /// <summary>The other transform worth trying when <see cref="Matrix"/> does not put the
             /// vertices inside the renderer's bounds, or null. Set only for a static batch, where the
             /// two candidates are world space and the renderer's own.</summary>
@@ -1672,6 +2010,15 @@ namespace QuestTree.QuestGraph
 
             /// <summary>Whether the group reads a coarser level than its first, for the log's wording.</summary>
             internal bool UsingCoarse => Current > 0;
+
+            /// <summary>WP2: the group's path hash and position (its sidecar identity, computed once), the stored
+            /// buildings of it, and the lowest LOD level they are at (int.MaxValue for none).</summary>
+            internal bool Identified;
+
+            internal ulong GroupHash;
+            internal Vector3 GroupPosition;
+            internal List<StoredEntry> Stored;
+            internal int StoredLod = int.MaxValue;
         }
 
         /// <summary>A source mesh in WORLD space, ready to store or decimate: x, y, z per vertex and three
@@ -1854,6 +2201,114 @@ namespace QuestTree.QuestGraph
             internal long Triangles;
 
             internal long Bytes;
+
+            /// <summary>WP2 (D3): a stored building re-decimated in place (its entry, what it was given, and the result).</summary>
+            internal StoredEntry RetargetOf;
+
+            internal Task<RetargetOutcome> Retarget;
+        }
+
+        /// <summary>WP2: one stored building of the base, as this build sees it: its row, whether a present candidate
+        /// matched it (and which), and whether it leaves the file (replaced this build).</summary>
+        private sealed class StoredEntry
+        {
+            internal int Index;
+            internal MapMeshIndex.Entry Meta;
+            internal bool Seen;
+            internal Candidate SeenBy;
+            internal bool Drop;
+
+            /// <summary>D3: picked to lose its excess; what the plan lands it at; how many triangles it holds meanwhile in
+            /// the ledger's eyes.</summary>
+            internal bool Retarget;
+
+            internal int RetargetTarget;
+            internal long PlannedNew;
+        }
+
+        /// <summary>WP2: the stored mesh's identities, looked up by path hash and by group path hash.</summary>
+        private sealed class StoredIndex
+        {
+            internal readonly List<StoredEntry> All = new List<StoredEntry>();
+            internal readonly Dictionary<ulong, List<StoredEntry>> ByPath = new Dictionary<ulong, List<StoredEntry>>();
+            internal readonly Dictionary<ulong, List<StoredEntry>> ByGroup = new Dictionary<ulong, List<StoredEntry>>();
+
+            internal StoredIndex(MapMeshIndex index)
+            {
+                for (var i = 0; i < index.Buildings.Count; i++)
+                {
+                    var entry = new StoredEntry { Index = i, Meta = index.Buildings[i] };
+                    All.Add(entry);
+                    Add(ByPath, entry.Meta.PathHash, entry);
+                    if (entry.Meta.GroupPathHash != 0) Add(ByGroup, entry.Meta.GroupPathHash, entry);
+                }
+            }
+
+            private static void Add(Dictionary<ulong, List<StoredEntry>> map, ulong key, StoredEntry entry)
+            {
+                if (!map.TryGetValue(key, out var list)) map[key] = list = new List<StoredEntry>(1);
+                list.Add(entry);
+            }
+
+            /// <summary>The stored building this renderer IS - same path hash, centre and size within the slack, not
+            /// already matched by another present renderer, the nearest centre - and whether its geometry signature is
+            /// unchanged. Null for none. Greedy in candidate order (volume descending, deterministic within a scene
+            /// load); exact duplicates are interchangeable, so the order does not matter for them.</summary>
+            internal StoredEntry Match(ulong pathHash, Vector3 centre, Vector3 size, int subFirst, int subEnd, long sourceTriangles,
+                int meshVertexCount, Renderer self, out bool sameSignature)
+            {
+                sameSignature = false;
+                if (!ByPath.TryGetValue(pathHash, out var list)) return null;
+
+                StoredEntry best = null;
+                var bestDistance = double.MaxValue;
+
+                foreach (var e in list)
+                {
+                    if (e.Seen && (self == null || e.SeenBy == null || e.SeenBy.Renderer != self)) continue;
+                    if (!MapMeshIndex.SameObject(e.Meta, pathHash, centre.x, centre.y, centre.z, size.x, size.y, size.z)) continue;
+
+                    double dx = e.Meta.Cx - centre.x, dy = e.Meta.Cy - centre.y, dz = e.Meta.Cz - centre.z;
+                    var d = dx * dx + dy * dy + dz * dz;
+                    if (d < bestDistance)
+                    {
+                        bestDistance = d;
+                        best = e;
+                    }
+                }
+
+                if (best != null) sameSignature = MapMeshIndex.SameSignature(best.Meta, subFirst, subEnd, sourceTriangles, meshVertexCount);
+                return best;
+            }
+        }
+
+        /// <summary>WP2 (D3): what a stored building re-decimated in place becomes - world positions and UVs by the
+        /// triangle's range, from a worker.</summary>
+        private sealed class RetargetOutcome
+        {
+            internal float[] Positions;
+            internal int[] Triangles;
+            internal float[] UV;
+            internal int[] TriangleRange;
+            internal bool Usable;
+            internal double Milliseconds;
+            internal string Why;
+        }
+
+        /// <summary>WP2 (D3): a stored building's re-decimated arrays, waiting for the merge (heights in metres until the
+        /// file's range is known).</summary>
+        private sealed class RetargetedBuilding
+        {
+            internal ushort[] X;
+            internal ushort[] Z;
+            internal float[] YMetres;
+            internal uint[] Indices;
+            internal ushort[] U;
+            internal ushort[] V;
+            internal List<MapMeshFile.AtlasRange> Ranges;
+            internal ulong[] RangeKeys;
+            internal int Triangles;
+            internal float Centroid;
         }
 
         // --- the header ------------------------------------------------------------------------------
@@ -2314,7 +2769,17 @@ namespace QuestTree.QuestGraph
                 if (band.Source.MaxY > bandHigh) bandHigh = band.Source.MaxY;
             }
 
-            if (!YRange(job.Lowest, job.Highest, job.VertexLow, job.VertexHigh, bandLow, bandHigh,
+            // WP2: the stored buildings' vertices are this file's too (measured on the base-load worker)
+            var vertexLow = job.VertexLow;
+            var vertexHigh = job.VertexHigh;
+
+            if (job.Stored != null)
+            {
+                if (IsFinite(job.Request.BaseYLow)) vertexLow = Math.Min(vertexLow, job.Request.BaseYLow);
+                if (IsFinite(job.Request.BaseYHigh)) vertexHigh = Math.Max(vertexHigh, job.Request.BaseYHigh);
+            }
+
+            if (!YRange(job.Lowest, job.Highest, vertexLow, vertexHigh, bandLow, bandHigh,
                     out var low, out var high, out var clamped))
                 throw new InvalidOperationException("nothing measurable was found to quantise heights over");
 
@@ -2326,6 +2791,79 @@ namespace QuestTree.QuestGraph
                     "of the map keeps its resolution.");
 
             job.File.SetYRange(low, high);
+
+            // WP2 (D4): the range only grows. A stored range that holds this one is kept bit for bit (the stored codes
+            // stay valid); otherwise the union, and the stored heights are requantised once.
+            if (job.Stored != null)
+            {
+                var stored = job.Request.Base;
+                job.OldYMin = stored.YMin;
+                job.OldYMax = stored.YMax;
+
+                if (stored.YMin <= job.File.YMin && stored.YMax >= job.File.YMax)
+                {
+                    job.File.YMin = stored.YMin;
+                    job.File.YMax = stored.YMax;
+                    job.RangeKept = true;
+                }
+                else
+                {
+                    job.File.YMin = Math.Min(stored.YMin, job.File.YMin);
+                    job.File.YMax = Math.Max(stored.YMax, job.File.YMax);
+                    job.RangeWidened = true;
+                    job.RequantisedY = new ushort[stored.Buildings.Count][];
+                }
+            }
+        }
+
+        /// <summary>WP2 (D2): the stored relief into a band this cast left cells of - only when the bands are the ones
+        /// the stored mesh was built with and its grid is this build's (same level, size and derived cell,
+        /// MapMeshIndex.ReliefFillable); MapMeshIndex.FillRelief does the merge.</summary>
+        /// <param name="job">The build.</param>
+        /// <param name="band">The band, still in metres.</param>
+        private static void FillFromBase(Job job, BandWork band)
+        {
+            if (!job.BandsSame || band.Metres == null) return;
+
+            var stored = job.Request.Base.Band(band.Source.Level);
+
+            if (!MapMeshIndex.ReliefFillable(stored, band.Source.Level, band.Width, band.Height, job.CellMetres))
+            {
+                job.ReliefNotFillable++;
+                return;
+            }
+
+            band.FromBase = new bool[band.Cells];
+            band.Filled = MapMeshIndex.FillRelief(band.Metres, band.Distance, stored, job.Request.Base.HeightOf, band.FromBase);
+            job.ReliefFilled += band.Filled;
+        }
+
+        /// <summary>WP2 (D4): the kept stored buildings' heights requantised over the widened range, a slice of vertices
+        /// a call: code' = new.QuantiseHeight(old.HeightOf(code)), at most half an old quantum plus half a new one
+        /// off. Into arrays of their own, taken at the merge.</summary>
+        /// <param name="job">The build.</param>
+        private static void RequantiseChunk(Job job)
+        {
+            var stored = job.Request.Base;
+            var done = 0L;
+
+            while (job.RequantisedUpTo < stored.Buildings.Count && done < QuantisePerFrameVertices)
+            {
+                var i = job.RequantisedUpTo++;
+                var e = job.Stored.All[i];
+                if (e.Drop || job.Retargeted.ContainsKey(i)) continue;
+
+                job.RequantisedY[i] = Requantise(stored.Buildings[i].Y, stored, job.File);
+                done += stored.Buildings[i].VertexCount;
+            }
+        }
+
+        /// <summary>Height codes from one file's range into another's.</summary>
+        private static ushort[] Requantise(ushort[] codes, MapMeshFile from, MapMeshFile to)
+        {
+            var result = new ushort[codes.Length];
+            for (var v = 0; v < codes.Length; v++) result[v] = to.QuantiseHeight(from.HeightOf(codes[v]));
+            return result;
         }
 
         /// <summary>
@@ -2420,7 +2958,7 @@ namespace QuestTree.QuestGraph
             var wrong = 0;
 
             for (var n = band.Done; n < band.Cells && n < band.Codes.Length; n++)
-                if (band.Codes[n] != MapMeshFile.NoHit) wrong++;
+                if (band.Codes[n] != MapMeshFile.NoHit && (band.FromBase == null || !band.FromBase[n])) wrong++;
 
             if (wrong > 0)
                 Plugin.LogSource?.LogWarning(
@@ -2802,7 +3340,7 @@ namespace QuestTree.QuestGraph
         /// <param name="candidate">The candidate.</param>
         private static bool Wanted(Job job, Candidate candidate)
         {
-            if (job.File.Buildings.Count >= MapMeshFile.MaxBuildings)
+            if (job.StoredCount + job.File.Buildings.Count >= MapMeshFile.MaxBuildings)
             {
                 job.Stopped = true;
                 job.StoppedWhy = $"the format's cap of {N(MapMeshFile.MaxBuildings)} buildings was reached";
@@ -2934,6 +3472,9 @@ namespace QuestTree.QuestGraph
             state.GroupKey = MapMeshFile.Building.KeyFor(HierarchyPath(group.transform),
                 group.transform.TransformPoint(group.localReferencePoint));
 
+            // WP2: the stored buildings of this group, and the lowest level they are at.
+            if (job.Stored != null) AttachStored(job, group, state);
+
             job.Groups[group] = state;
 
             return state;
@@ -3017,9 +3558,17 @@ namespace QuestTree.QuestGraph
         private static void MapLods(Job job)
         {
             var groups = job.LodGroups;
-            var end = Math.Min(groups.Length, job.LodMapped + LodGroupsPerFrame);
+            var scene = job.Request.Scene;
 
-            for (var i = job.LodMapped; i < end; i++)
+            // WP2 (7): with the raid's cache, a group an earlier build of this raid read is not read again - GetLODs
+            // allocates its whole LOD array - so a frame reads up to LodGroupsPerFrame NEW groups and walks at most ten
+            // times as many; without one this is the pre-WP2 pass exactly.
+            var end = scene == null
+                ? Math.Min(groups.Length, job.LodMapped + LodGroupsPerFrame)
+                : Math.Min(groups.Length, job.LodMapped + LodGroupsPerFrame * 10);
+            var reads = 0;
+
+            for (var i = job.LodMapped; i < end && reads < LodGroupsPerFrame; i++)
             {
                 job.LodMapped = i + 1;
 
@@ -3032,6 +3581,16 @@ namespace QuestTree.QuestGraph
                     job.LodInactive++;
                     continue;
                 }
+
+                if (scene != null && scene.Mapped.Contains(group))
+                {
+                    job.LodReused++;
+                    continue;
+                }
+
+                reads++;
+                job.LodRead++;
+                scene?.Mapped.Add(group);
 
                 var lods = group.GetLODs();
                 job.LodsOf[group] = lods;
@@ -3107,6 +3666,9 @@ namespace QuestTree.QuestGraph
                     candidate.Height = Math.Abs((double)candidate.Bounds.size.y);
 
                     if (candidate.Group == null && candidate.SourceTriangles > MaxSourceTriangles) job.InputGuarded++;
+
+                    // WP2: this renderer against the stored mesh - skipped, re-read or new (Classify).
+                    if (job.Stored != null && candidate.SourceTriangles > 0) Classify(job, candidate);
                 }
                 catch (Exception ex)
                 {
@@ -3146,6 +3708,13 @@ namespace QuestTree.QuestGraph
         /// <param name="job">The build.</param>
         private static void ApplyBudget(Job job)
         {
+            // WP2: onto a stored mesh, the plan is over the union of the stored buildings and the new ones.
+            if (job.Stored != null)
+            {
+                ApplyUnionBudget(job);
+                return;
+            }
+
             var sources = new List<Candidate>();
 
             foreach (var candidate in job.Candidates)
@@ -3198,6 +3767,7 @@ namespace QuestTree.QuestGraph
             }
 
             job.BudgetScale = scale;
+            job.FlexScale = scale;
             job.LegacyScale = legacyScale;
 
             // WP8 (D3): strict decimations over their limit are paid from half of the unreserved share; the other
@@ -3215,10 +3785,479 @@ namespace QuestTree.QuestGraph
         {
             if (candidate.Target > 0) return candidate.Target;
 
-            candidate.Target = AreaBudget.Target(AreaBudget.Basis(candidate.Surface, candidate.Footprint, candidate.Height), job.BudgetScale,
+            // FlexScale: the scale the new buildings are read at - the budget's own on the from-scratch path, s_Fit (at
+            // most s_G) onto a stored mesh whose union binds (WP2 D3).
+            candidate.Target = AreaBudget.Target(AreaBudget.Basis(candidate.Surface, candidate.Footprint, candidate.Height), job.FlexScale,
                 AreaBudget.LegacyTarget(candidate.Footprint, job.LegacyScale));
 
             return candidate.Target;
+        }
+
+        // --- WP2: the stored mesh, identity and classification ------------------------------------------------------
+
+        /// <summary>
+        /// WP2 (2.5): takes the stored mesh the capture offered - its identities indexed, what it holds counted (the
+        /// file's building, triangle and vertex totals count it from the start: StoreWorld's caps are the whole file's),
+        /// its bands compared with this build's (the stored relief is filled in only when they are the same) and its
+        /// atlas's materials and packing state kept - and says which path this build takes. Also counts the scene
+        /// cache's path hashes, for the reuse the building line reports.
+        /// </summary>
+        /// <param name="job">The build.</param>
+        private static void LoadBase(Job job)
+        {
+            var request = job.Request;
+            job.PathHashesAtStart = job.PathHashes.Count;
+            if (request.Scene != null) request.Scene.Builds++;
+
+            if (request.Base == null || request.BaseIndex == null)
+            {
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: the 3D mesh of {request.Map} is rebuilt from scratch - " +
+                    $"{request.BaseRefused ?? "there is no earlier mesh to add to"}.");
+                return;
+            }
+
+            var file = request.Base;
+            var index = request.BaseIndex;
+            file.Bind();
+
+            var stored = new StoredIndex(index);
+            long triangles = 0, vertices = 0;
+
+            foreach (var b in file.Buildings)
+            {
+                triangles += b.TriangleCount;
+                vertices += b.VertexCount;
+            }
+
+            var tiles = new Dictionary<ulong, MapMeshIndex.Tile>();
+            foreach (var row in index.Materials) tiles[row.Key] = row;
+
+            var sameBands = index.Bands.Count == job.Bands.Count;
+            for (var i = 0; sameBands && i < job.Bands.Count; i++)
+            {
+                var band = job.Bands[i].Source;
+                sameBands = index.Bands[i].SameAs(new MapMeshIndex.BandRow
+                {
+                    Level = band.Level, MinY = band.MinY, MaxY = band.MaxY, CameraY = band.CameraY, DepthBelow = band.DepthBelow,
+                    Interior = band.Interior,
+                });
+            }
+
+            job.StoredCount = file.Buildings.Count;
+            job.StoredTriangles = triangles;
+            job.StoredVertices = vertices;
+            job.Triangles = triangles;
+            job.Vertices = vertices;
+            job.BandsSame = sameBands;
+            job.StoredTiles = tiles;
+            job.PackState = index.Pack;
+
+            // last: anything above that threw leaves the build from scratch
+            job.Stored = stored;
+
+            Plugin.LogSource?.LogInfo(
+                $"QuestTree: accumulating onto capture {index.Captures}'s mesh: {N(file.Buildings.Count)} stored building(s), " +
+                $"{N(triangles)} triangles, {N(file.AtlasPages)} page(s)" +
+                (sameBands ? "" : "; the floor bands' heights changed, so the stored relief is not reused and the stored buildings are re-levelled") +
+                ".");
+        }
+
+        /// <summary>
+        /// WP2 (2.3): a transform's path hash - FNV-1a 64 of the string <see cref="HierarchyPath"/> builds - memoised per
+        /// transform (in the raid's scene cache when there is one), so each level's name is read once: FNV-1a streams, so
+        /// hash(parent + "/" + name) continues the parent's own. A root has no leading "/". Deeper than the 24 levels
+        /// HierarchyPath keeps, the path is hashed as HierarchyPath cuts it.
+        /// </summary>
+        /// <param name="job">The build.</param>
+        /// <param name="t">The transform.</param>
+        private static ulong PathHash(Job job, Transform t)
+        {
+            if (t == null) return 0UL;
+            if (job.PathHashes.TryGetValue(t, out var hash)) return hash;
+
+            var depth = 0;
+            for (var walk = t; walk != null && depth <= 24; walk = walk.parent) depth++;
+
+            if (depth > 24)
+            {
+                hash = MapMeshIndex.Fnv64(HierarchyPath(t));
+            }
+            else
+            {
+                var parent = t.parent;
+                hash = parent == null
+                    ? MapMeshIndex.Fnv64(t.name)
+                    : MapMeshIndex.Fnv64Continue(MapMeshIndex.Fnv64Continue(PathHash(job, parent), '/'), t.name);
+            }
+
+            job.PathHashes[t] = hash;
+            return hash;
+        }
+
+        /// <summary>The LOD level a candidate's group reads now (0 with no group).</summary>
+        /// <param name="job">The build.</param>
+        /// <param name="candidate">The candidate.</param>
+        private static int CurrentLod(Job job, Candidate candidate)
+        {
+            if (candidate.Group == null || !job.Groups.TryGetValue(candidate.Group, out var state) || state == null) return 0;
+            return state.Current < state.Levels.Count ? state.Levels[state.Current].Lod : 0;
+        }
+
+        /// <summary>
+        /// WP2 (2.4): a list candidate against the stored mesh. Matched with its signature unchanged, it is SKIPPED -
+        /// never read, never budgeted - unless it is its group's source now and the stored copy is degraded (grade over
+        /// "within its limit" for its level) or of another level, when it is an UPGRADE that replaces it; the shortfall
+        /// against this build's target is judged after the union plan (ApplyUnionBudget). Matched with a changed
+        /// signature it is CHANGED (read, replacing it). Not matched: NEW - including a finer level of a group stored
+        /// coarse, which ResolveGroupUpgrades commits or rolls back as a whole. A renderer of another level of its group
+        /// than the one read now is skipped (it is not read this build either way).
+        /// </summary>
+        /// <param name="job">The build.</param>
+        /// <param name="c">The candidate, its group and sizes known.</param>
+        private static void Classify(Job job, Candidate c)
+        {
+            job.Met.Add(c);
+            c.PathHash = PathHash(job, c.Renderer.transform);
+
+            var m = job.Stored.Match(c.PathHash, c.Bounds.center, c.Bounds.size, c.SubFirst, c.SubEnd, c.SourceTriangles,
+                c.Mesh.vertexCount, null, out var same);
+
+            if (m == null)
+            {
+                c.Kind = KindNew;
+                return;
+            }
+
+            m.Seen = true;
+            m.SeenBy = c;
+            c.Matched = m;
+
+            if (!IsSource(job, c))
+            {
+                c.Kind = KindSkip;
+                return;
+            }
+
+            if (!same)
+            {
+                c.Kind = KindChanged;
+                c.Replaces = m;
+                return;
+            }
+
+            if (m.Meta.Lod != CurrentLod(job, c) || MapMeshIndex.SubOfGrade(m.Meta.Grade) > GradeWithin)
+            {
+                c.Kind = KindUpgrade;
+                c.Replaces = m;
+                return;
+            }
+
+            c.Kind = KindSkip;
+        }
+
+        /// <summary>WP2: a ladder level's renderer, queued by a fallback, against the stored mesh - true when it is
+        /// stored unchanged at this very level within its limit (it is then not read again); otherwise it goes on the
+        /// queue as new, or replacing the stored copy.</summary>
+        /// <param name="job">The build.</param>
+        /// <param name="c">The queued candidate.</param>
+        /// <param name="lod">The LOD level it is queued for.</param>
+        private static bool ClassifyQueued(Job job, Candidate c, int lod)
+        {
+            job.Met.Add(c);
+            c.PathHash = PathHash(job, c.Renderer.transform);
+
+            var m = job.Stored.Match(c.PathHash, c.Bounds.center, c.Bounds.size, c.SubFirst, c.SubEnd, c.SourceTriangles,
+                c.Mesh.vertexCount, c.Renderer, out var same);
+
+            if (m == null || m.Drop)
+            {
+                c.Kind = KindNew;
+                return false;
+            }
+
+            m.Seen = true;
+            m.SeenBy = c;
+            c.Matched = m;
+
+            if (same && m.Meta.Lod == lod && MapMeshIndex.SubOfGrade(m.Meta.Grade) == GradeWithin) return true;
+
+            c.Kind = same ? KindUpgrade : KindChanged;
+            c.Replaces = m;
+            return false;
+        }
+
+        /// <summary>WP2: a group's sidecar identity - its path hash and position - computed once.</summary>
+        /// <param name="job">The build.</param>
+        /// <param name="group">The group.</param>
+        /// <param name="state">Its state.</param>
+        private static void Identify(Job job, LODGroup group, GroupState state)
+        {
+            if (state.Identified) return;
+
+            state.GroupHash = PathHash(job, group.transform);
+            state.GroupPosition = group.transform.position;
+            state.Identified = true;
+        }
+
+        /// <summary>WP2: the stored buildings of a group (same group path hash, position within the identity slack)
+        /// and the lowest LOD level they are at.</summary>
+        /// <param name="job">The build.</param>
+        /// <param name="group">The group.</param>
+        /// <param name="state">Its state.</param>
+        private static void AttachStored(Job job, LODGroup group, GroupState state)
+        {
+            Identify(job, group, state);
+            if (!job.Stored.ByGroup.TryGetValue(state.GroupHash, out var list)) return;
+
+            var at = state.GroupPosition;
+
+            foreach (var e in list)
+            {
+                if (!MapMeshIndex.Near(e.Meta.Gx, at.x) || !MapMeshIndex.Near(e.Meta.Gy, at.y) || !MapMeshIndex.Near(e.Meta.Gz, at.z))
+                    continue;
+
+                if (state.Stored == null) state.Stored = new List<StoredEntry>();
+                state.Stored.Add(e);
+                state.StoredLod = Math.Min(state.StoredLod, e.Meta.Lod);
+            }
+        }
+
+        /// <summary>
+        /// WP2 (2.5, D3): the area budget over the UNION of the stored buildings and this build's new ones. The new ones
+        /// (sources not stored unchanged: new, upgrades, changed) are the flex; the stored buildings they replace, and the
+        /// coarse ones of a group about to be read at a finer level, are NOT planned but stay in the fixed cost until
+        /// their replacement stores; every other stored building is planned as fixed with the live rule from its sidecar
+        /// inputs. The cap is derived from the union's demand exactly as a from-scratch build derives it. A stored
+        /// building stored under (1 - <see cref="UpgradeShortfall"/>) x min(its source, its target now) whose renderer is
+        /// a source here is re-read. When the planned cap binds, the over-served stored buildings are re-targeted: a
+        /// present one is re-read at its union target, an absent one re-decimated in place (the ledger credits their
+        /// excess now and settles as they land). The ledger is pre-loaded with the stored triangles; skipped candidates
+        /// are claimed (a group whose read level holds one can then never move) and leave the list.
+        /// </summary>
+        /// <param name="job">The build.</param>
+        private static void ApplyUnionBudget(Job job)
+        {
+            var flex = new List<Candidate>();
+
+            foreach (var c in job.Candidates)
+                if (c.SourceTriangles > 0 && c.SourceTriangles <= MaxSourceTriangles && IsSource(job, c) && c.Kind != KindSkip)
+                    flex.Add(c);
+
+            // the coarse stored buildings of a group read at a finer level now
+            var upgrading = new HashSet<StoredEntry>();
+            foreach (var c in flex)
+            {
+                if (c.Group == null || !job.Groups.TryGetValue(c.Group, out var state) || state?.Stored == null) continue;
+                if (CurrentLod(job, c) < state.StoredLod)
+                    foreach (var e in state.Stored) upgrading.Add(e);
+            }
+
+            job.RamMb = SystemInfo.systemMemorySize;
+            job.VramMb = SystemInfo.graphicsMemorySize;
+            job.MemoryCeiling = MemoryCeiling(job.RamMb, job.VramMb);
+
+            var plan = PlanUnionOf(job, flex, upgrading, out var union, out var cap, out var demand);
+
+            // the shortfall: a stored building under its target now, whose renderer is a source here, is read again
+            var converted = false;
+            for (var k = 0; k < union.Count; k++)
+            {
+                var e = union[k].Entry;
+                var c = e?.SeenBy;
+                if (c == null || c.Kind != KindSkip || c.QueuedLevel >= 0 || !IsSource(job, c)) continue;
+
+                var want = Math.Min((long)e.Meta.SourceTriangles, plan.Targets[k]);
+                if (e.Meta.StoredTriangles >= (1d - UpgradeShortfall) * want) continue;
+
+                c.Kind = KindUpgrade;
+                c.Replaces = e;
+                flex.Add(c);
+                converted = true;
+            }
+
+            if (converted) plan = PlanUnionOf(job, flex, upgrading, out union, out cap, out demand);
+
+            job.Cap = cap;
+            job.Demand = demand;
+            job.Ledger = new BudgetLedger(cap);
+            job.Ledger.Stored = plan.FixedCost;
+            job.BudgetScale = plan.Scale;
+            job.FlexScale = plan.FlexScale;
+            job.LegacyScale = plan.LegacyScale;
+            job.UnionBinds = plan.Binds;
+
+            for (var k = 0; k < union.Count; k++)
+            {
+                var item = union[k];
+
+                if (item.Candidate != null)
+                {
+                    var c = item.Candidate;
+                    c.Target = plan.Targets[k];
+                    c.Reserved = Math.Min(c.SourceTriangles, c.Target);
+                    job.Ledger.Reserve(c.Reserved);
+
+                    if (plan.Floors[k] > AreaBudget.Scaled(AreaBudget.Basis(c.Surface, c.Footprint, c.Height), plan.FlexScale)) job.HeldAtFloor++;
+                    continue;
+                }
+
+                if (!plan.Retarget[k]) continue;
+
+                // D3: an over-served stored building loses its excess over its union target
+                var e = item.Entry;
+                e.Retarget = true;
+                e.RetargetTarget = plan.Targets[k];
+                e.PlannedNew = Math.Min((long)e.Meta.SourceTriangles, plan.Targets[k]);
+                job.RetargetsPlanned++;
+
+                var present = e.SeenBy;
+                if (present != null && present.Kind == KindSkip && present.QueuedLevel < 0 && IsSource(job, present))
+                {
+                    // re-read at source quality: its planned share moves from what is stored to what is reserved
+                    present.Kind = KindUpgrade;
+                    present.Replaces = e;
+                    present.Retarget = true;
+                    present.Target = e.RetargetTarget;
+                    present.Reserved = Math.Min(present.SourceTriangles, e.PlannedNew);
+                    job.Ledger.Drop(e.PlannedNew);
+                    job.Ledger.Reserve(present.Reserved);
+                }
+                else
+                {
+                    job.RetargetQueue.Enqueue(e);
+                }
+            }
+
+            // WP8 (D3): the over-budget pool, as on the from-scratch path
+            job.OverBudgetPool = (long)(job.Cap * (1 - BudgetShare) * 0.5);
+
+            // the skipped: claimed, committed to their group's level, and off the list
+            foreach (var c in job.Candidates)
+            {
+                if (c.Kind != KindSkip) continue;
+
+                job.Claimed.Add(c.Renderer);
+                job.Skipped++;
+
+                if (c.Group != null && IsSource(job, c) && job.Groups.TryGetValue(c.Group, out var state) && state != null)
+                    state.Committed++;
+
+                // a skipped building whose stored tile was captured late, failed or from a coarse mip: its materials are
+                // registered, so the atlas can capture that tile again even when no new building uses it
+                RegisterDeficient(job, c);
+            }
+
+            job.Candidates.RemoveAll(c => c.Kind == KindSkip);
+            job.Budgeted = job.Candidates.Count;
+        }
+
+        /// <summary>WP2: one item of the union plan - a stored building (fixed) or a candidate (flex).</summary>
+        private sealed class UnionItem
+        {
+            internal StoredEntry Entry;
+            internal Candidate Candidate;
+        }
+
+        /// <summary>WP2: the union's lists, the cap derived from its demand, and AreaBudget.PlanUnion over them.</summary>
+        private static AreaBudget.UnionPlan PlanUnionOf(Job job, List<Candidate> flex, HashSet<StoredEntry> upgrading,
+            out List<UnionItem> union, out long cap, out long demand)
+        {
+            var replaced = new HashSet<StoredEntry>();
+            foreach (var c in flex)
+                if (c.Replaces != null) replaced.Add(c.Replaces);
+
+            union = new List<UnionItem>();
+            var extraFixed = 0L;
+
+            foreach (var e in job.Stored.All)
+            {
+                if (replaced.Contains(e) || upgrading.Contains(e))
+                {
+                    extraFixed += e.Meta.StoredTriangles;
+                    continue;
+                }
+
+                union.Add(new UnionItem { Entry = e });
+            }
+
+            foreach (var c in flex) union.Add(new UnionItem { Candidate = c });
+
+            var n = union.Count;
+            var surfaces = new double[n];
+            var footprints = new double[n];
+            var heights = new double[n];
+            var sources = new long[n];
+            var stored = new long[n];
+
+            for (var k = 0; k < n; k++)
+            {
+                var item = union[k];
+
+                if (item.Entry != null)
+                {
+                    var m = item.Entry.Meta;
+                    surfaces[k] = m.Surface;
+                    footprints[k] = m.Footprint;
+                    heights[k] = m.Height;
+                    sources[k] = Math.Max(1, m.SourceTriangles);
+                    stored[k] = m.StoredTriangles;
+                }
+                else
+                {
+                    var c = item.Candidate;
+                    surfaces[k] = c.Surface;
+                    footprints[k] = c.Footprint;
+                    heights[k] = c.Height;
+                    sources[k] = c.SourceTriangles;
+                    stored[k] = -1;
+                }
+            }
+
+            // D4-D6 over the union, exactly as ApplyBudget derives them over a from-scratch list
+            var legacy = AreaBudget.LegacyTargets(footprints, sources, out _);
+            demand = AreaBudget.Demand(surfaces, footprints, heights, legacy, sources);
+
+            var legacyReserved = 0L;
+            for (var k = 0; k < n; k++) legacyReserved += Math.Min(sources[k], legacy[k]);
+
+            cap = CapFor(demand, legacyReserved, job.MemoryCeiling);
+
+            return AreaBudget.PlanUnion(surfaces, footprints, heights, sources, stored, extraFixed, (long)(cap * BudgetShare));
+        }
+
+        /// <summary>WP2 (2.10): a skipped building's materials registered when its stored row names a tile that deserves
+        /// a second capture (late, failed, or possibly from a coarse mip) - no geometry is read.</summary>
+        /// <param name="job">The build.</param>
+        /// <param name="c">The skipped candidate.</param>
+        private static void RegisterDeficient(Job job, Candidate c)
+        {
+            var e = c.Matched;
+            if (e == null || job.StoredTiles == null || e.Meta.RangeMaterials.Length == 0) return;
+
+            var deficient = false;
+            foreach (var key in e.Meta.RangeMaterials)
+                if (job.StoredTiles.TryGetValue(key, out var row) && row.Page >= 0 &&
+                    ((row.Flags & (MapMeshIndex.FlagLate | MapMeshIndex.FlagFailed)) != 0 ||
+                     (row.Mip != MapMeshIndex.MipUnknown && row.Mip > 0)))
+                    deficient = true;
+
+            if (!deficient) return;
+
+            try
+            {
+                var before = job.Materials.Count;
+                var materials = c.Renderer.sharedMaterials;
+                if (materials != null)
+                    foreach (var material in materials)
+                        MaterialId(job, material);
+
+                job.StoredOnlyMaterials += job.Materials.Count - before;
+            }
+            catch (Exception ex)
+            {
+                job.Note("a stored building's materials", ex);
+            }
         }
 
         /// <summary>Whether this frame's budget of main-thread work is spent.</summary>
@@ -3247,11 +4286,19 @@ namespace QuestTree.QuestGraph
                 : state.Levels[state.Current].Set.Contains(candidate.Renderer);
 
             var made = new Dictionary<int, List<Candidate>>();
+            var kept = new Dictionary<int, List<Renderer>>();
             var group = candidate.Group;
 
+            // WP2: a level's renderers already stored unchanged at that level count as readable (the level is chosen)
+            // but are not read again; they are claimed and committed once it is.
             var next = NextLevel(state.Current, state.Levels.Count, state.Committed, current,
                 k => state.Levels[k].Set.Contains(candidate.Renderer),
-                k => (made[k] = MakeLevel(job, state.Levels[k], group, k)).Count);
+                k =>
+                {
+                    made[k] = MakeLevel(job, state.Levels[k], group, k, out var stored);
+                    kept[k] = stored;
+                    return made[k].Count + stored.Count;
+                });
 
             if (next < 0) return false;
 
@@ -3260,6 +4307,13 @@ namespace QuestTree.QuestGraph
             job.FellBackTo[Math.Max(1, Math.Min(3, state.Levels[next].Lod))]++;
 
             foreach (var c in made[next]) job.Extra.Enqueue(c);
+
+            foreach (var renderer in kept[next])
+            {
+                job.Claimed.Add(renderer);
+                state.Committed++;
+                job.Skipped++;
+            }
 
             return true;
         }
@@ -3271,9 +4325,11 @@ namespace QuestTree.QuestGraph
         /// <param name="level">The level.</param>
         /// <param name="group">Its group.</param>
         /// <param name="index">Its index in the ladder.</param>
-        private static List<Candidate> MakeLevel(Job job, LevelSet level, LODGroup group, int index)
+        /// <param name="stored">WP2: the level's renderers stored unchanged at this level, which are not queued.</param>
+        private static List<Candidate> MakeLevel(Job job, LevelSet level, LODGroup group, int index, out List<Renderer> stored)
         {
             var made = new List<Candidate>();
+            stored = new List<Renderer>();
 
             foreach (var renderer in level.List)
             {
@@ -3285,6 +4341,20 @@ namespace QuestTree.QuestGraph
 
                 c.Group = group;
                 c.QueuedLevel = index;
+
+                // WP2: against the stored mesh, as the level it is queued for.
+                if (job.Stored != null)
+                {
+                    var keep = false;
+                    Step(job, "a LOD level's identity", () => keep = ClassifyQueued(job, c, level.Lod));
+
+                    if (keep)
+                    {
+                        stored.Add(renderer);
+                        continue;
+                    }
+                }
+
                 made.Add(c);
             }
 
@@ -3375,7 +4445,7 @@ namespace QuestTree.QuestGraph
                 if (applied > 0 && FrameSpent(job)) break;
 
                 var flight = flights[k];
-                if (!flight.Task.IsCompleted) continue;
+                if (flight.RetargetOf != null ? !flight.Retarget.IsCompleted : !flight.Task.IsCompleted) continue;
 
                 flights.RemoveAt(k--);
                 applied++;
@@ -3390,7 +4460,8 @@ namespace QuestTree.QuestGraph
                     else job.LanesDropped++;
                 }
 
-                Step(job, "a finished building", () => Apply(job, flight));
+                if (flight.RetargetOf != null) Step(job, "a re-targeted building", () => ApplyRetarget(job, flight));
+                else Step(job, "a finished building", () => Apply(job, flight));
             }
         }
 
@@ -3437,6 +4508,7 @@ namespace QuestTree.QuestGraph
                 // and k+1, queued at k, is still read after the group moved to k+1 (IsSource passed it as a member
                 // of the current level), and its grade must say k+1, not one level better than it is.
                 candidate.ReadLod = state.Levels[state.Current].Lod;
+                candidate.ReadLevel = state.Current;
             }
 
             // The estimate the peak line adds up: the source's own arrays, the worker's lists over it, and
@@ -4656,23 +5728,39 @@ namespace QuestTree.QuestGraph
                 return Refused;
             }
 
-            // The format's building cap (M1): stop, rather than build a file Write refuses whole.
-            if (file.Buildings.Count >= MapMeshFile.MaxBuildings)
+            // The format's building cap (M1): stop, rather than build a file Write refuses whole. WP2: the stored
+            // buildings count - they are in the file this build writes.
+            if (job.StoredCount + file.Buildings.Count >= MapMeshFile.MaxBuildings)
             {
                 job.Stopped = true;
                 job.StoppedWhy = $"the format's cap of {N(MapMeshFile.MaxBuildings)} buildings was reached";
                 return Refused;
             }
 
+            // WP2: a building that replaces a stored one (an upgrade, a changed signature, a re-target) takes its place:
+            // the stored one leaves the file the moment this one is in it, so the totals below count the swap.
+            var replaced = candidate.Replaces != null && !candidate.Replaces.Drop ? candidate.Replaces : null;
+            var oldTriangles = replaced != null ? (long)replaced.Meta.StoredTriangles : 0L;
+            var oldVertices = replaced != null ? (long)job.Request.Base.Buildings[replaced.Index].VertexCount : 0L;
+
+            // WP2 (I6): an upgrade that came out WORSE than the stored copy (its re-read fell to a coarser path) does not
+            // replace it - a stored building never degrades. A changed signature replaces whatever it is; a re-target
+            // is a deliberate reduction.
+            if (replaced != null && candidate.Kind == KindUpgrade && !candidate.Retarget && grade > replaced.Meta.Grade)
+            {
+                job.UpgradesRefused++;
+                return Refused;
+            }
+
             // The ledger admitted this building and Apply checked any overshoot against the headroom, so
             // this cannot trip - it is the last line under the map's cap, not the budget itself.
-            if (job.Triangles + kept > job.Cap)
+            if (job.Triangles - oldTriangles + kept > job.Cap)
             {
                 job.OverBudget++;
                 return Refused;
             }
 
-            if (job.Vertices + vertices > MapMeshFile.MaxVerticesTotal)
+            if (job.Vertices - oldVertices + vertices > MapMeshFile.MaxVerticesTotal)
             {
                 job.RefusedFileVertices++;
                 return Refused;
@@ -4702,6 +5790,10 @@ namespace QuestTree.QuestGraph
             // is an empty array until then so nothing can mistake it for a quantised one.
             var key = MapMeshFile.Building.KeyFor(HierarchyPath(candidate.Renderer.transform), candidate.Bounds.center);
 
+            // WP2: the sidecar row BEFORE anything is added, so a renderer that throws here (destroyed under us) leaves the
+            // file and its rows in step.
+            var entry = MakeEntry(job, candidate, grade, groupKey ?? key, kept, (float)(heightSum / vertices));
+
             job.File.Buildings.Add(new MapMeshFile.Building
             {
                 Key = key,
@@ -4730,14 +5822,509 @@ namespace QuestTree.QuestGraph
             }
 
             job.Kept++;
-            job.Triangles += kept;
-            job.Vertices += vertices;
+            job.Triangles += kept - oldTriangles;
+            job.Vertices += vertices - oldVertices;
             job.Emitted.Add(candidate.Renderer);
 
             if (world.Mirrored) job.Mirrored++;
 
+            // WP2: the building's sidecar row (every build writes one - the from-scratch path a fresh sidecar), and the
+            // stored building it replaces out of the file: its triangles off the ledger (a re-target's were credited
+            // when it was planned).
+            job.NewEntries.Add(entry);
+            job.NewGroups.Add(candidate.Group);
+            job.NewCandidates.Add(candidate);
+
+            if (replaced != null)
+            {
+                replaced.Drop = true;
+                if (!candidate.Retarget) job.Ledger.Drop(oldTriangles);
+
+                if (candidate.Retarget) job.RetargetedRead++;
+                else if (candidate.Kind == KindChanged) job.Changed++;
+                else job.Upgraded++;
+            }
+
             return Stored;
         }
+
+        /// <summary>
+        /// WP2 (2.7): a stored building's sidecar row - which renderer it is (path hash, submesh range, source
+        /// triangles, vertex count, bounds), its group (path hash, position, PART-04's GroupKey) and the ladder level
+        /// read, its grade, its dup among identical renderers (a replacement keeps the stored one's), the budget inputs
+        /// the next build re-plans it with, and when it was stored. Its range materials are filled at ApplyAtlas.
+        /// Main thread (the mesh's vertex count, the group's transform).
+        /// </summary>
+        /// <param name="job">The build.</param>
+        /// <param name="c">The candidate stored.</param>
+        /// <param name="grade">Its grade.</param>
+        /// <param name="groupKey">PART-04's GroupKey.</param>
+        /// <param name="kept">Its triangles.</param>
+        /// <param name="centroid">Its mean vertex height, metres.</param>
+        private static MapMeshIndex.Entry MakeEntry(Job job, Candidate c, byte grade, int groupKey, int kept, float centroid)
+        {
+            if (c.PathHash == 0UL) c.PathHash = PathHash(job, c.Renderer.transform);
+
+            var centre = c.Bounds.center;
+            var size = c.Bounds.size;
+
+            var e = new MapMeshIndex.Entry
+            {
+                PathHash = c.PathHash,
+                SubFirst = c.SubFirst,
+                SubEnd = c.SubEnd,
+                SourceTriangles = (int)Math.Min(int.MaxValue, c.SourceTriangles),
+                MeshVertexCount = c.Mesh != null ? c.Mesh.vertexCount : 0,
+                Cx = centre.x, Cy = centre.y, Cz = centre.z,
+                Sx = size.x, Sy = size.y, Sz = size.z,
+                GroupKey = groupKey,
+                LevelIndex = (byte)Math.Max(0, Math.Min(255, c.ReadLevel)),
+                Grade = grade,
+                Footprint = (float)c.Footprint,
+                Surface = (float)c.Surface,
+                Height = (float)c.Height,
+                StoredTriangles = kept,
+                Centroid = centroid,
+                CapturedAt = (ushort)Math.Max(1, Math.Min(ushort.MaxValue, job.Request.CaptureOrdinal)),
+            };
+
+            if (c.Group != null && job.Groups.TryGetValue(c.Group, out var state) && state != null)
+            {
+                Identify(job, c.Group, state);
+                e.GroupPathHash = state.GroupHash;
+                e.Gx = state.GroupPosition.x;
+                e.Gy = state.GroupPosition.y;
+                e.Gz = state.GroupPosition.z;
+            }
+
+            e.Dup = c.Replaces != null ? c.Replaces.Meta.Dup : NextDup(job, e);
+
+            if (!job.NewByPath.TryGetValue(e.PathHash, out var list)) job.NewByPath[e.PathHash] = list = new List<MapMeshIndex.Entry>(1);
+            list.Add(e);
+
+            return e;
+        }
+
+        /// <summary>WP2: a new building's dup - one past the highest among the stored and new buildings that are the same
+        /// object (identical renderers), 0 when it is the first; so no two rows share an identity.</summary>
+        private static byte NextDup(Job job, MapMeshIndex.Entry e)
+        {
+            var dup = -1;
+
+            if (job.Stored != null && job.Stored.ByPath.TryGetValue(e.PathHash, out var stored))
+                foreach (var s in stored)
+                    if (MapMeshIndex.SameObject(s.Meta, e.PathHash, e.Cx, e.Cy, e.Cz, e.Sx, e.Sy, e.Sz)) dup = Math.Max(dup, s.Meta.Dup);
+
+            if (job.NewByPath.TryGetValue(e.PathHash, out var added))
+                foreach (var s in added)
+                    if (MapMeshIndex.SameObject(s, e.PathHash, e.Cx, e.Cy, e.Cz, e.Sx, e.Sy, e.Sz)) dup = Math.Max(dup, s.Dup);
+
+            return (byte)Math.Min(255, dup + 1);
+        }
+
+        // --- WP2 (D3): re-targeting absent stored buildings in place ------------------------------------------------
+
+        /// <summary>Whether absent over-served stored buildings are still to be re-decimated and may be.</summary>
+        private static bool RetargetsWaiting(Job job) =>
+            job.RetargetQueue.Count > 0 && !job.PastHard && !job.Request.Abort && !job.Stopped &&
+            job.RetargetMs < RetargetSeconds * 1000d;
+
+        /// <summary>A re-target that did not land: what the plan credited for it goes back on the ledger.</summary>
+        private static void RetargetFailed(Job job, StoredEntry e)
+        {
+            job.RetargetsFailed++;
+            job.Ledger.Stored += Math.Max(0L, e.Meta.StoredTriangles - e.PlannedNew);
+        }
+
+        /// <summary>
+        /// WP2 (D3): a stored building re-decimated from its stored geometry on a worker - its positions dequantised to
+        /// world metres, one vertex per (vertex, range) so every vertex has one range's UV, its raw UVs rebuilt from the
+        /// codes over each range's bounds, and each vertex's range as its material - through the same
+        /// MeshDecimator.DecimateTextured every building takes, to its union target. Main thread up to the Task.
+        /// </summary>
+        /// <param name="job">The build.</param>
+        /// <param name="e">The stored building.</param>
+        private static Flight LaunchRetarget(Job job, StoredEntry e)
+        {
+            var file = job.Request.Base;
+            var b = file.Buildings[e.Index];
+            var triangles = b.TriangleCount;
+            var ranges = b.Ranges ?? new List<MapMeshFile.AtlasRange>();
+            var textured = ranges.Count > 0 && b.U != null && b.V != null;
+
+            var triRange = new int[triangles];
+            for (var t = 0; t < triangles; t++) triRange[t] = -1;
+
+            for (var r = 0; r < ranges.Count; r++)
+                for (var i = ranges[r].First; i + 2 < ranges[r].First + ranges[r].Count && i + 2 < b.Indices.Length; i += 3)
+                    triRange[i / 3] = r;
+
+            var map = new Dictionary<long, int>();
+            var p = new List<float>(b.VertexCount * 3);
+            var uv = new List<float>(textured ? b.VertexCount * 2 : 0);
+            var material = new List<int>(textured ? b.VertexCount : 0);
+            var tri = new int[triangles * 3];
+
+            for (var t = 0; t < triangles; t++)
+            {
+                var r = textured ? triRange[t] : -1;
+
+                for (var k = 0; k < 3; k++)
+                {
+                    var v = (int)b.Indices[t * 3 + k];
+                    var key = ((long)v << 8) | (long)(r + 1);
+
+                    if (!map.TryGetValue(key, out var at))
+                    {
+                        at = p.Count / 3;
+                        map[key] = at;
+                        p.Add(file.XOf(b.X[v]));
+                        p.Add(file.HeightOf(b.Y[v]));
+                        p.Add(file.ZOf(b.Z[v]));
+
+                        if (textured)
+                        {
+                            uv.Add(r >= 0 ? ranges[r].U(b.U[v]) : 0f);
+                            uv.Add(r >= 0 ? ranges[r].V(b.V[v]) : 0f);
+                            material.Add(r);
+                        }
+                    }
+
+                    tri[t * 3 + k] = at;
+                }
+            }
+
+            var target = Math.Max(AreaBudget.MinTriangles, e.RetargetTarget);
+            var limit = (int)Math.Min(e.Meta.StoredTriangles - 1L, (long)Math.Ceiling(target * MeshDecimator.HardLimitFactor));
+            if (limit < target) return null;
+
+            var lane = job.Workspaces.Count > 0 ? job.Workspaces.Pop() : new Lane();
+            var positions = p.ToArray();
+            var uvs = textured ? uv.ToArray() : null;
+            var materials = textured ? material.ToArray() : null;
+            var capMs = ClusterCapMs(triangles);
+
+            job.InFlightTriangles += triangles;
+
+            return new Flight
+            {
+                RetargetOf = e,
+                Workspace = lane,
+                Triangles = triangles,
+                Bytes = positions.Length * 4L + tri.Length * 4L + triangles * DecimatorBytesPerTriangle,
+                Retarget = Task.Run(() =>
+                {
+                    var result = MeshDecimator.DecimateTextured(positions, tri, target, limit, capMs, lane.Decimator, uvs, materials);
+                    var outcome = new RetargetOutcome { Milliseconds = result.Milliseconds };
+
+                    if (result.TimedOut || result.Triangles == null || result.Triangles.Length < 3) outcome.Why = "timed out or empty";
+                    else if (result.SliversReverted) outcome.Why = "more slivers than its source";
+                    else if (result.AreaShare < MeshDecimator.AreaKept) outcome.Why = "a hole";
+                    else if (result.Triangles.Length / 3 > limit) outcome.Why = "over its limit";
+                    else
+                    {
+                        outcome.Usable = true;
+                        outcome.Positions = result.Positions;
+                        outcome.Triangles = result.Triangles;
+                        outcome.UV = uvs != null ? result.UV : null;
+                        outcome.TriangleRange = uvs != null ? result.TriangleMaterial : null;
+                    }
+
+                    return outcome;
+                }),
+            };
+        }
+
+        /// <summary>
+        /// WP2 (D3): a finished in-place re-target, on the main thread: re-split by range (every vertex one range's
+        /// again), UV codes over each range's UNCHANGED bounds (the decimator interpolates, so the bounds still hold
+        /// every UV), x and z quantised over the same extent, heights kept in metres for the merge; the ledger settles
+        /// the difference between what it lands at and what the plan credited. One that failed changes nothing.
+        /// </summary>
+        /// <param name="job">The build.</param>
+        /// <param name="flight">The finished flight.</param>
+        private static void ApplyRetarget(Job job, Flight flight)
+        {
+            var e = flight.RetargetOf;
+            RetargetOutcome o = null;
+
+            if (flight.Retarget.IsFaulted || flight.Retarget.IsCanceled)
+                job.Note("a stored building's re-target", flight.Retarget.Exception?.GetBaseException() ?? new InvalidOperationException("the worker failed"));
+            else o = flight.Retarget.Result;
+
+            if (o != null) job.RetargetMs += o.Milliseconds;
+
+            if (o == null || !o.Usable || job.Request.Abort)
+            {
+                RetargetFailed(job, e);
+                return;
+            }
+
+            var file = job.Request.Base;
+            var b = file.Buildings[e.Index];
+            var ranges = b.Ranges ?? new List<MapMeshFile.AtlasRange>();
+            var n = o.Positions.Length / 3;
+            var triangles = o.Triangles.Length / 3;
+
+            var indices = new uint[o.Triangles.Length];
+            for (var i = 0; i < indices.Length; i++) indices[i] = (uint)o.Triangles[i];
+
+            var triRange = new int[triangles];
+            for (var t = 0; t < triangles; t++)
+            {
+                var r = o.TriangleRange != null && t < o.TriangleRange.Length ? o.TriangleRange[t] : -1;
+                triRange[t] = r >= 0 && r < ranges.Count ? r : -1;
+            }
+
+            var split = SplitByRange(indices, n, triRange, ranges.Count);
+            var count = split.Source.Length;
+
+            if (count > MapMeshFile.MaxVerticesPerBuilding ||
+                job.Vertices - b.VertexCount + count > MapMeshFile.MaxVerticesTotal)
+            {
+                RetargetFailed(job, e);
+                return;
+            }
+
+            var x = new ushort[count];
+            var z = new ushort[count];
+            var y = new float[count];
+            ushort[] u = null, v = null;
+            var sum = 0d;
+
+            for (var k = 0; k < count; k++)
+            {
+                var from = split.Source[k];
+                x[k] = file.QuantiseX(o.Positions[from * 3]);
+                y[k] = o.Positions[from * 3 + 1];
+                z[k] = file.QuantiseZ(o.Positions[from * 3 + 2]);
+                sum += y[k];
+            }
+
+            var newRanges = new List<MapMeshFile.AtlasRange>();
+            var keys = new List<ulong>();
+
+            if (o.UV != null && ranges.Count > 0)
+            {
+                u = new ushort[count];
+                v = new ushort[count];
+
+                for (var r = 0; r < ranges.Count; r++)
+                {
+                    if (split.Count[r] == 0) continue;
+
+                    var range = ranges[r];
+                    range.First = split.First[r];
+                    range.Count = split.Count[r];
+
+                    for (var j = range.First; j < range.First + range.Count; j++)
+                    {
+                        var k = (int)split.Indices[j];
+                        var from = split.Source[k];
+                        u[k] = UvCodeFor(o.UV[from * 2], range.UMin, range.UMax);
+                        v[k] = UvCodeFor(o.UV[from * 2 + 1], range.VMin, range.VMax);
+                    }
+
+                    newRanges.Add(range);
+                    keys.Add(r < e.Meta.RangeMaterials.Length ? e.Meta.RangeMaterials[r] : 0UL);
+                }
+            }
+
+            job.Retargeted[e.Index] = new RetargetedBuilding
+            {
+                X = x, Z = z, YMetres = y, Indices = split.Indices, U = u, V = v, Ranges = newRanges, RangeKeys = keys.ToArray(),
+                Triangles = triangles, Centroid = (float)(sum / Math.Max(1, count)),
+            };
+
+            job.Ledger.Stored += triangles - e.PlannedNew;
+            job.Triangles += triangles - (long)e.Meta.StoredTriangles;
+            job.Vertices += count - (long)b.VertexCount;
+        }
+
+        /// <summary>WP2 (D3): after the loop - the re-targets never launched (the hard cap, the time budget, an abort),
+        /// and the re-reads that never stored, give back what the plan credited for them.</summary>
+        private static void SettleRetargets(Job job)
+        {
+            while (job.RetargetQueue.Count > 0) RetargetFailed(job, job.RetargetQueue.Dequeue());
+
+            foreach (var e in job.Stored.All)
+                if (e.Retarget && !e.Drop && !job.Retargeted.ContainsKey(e.Index) && e.SeenBy != null && e.SeenBy.Retarget)
+                {
+                    job.RetargetsFailed++;
+                    job.Ledger.Stored += e.Meta.StoredTriangles;
+                }
+        }
+
+        // --- WP2 (2.7): one level per LOD group -------------------------------------------------------------------
+
+        /// <summary>
+        /// WP2 (2.7): every LOD group with stored buildings that this build also stored buildings of, resolved to ONE
+        /// level (PART-04's rule: the lowest level wins wholesale). When the new buildings are at a FINER level than the
+        /// stored ones, the upgrade commits only when every renderer of that level this build could read (a candidate,
+        /// decodable) was stored - then the stored buildings of the group leave the file; otherwise the new ones at that
+        /// level are rolled back and the stored ones stay, because a group left half-detailed with its coarse shell
+        /// deleted is worse than what was stored. New buildings of the group at any level other than the one kept are
+        /// rolled back. A roll-back undoes a replacement it made.
+        /// </summary>
+        /// <param name="job">The build.</param>
+        private static void ResolveGroupUpgrades(Job job)
+        {
+            var byGroup = new Dictionary<LODGroup, List<int>>();
+
+            for (var i = 0; i < job.File.Buildings.Count && i < job.NewGroups.Count; i++)
+            {
+                var group = job.NewGroups[i];
+                if (group == null) continue;
+
+                if (!byGroup.TryGetValue(group, out var list)) byGroup[group] = list = new List<int>();
+                list.Add(i);
+            }
+
+            var remove = new HashSet<int>();
+
+            foreach (var pair in byGroup)
+            {
+                if (!job.Groups.TryGetValue(pair.Key, out var state) || state?.Stored == null) continue;
+
+                var kept = state.Stored.FindAll(s => !s.Drop);
+                if (kept.Count == 0) continue;
+
+                var storedLod = int.MaxValue;
+                foreach (var s in kept) storedLod = Math.Min(storedLod, s.Meta.Lod);
+
+                var newLod = int.MaxValue;
+                foreach (var i in pair.Value) newLod = Math.Min(newLod, job.NewEntries[i].Lod);
+
+                var keepLod = storedLod;
+
+                if (newLod < storedLod)
+                {
+                    if (LevelComplete(job, pair.Key, state, newLod))
+                    {
+                        keepLod = newLod;
+                        job.GroupsToDetail++;
+
+                        foreach (var s in kept)
+                        {
+                            s.Drop = true;
+                            job.Ledger.Drop(s.Meta.StoredTriangles);
+                            job.Triangles -= s.Meta.StoredTriangles;
+                            job.Vertices -= job.Request.Base.Buildings[s.Index].VertexCount;
+                        }
+                    }
+                }
+
+                foreach (var i in pair.Value)
+                    if (job.NewEntries[i].Lod != keepLod)
+                        remove.Add(i);
+            }
+
+            if (remove.Count > 0) RemoveNew(job, remove);
+        }
+
+        /// <summary>Whether every renderer of a group's level at this LOD that this build met as a decodable candidate is
+        /// in the file now.</summary>
+        private static bool LevelComplete(Job job, LODGroup group, GroupState state, int lod)
+        {
+            LevelSet level = null;
+            foreach (var l in state.Levels)
+                if (l.Lod == lod)
+                {
+                    level = l;
+                    break;
+                }
+
+            if (level == null) return false;
+
+            var any = false;
+
+            foreach (var c in job.Met)
+            {
+                if (c.Group != group || !level.Set.Contains(c.Renderer) || !Decodable(c)) continue;
+                if (!job.Emitted.Contains(c.Renderer)) return false;
+                any = true;
+            }
+
+            return any;
+        }
+
+        /// <summary>WP2: new buildings taken back out of the file - every parallel list compacted in one pass, the totals
+        /// and the ledger settled, and a replacement they made undone (the stored building stays).</summary>
+        private static void RemoveNew(Job job, HashSet<int> remove)
+        {
+            var file = job.File;
+            var buildings = new List<MapMeshFile.Building>(file.Buildings.Count);
+            var pendingY = new List<float[]>();
+            var centroids = new List<float>();
+            var pendingUV = new List<float[]>();
+            var pendingTriMat = new List<int[]>();
+            var entries = new List<MapMeshIndex.Entry>();
+            var groups = new List<LODGroup>();
+            var candidates = new List<Candidate>();
+
+            for (var i = 0; i < file.Buildings.Count; i++)
+            {
+                if (!remove.Contains(i))
+                {
+                    buildings.Add(file.Buildings[i]);
+                    pendingY.Add(i < job.PendingY.Count ? job.PendingY[i] : null);
+                    centroids.Add(i < job.Centroids.Count ? job.Centroids[i] : 0f);
+                    pendingUV.Add(i < job.PendingUV.Count ? job.PendingUV[i] : null);
+                    pendingTriMat.Add(i < job.PendingTriMat.Count ? job.PendingTriMat[i] : null);
+                    entries.Add(job.NewEntries[i]);
+                    groups.Add(job.NewGroups[i]);
+                    candidates.Add(job.NewCandidates[i]);
+                    continue;
+                }
+
+                var b = file.Buildings[i];
+                var c = job.NewCandidates[i];
+                var triangles = b.TriangleCount;
+
+                job.Ledger.Drop(triangles);
+                job.Triangles -= triangles;
+                job.Vertices -= b.VertexCount;
+                job.Kept--;
+                job.RolledBack++;
+                job.Emitted.Remove(c.Renderer);
+
+                if (i < job.PendingUV.Count && job.PendingUV[i] != null) job.PendingUVBytes -= job.PendingUV[i].Length * 4L;
+                if (i < job.PendingTriMat.Count && job.PendingTriMat[i] != null) job.PendingTriMatBytes -= job.PendingTriMat[i].Length * 4L;
+
+                if (job.NewByPath.TryGetValue(job.NewEntries[i].PathHash, out var same)) same.Remove(job.NewEntries[i]);
+
+                // its replacement undone: the stored building is in the file again
+                var old = c.Replaces;
+                if (old != null && old.Drop)
+                {
+                    old.Drop = false;
+                    job.Triangles += old.Meta.StoredTriangles;
+                    job.Vertices += job.Request.Base.Buildings[old.Index].VertexCount;
+                    job.Ledger.Stored += old.Meta.StoredTriangles;   // a replacement dropped it, a re-target credited it: back either way
+
+                    if (c.Retarget) job.RetargetedRead--;
+                    else if (c.Kind == KindChanged) job.Changed--;
+                    else job.Upgraded--;
+                }
+            }
+
+            file.Buildings = buildings;
+            job.PendingY.Clear();
+            job.PendingY.AddRange(pendingY);
+            job.Centroids.Clear();
+            job.Centroids.AddRange(centroids);
+            job.PendingUV.Clear();
+            job.PendingUV.AddRange(pendingUV);
+            job.PendingTriMat.Clear();
+            job.PendingTriMat.AddRange(pendingTriMat);
+            job.NewEntries.Clear();
+            job.NewEntries.AddRange(entries);
+            job.NewGroups.Clear();
+            job.NewGroups.AddRange(groups);
+            job.NewCandidates.Clear();
+            job.NewCandidates.AddRange(candidates);
+        }
+
 
         // --- stage W: the atlas ------------------------------------------------------------------------
 
@@ -4797,6 +6384,21 @@ namespace QuestTree.QuestGraph
             internal bool CutoutTaken;
             internal bool CutoutLeft;
             internal bool WhiteLeft;
+
+            /// <summary>WP2 (2.10): the material's key (MaterialKey), its stored tile row when the stored atlas has one,
+            /// the texture's resident mip when it was registered (MapMeshIndex.MipUnknown when not streamed), whether its
+            /// textured tile was left flat past the capture share or failed to capture this build, and whether its
+            /// stored tile is being captured again (a deficient one).</summary>
+            internal ulong Key;
+
+            internal MapMeshIndex.Tile Stored;
+            internal byte Mip = MapMeshIndex.MipUnknown;
+            internal bool Late;
+            internal bool Failed;
+            internal bool Upgrade;
+
+            /// <summary>WP2: captured by this build (not only copied from the stored row).</summary>
+            internal bool CapturedNow;
         }
 
         /// <summary>WP8 (D4 commit 1): what the atlas left out, one material at a time - its shader, render queue,
@@ -5047,6 +6649,11 @@ namespace QuestTree.QuestGraph
                         break;
                     }
 
+                    // WP2 (2.10): what the stored atlas knows the material by, and its tile there if it has one
+                    info.Key = MaterialKey(material, info);
+                    info.Mip = MipOf(info.Texture);
+                    if (job.StoredTiles != null && job.StoredTiles.TryGetValue(info.Key, out var row)) info.Stored = row;
+
                     id = job.Materials.Count;
                     job.Materials.Add(info);
 
@@ -5062,6 +6669,56 @@ namespace QuestTree.QuestGraph
 
             job.MaterialIds[material] = id;
             return id;
+        }
+
+        /// <summary>
+        /// WP2 (2.10): a material's key for the stored atlas - FNV-1a 64 over the material's and shader's names, the
+        /// property the texture was found under, the texture's name, size, format and mip count, the tint (each channel
+        /// rounded to 1/1024) and the cutout rule's inputs. The things a tile's pixels and MapBuilding's decision are
+        /// made from; the texture's scale and offset are left out - they move UVs, not pixels. Main thread.
+        /// </summary>
+        /// <param name="material">The material.</param>
+        /// <param name="info">Its registry entry, texture, tint and cutoff filled.</param>
+        private static ulong MaterialKey(Material material, AtlasMaterial info)
+        {
+            var h = MapMeshIndex.Fnv64(material.name);
+            h = MapMeshIndex.Fnv64Continue(MapMeshIndex.Fnv64Continue(h, '|'), material.shader != null ? material.shader.name : "");
+            h = MapMeshIndex.Fnv64Continue(MapMeshIndex.Fnv64Continue(h, '|'), info.TextureProperty ?? "");
+
+            var texture = info.Texture;
+            if (texture != null)
+            {
+                h = MapMeshIndex.Fnv64Continue(MapMeshIndex.Fnv64Continue(h, '|'), texture.name);
+                h = MapMeshIndex.Fnv64Continue(h, (ulong)texture.width);
+                h = MapMeshIndex.Fnv64Continue(h, (ulong)texture.height);
+                h = MapMeshIndex.Fnv64Continue(h, (ulong)(long)texture.graphicsFormat);
+                h = MapMeshIndex.Fnv64Continue(h, (ulong)(texture is Texture2D t2 ? t2.mipmapCount : 1));
+            }
+
+            h = MapMeshIndex.Fnv64Continue(h, (ulong)(long)Math.Round(info.Tint.r * 1024d));
+            h = MapMeshIndex.Fnv64Continue(h, (ulong)(long)Math.Round(info.Tint.g * 1024d));
+            h = MapMeshIndex.Fnv64Continue(h, (ulong)(long)Math.Round(info.Tint.b * 1024d));
+            h = MapMeshIndex.Fnv64Continue(h, (ulong)(long)Math.Round(info.Cutoff * 1024d));
+            h = MapMeshIndex.Fnv64Continue(h, info.Cutout ? 1UL : 0UL);
+
+            return h == 0UL ? 1UL : h;
+        }
+
+        /// <summary>WP2: a streamed texture's resident mip level now (0 = full), or MapMeshIndex.MipUnknown when it is not
+        /// streamed or the level cannot be read.</summary>
+        /// <param name="texture">The texture.</param>
+        private static byte MipOf(Texture texture)
+        {
+            try
+            {
+                if (texture is Texture2D t && t.streamingMipmaps) return (byte)Math.Max(0, Math.Min(254, t.loadedMipmapLevel));
+            }
+            catch (Exception)
+            {
+                // no streaming information: no mip upgrade
+            }
+
+            return MapMeshIndex.MipUnknown;
         }
 
         /// <summary>
@@ -5127,9 +6784,18 @@ namespace QuestTree.QuestGraph
                 var busy = new Task[2];
                 job.PeakAtlasBytes = 2L * size * size * 4;
 
+                // WP2: onto a stored atlas only the TOUCHED pages are filled and encoded (the rest are carried with their
+                // sha), a stored one decoded into its buffer first; from scratch every page is touched and this is the
+                // pre-WP2 loop exactly (slot == page).
+                var basePages = job.Stored != null ? job.Request.Base.AtlasPages : 0;
+                var slot = 0;
+                result.PageRewritten = new bool[job.AtlasPageCount];
+
                 for (var page = 0; page < job.AtlasPageCount; page++)
                 {
-                    var b = page % 2;
+                    if (job.TouchedPages != null && !job.TouchedPages[page]) continue;
+
+                    var b = slot++ % 2;
 
                     // the buffer this page fills must be free: its last encode has written and cleared it
                     while (busy[b] != null && !busy[b].IsCompleted)
@@ -5147,6 +6813,29 @@ namespace QuestTree.QuestGraph
 
                     var pixels = buffers[b];
                     var tiles = 0;
+
+                    if (page < basePages)
+                    {
+                        // a stored page takes new tiles: its pixels first (on a worker), or the atlas is abandoned - a page
+                        // that could not be read is never written over
+                        var from = job.Request.AtlasPagePath?.Invoke(page);
+                        var decode = StartDecode(from, pixels, size);
+
+                        while (!decode.IsCompleted)
+                        {
+                            if (OverCap(job)) yield break;
+                            yield return null;
+                            job.FrameClock.Restart();
+                        }
+
+                        if (decode.IsFaulted || !decode.Result)
+                        {
+                            job.AtlasAbandonWhy = $"stored page {page} would not decode ({(decode.IsFaulted ? Describe(decode.Exception) : "not a page this build can read")})";
+                            yield break;
+                        }
+
+                        tiles = job.Request.BaseIndex.Pages[page].Tiles;
+                    }
 
                     foreach (var request in requests)
                     {
@@ -5179,10 +6868,23 @@ namespace QuestTree.QuestGraph
                             else
                             {
                                 job.TilesLate++;
+                                info.Late = true;
                             }
                         });
 
-                        tiles++;
+                        // WP2: a stored tile captured again, into its own rect (the row before is kept for a failed page)
+                        if (r[1] == 2)
+                        {
+                            if (tile != null)
+                            {
+                                job.TilesUpgraded++;
+                                job.Placed.Add(new PlacedTile { Page = page, Key = info.Key, X = x, Y = y, Old = info.Stored.Copy() });
+                            }
+                        }
+                        else
+                        {
+                            tiles++;
+                        }
 
                         // the copy into the page, a slice of rows a step: a 1024 x 1024 block is a million texels
                         if (tile != null)
@@ -5229,6 +6931,7 @@ namespace QuestTree.QuestGraph
                     var encode = StartEncode(path, pixels, size);
 
                     busy[b] = encode;
+                    result.PageRewritten[page] = true;
                     jobs.Add(new AtlasPageJob { Page = page, Tiles = tiles, PartPath = path, Encode = encode });
                 }
 
@@ -5307,6 +7010,14 @@ namespace QuestTree.QuestGraph
                 }
             });
 
+        /// <summary>WP2: decodes a stored page's file into a page buffer on a worker (AtlasPng.DecodeTo). A method, like
+        /// <see cref="StartEncode"/>, so the closure holds its own parameters.</summary>
+        /// <param name="path">The committed page's file, or null.</param>
+        /// <param name="buffer">The page buffer.</param>
+        /// <param name="size">The page's side.</param>
+        internal static Task<bool> StartDecode(string path, byte[] buffer, int size) =>
+            Task.Run(() => !string.IsNullOrEmpty(path) && AtlasPng.DecodeTo(path, buffer, size));
+
         /// <summary>An exception as "Type: message at first frame", for a log line.</summary>
         /// <param name="ex">The exception (an AggregateException is unwrapped).</param>
         internal static string Describe(Exception ex)
@@ -5328,6 +7039,10 @@ namespace QuestTree.QuestGraph
         {
             job.AtlasAbandoned = true;
             job.Mapped = null;
+
+            // WP2: nothing placed or re-captured stands; the stored pages on disk were never touched (encodes only write
+            // .part files), and the stored ranges were not edited (that is ApplyAtlas's, the completion's).
+            job.Placed.Clear();
 
             // No range may outlive the pages - an ApplyAtlas that threw half way would otherwise leave ranges on a
             // file that names no page, which Write refuses whole.
@@ -5430,6 +7145,12 @@ namespace QuestTree.QuestGraph
         /// <param name="requests">Filled: material, kind, one repeat's w and h, page, x, y.</param>
         private static void Layout(Job job, List<int[]> requests)
         {
+            if (job.Stored != null)
+            {
+                LayoutAccumulated(job, requests);
+                return;
+            }
+
             for (var m = 0; m < job.Materials.Count; m++)
             {
                 var info = job.Materials[m];
@@ -5466,8 +7187,9 @@ namespace QuestTree.QuestGraph
             var ys = new int[n];
             var limits = new[] { flats > 0 ? MapMeshFile.MaxAtlasPages - 1 : MapMeshFile.MaxAtlasPages, MapMeshFile.MaxAtlasPages };
 
-            job.AtlasPageCount = AtlasPacker.Pack(widths, heights, MapMeshFile.AtlasPageSize, MapMeshFile.MaxAtlasPages,
-                AtlasPadding, pages, xs, ys, groups, limits);
+            // WP2: PackFrom from an empty state is Pack exactly; the state it stops at goes into the sidecar.
+            job.AtlasPageCount = AtlasPacker.PackFrom(ref job.PackState, widths, heights, MapMeshFile.AtlasPageSize,
+                MapMeshFile.MaxAtlasPages, AtlasPadding, pages, xs, ys, groups, limits);
 
             for (var k = 0; k < n; k++)
             {
@@ -5501,6 +7223,146 @@ namespace QuestTree.QuestGraph
             }
         }
 
+        /// <summary>
+        /// WP2 (2.10): the layout onto a stored atlas. A material the stored atlas has keeps its tiles - no request for a
+        /// kind it already has; its rects, capture state, opaque share and average colour are the stored row's - and a
+        /// stored textured tile that deserves it (late, failed, or from a coarser resident mip than now: Tile.Deficient)
+        /// is captured again into its SAME rect (kind 2). Every other tile is packed AFTER the stored packing
+        /// (AtlasPacker.PackFrom, the same group rule: textured tiles never start the last page while flats need a
+        /// place). The pages touched - a new tile or a re-capture on them, or past the stored pages - are the only ones
+        /// this build encodes.
+        /// </summary>
+        /// <param name="job">The build.</param>
+        /// <param name="requests">Filled: material, kind (0 textured, 1 flat, 2 re-capture), w, h, page, x, y.</param>
+        private static void LayoutAccumulated(Job job, List<int[]> requests)
+        {
+            var basePages = job.Request.Base.AtlasPages;
+            var fresh = new List<int[]>();
+
+            for (var m = 0; m < job.Materials.Count; m++)
+            {
+                var info = job.Materials[m];
+                var used = info.Textured || info.Flat;
+                var row = info.Stored;
+                var tex2d = info.Texture != null && info.Texture.dimension == TextureDimension.Tex2D;
+
+                if (row == null)
+                {
+                    if (!used) continue;
+
+                    if (info.Textured && tex2d)
+                        fresh.Add(new[] { m, 0, TileSide(info.Texture.width), TileSide(info.Texture.height), -1, 0, 0 });
+
+                    fresh.Add(new[] { m, 1, AtlasFlatPixels, AtlasFlatPixels, -1, 0, 0 });
+                    continue;
+                }
+
+                if (used) job.MaterialsReused++;
+
+                info.AvgR = row.AvgR;
+                info.AvgG = row.AvgG;
+                info.AvgB = row.AvgB;
+                if ((row.Flags & MapMeshIndex.FlagNormalRefused) != 0) info.NormalRefused = true;
+
+                if (row.Page >= 0 && row.Page < basePages)
+                {
+                    info.Page = row.Page;
+                    info.X = row.X;
+                    info.Y = row.Y;
+                    info.TileW = row.W;
+                    info.TileH = row.H;
+                    info.Captured = row.Captured;
+                    info.OpaqueShare = row.OpaqueShare;
+
+                    if (tex2d && TileSide(info.Texture.width) == row.W && TileSide(info.Texture.height) == row.H && row.Deficient(info.Mip))
+                    {
+                        requests.Add(new[] { m, 2, row.W, row.H, row.Page, row.X, row.Y });
+                        info.Upgrade = true;
+                    }
+                }
+                else if (used && info.Textured && tex2d)
+                {
+                    fresh.Add(new[] { m, 0, TileSide(info.Texture.width), TileSide(info.Texture.height), -1, 0, 0 });
+                }
+
+                if (row.FlatPage >= 0 && row.FlatPage < basePages)
+                {
+                    info.FlatPage = row.FlatPage;
+                    info.FlatX = row.FlatX;
+                    info.FlatY = row.FlatY;
+                }
+                else if (used)
+                {
+                    fresh.Add(new[] { m, 1, AtlasFlatPixels, AtlasFlatPixels, -1, 0, 0 });
+                }
+            }
+
+            var n = fresh.Count;
+            var widths = new int[n];
+            var heights = new int[n];
+            var groups = new int[n];
+            var flats = 0;
+
+            for (var k = 0; k < n; k++)
+            {
+                widths[k] = fresh[k][2];
+                heights[k] = fresh[k][3];
+                groups[k] = fresh[k][1] == 0 ? 0 : 1;
+                if (fresh[k][1] != 0) flats++;
+            }
+
+            var pages = new int[n];
+            var xs = new int[n];
+            var ys = new int[n];
+            var limits = new[] { flats > 0 ? MapMeshFile.MaxAtlasPages - 1 : MapMeshFile.MaxAtlasPages, MapMeshFile.MaxAtlasPages };
+
+            var used2 = AtlasPacker.PackFrom(ref job.PackState, widths, heights, MapMeshFile.AtlasPageSize, MapMeshFile.MaxAtlasPages,
+                AtlasPadding, pages, xs, ys, groups, limits);
+
+            job.AtlasPageCount = Math.Max(basePages, used2);
+            job.TouchedPages = new bool[job.AtlasPageCount];
+            for (var page = basePages; page < job.AtlasPageCount; page++) job.TouchedPages[page] = true;
+
+            foreach (var r in requests)
+                if (r[4] >= 0 && r[4] < job.AtlasPageCount) job.TouchedPages[r[4]] = true;
+
+            for (var k = 0; k < n; k++)
+            {
+                var r = fresh[k];
+                r[4] = pages[k];
+                r[5] = xs[k];
+                r[6] = ys[k];
+
+                if (pages[k] < 0)
+                {
+                    job.TilesUnplaced++;
+                    continue;
+                }
+
+                var info = job.Materials[r[0]];
+
+                if (r[1] == 0)
+                {
+                    info.Page = pages[k];
+                    info.X = xs[k];
+                    info.Y = ys[k];
+                    info.TileW = r[2];
+                    info.TileH = r[3];
+                }
+                else
+                {
+                    info.FlatPage = pages[k];
+                    info.FlatX = xs[k];
+                    info.FlatY = ys[k];
+                }
+
+                job.TouchedPages[pages[k]] = true;
+                job.TilesNew++;
+                job.Placed.Add(new PlacedTile { Page = pages[k], Key = info.Key, Flat = r[1] == 1, X = xs[k], Y = ys[k] });
+                requests.Add(r);
+            }
+        }
+
         /// <summary>A tile's side for a texture side (stage X): min(it, AtlasTileMax), rounded DOWN to a multiple of
         /// <see cref="MapMeshFile.TileAlign"/>, at least that - the viewer compresses each tile to DXT1, in 4 x 4
         /// blocks.</summary>
@@ -5524,6 +7386,7 @@ namespace QuestTree.QuestGraph
             if (tile == null)
             {
                 job.TexturesFailed++;
+                info.Failed = true;
                 return null;
             }
 
@@ -5554,6 +7417,7 @@ namespace QuestTree.QuestGraph
             info.AvgB = (byte)b;
             info.OpaqueShare = opaque;
             info.Captured = true;
+            info.CapturedNow = true;
             job.TexturesCaptured++;
 
             return tile;
@@ -5799,6 +7663,7 @@ namespace QuestTree.QuestGraph
             }
 
             var ranges = new List<MapMeshFile.AtlasRange>(rangeUse.Count);
+            var rangeKeys = new List<ulong>(rangeUse.Count);
 
             for (var r = 0; r < rangeUse.Count; r++)
             {
@@ -5831,6 +7696,7 @@ namespace QuestTree.QuestGraph
                 }
 
                 ranges.Add(range);
+                rangeKeys.Add(job.Materials[use.Material].Key);
             }
 
             job.SplitVertices += n - building.X.Length;
@@ -5839,7 +7705,7 @@ namespace QuestTree.QuestGraph
             job.Mapped[i] = new AtlasMapped
             {
                 Indices = split.Indices, X = x, Z = z, YMetres = y, U = u, V = v, Ranges = ranges,
-                Triangles = split.Textured,
+                Triangles = split.Textured, RangeKeys = rangeKeys.ToArray(),
             };
         }
 
@@ -5971,10 +7837,16 @@ namespace QuestTree.QuestGraph
 
                 job.TexturedBuildings++;
                 job.TexturedTriangles += mapped.Triangles;
+
+                if (i < job.NewEntries.Count) job.NewEntries[i].RangeMaterials = mapped.RangeKeys ?? new ulong[0];
             }
 
             file.AtlasPages = job.AtlasPageCount;
             job.AtlasApplied = true;
+
+            // WP2: a stored building drew a material on its flat tile because the textured capture was late or failed;
+            // captured now, its ranges take the textured rect (their UVs and bounds are the same for both).
+            if (job.Stored != null) SwitchStoredRanges(job);
 
             for (var i = 0; i < job.PendingUV.Count; i++)
             {
@@ -5983,6 +7855,51 @@ namespace QuestTree.QuestGraph
             }
 
             job.Mapped = null;
+        }
+
+        /// <summary>WP2 (2.10): stored ranges on a material's flat tile moved to its textured tile, now that a re-capture
+        /// took it - when the textured tile would be used at all (a cutout only when opaque enough). Each edit is kept
+        /// with the range before, for a page that fails to settle.</summary>
+        /// <param name="job">The build.</param>
+        private static void SwitchStoredRanges(Job job)
+        {
+            var taken = new Dictionary<ulong, AtlasMaterial>();
+
+            foreach (var info in job.Materials)
+            {
+                if (!info.Upgrade || !info.Captured || info.Stored == null || info.Stored.Captured) continue;
+                if (info.Page < 0 || info.FlatPage < 0) continue;
+                if (info.Cutout && !(info.OpaqueShare >= CutoutOpaqueShare)) continue;
+
+                taken[info.Key] = info;
+            }
+
+            if (taken.Count == 0) return;
+
+            foreach (var e in job.Stored.All)
+            {
+                if (e.Drop || job.Retargeted.ContainsKey(e.Index)) continue;
+
+                var b = job.Request.Base.Buildings[e.Index];
+                var keys = e.Meta.RangeMaterials;
+
+                for (var k = 0; k < keys.Length && k < b.Ranges.Count; k++)
+                {
+                    if (!taken.TryGetValue(keys[k], out var info)) continue;
+
+                    var range = b.Ranges[k];
+                    if (range.Page != info.FlatPage || range.TileX != info.FlatX || range.TileY != info.FlatY) continue;
+
+                    job.RangeEdits.Add(new RangeEdit { Building = e.Index, Range = k, Page = info.Page, Old = range });
+
+                    range.Page = info.Page;
+                    range.TileX = (ushort)info.X;
+                    range.TileY = (ushort)info.Y;
+                    range.TileW = (ushort)info.TileW;
+                    range.TileH = (ushort)info.TileH;
+                    b.Ranges[k] = range;
+                }
+            }
         }
 
         /// <summary>
@@ -6051,6 +7968,218 @@ namespace QuestTree.QuestGraph
             if (file != null && good.Count < file.AtlasPages) TruncateAtlas(file, good.Count);
 
             return good;
+        }
+
+        /// <summary>
+        /// WP2 (2.13): the capture's end of the atlas, for both paths. From scratch it is <see cref="SettleAtlas"/>'s
+        /// rule - pages 0..n-1 up to the first that did not finish, the rest cut - with the sidecar kept in step. Onto a
+        /// stored atlas, page by page: a REWRITTEN stored page that did not finish keeps its old file (FailAtlasPage
+        /// undoes what this build put on it); a NEW page that did not finish ends the atlas there. Each page that settles
+        /// gets its sha into the sidecar. Returns the pages that finished, in order, with their real page numbers.
+        /// </summary>
+        /// <param name="result">The build's result: its file, sidecar and page jobs (all finished or given up on).</param>
+        internal static List<AtlasPageDone> SettleAccumulated(Result result)
+        {
+            var good = new List<AtlasPageDone>();
+            var pages = result?.AtlasPages;
+            if (pages == null || result.File == null) return good;
+
+            var basePages = result.Accumulated ? result.BasePages : 0;
+            var nextNew = basePages;
+            var last = -1;
+
+            for (var k = 0; k < pages.Count; k++)
+            {
+                var page = pages[k];
+                var fresh = page.Page >= basePages;
+
+                var ok = page.Encode != null && page.Encode.Status == TaskStatus.RanToCompletion && page.Encode.Result != null &&
+                         page.Page > last && page.Page < result.File.AtlasPages && (!fresh || page.Page == nextNew);
+
+                if (!ok)
+                {
+                    var why = page.Encode == null ? "no encode was started"
+                        : page.Encode.IsFaulted ? $"its encode failed ({Describe(page.Encode.Exception)})"
+                        : !page.Encode.IsCompleted ? "its encode was still running when the capture stopped waiting"
+                        : page.Encode.IsCanceled ? "its encode was cancelled"
+                        : $"it arrived as page {page.Page} out of order";
+
+                    Plugin.LogSource?.LogWarning(
+                        fresh
+                            ? $"QuestTree: atlas page {page.Page} was not kept - {why}; it and every later page are dropped, and their buildings keep the side views."
+                            : $"QuestTree: stored atlas page {page.Page} was not rewritten - {why}; the stored page stays and the tiles this capture put on it are dropped.");
+
+                    FailAtlasPage(result, page.Page);
+                    DeletePart(page);
+
+                    if (fresh)
+                    {
+                        for (var j = k + 1; j < pages.Count; j++) DeletePart(pages[j]);
+                        break;
+                    }
+
+                    last = page.Page;
+                    continue;
+                }
+
+                last = page.Page;
+                if (fresh) nextNew++;
+
+                good.Add(new AtlasPageDone
+                {
+                    Page = page.Page, Tiles = page.Tiles, PartPath = page.PartPath,
+                    Bytes = page.Encode.Result.Length, Sha256 = page.Encode.Result.Sha256,
+                });
+
+                if (result.Index != null && page.Page < result.Index.Pages.Count)
+                {
+                    var sha = MapMeshIndex.ShaBytes(page.Encode.Result.Sha256);
+                    if (sha != null) result.Index.Pages[page.Page].Sha = sha;
+                    result.Index.Pages[page.Page].Tiles = page.Tiles;
+                }
+            }
+
+            // a new page that never started ends the atlas where the pages stop
+            if (nextNew < result.File.AtlasPages) TruncateAtlasIndexed(result.File, nextNew, result.Index);
+
+            return good;
+        }
+
+        /// <summary>A page's .part file deleted - now, or when a still-running encode finishes.</summary>
+        private static void DeletePart(AtlasPageJob page)
+        {
+            var path = page.PartPath;
+
+            void Delete()
+            {
+                try
+                {
+                    if (System.IO.File.Exists(path)) System.IO.File.Delete(path);
+                }
+                catch
+                {
+                    // swept by the capture's cleanup
+                }
+            }
+
+            if (page.Encode != null && !page.Encode.IsCompleted) page.Encode.ContinueWith(_ => Delete());
+            else Delete();
+        }
+
+        /// <summary>
+        /// WP2 (2.13): one page that did not make it to disk, undone in the file and the sidecar. A page past the stored
+        /// ones (or any page from scratch) ends the atlas there (TruncateAtlasIndexed). A stored page keeps its old file,
+        /// so: the rows of the new tiles on it lose that tile, re-captured tiles on it get their rows back, new buildings'
+        /// ranges on its NEW tiles (and on re-captured tiles that had never been captured - their old rect is blank) are
+        /// dropped, and stored ranges switched onto it are switched back. Nothing stored is lost either way (I6).
+        /// </summary>
+        /// <param name="result">The build's result.</param>
+        /// <param name="page">The page.</param>
+        internal static void FailAtlasPage(Result result, int page)
+        {
+            if (result?.File == null) return;
+
+            if (!result.Accumulated || page >= result.BasePages)
+            {
+                TruncateAtlasIndexed(result.File, page, result.Index);
+                return;
+            }
+
+            var index = result.Index;
+            var rows = new Dictionary<ulong, int>();
+            if (index != null)
+                for (var i = 0; i < index.Materials.Count; i++) rows[index.Materials[i].Key] = i;
+
+            var gone = new HashSet<long>();
+
+            foreach (var t in result.Placed)
+            {
+                if (t.Page != page) continue;
+
+                var at = rows.TryGetValue(t.Key, out var i) ? i : -1;
+
+                if (t.Old != null)
+                {
+                    if (at >= 0) index.Materials[at] = t.Old.Copy();
+                    if (!t.Old.Captured) gone.Add(((long)t.X << 32) | (uint)t.Y);
+                    continue;
+                }
+
+                gone.Add(((long)t.X << 32) | (uint)t.Y);
+
+                if (at < 0) continue;
+                if (t.Flat) index.Materials[at].FlatPage = -1;
+                else index.Materials[at].Page = -1;
+            }
+
+            var file = result.File;
+
+            for (var b = result.StoredKept; b < file.Buildings.Count; b++)
+            {
+                var ranges = file.Buildings[b].Ranges;
+                if (ranges == null || ranges.Count == 0) continue;
+
+                var keys = index != null && b < index.Buildings.Count ? index.Buildings[b].RangeMaterials : null;
+                var keptRanges = new List<MapMeshFile.AtlasRange>(ranges.Count);
+                var keptKeys = new List<ulong>(ranges.Count);
+
+                for (var k = 0; k < ranges.Count; k++)
+                {
+                    var r = ranges[k];
+                    if (r.Page == page && gone.Contains(((long)r.TileX << 32) | r.TileY)) continue;
+
+                    keptRanges.Add(r);
+                    if (keys != null && k < keys.Length) keptKeys.Add(keys[k]);
+                }
+
+                if (keptRanges.Count == ranges.Count) continue;
+
+                file.Buildings[b].Ranges = keptRanges;
+                if (keys != null) index.Buildings[b].RangeMaterials = keptKeys.ToArray();
+            }
+
+            foreach (var edit in result.RangeEdits)
+                if (edit.Page == page && edit.Building < file.Buildings.Count && edit.Range < file.Buildings[edit.Building].Ranges.Count)
+                    file.Buildings[edit.Building].Ranges[edit.Range] = edit.Old;
+        }
+
+        /// <summary>WP2: <see cref="TruncateAtlas"/> with the sidecar kept in step - each building's range keys cut with
+        /// its ranges, the page rows cut to the count, material rows pointing past it cleared, and the packing state
+        /// moved to the start of the first page gone (that page is new again next time).</summary>
+        /// <param name="file">The mesh.</param>
+        /// <param name="pages">Pages kept.</param>
+        /// <param name="index">Its sidecar, or null.</param>
+        internal static void TruncateAtlasIndexed(MapMeshFile file, int pages, MapMeshIndex index)
+        {
+            pages = Math.Max(0, pages);
+
+            if (index != null && index.Buildings.Count == file.Buildings.Count)
+                for (var b = 0; b < file.Buildings.Count; b++)
+                {
+                    var ranges = file.Buildings[b].Ranges;
+                    var keys = index.Buildings[b].RangeMaterials;
+                    if (ranges == null || keys == null || keys.Length != ranges.Count) continue;
+
+                    var keptKeys = new List<ulong>(keys.Length);
+                    for (var k = 0; k < ranges.Count; k++)
+                        if (ranges[k].Page < pages) keptKeys.Add(keys[k]);
+
+                    index.Buildings[b].RangeMaterials = keptKeys.ToArray();
+                }
+
+            TruncateAtlas(file, pages);
+
+            if (index == null) return;
+
+            while (index.Pages.Count > pages) index.Pages.RemoveAt(index.Pages.Count - 1);
+
+            foreach (var row in index.Materials)
+            {
+                if (row.Page >= pages) row.Page = -1;
+                if (row.FlatPage >= pages) row.FlatPage = -1;
+            }
+
+            if (index.Pack.Page >= pages) index.Pack = new AtlasPackState { Page = pages };
         }
 
         /// <summary>Cuts a file's atlas to its first <paramref name="pages"/> pages: the count, and every range on a
@@ -6192,7 +8321,7 @@ namespace QuestTree.QuestGraph
                 $"; {N(job.InputGuarded)} over the {Millions(MaxSourceTriangles)} source guard, " +
                 $"{N(job.Oversized)} oversized, {N(job.HiddenSkipped + job.ShadowOnlySkipped + job.VolumeSkipped)} hidden " +
                 $"volumes skipped ({N(job.HiddenSkipped)} switched off, {N(job.ShadowOnlySkipped)} shadow-only, " +
-                $"{N(job.VolumeSkipped)} untextured helper volumes), LOD map {N(job.LodsOf.Count)} group(s): " +
+                $"{N(job.VolumeSkipped)} untextured helper volumes), LOD map {N(job.LodsOf.Count)} group(s){LodCacheNote(job)}: " +
                 $"{N(job.LodUnmanaged)} candidate(s) under a group that lists none of them, {N(job.LodNotAncestor)} listed by a " +
                 $"group that is not their parent, {N(job.LodShared)} renderer(s) in two groups, {N(job.LodInactive)} inactive " +
                 $"group(s) skipped" + (job.LodFallback > 0 ? $", {N(job.LodFallback)} on the nearest-parent rule (the LOD map did not complete)" : "") +
@@ -6231,6 +8360,18 @@ namespace QuestTree.QuestGraph
                     : ""));
 
             ReportQuality(job);
+        }
+
+        /// <summary>WP2 (7): what the raid's cache saved this build - the LOD groups read against those an earlier build
+        /// of this raid had read, and the path hashes known before it against those it added. Empty without a cache.</summary>
+        /// <param name="job">The build.</param>
+        private static string LodCacheNote(Job job)
+        {
+            var scene = job.Request.Scene;
+            if (scene == null) return "";
+
+            return $" ({N(job.LodRead)} read this build, {N(job.LodReused)} reused from this raid's {N(scene.Builds - 1)} earlier " +
+                   $"build(s); path hashes {N(job.PathHashesAtStart)} reused, {N(job.PathHashes.Count - job.PathHashesAtStart)} new)";
         }
 
         /// <summary>WP8 (V.2): the building-quality line, one a build - how the decimations ended, what they refused,
@@ -6327,9 +8468,31 @@ namespace QuestTree.QuestGraph
                 $"{N(job.TexturedBuildings)} building(s) textured ({Millions(job.TexturedTriangles)} triangles), " +
                 $"{N(job.UntexturedBuildings)} with UVs but no tile; {N(job.SeamsRelaxed)} decimated with their seams " +
                 $"relaxed, {N(job.ClusteredTextureless)} clustered without a texture" +
+                (job.Stored != null ? AccumulatedAtlas(job) : "") +
                 (job.AtlasAbandoned ? " - ABANDONED, no page kept." : "."));
 
             ReportMaterialDiags(job);
+        }
+
+        /// <summary>WP2: the textures line's account of the stored atlas.</summary>
+        /// <param name="job">The build.</param>
+        private static string AccumulatedAtlas(Job job)
+        {
+            var basePages = job.Request.Base.AtlasPages;
+            int rewritten = 0, added = 0;
+
+            if (job.TouchedPages != null)
+                for (var p = 0; p < job.TouchedPages.Length; p++)
+                {
+                    if (!job.TouchedPages[p]) continue;
+                    if (p < basePages) rewritten++;
+                    else added++;
+                }
+
+            return $"; {N(job.MaterialsReused)} material(s) reused from the stored atlas, {N(job.TilesNew)} tile(s) new, " +
+                   $"{N(job.TilesUpgraded)} upgraded, {N(job.StoredOnlyMaterials)} registered for a re-capture only; pages " +
+                   $"{N(Math.Max(0, basePages - rewritten))} kept, {N(rewritten)} rewritten, {N(added)} new; packing at page " +
+                   $"{job.PackState.Page.ToString(CultureInfo.InvariantCulture)}";
         }
 
         /// <summary>WP8 (D4 commit 1): the materials the atlas left out, by render queue and flat, the
@@ -6394,12 +8557,25 @@ namespace QuestTree.QuestGraph
             // empty Y beside a full X, which Write refuses for the WHOLE file. Dropping those keeps the
             // relief and every building that did finish; it is the same "one bad renderer must not cost
             // the map its mesh" rule StoreWorld follows.
-            var unfinished = file.Buildings.RemoveAll(b => b.Y == null || b.Y.Length != b.X.Length);
+            var unfinished = RemoveUnfinished(job);
 
             if (unfinished > 0)
                 Plugin.LogSource?.LogWarning(
                     $"QuestTree: {N(unfinished)} building(s) of {job.Request.Map} never had their heights " +
                     "quantised and were left out; the relief and the rest are written.");
+
+            // WP2 (2.11): the stored buildings (their order) and then this build's (store order), and the sidecar row of
+            // each. Onto a stored mesh a merge that fails writes NOTHING - a file of this build's buildings alone would
+            // replace the stored mesh with a part of it (I6).
+            MapMeshIndex index = null;
+
+            if (!Step(job, "the merge and its sidecar", () => index = MergeAndIndex(job, result)) && job.Stored != null)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: the 3D mesh of {job.Request.Map} could not be merged with the stored one - nothing is written " +
+                    "and the stored mesh is kept.");
+                return;
+            }
 
             // Bands and buildings were filled by hand, so they are not bound to the file whose ranges
             // they are quantised over until this runs. Write binds too; a caller that reads the file
@@ -6407,6 +8583,7 @@ namespace QuestTree.QuestGraph
             file.Bind();
 
             result.File = file;
+            result.Index = index;
             result.Cells = file.CellCount();
             result.Triangles = file.TriangleCount();
             result.Buildings = file.Buildings.Count;
@@ -6447,8 +8624,13 @@ namespace QuestTree.QuestGraph
 
             var buffers = job.PeakPipelineBytes + job.PeakDecodedBytes + job.PeakAtlasBytes + pending;
 
+            // WP2: the stored mesh's relief was held beside this build's (its buildings are in BuildingBytes now)
+            var baseRelief = 0L;
+            if (job.Stored != null)
+                foreach (var band in job.Request.Base.Bands) baseRelief += band.CellCount * 3L + 64L;
+
             var peak = relief + floats + job.RendererCount * 8L + job.PeakReadbackBytes +
-                       result.BuildingBytes + candidates + buffers;
+                       result.BuildingBytes + candidates + buffers + baseRelief;
 
             // WP7: said at Info, against the memory ceiling it rests on (D5: M triangles at 64 B, a sixteenth of
             // RAM) - the check that the 64 B/triangle estimate holds on a real build.
@@ -6462,10 +8644,365 @@ namespace QuestTree.QuestGraph
                 $"({(ceilingBytes > 0 ? 100d * peak / ceilingBytes : 0d).ToString("0", CultureInfo.InvariantCulture)} % used) " +
                 $"(grids {N(relief + floats)} B, {N(job.RendererCount)} renderer(s) scanned, " +
                 $"{N(job.Candidates.Count)} candidate(s) held, stored buildings {N(result.BuildingBytes)} B, " +
+                (baseRelief > 0 ? $"the stored mesh's relief {N(baseRelief)} B, " : "") +
                 $"pipeline peak {N(job.PeakPipelineBytes)} B over up to {N(job.PeakWorkers)} worker(s), " +
                 $"{N(job.LanesDropped)} lane(s) dropped for size, largest readback " +
                 $"{(job.PeakReadbackBytes / 1024d).ToString("0", CultureInfo.InvariantCulture)} KB), " +
                 "excluding the arrays Unity allocates for mesh.vertices and GetTriangles.");
+
+            Step(job, "the accumulation line", () => ReportAccumulation(job, result));
+        }
+
+        /// <summary>WP2: new buildings whose heights were never quantised leave the file with their sidecar rows, and a
+        /// replacement they made is undone (the stored building stays).</summary>
+        /// <param name="job">The build.</param>
+        private static int RemoveUnfinished(Job job)
+        {
+            var file = job.File;
+            var removed = 0;
+
+            for (var i = file.Buildings.Count - 1; i >= 0; i--)
+            {
+                var b = file.Buildings[i];
+                if (b.Y != null && b.Y.Length == b.X.Length) continue;
+
+                file.Buildings.RemoveAt(i);
+                removed++;
+
+                if (i >= job.NewEntries.Count) continue;
+
+                var c = job.NewCandidates[i];
+                job.NewEntries.RemoveAt(i);
+                job.NewCandidates.RemoveAt(i);
+                job.NewGroups.RemoveAt(i);
+
+                if (c?.Replaces != null && c.Replaces.Drop) c.Replaces.Drop = false;
+            }
+
+            return removed;
+        }
+
+        /// <summary>
+        /// WP2 (2.11): the merge - the kept stored buildings first, in their order (heights requantised when the range
+        /// widened, a re-targeted one's new arrays, re-levelled when the bands changed or its band is gone), then this
+        /// build's - with PART-04's rule over the union as a net (one level per LOD group; ResolveGroupUpgrades already
+        /// kept one, so this removes nothing unless something upstream broke it, and says so) - and the sidecar for the
+        /// merged file: header, bands, one row per building in the same order, the pages (a stored page's row carried,
+        /// an encoded page's filled when it settles), the packing state and the material table. On the from-scratch path
+        /// the file is this build's and the sidecar is fresh. Everything is computed before the file's building list is
+        /// replaced, so a throw leaves the file as it was.
+        /// </summary>
+        /// <param name="job">The build.</param>
+        /// <param name="result">Filled with the settle bookkeeping and the counts.</param>
+        private static MapMeshIndex MergeAndIndex(Job job, Result result)
+        {
+            var request = job.Request;
+            var file = job.File;
+            var stored = job.Stored;
+            var basis = stored != null ? request.Base : null;
+            var ordinal = (ushort)Math.Max(1, Math.Min(ushort.MaxValue, request.CaptureOrdinal));
+
+            var buildings = new List<MapMeshFile.Building>();
+            var rows = new List<MapMeshIndex.Entry>();
+            var mergedOf = stored != null ? new int[basis.Buildings.Count] : new int[0];
+            var dropped = 0;
+
+            if (stored != null)
+            {
+                for (var i = 0; i < basis.Buildings.Count; i++)
+                {
+                    mergedOf[i] = -1;
+
+                    var e = stored.All[i];
+                    if (e.Drop)
+                    {
+                        dropped++;
+                        continue;
+                    }
+
+                    var b = basis.Buildings[i];
+                    var row = e.Meta.Copy();
+
+                    if (job.Retargeted.TryGetValue(i, out var rt))
+                    {
+                        var y = new ushort[rt.YMetres.Length];
+                        for (var v = 0; v < y.Length; v++) y[v] = file.QuantiseHeight(rt.YMetres[v]);
+
+                        b.X = rt.X;
+                        b.Y = y;
+                        b.Z = rt.Z;
+                        b.Indices = rt.Indices;
+                        b.U = rt.U;
+                        b.V = rt.V;
+                        b.Ranges = rt.Ranges;
+
+                        row.RangeMaterials = rt.RangeKeys;
+                        row.StoredTriangles = rt.Triangles;
+                        row.Centroid = rt.Centroid;
+                        row.CapturedAt = ordinal;
+                    }
+                    else if (job.RangeWidened)
+                    {
+                        b.Y = job.RequantisedY != null && job.RequantisedY[i] != null ? job.RequantisedY[i] : Requantise(b.Y, basis, file);
+                    }
+
+                    if (!job.BandsSame || file.Band(b.Level) == null) b.Level = LevelFor(job, row.Centroid);
+
+                    mergedOf[i] = buildings.Count;
+                    buildings.Add(b);
+                    rows.Add(row);
+                }
+            }
+
+            var storedKept = buildings.Count;
+            buildings.AddRange(file.Buildings);
+            rows.AddRange(job.NewEntries);
+
+            if (rows.Count != buildings.Count)
+                throw new InvalidOperationException($"{rows.Count} sidecar row(s) for {buildings.Count} building(s)");
+
+            if (stored != null)
+            {
+                var keep = MapMeshIndex.KeepLowestLevel(rows);
+                var filteredBuildings = new List<MapMeshFile.Building>(buildings.Count);
+                var filteredRows = new List<MapMeshIndex.Entry>(rows.Count);
+                var remap = new int[buildings.Count];
+                var keptStored = 0;
+
+                for (var i = 0; i < buildings.Count; i++)
+                {
+                    remap[i] = -1;
+                    if (!keep[i])
+                    {
+                        job.LevelsDropped++;
+                        continue;
+                    }
+
+                    remap[i] = filteredBuildings.Count;
+                    if (i < storedKept) keptStored++;
+                    filteredBuildings.Add(buildings[i]);
+                    filteredRows.Add(rows[i]);
+                }
+
+                if (job.LevelsDropped > 0)
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: {N(job.LevelsDropped)} building(s) of {request.Map} were a second LOD level of a group already " +
+                        "stored at a finer one and are left out (PART-04's rule over the union).");
+
+                for (var i = 0; i < mergedOf.Length; i++)
+                    if (mergedOf[i] >= 0) mergedOf[i] = remap[mergedOf[i]];
+
+                buildings = filteredBuildings;
+                rows = filteredRows;
+                storedKept = keptStored;
+            }
+
+            // --- the sidecar ---
+            var index = new MapMeshIndex
+            {
+                Recipe = MeshRecipe,
+                Game = request.Game ?? "",
+                MinX = request.MinX,
+                MinZ = request.MinZ,
+                MaxX = request.MaxX,
+                MaxZ = request.MaxZ,
+                RenderMask = request.RenderMask,
+                CullingKnown = request.CullingKnown,
+                Captures = ordinal,
+            };
+
+            foreach (var band in job.Bands)
+                index.Bands.Add(new MapMeshIndex.BandRow
+                {
+                    Level = band.Source.Level, MinY = band.Source.MinY, MaxY = band.Source.MaxY, CameraY = band.Source.CameraY,
+                    DepthBelow = band.Source.DepthBelow, Interior = band.Source.Interior,
+                });
+
+            var pages = stored != null ? (job.AtlasApplied ? job.AtlasPageCount : basis.AtlasPages) : file.AtlasPages;
+
+            for (var page = 0; page < pages; page++)
+            {
+                if (stored != null && page < basis.AtlasPages && page < request.BaseIndex.Pages.Count)
+                {
+                    var from = request.BaseIndex.Pages[page];
+                    index.Pages.Add(new MapMeshIndex.Page { Sha = (byte[])from.Sha.Clone(), Tiles = from.Tiles });
+                }
+                else
+                {
+                    index.Pages.Add(new MapMeshIndex.Page());
+                }
+            }
+
+            index.Pack = job.AtlasApplied ? job.PackState : stored != null ? request.BaseIndex.Pack : AtlasPackState.Empty;
+
+            var byKey = new Dictionary<ulong, MapMeshIndex.Tile>();
+            var order = new List<ulong>();
+
+            if (stored != null)
+                foreach (var row in request.BaseIndex.Materials)
+                {
+                    byKey[row.Key] = row.Copy();
+                    order.Add(row.Key);
+                }
+
+            if (job.AtlasApplied)
+                foreach (var info in job.Materials)
+                {
+                    if (info.Key == 0UL) continue;
+
+                    var hasTile = (info.Page >= 0 && info.Page < pages) || (info.FlatPage >= 0 && info.FlatPage < pages);
+                    if (!hasTile) continue;
+
+                    byKey.TryGetValue(info.Key, out var old);
+                    var changed = old == null || info.CapturedNow || (old.Page < 0 && info.Page >= 0) || (old.FlatPage < 0 && info.FlatPage >= 0);
+                    if (!changed) continue;
+
+                    if (old == null) order.Add(info.Key);
+                    byKey[info.Key] = RowOf(info, old, ordinal);
+                }
+
+            foreach (var key in order) index.Materials.Add(byKey[key]);
+            index.Buildings = rows;
+
+            // everything computed: the file is the merged one from here
+            file.Buildings = buildings;
+            if (stored != null) file.AtlasPages = pages;
+
+            result.Accumulated = stored != null;
+            result.BasePages = stored != null ? basis.AtlasPages : 0;
+            result.StoredKept = storedKept;
+            result.Placed = job.AtlasApplied ? new List<PlacedTile>(job.Placed) : new List<PlacedTile>();
+            result.RangeEdits = new List<RangeEdit>();
+
+            if (job.AtlasApplied)
+                foreach (var edit in job.RangeEdits)
+                    if (edit.Building >= 0 && edit.Building < mergedOf.Length && mergedOf[edit.Building] >= 0)
+                        result.RangeEdits.Add(new RangeEdit
+                        {
+                            Building = mergedOf[edit.Building], Range = edit.Range, Page = edit.Page, Old = edit.Old,
+                        });
+
+            result.Kept = storedKept;
+            result.Added = buildings.Count - storedKept;
+            result.Replaced = dropped;
+            result.Skipped = job.Skipped;
+            result.Retargeted = job.Retargeted.Count + job.RetargetedRead;
+
+            var touched = false;
+            if (job.AtlasApplied && job.TouchedPages != null)
+                foreach (var t in job.TouchedPages) touched |= t;
+
+            result.Unchanged = stored != null && result.Added == 0 && dropped == 0 && job.Retargeted.Count == 0 &&
+                               job.GroupsToDetail == 0 && job.LevelsDropped == 0 && !touched && result.RangeEdits.Count == 0 &&
+                               job.RangeKept && job.BandsSame && pages == basis.AtlasPages && SameRelief(file, basis);
+
+            return index;
+        }
+
+        /// <summary>WP2: a material's sidecar row from the registry - its tiles, capture flags, mip, average and opaque
+        /// share - over the stored row it had, if any.</summary>
+        private static MapMeshIndex.Tile RowOf(AtlasMaterial info, MapMeshIndex.Tile old, ushort ordinal)
+        {
+            var row = old?.Copy() ?? new MapMeshIndex.Tile { Key = info.Key, CapturedAt = ordinal };
+
+            try
+            {
+                if (info.Texture != null)
+                {
+                    row.TexW = info.Texture.width;
+                    row.TexH = info.Texture.height;
+                }
+            }
+            catch (Exception)
+            {
+                // a texture destroyed since: its size stays what it was
+            }
+
+            row.Page = info.Page;
+            row.X = info.X;
+            row.Y = info.Y;
+            row.W = info.TileW;
+            row.H = info.TileH;
+            row.FlatPage = info.FlatPage;
+            row.FlatX = info.FlatX;
+            row.FlatY = info.FlatY;
+
+            if (old == null || info.CapturedNow || info.Late || info.Failed)
+            {
+                byte flags = 0;
+                if (info.Captured) flags |= MapMeshIndex.FlagCaptured;
+                if (info.Late && !info.Captured) flags |= MapMeshIndex.FlagLate;
+                if (info.Failed && !info.Captured) flags |= MapMeshIndex.FlagFailed;
+                if (info.Texture == null) flags |= MapMeshIndex.FlagNoTexture;
+                if (info.NormalRefused) flags |= MapMeshIndex.FlagNormalRefused;
+
+                if (info.CapturedNow && info.Mip != MapMeshIndex.MipUnknown && info.Mip < 31 && row.W > 0 && (row.TexW >> info.Mip) < row.W)
+                    flags |= MapMeshIndex.FlagMipDeficient;
+
+                row.Flags = flags;
+                if (info.CapturedNow || old == null) row.Mip = info.Mip;
+                row.OpaqueShare = info.OpaqueShare;
+                row.CapturedAt = ordinal;
+            }
+
+            row.AvgR = info.AvgR;
+            row.AvgG = info.AvgG;
+            row.AvgB = info.AvgB;
+
+            return row;
+        }
+
+        /// <summary>WP2: whether a file's relief is the stored one's byte for byte (the no-op stop's last test).</summary>
+        private static bool SameRelief(MapMeshFile file, MapMeshFile stored)
+        {
+            if (file.Bands.Count != stored.Bands.Count) return false;
+
+            foreach (var band in file.Bands)
+            {
+                var old = stored.Band(band.Level);
+                if (old == null || old.Width != band.Width || old.Height != band.Height ||
+                    MapMeshIndex.Bits(old.CellMetres) != MapMeshIndex.Bits(band.CellMetres))
+                    return false;
+
+                for (var n = 0; n < band.Heights.Length; n++)
+                    if (band.Heights[n] != old.Heights[n] || band.Distance[n] != old.Distance[n])
+                        return false;
+            }
+
+            return true;
+        }
+
+        /// <summary>WP2 (2.11): the accumulation line - what the build did to the stored mesh (the from-scratch path
+        /// "accumulates onto" this capture with nothing kept), the triangles against the derived cap, the scales, and
+        /// the y range.</summary>
+        /// <param name="job">The build.</param>
+        /// <param name="result">The result.</param>
+        private static void ReportAccumulation(Job job, Result result)
+        {
+            var f1 = CultureInfo.InvariantCulture;
+            var stored = job.Stored;
+            var onto = stored != null ? job.Request.BaseIndex.Captures : job.Request.CaptureOrdinal;
+            var dropped = result.Replaced;
+            var upgraded = job.Upgraded;
+            var changed = job.Changed;
+
+            string range;
+            if (stored == null) range = $"measured {F(job.File.YMin)}..{F(job.File.YMax)}";
+            else if (job.RangeKept) range = "kept";
+            else range = $"widened {F(job.OldYMin)}..{F(job.OldYMax)} -> {F(job.File.YMin)}..{F(job.File.YMax)}, stored heights requantised";
+
+            Plugin.LogSource?.LogInfo(
+                $"QuestTree: mesh of {job.Request.Map} accumulated onto capture {N(onto)} - kept {N(result.Kept)} stored building(s), " +
+                $"added {N(result.Added)}, replaced {N(dropped)} ({N(upgraded)} upgraded, {N(changed)} changed, {N(job.GroupsToDetail)} LOD " +
+                $"group(s) to detail), skipped {N(job.Skipped)} already stored, {N(result.Retargeted)} re-targeted; " +
+                $"{N(result.Triangles)} triangles of the {N(job.Cap)} cap (area scale x{job.BudgetScale.ToString("0.00", f1)}" +
+                (job.FlexScale < job.BudgetScale ? $", new at x{job.FlexScale.ToString("0.00", f1)}" : "") + $"); y range {range}" +
+                (job.ReliefFilled > 0 ? $", {N(job.ReliefFilled)} cell(s) filled from the stored relief" : "") +
+                (job.ReliefNotFillable > 0 ? $", {N(job.ReliefNotFillable)} band(s) whose stored grid is another (not filled)" : "") +
+                (job.RolledBack > 0 ? $"; {N(job.RolledBack)} new building(s) rolled back (a LOD level not read whole)" : "") +
+                (job.UpgradesRefused > 0 ? $"; {N(job.UpgradesRefused)} re-read(s) came out worse than the stored copy, which stays" : "") +
+                (job.RetargetsFailed > 0 ? $"; {N(job.RetargetsFailed)} re-target(s) did not land" : "") +
+                (result.Unchanged ? "; unchanged - the stored mesh is kept" : "") + ".");
         }
 
         // --- small helpers -------------------------------------------------------------------------------------
@@ -9406,6 +11943,14 @@ namespace QuestTree.QuestGraph
         {
             Pending = Math.Max(0, Pending - limit);
             if (stored > 0) Stored += stored;
+        }
+
+        /// <summary>WP2: a stored building leaves the file (replaced, or its group moved to a finer level): its
+        /// triangles come off what is stored. Clamped at 0.</summary>
+        /// <param name="triangles">Its triangles.</param>
+        internal void Drop(long triangles)
+        {
+            if (triangles > 0) Stored = Math.Max(0, Stored - triangles);
         }
 
         /// <summary>
