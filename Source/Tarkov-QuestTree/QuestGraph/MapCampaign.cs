@@ -87,7 +87,7 @@ namespace QuestTree.QuestGraph
         /// Why so little and not five. The game DOES see this as a fall - the claim that it does not was
         /// wrong: <c>Player.Teleport</c> sets the transform and then calls
         /// <c>MovementContext.ResetFlying</c>, which re-bases the fall height to the NEW position,
-        /// which is this one, the rise up. <c>CheckFlying</c> then measures the drop from there to
+        /// i.e. the stop plus the rise. <c>CheckFlying</c> then measures the drop from there to
         /// the ground and hands it to <c>ActiveHealthController.HandleFall</c>, which does nothing
         /// below the globals' <c>Health.Falling.SafeHeight</c> - 3 m on this server. So what the
         /// teleport itself saves the player is the 500 m fall; the rise is a real fall with

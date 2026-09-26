@@ -4011,10 +4011,16 @@ namespace QuestTree.QuestGraph
                     for (var i = 0; i < _cullingHeld && i < _culling.Length; i++)
                     {
                         var component = _culling[i];
-                        if (component == null || _cullingWasEnabled[i]) continue;
+                        if (component == null) continue;
 
+                        // Marked BEFORE the already-on skip (review of PART-01): a culler the player stands inside
+                        // has every entry on before the hold, so nothing below writes to it - but a renderer it
+                        // shares with a neighbouring culler is switched off when THAT one re-applies its state, and
+                        // only a culler that is asked as well turns the shared renderer back on.
                         var owner = OwnerOf(_cullingOwner, i);
                         if (touched != null && owner >= 0 && owner < touched.Length) touched[owner] = true;
+
+                        if (_cullingWasEnabled[i]) continue;
 
                         // The game's own answer (review F07): a culler whose triggers hold the player wants all of its
                         // lists ON - HasEntered implies _enteredColliders.Count > 0, which is what the
@@ -4034,10 +4040,12 @@ namespace QuestTree.QuestGraph
                     for (var i = 0; i < _cullingObjectsHeldCount && i < _cullingObjectsHeld.Length; i++)
                     {
                         var item = _cullingObjectsHeld[i];
-                        if (item == null || _cullingObjectWasActive[i]) continue;
+                        if (item == null) continue;
 
                         var owner = OwnerOf(_cullingObjectOwner, i);
                         if (touched != null && owner >= 0 && owner < touched.Length) touched[owner] = true;
+
+                        if (_cullingObjectWasActive[i]) continue;
 
                         if (asks && Entered(cullers, owner))
                         {

@@ -232,9 +232,10 @@ frames - a handful of short hitches, not one long freeze - and takes a second or
   replaces it.`
 
 **Ctrl+Shift+F9 captures the whole map in one press.** Instead of walking a kilometre of Customs
-pressing the other key, this teleports you across a grid of standable spots 200 m apart, takes a
-capture at each, and puts you back exactly where you pressed it - about sixteen stops and a couple
-of minutes on Customs. **Start such a raid with AI set to none: it does not disable bots**, and it
+pressing the other key, this teleports you across a grid of standable spots about 120 m apart,
+takes a capture at each - floors, side views and the 3D model, rebuilt at every stop - and puts
+you back exactly where you pressed it: about 33 stops on Customs (9 x 5 cells of 115 x 100 m,
+fewer where a cell has nowhere to stand), and the log's closing line gives the real duration. **Start such a raid with AI set to none: it does not disable bots**, and it
 leaves you standing still for a second and a half at every stop. It moves nothing but your position,
 it is local to you on a Fika raid, and the log names every stop and what happened there. It also
 writes those lines to `captures\<key>\<key>.campaign.txt`, keeping the last twenty runs, because a
@@ -791,7 +792,7 @@ report is worth the restart.
   they were rendered the same way, and the log line names what differed: a new build's render recipe,
   a changed extent, a different resolution, a different set of floors. The map starts over from this
   capture, which is the right answer - the old pixels no longer mean the same thing as the new ones.
-  Use `Ctrl+Shift+F9` once and the map is whole again in a couple of minutes.
+  Use `Ctrl+Shift+F9` once and the map is whole again after one campaign.
 - **Uploads say the host does not accept map pictures** - that is the host opting out, which is the
   default: a picture is the one thing a peer can post that everyone else then looks at. Start the
   host's server from `tools/server-host.cmd` (it sets `QUESTTREE_ACCEPT_MAPS=1` and starts

@@ -36,7 +36,9 @@ namespace QuestTree.Patches
             // raid count up for the rest of the menu session (review F58). Nothing of this mod runs there.
             if (__instance == null || __instance is NarrateGameWorld)
             {
-                Plugin.LogSource?.LogDebug("QuestTree: OnGameStarted on a trader visit - nothing installed.");
+                Plugin.LogSource?.LogDebug(__instance == null
+                    ? "QuestTree: OnGameStarted with no GameWorld - nothing installed."
+                    : "QuestTree: OnGameStarted on a trader visit - nothing installed.");
                 return;
             }
 
@@ -81,7 +83,7 @@ namespace QuestTree.Patches
                     MapCapture.Install(__instance);
 
                     // The two ways to capture a whole map without walking it - the campaign key and
-                // automatic capture as you play - which drive that same capture rather than rendering
+                    // automatic capture as you play - which drive that same capture rather than rendering
                     // anything themselves, so they sit behind the same gate. Also a watcher only: nothing
                     // moves and nothing renders until a key is pressed or the setting is on.
                     MapCampaign.Install(__instance);
