@@ -302,7 +302,7 @@ namespace QuestTree.UI
                 "Mirrors the map picture left-to-right. Markers are not mirrored.",
                 ModSettings.MirrorMapArtwork);
             Toggle(column, ref y, "Share captured maps",
-                "Offer a map picture you capture in raid to the server, so others on the same host get it. A host that does not collect them refuses.",
+                "Offer a map picture you capture in raid to the server, so others on the same host get it. A campaign offers its map once, when it ends; automatic capture at most every ten minutes and when you stop. A host that does not collect them refuses.",
                 ModSettings.UploadCaptures);
             Toggle(column, ref y, "Show map alignment guides",
                 "Diagnostic: outline the area the map's coordinates cover, and mark its origin.",

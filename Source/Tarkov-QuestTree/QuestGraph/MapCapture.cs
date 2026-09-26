@@ -9436,7 +9436,9 @@ namespace QuestTree.QuestGraph
 
                 // Offered to the host, which may well refuse - see MapTransfer.UploadCapture and the
                 // UploadCaptures setting. It returns at once and runs on the plugin object rather than
-                // this one, so an upload outlives the raid the capture was taken in.
+                // this one, so an upload outlives the raid the capture was taken in. While a campaign or
+                // automatic capture holds this map (WP3) the capture is recorded as owed instead, and the
+                // hold's release uploads it once.
                 try
                 {
                     MapTransfer.UploadCapture(plan.Key);

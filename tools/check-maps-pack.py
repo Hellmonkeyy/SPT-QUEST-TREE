@@ -80,16 +80,33 @@ cells and triangles (the host's D14 rule, capped at 1 GiB); every band's cell is
 - the builder's rule - with a 2 m band where the rule gives 1 m a WARN ("captured before WP7 at 2 m"); and
 a mesh over 100,000,000 bytes is a WARN, because GitHub refuses such a file in a push.
 
-Usage:  python tools/check-maps-pack.py <maps-root> --schema N
+WP3 (upload once): with --against-captures CAPTURES, each set is also held to the LOCAL capture it was uploaded
+from - CAPTURES\\<key>\\, or the folder of the pair's other id (the host folds factory4_night onto
+factory4_day; the pairs are read out of the client's own MapView.SceneAliases, so nothing here keys on a map name).
+This is the check that the host holds the LAST capture of a campaign and not an intermediate one:
+  - capturedAt is equal - an ERROR when the host's is older ("the host holds an intermediate capture"); a host
+    set NEWER than the local one is another machine's capture, a WARN, and nothing else is compared;
+  - the mesh's sha256 is equal when both have a mesh (the host stores the posted bytes as they are);
+  - the floor levels are the same set;
+  - each floor JPEG's frame is ScaleTo(the local picture's size, 2048), each side's ScaleTo(..., ceil_short=True),
+    each atlas page's the local page's own size - ScaleTo ported verbatim from MapTransfer.ScaleTo, Mono's
+    round-half-away-from-zero included;
+  - the atlas page counts are equal, and each local page PNG hashes to the sha256 its local meta names (the host's
+    pages are JPEGs, so only their count and size are compared).
+A host set with no local capture is reported and skipped.
+
+Usage:  python tools/check-maps-pack.py <maps-root> --schema N [--against-captures CAPTURES]
 """
 
 import argparse
 import hashlib
 import json
 import math
+import re
 import struct
 import sys
 import zlib
+from datetime import datetime, timezone
 from pathlib import Path
 
 PIXEL_TOLERANCE = 2     # px, on each axis, against ceil(span * pxPerMetre) - MapStore.PixelTolerance (review F53)
@@ -895,11 +912,192 @@ def check_set(folder, schema, errors):
             f"captured {meta.get('capturedAt') or '?'}")
 
 
+# ------------------------------------------------------------------ WP3: --against-captures
+
+MAX_LONG_SIDE = 2048    # MapTransfer.MaxLongSide: what a floor or side goes up at
+MAP_VIEW = Path(__file__).resolve().parent.parent / "Source" / "Tarkov-QuestTree" / "UI" / "MapView.cs"
+
+
+def _round_away(value):
+    """Math.Round(value, MidpointRounding.AwayFromZero) as Mono runs it: the fraction split off, and the integer
+    part moved one away from zero when the fraction is half or more."""
+    fraction, whole = math.modf(value)
+    if abs(fraction) >= 0.5:
+        whole += math.copysign(1.0, fraction)
+    return whole
+
+
+def scale_to(width, height, max_long_side, ceil_short=False):
+    """MapTransfer.ScaleTo, ported verbatim: the long side set to the cap EXACTLY, the short one the only rounded
+    quantity (to the nearest pixel, half away from zero; CEILED for a side picture), a degenerate size handed back."""
+    scaled_width, scaled_height = width, height
+
+    if width <= 0 or height <= 0 or max_long_side <= 0:
+        return scaled_width, scaled_height
+    if width <= max_long_side and height <= max_long_side:
+        return scaled_width, scaled_height
+
+    def short(value):
+        return math.ceil(value - 1e-9) if ceil_short else _round_away(value)
+
+    if width >= height:
+        scaled_width = max_long_side
+        scaled_height = max(1, int(short(height * float(max_long_side) / width)))
+    else:
+        scaled_height = max_long_side
+        scaled_width = max(1, int(short(width * float(max_long_side) / height)))
+    return scaled_width, scaled_height
+
+
+def scene_aliases():
+    """The pairs of ids that load one scene, read out of the client's MapView.SceneAliases - one table, not a copy
+    of it. Empty (with a WARN) when the source is not beside this script."""
+    try:
+        text = MAP_VIEW.read_text(encoding="utf-8")
+    except OSError:
+        WARNINGS.append(f"--against-captures: {MAP_VIEW} is not readable, so no map is matched to its alias")
+        return []
+    block = re.search(r"SceneAliases\s*=\s*\{(.*?)\};", text, re.S)
+    if block is None:
+        WARNINGS.append(f"--against-captures: no SceneAliases table in {MAP_VIEW.name}, so no map is matched to its alias")
+        return []
+    return re.findall(r'\(\s*"([^"]+)"\s*,\s*"([^"]+)"\s*\)', block.group(1))
+
+
+def iso_time(value):
+    """An ISO capturedAt as a comparable UTC datetime, or None."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def local_capture(captures, key, aliases):
+    """(folder, meta) of this machine's capture of the host's `key` - its own folder, or its alias's - taking the
+    later capturedAt when both exist; (None, None) when there is none."""
+    names = [key] + [b if a.lower() == key.lower() else a for a, b in aliases
+                     if key.lower() in (a.lower(), b.lower())]
+    found = []
+    for name in names:
+        for folder in (p for p in captures.iterdir() if p.is_dir() and p.name.lower() == name.lower()):
+            meta, _ = load_json(folder / f"{folder.name}{META_SUFFIX}")
+            if isinstance(meta, dict):
+                found.append((folder, meta))
+    if not found:
+        return None, None
+    return max(found, key=lambda fm: iso_time(fm[1].get("capturedAt")) or iso_time("1970-01-01T00:00:00Z"))
+
+
+def against_capture(host_folder, captures, aliases, errors):
+    """One host set against the local capture it came from. Returns the line to print."""
+    key = host_folder.name
+    host, _ = load_json(host_folder / f"{key}{META_SUFFIX}")
+    if not isinstance(host, dict):
+        return f"{key}: no host meta to compare"
+    folder, local = local_capture(captures, key, aliases)
+    if local is None:
+        return f"{key}: no local capture of it under {captures} - not compared"
+    where = f"{key} against {folder.name}"
+
+    host_at, local_at = iso_time(host.get("capturedAt")), iso_time(local.get("capturedAt"))
+    if host_at is None or local_at is None:
+        errors.append(f"{where}: capturedAt {host.get('capturedAt')!r} (host) / {local.get('capturedAt')!r} (local) "
+                      f"is not a time both sides can read")
+        return f"{where}: not compared"
+    if host_at < local_at:
+        errors.append(f"{where}: the host holds an intermediate capture - its capturedAt {host.get('capturedAt')} is "
+                      f"older than this machine's {local.get('capturedAt')}, so the last capture never reached it")
+        return f"{where}: host OLDER"
+    if host_at > local_at:
+        WARNINGS.append(f"{where}: the host's set ({host.get('capturedAt')}) is newer than this machine's capture "
+                        f"({local.get('capturedAt')}) - another machine's, so nothing else is compared")
+        return f"{where}: host newer (another machine's)"
+
+    problems = len(errors)
+
+    host_mesh = host.get("mesh") if isinstance(host.get("mesh"), dict) else None
+    local_mesh = local.get("mesh") if isinstance(local.get("mesh"), dict) else None
+    if host_mesh and local_mesh:
+        if str(host_mesh.get("sha256", "")).lower() != str(local_mesh.get("sha256", "")).lower():
+            errors.append(f"{where}: the host's mesh sha256 {str(host_mesh.get('sha256'))[:12]} is not the local "
+                          f"capture's {str(local_mesh.get('sha256'))[:12]} - a mesh from another capture")
+    elif host_mesh and not local_mesh:
+        errors.append(f"{where}: the host's set has a mesh and the local capture of the same instant has none")
+    elif local_mesh and not host_mesh:
+        WARNINGS.append(f"{where}: the host serves this capture without its mesh (flat)")
+
+    def by_level(meta):
+        return {f.get("level"): f for f in (meta.get("floors") or []) if isinstance(f, dict)}
+
+    host_floors, local_floors = by_level(host), by_level(local)
+    if set(host_floors) != set(local_floors):
+        errors.append(f"{where}: floor levels {sorted(host_floors)} on the host, {sorted(local_floors)} locally")
+    for level in sorted(set(host_floors) & set(local_floors), key=lambda v: (v is None, v)):
+        lf, hf = local_floors[level], host_floors[level]
+        want = scale_to(int(lf.get("width") or 0), int(lf.get("height") or 0), MAX_LONG_SIDE)
+        size, why = jpeg_size(host_folder / str(hf.get("file", "")))
+        if size is None:
+            errors.append(f"{where}: floor {level}'s host picture {why}")
+        elif tuple(size) != tuple(want):
+            errors.append(f"{where}: floor {level}'s host JPEG is {size[0]}x{size[1]} px where ScaleTo of the local "
+                          f"{lf.get('width')}x{lf.get('height')} gives {want[0]}x{want[1]}")
+
+    local_sides = {str(s.get("dir")).upper(): s for s in (local.get("sides") or []) if isinstance(s, dict)}
+    host_sides = [s for s in (host.get("sides") or []) if isinstance(s, dict)]
+    for side in host_sides:
+        direction = str(side.get("dir")).upper()
+        mine = local_sides.get(direction)
+        if mine is None:
+            errors.append(f"{where}: the host has a {direction} side the local capture does not")
+            continue
+        want = scale_to(int(mine.get("width") or 0), int(mine.get("height") or 0), MAX_LONG_SIDE, ceil_short=True)
+        size, why = jpeg_size(host_folder / str(side.get("file", "")))
+        if size is None:
+            errors.append(f"{where}: the {direction} side's host picture {why}")
+        elif tuple(size) != tuple(want):
+            errors.append(f"{where}: the {direction} side's host JPEG is {size[0]}x{size[1]} px where ScaleTo of the "
+                          f"local {mine.get('width')}x{mine.get('height')} (short side ceiled) gives {want[0]}x{want[1]}")
+
+    host_pages = {pg.get("page"): pg for pg in (host.get("atlas") or []) if isinstance(pg, dict)}
+    local_pages = {pg.get("page"): pg for pg in (local.get("atlas") or []) if isinstance(pg, dict)}
+    if host_mesh and local_mesh and len(host_pages) != len(local_pages):
+        errors.append(f"{where}: {len(host_pages)} atlas page(s) on the host, {len(local_pages)} locally")
+    for number, mine in sorted(local_pages.items(), key=lambda kv: (kv[0] is None, kv[0])):
+        png = folder / str(mine.get("file", ""))
+        try:
+            digest = hashlib.sha256(png.read_bytes()).hexdigest()
+        except OSError as exc:
+            errors.append(f"{where}: local atlas page {number} ({png.name}) cannot be read ({exc.strerror or exc})")
+            continue
+        if digest != str(mine.get("sha256", "")).lower():
+            errors.append(f"{where}: local atlas page {number} hashes to {digest[:12]}, not the {str(mine.get('sha256'))[:12]} "
+                          f"its meta names - the local set is not the one the host was sent")
+        theirs = host_pages.get(number)
+        if theirs is None:
+            continue
+        size, why = jpeg_size(host_folder / str(theirs.get("file", "")))
+        if size is None:
+            errors.append(f"{where}: atlas page {number}'s host picture {why}")
+        elif tuple(size) != (int(mine.get("width") or 0), int(mine.get("height") or 0)):
+            errors.append(f"{where}: atlas page {number}'s host JPEG is {size[0]}x{size[1]} px where the local page is "
+                          f"{mine.get('width')}x{mine.get('height')}")
+
+    ok = len(errors) == problems
+    return (f"{where}: capturedAt {host.get('capturedAt')} on both, "
+            f"{'mesh sha equal' if host_mesh and local_mesh else 'no mesh compared'}, {len(host_floors)} floor(s), "
+            f"{len(host_sides)} side(s), {len(host_pages)} page(s) - {'the host holds this capture' if ok else 'MISMATCH'}")
+
+
 def main():
     parser = argparse.ArgumentParser(add_help=True)
     parser.add_argument("root", help="the maps folder the release is assembled from")
     parser.add_argument("--schema", type=int, required=True,
                         help="the client's SupportedCaptureSchema, read by package.ps1")
+    parser.add_argument("--against-captures", metavar="CAPTURES", default=None,
+                        help="also hold each set to this machine's capture it was uploaded from (WP3)")
     args = parser.parse_args()
 
     root = Path(args.root)
@@ -923,6 +1121,17 @@ def main():
     for line in lines:
         print(f"  {line}")
     print()
+
+    if args.against_captures is not None:
+        captures = Path(args.against_captures)
+        if not captures.is_dir():
+            errors.append(f"--against-captures: no captures folder at {captures}")
+        else:
+            aliases = scene_aliases()
+            print(f"against captures: {captures}")
+            for folder in folders:
+                print(f"  {against_capture(folder, captures, aliases, errors)}")
+            print()
 
     for w in WARNINGS:
         print(f"WARN   {w}")

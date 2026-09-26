@@ -74,7 +74,12 @@ have moved 15 m; it hitches every few seconds and is meant for a raid set aside 
 2048-px JPEG, and every client of that host picks up the maps it lacks on the first Maps-tab open of
 a session. The host decides: uploads are refused unless it runs with `QUESTTREE_ACCEPT_MAPS=1`
 (`tools/server-host.cmd` sets it), the refusal is one line and is not retried that session, and a
-set only ever moves into place whole. The release ships whatever map sets exist, gated on layout,
+set only ever moves into place whole. A capture campaign offers its map ONCE, when it ends - not after every stop - so the host gets the finished set and the raid is not interrupted by fifty uploads; automatic capture offers at most every ten minutes while you keep walking, and when you stop (two minutes without an automatic capture, the setting turned off, or the raid over). A capture the game closed before sending is
+remembered in `captures\.upload-owed` and offered on the next session's first Maps-tab open, unless the
+host already has it or a newer one; a session that never opens the Maps tab never syncs. The upload's
+file reads, mesh hash and JPEG encodes run off the main thread (the encoder only after a byte-identity
+check against the main-thread one each session), and a capture waits for an upload's read before it
+replaces the files. The release ships whatever map sets exist, gated on layout,
 1.5 MB per image, the meta schema and `tools/check-maps-pack.py`, with two things reported rather
 than gated: the payload's total size (printed on every run, a warning past 80 MB) and coverage of the
 eleven vanilla maps (a warning naming the missing ones).

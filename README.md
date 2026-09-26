@@ -429,6 +429,16 @@ next start. Two players who capture the same map in the same second share a slot
 the second one is refused rather than merged - its own next capture goes up normally. The credit line under a captured map is ours and names the build and the raid rather than
 a licence: `Map: captured in-game with Quest Tracker 1.19.0, 3 captures since 2026-09-19 (10:49)`.
 
+**When a capture goes up.** A key press offers its capture as soon as it is written. A capture campaign offers its map ONCE, when it ends - not after every stop - so the host gets the finished set and the raid is not interrupted by fifty uploads; automatic capture offers at most every ten minutes while you keep walking, and when you stop (two minutes without an automatic capture, the setting turned off, or the raid over). A key
+press while automatic capture is on waits with it. The upload runs on the plugin rather than the raid, so a
+raid that ends first still sends it, from the menu. If the game closes before it has gone up, the map is
+written to `captures\.upload-owed`, and the next session offers it the first time the Maps tab is opened -
+unless the host already has that capture or a newer one. A session that never opens the Maps tab never
+syncs, so the marker waits for one that does (`tools/check-capture.py` warns while it is there). The
+upload reads the files and hashes the mesh off the game's main thread, and a capture waits for such a
+read to finish before it replaces the files; the JPEG encoding runs off it too, once a check at the
+start of the session has shown the off-thread encoder produces exactly the main thread's bytes.
+
 ## The tree
 
 The **Tree** button, top right, is the whole progression. Each quest is a box that says what it is

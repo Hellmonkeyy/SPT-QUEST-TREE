@@ -880,8 +880,12 @@ namespace QuestTree
             UploadCaptures = config.Bind(
                 "Map", "Share captured maps", true,
                 "Offer a map picture you have just captured to the Quest Tracker server mod, so anyone " +
-                "else playing on the same host gets it too. A host that does not collect map pictures " +
-                "refuses the offer and nothing is sent; turn this off to not offer at all.");
+                "else playing on the same host gets it too. A capture campaign offers the map once, when it " +
+                "ends; automatic capture at most every ten minutes and when you stop (two minutes without an " +
+                "automatic capture, the setting turned off, or the raid over) - a key press while automatic " +
+                "capture is on waits with it. A capture the game closed before sending is offered the next time " +
+                "the Maps tab is opened. A host that does not collect map pictures refuses the offer and nothing " +
+                "is sent; turn this off to not offer at all.");
 
             PinLabels = config.Bind(
                 "Map", "Pin labels", PinLabelMode.HoverOnly,

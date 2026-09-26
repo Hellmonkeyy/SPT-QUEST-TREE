@@ -90,6 +90,10 @@ older path breaks the invariant too and is not WP1's: a merge into a picture tha
 old colour with distance 255 (the colour test says drawn, the missing sidecar gives no distance), so a set
 merged once without its sidecar fails here until its pixels are drawn again.
 
+WP3 (upload once): a captures\\.upload-owed marker at the root of the captures folder names the maps whose one
+upload was owed when the game last closed; each is a WARN ("an upload of X was owed when the game last closed"),
+never an ERROR - the capture is fine, and the next session's first Maps-tab open offers it again.
+
 Usage:  python tools/check-capture.py [captures-root] [zones-folder] [--compare OLD_ROOT] [--mesh-quality]
                                       [--legacy-view] [--pixels]
         defaults: C:\\Games\\SPT\\BepInEx\\plugins\\QuestTree\\captures
@@ -2082,6 +2086,31 @@ def compare(new_root, old_root, errors, warnings):
     return lines
 
 
+OWED_MARKER = ".upload-owed"   # MapTransfer.OwedMarker.FileName (WP3 step 7)
+
+
+def check_owed_marker(captures, warnings):
+    """WP3 step 7: captures\\.upload-owed names the maps whose one upload was owed when the game last closed. The
+    client offers them again on the next session's first Maps-tab open, and takes each off once its upload has run,
+    so a marker that lingers is a map this machine has not shared - worth a WARN, never an ERROR (the capture itself
+    is fine, and a session that never opens the Maps tab never syncs)."""
+    marker = captures / OWED_MARKER
+    if not marker.is_file():
+        return
+    try:
+        keys = [line.strip() for line in marker.read_text(encoding="utf-8-sig").splitlines() if line.strip()]
+    except OSError as exc:
+        warnings.append(f"{marker} exists but cannot be read ({exc.strerror or exc})")
+        return
+    seen = set()
+    for key in keys:
+        if key.lower() in seen:
+            continue
+        seen.add(key.lower())
+        warnings.append(f"an upload of {key} was owed when the game last closed ({marker.name}) - it is offered "
+                        f"again the next time the Maps tab is opened, unless the host already has it")
+
+
 def main():
     if not CAPTURES.is_dir():
         fail_hard(f"no captures folder at {CAPTURES} - pass one as the first argument")
@@ -2093,6 +2122,8 @@ def main():
         result = check_capture(folder, errors, warnings)
         if result is not None:
             lines.append(result)
+
+    check_owed_marker(CAPTURES, warnings)
 
     print(f"captures: {CAPTURES}")
     print(f"zones:    {ZONES}")

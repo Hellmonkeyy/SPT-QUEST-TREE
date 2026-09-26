@@ -254,6 +254,15 @@ deadline sized to it (60 s plus its transfer at 512 KB/s, 240 s to 30 minutes). 
 is not downloaded back from the host. A solo player needs none of it - their own captures are read
 straight out of their own folder.
 
+**When a capture goes up.** A key press offers its capture as soon as it is written. A capture campaign offers its map ONCE, when it ends - not after every stop - so the host gets the finished set and the raid is not interrupted by fifty uploads; automatic capture offers at most every ten minutes while you keep walking, and when you stop (two minutes without an automatic capture, the setting turned off, or the raid over). A key
+press while automatic capture is on waits with it. The upload runs on the plugin rather than the raid, so
+a raid that ends first still sends it, from the menu. If the game closes before it has gone up, the map is
+remembered in `captures\.upload-owed` and offered the next time the Maps tab is opened, unless the host
+already has that capture or a newer one - **a session that never opens the Maps tab never syncs**, so the
+marker waits for one that does. The upload reads its files and hashes the mesh off the game's main thread,
+and encodes its JPEGs off it too once a check at the start of the session has shown the off-thread encoder
+gives exactly the main thread's bytes.
+
 ## DynamicMaps is now a choice rather than a dependency
 
 **Map pictures come from** has three settings: *DynamicMaps when it has the map, else my captures*
@@ -593,6 +602,8 @@ the rest.
   old sidebar-only message, and the line above it should say `No map picture yet`.
 - Start the server from `tools/server-host.cmd` and capture something. Its console should say
   `map uploads from clients are accepted (QUESTTREE_ACCEPT_MAPS=1).` and the client should log
-  `capture of <map> uploaded to the host`. Start it normally instead and the client should say the
+  `capture of <map> uploaded to the host`. After a campaign it should log
+  `campaign done: 1 upload of <map> (N stops, 0 intermediate uploads).` and then exactly one
+  `capture of <map> uploaded to the host`, with none between the campaign's start and that line. Start it normally instead and the client should say the
   host does not accept map pictures, once.
 - Everything that is not the map should be exactly as it was in 1.18.5.

@@ -13,8 +13,9 @@ using UnityEngine;
 namespace QuestTree.QuestGraph
 {
     /// <summary>
-    /// Moves captured map pictures between this client and the host it plays on: up, right after a
-    /// capture, and down, once a session, for the maps somebody else captured.
+    /// Moves captured map pictures between this client and the host it plays on: up, once a capture is on
+    /// disk - and, since WP3, once per capture campaign at its end and at most every ten minutes of automatic
+    /// capture (see <see cref="HoldUploads"/>) - and down, once a session, for the maps somebody else captured.
     ///
     /// Why it exists. A capture costs one raid on one map, and a Fika group has one host and several
     /// players: without this, every player would have to raid every map to see a picture of it, and a
@@ -28,10 +29,12 @@ namespace QuestTree.QuestGraph
     /// A host that does not want a hundred megabytes of other people's pictures says so once per
     /// session and is never asked again (<see cref="_uploadsDeclined"/>).
     ///
-    /// Nothing waits on the network on Unity's thread. Encoding is Texture2D work and cannot leave
-    /// the main thread, so it is spread one floor per frame; every request is issued on a pool thread
-    /// and polled from a coroutine (upload) or done wholesale on one worker (download), which is the
-    /// same begin/poll/take shape <see cref="QuestDataClient.BeginAll"/> uses.
+    /// Nothing waits on the network on Unity's thread. The decode, the blit and the readback of an upload
+    /// are Texture2D work and cannot leave the main thread, so they are spread one picture per frame; the
+    /// file reads, the mesh hash (WP3 Phase A), the composite loop and the JPEG encode (Phase B, behind a
+    /// byte-identity self-check) run on workers, and every request is issued on a pool thread and polled
+    /// from a coroutine (upload) or done wholesale on one worker (download), which is the same
+    /// begin/poll/take shape <see cref="QuestDataClient.BeginAll"/> uses.
     ///
     /// A download never leaves a HALF set on disk. The reader's gate is the meta file - a picture
     /// nothing names is never drawn - so a set is assembled in a staging folder, the old meta is
@@ -780,7 +783,11 @@ namespace QuestTree.QuestGraph
         ///
         /// Called by <see cref="MapCapture"/> the moment a capture's meta is safely on disk - never
         /// before, because what is uploaded is read back from those files, and a meta that failed to
-        /// write is a capture that does not exist.
+        /// write is a capture that does not exist. Since WP3 that call does not always upload: while a
+        /// capture campaign or automatic capture HOLDS the map (<see cref="HoldUploads"/>), the capture is
+        /// recorded as owed and the hold's release uploads it once - see the rules on
+        /// <see cref="_pendingUploads"/>. The queued offers and the next session's owed-marker offers come
+        /// through here too.
         ///
         /// Returns at once: the work is a coroutine on the plugin object, which outlives the raid the
         /// capture was taken in, so an upload that is still going when the player extracts finishes
@@ -2221,6 +2228,9 @@ namespace QuestTree.QuestGraph
             RenderTexture render = null;
             var previous = RenderTexture.active;
 
+            // WP3 4c: the main thread's cost of this picture, decode to JPEG, for the Debug line.
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+
             try
             {
                 // The read's failure, worded as this method's own catch words any failure (WP3 Phase A: the read moved
@@ -2341,7 +2351,8 @@ namespace QuestTree.QuestGraph
                     jpg = encodeFrom.EncodeToJPG(quality);
                 }
 
-                return AcceptJpg(key, floor, jpg, null, quality, source.width, source.height, encodeFrom.width, encodeFrom.height);
+                return AcceptJpg(key, floor, jpg, null, quality, source.width, source.height, encodeFrom.width, encodeFrom.height,
+                    clock.ElapsedMilliseconds, offThread: false);
             }
             catch (Exception ex)
             {
@@ -2395,7 +2406,7 @@ namespace QuestTree.QuestGraph
         /// </summary>
         private static bool AcceptJpg(
             string key, FloorUpload floor, byte[] jpg, string base64, int quality, int sourceWidth, int sourceHeight,
-            int width, int height)
+            int width, int height, long mainMs, bool offThread)
         {
             if (jpg == null || jpg.Length == 0)
             {
@@ -2419,9 +2430,12 @@ namespace QuestTree.QuestGraph
             floor.Base64 = base64 ?? Convert.ToBase64String(jpg);
             floor.Bytes = jpg.Length;
 
+            // "in {ms} ms": the main thread's share (WP3 4c) - the whole encode on the main-thread path, the decode and the
+            // hand-offs when the composite and the encode ran on workers.
             Plugin.LogSource?.LogDebug(
                 $"QuestTree: {key} \"{floor.Name}\" {sourceWidth}x{sourceHeight} -> " +
-                $"{width}x{height} JPEG q{quality}, {Mb(jpg.Length)} MB.");
+                $"{width}x{height} JPEG q{quality}, {Mb(jpg.Length)} MB in {mainMs} ms" +
+                (offThread ? " on the main thread (encoded off it)." : "."));
 
             return true;
         }
@@ -2530,6 +2544,9 @@ namespace QuestTree.QuestGraph
             public string Base64;
             public string RetryLine;
             public Exception Failure;
+
+            /// <summary>Milliseconds the main thread spent on this picture, summed over its steps (WP3 4c).</summary>
+            public long MainMs;
         }
 
         /// <summary>What an encode came to, for the routine that drives <see cref="EncodeSteps"/>.</summary>
@@ -2612,6 +2629,8 @@ namespace QuestTree.QuestGraph
         /// pixels handed out. False, having said why, when the picture is not offered.</summary>
         private static bool ArrayBegin(string key, FloorUpload floor, byte[] bytes, ArrayEncode s)
         {
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+
             try
             {
                 // The frame size from the header BEFORE the decode (review F49) - see Encode.
@@ -2650,6 +2669,7 @@ namespace QuestTree.QuestGraph
                 }
 
                 s.Pixels = s.Source.GetPixels32();
+                s.MainMs += clock.ElapsedMilliseconds;
                 return true;
             }
             catch (Exception ex)
@@ -2668,6 +2688,7 @@ namespace QuestTree.QuestGraph
         private static bool ArrayMiddle(string key, FloorUpload floor, ArrayEncode s)
         {
             var previous = RenderTexture.active;
+            var clock = System.Diagnostics.Stopwatch.StartNew();
 
             try
             {
@@ -2707,6 +2728,7 @@ namespace QuestTree.QuestGraph
 
                 if (s.SelfCheck) s.MainJpg = encodeFrom.EncodeToJPG(s.Quality);
 
+                s.MainMs += clock.ElapsedMilliseconds;
                 return true;
             }
             catch (Exception ex)
@@ -2761,6 +2783,8 @@ namespace QuestTree.QuestGraph
         /// worker failed or its bytes differed, and the same accept as <see cref="Encode"/>.</summary>
         private static bool ArrayFinish(string key, FloorUpload floor, ArrayEncode s)
         {
+            var clock = System.Diagnostics.Stopwatch.StartNew();
+
             try
             {
                 if (s.RetryLine != null) Plugin.LogSource?.LogDebug(s.RetryLine);
@@ -2814,7 +2838,8 @@ namespace QuestTree.QuestGraph
                     }
                 }
 
-                return AcceptJpg(key, floor, jpg, base64, s.Quality, s.SourceWidth, s.SourceHeight, s.Width, s.Height);
+                return AcceptJpg(key, floor, jpg, base64, s.Quality, s.SourceWidth, s.SourceHeight, s.Width, s.Height,
+                    s.MainMs + clock.ElapsedMilliseconds, offThread: useArray && !s.SelfCheck);
             }
             catch (Exception ex)
             {
@@ -3117,7 +3142,8 @@ namespace QuestTree.QuestGraph
         /// The sha256 is the check that can fail, and it is not ceremony: the meta and the .bin are two
         /// files written in sequence by a capture that can be interrupted, a merge can leave an older
         /// mesh beside a newer meta, and a hand-copied folder can hold either half. Reading and hashing
-        /// is ~30 ms per 48 MB (WP7 meshes run 50-90 MB on a stock map, up to 512 MiB), paid once per upload - on the main thread, in the raid when the capture was taken in one, but a frame after the capture finished (UploadRoutine yields first) and hashed once (review F34).
+        /// is tens to hundreds of ms per 48 MB (WP7 meshes run 50-90 MB on a stock map, up to 512 MiB), paid once per upload and hashed
+        /// once (review F34) - on a worker since WP3 Phase A (<see cref="PrepareOffThread"/>), so not in any frame.
         /// </summary>
         /// <param name="key">The map's internal id.</param>
         /// <param name="meta">The meta about to be offered. Its mesh block is stripped on any failure.</param>
