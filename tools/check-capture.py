@@ -1653,10 +1653,14 @@ def check_pixels(meta, folder, key, errors, warnings):
         checked += 1
         coloured += here
         if here:
-            errors.append(f"{where}: INVARIANT broken - {here:,} pixel(s) of {rel} have colour where {dist_name} says "
-                          f"nothing was drawn (distance 255), the first at column {first[0]}, row {first[1]} from the "
-                          f"top - a kept colour lost its distance, or an empty pixel was not written black (a merge into a "
-                          f"picture that had NO sidecar also does this: DevelopBand keeps the colour with distance 255)")
+            # A WARN, not an ERROR (PART-06 review): a merge into a picture that had no sidecar legitimately keeps
+            # its colours at distance 255 (DevelopBand's rule since the sidecar was introduced - the next capture
+            # takes such a pixel whatever its distance), and Interchange's four sides on the maintainer's machine
+            # are exactly that. A colour under 255 in a set that always had sidecars is still worth a look.
+            warnings.append(f"{where}: {here:,} pixel(s) of {rel} have colour where {dist_name} says nothing was drawn "
+                            f"(distance 255), the first at column {first[0]}, row {first[1]} from the top - either a merge "
+                            f"into a picture that had no sidecar (DevelopBand keeps the colour with distance 255, and the "
+                            f"next capture takes it whatever its distance), or a kept colour that lost its distance")
     return f"pixels: {checked} picture(s) against their sidecars, {empty:,} px at dist 255, {coloured:,} with colour"
 
 
