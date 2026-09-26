@@ -4121,7 +4121,9 @@ namespace QuestTree.UI
                             tileSinks[tile] = sink;
                         }
 
-                        // +6, not +3 (WP8 D5): MeshData.From may split a crease corner into a vertex of its own.
+                        // +6, not +3 (WP8 D5): MeshData.From may split a crease corner into a vertex of its own -
+                        // a SOFT chunk size, not a bound (PART-04 review): the split can add a vertex per crease
+                        // corner, so a chunk can pass MaxVerticesPerMesh, and every mesh is UInt32-indexed.
                         if (sink.Count + 6 > MaxVerticesPerMesh) sink.Flush($"{p.MapKey}-tile{tile}-{level}", AtlasList(data, tile));
 
                         sink.Triangle(p, serial, building.VertexCount, range, a, b, c);

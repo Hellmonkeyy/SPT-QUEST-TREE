@@ -2558,13 +2558,20 @@ namespace QuestTree.QuestGraph
 
             if (request.CullingKnown && (!renderer.enabled || renderer.forceRenderingOff))
             {
-                if (IncludeGameCulled && request.GameCulled != null && request.GameCulled.Contains(renderer))
+                // Owned by a culling system AND switched off the way that system switches (PART-04 review): the
+                // distance switcher only ever sets forceRenderingOff on its content, and an occlusion bake group
+                // toggles enabled - so a renderer under a switcher that is merely disabled (a designer-disabled
+                // variant, a helper) is not the game hiding it from this position, and stays skipped.
+                var byOcclusion = request.OcclusionCulled != null && request.OcclusionCulled.Contains(renderer) &&
+                                  !renderer.enabled;
+                var bySwitcher = renderer.forceRenderingOff;
+
+                if (IncludeGameCulled && request.GameCulled != null && request.GameCulled.Contains(renderer) &&
+                    (byOcclusion || bySwitcher))
                 {
                     // Hidden from where the player stands, not from the map: read like any other.
-                    if (request.OcclusionCulled != null && request.OcclusionCulled.Contains(renderer))
-                        job.GameCulledByOcclusion++;
-                    else
-                        job.GameCulledBySwitcher++;
+                    if (byOcclusion) job.GameCulledByOcclusion++;
+                    else job.GameCulledBySwitcher++;
                 }
                 else
                 {
@@ -3426,9 +3433,10 @@ namespace QuestTree.QuestGraph
             {
                 state.Committed++;
                 candidate.AsSource = true;
-                candidate.ReadLod = state.Levels[candidate.QueuedLevel >= 0 && candidate.QueuedLevel < state.Levels.Count
-                    ? candidate.QueuedLevel
-                    : state.Current].Lod;
+                // The level the group is ON when the read happens (PART-04 review): a renderer shared by levels k
+                // and k+1, queued at k, is still read after the group moved to k+1 (IsSource passed it as a member
+                // of the current level), and its grade must say k+1, not one level better than it is.
+                candidate.ReadLod = state.Levels[state.Current].Lod;
             }
 
             // The estimate the peak line adds up: the source's own arrays, the worker's lists over it, and
@@ -5007,7 +5015,12 @@ namespace QuestTree.QuestGraph
                     var info = new AtlasMaterial
                     {
                         Material = material,
-                        Cutout = queue >= 2450 || material.IsKeywordEnabled("_ALPHATEST_ON"),
+                        // The QUEUE decides (PART-04 review): the AlphaTest queue is where the engine sorts a
+                        // material it cuts out. The _ALPHATEST_ON keyword alone does not - EFT packs smoothness
+                        // into albedo alpha and a keyword can outlive a shader change - so a Geometry-queue material
+                        // with the keyword would be judged on smoothness and left untextured. The keyword is still
+                        // printed in the diagnostics line.
+                        Cutout = queue >= 2450,
                         Cutoff = material.HasProperty("_Cutoff") ? material.GetFloat("_Cutoff") : 0.5f,
                     };
 
@@ -8483,7 +8496,11 @@ namespace QuestTree.QuestGraph
 
                         if (e2 > maxEdge2) maxEdge2 = e2;
 
-                        var aspect = cross > 1e-12 ? e2 / cross : double.PositiveInfinity;
+                        // A near-degenerate face is not "the thinnest before" (PART-04 review): as +infinity it
+                        // would switch the sliver guard off for every collapse touching this fan.
+                        if (cross <= 1e-12) continue;
+
+                        var aspect = e2 / cross;
                         if (aspect > worstAspect) worstAspect = aspect;
                     }
             }
