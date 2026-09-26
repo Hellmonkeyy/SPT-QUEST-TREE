@@ -63,7 +63,7 @@ facts line counts them.
 **Ctrl+Shift+F9 captures a whole map without you walking it.** One press plans a grid of stops about
 120 m apart, finds somewhere standable in each cell, teleports the player from stop to stop, captures at
 each and returns them to where they pressed it - about 33 stops on Customs (9 x 5 cells of 115 x 100 m,
-the ones with nowhere to stand dropped), each a full capture, with the 3D model rebuilt at every stop;
+the ones with nowhere to stand dropped), each a full capture, each stop adding to the 3D model what it newly sees;
 120 m because at 200 m the ground between stops was not covered well, and the nearest-capture-wins
 merge needs every pixel loaded at the stop nearest to it. It disables no bots and touches nothing but the player's position:
 start such a raid with AI set to none. "Capture the map automatically while I play" (off by default)
@@ -83,6 +83,31 @@ eleven vanilla maps (a warning naming the missing ones).
 default, so nothing changes for an install already using it), our captures first, or our captures
 only. Nothing of its artwork is bundled or copied, and each map's author is still credited; a
 captured map carries our own credit line naming the build, the date and the raid's clock.
+
+**The 3D mesh accumulates.** A capture that builds the mesh adds to the one already stored rather
+than replacing it: it reads the stored mesh and its identity sidecar, `captures\<key>\<key>-mesh.index`
+(which renderer every stored building was read from - a 64-bit hash of its scene path, its bounds, its
+submesh range and its geometry - its LOD group and level, how it was stored, and which material every
+atlas tile is), skips every building already stored, reads only what is new, degraded (stored over its
+limit, as it is, clustered or from a coarser LOD level) or changed, re-plans the triangle budget over
+the stored and the new buildings together, fills relief cells this stop could not measure from the
+stored relief, appends new textures to the stored atlas pages (only the pages that take a new tile are
+re-encoded), and writes the stored buildings and the new ones as one file of the same format. So a
+campaign's mesh is every stop's buildings, not the last stop's alone, and after the first stop a stop
+costs a few seconds of mesh instead of the whole building phase. A LOD group is only ever stored at one
+level: a finer level replaces a coarser one only when this stop read the whole of it. A stored building
+is never removed because it was not loaded this time - only replaced - so something genuinely removed
+from a map within one game version stays until a rebuild. A stop that added nothing keeps the stored
+files as they were. The sidecar is local: it is never uploaded or shipped, the viewer never reads it,
+and without it (or with one that does not match the mesh) the next capture simply builds from scratch
+and writes one. Three settings, in the F12 menu under **Advanced** only: **3D map: add to the stored
+mesh** (on; off rebuilds from scratch at every capture, the last one winning - the old behaviour),
+**3D map: rebuild from scratch on the next capture** (a one-shot that turns itself off once a mesh is
+written), and **3D map: verify the last campaign stop (debug)**, which at a campaign's last stop also
+builds the mesh from scratch into `<key>-mesh.verify.bin` for `python tools/compare-mesh.py
+captures\<key>` to hold the accumulated mesh to (every building present, none with fewer triangles,
+the relief and the height range held, the textures as sharp). A change of the mod's mesh recipe, the
+game version, the map's rectangle, its floors or the render mask rebuilds from scratch once by itself.
 
 ## Also
 

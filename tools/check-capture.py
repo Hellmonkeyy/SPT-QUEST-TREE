@@ -535,6 +535,10 @@ def read_mesh(data, bound=MESH_MAX_INFLATED_BYTES, keep=False):
         "maxBuilding": 0,
         "keys": {},
         "kept": [],
+        # WP2: every building in file order - (key, level, triangles, [(page, x, y, w, h) per range]) - for the
+        # sidecar's row-by-row checks and compare-mesh; with keep, every band's heights and distances by level
+        "shapes": [],
+        "grids": {},
     }
 
     if version != MESH_VERSION:
@@ -571,6 +575,8 @@ def read_mesh(data, bound=MESH_MAX_INFLATED_BYTES, keep=False):
         cells = width * height
         heights = cur.u16s(cells, f"{where}'s heights")
         distance = cur.take(cells, f"{where}'s distances")
+        if keep:
+            mesh["grids"][level] = (heights, distance)
 
         mesh["bands"].append({
             "level": level,
@@ -666,6 +672,8 @@ def read_mesh(data, bound=MESH_MAX_INFLATED_BYTES, keep=False):
 
         end = 0
         owner = bytearray(count) if ranges else None
+        shape = []
+        mesh["shapes"].append((key, level, indices // 3, shape))
         for k in range(ranges):
             page = cur.i32(f"{where}'s range {k} page")
             first = cur.i32(f"{where}'s range {k} first index")
@@ -688,6 +696,7 @@ def read_mesh(data, bound=MESH_MAX_INFLATED_BYTES, keep=False):
                 raise MeshError(f"{where} (key {key}) range {k} is indices {first}+{span} of {indices} "
                                 f"(after {end}) - ranges are ascending whole triangles inside the building")
             end = first + span
+            shape.append((page, tx, ty, tw, th))
             mesh["textured"] += span // 3
             if kept is not None:
                 kept["ranges"].append((page, first, span, tx, ty, tw, th, u_min, u_max, v_min, v_max))
@@ -1200,6 +1209,9 @@ def check_mesh(meta, folder, key, extent, levels, errors, warnings):
 
     meta["_meshKeys"] = mesh["keys"]
 
+    # WP2: the identity sidecar beside the mesh (optional: absent is a note, not a warning)
+    index_column = check_mesh_index(meta, folder, key, mesh, actual_sha, errors, warnings)
+
     if mesh["triangles"] > MESH_BUILDER_ABSOLUTE:
         errors.append(f"{key}: {rel} holds {mesh['triangles']} triangles, over the builder's absolute "
                       f"{MESH_BUILDER_ABSOLUTE} - not a file this build wrote")
@@ -1274,7 +1286,303 @@ def check_mesh(meta, folder, key, extent, levels, errors, warnings):
             f"hit), {mesh['buildings']} building(s), "
             f"{mesh['triangles']} triangles, {mesh['textured']} textured in {mesh['ranges']} range(s) "
             f"over {mesh['atlasPages']} atlas page(s), per-building max {mesh['maxBuilding']} triangles, "
-            f"cell {cell_text} m" + quality)
+            f"cell {cell_text} m; {index_column}" + quality)
+
+
+# --- WP2: the mesh's identity sidecar ---------------------------------------------------------------------------------
+#
+# <key>-mesh.index, from Source\Tarkov-QuestTree\QuestGraph\MapMeshIndex.cs - ToBytes is the byte table read_index follows,
+# with the same caps. It is LOCAL (never uploaded, never shipped): the capturing machine's record of which renderer each
+# stored building is, so the next capture adds to the mesh instead of rebuilding it. A missing sidecar is a note; one
+# that does not describe this mesh (another sha) is a WARN - the next capture rebuilds from scratch, which is safe; one
+# that describes it wrongly (the rows disagree with the mesh, two rows of one identity, two levels of one LOD group) is
+# an ERROR - that is a builder bug the next capture would build on.
+INDEX_MAGIC = b"QTMI"
+INDEX_VERSION = 1               # MapMeshIndex.Version
+INDEX_SUFFIX = "-mesh.index"    # MapMeshIndex.Suffix
+INDEX_MAX_RECIPE = 512
+INDEX_MAX_GAME = 128
+INDEX_MAX_MATERIALS = 16384
+INDEX_MAX_INFLATED = 64 * 1024 * 1024
+INDEX_SLACK = 0.25              # MapMeshIndex.IdentitySlackMetres
+INDEX_FLAT_PIXELS = 4           # MapMeshBuilder.AtlasFlatPixels
+INDEX_PADDING = 8               # MapMeshBuilder.AtlasPadding
+INDEX_MATERIAL = struct.Struct("<Q10iBBBBBfH")
+INDEX_BUILDING = struct.Struct("<Q4i6fQ3fiBBB3fifHB")
+
+
+def read_index(data):
+    """The sidecar as a dict, or a MeshError naming the first thing wrong - counts checked against the caps before
+    anything is read behind them, trailing bytes refused."""
+    un = zlib.decompressobj(-15)
+    try:
+        body = un.decompress(data, INDEX_MAX_INFLATED + 1)
+    except zlib.error as exc:
+        raise MeshError(f"is not a deflate stream ({exc})")
+    if len(body) > INDEX_MAX_INFLATED:
+        raise MeshError(f"inflates past {INDEX_MAX_INFLATED} bytes")
+    if not un.eof:
+        raise MeshError("is a truncated deflate stream")
+    cur = MeshCursor(body)
+
+    if cur.take(4, "the magic") != INDEX_MAGIC:
+        raise MeshError("is not a QuestTree mesh index")
+    version = cur.i32("the version")
+    if version != INDEX_VERSION:
+        raise MeshError(f"is version {version}; this script reads version {INDEX_VERSION}")
+
+    def count(cap, what):
+        n = cur.i32(what)
+        if n < 0 or n > cap:
+            raise MeshError(f"claims {n} {what} (cap {cap})")
+        return n
+
+    def string(cap, what):
+        n = count(cap, what)
+        return cur.take(n, what).decode("utf-8", "replace")
+
+    index = {"sha": cur.take(32, "the mesh sha").hex()}
+    index["recipe"] = string(INDEX_MAX_RECIPE, "recipe bytes")
+    index["game"] = string(INDEX_MAX_GAME, "game bytes")
+    index["minX"], index["minZ"], index["maxX"], index["maxZ"] = struct.unpack("<4d", cur.take(32, "the extent"))
+    index["renderMask"] = cur.i32("the render mask")
+    index["cullingKnown"] = cur.take(1, "culling-known")[0]
+    index["bands"] = []
+    for _ in range(count(MESH_MAX_BANDS, "bands")):
+        level = cur.i32("a band's level")
+        min_y, max_y, camera_y, depth = struct.unpack("<4f", cur.take(16, "a band"))
+        index["bands"].append({"level": level, "minY": min_y, "maxY": max_y, "cameraY": camera_y, "depthBelow": depth,
+                               "interior": cur.take(1, "a band's interior flag")[0]})
+    index["captures"] = cur.i32("the captures")
+    index["pages"] = []
+    for _ in range(count(MESH_MAX_ATLAS_PAGES, "atlas pages")):
+        index["pages"].append({"sha": cur.take(32, "a page's sha").hex(), "tiles": cur.i32("a page's tiles")})
+    index["pack"] = struct.unpack("<4i", cur.take(16, "the packing state"))
+    index["materials"] = []
+    for _ in range(count(INDEX_MAX_MATERIALS, "materials")):
+        v = INDEX_MATERIAL.unpack(cur.take(INDEX_MATERIAL.size, "a material"))
+        index["materials"].append({
+            "key": v[0], "texW": v[1], "texH": v[2], "page": v[3], "x": v[4], "y": v[5], "w": v[6], "h": v[7],
+            "flatPage": v[8], "flatX": v[9], "flatY": v[10], "flags": v[11], "mip": v[12], "avg": v[13:16],
+            "opaque": v[16], "capturedAt": v[17]})
+    index["buildings"] = []
+    for i in range(count(MESH_MAX_BUILDINGS, "buildings")):
+        v = INDEX_BUILDING.unpack(cur.take(INDEX_BUILDING.size, f"building {i}"))
+        ranges = v[-1]
+        if ranges > MESH_MAX_RANGES_PER_BUILDING:
+            raise MeshError(f"building {i} lists {ranges} ranges (cap {MESH_MAX_RANGES_PER_BUILDING})")
+        keys = struct.unpack(f"<{ranges}Q", cur.take(8 * ranges, f"building {i}'s range keys")) if ranges else ()
+        index["buildings"].append({
+            "pathHash": v[0], "subFirst": v[1], "subEnd": v[2], "source": v[3], "meshVertices": v[4],
+            "centre": v[5:8], "size": v[8:11], "groupHash": v[11], "groupPos": v[12:15], "groupKey": v[15],
+            "levelIndex": v[16], "grade": v[17], "dup": v[18], "footprint": v[19], "surface": v[20], "height": v[21],
+            "stored": v[22], "centroid": v[23], "capturedAt": v[24], "keys": keys})
+    if cur.at != len(body):
+        raise MeshError(f"carries {len(body) - cur.at} byte(s) after its last building")
+    return index
+
+
+def grade_level(grade):
+    """The LOD level a grade says (MapMeshBuilder.GradeFor: sub for level 0, 10 + 4 x lod + sub above)."""
+    return 0 if grade < 10 else (grade - 10) // 4
+
+
+def _near(a, b):
+    return all(abs(x - y) <= INDEX_SLACK for x, y in zip(a, b))
+
+
+def index_groups(rows):
+    """Each row's LOD group number by group path hash and position within the slack (-1 for none)."""
+    heads, out = {}, []
+    for i, row in enumerate(rows):
+        if row["groupHash"] == 0:
+            out.append(-1)
+            continue
+        found = -1
+        for head in heads.get(row["groupHash"], []):
+            if _near(rows[head]["groupPos"], row["groupPos"]):
+                found = out[head]
+                break
+        if found < 0:
+            found = len(set(g for g in out if g >= 0))
+            heads.setdefault(row["groupHash"], []).append(i)
+        out.append(found)
+    return out
+
+
+def check_mesh_index(meta, folder, key, mesh, mesh_sha, errors, warnings):
+    """WP2 (PART-05 4.2): the sidecar beside the mesh, when there is one - its eleven assertions. Returns the summary
+    line's index column."""
+    path = folder / f"{key}{INDEX_SUFFIX}"
+    if not path.is_file():
+        return "no index (the next capture rebuilds the 3D mesh from scratch)"
+
+    name = path.name
+    # 1. it parses with its caps; its magic and version are known
+    try:
+        index = read_index(path.read_bytes())
+    except MeshError as exc:
+        warnings.append(f"{key}: {name} {exc} - the next capture rebuilds the 3D mesh from scratch")
+        return "index UNREADABLE"
+
+    # 2. it describes THIS mesh
+    if index["sha"] != mesh_sha:
+        warnings.append(f"{key}: {name} describes another mesh (sha {index['sha'][:16]}... vs {mesh_sha[:16]}...) - "
+                        f"the next capture rebuilds the 3D mesh from scratch")
+        return "index STALE"
+
+    problems = len(errors)
+
+    # 3. the extent to the bit, and the band levels
+    for field in ("minX", "minZ", "maxX", "maxZ"):
+        if struct.pack("<d", index[field]) != struct.pack("<d", mesh[field]):
+            errors.append(f"{key}: {name}'s {field} {index[field]!r} is not the mesh's {mesh[field]!r}")
+    index_levels = sorted(b["level"] for b in index["bands"])
+    mesh_levels = sorted(b["level"] for b in mesh["bands"])
+    if index_levels != mesh_levels:
+        errors.append(f"{key}: {name} names bands {index_levels} where the mesh has {mesh_levels}")
+
+    # 4. one row per building, in order, with its triangles and ranges
+    rows = index["buildings"]
+    shapes = mesh["shapes"]
+    if len(rows) != len(shapes):
+        errors.append(f"{key}: {name} lists {len(rows)} building(s) where the mesh has {len(shapes)}")
+    for i, (row, shape) in enumerate(zip(rows, shapes)):
+        if row["stored"] != shape[2] or len(row["keys"]) != len(shape[3]):
+            errors.append(f"{key}: {name} row {i} says {row['stored']} triangle(s) and {len(row['keys'])} range(s); the "
+                          f"mesh's building {i} (key {shape[0]}) has {shape[2]} and {len(shape[3])}")
+            break
+
+    # 5. identity uniqueness: no two rows share (pathHash, dup) with centres and sizes within the slack
+    by_path = {}
+    for i, row in enumerate(rows):
+        by_path.setdefault((row["pathHash"], row["dup"]), []).append(i)
+    duplicates = 0
+    first = None
+    for same in by_path.values():
+        for a in range(len(same)):
+            for b in range(a + 1, len(same)):
+                ra, rb = rows[same[a]], rows[same[b]]
+                if _near(ra["centre"], rb["centre"]) and _near(ra["size"], rb["size"]):
+                    duplicates += 1
+                    first = first or (same[a], same[b])
+    if duplicates:
+        errors.append(f"{key}: {name} has {duplicates} pair(s) of rows with one identity (path hash, dup, centre and size "
+                      f"within {INDEX_SLACK} m; first rows {first[0]} and {first[1]}) - one object stored twice")
+
+    # 6. one level per LOD group
+    groups = index_groups(rows)
+    levels_of = {}
+    for i, g in enumerate(groups):
+        if g >= 0:
+            levels_of.setdefault(g, set()).add(grade_level(rows[i]["grade"]))
+    mixed = [g for g, levels in levels_of.items() if len(levels) > 1]
+    if mixed:
+        g = mixed[0]
+        errors.append(f"{key}: {name} stores {len(mixed)} LOD group(s) at two levels at once (first: levels "
+                      f"{sorted(levels_of[g])}) - PART-04's rule keeps the lowest level of a group wholesale")
+
+    # 7. provenance
+    captures = meta.get("captures") if isinstance(meta.get("captures"), int) else None
+    stops = {}
+    for row in rows:
+        stops[row["capturedAt"]] = stops.get(row["capturedAt"], 0) + 1
+    late = [r for r in rows if r["capturedAt"] < 1 or (captures is not None and r["capturedAt"] > captures)]
+    late += [m for m in index["materials"] if m["capturedAt"] < 1 or (captures is not None and m["capturedAt"] > captures)]
+    if late:
+        errors.append(f"{key}: {name} has {len(late)} row(s) stamped outside capture 1..{captures} (first "
+                      f"{late[0]['capturedAt']})")
+
+    # 8. materials: unique keys; every range names one, on its textured or flat rect
+    materials = {}
+    for m in index["materials"]:
+        if m["key"] in materials:
+            errors.append(f"{key}: {name} lists material {m['key']:016x} twice")
+        materials[m["key"]] = m
+    unknown = wrong_rect = 0
+    for row, shape in zip(rows, shapes):
+        for material_key, (page, x, y, w, h) in zip(row["keys"], shape[3]):
+            m = materials.get(material_key)
+            if m is None:
+                unknown += 1
+                continue
+            textured = (m["page"], m["x"], m["y"], m["w"], m["h"])
+            flat = (m["flatPage"], m["flatX"], m["flatY"], INDEX_FLAT_PIXELS, INDEX_FLAT_PIXELS)
+            if (page, x, y, w, h) not in (textured, flat):
+                wrong_rect += 1
+    if unknown:
+        errors.append(f"{key}: {name} has {unknown} range(s) whose material is not in its table")
+    if wrong_rect:
+        errors.append(f"{key}: {name} has {wrong_rect} range(s) on a rect that is neither its material's textured nor "
+                      f"its flat tile")
+
+    # 9. packing: rects inside the page, no two overlapping with their gutter, the packing state after all of them
+    rects = []
+    for m in index["materials"]:
+        if m["page"] >= 0:
+            rects.append((m["page"], m["x"], m["y"], m["w"], m["h"], m["key"]))
+        if m["flatPage"] >= 0:
+            rects.append((m["flatPage"], m["flatX"], m["flatY"], INDEX_FLAT_PIXELS, INDEX_FLAT_PIXELS, m["key"]))
+    pad = INDEX_PADDING
+    outside = [r for r in rects if r[1] - pad < 0 or r[2] - pad < 0 or r[1] + r[3] + pad > ATLAS_PAGE_SIZE
+               or r[2] + r[4] + pad > ATLAS_PAGE_SIZE or not 0 <= r[0] < MESH_MAX_ATLAS_PAGES]
+    if outside:
+        errors.append(f"{key}: {name} has {len(outside)} tile(s) whose rect and gutter leave the page")
+    overlaps = 0
+    by_page = {}
+    for r in rects:
+        by_page.setdefault(r[0], []).append(r)
+    for page_rects in by_page.values():
+        page_rects.sort(key=lambda r: (r[2], r[1]))
+        for a in range(len(page_rects)):
+            ra = page_rects[a]
+            for b in range(a + 1, len(page_rects)):
+                rb = page_rects[b]
+                if rb[2] - pad >= ra[2] + ra[4] + pad:
+                    break
+                if (ra[1] - pad < rb[1] + rb[3] + pad and rb[1] - pad < ra[1] + ra[3] + pad and
+                        ra[2] - pad < rb[2] + rb[4] + pad and rb[2] - pad < ra[2] + ra[4] + pad):
+                    overlaps += 1
+    if overlaps:
+        errors.append(f"{key}: {name} has {overlaps} pair(s) of atlas tiles overlapping with their {pad} px gutter")
+    pack_page, shelf_y, shelf_h, cursor = index["pack"]
+    ahead = 0
+    for page, x, y, w, h, _ in rects:
+        if page > pack_page:
+            ahead += 1
+        elif page == pack_page:
+            on_shelf = y - pad == shelf_y
+            if (on_shelf and x + w + pad > cursor) or (not on_shelf and y + h + pad > shelf_y):
+                ahead += 1
+    if ahead:
+        errors.append(f"{key}: {name}'s packing state (page {pack_page}, shelf {shelf_y}+{shelf_h}, cursor {cursor}) is "
+                      f"BEFORE {ahead} tile(s) - the next capture would pack over them")
+
+    # 10. the pages: the mesh's count; the meta's list and shas
+    atlas = meta.get("atlas") if isinstance(meta.get("atlas"), list) else []
+    if len(index["pages"]) != mesh["atlasPages"]:
+        errors.append(f"{key}: {name} lists {len(index['pages'])} atlas page(s) where the mesh names {mesh['atlasPages']}")
+    if len(index["pages"]) != len(atlas):
+        warnings.append(f"{key}: {name} lists {len(index['pages'])} atlas page(s) where the meta lists {len(atlas)} - the "
+                        f"next capture rebuilds the 3D mesh from scratch")
+    else:
+        for n, (page, entry) in enumerate(zip(index["pages"], atlas)):
+            if not isinstance(entry, dict) or page["sha"] != entry.get("sha256"):
+                warnings.append(f"{key}: {name}'s page {n} sha is not the meta's - a page committed without its meta (a "
+                                f"crash window); the next capture rebuilds the 3D mesh from scratch")
+                break
+
+    # 11. grades and levels are ones GradeFor makes; a row with no group is level 0
+    bad = [r for r in rows if (4 <= r["grade"] < 14) or r["levelIndex"] > grade_level(r["grade"])
+           or (r["groupHash"] == 0 and (grade_level(r["grade"]) != 0 or r["levelIndex"] != 0))]
+    if bad:
+        errors.append(f"{key}: {name} has {len(bad)} row(s) with a grade or level GradeFor never makes (first: grade "
+                      f"{bad[0]['grade']}, level index {bad[0]['levelIndex']})")
+
+    distribution = ", ".join(f"{s}:{n:,}" for s, n in sorted(stops.items()))
+    last = max(stops) if stops else 0
+    return (f"index: {len(rows)} identities, {len(index['materials'])} materials, stops 1..{last} "
+            f"(captured at stops: {distribution or '-'})" + (" - WRONG" if len(errors) > problems else ""))
 
 
 def png_is(path, width, height):

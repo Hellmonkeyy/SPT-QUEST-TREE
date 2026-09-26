@@ -146,9 +146,35 @@ Smaller things that are all lessons from a picture that came out wrong:
 map, finds somewhere standable in each cell, teleports you from one to the next, takes a capture at every
 stop, and puts you back exactly where you pressed it. Customs is 9 x 5 cells of 115 x 100 m - about 33
 stops once the cells with nowhere to stand are dropped - and each stop is a full capture of the floors
-and side views, with the 3D model rebuilt at every stop. The log's closing line gives the campaign's
-real duration. 120 m because at 200 m the ground between stops was not covered well: every pixel of the
+and side views, and ADDS the buildings it newly sees to the stored 3D model: the first stop builds it
+whole (up to a couple of minutes), every later stop reads only what is new or degraded. The log's
+closing line gives the campaign's real duration. 120 m because at 200 m the ground between stops was not covered well: every pixel of the
 map has to be, at some stop, both loaded and that stop's nearest - which is the pixel the merge keeps.
+
+**The 3D mesh accumulates.** A capture that builds the mesh adds to the one already stored rather
+than replacing it: it reads the stored mesh and its identity sidecar, `captures\<key>\<key>-mesh.index`
+(which renderer every stored building was read from - a 64-bit hash of its scene path, its bounds, its
+submesh range and its geometry - its LOD group and level, how it was stored, and which material every
+atlas tile is), skips every building already stored, reads only what is new, degraded (stored over its
+limit, as it is, clustered or from a coarser LOD level) or changed, re-plans the triangle budget over
+the stored and the new buildings together, fills relief cells this stop could not measure from the
+stored relief, appends new textures to the stored atlas pages (only the pages that take a new tile are
+re-encoded), and writes the stored buildings and the new ones as one file of the same format. So a
+campaign's mesh is every stop's buildings, not the last stop's alone, and after the first stop a stop
+costs a few seconds of mesh instead of the whole building phase. A LOD group is only ever stored at one
+level: a finer level replaces a coarser one only when this stop read the whole of it. A stored building
+is never removed because it was not loaded this time - only replaced - so something genuinely removed
+from a map within one game version stays until a rebuild. A stop that added nothing keeps the stored
+files as they were. The sidecar is local: it is never uploaded or shipped, the viewer never reads it,
+and without it (or with one that does not match the mesh) the next capture simply builds from scratch
+and writes one. Three settings, in the F12 menu under **Advanced** only: **3D map: add to the stored
+mesh** (on; off rebuilds from scratch at every capture, the last one winning - the old behaviour),
+**3D map: rebuild from scratch on the next capture** (a one-shot that turns itself off once a mesh is
+written), and **3D map: verify the last campaign stop (debug)**, which at a campaign's last stop also
+builds the mesh from scratch into `<key>-mesh.verify.bin` for `python tools/compare-mesh.py
+captures\<key>` to hold the accumulated mesh to (every building present, none with fewer triangles,
+the relief and the height range held, the textures as sharp). A change of the mod's mesh recipe, the
+game version, the map's rectangle, its floors or the render mask rebuilds from scratch once by itself.
 
 **The campaign keeps a journal.** Every run appends its stop lines to
 `captures\<key>\<key>.campaign.txt` beside the pictures, the last twenty runs of that map, because the

@@ -815,8 +815,9 @@ namespace QuestTree
                 "you to where you pressed it. Start the raid with AI set to none - it does not disable bots, and " +
                 "it leaves you standing still for a second and a half at every stop and for the length of each " +
                 "capture. Customs is 9 x 5 cells of 115 x 100 m, about 33 stops once the cells with nowhere to " +
-                "stand are dropped; the 3D model is rebuilt at every stop. The log's closing line gives the " +
-                "campaign's real duration. Needs 'Harvest quest zones in raid' on, like the single capture key.");
+                "stand are dropped. The first stop builds the 3D map whole (up to a couple of minutes); every later " +
+                "stop only adds what it newly sees. The log's closing line gives the campaign's real duration. Needs " +
+                "'Harvest quest zones in raid' on, like the single capture key.");
 
             AutoCapture = config.Bind(
                 "Map", "Capture the map automatically while I play", false,
