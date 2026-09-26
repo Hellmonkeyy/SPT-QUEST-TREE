@@ -956,7 +956,12 @@ namespace QuestTree.QuestGraph
 
                     var bytesFloor = ReadOutcome(readFloor);
 
-                    if (!Encode(key, floor, bytesFloor.Bytes, bytesFloor.Error))
+                    // WP3 Phase B: the encode as frames - the composite loop and the JPEG on workers (EncodeSteps).
+                    var encodeFloor = new EncodeJob();
+                    var stepsFloor = EncodeSteps(key, floor, bytesFloor.Bytes, bytesFloor.Error, encodeFloor);
+                    while (stepsFloor.MoveNext()) yield return stepsFloor.Current;
+
+                    if (!encodeFloor.Ok)
                     {
                         // Taken out of the meta the LATER floors carry, so the host is never told
                         // about a picture it is not going to be sent. The posts already made named
@@ -1077,7 +1082,12 @@ namespace QuestTree.QuestGraph
                         // told to expect it (every floor's meta named it), and an empty side post is how it
                         // is told to stop expecting it; leaving it unsent would hold the whole set until the
                         // host's next start a day later.
-                        var encoded = Encode(key, side, bytesSide.Bytes, bytesSide.Error);
+                        // WP3 Phase B: the encode as frames (EncodeSteps).
+                        var encodeSide = new EncodeJob();
+                        var stepsSide = EncodeSteps(key, side, bytesSide.Bytes, bytesSide.Error, encodeSide);
+                        while (stepsSide.MoveNext()) yield return stepsSide.Current;
+
+                        var encoded = encodeSide.Ok;
 
                         if (!encoded)
                         {
@@ -1166,7 +1176,12 @@ namespace QuestTree.QuestGraph
 
                         var bytesPage = ReadOutcome(readPage);
 
-                        var encoded = Encode(key, page, bytesPage.Bytes, bytesPage.Error);
+                        // WP3 Phase B: the encode as frames (EncodeSteps).
+                        var encodePage = new EncodeJob();
+                        var stepsPage = EncodeSteps(key, page, bytesPage.Bytes, bytesPage.Error, encodePage);
+                        while (stepsPage.MoveNext()) yield return stepsPage.Current;
+
+                        var encoded = encodePage.Ok;
 
                         if (!encoded)
                         {
@@ -2312,63 +2327,21 @@ namespace QuestTree.QuestGraph
                 // The check that can fail, and the one that keeps the shared meta honest: every post
                 // carries the same meta, whose floors DescribeWire has already measured, so a picture
                 // that came out a different size cannot be described - it can only be left out.
-                if (encodeFrom.width != floor.WantWidth || encodeFrom.height != floor.WantHeight)
-                {
-                    Plugin.LogSource?.LogWarning(
-                        $"QuestTree: {key} \"{floor.Name}\" came out {encodeFrom.width}x{encodeFrom.height} px " +
-                        $"where its meta says {floor.WantWidth}x{floor.WantHeight} - the capture's meta does " +
-                        (floor.Atlas != null
-                            ? "not describe its own atlas page, so the host is told to go on without this page."
-                            : floor.Side != null
-                            ? "not describe its own side picture, so the host is told to go on without this side."
-                            : "not describe its own pictures, so this floor is not offered. Capture the map again."));
-                    return false;
-                }
+                if (!SizeMatches(key, floor, encodeFrom.width, encodeFrom.height)) return false;
 
                 var quality = floor.Atlas != null ? AtlasJpegQuality : JpegQuality;
                 var jpg = encodeFrom.EncodeToJPG(quality);
 
                 // A page over its cap gets ONE more try, at the lower quality - see AtlasJpegQuality.
-                if (floor.Atlas != null && jpg != null && jpg.Length > MaxAtlasPageBytes)
+                if (NeedsRetry(floor, jpg))
                 {
-                    Plugin.LogSource?.LogDebug(
-                        $"QuestTree: {key} \"{floor.Name}\" is {Mb(jpg.Length)} MB at q{quality}, over the " +
-                        $"{Mb(MaxAtlasPageBytes)} MB a page may be - encoded again at q{AtlasRetryJpegQuality}.");
+                    Plugin.LogSource?.LogDebug(RetryLine(key, floor, jpg, quality));
 
                     quality = AtlasRetryJpegQuality;
                     jpg = encodeFrom.EncodeToJPG(quality);
                 }
 
-                if (jpg == null || jpg.Length == 0)
-                {
-                    Plugin.LogSource?.LogWarning(
-                        $"QuestTree: {key} \"{floor.Name}\" encoded to nothing and is not offered to the host.");
-                    return false;
-                }
-
-                // A page's own cap - see MaxAtlasPageBytes - and a floor's (and a side's) otherwise.
-                var cap = floor.Atlas != null ? MaxAtlasPageBytes : MaxFloorUploadBytes;
-
-                if (jpg.Length > cap)
-                {
-                    // Skipped rather than sent: the host would reject it, and a rejection stops the
-                    // whole upload - see MaxFloorUploadBytes. (A side or page skipped here is still posted
-                    // empty by the caller, which is how the host is told to stop waiting for it.)
-                    Plugin.LogSource?.LogInfo(
-                        $"QuestTree: {key} \"{floor.Name}\" is {Mb(jpg.Length)} MB as a JPEG, over the " +
-                        $"{Mb(cap)} MB a host takes per {(floor.Atlas != null ? "atlas page" : "picture")} - it is " +
-                        "not offered. The rest of the capture still is.");
-                    return false;
-                }
-
-                floor.Base64 = Convert.ToBase64String(jpg);
-                floor.Bytes = jpg.Length;
-
-                Plugin.LogSource?.LogDebug(
-                    $"QuestTree: {key} \"{floor.Name}\" {source.width}x{source.height} -> " +
-                    $"{encodeFrom.width}x{encodeFrom.height} JPEG q{quality}, {Mb(jpg.Length)} MB.");
-
-                return true;
+                return AcceptJpg(key, floor, jpg, null, quality, source.width, source.height, encodeFrom.width, encodeFrom.height);
             }
             catch (Exception ex)
             {
@@ -2384,6 +2357,471 @@ namespace QuestTree.QuestGraph
                 if (render != null) RenderTexture.ReleaseTemporary(render);
                 if (scaled != null) UnityEngine.Object.Destroy(scaled);
                 if (source != null) UnityEngine.Object.Destroy(source);
+            }
+        }
+
+        /// <summary>Whether the picture came out the size the meta promised - and the Warning when it did not. The
+        /// meta is shared by every post and cannot be bent to one picture, so a mismatch leaves the picture out.</summary>
+        private static bool SizeMatches(string key, FloorUpload floor, int width, int height)
+        {
+            if (width == floor.WantWidth && height == floor.WantHeight) return true;
+
+            Plugin.LogSource?.LogWarning(
+                $"QuestTree: {key} \"{floor.Name}\" came out {width}x{height} px " +
+                $"where its meta says {floor.WantWidth}x{floor.WantHeight} - the capture's meta does " +
+                (floor.Atlas != null
+                    ? "not describe its own atlas page, so the host is told to go on without this page."
+                    : floor.Side != null
+                    ? "not describe its own side picture, so the host is told to go on without this side."
+                    : "not describe its own pictures, so this floor is not offered. Capture the map again."));
+            return false;
+        }
+
+        /// <summary>Whether an atlas page came out over its cap at the first quality, and so gets its ONE more try at the
+        /// lower one - see AtlasJpegQuality.</summary>
+        private static bool NeedsRetry(FloorUpload floor, byte[] jpg) =>
+            floor.Atlas != null && jpg != null && jpg.Length > MaxAtlasPageBytes;
+
+        private static string RetryLine(string key, FloorUpload floor, byte[] jpg, int quality) =>
+            $"QuestTree: {key} \"{floor.Name}\" is {Mb(jpg.Length)} MB at q{quality}, over the " +
+            $"{Mb(MaxAtlasPageBytes)} MB a page may be - encoded again at q{AtlasRetryJpegQuality}.";
+
+        /// <summary>
+        /// The end of every encode, on either path: a JPEG of nothing is refused, one over the host's cap is skipped
+        /// (the host would reject it, and a rejection stops the whole upload - see MaxFloorUploadBytes; a side or page
+        /// skipped here is still posted empty by the caller, which is how the host is told to stop waiting for it), and
+        /// a good one becomes the item's base64 (the worker's, when it already made it; else made here) with the one Debug
+        /// line. Main thread.
+        /// </summary>
+        private static bool AcceptJpg(
+            string key, FloorUpload floor, byte[] jpg, string base64, int quality, int sourceWidth, int sourceHeight,
+            int width, int height)
+        {
+            if (jpg == null || jpg.Length == 0)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: {key} \"{floor.Name}\" encoded to nothing and is not offered to the host.");
+                return false;
+            }
+
+            // A page's own cap - see MaxAtlasPageBytes - and a floor's (and a side's) otherwise.
+            var cap = floor.Atlas != null ? MaxAtlasPageBytes : MaxFloorUploadBytes;
+
+            if (jpg.Length > cap)
+            {
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: {key} \"{floor.Name}\" is {Mb(jpg.Length)} MB as a JPEG, over the " +
+                    $"{Mb(cap)} MB a host takes per {(floor.Atlas != null ? "atlas page" : "picture")} - it is " +
+                    "not offered. The rest of the capture still is.");
+                return false;
+            }
+
+            floor.Base64 = base64 ?? Convert.ToBase64String(jpg);
+            floor.Bytes = jpg.Length;
+
+            Plugin.LogSource?.LogDebug(
+                $"QuestTree: {key} \"{floor.Name}\" {sourceWidth}x{sourceHeight} -> " +
+                $"{width}x{height} JPEG q{quality}, {Mb(jpg.Length)} MB.");
+
+            return true;
+        }
+
+        // ------------------------------------------------------------------ Phase B: the encode off the main thread
+
+        /// <summary>WP3 Phase B's switch: the composite loop and the JPEG encode of an upload's pictures run on a
+        /// worker, through <see cref="ImageConversion.EncodeArrayToJPG"/> (documented thread-safe), after a byte-identity
+        /// self-check against the main-thread encoder. False restores Phase A exactly: every encode on the main thread.</summary>
+        internal static readonly bool UploadEncodeOffThread = true;
+
+        /// <summary>Set for the rest of the session when the off-thread encoder's bytes differed from the main
+        /// thread's, or it failed: every encode then runs on the main thread, as before Phase B.</summary>
+        private static bool _arrayEncodeRejected;
+
+        /// <summary>The kinds of picture (texture format, scaled or not) whose off-thread JPEG has been proven
+        /// byte-identical to the main-thread one this session. A kind not in here is checked the first time it is
+        /// encoded: both encoders run and their bytes are compared.</summary>
+        private static readonly HashSet<string> _arrayEncodeVerified = new HashSet<string>(StringComparer.Ordinal);
+
+        /// <summary>Whether the off-thread encoder is used for the next picture.</summary>
+        private static bool UseArrayEncoder() => UploadEncodeOffThread && !_arrayEncodeRejected;
+
+        /// <summary>
+        /// The self-check's verdict (Phase B): the same picture through both encoders at the same quality. Identical
+        /// bytes prove the kind (the array path is used for it from now on, and the host copies stay byte-identical to
+        /// what the main thread would have produced); ANY difference - row order, colour space - or a missing result
+        /// rejects the off-thread encoder for the rest of the session. True when the array bytes may be sent. Pure but
+        /// for the two statics, so the client harness checks it.
+        /// </summary>
+        internal static bool JudgeArrayEncode(byte[] mainThread, byte[] offThread, string kind)
+        {
+            var same = mainThread != null && offThread != null && mainThread.Length > 0 &&
+                       mainThread.Length == offThread.Length && mainThread.AsSpan().SequenceEqual(offThread);
+
+            if (same)
+            {
+                if (_arrayEncodeVerified.Add(kind ?? ""))
+                    Plugin.LogSource?.LogDebug(
+                        $"QuestTree: the off-thread JPEG encoder matches the main-thread one byte for byte ({kind}).");
+                return true;
+            }
+
+            if (!_arrayEncodeRejected)
+                Plugin.LogSource?.LogInfo(
+                    "QuestTree: the off-thread JPEG encoder's bytes differ from the main-thread one's (row order or " +
+                    "colour space) - uploads encode on the main thread this session.");
+
+            _arrayEncodeRejected = true;
+            return false;
+        }
+
+        /// <summary>
+        /// The loop of <see cref="Composite"/>, verbatim, over an array a worker holds (Phase B): every pixel that is not
+        /// opaque flattened onto <see cref="BackdropFill"/>. Returns how many were. No Unity API - Color32 is a struct.
+        /// </summary>
+        internal static int CompositeArray(Color32[] pixels)
+        {
+            var flattened = 0;
+
+            for (var i = 0; i < pixels.Length; i++)
+            {
+                var pixel = pixels[i];
+                if (pixel.a == 255) continue;
+
+                flattened++;
+
+                if (pixel.a == 0)
+                {
+                    pixels[i] = BackdropFill;
+                    continue;
+                }
+
+                var alpha = pixel.a;
+                var rest = 255 - alpha;
+
+                pixels[i] = new Color32(
+                    (byte)((pixel.r * alpha + BackdropFill.r * rest) / 255),
+                    (byte)((pixel.g * alpha + BackdropFill.g * rest) / 255),
+                    (byte)((pixel.b * alpha + BackdropFill.b * rest) / 255),
+                    255);
+            }
+
+            return flattened;
+        }
+
+        /// <summary>One off-thread encode's state, carried across its frames.</summary>
+        private sealed class ArrayEncode
+        {
+            public Texture2D Source;
+            public Texture2D Scaled;
+            public RenderTexture Render;
+            public Color32[] Pixels;
+            public Color32[] EncodePixels;
+            public int Width;
+            public int Height;
+            public int SourceWidth;
+            public int SourceHeight;
+            public int Flattened;
+            public bool Applied;
+            public string Kind;
+            public bool SelfCheck;
+            public byte[] MainJpg;
+            public int Quality;
+            public byte[] Jpg;
+            public string Base64;
+            public string RetryLine;
+            public Exception Failure;
+        }
+
+        /// <summary>What an encode came to, for the routine that drives <see cref="EncodeSteps"/>.</summary>
+        private sealed class EncodeJob
+        {
+            public bool Ok;
+        }
+
+        /// <summary>
+        /// One picture's encode, as frames (Phase B). With the off-thread encoder off or rejected it is exactly
+        /// <see cref="Encode"/>, in one frame. Otherwise: the decode and GetPixels32 on the main thread; the composite
+        /// loop on a worker; for a SCALED picture the SetPixels32, blit, readback and orientation check back on the main
+        /// thread; the JPEG encode (and a page's retry) and the base64 on a worker; the self-check and the accept on the
+        /// main thread. Any failure of the worker falls back to the main-thread encoder for this picture and rejects the
+        /// off-thread one for the session. Same lines, same checks, same bytes (the self-check is the argument).
+        /// </summary>
+        private static IEnumerator EncodeSteps(string key, FloorUpload floor, byte[] bytes, string readError, EncodeJob job)
+        {
+            if (!UseArrayEncoder() || bytes == null)
+            {
+                job.Ok = Encode(key, floor, bytes, readError);
+                yield break;
+            }
+
+            var s = new ArrayEncode();
+
+            try
+            {
+                if (!ArrayBegin(key, floor, bytes, s)) yield break;
+
+                // The composite loop - a managed pass over up to 16 Mpx - on a worker.
+                var pixels = s.Pixels;
+                var composite = StartWork(() => CompositeArray(pixels));
+                while (composite != null && !composite.IsCompleted) yield return null;
+
+                if (composite == null || composite.IsFaulted || composite.IsCanceled)
+                {
+                    s.Flattened = CompositeArray(pixels);   // here, then: the loop is the loop
+                }
+                else s.Flattened = composite.Result;
+
+                if (s.Flattened > 0)
+                    Plugin.LogSource?.LogDebug(
+                        $"QuestTree: {s.Flattened} of {pixels.Length} pixel(s) of this floor were transparent and are " +
+                        "flattened onto the map backdrop for the host copy.");
+
+                if (!ArrayMiddle(key, floor, s)) yield break;
+
+                // The encode, a page's retry and the base64 on a worker.
+                var encode = StartWork(() => ArrayEncodeOffThread(key, floor, s));
+                while (encode != null && !encode.IsCompleted) yield return null;
+
+                if (encode == null || encode.IsFaulted || encode.IsCanceled || s.Failure != null)
+                    s.Failure = s.Failure ?? encode?.Exception?.GetBaseException() ?? new InvalidOperationException("the worker would not start");
+
+                job.Ok = ArrayFinish(key, floor, s);
+            }
+            finally
+            {
+                if (s.Render != null) RenderTexture.ReleaseTemporary(s.Render);
+                if (s.Scaled != null) UnityEngine.Object.Destroy(s.Scaled);
+                if (s.Source != null) UnityEngine.Object.Destroy(s.Source);
+            }
+        }
+
+        /// <summary>A worker, or null when the pool would not take it.</summary>
+        private static Task<T> StartWork<T>(Func<T> work)
+        {
+            try
+            {
+                return Task.Run(work);
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        /// <summary>Phase B, main thread, first frame: the header check (F49), the decode, the size it goes up at, and the
+        /// pixels handed out. False, having said why, when the picture is not offered.</summary>
+        private static bool ArrayBegin(string key, FloorUpload floor, byte[] bytes, ArrayEncode s)
+        {
+            try
+            {
+                // The frame size from the header BEFORE the decode (review F49) - see Encode.
+                var sideLimit = floor.Atlas != null ? MaxAtlasPixels : QuestTree.UI.DynamicMapsLibrary.MaxPictureSide;
+
+                if (!QuestTree.UI.DynamicMapsLibrary.PictureSize(bytes, out var declaredWidth, out var declaredHeight) ||
+                    declaredWidth > sideLimit || declaredHeight > sideLimit)
+                {
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: {key} \"{floor.Name}\" is not a PNG or JPEG of at most {sideLimit} px a side " +
+                        $"({declaredWidth}x{declaredHeight}) and is not offered to the host.");
+                    return false;
+                }
+
+                s.Source = new Texture2D(2, 2, TextureFormat.RGBA32, mipChain: false);
+
+                if (!s.Source.LoadImage(bytes))
+                {
+                    Plugin.LogSource?.LogWarning(
+                        $"QuestTree: {key} \"{floor.Name}\" could not be decoded from disk " +
+                        $"({bytes.Length} bytes) and is not offered to the host.");
+                    return false;
+                }
+
+                s.SourceWidth = s.Source.width;
+                s.SourceHeight = s.Source.height;
+
+                if (floor.Atlas != null)
+                {
+                    s.Width = s.SourceWidth;
+                    s.Height = s.SourceHeight;
+                }
+                else
+                {
+                    ScaleTo(s.SourceWidth, s.SourceHeight, MaxLongSide, out s.Width, out s.Height, ceilShort: floor.Side != null);
+                }
+
+                s.Pixels = s.Source.GetPixels32();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: {key} \"{floor.Name}\" could not be prepared for upload " +
+                    $"({ex.GetType().Name}: {ex.Message}) - it is not offered.");
+                return false;
+            }
+        }
+
+        /// <summary>Phase B, main thread, after the composite: for a scaled picture the flattened pixels applied and the
+        /// GPU downscale read back (the filter still runs on the composited texture, so the pixels fed to the encode are
+        /// the same); the size check; and, the first time this kind of picture is encoded this session, the main-thread
+        /// JPEG the self-check compares against. False, having said why, when the picture is not offered.</summary>
+        private static bool ArrayMiddle(string key, FloorUpload floor, ArrayEncode s)
+        {
+            var previous = RenderTexture.active;
+
+            try
+            {
+                var scale = s.Width != s.SourceWidth || s.Height != s.SourceHeight;
+                s.Kind = (scale ? "scaled " : "") + s.Source.format;
+                s.SelfCheck = !_arrayEncodeVerified.Contains(s.Kind);
+                s.Quality = floor.Atlas != null ? AtlasJpegQuality : JpegQuality;
+
+                if (s.Flattened > 0 && (scale || s.SelfCheck))
+                {
+                    s.Source.SetPixels32(s.Pixels);
+                    s.Source.Apply(updateMipmaps: false);
+                    s.Applied = true;
+                }
+
+                var encodeFrom = s.Source;
+
+                if (scale)
+                {
+                    s.Render = RenderTexture.GetTemporary(s.Width, s.Height, 0, RenderTextureFormat.ARGB32);
+                    Graphics.Blit(s.Source, s.Render);
+                    RenderTexture.active = s.Render;
+
+                    s.Scaled = new Texture2D(s.Width, s.Height, TextureFormat.RGBA32, mipChain: false);
+                    s.Scaled.ReadPixels(new Rect(0f, 0f, s.Width, s.Height), 0, 0);
+                    s.Scaled.Apply(updateMipmaps: false);
+
+                    encodeFrom = s.Scaled;
+                    CheckOrientation(key, floor, s.Source, s.Scaled);
+                }
+
+                if (!SizeMatches(key, floor, encodeFrom.width, encodeFrom.height)) return false;
+
+                s.EncodePixels = scale ? s.Scaled.GetPixels32() : s.Pixels;
+                s.Width = encodeFrom.width;
+                s.Height = encodeFrom.height;
+
+                if (s.SelfCheck) s.MainJpg = encodeFrom.EncodeToJPG(s.Quality);
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: {key} \"{floor.Name}\" could not be prepared for upload " +
+                    $"({ex.GetType().Name}: {ex.Message}) - it is not offered.");
+                return false;
+            }
+            finally
+            {
+                RenderTexture.active = previous;
+            }
+        }
+
+        /// <summary>Phase B, on a worker: the JPEG from the pixel array, a page's one retry at the lower quality (not
+        /// for the self-check's picture, whose retry is the main thread's), and the base64. No Unity object is touched:
+        /// only the array and ImageConversion.EncodeArrayToJPG, which is documented thread-safe. Never throws: a failure
+        /// is handed back on the state.</summary>
+        private static bool ArrayEncodeOffThread(string key, FloorUpload floor, ArrayEncode s)
+        {
+            try
+            {
+                var jpg = ImageConversion.EncodeArrayToJPG(
+                    s.EncodePixels, UnityEngine.Experimental.Rendering.GraphicsFormat.R8G8B8A8_UNorm,
+                    (uint)s.Width, (uint)s.Height, 0, s.Quality);
+
+                if (!s.SelfCheck && NeedsRetry(floor, jpg))
+                {
+                    s.RetryLine = RetryLine(key, floor, jpg, s.Quality);
+                    s.Quality = AtlasRetryJpegQuality;
+                    jpg = ImageConversion.EncodeArrayToJPG(
+                        s.EncodePixels, UnityEngine.Experimental.Rendering.GraphicsFormat.R8G8B8A8_UNorm,
+                        (uint)s.Width, (uint)s.Height, 0, s.Quality);
+                }
+
+                s.Jpg = jpg;
+
+                var cap = floor.Atlas != null ? MaxAtlasPageBytes : MaxFloorUploadBytes;
+                if (!s.SelfCheck && jpg != null && jpg.Length > 0 && jpg.Length <= cap) s.Base64 = Convert.ToBase64String(jpg);
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                s.Failure = ex;
+                return false;
+            }
+        }
+
+        /// <summary>Phase B, main thread, last frame: the self-check's verdict, the main-thread encoder whenever the
+        /// worker failed or its bytes differed, and the same accept as <see cref="Encode"/>.</summary>
+        private static bool ArrayFinish(string key, FloorUpload floor, ArrayEncode s)
+        {
+            try
+            {
+                if (s.RetryLine != null) Plugin.LogSource?.LogDebug(s.RetryLine);
+
+                bool useArray;
+
+                if (s.Failure != null)
+                {
+                    if (!_arrayEncodeRejected)
+                        Plugin.LogSource?.LogInfo(
+                            $"QuestTree: the off-thread JPEG encoder failed ({s.Failure.GetType().Name}: {s.Failure.Message}) - " +
+                            "uploads encode on the main thread this session.");
+                    _arrayEncodeRejected = true;
+                    useArray = false;
+                }
+                else
+                {
+                    useArray = !s.SelfCheck || JudgeArrayEncode(s.MainJpg, s.Jpg, s.Kind);
+                }
+
+                byte[] jpg;
+                string base64 = null;
+
+                if (useArray && !s.SelfCheck)
+                {
+                    // The worker's JPEG (and its retry) and its base64.
+                    jpg = s.Jpg;
+                    base64 = s.Base64;
+                }
+                else
+                {
+                    // The main thread's encoder, as Encode runs it: the self-check's picture (whose bytes were just proven
+                    // identical, or were not), or a fallback after the worker failed - with the flattened pixels applied
+                    // first when the array path had left them off the texture.
+                    if (s.Scaled == null && s.Flattened > 0 && !s.Applied)
+                    {
+                        s.Source.SetPixels32(s.Pixels);
+                        s.Source.Apply(updateMipmaps: false);
+                        s.Applied = true;
+                    }
+
+                    var encodeFrom = s.Scaled != null ? s.Scaled : s.Source;
+                    s.Quality = floor.Atlas != null ? AtlasJpegQuality : JpegQuality;
+                    jpg = s.MainJpg ?? encodeFrom.EncodeToJPG(s.Quality);
+
+                    if (NeedsRetry(floor, jpg))
+                    {
+                        Plugin.LogSource?.LogDebug(RetryLine(key, floor, jpg, s.Quality));
+                        s.Quality = AtlasRetryJpegQuality;
+                        jpg = encodeFrom.EncodeToJPG(s.Quality);
+                    }
+                }
+
+                return AcceptJpg(key, floor, jpg, base64, s.Quality, s.SourceWidth, s.SourceHeight, s.Width, s.Height);
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: {key} \"{floor.Name}\" could not be prepared for upload " +
+                    $"({ex.GetType().Name}: {ex.Message}) - it is not offered.");
+                return false;
             }
         }
 
