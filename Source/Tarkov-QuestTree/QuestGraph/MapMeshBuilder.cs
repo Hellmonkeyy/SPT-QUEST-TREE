@@ -3,10 +3,12 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
+using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 using Unity.Collections;
 using Unity.Jobs;
 using UnityEngine;
+using UnityEngine.Experimental.Rendering;
 using UnityEngine.Rendering;
 
 namespace QuestTree.QuestGraph
@@ -449,11 +451,30 @@ namespace QuestTree.QuestGraph
         /// <summary>A static-batch member's UVs are read when its own vertex range is at least 1/this of the batch.</summary>
         private const int StaticBatchUvShare = 4;
 
-        /// <summary>The gutter round every atlas tile, filled with copies of the tile's edge texels. 2 px (stage X):
-        /// the viewer cuts each tile out of its page into a texture of its own with wrapMode Repeat and its own
-        /// mips, so no mip level of the page is ever sampled across tiles - the 16 px gutter stage W's
-        /// mipmapped pages needed is gone; 2 px covers bilinear filtering at the cut.</summary>
-        internal const int AtlasPadding = 2;
+        /// <summary>The gutter round every atlas tile. Stage X made it 2 px of CLAMPED edge copies: the viewer cuts each
+        /// tile out of its page into a texture of its own with wrapMode Repeat and its own mips, so no mip level of the
+        /// page is ever sampled across tiles. WP8 (D4): 8 px of the tile's own WRAP (AtlasPacker.BlitRows), with every
+        /// tile's outer origin on an 8 px grid (AtlasPacker.Pack), because the pages go up as JPEG: an 8 x 8 block
+        /// then never straddles two tiles, and the texels just outside a tile are the ones a repeat samples - 77 of
+        /// 223 Customs tiles had a wrap seam over 4x their interior gradient. About 6 % fewer 256 px tiles a page.
+        /// (Pre-WP8: 2 px of clamped copies.)</summary>
+        internal const int AtlasPadding = 8;
+
+        /// <summary>WP8 (D4) rollback: the wider main-texture search - the longer property list, then every texture
+        /// property whose name says albedo and not a mask or a normal. False restores the pre-WP8 three names.
+        /// Static readonly so the choice is not a constant the compiler folds.</summary>
+        internal static readonly bool WideTextureSearch = true;
+
+        /// <summary>WP8 (D4): a CUTOUT material (render queue 2450..2500, or _ALPHATEST_ON) is textured in the atlas
+        /// only when at least this share of its captured tile's texels is at or over its _Cutoff - a wall that is
+        /// alpha-tested for its edges, not a fence or a leaf card, which keep the viewer's fallback exactly as
+        /// before. Rollback: 2 (never opaque). Static readonly so the rollback is not a folded constant.</summary>
+        internal static readonly float CutoutOpaqueShare = 0.9f;
+
+        /// <summary>WP8 (D4): a flat tile whose average is at least this on all three channels is left to the viewer's
+        /// fallback: a 4 x 4 white tile from a material with no texture and no colour is not information (the white
+        /// slabs of m14).</summary>
+        private const int WhiteFlatLevel = 242;
         private const int AtlasFlatPixels = 4;
         private const int AtlasAveragePixels = 8;
         private const float AtlasTileSlack = 0.05f;
@@ -1320,6 +1341,9 @@ namespace QuestTree.QuestGraph
             internal bool AtlasApplied;
             internal double AtlasSeconds;
             internal int TransparentMaterials;
+
+            /// <summary>WP8 (D4): normal maps refused as main textures (by name, format or the captured tile's mean).</summary>
+            internal int NormalMapsRefused;
 
             /// <summary>WP8 (D4 commit 1): every material the atlas leaves out - by render queue (2450 and up) or for
             /// having no main texture (flat) - with what its shader exposes and how much geometry it draws, for the
@@ -4751,6 +4775,20 @@ namespace QuestTree.QuestGraph
             internal byte AvgR = 255;
             internal byte AvgG = 255;
             internal byte AvgB = 255;
+
+            /// <summary>WP8 (D4): the property the main texture was found under; whether the material is CUTOUT
+            /// (alpha-tested) and its cutoff; the share of its captured tile at or over the cutoff (-1 until captured);
+            /// whether its texture was refused as a normal map after capture; and what MapBuilding decided, for the
+            /// materials counts.</summary>
+            internal string TextureProperty;
+
+            internal bool Cutout;
+            internal float Cutoff = 0.5f;
+            internal float OpaqueShare = -1f;
+            internal bool NormalRefused;
+            internal bool CutoutTaken;
+            internal bool CutoutLeft;
+            internal bool WhiteLeft;
         }
 
         /// <summary>WP8 (D4 commit 1): what the atlas left out, one material at a time - its shader, render queue,
@@ -4764,7 +4802,11 @@ namespace QuestTree.QuestGraph
             internal bool AlphaTest;
             internal float Cutoff = float.NaN;
             internal string Properties;
-            internal bool ByQueue;
+
+            /// <summary>Why it is listed: <see cref="DiagTransparent"/>, <see cref="DiagFlat"/> or
+            /// <see cref="DiagCutout"/> (WP8 commit 2: admitted, then taken or left by its measured coverage).</summary>
+            internal int Kind;
+
             internal int Buildings;
             internal long Triangles;
         }
@@ -4772,15 +4814,21 @@ namespace QuestTree.QuestGraph
         /// <summary>Entries the materials line lists, most triangles first.</summary>
         private const int MaterialDiagEntries = 20;
 
+        private const int DiagTransparent = 0;
+        private const int DiagFlat = 1;
+        private const int DiagCutout = 2;
+
+        private static readonly string[] DiagKinds = { "transparent", "flat", "cutout" };
+
         /// <summary>WP8 (D4 commit 1): records a material the atlas leaves out. Never throws.</summary>
         /// <param name="job">The build.</param>
         /// <param name="material">The material.</param>
-        /// <param name="byQueue">Left out by its render queue (true) or for having no main texture (false).</param>
-        private static void Diagnose(Job job, Material material, bool byQueue)
+        /// <param name="kind">Why: transparent by its queue, flat (no main texture), or cutout.</param>
+        private static void Diagnose(Job job, Material material, int kind)
         {
             if (material == null || job.MaterialDiags.ContainsKey(material)) return;
 
-            var diag = new MaterialDiag { ByQueue = byQueue };
+            var diag = new MaterialDiag { Kind = kind };
 
             try
             {
@@ -4827,14 +4875,115 @@ namespace QuestTree.QuestGraph
         }
 
         /// <summary>The shader properties a main texture is looked for under, in order.</summary>
-        private static readonly string[] TextureProperties = { "_MainTex", "_BaseMap", "_BaseColorMap" };
+        private static readonly string[] TextureProperties =
+        {
+            "_MainTex", "_BaseMap", "_BaseColorMap", "_MainTex0", "_Albedo", "_AlbedoMap", "_AlbedoTex", "_Diffuse",
+            "_DiffuseMap", "_BaseAlbedoASmoothness", "_MainTexture", "_BaseTex", "_ColorMap"
+        };
 
-        /// <summary>The shader properties a tint is looked for under, in order.</summary>
-        private static readonly string[] TintProperties = { "_Color", "_BaseColor" };
+        /// <summary>The pre-WP8 list (<see cref="WideTextureSearch"/> rollback).</summary>
+        private static readonly string[] LegacyTextureProperties = { "_MainTex", "_BaseMap", "_BaseColorMap" };
 
-        /// <summary>A material's registry id, registering it the first time: -1 for none, and for a
-        /// transparent or alpha-tested one (render queue 2450 and up) - those keep the stage U/V fallback, since
-        /// the atlas is drawn opaque and a leaf card or a window would come out a solid square.</summary>
+        /// <summary>WP8 (D4): a texture property name that says albedo, and one that says anything else - tried in the
+        /// shader's own order after the list, EFT's vertex-painted shaders (_MainTex0.._MainTex2) among them.</summary>
+        private static readonly Regex MainLike = new Regex("(main|albedo|diffuse|base|color)", RegexOptions.IgnoreCase);
+
+        private static readonly Regex NotMain = new Regex(
+            "(bump|normal|nrm|spec|gloss|rough|metal|mask|detail|noise|height|occl|ao|emiss|light|dudv|ramp|blur|depth|flow|mip)",
+            RegexOptions.IgnoreCase);
+
+        /// <summary>WP8 (D4): a normal map's name ends like this.</summary>
+        private static readonly Regex NormalName = new Regex("(_n|_nm|_nrm|_normal|_normals|_bump)$", RegexOptions.IgnoreCase);
+
+        /// <summary>The shader properties a tint is looked for under, in order (WP8: longer, for the vertex-painted and
+        /// tinted shaders).</summary>
+        private static readonly string[] TintProperties = { "_Color", "_BaseColor", "_Color0", "_MainColor", "_TintColor" };
+
+        /// <summary>The pre-WP8 tint list (<see cref="WideTextureSearch"/> rollback).</summary>
+        private static readonly string[] LegacyTintProperties = { "_Color", "_BaseColor" };
+
+        /// <summary>WP8 (D4): whether a texture is a normal map by what can be told before reading it - its name, or a
+        /// two-channel format (BC5, RG). The captured tile's mean is the third test (CaptureTile).</summary>
+        /// <param name="texture">The texture.</param>
+        private static bool NormalMapLike(Texture texture)
+        {
+            if (texture == null) return false;
+            if (NormalName.IsMatch(texture.name ?? "")) return true;
+
+            switch (texture.graphicsFormat)
+            {
+                case GraphicsFormat.RG_BC5_UNorm:
+                case GraphicsFormat.RG_BC5_SNorm:
+                case GraphicsFormat.R8G8_UNorm:
+                case GraphicsFormat.R8G8_SNorm:
+                case GraphicsFormat.R16G16_UNorm:
+                case GraphicsFormat.R16G16_SNorm:
+                case GraphicsFormat.R16G16_SFloat:
+                case GraphicsFormat.R32G32_SFloat:
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        /// <summary>WP8 (D4): a material's main texture and the property it is under - the list first, in order, then
+        /// (<see cref="WideTextureSearch"/>) every texture property of the shader whose name says albedo and nothing
+        /// else and whose texture is 2D - never a normal map. Null for none.</summary>
+        /// <param name="job">The build, for the refusals.</param>
+        /// <param name="material">The material.</param>
+        /// <param name="property">The property it was found under.</param>
+        private static Texture FindMainTexture(Job job, Material material, out string property)
+        {
+            foreach (var name in WideTextureSearch ? TextureProperties : LegacyTextureProperties)
+            {
+                if (!material.HasProperty(name)) continue;
+
+                var texture = material.GetTexture(name);
+                if (texture == null) continue;
+
+                if (WideTextureSearch && NormalMapLike(texture))
+                {
+                    job.NormalMapsRefused++;
+                    continue;
+                }
+
+                property = name;
+                return texture;
+            }
+
+            if (WideTextureSearch)
+            {
+                var names = material.GetTexturePropertyNames();
+
+                if (names != null)
+                    foreach (var name in names)
+                    {
+                        if (string.IsNullOrEmpty(name) || !MainLike.IsMatch(name) || NotMain.IsMatch(name)) continue;
+
+                        var texture = material.GetTexture(name);
+                        if (texture == null || texture.dimension != TextureDimension.Tex2D) continue;
+
+                        if (NormalMapLike(texture))
+                        {
+                            job.NormalMapsRefused++;
+                            continue;
+                        }
+
+                        property = name;
+                        return texture;
+                    }
+            }
+
+            property = null;
+            return null;
+        }
+
+        /// <summary>A material's registry id, registering it the first time: -1 for none, and for a TRANSPARENT one
+        /// (render queue over 2500: sorted blending, a window or a decal) - those keep the stage U/V fallback, since the
+        /// atlas is drawn opaque. WP8 (D4): an ALPHA-TESTED one (queue 2450..2500, EFT's AlphaTest queue where the
+        /// common wall and roof materials sit, or _ALPHATEST_ON) is registered as CUTOUT and textured only when its
+        /// captured tile turns out opaque enough (<see cref="CutoutOpaqueShare"/>, MapBuilding) - a fence or a leaf card
+        /// still keeps the fallback.</summary>
         /// <param name="job">The build.</param>
         /// <param name="material">The material.</param>
         private static int MaterialId(Job job, Material material)
@@ -4846,34 +4995,38 @@ namespace QuestTree.QuestGraph
 
             try
             {
-                if (material.renderQueue >= 2450)
+                var queue = material.renderQueue;
+
+                if (queue > 2500)
                 {
                     job.TransparentMaterials++;
-                    Diagnose(job, material, true);
+                    Diagnose(job, material, DiagTransparent);
                 }
                 else
                 {
-                    var info = new AtlasMaterial { Material = material };
-
-                    foreach (var name in TextureProperties)
+                    var info = new AtlasMaterial
                     {
-                        if (!material.HasProperty(name)) continue;
+                        Material = material,
+                        Cutout = queue >= 2450 || material.IsKeywordEnabled("_ALPHATEST_ON"),
+                        Cutoff = material.HasProperty("_Cutoff") ? material.GetFloat("_Cutoff") : 0.5f,
+                    };
 
-                        var texture = material.GetTexture(name);
-                        if (texture == null) continue;
+                    if (!IsFinite(info.Cutoff)) info.Cutoff = 0.5f;
 
-                        info.Texture = texture;
+                    info.Texture = FindMainTexture(job, material, out var property);
+                    info.TextureProperty = property;
 
-                        var scale = material.GetTextureScale(name);
-                        var offset = material.GetTextureOffset(name);
+                    if (info.Texture != null)
+                    {
+                        var scale = material.GetTextureScale(property);
+                        var offset = material.GetTextureOffset(property);
                         info.ScaleU = IsFinite(scale.x) ? scale.x : 1f;
                         info.ScaleV = IsFinite(scale.y) ? scale.y : 1f;
                         info.OffsetU = IsFinite(offset.x) ? offset.x : 0f;
                         info.OffsetV = IsFinite(offset.y) ? offset.y : 0f;
-                        break;
                     }
 
-                    foreach (var name in TintProperties)
+                    foreach (var name in WideTextureSearch ? TintProperties : LegacyTintProperties)
                     {
                         if (!material.HasProperty(name)) continue;
 
@@ -4884,7 +5037,8 @@ namespace QuestTree.QuestGraph
                     id = job.Materials.Count;
                     job.Materials.Add(info);
 
-                    if (info.Texture == null) Diagnose(job, material, false);
+                    if (info.Texture == null) Diagnose(job, material, DiagFlat);
+                    else if (info.Cutout) Diagnose(job, material, DiagCutout);
                 }
             }
             catch (Exception ex)
@@ -5353,7 +5507,7 @@ namespace QuestTree.QuestGraph
         {
             if (info.Texture == null || info.Page < 0) return null;
 
-            var tile = ReadTexture(job, info, w, h);
+            var tile = ReadTexture(job, info, w, h, out var opaque);
             if (tile == null)
             {
                 job.TexturesFailed++;
@@ -5369,22 +5523,41 @@ namespace QuestTree.QuestGraph
             }
 
             var n = Math.Max(1, w * h);
-            info.AvgR = (byte)(sr / n);
-            info.AvgG = (byte)(sg / n);
-            info.AvgB = (byte)(sb / n);
+            var r = sr / n;
+            var g = sg / n;
+            var b = sb / n;
+
+            // WP8 (D4): a normal map captured as colour (m15: mean 127, 127, 246) - blue-dominant around the middle
+            // grey. Refused: the material draws its flat tile, in its tint (Average skips the texture).
+            if (WideTextureSearch && b > 200 && Math.Abs(r - 128) < 40 && Math.Abs(g - 128) < 40)
+            {
+                info.NormalRefused = true;
+                job.NormalMapsRefused++;
+                return null;
+            }
+
+            info.AvgR = (byte)r;
+            info.AvgG = (byte)g;
+            info.AvgB = (byte)b;
+            info.OpaqueShare = opaque;
             info.Captured = true;
             job.TexturesCaptured++;
 
             return tile;
         }
 
-        /// <summary>A texture read back at w x h, tint applied, RGBA with row 0 at the bottom - or null.</summary>
+        /// <summary>A texture read back at w x h, tint applied (clamped to [0, 1]), RGBA with row 0 at the bottom - or
+        /// null. WP8 (D4): the texture's alpha is READ, for the share of texels at or over the material's cutoff
+        /// (<paramref name="opaque"/>), and 255 is written: the page never carries it.</summary>
         /// <param name="job">The build.</param>
         /// <param name="info">The material.</param>
         /// <param name="w">The width.</param>
         /// <param name="h">The height.</param>
-        private static byte[] ReadTexture(Job job, AtlasMaterial info, int w, int h)
+        /// <param name="opaque">The share of texels whose alpha is at or over the cutoff.</param>
+        private static byte[] ReadTexture(Job job, AtlasMaterial info, int w, int h, out float opaque)
         {
+            opaque = -1f;
+
             if (info.Texture == null || info.Texture.dimension != TextureDimension.Tex2D) return null;
 
             var previous = RenderTexture.active;
@@ -5405,6 +5578,9 @@ namespace QuestTree.QuestGraph
                 var read = job.AtlasScratch.GetRawTextureData<Color32>();
                 var stride = job.AtlasScratch.width;
                 var tile = new byte[w * h * 4];
+                float tr = Mathf.Clamp01(info.Tint.r), tg = Mathf.Clamp01(info.Tint.g), tb = Mathf.Clamp01(info.Tint.b);
+                var cut = Mathf.Clamp(info.Cutoff, 0f, 1f) * 255f;
+                var solid = 0;
 
                 for (var y = 0; y < h; y++)
                     for (var x = 0; x < w; x++)
@@ -5412,12 +5588,15 @@ namespace QuestTree.QuestGraph
                         var c = read[y * stride + x];
                         var o = (y * w + x) * 4;
 
-                        tile[o] = (byte)Math.Min(255f, c.r * info.Tint.r);
-                        tile[o + 1] = (byte)Math.Min(255f, c.g * info.Tint.g);
-                        tile[o + 2] = (byte)Math.Min(255f, c.b * info.Tint.b);
+                        tile[o] = (byte)Math.Min(255f, c.r * tr);
+                        tile[o + 1] = (byte)Math.Min(255f, c.g * tg);
+                        tile[o + 2] = (byte)Math.Min(255f, c.b * tb);
                         tile[o + 3] = 255;
+
+                        if (c.a >= cut) solid++;
                     }
 
+                opaque = solid / (float)Math.Max(1, w * h);
                 return tile;
             }
             catch (Exception ex)
@@ -5444,7 +5623,10 @@ namespace QuestTree.QuestGraph
 
             if (job.AtlasClock == null || job.AtlasClock.Elapsed.TotalSeconds >= AtlasSecondsCap * AtlasCaptureShare) return;
 
-            var tile = ReadTexture(job, info, AtlasAveragePixels, AtlasAveragePixels);
+            // WP8 (D4): a texture refused as a normal map is not the colour either - the tint alone.
+            if (info.NormalRefused) return;
+
+            var tile = ReadTexture(job, info, AtlasAveragePixels, AtlasAveragePixels, out _);
             if (tile == null) return;
 
             long r = 0, g = 0, b = 0;
@@ -5526,6 +5708,30 @@ namespace QuestTree.QuestGraph
                     var flat = !textured && info.FlatPage >= 0 && info.FlatPage < pages;
 
                     if (use != null && !use.Flat && !textured) job.FlatCaptureFailed++;
+
+                    // WP8 (D4): a CUTOUT material is textured only when its captured tile is opaque enough; a fence, a
+                    // grate or a leaf card - or one never captured - keeps the viewer's fallback, exactly as before.
+                    if (info.Cutout)
+                    {
+                        if (textured && info.OpaqueShare >= CutoutOpaqueShare)
+                        {
+                            info.CutoutTaken = true;
+                        }
+                        else
+                        {
+                            info.CutoutLeft = true;
+                            textured = false;
+                            flat = false;
+                        }
+                    }
+
+                    // WP8 (D4): a flat tile that is WHITE is not information - the faces take the viewer's fallback (top
+                    // picture, side picture or the building's tint) rather than a white slab.
+                    if (!textured && flat && info.AvgR >= WhiteFlatLevel && info.AvgG >= WhiteFlatLevel && info.AvgB >= WhiteFlatLevel)
+                    {
+                        info.WhiteLeft = true;
+                        flat = false;
+                    }
 
                     if (use != null && (textured || flat))
                     {
@@ -6074,9 +6280,20 @@ namespace QuestTree.QuestGraph
         {
             var f1 = CultureInfo.InvariantCulture;
             var used = 0;
+            int cutoutTaken = 0, cutoutLeft = 0, whiteLeft = 0, byMainTex = 0, byMainTex0 = 0, byOther = 0;
 
             foreach (var m in job.Materials)
+            {
                 if (m.Textured || m.Flat) used++;
+                if (m.CutoutTaken) cutoutTaken++;
+                if (m.CutoutLeft) cutoutLeft++;
+                if (m.WhiteLeft) whiteLeft++;
+
+                if (m.Texture == null || !(m.Textured || m.Flat)) continue;
+                if (m.TextureProperty == "_MainTex") byMainTex++;
+                else if (m.TextureProperty == "_MainTex0") byMainTex0++;
+                else byOther++;
+            }
 
             Plugin.LogSource?.LogInfo(
                 $"QuestTree: textures for {job.Request.Map} - {N(job.TexturesCaptured)} material(s) captured into " +
@@ -6089,7 +6306,9 @@ namespace QuestTree.QuestGraph
                 $"{N(used)} material(s) in use, {N(job.TexturesFailed)} texture(s) would not capture, " +
                 $"{N(job.TilesUnplaced)} tile(s) over the {MapMeshFile.MaxAtlasPages}-page cap, " +
                 $"{N(job.TilesLate)} left flat past {N(AtlasSecondsCap * AtlasCaptureShare)} s of the {N(AtlasSecondsCap)} s atlas cap, " +
-                $"{N(job.TransparentMaterials)} transparent material(s) left to the side views, " +
+                $"materials: {N(job.TransparentMaterials)} transparent (queue > 2500), {N(cutoutTaken)} cutout taken as opaque, " +
+                $"{N(cutoutLeft)} cutout left; {N(whiteLeft)} white flat left to the fallback; {N(job.NormalMapsRefused)} normal " +
+                $"maps refused; main texture by property: _MainTex {N(byMainTex)}, _MainTex0 {N(byMainTex0)}, other {N(byOther)}; " +
                 $"{N(job.UvElsewhere)} GPU mesh(es) with UVs in another stream, {N(job.StaticBatchUvSkipped)} static-batch " +
                 "member(s) with their UVs not read; " +
                 $"{N(job.TexturedBuildings)} building(s) textured ({Millions(job.TexturedTriangles)} triangles), " +
@@ -6112,37 +6331,30 @@ namespace QuestTree.QuestGraph
             var all = new List<MaterialDiag>(job.MaterialDiags.Values);
             all.Sort((a, b) => b.Triangles.CompareTo(a.Triangles));
 
-            int byQueue = 0, flat = 0;
-            long queueTriangles = 0, flatTriangles = 0;
+            var count = new int[DiagKinds.Length];
+            var triangles = new long[DiagKinds.Length];
 
             foreach (var d in all)
             {
-                if (d.ByQueue)
-                {
-                    byQueue++;
-                    queueTriangles += d.Triangles;
-                }
-                else
-                {
-                    flat++;
-                    flatTriangles += d.Triangles;
-                }
+                count[d.Kind]++;
+                triangles[d.Kind] += d.Triangles;
             }
 
             var entries = new List<string>();
             for (var i = 0; i < all.Count && i < MaterialDiagEntries; i++)
             {
                 var d = all[i];
-                entries.Add($"{(d.ByQueue ? "queue" : "flat")}: {d.Shader} | {d.Queue} | " +
+                entries.Add($"{DiagKinds[d.Kind]}: {d.Shader} | {d.Queue} | " +
                             $"{(d.AlphaTest ? "alphatest" : "-")} | " +
                             $"{(float.IsNaN(d.Cutoff) ? "-" : d.Cutoff.ToString("0.00", f1))} | {d.Properties} | " +
                             $"{N(d.Buildings)} | {N(d.Triangles)}");
             }
 
             Plugin.LogSource?.LogInfo(
-                $"QuestTree: materials left out of the atlas on {job.Request.Map} - {N(byQueue)} by render queue >= 2450 " +
-                $"({N(queueTriangles)} source triangles), {N(flat)} flat without a main texture ({N(flatTriangles)} source " +
-                $"triangles); the {entries.Count} drawing the most (kind: shader | renderQueue | _ALPHATEST_ON | _Cutoff | " +
+                $"QuestTree: materials left out of the atlas on {job.Request.Map} - {N(count[DiagTransparent])} transparent by " +
+                $"render queue > 2500 ({N(triangles[DiagTransparent])} source triangles), {N(count[DiagFlat])} flat without a " +
+                $"main texture ({N(triangles[DiagFlat])}), {N(count[DiagCutout])} cutout (queue 2450..2500 or _ALPHATEST_ON; " +
+                $"taken or left by measured coverage, {N(triangles[DiagCutout])}); the {entries.Count} drawing the most (kind: shader | renderQueue | _ALPHATEST_ON | _Cutoff | " +
                 $"texture properties, * = set | buildings | triangles): {string.Join(" ;; ", entries.ToArray())}");
         }
 
@@ -8477,6 +8689,10 @@ namespace QuestTree.QuestGraph
     /// </summary>
     internal static class AtlasPacker
     {
+        /// <summary>WP8 (D4): the JPEG block the pages are uploaded in; a gutter that is a multiple of it puts every
+        /// tile's origin on its grid.</summary>
+        internal const int JpegBlock = 8;
+
         /// <summary>Packs the tiles. Returns the pages used.</summary>
         /// <param name="widths">Each tile's inner width.</param>
         /// <param name="heights">Each tile's inner height.</param>
@@ -8516,6 +8732,11 @@ namespace QuestTree.QuestGraph
             var cursor = 0;         // the next free x on it
             var used = 0;
 
+            // WP8 (D4): with a JPEG-block gutter, every outer origin on the JPEG grid, so with the gutter a multiple of
+            // it the inner origin is too and no 8 x 8 block straddles two tiles.
+            var align = padding > 0 && padding % JpegBlock == 0 ? JpegBlock : 1;
+            int Up(int v) => (v + align - 1) / align * align;
+
             foreach (var i in order)
             {
                 var ow = widths[i] + padding * 2;
@@ -8528,11 +8749,11 @@ namespace QuestTree.QuestGraph
                     groupPageLimits != null && group >= 0 && group < groupPageLimits.Length ? groupPageLimits[group] : maxPages);
 
                 // a tentative placement, committed only if it lands on a page this group may use
-                int tPage = page, tShelfY = shelfY, tShelfH = shelfH, tCursor = cursor;
+                int tPage = page, tShelfY = shelfY, tShelfH = shelfH, tCursor = Up(cursor);
 
                 if (tCursor + ow > pageSize || (tCursor > 0 && oh > tShelfH))
                 {
-                    tShelfY += tShelfH;
+                    tShelfY = Up(tShelfY + tShelfH);
                     tShelfH = 0;
                     tCursor = 0;
                 }
@@ -8562,7 +8783,8 @@ namespace QuestTree.QuestGraph
         }
 
         /// <summary>Copies rows [rowFrom, rowTo) of a block - the tile repeated rx x ry times, with a border of
-        /// <c>padding</c> filled by copies of the block's edge texels (row -padding is the bottom of the gutter) -
+        /// <c>padding</c> filled by the tile's own WRAP (WP8 D4: the texel a repeat would sample there - the pre-WP8
+        /// gutter held clamped edge copies; row -padding is the bottom of the gutter) -
         /// into a page at (x, y). RGBA bytes, row 0 at the bottom, in both arrays. Called a slice at a time so a
         /// 1024 x 1024 block is several short steps.</summary>
         /// <param name="page">The page's pixels.</param>
@@ -8588,14 +8810,14 @@ namespace QuestTree.QuestGraph
                 var ty = y + py;
                 if (ty < 0 || ty >= pageSize) continue;
 
-                var sy = Math.Max(0, Math.Min(bh - 1, py)) % h;
+                var sy = ((py % h) + h) % h;
 
                 for (var px = -padding; px < bw + padding; px++)
                 {
                     var tx = x + px;
                     if (tx < 0 || tx >= pageSize) continue;
 
-                    var sx = Math.Max(0, Math.Min(bw - 1, px)) % w;
+                    var sx = ((px % w) + w) % w;
                     var o = (ty * pageSize + tx) * 4;
                     var s = (sy * w + sx) * 4;
 
