@@ -3282,6 +3282,45 @@ namespace QuestTree.QuestGraph
             }
         }
 
+        /// <summary>WP4 B1: the row filler for a floor or side picture handed to <see cref="PngEncoder"/>. Texture row 0
+        /// is the BOTTOM (SetPixels32's order, which DevelopBand fills the pool in), PNG row 0 the TOP - as EncodeToPNG
+        /// writes it - so PNG row r is texture row h-1-r, four bytes a pixel in R, G, B, A order.</summary>
+        /// <param name="px">The developed picture, texture order.</param>
+        /// <param name="w">Its width.</param>
+        /// <param name="h">Its height.</param>
+        private static Action<int, byte[]> RgbaRows(Color32[] px, int w, int h) => (row, buf) =>
+        {
+            var from = (h - 1 - row) * w;
+
+            for (int x = 0, o = 0; x < w; x++, o += 4)
+            {
+                var c = px[from + x];
+                buf[o] = c.r;
+                buf[o + 1] = c.g;
+                buf[o + 2] = c.b;
+                buf[o + 3] = c.a;
+            }
+        };
+
+        /// <summary>WP4 B1: the row filler for a distance sidecar - RGB of (d, d, d), exactly what EncodeSidecar's
+        /// SetPixels32(Color32(step, step, step, 255)) into an RGB24 texture stores, top row first. Colour type 2, never
+        /// grey: LoadImage of a grey PNG comes back in a format CopyRed does not take (see EncodeSidecar).</summary>
+        /// <param name="dist">The floor's distances, texture order.</param>
+        /// <param name="w">Its width.</param>
+        /// <param name="h">Its height.</param>
+        private static Action<int, byte[]> GreyRgbRows(byte[] dist, int w, int h) => (row, buf) =>
+        {
+            var from = (h - 1 - row) * w;
+
+            for (int x = 0, o = 0; x < w; x++, o += 3)
+            {
+                var d = dist[from + x];
+                buf[o] = d;
+                buf[o + 1] = d;
+                buf[o + 2] = d;
+            }
+        };
+
         /// <summary>
         /// Writes a file's bytes BESIDE the file they are for, as a temporary, for
         /// <see cref="Commit"/> to put in place at the end of the capture.
