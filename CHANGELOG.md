@@ -177,8 +177,9 @@ captured map carries our own credit line naming the build, the date and the raid
   picture, two campaigns on this build.
 - **The capture now also measures the map's shape.** The picture is a photograph from above; the
   mesh is the ground and the buildings as geometry, written beside it in one press. The ground
-  comes from a raycast grid at two metres a cell, cast from each floor band's own camera height -
-  the experiments measured the whole of Customs at 45 ms through `RaycastCommand`, against 290 ms
+  comes from a raycast grid - a one-metre cell since WP7, coarser in half-metre steps only for an
+  extent over 4 million cells (it was two metres) - cast from each floor band's own camera height -
+  the experiments measured the whole of Customs at 2 m in 45 ms through `RaycastCommand`, against 290 ms
   one ray at a time, and measured something better: colliders do NOT stream out with the player, so
   the ground comes back complete from anywhere on the map and needs none of the merging the pixels
   need. The buildings come from the renderers themselves, 184,000 of them on Customs filtered down
@@ -186,8 +187,9 @@ captured map carries our own credit line naming the build, the date and the raid
   geometry step taken rather than its impostor card, and with the meshes the graphics card holds
   alone read back asynchronously off their own buffers - never by writing a mesh's buffer target,
   which killed the process outright on 2026-09-22 and is now forbidden everywhere in this feature.
-  Everything is chunked over frames (20,000 rays, 20,000 renderers, one building), capped at
-  3,000,000 triangles a map, and says in three log lines what it built and what it cut.
+  Everything is chunked over frames (20,000 rays, 20,000 renderers, one building), capped at a
+  triangle budget derived per capture (see "Extreme detail is the only detail" below), and says in
+  three log lines what it built and what it cut.
 - **Maps: 3D.** A captured map now opens as ground with its picture draped over it and its
   buildings standing on it - drag to move, right-drag to turn and tilt, scroll to come closer, and
   the floor picker peels the storeys. Markers, extracts and place names sit on the ground at their
@@ -214,7 +216,7 @@ captured map carries our own credit line naming the build, the date and the raid
   the session and is fetched again, whole, on the next start, rather than installed flat for good.
   Nothing about it bumps a schema version: an older host stores the pictures and ignores the mesh,
   an older client never asks. The release
-  payload gains the meshes (up to 48 MB a map), so the packager's total-size gate is now a warning at
+  payload gains the meshes (tens of megabytes a map, sized by the capturing machine), so the packager's total-size gate is now a warning at
   80 MB that prints the payload's size - and the meshes' share of it - on every run instead of a hard
   40 MB stop, and a shipped mesh is checked against its meta's sha256, byte length, extent and floor
   levels before it can be zipped.
@@ -234,7 +236,9 @@ captured map carries our own credit line naming the build, the date and the raid
   first floor. Packaging admits `<key>\<key>-side-<N|S|E|W>.jpg` by that exact name, holds sides
   to the 1.5 MB per-image gate, and `tools/check-maps-pack.py` checks each side's JPEG size against
   its meta, its basis for unit length, and that no side file goes unnamed.
-- **Buildings in full detail, up to 3,000,000 triangles a map.** Each building's MOST detailed
+- **Buildings in full detail, up to 3,000,000 triangles a map** (stage V; the budgets, caps and
+  transfer limits in this bullet and the atlas bullet below are stage V's and W's, and WP7 replaced
+  every one of them with a derived rule - see "Extreme detail is the only detail"). Each building's MOST detailed
   level of detail is read whenever its source totals at most 1,000,000 triangles (a bigger one keeps
   the old rule: the last real level, never an impostor card), and our own decimation - quadric edge
   collapse on a worker thread - reduces it to a budget set by its footprint area. The map budget
@@ -288,6 +292,38 @@ captured map carries our own credit line naming the build, the date and the raid
   gate rather than the 1.5 MB picture gate; the payload warning counts pages with the meshes; and
   `tools/check-maps-pack.py` checks every page's JPEG size and sha256 against its meta, that pages sit
   only beside a mesh, and that no page file goes unnamed.
+- **Extreme detail is the only detail.** There is no quality setting and no per-map number: every
+  budget is derived at capture time from what the scanner measures, the machine and the file itself.
+  A building's target is 20 triangles for every square metre of its bounding box's SURFACE (was 6 per
+  square metre of footprint), 24 to 250,000 a building, and never below the target the old footprint
+  rule would have given the same building on the same list - so no building gets less than before, on
+  any machine. A 62 m pylon on a 5x15 m footprint went from 288 triangles to its full source. The map's
+  cap is the least of what the buildings need at that density divided by 0.9, this machine's memory
+  ceiling (a sixteenth of RAM and an eighth of video memory at 64 bytes a triangle, never under the old
+  3,000,000) and 20,000,000; on a 16 GB / 8 GB machine Customs stores about 6.8 million triangles at
+  scale 1 where it stored at most three. The relief cell is 1 m wherever the extent fits 4 million
+  cells a band and half a metre coarser at a time only where it does not, so every stock map runs at
+  1 m and no extent can lose its mesh by throwing. The file stays version 3: its caps became hard
+  bounds that only refuse hostile files - 40,000,000 triangles, 80,000,000 vertices and 1,000,000
+  triangles a building - and a reader from before this change refuses a larger file by name while
+  every earlier file reads unchanged. A building whose atlas split would pass a vertex cap stays
+  untextured instead of costing the whole file. **The 3D view's floor cut is the camera's near plane**:
+  choosing a lower floor makes the private camera's near plane oblique along the cut height, so the
+  graphics card clips everything above it exactly at the pixel; the CPU clip, its cache of clipped
+  copies and the managed copy of every building mesh it clipped from are gone, a floor switch is one
+  matrix, and the camera renders forward (the deferred path cannot take an oblique projection). Terrain
+  that rises above the chosen floor's top is clipped too now, and the build line counts it. The view
+  refuses a file with more triangles than a quarter of its graphics card's memory holds and draws the
+  flat map. **Host and client limits follow the disk and the RAM**: a host's store is a quarter of its
+  free disk at boot (1.5 to 32 GB), a map an eighth of that, a mesh that less the map's pictures (512 MB
+  at most), each upload held to the size its capture declared, in up to 64 parts of 16 MiB; a client
+  takes host meshes up to a fiftieth of its RAM, keeps a quarter of its free disk of host maps (2 to
+  32 GB), no longer stops at 600 MB a session, and gives a whole mesh download a deadline sized to it
+  (60 s plus the transfer at 512 KB/s, 240 s to 30 minutes). `tools/check-capture.py` and
+  `tools/check-maps-pack.py` hold the new bounds and the relief-cell rule (a 2 m capture from before
+  this is a WARN, not an error), check-capture.py's `--compare OLD_ROOT` says whether any building
+  lost detail between two captures, and check-maps-pack.py warns at a mesh over 100 MB, which GitHub
+  refuses in a push.
 - **A throwaway diagnostic ships unbound with this release**, which is worth saying out loud because
   it is not a feature: the mesh probe of the 3D map experiments, which does nothing until it is bound
   under F12 > **Advanced > Mesh probe key (throwaway)**. Once bound it writes

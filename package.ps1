@@ -398,9 +398,11 @@ if ($fatPages.Count -gt 0) {
 # 3D maps: the meshes are the payload nobody can trade away at packaging time (a mesh is the map's
 # geometry - there is no "lower quality" setting that keeps it usable), so a hard cap here would mean a
 # release that cannot be built at all rather than one that is large. Since stage V the warning is
-# EXPECTED to fire: a map's building shells can hold up to 3,000,000 triangles and its mesh file up to
-# 48 MB, so eleven maps of 1-4 floors at ~1 MB plus 10-45 MB of mesh each is well past 80 MB - and since
-# stage W each map adds up to eight 2-4 MB atlas pages of building textures. It still prints on every
+# EXPECTED to fire, and since WP7 the meshes are sized by the CAPTURING machine and the map's surfaces
+# (20 triangles a square metre of each building's surface, a map cap derived from what the buildings need
+# and that machine's memory; a stock map runs to ~50-90 MB of mesh, and no host takes one past 512 MB) - so
+# eleven maps are well past 80 MB, and each adds up to eight 2-4 MB atlas pages of building textures. A
+# single mesh over 100 MB is check-maps-pack.py's WARN: GitHub refuses such a file in a push. It still prints on every
 # run, with the 3D share beside the total, because the one thing that must not happen is the payload
 # growing unnoticed - and the share is what says whether it grew for the expected reason: meshes and
 # atlas pages most of it is stages V and W working; floor and side pictures most of it is something to
@@ -414,7 +416,7 @@ $meshShare = if ($mapsBytes -gt 0) { [math]::Round(100 * $mapsMeshBytes / $mapsB
 $mapsSizeLine = "Map payload: $("{0:N1}" -f ($mapsBytes / 1MB)) MB in maps\ ($("{0:N1}" -f ($mapsMeshBytes / 1MB)) MB of it 3D meshes and atlas pages, $meshShare %)"
 if ($mapsBytes -gt $warnMapsBytes) {
     $meshNote = if ($meshShare -ge 50) {
-        "the 3D meshes and atlas pages are $meshShare % of it, which is the expected reason since stages V and W (up to 48 MB of mesh and 48 MB of pages a map)"
+        "the 3D meshes and atlas pages are $meshShare % of it, which is the expected reason: the meshes are sized by the capturing machine and the map's surfaces (WP7), and each map carries up to 48 MB of atlas pages"
     } else {
         "the 3D meshes and atlas pages are only $meshShare % of it - the PICTURES grew, which is not the expected reason; look at them before publishing"
     }

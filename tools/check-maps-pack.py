@@ -73,6 +73,13 @@ count, a wrong triangle count, a wrong version, four bytes of trailing data, an 
 mesh the meta names but that is absent, and bytes that are not a deflate stream at all - each exits 1
 naming the map and what was wrong; an intact set with a mesh and a set with NO mesh both exit 0.
 
+WP7 (dynamic budgets): the format's hard bounds are 40 M triangles / 80 M vertices; a building is at most
+1 M triangles and a file at most 512 MiB (the host's rules: an ERROR, a seed no host takes); more than the
+builder's absolute 20 M triangles is an ERROR; the inflate bound is computed from the meta's declared
+cells and triangles (the host's D14 rule, capped at 1 GiB); every band's cell is relief_cell_for(extent)
+- the builder's rule - with a 2 m band where the rule gives 1 m a WARN ("captured before WP7 at 2 m"); and
+a mesh over 100,000,000 bytes is a WARN, because GitHub refuses such a file in a push.
+
 Usage:  python tools/check-maps-pack.py <maps-root> --schema N
 """
 
@@ -103,16 +110,40 @@ MESH_MAX_BANDS = 8                  # MaxFloors
 MESH_MAX_CELLS_PER_BAND = 4_000_000
 MESH_MAX_BUILDINGS = 20_000
 MESH_MAX_VERTICES_PER_BUILDING = 2_000_000
-MESH_MAX_VERTICES_TOTAL = 12_000_000    # stage V: MapMeshFile.MaxVerticesTotal
-MESH_MAX_TRIANGLES = 6_000_000          # stage V: MapMeshFile.MaxTriangles (the builder keeps up to 3 M)
-# What this script will inflate before giving up - the host's own ceiling (MapStore.MaxDecompressedMeshBytes):
-# 3 M triangles x 12 B of indices (36 MB) + the format's 12 M vertices x 10 B with v2's UVs (120 MB) =
-# 156 MB of buildings, and 64 MB for the relief grids and headers. Stage X's v3 ranges are 24 bytes longer,
-# which at the caps (20,000 buildings x 64 ranges) is 30.72 MB more: 256 MB, as the host.
-MESH_MAX_INFLATED = 256 * 1024 * 1024
-# The largest mesh FILE a host takes (MapStore.MaxMeshBytes / MapTransfer.MaxMeshBytes). A shipped seed
-# past it would install and draw on this machine and then never reach anybody else: the host refuses it.
-MESH_MAX_FILE_BYTES = 48 * 1024 * 1024
+MESH_MAX_VERTICES_TOTAL = 80_000_000    # WP7: MapMeshFile.MaxVerticesTotal (was 12 M) - a hard bound
+MESH_MAX_TRIANGLES = 40_000_000         # WP7: MapMeshFile.MaxTriangles (was 6 M) - a hard bound
+MESH_MAX_TRIANGLES_PER_BUILDING = 1_000_000   # MapMeshFile.MaxTrianglesPerBuilding, the host's rule
+MESH_BUILDER_ABSOLUTE = 20_000_000      # MapMeshBuilder.BuilderAbsoluteTriangles: no build stores more
+# What this script will inflate before giving up: the host's own D14 bound (MapStore.MeshInflateBound) from
+# the meta's DECLARED cells and triangles - 64 + 3 a cell + 42 a triangle + 20,000 x 2,328 - capped at 1 GiB.
+MESH_MAX_INFLATED = 1 << 30
+# The largest mesh FILE any host takes (MapStore.MeshAbsolute / MapTransfer.ClientMeshAbsolute). A shipped seed
+# past it would install and draw on this machine and then never reach anybody else: every host refuses it.
+MESH_MAX_FILE_BYTES = 512 * 1024 * 1024
+# GitHub refuses a file over 100 MB in a push, and the seed folder is not ignored.
+GITHUB_FILE_LIMIT = 100_000_000
+# The relief cell rule, identical to MapMeshBuilder.ReliefCellFor and check-capture.py's relief_cell_for.
+RELIEF_PREFERRED_CELL = 1.0
+RELIEF_CELL_STEP = 0.5
+RELIEF_PRE_WP7_CELL = 2.0
+
+WARNINGS = []
+
+
+def inflate_bound(cells, triangles):
+    """The host's D14 inflate bound from a meta's declared cells and triangles."""
+    return min(MESH_MAX_INFLATED, 64 + 3 * max(0, cells) + 42 * max(0, triangles) + 20_000 * 2_328)
+
+
+def relief_cell_for(span_x, span_z):
+    """The cell MapMeshBuilder.ReliefCellFor derives for an extent of span_x by span_z metres."""
+    if not (span_x > 0 and span_z > 0) or math.isinf(span_x) or math.isinf(span_z):
+        return RELIEF_PREFERRED_CELL
+    c = max(RELIEF_PREFERRED_CELL,
+            math.ceil(math.sqrt(span_x * span_z / MESH_MAX_CELLS_PER_BAND) / RELIEF_CELL_STEP) * RELIEF_CELL_STEP)
+    while math.ceil(span_x / c) * math.ceil(span_z / c) > MESH_MAX_CELLS_PER_BAND:
+        c += RELIEF_CELL_STEP
+    return c
 EXTENT_TOLERANCE = 1e-6                 # m, mesh header against the meta's extent
 
 # SOFn: C0-CF except C4 (DHT), C8 (JPG extension) and CC (DAC), which are not frame headers.
@@ -168,7 +199,7 @@ def jpeg_size(path):
     return None, "has no frame header (SOF) in it at all"
 
 
-def mesh_header(path):
+def mesh_header(path, bound=MESH_MAX_INFLATED):
     """(header dict, None) or (None, reason) for a mesh file - MapMeshFile's layout, read whole.
 
     Inflated in chunks with a ceiling, because this file arrives from a capture, from a host, or from a
@@ -189,15 +220,15 @@ def mesh_header(path):
         engine = zlib.decompressobj(-15)
         out = bytearray()
         for at in range(0, len(raw), 1 << 16):
-            out += engine.decompress(raw[at:at + (1 << 16)], MESH_MAX_INFLATED - len(out) + 1)
-            if len(out) > MESH_MAX_INFLATED:
-                return None, (f"inflates to more than the {MESH_MAX_INFLATED:,} bytes this check will "
-                              f"read - it is not a mesh this build wrote")
+            out += engine.decompress(raw[at:at + (1 << 16)], bound - len(out) + 1)
+            if len(out) > bound:
+                return None, (f"inflates to more than the {bound:,} bytes its meta's declared cells and "
+                              f"triangles allow - it is not a mesh this build wrote")
         out += engine.flush()
     except zlib.error as exc:
         return None, f"is not a deflate stream, or its data is corrupt ({exc})"
-    if len(out) > MESH_MAX_INFLATED:
-        return None, f"inflates to more than the {MESH_MAX_INFLATED:,} bytes this check will read"
+    if len(out) > bound:
+        return None, f"inflates to more than the {bound:,} bytes its meta's declared cells and triangles allow"
 
     at = 0
 
@@ -282,6 +313,9 @@ def mesh_header(path):
             index_count = i32(f"building {index}'s index count")
             if index_count < 0 or index_count % 3 != 0:
                 return None, f"has a building claiming {index_count:,} triangle indices"
+            if index_count // 3 > MESH_MAX_TRIANGLES_PER_BUILDING:
+                return None, (f"has building {index} claiming {index_count // 3:,} triangles, past the "
+                              f"{MESH_MAX_TRIANGLES_PER_BUILDING:,} one building may have (the host refuses it)")
             indices += index_count
             if indices // 3 > MESH_MAX_TRIANGLES:
                 return None, (f"claims {indices // 3:,} triangles by building {index}, past the "
@@ -387,8 +421,11 @@ def check_mesh(meta, folder, key, extent, levels, errors):
 
     size = path.stat().st_size
     if size > MESH_MAX_FILE_BYTES:
-        errors.append(f"{where}: {rel} is {size:,} bytes, past the {MESH_MAX_FILE_BYTES:,} a host takes - "
-                      f"shipped, it would draw here and never travel; the host refuses it")
+        errors.append(f"{where}: {rel} is {size:,} bytes, past the {MESH_MAX_FILE_BYTES:,} any host takes - "
+                      f"shipped, it would draw here and never travel; every host refuses it")
+    elif size > GITHUB_FILE_LIMIT:
+        WARNINGS.append(f"{where}: {rel} is {size:,} bytes - GitHub refuses a file over 100 MB in a push - "
+                        f"this seed cannot be committed")
     claimed_bytes = mesh.get("bytes")
     if isinstance(claimed_bytes, bool) or not isinstance(claimed_bytes, int) or claimed_bytes <= 0:
         errors.append(f"{where}.bytes {claimed_bytes!r} is not a positive integer")
@@ -409,7 +446,12 @@ def check_mesh(meta, folder, key, extent, levels, errors):
                           f"the meta is not the one that capture wrote, so it is a mesh of some other "
                           f"extent. Delete it and re-run -RefreshMaps.")
 
-    header, why = mesh_header(path)
+    declared_cells, declared_triangles = mesh.get("cells"), mesh.get("triangles")
+    bound = (inflate_bound(declared_cells, declared_triangles)
+             if isinstance(declared_cells, int) and isinstance(declared_triangles, int)
+             and not isinstance(declared_cells, bool) and not isinstance(declared_triangles, bool)
+             else MESH_MAX_INFLATED)
+    header, why = mesh_header(path, bound)
     if header is None:
         errors.append(f"{where}: {rel} {why}")
         return named, size
@@ -426,6 +468,24 @@ def check_mesh(meta, folder, key, extent, levels, errors):
             if abs(mine - theirs) > EXTENT_TOLERANCE:
                 errors.append(f"{where}: its {name} is {mine:.6f} but the meta's extent says "
                               f"{theirs:.6f} - the mesh and the pictures cover different rectangles")
+
+    if header["triangles"] > MESH_BUILDER_ABSOLUTE:
+        errors.append(f"{where}: {rel} holds {header['triangles']:,} triangles, over the builder's absolute "
+                      f"{MESH_BUILDER_ABSOLUTE:,} - not a file this build wrote")
+
+    # The relief cell: derived from the mesh's own extent by one rule the builder and this script share.
+    span_x = header["extent"][2] - header["extent"][0]
+    span_z = header["extent"][3] - header["extent"][1]
+    derived = relief_cell_for(span_x, span_z)
+    for band in header["bands"]:
+        if abs(band["cell"] - derived) <= 1e-6:
+            continue
+        if abs(band["cell"] - RELIEF_PRE_WP7_CELL) <= 1e-6 and abs(derived - RELIEF_PREFERRED_CELL) <= 1e-6:
+            WARNINGS.append(f"{where}: {rel} band {band['level']} was captured before WP7 at 2 m - the rule now "
+                            f"gives {derived:g} m for this extent")
+        else:
+            errors.append(f"{where}: {rel} band {band['level']} has a {band['cell']:g} m cell but the rule gives "
+                          f"{derived:g} m for its {span_x:g} x {span_z:g} m extent")
 
     mesh_levels = sorted(b["level"] for b in header["bands"])
     if levels is not None and mesh_levels != sorted(levels):
@@ -864,12 +924,15 @@ def main():
         print(f"  {line}")
     print()
 
+    for w in WARNINGS:
+        print(f"WARN   {w}")
     for e in errors:
         print(f"ERROR  {e}")
-    if errors:
+    if errors or WARNINGS:
         print()
 
-    print(f"{len(folders)} map set(s) checked, {len(errors)} problem(s)")
+    print(f"{len(folders)} map set(s) checked, {len(errors)} problem(s)"
+          + (f", {len(WARNINGS)} warning(s)" if WARNINGS else ""))
     return 1 if errors else 0
 
 

@@ -100,12 +100,111 @@ namespace QuestTree.QuestGraph
         /// near it; it is a guard against a host - or something answering as one - filling the disk.</summary>
         private const int MaxFloorDownloadBytes = 8 * 1024 * 1024;
 
-        /// <summary>The most one mesh may weigh, in either direction, decoded. The host's own ceiling
-        /// (MapStore.MaxMeshBytes), so a mesh this side would offer is never one the host refuses, and a
-        /// mesh a host offers is never one this side would refuse after downloading it. 48 MB since stage V,
-        /// whose builder keeps up to 3,000,000 building triangles a map. Past
-        /// <see cref="MeshPartBytes"/> it goes up in parts - see that constant for why.</summary>
-        private const int MaxMeshBytes = 48 * 1024 * 1024;
+        /// <summary>
+        /// The largest mesh ANY host takes, and so the largest this side offers: the protocol's absolute
+        /// (MapStore.MeshAbsolute), set by the one-body download - the host base64s the whole mesh into one
+        /// string. A host with less disk takes less (its ceiling is derived from its own free disk) and drops the
+        /// mesh at the first post, keeping the pictures. Past <see cref="MeshPartBytes"/> a mesh goes up in parts.
+        /// Also the most <see cref="ClientMeshCeiling"/> ever is. Rollback: 48 MiB (the pre-WP7 fixed ceiling).
+        /// </summary>
+        private const long ClientMeshAbsolute = 512L << 20;
+
+        /// <summary>The share of RAM one mesh download may be: the one-body download holds the response string
+        /// (base64 in UTF-16, 2.67 bytes a mesh byte), the DTO's copy (2.67) and the decoded bytes (1) - about 6.3
+        /// times the mesh - and that is allowed an eighth of RAM, so a fiftieth of RAM per mesh byte.</summary>
+        private const long ClientRamShare = 50;
+
+        /// <summary>The host-picture cache's ceiling is a quarter of the free disk, never under this (the
+        /// pre-WP7 fixed 2 GiB) nor over <see cref="HostCacheTop"/>.</summary>
+        private const long HostCacheFloor = 2L << 30;
+
+        /// <summary>The most the host-picture cache holds, however much disk is free. Rollback: 2 GiB.</summary>
+        private const long HostCacheTop = 32L << 30;
+
+        /// <summary>The host's own cap on one picture (MapStore.MaxImageBytes): 2.5 MiB. The per-map download
+        /// bound counts twelve of them (eight floors, four sides).</summary>
+        private const long HostPictureBytes = 2_621_440;
+
+        /// <summary>This machine's mesh ceiling (D15) and host-cache ceiling (D17), sized ONCE per session on the
+        /// main thread by <see cref="SizeSessionLimits"/> (SystemInfo is Unity's) before the download worker
+        /// starts, which only reads them. Until then the pre-WP7 numbers.</summary>
+        private static long _clientMeshCeiling = 48L << 20;
+
+        private static long _hostCacheCeiling = HostCacheFloor;
+
+        private static bool _limitsSized;
+
+        /// <summary>The largest mesh this machine downloads (D15): min(512 MiB, RAM / 50) - 16 GB -> 328 MiB,
+        /// 8 GB -> 164 MiB, 32 GB -> 512 MiB.</summary>
+        internal static long ClientMeshCeiling => _clientMeshCeiling;
+
+        /// <summary>The most one map may weigh coming down (D16): twelve pictures at the host's cap, eight atlas
+        /// pages at theirs, and <see cref="ClientMeshCeiling"/>.</summary>
+        internal static long MaxMapDownload => 12L * HostPictureBytes + 8L * MaxAtlasPageBytes + ClientMeshCeiling;
+
+        /// <summary>The most the host-picture cache holds on this disk (D17): clamp(free / 4, 2 GiB, 32 GiB).</summary>
+        internal static long HostCacheCeiling => _hostCacheCeiling;
+
+        /// <summary>The mesh ceiling for this much RAM (D15). Pure, for the harness.</summary>
+        /// <param name="ramMb">SystemInfo.systemMemorySize.</param>
+        internal static long ClientMeshCeilingFor(long ramMb) =>
+            Math.Min(ClientMeshAbsolute, (Math.Max(0L, ramMb) << 20) / ClientRamShare);
+
+        /// <summary>The host-cache ceiling for this much free disk (D17). Pure, for the harness.</summary>
+        /// <param name="free">Free bytes on the maps' volume; zero or less when unknown (the floor).</param>
+        internal static long HostCacheCeilingFor(long free) =>
+            Math.Min(HostCacheTop, Math.Max(HostCacheFloor, Math.Max(0L, free) / 4));
+
+        /// <summary>The longest a mesh download may take (D18), in seconds.</summary>
+        private const double MeshDownloadMaxSeconds = 1800d;
+
+        /// <summary>The slowest link a mesh download is sized for, bytes a second: 512 KiB/s.</summary>
+        private const double MeshDownloadBytesPerSecond = 512d * 1024d;
+
+        /// <summary>
+        /// A mesh download's deadline for its size (D18): 60 s plus the transfer of 4/3 of the mesh (its base64)
+        /// at 512 KiB/s, never under <see cref="MeshRequestTimeout"/> nor over 30 minutes - 48 MiB -> 240 s,
+        /// 160 MiB -> 487 s, 512 MiB -> 1,425 s. Needs the dedicated transfer client (one request, one deadline);
+        /// its HttpClient backstop is above the longest of these.
+        /// </summary>
+        /// <param name="bytes">The mesh's size, as the index declares it.</param>
+        internal static double MeshDownloadSecondsFor(long bytes) =>
+            Math.Min(MeshDownloadMaxSeconds,
+                Math.Max(MeshRequestTimeout.TotalSeconds, 60d + Math.Max(0L, bytes) * 4d / 3d / MeshDownloadBytesPerSecond));
+
+        /// <summary>
+        /// MAIN THREAD, once per session, before the download worker starts: this machine's mesh and host-cache
+        /// ceilings from its RAM and the free disk under the maps folder, said once.
+        /// </summary>
+        private static void SizeSessionLimits()
+        {
+            if (_limitsSized) return;
+            _limitsSized = true;
+
+            var ramMb = 0L;
+            try { ramMb = SystemInfo.systemMemorySize; } catch (Exception) { ramMb = 0L; }
+
+            if (ramMb > 0) _clientMeshCeiling = ClientMeshCeilingFor(ramMb);
+
+            var free = 0L;
+
+            try
+            {
+                var root = MapsRoot();
+                var drive = string.IsNullOrEmpty(root) ? null : Path.GetPathRoot(Path.GetFullPath(root));
+                if (!string.IsNullOrEmpty(drive)) free = new DriveInfo(drive).AvailableFreeSpace;
+            }
+            catch (Exception)
+            {
+                free = 0L;
+            }
+
+            _hostCacheCeiling = HostCacheCeilingFor(free);
+
+            Plugin.LogSource?.LogInfo(
+                $"QuestTree: this machine takes host meshes up to {Mb(_clientMeshCeiling)} MB (RAM {ramMb:N0} MB), keeps " +
+                $"up to {Mb(_hostCacheCeiling)} MB of host maps ({Mb(free)} MB free).");
+        }
 
         /// <summary>
         /// How much of a mesh one upload post carries. A stock SPT host runs on Kestrel with its default
@@ -114,19 +213,13 @@ namespace QuestTree.QuestGraph
         /// 23.5 MB goes through. Every body is zlib-compressed on the way (TransferHttp sends what SPT's
         /// RequestHandler would, at the same level), which brings the base64
         /// of an already-deflated mesh back to about 1.03 times the mesh, so ONE post can carry a mesh of
-        /// roughly 28 MB and no more - and stage V's cap is 48. A mesh past this size is therefore sent in
-        /// parts of this size (MapStore.HoldMeshPart joins them and checks the whole exactly as it checks a
-        /// mesh sent in one post). 16 MiB is ~17 MB on the wire: over 40 % under the limit, so a less
-        /// compressible body than any measured still fits, and a mesh at the cap is three posts.
+        /// roughly 28 MB and no more - and a mesh may be up to 512 MiB. A mesh past this size is therefore sent in
+        /// ceil(bytes / 16 MiB) parts (MapStore.HoldMeshPart joins them and checks the whole exactly as it checks
+        /// a mesh sent in one post; it takes up to 64). 16 MiB is ~17 MB on the wire: over 40 % under the limit,
+        /// so a less compressible body than any measured still fits. The host's 24 MiB part ceiling is postable
+        /// only compressed, which is why this side does not move to 24 MiB parts to save posts.
         /// </summary>
         private const int MeshPartBytes = 16 * 1024 * 1024;
-
-        /// <summary>The most one map's pictures, sides, atlas pages AND mesh may weigh coming down, decoded.
-        /// The host's per-map ceiling (MapStore.MaxBytesPerMap), checked again here: 8 floors and 4 sides at
-        /// 2.5 MB, a 48 MB mesh and 8 atlas pages at 6 MB make 126 MB, with 6 MB of margin - 132 MB. It rose
-        /// 20 -> 32 MB with the mesh, 32 -> 42 with the sides, 42 -> 84 with stage V's 48 MB mesh and
-        /// 84 -> 132 with stage W's atlas pages.</summary>
-        private const long MaxMapDownloadBytes = 132L * 1024 * 1024;
 
         /// <summary>The most atlas pages one capture carries - the builder's own cap, and the host's
         /// (MapStore.MaxAtlasPages).</summary>
@@ -166,15 +259,6 @@ namespace QuestTree.QuestGraph
         /// picture over a real floor. A host that knows sides ignores the level.</summary>
         private const int SideLevel = int.MinValue;
 
-        /// <summary>The most a session will download in total. A player who joins a host holding
-        /// thirty maps gets what fits and the rest on the next start, rather than a quarter of an hour
-        /// of a worker on the first Maps tab open. 300 MB since stage V: a set that was 1-4 MB of pictures
-        /// can now be 10-50 MB with its 3-million-triangle geometry, and the 120 MB before it would have
-        /// taken three or four such maps a session and left the rest for later every time. 600 MB since
-        /// stage W, whose atlas pages add up to 48 MB a map: at 300 a group's eleven maps in 3D would have
-        /// taken three sessions to arrive.</summary>
-        private const long MaxSessionDownloadBytes = 600L * 1024 * 1024;
-
         /// <summary>The most floors of one map to take from a host, matching the harvested band
         /// ceiling the zone file enforces.</summary>
         private const int MaxFloors = 8;
@@ -187,8 +271,9 @@ namespace QuestTree.QuestGraph
         /// ENFORCED: the request is aborted at it (TransferHttp), never retried.</summary>
         private static readonly TimeSpan RequestTimeout = TimeSpan.FromSeconds(30);
 
-        /// <summary>The deadline on a MESH-SIZED request - one mesh part up, one atlas page up or down, the whole
-        /// mesh down - aborted at it like every other. 240 s: 48 MB at 2 MB/s is 24 s of transfer, and a remote
+        /// <summary>The deadline on a MESH-SIZED request - one mesh part up, one atlas page up or down - aborted at
+        /// it like every other, and the least a whole mesh coming down gets (<see cref="MeshDownloadSecondsFor"/>
+        /// scales that one with its size). 240 s: a 16 MiB part at 2 MB/s is 8 s of transfer, and a remote
         /// host's slow uplink is the whole point of the transport. Before review F57 this was not what a
         /// request actually got: SPT's own client cut every attempt at 100 s and sent it again up to three
         /// times, so nothing needing more than 100 s ever landed and a failure took ~400 s to be reported.</summary>
@@ -202,20 +287,14 @@ namespace QuestTree.QuestGraph
         /// the next session. A worker that never returns is one the session can never retry.
         ///
         /// A MINIMUM since stage W, not a flat limit: past it the session keeps going for as long as it is
-        /// still receiving at <see cref="MinSyncBytesPerSecond"/> or better on average, up to
-        /// <see cref="MaxSessionDownloadBytes"/> - which bounds it (600 MB at 1 MB/s is ten minutes). A flat
-        /// three minutes took a third of a 3D map a session on a slow link and all of them on a fast one.</summary>
+        /// still receiving at <see cref="MinSyncBytesPerSecond"/> or better on average, and while what it takes
+        /// fits <see cref="HostCacheCeiling"/> (WP7 removed the fixed 600 MB a session). A flat three minutes took a
+        /// third of a 3D map a session on a slow link and all of them on a fast one.</summary>
         private static readonly TimeSpan SyncBudget = TimeSpan.FromMinutes(3);
 
         /// <summary>The average rate, over the whole session, a download must be keeping up past
         /// <see cref="SyncBudget"/> to go on to the next map. 1 MB/s.</summary>
         private const double MinSyncBytesPerSecond = 1024d * 1024d;
-
-        /// <summary>The most the host-picture cache (<see cref="MapsRoot"/>) may hold on this disk. Eleven maps at
-        /// the host's 132 MB ceiling are 1.45 GB; 2 GB is that with room for a modded map or two. Past it, the
-        /// set whose stamp was written longest ago is evicted - never one taken this session - before the next
-        /// is installed, and a set that cannot fit even then waits.</summary>
-        private const long MaxHostCacheBytes = 2048L * 1024 * 1024;
 
         /// <summary>Where a download stages a set before it replaces the one in place. Under the maps
         /// folder, so it is on the same volume as its destination and a move cannot become a copy;
@@ -340,7 +419,7 @@ namespace QuestTree.QuestGraph
             {
                 // One frame first (review F34): StartCoroutine runs this synchronously up to its first yield,
                 // and the caller is the frame that just finished writing the capture - so without it the read
-                // and hash of up to 48 MB of mesh below landed in that same frame.
+                // and hash of the mesh below (tens of MB, up to 512 MiB) landed in that same frame.
                 yield return null;
 
                 if (!ReadCapture(key, out var meta, out var floors)) yield break;
@@ -441,7 +520,7 @@ namespace QuestTree.QuestGraph
                         // or the host dropped the mesh (an older host drops one past 12 MB at the meta;
                         // any host drops one its meta cannot describe), or it already had the mesh staged
                         // from an earlier attempt of the same capture - in all three, sending the mesh now
-                        // would be up to 48 MB the host has no place for. Only the middle one is news.
+                        // would be megabytes the host has no place for. Only the middle one is news.
                         SayIfMeshWasNotKept(key, mesh, meshKept, completeReason);
                         Done(key, Math.Max(posted, held), bytes, 0, clock);
                         yield break;
@@ -656,7 +735,7 @@ namespace QuestTree.QuestGraph
                 //
                 // Not when a floor was dropped SINCE THE LAST POST, though: the host is then waiting for
                 // a picture that will never arrive, so it would hold the mesh with the rest and discard
-                // the lot. Up to 48 MB of posts to a host that cannot use them is worth skipping.
+                // the lot. A mesh's worth of posts to a host that cannot use them is worth skipping.
                 if (posted > 0 && droppedSincePost == 0 && mesh != null)
                 {
                     // In PARTS when the mesh is past what one post can carry to a stock host - see
@@ -1836,8 +1915,8 @@ namespace QuestTree.QuestGraph
         ///
         /// The sha256 is the check that can fail, and it is not ceremony: the meta and the .bin are two
         /// files written in sequence by a capture that can be interrupted, a merge can leave an older
-        /// mesh beside a newer meta, and a hand-copied folder can hold either half. Reading 48 MB and
-        /// hashing it is ~30 ms, paid once per upload - on the main thread, in the raid when the capture was taken in one, but a frame after the capture finished (UploadRoutine yields first) and hashed once (review F34).
+        /// mesh beside a newer meta, and a hand-copied folder can hold either half. Reading and hashing
+        /// is ~30 ms per 48 MB (WP7 meshes run 50-90 MB on a stock map, up to 512 MiB), paid once per upload - on the main thread, in the raid when the capture was taken in one, but a frame after the capture finished (UploadRoutine yields first) and hashed once (review F34).
         /// </summary>
         /// <param name="key">The map's internal id.</param>
         /// <param name="meta">The meta about to be offered. Its mesh block is stripped on any failure.</param>
@@ -1876,11 +1955,12 @@ namespace QuestTree.QuestGraph
                     {
                         why = $"{mesh.File} is empty";
                     }
-                    else if (bytes.Length > MaxMeshBytes)
+                    else if (bytes.Length > ClientMeshAbsolute)
                     {
-                        // The host would refuse it, and a refusal after the floors have gone up leaves
-                        // the set staged there - so it is not offered at all.
-                        why = $"{mesh.File} is {Mb(bytes.Length)} MB, over the {Mb(MaxMeshBytes)} MB a host takes";
+                        // No host would take it (the protocol's absolute), and a refusal after the floors have
+                        // gone up leaves the set staged there - so it is not offered at all. A host whose own
+                        // ceiling is lower drops the mesh at the first post and keeps the pictures.
+                        why = $"{mesh.File} is {Mb(bytes.Length)} MB, over the {Mb(ClientMeshAbsolute)} MB any host takes";
                     }
                     else if (!string.Equals(hash = Sha256(bytes), (mesh.Sha256 ?? "").Trim(),
                                  StringComparison.OrdinalIgnoreCase))
@@ -2240,6 +2320,10 @@ namespace QuestTree.QuestGraph
             if (_syncStarted) return;
             _syncStarted = true;
 
+            // On this (main) thread, before the worker that reads them starts.
+            try { SizeSessionLimits(); }
+            catch (Exception ex) { Plugin.LogSource?.LogDebug($"QuestTree: the transfer limits stay at their defaults ({ex.Message})."); }
+
             try
             {
                 _sync = Task.Run(() => SyncOffThread());
@@ -2416,14 +2500,6 @@ namespace QuestTree.QuestGraph
 
                     if (LocalCaptureIsNewer(key, entry, result)) continue;
 
-                    if (budget + Math.Max(entry.Bytes, 0L) > MaxSessionDownloadBytes)
-                    {
-                        result.Debug.Add(
-                            $"QuestTree: {Mb(MaxSessionDownloadBytes)} MB of the host's map pictures is all this " +
-                            $"session takes, so {key} waits for the next one.");
-                        break;
-                    }
-
                     // The cache's own cap, BEFORE the download: room is made by evicting the sets written
                     // longest ago (never one taken this session), and a set that cannot fit waits.
                     if (!MakeRoom(root, key, Math.Max(entry.Bytes, 0L), installed, result)) continue;
@@ -2546,10 +2622,10 @@ namespace QuestTree.QuestGraph
 
                     if (picture == null) continue;
 
-                    if (bytes + picture.Length > MaxMapDownloadBytes)
+                    if (bytes + picture.Length > MaxMapDownload)
                     {
                         result.Debug.Add(
-                            $"QuestTree: the host's pictures of {key} are over the {Mb(MaxMapDownloadBytes)} MB a map " +
+                            $"QuestTree: the host's pictures of {key} are over the {Mb(MaxMapDownload)} MB a map " +
                             "may take - the floors past that are left.");
                         break;
                     }
@@ -2601,11 +2677,11 @@ namespace QuestTree.QuestGraph
 
                         if (picture == null) continue;
 
-                        if (bytes + picture.Length > MaxMapDownloadBytes)
+                        if (bytes + picture.Length > MaxMapDownload)
                         {
                             result.Debug.Add(
                                 $"QuestTree: {key}'s {dirName} side would take the map past the " +
-                                $"{Mb(MaxMapDownloadBytes)} MB it may weigh - it is left out.");
+                                $"{Mb(MaxMapDownload)} MB it may weigh - it is left out.");
                             continue;
                         }
 
@@ -2707,11 +2783,11 @@ namespace QuestTree.QuestGraph
 
                         if (picture == null) continue;
 
-                        if (bytes + picture.Length > MaxMapDownloadBytes)
+                        if (bytes + picture.Length > MaxMapDownload)
                         {
                             result.Debug.Add(
                                 $"QuestTree: {key}'s atlas page {page.Page} would take the map past the " +
-                                $"{Mb(MaxMapDownloadBytes)} MB it may weigh - it is left out.");
+                                $"{Mb(MaxMapDownload)} MB it may weigh - it is left out.");
                             continue;
                         }
 
@@ -3086,18 +3162,18 @@ namespace QuestTree.QuestGraph
                     return null;
                 }
 
-                if (entry.Mesh.Bytes > MaxMeshBytes)
+                if (entry.Mesh.Bytes > ClientMeshCeiling)
                 {
                     result.Debug.Add(
                         $"QuestTree: the host's mesh for {key} is {Mb(entry.Mesh.Bytes)} MB, over the " +
-                        $"{Mb(MaxMeshBytes)} MB this build takes - the pictures are taken without it.");
+                        $"{Mb(ClientMeshCeiling)} MB this machine takes - the pictures are taken without it.");
                     return null;
                 }
 
-                if (soFar + Math.Max(entry.Mesh.Bytes, 0L) > MaxMapDownloadBytes)
+                if (soFar + Math.Max(entry.Mesh.Bytes, 0L) > MaxMapDownload)
                 {
                     result.Debug.Add(
-                        $"QuestTree: {key}'s pictures and mesh together are over the {Mb(MaxMapDownloadBytes)} MB a " +
+                        $"QuestTree: {key}'s pictures and mesh together are over the {Mb(MaxMapDownload)} MB a " +
                         "map may take - the mesh is left.");
                     return null;
                 }
@@ -3106,11 +3182,14 @@ namespace QuestTree.QuestGraph
 
                 string reply;
 
+                // The deadline for THIS mesh's size (D18): the whole mesh is one body coming down, so it scales
+                // with it. Post waits that plus AbortGrace as its backstop.
+                var deadline = TimeSpan.FromSeconds(MeshDownloadSecondsFor(entry.Mesh.Bytes));
+                var took = System.Diagnostics.Stopwatch.StartNew();
+
                 try
                 {
-                    // The longer deadline: a 48 MB mesh is a 64 MB base64 body, and this is a blocking
-                    // wait on a worker, so 30 s would be a limit the body loses to rather than the host.
-                    reply = Post(MeshFileRoute, body, MeshRequestTimeout);
+                    reply = Post(MeshFileRoute, body, deadline);
                 }
                 catch (Exception ex)
                 {
@@ -3173,7 +3252,7 @@ namespace QuestTree.QuestGraph
                     return null;
                 }
 
-                if (bytes.Length == 0 || bytes.Length > MaxMeshBytes)
+                if (bytes.Length == 0 || bytes.Length > ClientMeshCeiling)
                 {
                     result.Debug.Add(
                         $"QuestTree: the host's mesh for {key} is {bytes.Length:N0} bytes, which is not a mesh this " +
@@ -3184,11 +3263,11 @@ namespace QuestTree.QuestGraph
                 // The per-map budget again, against what DECODED rather than what the index claimed: the
                 // check above trusted the host's own number, and a host - or something answering as one -
                 // that under-states it would otherwise walk a map past its ceiling.
-                if (soFar + bytes.Length > MaxMapDownloadBytes)
+                if (soFar + bytes.Length > MaxMapDownload)
                 {
                     result.Debug.Add(
                         $"QuestTree: {key}'s mesh decoded to {Mb(bytes.Length)} MB, which with its pictures is over " +
-                        $"the {Mb(MaxMapDownloadBytes)} MB a map may take - the mesh is left.");
+                        $"the {Mb(MaxMapDownload)} MB a map may take - the mesh is left.");
                     return null;
                 }
 
@@ -3204,6 +3283,11 @@ namespace QuestTree.QuestGraph
                         "pictures are unaffected.");
                     return null;
                 }
+
+                result.Info.Add(
+                    $"QuestTree: the host's 3D mesh for {key} ({Mb(bytes.Length)} MB) arrived in " +
+                    $"{took.Elapsed.TotalSeconds.ToString("0.0", CultureInfo.InvariantCulture)} s of its " +
+                    $"{deadline.TotalSeconds.ToString("0", CultureInfo.InvariantCulture)} s deadline.");
 
                 return bytes;
             }
@@ -3698,7 +3782,7 @@ namespace QuestTree.QuestGraph
 
         /// <summary>
         /// Makes room in the host-picture cache for a set of <paramref name="incoming"/> bytes that will replace
-        /// whatever <paramref name="key"/>'s folder holds now - see <see cref="MaxHostCacheBytes"/>. Evicts the
+        /// whatever <paramref name="key"/>'s folder holds now - see <see cref="HostCacheCeiling"/>. Evicts the
         /// sets whose stamp was written longest ago, never one in <paramref name="keep"/> (taken this session)
         /// and never this map's own. False, with a line, when the set cannot fit even then.
         /// </summary>
@@ -3709,13 +3793,13 @@ namespace QuestTree.QuestGraph
                 var sets = HostSets(root);
                 var total = sets.Where(s => !string.Equals(s.Key, key, StringComparison.OrdinalIgnoreCase)).Sum(s => s.Bytes);
 
-                if (total + incoming <= MaxHostCacheBytes) return true;
+                if (total + incoming <= HostCacheCeiling) return true;
 
                 foreach (var set in sets.Where(s => !string.Equals(s.Key, key, StringComparison.OrdinalIgnoreCase) &&
                                                    !keep.Contains(s.Key))
                              .OrderBy(s => s.Written))
                 {
-                    if (total + incoming <= MaxHostCacheBytes) break;
+                    if (total + incoming <= HostCacheCeiling) break;
 
                     Wipe(set.Folder);
 
@@ -3724,14 +3808,14 @@ namespace QuestTree.QuestGraph
                     total -= set.Bytes;
                     result.Info.Add(
                         $"QuestTree: the host's pictures of {set.Key} were removed from this machine ({Mb(set.Bytes)} MB) " +
-                        $"to keep the host-picture cache under {Mb(MaxHostCacheBytes)} MB - they come back the next time " +
+                        $"to keep the host-picture cache under {Mb(HostCacheCeiling)} MB - they come back the next time " +
                         "there is room.");
                 }
 
-                if (total + incoming <= MaxHostCacheBytes) return true;
+                if (total + incoming <= HostCacheCeiling) return true;
 
                 result.Debug.Add(
-                    $"QuestTree: the host's {key} ({Mb(incoming)} MB) does not fit in the {Mb(MaxHostCacheBytes)} MB " +
+                    $"QuestTree: the host's {key} ({Mb(incoming)} MB) does not fit in the {Mb(HostCacheCeiling)} MB " +
                     "host-picture cache - it waits.");
                 return false;
             }
@@ -3799,7 +3883,7 @@ namespace QuestTree.QuestGraph
                 if (!ours.HasValue) return false;
 
                 // EQUAL counts as ours: the host's set with this machine's capture instant is, in every case
-                // that happens, the set this machine uploaded - taking it back would be up to 132 MB of our own
+                // that happens, the set this machine uploaded - taking it back would be up to a map's whole ceiling of our own
                 // pictures down the wire, to be drawn second to the local capture anyway.
                 if (!theirs.HasValue || ours.Value >= theirs.Value)
                 {
@@ -4106,8 +4190,9 @@ namespace QuestTree.QuestGraph
                 };
 
                 // Set ONCE, here - HttpClient refuses a change after its first request. A backstop above the
-                // longest per-request deadline; the deadline that actually applies is each request's own.
-                return new HttpClient(handler) { Timeout = MeshRequestTimeout + TimeSpan.FromSeconds(30) };
+                // longest per-request deadline - a whole mesh coming down, up to MeshDownloadMaxSeconds (WP7) -
+                // and the deadline that actually applies is each request's own.
+                return new HttpClient(handler) { Timeout = TimeSpan.FromSeconds(MeshDownloadMaxSeconds + 30d) };
             }
 
             /// <summary>POSTs a JSON body and returns the answer's text, or throws. A TimeoutException naming the

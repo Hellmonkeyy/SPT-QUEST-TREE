@@ -41,7 +41,7 @@ namespace QuestTreeServer
     /// reported success, so the one thing persisted beside a set is a CACHE of it (<c>&lt;key&gt;.stamp-cache.json</c>,
     /// stage W): the stamp and each file's sha256, keyed on every file's name, size and write time and the
     /// meta's - trusted only while ALL of those still match, and rebuilt from the bytes otherwise. It exists
-    /// because a host at the 1.5 GB ceiling would otherwise hash all of it under the lock on the first
+    /// because a host at its store ceiling (1.5 to 32 GB) would otherwise hash all of it under the lock on the first
     /// index request after every boot.
     ///
     /// FOUR (1.19.0). A set may carry a MESH - the map's ground relief and building shells, which the
@@ -75,17 +75,41 @@ namespace QuestTreeServer
         /// bytes, plus room for padding and line breaks.</summary>
         private const int MaxEncodedChars = MaxImageBytes / 3 * 4 + 1024;
 
-        /// <summary>One mesh file's ceiling. Stage V's builder keeps up to 3,000,000 building triangles a
-        /// map - 36 MB of indices and up to 54 MB of vertex coordinates before deflate - and a Customs file
-        /// at that budget is measured in tens of megabytes; 48 MB is that with room. It is ALSO more than
-        /// one HTTP post can carry to a stock SPT host - Kestrel refuses a request body past 30,000,000
-        /// bytes, measured (scratchpad kestrel-limit) - which is why a mesh past
-        /// <see cref="MaxMeshPartBytes"/> arrives in parts (<see cref="AcceptMesh"/>).</summary>
-        private const int MaxMeshBytes = 48 * 1024 * 1024;
+        /// <summary>
+        /// The store's, a map's and a mesh's ceilings (WP7), DERIVED once at boot from the free disk of the
+        /// volume the maps live on (<see cref="SizeCeilings"/>) rather than fixed: a quarter of the free disk,
+        /// never under <see cref="StoreFloor"/> (the pre-WP7 total) nor over <see cref="StoreTop"/>; an eighth of
+        /// that a map; the map's pictures and pages at their own caps taken off for the mesh, never over
+        /// <see cref="MeshAbsolute"/>. Each upload is then held to its meta's DECLARED mesh size, accepted up to
+        /// the mesh ceiling (<see cref="DropUnusableMesh"/>). Fixed for the process: a host that frees disk picks
+        /// it up at its next start.
+        /// </summary>
+        private long _storeCeiling = StoreFloor;
 
-        /// <summary>The mesh's base64 ceiling, checked BEFORE decoding, for
-        /// <see cref="MaxEncodedChars"/>' reason.</summary>
-        private const int MaxEncodedMeshChars = MaxMeshBytes / 3 * 4 + 1024;
+        private long _mapCeiling = StoreFloor / 8;
+
+        private long _meshCeiling = Math.Min(StoreFloor / 8 - PicturesAndPagesPerMap, MeshAbsolute);
+
+        private bool _ceilingsSized;
+
+        /// <summary>The least the store ceiling is: the pre-WP7 fixed total, so no host holds less than before.
+        /// Rollback (with <see cref="StoreTop"/>): 1.5 GiB and 1.5 GiB.</summary>
+        private const long StoreFloor = 1536L << 20;
+
+        /// <summary>The most the store ceiling is, however much disk is free. Rollback: 1.5 GiB.</summary>
+        private const long StoreTop = 32L << 30;
+
+        /// <summary>
+        /// The largest mesh any host takes: the one-body download WP7 does not redesign. <see cref="MeshFile"/>
+        /// base64s the whole mesh into one string - 512 MiB is 716 M characters, under .NET's ~1.07 G-character
+        /// string limit (768 MiB would be at it) - and a client holds ~6.3x the mesh while it decodes it.
+        /// Rollback: 48 MiB (the pre-WP7 fixed mesh ceiling).
+        /// </summary>
+        private const long MeshAbsolute = 512L << 20;
+
+        /// <summary>What a map's pictures and atlas pages may weigh at their own caps: 12 pictures (8 floors, 4
+        /// sides) and 8 pages - 78 MiB, taken off the map's ceiling for the mesh.</summary>
+        private const long PicturesAndPagesPerMap = 12L * MaxImageBytes + 8L * MaxAtlasPageBytes;
 
         /// <summary>The most one PART of a mesh may weigh, decoded. The client sends 16 MiB parts; this is
         /// the host's own ceiling on one, set by what a post can carry at all: Kestrel's default request
@@ -97,36 +121,30 @@ namespace QuestTreeServer
         /// <summary>A part's base64 ceiling, checked before decoding.</summary>
         private const int MaxEncodedMeshPartChars = MaxMeshPartBytes / 3 * 4 + 1024;
 
-        /// <summary>The most parts one mesh may come in. 48 MB at the client's 16 MiB is three; eight is room
-        /// for a smaller part size later without a host update, and a bound on how many files one upload
-        /// can make a host hold.</summary>
-        private const int MaxMeshParts = 8;
+        /// <summary>The most parts one mesh may come in: 64, which at the client's 16 MiB parts is 1 GiB - twice
+        /// <see cref="MeshAbsolute"/> - and a bound on how many files one upload can make a host hold. A mesh
+        /// must also come in at least ceil(bytes / <see cref="MaxMeshPartBytes"/>) parts, so no part is ever
+        /// asked to carry more than one post can. Rollback: 8.</summary>
+        private const int MaxMeshPartsCeiling = 64;
 
-        /// <summary>The most a mesh file may INFLATE to while its header is being checked. A mesh file is
-        /// one deflate block, so a 48 MB body can legitimately hold a hundred megabytes of quantised data -
-        /// and a hostile one can hold a thousand times that. The header parse below stops reading at this,
-        /// which is what keeps a deflate bomb to a bounded read rather than a full disk of RAM.
-        ///
-        /// 160 MB, KEPT and its arithmetic corrected, from the most stage V's builder can write: 3,000,000
-        /// triangles x 12 bytes of uint32 indices = 36 MB, plus vertices up to the FORMAT's 12,000,000 (not
-        /// the 9 M a triangle soup of 3 M triangles would use - the builder is held to the format's cap, not
-        /// to that) x 3 axes x 2 bytes = 72 MB: 108 MB of buildings. That leaves 52 MB for the relief grids
-        /// and the headers - four full bands of the 4 M-cell maximum at 3 bytes a cell are 48 MB, and a real
-        /// band is far smaller (Customs at 2 m is 0.45 MB). A file with all eight bands at their maximum AND
-        /// a full building budget would pass 160 MB; it is refused with the number in the message. DELIBERATELY LOWER than the format's own theoretical ceiling, which is
-        /// about 240 MB at MapMeshFile's caps (8 bands x 4 M cells x 3 = 96 MB, 12 M vertices x 6 = 72 MB,
-        /// 6 M triangles x 12 = 72 MB): those caps are sized to "no count can ask the allocator for a silly
-        /// number", this one to what this mod writes. A file past it is refused with the number in the
-        /// message, so the day a map needs more, the log says exactly what to raise.
-        ///
-        /// 224 MB since stage W (format v2): every vertex may carry a U and a V, two more uint16s - up to
-        /// 12,000,000 x 4 = 48 MB more at the format's vertex cap - so the buildings' worst case is 156 MB
-        /// (72 + 48 of vertices, 36 of indices) and 64 MB is left for the relief grids and the headers.
-        ///
-        /// 256 MB since stage X (format v3): a range grows from 12 bytes to 36 - its tile rect (4 x uint16) and
-        /// its UV bounds (4 x float32), 24 bytes more - and at the format's caps that is 20,000 buildings x 64
-        /// ranges x 24 B = 30.72 MB more. 224 + 30.72 = 254.72 MB, rounded up to 256 MB (268,435,456 bytes).</summary>
-        private const long MaxDecompressedMeshBytes = 256L * 1024 * 1024;
+        /// <summary>
+        /// The most a mesh file may INFLATE to while its header is being checked, from the meta's DECLARED counts
+        /// (D14): 64 bytes of header, 3 a relief cell (height and distance), 42 a triangle (12 of indices and at
+        /// most three vertices of x, y, z, u, v at 10 bytes), and 2,328 a building slot (24 of counts and 64
+        /// ranges of 36) for up to 20,000 of them - capped at 1 GiB. A mesh file is one deflate block, so a
+        /// hostile one can hold a thousand times its size; the walk stops reading at this, which keeps a deflate
+        /// bomb to a bounded read. A file that under-declares is refused anyway: the walk's totals are held to the
+        /// meta (<see cref="MeshFitsMeta"/>). Customs at 2.4 M cells and 6.8 M triangles: about 340 MB.
+        /// Replaces the fixed 256 MB of stage X.
+        /// </summary>
+        /// <param name="cells">The meta's declared relief cells.</param>
+        /// <param name="triangles">The meta's declared triangles.</param>
+        internal static long MeshInflateBound(long cells, long triangles) =>
+            Math.Min(MaxInflatedMeshBytes,
+                64L + 3L * Math.Max(0L, cells) + 42L * Math.Max(0L, triangles) + (long)MaxMeshBuildings * 2_328L);
+
+        /// <summary>The inflate bound's cap: 1 GiB.</summary>
+        private const long MaxInflatedMeshBytes = 1L << 30;
 
         /// <summary>The scratch buffer size for one header walk, shared by every read in it. 64 KiB
         /// divides by both 2 and 4, so a chunk never splits a uint16 or a uint32 element.</summary>
@@ -168,7 +186,8 @@ namespace QuestTreeServer
 
         private const int MaxMeshBuildings = 20_000;
 
-        private const long MaxMeshVerticesTotal = 12_000_000L;
+        /// <summary>MapMeshFile.MaxVerticesTotal (WP7: was 12 M) - a hard bound, twice the triangle bound.</summary>
+        private const long MaxMeshVerticesTotal = 80_000_000L;
 
         /// <summary>MapMeshFile.MaxVerticesPerBuilding - the per-building cap the client's reader
         /// enforces as well as the total.</summary>
@@ -180,7 +199,13 @@ namespace QuestTreeServer
         /// capture.</summary>
         private const double MeshExtentTolerance = 1e-6;
 
-        private const long MaxMeshTriangles = 6_000_000L;
+        /// <summary>MapMeshFile.MaxTriangles (WP7: was 6 M) - a hard bound, twice the builder's absolute 20 M.</summary>
+        private const long MaxMeshTriangles = 40_000_000L;
+
+        /// <summary>MapMeshFile.MaxTrianglesPerBuilding: the builder's source guard, which no stored building
+        /// passes. Checked BEFORE the walk grows its index buffer to a building's index count - without it the
+        /// 40 M total would let one hostile building make this host allocate 120 M uints (480 MB); with it, 12 MB.</summary>
+        private const long MaxMeshTrianglesPerBuilding = 1_000_000L;
 
         /// <summary>The same ceiling ZoneStore puts on a map's floors, for the same reason: no Tarkov
         /// map has eight walkable layers, and each one here costs a picture.</summary>
@@ -195,15 +220,8 @@ namespace QuestTreeServer
         /// rounds a metre extent up to whole tiles and the two sides round in their own code.</summary>
         private const int PixelTolerance = 2;
 
-        /// <summary>One map's ceiling: 8 floors x 2.5 MB + 4 sides x 2.5 MB + a 48 MB mesh + 8 atlas pages x
-        /// 6 MB = 126 MB, and 6 MB of margin on top for a later change to any one of them - 132 MB. Said
-        /// plainly because a guard that cannot fire must not look like one: as the constants stand today
-        /// nothing can reach it, since every part is capped on its own and they sum to 126. It is kept
-        /// because the numbers are set independently and it is the one that would bite first if a later
-        /// release raised the floor cap, the picture size, the side or page count or the mesh size. It rose
-        /// 20 -> 32 MB with the mesh, 32 -> 42 with the sides, 42 -> 84 with stage V's 48 MB mesh and
-        /// 84 -> 132 with stage W's atlas pages. The store's own total below is reachable.</summary>
-        private const long MaxBytesPerMap = 132L * 1024 * 1024;
+        // One map's ceiling is _mapCeiling: an eighth of the store's (WP7, see _storeCeiling). It replaced the
+        // fixed 132 MB (8 floors + 4 sides at 2.5 MB, a 48 MB mesh, 8 pages at 6 MB, and margin).
 
         /// <summary>The most atlas pages one set may carry (MapCaptureAtlasDto.Page is 0 to this less one),
         /// the builder's own ceiling.</summary>
@@ -244,16 +262,9 @@ namespace QuestTreeServer
         /// holds a shipped set to.</summary>
         private const double SideUnitTolerance = 1e-3;
 
-        /// <summary>The whole store's ceiling, counting what is staged with what is served. Raised 300 MB ->
-        /// 1.5 GB with stage W: a map in 3D is now its floors, its sides, a mesh of up to 48 MB and up to
-        /// 48 MB of atlas pages, so 300 MB held about two maps at their ceilings and the eleven vanilla maps
-        /// of one group could not all be served. Eleven maps at the full 132 MB are 1,452 MB, which leaves
-        /// 84 MB - LESS than one more map at its ceiling. So a host already holding eleven maps at the ceiling
-        /// cannot stage a twelfth set, nor a full-size replacement of one of them, until something is freed;
-        /// that is the bound working, and it is far from real sets (a 3D map measures tens of megabytes, not
-        /// 132). Still a bound a peer cannot pass - and uploads are refused by default
-        /// (<see cref="AcceptVariable"/>), so only a host that opted in can be asked to hold it.</summary>
-        private const long MaxBytesTotal = 1536L * 1024 * 1024;
+        // The whole store's ceiling, counting what is staged with what is served, is _storeCeiling: a quarter of
+        // the free disk at boot, 1.5 GiB (the stage W total) to 32 GiB (WP7). Still a bound a peer cannot pass -
+        // and uploads are refused by default (AcceptVariable), so only a host that opted in can be asked to hold it.
 
         private const int MaxLabels = 200;
         private const int MaxLabelLength = 40;
@@ -583,7 +594,7 @@ namespace QuestTreeServer
 
             // Set under the lock, used after it: the folder this capture is staged in, and - only once
             // every piece is here - the meta to promote. The promotion itself reads and hashes up to
-            // 132 MB, so it is PREPARED outside the lock and only committed under it (see CompleteSet).
+            // a map's ceiling (hundreds of MB), so it is PREPARED outside the lock and only committed under it (see CompleteSet).
             string staging;
             MapCaptureMetaDto ready;
 
@@ -738,7 +749,7 @@ namespace QuestTreeServer
                     .Count(p => p.Page != pageNo && !stagedPages.ContainsKey(p.Page)) * (long)MaxAtlasPageBytes;
 
                 // The mesh counts against the map's budget from the FIRST floor: staged, at its size on
-                // disk; not yet staged, at the size the meta declares for it (bounded to MaxMeshBytes by
+                // disk; not yet staged, at the size the meta declares for it (bounded to the mesh ceiling by
                 // DropUnusableMesh). Counting only what is on disk meant a capture that could never fit
                 // was refused on the mesh, after every floor had been staged - and a refusal there is one
                 // the floors then wait out for a day. Refused here, nothing is staged at all.
@@ -756,9 +767,9 @@ namespace QuestTreeServer
                 // post the whole mesh into a set that can never complete. A floor still refuses.
                 string? overBudget = null;
 
-                if (setBytes + bytes.Length > MaxBytesPerMap)
+                if (setBytes + bytes.Length > _mapCeiling)
                     overBudget = $"this capture would be {Mb(setBytes + bytes.Length)} MB, past the " +
-                                 $"{Mb(MaxBytesPerMap)} MB one map may hold";
+                                 $"{Mb(_mapCeiling)} MB one map may hold";
 
                 // The whole store, counting what is staged as well as what is served: during an upload
                 // the disk really does hold both - the set being replaced is still being served - and a
@@ -777,11 +788,11 @@ namespace QuestTreeServer
                     pendingSides > 0 ? "sides" : null,
                     pendingPages > 0 ? "atlas pages" : null);
 
-                if (overBudget == null && total + pending + bytes.Length > MaxBytesTotal)
-                    overBudget = pending > 0 && total + bytes.Length <= MaxBytesTotal
+                if (overBudget == null && total + pending + bytes.Length > _storeCeiling)
+                    overBudget = pending > 0 && total + bytes.Length <= _storeCeiling
                         ? $"the host holds {Mb(total)} MB of map pictures, and the {Mb(pending)} MB this capture's " +
-                          $"{pendingWhat} may still need would take it past the {Mb(MaxBytesTotal)} MB limit"
-                        : $"the host already holds {Mb(total)} MB of map pictures, at the {Mb(MaxBytesTotal)} MB limit";
+                          $"{pendingWhat} may still need would take it past the {Mb(_storeCeiling)} MB limit"
+                        : $"the host already holds {Mb(total)} MB of map pictures, at the {Mb(_storeCeiling)} MB limit";
 
                 if (overBudget != null)
                 {
@@ -1133,7 +1144,7 @@ namespace QuestTreeServer
             // THE CHEAP GATE, BEFORE THE BYTES ARE EVEN DECODED. Nothing below this line is work a
             // stranger can make this host do: a post for a capture nothing has staged, or for a capture
             // whose meta names a different mesh, is refused here having cost one directory probe and one
-            // small JSON read - no 48 MB decode, no sha over it, no inflate of the header. It needs only
+            // small JSON read - no decode of up to 512 MiB, no sha over it, no inflate of the header. It needs only
             // the CLAIMED sha, and the bytes are then held to that claim below, so the chain is
             // unbroken: claim matches the staged meta, bytes match the claim.
             //
@@ -1180,8 +1191,9 @@ namespace QuestTreeServer
 
                 if (encoded.Length == 0) return RejectMesh(key, "the post carries no mesh");
 
-                if (encoded.Length > MaxEncodedMeshChars)
-                    return RejectMesh(key, $"the mesh is larger than the {Mb(MaxMeshBytes)} MB a map's mesh may be");
+                // One post can never carry more than a part: a mesh past that comes in parts (the ceil rule).
+                if (encoded.Length > MaxEncodedMeshPartChars)
+                    return RejectMesh(key, $"the mesh is larger than the {Mb(MaxMeshPartBytes)} MB one post may carry");
 
                 try
                 {
@@ -1195,9 +1207,15 @@ namespace QuestTreeServer
 
             if (bytes.Length == 0) return RejectMesh(key, "the mesh decodes to nothing");
 
-            if (bytes.Length > MaxMeshBytes)
+            if (bytes.Length > _meshCeiling)
                 return RejectMesh(key,
-                    $"the mesh is {bytes.Length:N0} bytes, past the {MaxMeshBytes:N0} a map's mesh may be");
+                    $"the mesh is {bytes.Length:N0} bytes, past the {_meshCeiling:N0} a map's mesh may be on this host");
+
+            // The whole upload is held to the size the STAGED capture declared (D12): a mesh of any other size
+            // is not the one the capture described, whatever it hashes to.
+            if (wanted.Mesh != null && request.Bytes != wanted.Mesh.Bytes)
+                return RejectMesh(key,
+                    $"the mesh says it is {request.Bytes:N0} bytes, but the capture's meta says {wanted.Mesh.Bytes:N0}");
 
             // Two numbers from one machine that disagree mean the file was not read whole. Cheap, and
             // it catches a truncated read on the SENDER, which the sha below would also catch but
@@ -1227,7 +1245,8 @@ namespace QuestTreeServer
 
             // The header, before anything is written: a file whose magic, version or counts are wrong
             // is one no client could draw, and storing it would serve it to every client in the group.
-            if (!MeshHeaderIsUsable(bytes, out var problem, out var facts))
+            if (!MeshHeaderIsUsable(bytes, MeshInflateBound(wanted.Mesh?.Cells ?? 0L, wanted.Mesh?.Triangles ?? 0L),
+                    out var problem, out var facts))
                 permanent = problem;
             else if (!MeshFitsMeta(facts, wanted, out var misfit))
                 permanent = misfit;
@@ -1281,9 +1300,9 @@ namespace QuestTreeServer
                                    stagedSides.Sum(entry => SizeOf(entry.Value)) +
                                    PagesByNumber(staging).Sum(entry => SizeOf(entry.Value));
 
-                    if (setBytes + bytes.Length > MaxBytesPerMap)
+                    if (setBytes + bytes.Length > _mapCeiling)
                         permanent = $"this capture would be {Mb(setBytes + bytes.Length)} MB with its mesh, past the " +
-                                    $"{Mb(MaxBytesPerMap)} MB one map may hold";
+                                    $"{Mb(_mapCeiling)} MB one map may hold";
                 }
 
                 if (permanent == null)
@@ -1292,9 +1311,9 @@ namespace QuestTreeServer
                     // for the reason above.
                     var total = _sets.Values.Sum(s => s.Bytes) + IncomingBytes() - existing;
 
-                    if (total + bytes.Length > MaxBytesTotal)
+                    if (total + bytes.Length > _storeCeiling)
                         permanent = $"the host already holds {Mb(total)} MB of map pictures, at the " +
-                                    $"{Mb(MaxBytesTotal)} MB limit";
+                                    $"{Mb(_storeCeiling)} MB limit";
                 }
 
                 if (permanent != null)
@@ -1394,7 +1413,7 @@ namespace QuestTreeServer
         /// The parts are named for the whole mesh's sha and the number of parts, so two attempts at one
         /// capture that split it differently, or a different mesh, can never be joined into one file.
         /// Joining is done OUTSIDE the lock, as a set's completion is: under it the parts are only RENAMED to
-        /// a name no other post uses, so nothing else can touch them while up to 48 MB is read back.
+        /// a name no other post uses, so nothing else can touch them while up to the mesh ceiling (at most 512 MiB) is read back.
         /// </summary>
         /// <param name="key">The canonical map name.</param>
         /// <param name="request">The post, carrying one part.</param>
@@ -1409,15 +1428,22 @@ namespace QuestTreeServer
         {
             assembled = null;
 
-            if (parts > MaxMeshParts)
-                return RejectMesh(key, $"the mesh comes in {parts} parts, past the {MaxMeshParts} one mesh may");
+            if (parts > MaxMeshPartsCeiling)
+                return RejectMesh(key, $"the mesh comes in {parts} parts, past the {MaxMeshPartsCeiling} one mesh may");
 
             if (request.Part < 0 || request.Part >= parts)
                 return RejectMesh(key, $"part {request.Part} is not one of the mesh's {parts} parts");
 
-            if (request.Bytes <= 0 || request.Bytes > MaxMeshBytes)
+            if (request.Bytes <= 0 || request.Bytes > _meshCeiling)
                 return RejectMesh(key,
-                    $"the mesh says it is {request.Bytes:N0} bytes, which is not a mesh up to {MaxMeshBytes:N0}");
+                    $"the mesh says it is {request.Bytes:N0} bytes, which is not a mesh up to {_meshCeiling:N0} on this host");
+
+            // The ceil rule (D13): at least ceil(bytes / the part ceiling) parts, so no part carries more than
+            // one post can.
+            if (parts < MinMeshParts(request.Bytes))
+                return RejectMesh(key,
+                    $"a mesh of {request.Bytes:N0} bytes comes in at least {MinMeshParts(request.Bytes)} parts of up to " +
+                    $"{MaxMeshPartBytes:N0}, not {parts}");
 
             var encoded = request.DataBase64 ?? "";
 
@@ -1462,7 +1488,7 @@ namespace QuestTreeServer
 
                 // A completion - or another part's JOIN - of this capture is in flight: see the same guard
                 // in AcceptMesh. The join claims the folder too, so nothing writes a part into it or sweeps
-                // it while up to 48 MB of parts is being read back outside the lock.
+                // it while up to the mesh ceiling of parts is being read back outside the lock.
                 if (_completing.Contains(staging))
                     return MeshIsStaged(staging, claimed)
                         ? new MapMeshUploadResponse { Accepted = true, Served = true }
@@ -1500,16 +1526,16 @@ namespace QuestTreeServer
                 var pictures = FilesByLevel(staging).Sum(e => SizeOf(e.Value)) + SidesByDir(staging).Sum(e => SizeOf(e.Value)) +
                                PagesByNumber(staging).Sum(e => SizeOf(e.Value));
 
-                if (pictures + request.Bytes > MaxBytesPerMap)
+                if (pictures + request.Bytes > _mapCeiling)
                     permanent = $"this capture would be {Mb(pictures + request.Bytes)} MB with its mesh, past the " +
-                                $"{Mb(MaxBytesPerMap)} MB one map may hold";
+                                $"{Mb(_mapCeiling)} MB one map may hold";
 
                 var held = paths.Sum(SizeOf);
                 var total = _sets.Values.Sum(s => s.Bytes) + IncomingBytes() - held;
 
-                if (permanent == null && total + request.Bytes > MaxBytesTotal)
+                if (permanent == null && total + request.Bytes > _storeCeiling)
                     permanent = $"the host holds {Mb(total)} MB of map pictures, and this {Mb(request.Bytes)} MB mesh " +
-                                $"would take it past the {Mb(MaxBytesTotal)} MB limit";
+                                $"would take it past the {Mb(_storeCeiling)} MB limit";
 
                 if (permanent != null)
                 {
@@ -1649,6 +1675,9 @@ namespace QuestTreeServer
             }
         }
 
+        /// <summary>The fewest parts a mesh of this many bytes may come in: ceil(bytes / <see cref="MaxMeshPartBytes"/>).</summary>
+        internal static long MinMeshParts(long bytes) => (Math.Max(0L, bytes) + MaxMeshPartBytes - 1) / MaxMeshPartBytes;
+
         /// <summary>Where one part of a mesh waits, named for the whole mesh's sha and the number of parts -
         /// see <see cref="HoldMeshPart"/>. Not a picture extension, so FilesByLevel never reads it as one.</summary>
         private static string MeshPartPath(string staging, string sha256, int index, int parts) =>
@@ -1689,8 +1718,8 @@ namespace QuestTreeServer
                 try
                 {
                     // The READ stays under the lock - it must not meet CommitSet replacing the file, which
-                    // Windows refuses while a handle is open - but the base64 of up to 48 MB (a 64 M-character
-                    // string) is built after it is released (review F39): every other route, the index and
+                    // Windows refuses while a handle is open - but the base64 of up to 512 MiB (MeshAbsolute: a 716 M-
+                    // character string, under .NET's string limit) is built after it is released (review F39): every other route, the index and
                     // image routes the game calls on its main thread among them, waits on this lock.
                     meshBytes = System.IO.File.ReadAllBytes(System.IO.Path.Combine(Folder, key, mesh.File));
 
@@ -1725,7 +1754,7 @@ namespace QuestTreeServer
         /// <summary>
         /// Completes a set whose every piece is staged: PREPARED outside the lock, COMMITTED under it.
         ///
-        /// Why two phases. A set is up to 132 MB - eight floors, four sides, eight atlas pages and a mesh -
+        /// Why two phases. A set is up to a map's ceiling (an eighth of the store's) - eight floors, four sides, eight atlas pages and a mesh -
         /// and completing it
         /// means reading all of it, hashing the mesh again and hashing the whole of it for the stamp. Done
         /// under <see cref="_lock"/>, as it once was, that is well over 100 MB of reading and hashing while the index
@@ -2261,10 +2290,64 @@ namespace QuestTreeServer
         // Reading what is already here
         // ---------------------------------------------------------------------------------------
 
+        /// <summary>
+        /// The store's, a map's and a mesh's ceilings from the free disk of the maps' volume (D9-D11), once per
+        /// process: a quarter of the free disk, clamped to 1.5..32 GiB; an eighth of that a map; that less the
+        /// map's pictures and pages at their caps for the mesh, never over 512 MiB. 200 GB free -> 32 GiB, 4 GiB,
+        /// 512 MiB; 10 GB -> 2.5 GiB, 320 MiB, 242 MiB; 2 GB -> the 1.5 GiB floor, 192 MiB, 114 MiB. A disk that
+        /// cannot be measured gets the floor. Caller holds the lock.
+        /// </summary>
+        private void SizeCeilings()
+        {
+            _ceilingsSized = true;
+
+            long free;
+
+            try
+            {
+                var root = System.IO.Path.GetPathRoot(System.IO.Path.GetFullPath(Folder));
+                free = string.IsNullOrEmpty(root) ? 0L : new System.IO.DriveInfo(root).AvailableFreeSpace;
+            }
+            catch (Exception)
+            {
+                free = 0L;
+            }
+
+            var ceilings = CeilingsFor(free);
+            _storeCeiling = ceilings.Store;
+            _mapCeiling = ceilings.Map;
+            _meshCeiling = ceilings.Mesh;
+
+            var line = $"Quest Tracker: maps: store ceiling {Mb(_storeCeiling)} MB ({Mb(free)} MB free at boot), " +
+                       $"a map {Mb(_mapCeiling)} MB, a mesh {Mb(_meshCeiling)} MB.";
+
+            // At Information on a host that takes uploads - the ceilings are what an upload is judged on - and
+            // a detail line otherwise, where they only bound the sets already on disk.
+            if (AcceptsUploads) _logger.Info(line);
+            else _logger.Detail(line);
+        }
+
+        /// <summary>The three ceilings for this much free disk (D9-D11). Pure, for the harness.</summary>
+        /// <param name="free">Free bytes on the maps' volume; zero or less when unknown.</param>
+        internal static (long Store, long Map, long Mesh) CeilingsFor(long free)
+        {
+            var store = Math.Clamp(Math.Max(0L, free) / 4, StoreFloor, StoreTop);
+            var map = store / 8;
+            var mesh = Math.Min(map - PicturesAndPagesPerMap, MeshAbsolute);
+
+            return (store, map, mesh);
+        }
+
+        /// <summary>This host's mesh ceiling, as sized at boot (<see cref="SizeCeilings"/>).</summary>
+        internal long MeshCeiling => _meshCeiling;
+
         /// <summary>Rebuilds the stamp cache from the folders. Caller holds the lock.</summary>
         private void Load()
         {
             var clock = System.Diagnostics.Stopwatch.StartNew();
+
+            // Before the sets are read: ReadSet holds each stored meta's mesh to the mesh ceiling.
+            if (!_ceilingsSized) SizeCeilings();
 
             _sets.Clear();
             _loaded = true;
@@ -2779,8 +2862,9 @@ namespace QuestTreeServer
                 why = $"is version {mesh.Version}, not the v{MeshVersion} this server stores";
             else if (!Sha256Hex.IsMatch(mesh.Sha256))
                 why = "carries no usable sha256, so no upload could ever be matched to it";
-            else if (mesh.Bytes <= 0 || mesh.Bytes > MaxMeshBytes)
-                why = $"claims {mesh.Bytes:N0} bytes, which is not a mesh up to {MaxMeshBytes:N0}";
+            else if (mesh.Bytes <= 0 || mesh.Bytes > _meshCeiling)
+                why = $"claims {mesh.Bytes:N0} bytes, which is not a mesh up to this host's ceiling of {_meshCeiling:N0} " +
+                      $"({Mb(_meshCeiling)} MB, from its free disk at boot)";
             else if (mesh.Cells < 0 || mesh.Cells > MaxMeshBands * MaxMeshCellsPerBand)
                 why = $"claims {mesh.Cells:N0} relief cells";
             else if (mesh.Triangles < 0 || mesh.Triangles > MaxMeshTriangles)
@@ -3349,8 +3433,8 @@ namespace QuestTreeServer
         /// could have said so was this one, where the bytes arrived from an unauthenticated route.
         ///
         /// HOSTILE INPUT IS THE CASE, not the exception. Every count is tested against its cap BEFORE
-        /// the bytes behind it are read, the inflated read is stopped at
-        /// <see cref="MaxDecompressedMeshBytes"/> so a deflate bomb costs a bounded read rather than
+        /// the bytes behind it are read, the inflated read is stopped at the bound the meta's declared counts
+        /// allow (<see cref="MeshInflateBound"/>) so a deflate bomb costs a bounded read rather than
         /// the machine, and the whole walk allocates ONE buffer however many counts the file declares:
         /// a 45 KB body can legitimately hold 20,000 buildings, and a buffer per count was 2.5 GB of
         /// allocation for it - on an unauthenticated route, which makes an allocation per declared thing
@@ -3365,10 +3449,11 @@ namespace QuestTreeServer
         /// exists to keep off the host. X and Z are skipped: every sixteen-bit value in them is a
         /// position the reader accepts.</summary>
         /// <param name="bytes">The file, exactly as it arrived.</param>
+        /// <param name="inflateBound">The most it may inflate to (<see cref="MeshInflateBound"/>).</param>
         /// <param name="problem">Why it was refused. Empty when it was not.</param>
         /// <param name="facts">What the walk found - the extent, the band levels and the totals - for
         /// <see cref="MeshFitsMeta"/> to hold against the capture's meta. Partly filled on a refusal.</param>
-        private static bool MeshHeaderIsUsable(byte[] bytes, out string problem, out MeshFacts facts)
+        private static bool MeshHeaderIsUsable(byte[] bytes, long inflateBound, out string problem, out MeshFacts facts)
         {
             problem = "";
             facts = new MeshFacts();
@@ -3381,7 +3466,7 @@ namespace QuestTreeServer
 
                 // The cap is enforced by the stream itself rather than by a count this method
                 // remembers: every read below goes through it, so no later addition can forget.
-                using var bounded = new BoundedStream(inflate, MaxDecompressedMeshBytes);
+                using var bounded = new BoundedStream(inflate, inflateBound);
                 using var reader = new System.IO.BinaryReader(bounded);
 
                 // ONE buffer for the whole walk - see the summary. 64 KiB divides by 2 and by 4, so a
@@ -3564,6 +3649,15 @@ namespace QuestTreeServer
                     if (indexCount < 0 || indexCount % 3 != 0)
                     {
                         problem = $"the mesh's building {i} claims {indexCount:N0} triangle indices";
+                        return false;
+                    }
+
+                    // One building's own bound FIRST (S4): the index buffer below grows to a building's index
+                    // count, and the total alone would let one building ask for 120 M of them.
+                    if (indexCount / 3 > MaxMeshTrianglesPerBuilding)
+                    {
+                        problem = $"the mesh's building {i} claims {indexCount / 3:N0} triangles, past the " +
+                                  $"{MaxMeshTrianglesPerBuilding:N0} one building may have";
                         return false;
                     }
 
@@ -4038,7 +4132,7 @@ namespace QuestTreeServer
         ///
         /// Read from the sidecar <see cref="MeshShaPath"/> rather than by hashing the file, because this
         /// is asked on EVERY floor post of a capture that already has its mesh: a four-floor map would
-        /// otherwise re-hash 48 MB four times over, on the request thread, to answer a question the
+        /// otherwise re-hash the mesh four times over, on the request thread, to answer a question the
         /// staging folder already knows the answer to. The sidecar is written after the mesh and deleted
         /// before it, so its absence means "hash it" rather than "no mesh"; and it is only ever a HINT -
         /// <see cref="PrepareSet"/> re-hashes the file itself before serving it, which is the check that

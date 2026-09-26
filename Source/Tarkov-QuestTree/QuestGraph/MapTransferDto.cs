@@ -462,8 +462,9 @@ namespace QuestTree.QuestGraph
         [JsonProperty("part")] public int Part { get; set; }
 
         /// <summary>How many parts the mesh goes up in; 0 for a mesh in one post. Several because one
-        /// post to a stock SPT host cannot carry more than 30,000,000 bytes (MapTransfer.MeshPartBytes);
-        /// the host joins them and checks the whole as it checks a one-post mesh.</summary>
+        /// post to a stock SPT host cannot carry more than 30,000,000 bytes (MapTransfer.MeshPartBytes):
+        /// ceil(bytes / 16 MiB), which the host takes up to 64 of; it joins them and checks the whole as it
+        /// checks a one-post mesh.</summary>
         [JsonProperty("parts")] public int Parts { get; set; }
 
         [JsonProperty("dataBase64")] public string DataBase64 { get; set; }

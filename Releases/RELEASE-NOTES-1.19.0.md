@@ -180,10 +180,14 @@ picture is the one thing a peer can post that everybody else then looks at; `too
 in the source repo sets it and starts the server. A host that has not opted in says so once, nothing
 is sent, and it is not asked again that session. The limits: one picture a post, up to 2.5 MB a
 picture, eight floors and four side pictures a map, up to eight atlas pages a map at up to 6 MB each,
-one 3D mesh a capture up to 48 MB (in 16 MiB parts past that size - an SPT server takes no request
-body past 30,000,000 bytes), 132 MB a map and 1.5 GB in all on the host, 600 MB downloaded per
-session (at least three minutes, and longer while it still arrives at 1 MB/s), 2 GB of other players'
-maps kept on a client, and up to 240 seconds a mesh or atlas-page request. A map you captured yourself
+and one 3D mesh a capture up to what the host's disk allows, in parts of 16 MiB (an SPT server takes
+no request body past 30,000,000 bytes), up to 64 of them. The host's ceilings are derived from its free
+disk when it starts - a quarter of it for the whole store (1.5 to 32 GB), an eighth of that a map, that
+less the map's pictures for a mesh (512 MB at most) - and its boot log says them. A client takes host
+meshes up to a fiftieth of its RAM (328 MB on 16 GB), keeps up to a quarter of its free disk of other
+players' maps (2 to 32 GB), downloads for at least three minutes a session and longer while it still
+arrives at 1 MB/s, and gives a mesh part or atlas page 240 seconds and a whole mesh coming down a
+deadline sized to it (60 s plus its transfer at 512 KB/s, 240 s to 30 minutes). A map you captured yourself
 is not downloaded back from the host. A solo player needs none of it - their own captures are read
 straight out of their own folder.
 
@@ -210,21 +214,37 @@ in 3D - the picture is laid on the ground by the coordinates it was measured ove
 built once per file and kept across repaints, so clicking a quest row does not rebuild a map.
 
 **The same press measures the map's shape.** Beside the pictures, a capture writes
-`<key>-mesh.bin`: the ground as a raycast grid at two metres a cell, cast from each floor band's own
-camera height, and the buildings as geometry. The experiments measured the whole of Customs at 45 ms
+`<key>-mesh.bin`: the ground as a raycast grid - a one-metre cell, coarser in half-metre steps only for
+an extent over 4 million cells - cast from each floor band's own camera height, and the buildings as
+geometry. The experiments measured the whole of Customs at two metres in 45 ms
 through `RaycastCommand` against 290 ms one ray at a time, and found that colliders do not stream out
 with the player - so the ground comes back complete from anywhere on the map and needs none of the
 merging the pixels need. The buildings come from the renderers themselves - 184,000 of them on
 Customs, filtered by size and by the layers the picture draws - taking each building's MOST detailed
 level of detail whenever its source totals at most 1,000,000 triangles (the last real level, never an
 impostor card, when it is bigger), reducing it with our own decimation (quadric edge collapse, on a
-worker thread) to a budget set by its footprint, and reading the meshes only the graphics card holds
+worker thread) only where it is past its budget, and reading the meshes only the graphics card holds
 back asynchronously off their own buffers. A mesh's buffer target is never
 written: doing so killed the game outright on 2026-09-22, and it is forbidden everywhere in this
-feature. The work is spread over frames, capped at 3,000,000 triangles a map, and three log lines
-say what was built and what was cut. A file is about 0.3 MB of ground plus up to a few tens of
-megabytes of buildings for a map of Customs' size; the format allows 6,000,000 triangles and
-12,000,000 vertices a file, and the host takes a mesh of up to 48 MB that inflates to at most 160 MB.
+feature. The work is spread over frames and three log lines say what was built and what was cut.
+
+**Extreme detail is the only detail**, and nothing in it is a per-map number. A building's budget is
+20 triangles for every square metre of its bounding box's surface, 24 to 250,000 a building, and never
+less than the footprint rule this replaced would have given it - so a 62 m pylon that drew as a
+288-triangle spike now keeps its full geometry. The map's cap is derived per capture: what the buildings
+need at that density, this machine's memory (a sixteenth of RAM and an eighth of video memory at 64
+bytes a triangle, never under 3,000,000) and an absolute 20,000,000, whichever is least; the building
+log line names all three. Customs, as an example, stores about 6.8 million triangles on a 16 GB / 8 GB
+machine, every building at its full source or its surface target, in a file of roughly 50-90 MB. When
+memory is what limits it, a smaller machine's capture holds less - never less than before. The format
+stays version 3; its limits are hard bounds that only refuse hostile files (40,000,000 triangles,
+80,000,000 vertices, 1,000,000 triangles a building), and the host checks a mesh inflating to what its
+capture's declared cells and triangles allow (1 GB at most). **A lower floor is cut by the camera's
+near plane**: the view makes its near plane oblique along the cut height, so the graphics card clips
+everything above the floor exactly at the pixel - no clipped copies and no managed copy of any mesh,
+and a floor switch is one matrix. The 3D view renders forward for it. Ground that rises above the
+chosen floor's top is clipped as well, and the build line counts it. A file with more triangles than
+a quarter of the graphics card's memory holds is drawn flat, with a line saying so.
 
 **The 3D map travels with the pictures.** The mesh goes up to the host on its own route after the
 floors (`POST /questtree/maps/mesh`) and comes down with them (`POST /questtree/maps/meshfile`), so
@@ -265,9 +285,8 @@ host stores a page as `<key>-atlas-<n>.jpg` and rewrites its sha256 to the store
 downloading the set holds each page to that sha and its stated size. Pages only dress the mesh's
 buildings, so they come down only with a mesh, and a set served flat carries none. A host from before
 pages refuses a page post as a floor it has no record of, and the client goes on to the mesh. The
-per-map budget is 132 MB: eight floors and four sides at 2.5 MB, eight pages at 6 MB, a 48 MB mesh, and
-6 MB of margin; the host's whole store is 1.5 GB - all eleven maps at that ceiling, though not a
-twelfth set beside them.
+per-map budget is an eighth of the host's store, which is a quarter of its free disk at boot (1.5 to
+32 GB), and every page a meta names is reserved against it from the first floor.
 
 **A throwaway diagnostic ships in this build, with no key bound**, said out loud because it is not a
 feature: the mesh probe of the 3D experiments, which does nothing until you give it a key under F12 >
@@ -315,9 +334,11 @@ is meant to be removed again.
   goes unnamed, and holds a set's 3D mesh to the sha256, byte
   length, extent, floor levels and counts its meta states. The sixth is the payload's total size:
   printed on every run with the meshes' share of it, and a **warning** past 80 MB rather than a
-  failure, because a mesh cannot be made smaller without losing the map. With 3 M-triangle meshes the
-  warning is expected to fire; it says so when the meshes are most of the payload, and says the
-  pictures grew when they are not.
+  failure, because a mesh cannot be made smaller without losing the map. Meshes are sized by the
+  capturing machine and the map's surfaces, so the warning is expected to fire; it says so when the
+  meshes are most of the payload, and says the pictures grew when they are not. The pack check also
+  holds each mesh to the hard bounds and the relief-cell rule, and warns at a mesh over 100 MB, which
+  GitHub refuses in a push.
   Each gate was proven able to fail against a planted fake set, one fault at a time. How many maps
   are covered is also a warning naming the missing ones, not a gate, because a map with no set falls
   back instead of breaking.
