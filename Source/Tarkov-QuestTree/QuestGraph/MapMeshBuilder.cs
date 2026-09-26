@@ -6836,7 +6836,10 @@ namespace QuestTree.QuestGraph
                 var ranges = job.File.Buildings[i].Ranges?.Count ?? 0;
                 var target = c.Target > 0 ? c.Target : TargetNow(job, c.Replaces.Meta);
 
-                if (MapMeshIndex.SettleTextureReread(c.Replaces.Meta, ranges, target, Math.Min(254, c.ReadLod))) continue;
+                // Clean only when the atlas ran for it: abandoned, aborted or never applied is the clock's doing.
+                var clean = job.AtlasApplied && !job.AtlasAbandoned && !job.Request.Abort;
+
+                if (MapMeshIndex.SettleTextureReread(c.Replaces.Meta, ranges, target, Math.Min(254, c.ReadLod), clean)) continue;
 
                 remove.Add(i);
                 job.IndexChanged = true;

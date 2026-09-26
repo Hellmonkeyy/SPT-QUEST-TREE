@@ -881,13 +881,21 @@ namespace QuestTree.QuestGraph
         /// none is refused, and its stored row records the attempt (clean) and that a texture was tried, so it is not read
         /// again until its target grows (<see cref="TextureDue"/>). True when the re-read is kept.
         /// </summary>
-        internal static bool SettleTextureReread(Entry stored, int ranges, int target, int level)
+        /// <param name="stored">The stored row the re-read would replace.</param>
+        /// <param name="ranges">Atlas ranges the re-read ended with.</param>
+        /// <param name="target">The target it was read at.</param>
+        /// <param name="level">The level it was read at.</param>
+        /// <param name="clean">Whether the atlas actually ran to completion for it (PART-05 review of fixes 5): an
+        /// atlas abandoned at its cap, a stored page that would not decode, a throw or the capture's abort leaves every
+        /// new building without a range for reasons of the clock, not of the material - such a refusal is UNCLEAN and
+        /// is counted, not recorded, so the building is tried again at the next stop (bounded by MaxUncleanAttempts).</param>
+        internal static bool SettleTextureReread(Entry stored, int ranges, int target, int level, bool clean)
         {
             if (ranges > 0) return true;
             if (stored == null) return false;
 
-            RecordAttempt(stored, true, target, level);
-            stored.TextureTried = 1;
+            RecordAttempt(stored, clean, target, level);
+            if (AttemptRecorded(stored, clean)) stored.TextureTried = 1;
             return false;
         }
 
