@@ -176,6 +176,43 @@ captures\<key>` to hold the accumulated mesh to (every building present - fewer 
 the relief and the height range held, the textures as sharp). A change of the mod's mesh recipe, the
 game version, the map's rectangle, its floors or the render mask rebuilds from scratch once by itself.
 
+**A stop renders only the tiles it can improve.** A floor or side view is rendered in tiles of 1024 x 1024
+pixels, and until now every tile was rendered at every capture. Most of them were then thrown away pixel by
+pixel, because the merge keeps whichever capture saw each pixel from closer. Now, when a capture merges into
+the pictures already on disk, it loads the previous picture and its distance sidecar before the tiles rather
+than after them. It then asks the merge's own question of every pixel of every tile, and of the 2 px around
+it that the smoothing and the despeckle read: "could this capture's pixel replace the one on disk, if it drew
+one here?" A tile where the answer is no everywhere is owned by closer captures, and it is not rendered. Its
+pixels and sidecar bytes are exactly the ones on disk, and every other pixel of the picture comes out exactly
+as it would have with the tile rendered, so the files are byte for byte the same.
+
+- **Water.** Water is painted out from the ground up to 8 px around it. A skipped tile with drawn water
+  within 8 px of its edge is therefore rendered after all, late in the same scene hold, and the check is
+  repeated until none is found.
+- **A floor that renders nothing.** A merged floor whose tiles are all owned keeps its stored exposure with
+  no light test and is written unchanged, rather than failed. The same holds when the tiles it did render
+  drew nothing.
+- **What does not change.** A fresh capture, a side view that cannot merge, and a previous picture that did
+  not load all render every tile, as before. The scene is held only while something is rendered. The render
+  recipe is unchanged, so every set on disk still merges.
+- **The log.** It says `rendered N of M tiles (skipped o owned by closer captures, ...)` per floor and side,
+  and a Debug line lists the skipped tile indices.
+
+The switches are static readonly constants in MapCapture.cs:
+- `TileSkipEnabled` (on): off restores the old path exactly.
+- `TileSkipOutsideMask` (off): it would also skip tiles whose takeable pixels are transparent either way.
+  It is not byte-identical (the RGB and sidecar under alpha 0 keep older values), so it does not ship on.
+- `TileSkipAudit` (off): a verification mode. It renders every tile, logs what would have been skipped,
+  counts any pixel the merge took inside a skipped tile's halo (it must be 0), and judges the light test
+  both ways.
+
+Two tools check the claim on files:
+- `python tools/compare-captures.py SNAP_A SNAP_B --skipped "<file>:i,j" [--side N i,j]` compares two
+  copies of a captures folder. Every pixel and sidecar byte inside the listed tiles must be identical.
+- `python tools/check-capture.py --pixels` decodes each floor and side with its sidecar. It checks that a
+  pixel with distance 255 is black and that each floor's sidecar is the floor's size. A set that was once
+  merged into a picture with no sidecar also fails that check; this is older than the tile skip.
+
 **The campaign keeps a journal.** Every run appends its stop lines to
 `captures\<key>\<key>.campaign.txt` beside the pictures, the last twenty runs of that map, because the
 game log is gone the moment the game restarts and the run that captured 11 of 16 stops had nothing left

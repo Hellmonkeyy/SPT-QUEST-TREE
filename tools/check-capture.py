@@ -80,8 +80,18 @@ atlas texel-density outliers, crease vertices, and on local PNG atlas pages the 
 wrap-seam tiles. Quality measures: every finding is a WARN (slivers over 4 %, spike apexes over 200, tri/m2 p10
 under 0.5, side pictures over 25 % of the area), never an ERROR. See mesh_quality for the definitions.
 
+WP1 (tile skip): with --pixels, every floor and side is decoded with its distance sidecar and held to the
+invariant the merge keeps - a pixel whose sidecar byte is 255 (nothing drawn) has R = G = B = 0 - which holds
+by induction: a fresh capture writes black wherever it did not take, and a merge keeps an old pixel only
+together with its old distance. A skip that re-encoded "empty" for a kept pixel, or kept a colour but lost its
+distance, breaks it at once. Each floor's sidecar must also be the floor's size. Both are ERRORs. Opt-in,
+because a stdlib decode of a large floor takes a while (about 1.5 minutes for Customs and Interchange). One
+older path breaks the invariant too and is not WP1's: a merge into a picture that had no sidecar keeps every
+old colour with distance 255 (the colour test says drawn, the missing sidecar gives no distance), so a set
+merged once without its sidecar fails here until its pixels are drawn again.
+
 Usage:  python tools/check-capture.py [captures-root] [zones-folder] [--compare OLD_ROOT] [--mesh-quality]
-                                      [--legacy-view]
+                                      [--legacy-view] [--pixels]
         defaults: C:\\Games\\SPT\\BepInEx\\plugins\\QuestTree\\captures
                   C:\\Games\\SPT\\SPT_Runtime\\user\\mods\\QuestTree\\zones
 """
@@ -100,7 +110,7 @@ def _arguments(argv):
     positional, compare, k = [], None, 0
     flags = set()
     while k < len(argv):
-        if argv[k] in ("--mesh-quality", "--legacy-view"):
+        if argv[k] in ("--mesh-quality", "--legacy-view", "--pixels"):
             flags.add(argv[k])
             k += 1
             continue
@@ -119,6 +129,7 @@ def _arguments(argv):
 _POSITIONAL, COMPARE, _FLAGS = _arguments(sys.argv[1:])
 MESH_QUALITY = "--mesh-quality" in _FLAGS
 LEGACY_VIEW = "--legacy-view" in _FLAGS
+PIXELS = "--pixels" in _FLAGS
 CAPTURES = Path(_POSITIONAL[0]) if len(_POSITIONAL) > 0 else Path(
     r"C:\Games\SPT\BepInEx\plugins\QuestTree\captures")
 ZONES = Path(_POSITIONAL[1]) if len(_POSITIONAL) > 1 else Path(
@@ -1587,6 +1598,68 @@ def check_mesh_index(meta, folder, key, mesh, mesh_sha, errors, warnings):
             f"(captured at stops: {distribution or '-'})" + (" - WRONG" if len(errors) > problems else ""))
 
 
+def check_pixels(meta, folder, key, errors, warnings):
+    """--pixels (WP1): each floor and side against its distance sidecar - the floor sidecar's size is the
+    floor's, and dist == 255 implies R == G == B == 0. Returns the summary column."""
+    pairs = []
+    for floor in meta.get("floors") or []:
+        level = floor.get("level") if isinstance(floor, dict) else None
+        if isinstance(level, int) and not isinstance(level, bool) and isinstance(floor.get("file"), str):
+            pairs.append((f"{key}: floor {level}", floor["file"], f"{key}-{level}.dist.png", True))
+    for side in meta.get("sides") or []:
+        direction = side.get("dir") if isinstance(side, dict) else None
+        if direction in SIDE_DIRS and isinstance(side.get("file"), str):
+            pairs.append((f"{key}: side {direction}", side["file"], f"{key}-side-{direction}.dist.png", False))
+
+    checked = empty = coloured = 0
+    for where, rel, dist_name, is_floor in pairs:
+        parts = Path(rel.replace("\\", "/"))
+        if parts.is_absolute() or ".." in parts.parts:
+            continue
+        png, dist = folder / parts, folder / dist_name
+        if not png.is_file() or not dist.is_file():
+            continue
+        size, _ = png_size(png)
+        dist_size, dist_why = png_size(dist)
+        if dist_size is None:
+            errors.append(f"{where}: {dist_name} {dist_why}")
+            continue
+        if size is not None and dist_size != size:
+            errors.append(f"{where}: {dist_name} is {dist_size[0]}x{dist_size[1]} but its "
+                          f"{'floor' if is_floor else 'side'} is {size[0]}x{size[1]} - the merge would refuse the "
+                          f"sidecar")
+            continue
+        picture, sidecar = read_png_planes(png), read_png_planes(dist)
+        if picture is None or sidecar is None:
+            errors.append(f"{where}: {rel if picture is None else dist_name} could not be decoded for the pixel check "
+                          f"(not an 8-bit RGB/RGBA PNG)")
+            continue
+        width, height, (red, green, blue) = picture
+        distance = sidecar[2][0]
+        here = first = 0
+        for y in range(height):
+            d = distance[y]
+            if 255 not in d:
+                continue
+            r, g, b = red[y], green[y], blue[y]
+            x = d.find(255)
+            while x >= 0:
+                empty += 1
+                if r[x] or g[x] or b[x]:
+                    here += 1
+                    if here == 1:
+                        first = (x, y)
+                x = d.find(255, x + 1)
+        checked += 1
+        coloured += here
+        if here:
+            errors.append(f"{where}: INVARIANT broken - {here:,} pixel(s) of {rel} have colour where {dist_name} says "
+                          f"nothing was drawn (distance 255), the first at column {first[0]}, row {first[1]} from the "
+                          f"top - a kept colour lost its distance, or an empty pixel was not written black (a merge into a "
+                          f"picture that had NO sidecar also does this: DevelopBand keeps the colour with distance 255)")
+    return f"pixels: {checked} picture(s) against their sidecars, {empty:,} px at dist 255, {coloured:,} with colour"
+
+
 def png_is(path, width, height):
     """(ok, actual size) for a PNG that must be width x height."""
     size, why = png_size(path)
@@ -1929,6 +2002,8 @@ def check_capture(folder, errors, warnings):
     mesh = check_mesh(meta, folder, key, extent, levels, errors, warnings)
     atlas = check_atlas(meta, folder, key, errors, warnings)
     sides = check_sides(meta, folder, key, extent, errors, warnings)
+    if PIXELS:
+        sides += "; " + check_pixels(meta, folder, key, errors, warnings)
 
     zones, rotation = check_zone(key, extent, levels, errors, warnings)
     meta_rotation = number(meta.get("rotation"))
