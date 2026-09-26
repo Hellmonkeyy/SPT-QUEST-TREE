@@ -845,11 +845,16 @@ namespace QuestTree.QuestGraph
                 // WP3: the campaign's one upload is released where the last capture is known to have ended - here, or
                 // in RestoreWhenDone after its wait - so that capture (and a last-stop verification build inside it)
                 // is under the hold.
-                if (_stillCapturing && MapCapture.IsCapturing)
+                // WHENEVER a capture is still running (PART-07 review), not only on the timeout: a death or an abort
+                // breaks the wait loop with the stop's capture in flight, and releasing the hold here would let that
+                // capture write its meta unheld - a second upload, stopped and re-queued by the supersede guard.
+                if (MapCapture.IsCapturing)
                 {
-                    Plugin.LogSource?.LogWarning(
-                        $"QuestTree: the capture is still running past its own worst case of {Whole(waitUsed)} s - " +
-                        "you are put back as soon as it finishes.");
+                    if (_stillCapturing)
+                        Plugin.LogSource?.LogWarning(
+                            $"QuestTree: the capture is still running past its own worst case of {Whole(waitUsed)} s - " +
+                            "you are put back as soon as it finishes.");
+
                     _campaignUploadNote = _campaignHold != null ? ", upload after the last capture ends" : "";
                     StartCoroutine(RestoreWhenDone(start, map, captured, stops.Count));   // clears _running itself
                 }
@@ -1087,7 +1092,13 @@ namespace QuestTree.QuestGraph
                 // hold must exist before any meta of this capture is written. A start that fails leaves the hold for the
                 // idle rule to release, with nothing owed.
                 if (AutoUploadDebounce && _autoHold == null)
+                {
                     _autoHold = MapTransfer.HoldUploads(this, map, "automatic capture", preempts: false);
+
+                    // The idle clock starts with the hold (PART-07 review): a start that then fails must not have the
+                    // idle rule release the hold at the next evaluation and this line take it again, a second later.
+                    _autoLastStartAt = Time.realtimeSinceStartup;
+                }
 
                 // automatic: this tick comes round every few seconds, so the capture builds the 3D mesh
                 // only for a map that has none yet - the pictures are taken exactly as ever. A campaign
