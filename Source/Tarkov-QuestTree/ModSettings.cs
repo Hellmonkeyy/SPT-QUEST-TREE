@@ -251,6 +251,11 @@ namespace QuestTree
         /// &lt;key&gt;-mesh.verify.bin for tools/compare-mesh.py. Costs one extra full mesh phase.</summary>
         public static ConfigEntry<bool> MeshVerifyLastStop { get; private set; }
 
+        /// <summary>PART-10: whether the 3D map's mesh keeps trees and bushes - renderers whose materials are all on a SpeedTree
+        /// shader. Off by default: the top-down picture already shows the canopy, and cutout leaves have no texture the model
+        /// can draw. On, their faces without an atlas texture are left out rather than projected from the side pictures.</summary>
+        public static ConfigEntry<bool> MeshFoliage { get; private set; }
+
         /// <summary>THROWAWAY. The debug key of the 3D map experiments - see QuestGraph/MeshProbe.cs,
         /// which measures in one raid and one menu visit whether a scene mesh can be read back off the
         /// GPU, whether colliders stream out with the player, which layer has no renderer on it, and
@@ -956,6 +961,12 @@ namespace QuestTree
                 "Debug only. After a campaign's last stop, also build the mesh from scratch into <key>-mesh.verify.bin (with " +
                 "its sidecar and <key>-verify-atlas-<n>.png pages) for tools/compare-mesh.py to compare with the accumulated " +
                 "mesh. This costs one extra full mesh phase at that stop.");
+
+            MeshFoliage = config.Bind(
+                "Advanced", "3D map: include trees and bushes", false,
+                "On, the 3D map's mesh keeps trees and bushes (renderers drawn with the game's SpeedTree shaders); only their " +
+                "faces with a real texture are kept. Off (the default), they are left out - the top-down picture already shows " +
+                "the canopy - and ones an earlier capture stored leave the mesh at the next capture.");
 
             Entries.AddRange(new ConfigEntryBase[]
             {

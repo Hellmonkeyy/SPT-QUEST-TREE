@@ -9927,6 +9927,7 @@ namespace QuestTree.QuestGraph
                     Game = plan.Game ?? "",
                     CaptureOrdinal = plan.Captures,
                     BaseRefused = "this is MeshVerifyLastStop's comparison build",
+                    IncludeFoliage = ModSettings.MeshFoliage?.Value ?? false,
                     AtlasPartPath = page => Path.Combine(plan.Dir, VerifyAtlasName(plan.Key, page)) + ".part",
                 };
 
@@ -10108,6 +10109,9 @@ namespace QuestTree.QuestGraph
                 CaptureOrdinal = plan.Captures,
                 Game = plan.Game ?? "",
                 AtlasPagePath = page => Path.Combine(plan.Dir, MapMeshFile.AtlasFileNameFor(plan.Key, page)),
+
+                // PART-10: trees and bushes in the model, or left out (the default)
+                IncludeFoliage = ModSettings.MeshFoliage?.Value ?? false,
             };
 
             foreach (var floor in plan.Floors)

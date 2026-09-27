@@ -1175,6 +1175,27 @@ namespace QuestTree.QuestGraph
         internal static bool StencilPath(string path) =>
             path != null && path.IndexOf("stencil", StringComparison.OrdinalIgnoreCase) >= 0;
 
+        /// <summary>PART-10: whether a renderer's materials are all on a SpeedTree shader - a tree or a bush (EFT's
+        /// "Nature/SpeedTreeEFT" family), ignoring case; null entries (no material, no shader) are passed over, and at least one
+        /// must be SpeedTree.</summary>
+        /// <param name="shaders">Each material's shader name, null for none.</param>
+        internal static bool FoliageShaders(IEnumerable<string> shaders)
+        {
+            if (shaders == null) return false;
+
+            var any = false;
+
+            foreach (var shader in shaders)
+            {
+                if (string.IsNullOrEmpty(shader)) continue;
+                if (shader.IndexOf("SpeedTree", StringComparison.OrdinalIgnoreCase) < 0) return false;
+
+                any = true;
+            }
+
+            return any;
+        }
+
         /// <summary>
         /// PART-10: every member's sibling when it is a shell of one (<see cref="ShellKind"/>), else -1, with the kind. The
         /// sibling picked is the one with the most source triangles among those it is a shell of. Members are bucketed by

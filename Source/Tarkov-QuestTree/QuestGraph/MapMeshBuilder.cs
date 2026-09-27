@@ -195,6 +195,18 @@ namespace QuestTree.QuestGraph
         /// Static readonly so the choice is not a constant the compiler folds.</summary>
         internal static readonly bool IncludeGameCulled = true;
 
+        /// <summary>PART-10 (F4) rollback: a member that is the low-poly copy of a same-level sibling - its box at least 80 %
+        /// inside the sibling's, both at least 15 m, at least half its height, under 1/20 of its density and at most 1,000
+        /// source triangles, or a level-0 member whose path names a stencil (MapMeshIndex.ShellKind) - is never stored. False
+        /// stores it as before. NOT in the recipe: a stored copy is pruned at the next capture (section 8), so a rollback or a
+        /// re-enable never throws the accumulated mesh away. Static readonly so the choice is not a constant the compiler folds.</summary>
+        internal static readonly bool ShellRule = true;
+
+        /// <summary>PART-10: members named in the shells' line, and tree/bush paths sampled in the foliage line.</summary>
+        private const int ShellDropsLogged = 40;
+
+        private const int FoliageSamplesLogged = 10;
+
         /// <summary>LOD groups mapped a frame (screen defect 4's duplicates).</summary>
         private const int LodGroupsPerFrame = 2_000;
 
@@ -738,6 +750,11 @@ namespace QuestTree.QuestGraph
             /// hidden line's split. Null for none.</summary>
             internal HashSet<Renderer> OcclusionCulled;
 
+            /// <summary>PART-10: whether trees and bushes (renderers whose materials are all on a SpeedTree shader) are stored -
+            /// ModSettings.MeshFoliage, off by default. When they are, their faces without an atlas range are left out, never
+            /// side-projected.</summary>
+            internal bool IncludeFoliage;
+
             /// <summary>WP2: the stored mesh and its identity sidecar, read and checked by the capture
             /// (MapCapture.StartMeshBase). Null takes the from-scratch path, which is the pre-WP2 build exactly and writes
             /// a fresh sidecar.</summary>
@@ -922,6 +939,9 @@ namespace QuestTree.QuestGraph
 
             /// <summary>WP2: each range's material key, for the sidecar.</summary>
             internal ulong[] RangeKeys;
+
+            /// <summary>PART-10: a tree's or bush's triangles left out for having no range.</summary>
+            internal int Removed;
         }
 
         // --- the build ------------------------------------------------------------------------------
@@ -1041,6 +1061,9 @@ namespace QuestTree.QuestGraph
 
                     yield return null;
                 }
+
+                // PART-10 (F4): the shells and the trees, before anything is planned or read
+                Step(job, "the shells", () => MarkShells(job));
 
                 Step(job, "the area budget", () => ApplyBudget(job));
             }
@@ -1314,6 +1337,10 @@ namespace QuestTree.QuestGraph
 
                 Step(job, "the textures' log line", () => ReportAtlas(job));
             }
+
+            // PART-10: a tree or bush stored keeps only what the atlas textures - one with no range at all leaves the file
+            if (job.File != null && job.Request.IncludeFoliage)
+                Step(job, "the trees without a texture", () => SettleFoliage(job));
 
             // WP2 (fixes 5): a texture re-read replaces its stored copy only if the atlas gave it a range - decided here,
             // where the ranges are known, not at the store (a re-read with UVs is not a textured building)
@@ -1885,6 +1912,22 @@ namespace QuestTree.QuestGraph
             /// over it.</summary>
             internal int InputGuarded;
 
+            /// <summary>PART-10 (F4): the renderers MarkShells found to be shells (MakeLevel's queued candidates are new objects),
+            /// and its counts.</summary>
+            internal readonly HashSet<Renderer> ShellRenderers = new HashSet<Renderer>();
+
+            internal int ShellsByDensity;
+            internal int ShellsByStencil;
+            internal long ShellTriangles;
+
+            /// <summary>PART-10: trees and bushes among the candidates and their source triangles; with them stored, the
+            /// triangles left out for having no atlas range and the buildings removed for having none.</summary>
+            internal int FoliageCandidates;
+
+            internal long FoliageTriangles;
+            internal long FoliageFacesDropped;
+            internal int FoliageRemoved;
+
             internal int Logged;
 
             /// <summary>Records a step that failed, at most <see cref="MaxLoggedFailures"/> times.</summary>
@@ -2054,6 +2097,17 @@ namespace QuestTree.QuestGraph
             /// vertices inside the renderer's bounds, or null. Set only for a static batch, where the
             /// two candidates are world space and the renderer's own.</summary>
             internal Matrix4x4? Fallback;
+
+            /// <summary>PART-10 (F4): the low-poly copy of a same-level sibling (MarkShells) - never read; how
+            /// (MapMeshIndex.ShellByDensity or ShellByStencil) and of which sibling.</summary>
+            internal bool Shell;
+
+            internal byte ShellBy;
+            internal Candidate ShellOf;
+
+            /// <summary>PART-10: a tree or a bush - every material on a SpeedTree shader. Stored only with
+            /// Request.IncludeFoliage, and then only its faces with an atlas range.</summary>
+            internal bool Foliage;
         }
 
         /// <summary>
@@ -3186,7 +3240,8 @@ namespace QuestTree.QuestGraph
                     Renderer = renderer,
                     Mesh = mesh,
                     Bounds = bounds,
-                    Volume = Math.Abs(size.x * size.y * size.z)
+                    Volume = Math.Abs(size.x * size.y * size.z),
+                    Foliage = IsFoliage(renderer),
                 });
             }
 
@@ -3280,6 +3335,28 @@ namespace QuestTree.QuestGraph
 
             return true;
         }
+
+        /// <summary>PART-10: whether a renderer is a tree or a bush - every material on a SpeedTree shader
+        /// (MapMeshIndex.FoliageShaders). A rule about the game's shaders, never about a map.</summary>
+        /// <param name="renderer">The renderer.</param>
+        private static bool IsFoliage(Renderer renderer)
+        {
+            var materials = renderer.sharedMaterials;
+            if (materials == null || materials.Length == 0) return false;
+
+            var shaders = new string[materials.Length];
+            for (var i = 0; i < materials.Length; i++)
+                shaders[i] = materials[i] != null && materials[i].shader != null ? materials[i].shader.name : null;
+
+            return MapMeshIndex.FoliageShaders(shaders);
+        }
+
+        /// <summary>PART-10: whether a candidate is left out of this build - a shell (F4), or a tree or bush while
+        /// Request.IncludeFoliage is off.</summary>
+        /// <param name="job">The build.</param>
+        /// <param name="c">The candidate.</param>
+        private static bool Left(Job job, Candidate c) =>
+            c.Shell || job.ShellRenderers.Contains(c.Renderer) || (c.Foliage && !job.Request.IncludeFoliage);
 
         /// <summary>Whether a renderer is a helper volume the game draws nothing useful with: every
         /// material a plain Standard or Unlit one with no main texture, and bounds over
@@ -3491,6 +3568,9 @@ namespace QuestTree.QuestGraph
             }
 
             if (job.Claimed.Contains(candidate.Renderer)) return false;
+
+            // PART-10: a shell, or a tree or bush while they are left out
+            if (Left(job, candidate)) return false;
 
             // WP2: a building stored unchanged is never read again, whatever else went wrong
             if (candidate.Kind == KindSkip) return false;
@@ -3845,6 +3925,126 @@ namespace QuestTree.QuestGraph
         internal static double BoxSurface(double w, double h, double d) =>
             2d * (Math.Abs(w * h) + Math.Abs(w * d) + Math.Abs(h * d));
 
+        /// <summary>
+        /// PART-10 (F4): after the budget pass and before anything is planned or read - the trees and bushes counted (left out
+        /// unless Request.IncludeFoliage), and the SHELLS marked: every candidate that is the low-poly copy of a same-level
+        /// sibling by <see cref="MapMeshIndex.FindShells"/> with <see cref="MapMeshIndex.ShellTests.Safe"/> - both boxes at
+        /// least 15 m, at least 80 % of its box inside the sibling's, at least half its height, under 1/20 of its density and at
+        /// most 1,000 source triangles; or a level-0 member whose hierarchy path names a stencil (EFT's authoring convention)
+        /// inside a level-0 sibling whose path does not. Its level is the LOD level of its group's ladder that lists it (0 with
+        /// no group); a tree is neither a shell nor a sibling. Marked candidates are never planned (ApplyBudget), read (Wanted),
+        /// queued by a fallback (MakeLevel, by renderer) or waited for by a group upgrade (LevelComplete). Every drop is logged
+        /// with its path (the first <see cref="ShellDropsLogged"/>), and the trees with their count, triangles and samples.
+        /// </summary>
+        /// <param name="job">The build.</param>
+        private static void MarkShells(Job job)
+        {
+            var f1 = CultureInfo.InvariantCulture;
+            var candidates = job.Candidates;
+
+            // the trees and bushes
+            var samples = new List<string>();
+            foreach (var c in candidates)
+            {
+                if (!c.Foliage) continue;
+
+                job.FoliageCandidates++;
+                job.FoliageTriangles += Math.Max(0L, c.SourceTriangles);
+                if (samples.Count < FoliageSamplesLogged) samples.Add(SafePath(c.Renderer));
+            }
+
+            if (job.FoliageCandidates > 0)
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: foliage on {job.Request.Map} - {N(job.FoliageCandidates)} renderer(s) whose materials are all on a " +
+                    $"SpeedTree shader, {N(job.FoliageTriangles)} source triangles, " +
+                    (job.Request.IncludeFoliage
+                        ? "read ('3D map: include trees and bushes' is on) - their faces without an atlas texture are left out, never " +
+                          "side-projected"
+                        : "left out of the 3D map ('3D map: include trees and bushes' is off)") +
+                    $"; samples: {string.Join(" | ", samples.ToArray())}.");
+
+            if (!ShellRule) return;
+
+            // the shells
+            var boxes = new List<MapMeshIndex.ShellBox>(candidates.Count);
+            foreach (var c in candidates)
+            {
+                var level = ShellLevel(job, c);
+                var centre = c.Bounds.center;
+                var size = c.Bounds.size;
+                boxes.Add(new MapMeshIndex.ShellBox(centre.x, centre.y, centre.z, size.x, size.y, size.z, c.SourceTriangles, level,
+                    c.Foliage || level < 0 || c.SourceTriangles <= 0));
+            }
+
+            var sibling = MapMeshIndex.FindShells(boxes, MapMeshIndex.ShellTests.Safe,
+                i => MapMeshIndex.StencilPath(SafePath(candidates[i].Renderer)), out var kinds);
+
+            var drops = new List<string>();
+            var hits = 0;
+
+            for (var i = 0; i < candidates.Count; i++)
+            {
+                if (sibling[i] < 0) continue;
+
+                var c = candidates[i];
+                c.Shell = true;
+                c.ShellBy = kinds[i];
+                c.ShellOf = candidates[sibling[i]];
+                job.ShellRenderers.Add(c.Renderer);
+
+                hits++;
+                job.ShellTriangles += c.SourceTriangles;
+                if (kinds[i] == MapMeshIndex.ShellByStencil) job.ShellsByStencil++;
+                else job.ShellsByDensity++;
+
+                if (drops.Count < ShellDropsLogged)
+                    drops.Add($"#{drops.Count + 1} '{SafePath(c.Renderer)}' (level {boxes[i].Level}, {N(c.SourceTriangles)} source triangles, " +
+                              $"{(kinds[i] == MapMeshIndex.ShellByStencil ? "by its stencil path" : "by density")}) inside " +
+                              $"'{SafePath(c.ShellOf.Renderer)}' ({N(c.ShellOf.SourceTriangles)})");
+            }
+
+            Plugin.LogSource?.LogInfo(
+                $"QuestTree: shells on {job.Request.Map} - {N(hits)} member(s) left out as the low-poly copy of a same-level sibling " +
+                $"({N(job.ShellsByDensity)} by density: both at least {MapMeshIndex.ShellMinSideMetres.ToString("0", f1)} m, " +
+                $"{(MapMeshIndex.ShellCover * 100d).ToString("0", f1)} % inside, at least " +
+                $"{(MapMeshIndex.ShellHeightShare * 100d).ToString("0", f1)} % of its height, under 1/" +
+                $"{MapMeshIndex.ShellDensityRatio.ToString("0", f1)} of its density, at most {N(MapMeshIndex.ShellMaxSourceTriangles)} " +
+                $"source triangles; {N(job.ShellsByStencil)} by a stencil path; {N(job.ShellTriangles)} source triangles)" +
+                (drops.Count > 0
+                    ? $"; {(drops.Count < hits ? $"the first {N(drops.Count)}" : "each")}: {string.Join(" | ", drops.ToArray())}"
+                    : "") + ".");
+        }
+
+        /// <summary>PART-10: the LOD level the shell rule compares a candidate at - the level of its group's ladder that lists
+        /// it, 0 with no group, -1 for none (it is then never read, and takes no part).</summary>
+        /// <param name="job">The build.</param>
+        /// <param name="c">The candidate.</param>
+        private static int ShellLevel(Job job, Candidate c)
+        {
+            if (c.Group == null) return 0;
+            if (!job.Groups.TryGetValue(c.Group, out var state) || state == null) return -1;
+
+            foreach (var level in state.Levels)
+                if (level.Set.Contains(c.Renderer))
+                    return level.Lod;
+
+            return -1;
+        }
+
+        /// <summary>A renderer's hierarchy path for a log line or a name test, "?" for one that cannot be read.</summary>
+        /// <param name="renderer">The renderer.</param>
+        private static string SafePath(Renderer renderer)
+        {
+            try
+            {
+                return renderer != null ? HierarchyPath(renderer.transform) : "?";
+            }
+            catch (Exception)
+            {
+                return "?";
+            }
+        }
+
         /// <summary>The area budget over every candidate that is its group's source now: the targets at 20 per m2
         /// of box surface with the pre-WP7 target as a floor, the map's cap DERIVED from what they need and what
         /// this machine holds (D4-D6), scaled by one factor when the planned total would pass
@@ -3875,7 +4075,7 @@ namespace QuestTree.QuestGraph
 
             foreach (var candidate in job.Candidates)
                 if (candidate.SourceTriangles > 0 && candidate.SourceTriangles <= MaxSourceTriangles &&
-                    IsSource(job, candidate))
+                    IsSource(job, candidate) && !Left(job, candidate))
                     sources.Add(candidate);
 
             var surfaces = new double[sources.Count];
@@ -4289,7 +4489,8 @@ namespace QuestTree.QuestGraph
             var flex = new List<Candidate>();
 
             foreach (var c in job.Candidates)
-                if (c.SourceTriangles > 0 && c.SourceTriangles <= MaxSourceTriangles && IsSource(job, c) && c.Kind != KindSkip)
+                if (c.SourceTriangles > 0 && c.SourceTriangles <= MaxSourceTriangles && IsSource(job, c) && c.Kind != KindSkip &&
+                    !Left(job, c))
                     flex.Add(c);
 
             // the coarse stored buildings of a group read at a finer level now
@@ -4314,7 +4515,7 @@ namespace QuestTree.QuestGraph
             {
                 var e = union[k].Entry;
                 var c = e?.SeenBy;
-                if (c == null || c.Kind != KindSkip || c.QueuedLevel >= 0 || !IsSource(job, c)) continue;
+                if (c == null || c.Kind != KindSkip || c.QueuedLevel >= 0 || !IsSource(job, c) || Left(job, c)) continue;
 
                 var targetNow = AreaBudget.Target(AreaBudget.Basis(e.Meta.Surface, e.Meta.Footprint, e.Meta.Height), plan.FlexScale,
                     plan.Floors[k]);
@@ -4407,7 +4608,8 @@ namespace QuestTree.QuestGraph
                 job.RetargetsPlanned++;
 
                 var present = e.SeenBy;
-                if (present != null && present.Kind == KindSkip && present.QueuedLevel < 0 && IsSource(job, present))
+                if (present != null && present.Kind == KindSkip && present.QueuedLevel < 0 && IsSource(job, present) &&
+                    !Left(job, present))
                 {
                     // re-read at source quality: its planned share moves from what is stored to what is reserved
                     present.Kind = KindUpgrade;
@@ -4792,6 +4994,9 @@ namespace QuestTree.QuestGraph
                 Step(job, "a LOD level", () => c = MakeCandidate(job, renderer));
                 if (c == null || !Decodable(c)) continue;
 
+                // PART-10: a shell MarkShells found (by renderer - this is a new candidate object), or a tree left out
+                if (Left(job, c)) continue;
+
                 c.Group = group;
                 c.QueuedLevel = index;
 
@@ -4872,6 +5077,7 @@ namespace QuestTree.QuestGraph
                 Footprint = Math.Abs((double)size.x * size.z),
                 Surface = BoxSurface(size),
                 Height = Math.Abs((double)size.y),
+                Foliage = IsFoliage(renderer),
             };
 
             candidate.Stride = candidate.Stream >= 0 ? mesh.GetVertexBufferStride(candidate.Stream) : 0;
@@ -6875,6 +7081,10 @@ namespace QuestTree.QuestGraph
             foreach (var c in job.Met)
             {
                 if (c.Group != group || !level.Set.Contains(c.Renderer) || !Decodable(c)) continue;
+
+                // PART-10: a shell or a tree left out is not part of the level's building
+                if (Left(job, c)) continue;
+
                 if (!job.Emitted.Contains(c.Renderer)) return false;
                 any = true;
             }
@@ -6918,6 +7128,45 @@ namespace QuestTree.QuestGraph
             job.TextureRefused += remove.Count;
         }
 
+        /// <summary>
+        /// PART-10: a tree or bush is never side-projected. MapBuilding left out every face of one the atlas gave no range to;
+        /// here a tree or bush with no range at all - its materials got no tile, or the atlas did not run - is taken out again
+        /// (RemoveNew; a stored copy it replaced comes back), and the line says what was left out.
+        /// </summary>
+        /// <param name="job">The build.</param>
+        private static void SettleFoliage(Job job)
+        {
+            var remove = new HashSet<int>();
+            var trees = 0;
+            var triangles = 0L;
+
+            for (var i = 0; i < job.File.Buildings.Count && i < job.NewCandidates.Count; i++)
+            {
+                var c = job.NewCandidates[i];
+                if (c == null || !c.Foliage) continue;
+
+                trees++;
+                if ((job.File.Buildings[i].Ranges?.Count ?? 0) > 0) continue;
+
+                remove.Add(i);
+                triangles += job.File.Buildings[i].TriangleCount;
+            }
+
+            if (remove.Count > 0)
+            {
+                RemoveNew(job, remove);
+                job.RolledBack -= remove.Count;      // not a LOD roll-back: counted as trees without a texture
+                job.FoliageRemoved += remove.Count;
+            }
+
+            if (trees > 0)
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: foliage on {job.Request.Map} - {N(trees)} tree/bush building(s) stored this build: " +
+                    $"{N(job.FoliageFacesDropped)} face(s) without an atlas range left out, {N(remove.Count)} with no range at all " +
+                    $"removed ({N(triangles)} triangles) - never side-projected.");
+        }
+
+        /// <summary>WP2: new buildings taken back out of the file (see the summary above SettleTextureRereads).</summary>
         private static void RemoveNew(Job job, HashSet<int> remove)
         {
             var file = job.File;
@@ -8304,8 +8553,42 @@ namespace QuestTree.QuestGraph
                 return;
             }
 
+            // PART-10: a tree or bush keeps only the faces the atlas draws - one with no range is left out, never side-projected
+            // (SettleFoliage takes out one with no range at all)
+            var indices = building.Indices;
+            var removed = 0;
+
+            if (i < job.NewCandidates.Count && job.NewCandidates[i] != null && job.NewCandidates[i].Foliage)
+            {
+                var kept = 0;
+                for (var t = 0; t < triangles; t++)
+                    if (triRange[t] >= 0) kept++;
+
+                removed = triangles - kept;
+
+                if (removed > 0)
+                {
+                    var keptIndices = new uint[kept * 3];
+                    var keptRange = new int[kept];
+                    var k = 0;
+
+                    for (var t = 0; t < triangles; t++)
+                    {
+                        if (triRange[t] < 0) continue;
+
+                        keptIndices[k * 3] = indices[t * 3];
+                        keptIndices[k * 3 + 1] = indices[t * 3 + 1];
+                        keptIndices[k * 3 + 2] = indices[t * 3 + 2];
+                        keptRange[k++] = triRange[t];
+                    }
+
+                    indices = keptIndices;
+                    triRange = keptRange;
+                }
+            }
+
             // grouped by range, vertices split per range
-            var split = SplitByRange(building.Indices, building.X.Length, triRange, rangeUse.Count);
+            var split = SplitByRange(indices, building.X.Length, triRange, rangeUse.Count);
             var source = split.Source;
             var n = source.Length;
 
@@ -8378,7 +8661,7 @@ namespace QuestTree.QuestGraph
             job.Mapped[i] = new AtlasMapped
             {
                 Indices = split.Indices, X = x, Z = z, YMetres = y, U = u, V = v, Ranges = ranges,
-                Triangles = split.Textured, RangeKeys = rangeKeys.ToArray(),
+                Triangles = split.Textured, RangeKeys = rangeKeys.ToArray(), Removed = removed,
             };
         }
 
@@ -8512,6 +8795,14 @@ namespace QuestTree.QuestGraph
                 job.TexturedTriangles += mapped.Triangles;
 
                 if (i < job.NewEntries.Count) job.NewEntries[i].RangeMaterials = mapped.RangeKeys ?? new ulong[0];
+
+                // PART-10: a tree's faces without a range left out - the totals and its sidecar row follow the building
+                if (mapped.Removed > 0)
+                {
+                    job.Triangles -= mapped.Removed;
+                    job.FoliageFacesDropped += mapped.Removed;
+                    if (i < job.NewEntries.Count) job.NewEntries[i].StoredTriangles -= mapped.Removed;
+                }
             }
 
             file.AtlasPages = job.AtlasPageCount;
