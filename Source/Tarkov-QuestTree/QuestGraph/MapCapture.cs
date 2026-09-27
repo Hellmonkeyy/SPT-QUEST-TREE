@@ -947,6 +947,10 @@ namespace QuestTree.QuestGraph
                 // A Fika headless client has no player, no camera and nobody to press a key.
                 if (ModEnvironment.IsHeadlessClient) return;
 
+                // A new raid starts with the game's own full collection (PrepareSession), so the trigger's baseline
+                // must not carry the last raid's heap (hotfix review): the first capture would otherwise collect late.
+                _heapAfterCollect = -1;
+
                 var go = new GameObject("QuestTreeMapCapture");
                 go.transform.SetParent(gameWorld.transform, worldPositionStays: false);
 
@@ -1082,7 +1086,9 @@ namespace QuestTree.QuestGraph
                 var after = GC.GetTotalMemory(false);
                 _heapAfterCollect = after;
 
-                Plugin.LogSource?.LogDebug(
+                // Info, not Debug (hotfix review): the installed log level does not record Debug, and this line is the
+                // one piece of evidence that the collection ran in a raid and what it freed - one to three a stop.
+                Plugin.LogSource?.LogInfo(
                     $"QuestTree: garbage collected {where} - managed heap {GB(before)} -> {GB(after)} GB in " +
                     $"{clock.ElapsedMilliseconds} ms (the game's collector mode: {mode}).");
             }
