@@ -117,7 +117,8 @@ sibling's height, under 1/20 of its density (source triangles per m2 of box surf
 the low-poly copy the viewer z-fights against the detailed walls. Each hit is printed as (row, source, box, sibling row,
 source, same group) under the index column, with rule A's count (no height guard, no source cap) beside it. The stencil
 test needs a renderer's path, which the sidecar does not hold, so it is the client's alone. Never an ERROR: the next capture
-prunes these rows (MapMeshBuilder.PruneStored), after which --shells reports 0.
+prunes these rows through their present renderers (MapMeshBuilder.PruneSeen - the builder also knows which siblings will be
+drawn, which the sidecar does not), after which --shells reports 0.
 
 PART-10: the sliver WARN of --mesh-quality is measured against the SOURCES, not an absolute share. Most remaining slivers are the
 game's own geometry (Customs after Parts 01-08: sliver area 16.6 % in the decimated sources, 13.7 % stored), so a fixed
@@ -1740,10 +1741,17 @@ def shell_is(m, b, height=True, cap=True):
     return True
 
 
+def _shell_density(r):
+    sx, sy, sz = (abs(v) for v in r["size"])
+    surface = 2.0 * (sx * sy + sx * sz + sy * sz)
+    return r["source"] / surface if surface > 0 else float("inf")
+
+
 def find_shells(rows, height=True, cap=True):
-    """MapMeshIndex.FindShells over sidecar rows: each row's sibling (the one with the most source triangles among those it
-    is a shell of, the lowest row on a tie) or -1. A sibling is listed in every 16 m cell its box covers, one cell wider
-    each way than the builder's float grid, so this is the every-pair test exactly."""
+    """MapMeshIndex.FindShells' density pass over sidecar rows: each row's sibling (the one with the most source triangles
+    among those it is a shell of, the lowest row on a tie) or -1. The rows are judged densest first and a row found a shell
+    is never a sibling (the builder's sibling is one that will be drawn). A sibling is listed in every 16 m cell its box
+    covers, one cell wider each way than the builder's float grid, so this is the every-pair test exactly."""
     cells = {}
     usable = [r["source"] > 0 and max(abs(v) for v in r["size"]) >= SHELL_MIN_SIDE for r in rows]
     for j, b in enumerate(rows):
@@ -1753,17 +1761,20 @@ def find_shells(rows, height=True, cap=True):
         for x in range(math.floor((cx - sx * 0.5) / SHELL_CELL) - 1, math.floor((cx + sx * 0.5) / SHELL_CELL) + 2):
             for z in range(math.floor((cz - sz * 0.5) / SHELL_CELL) - 1, math.floor((cz + sz * 0.5) / SHELL_CELL) + 2):
                 cells.setdefault((x, z), []).append(j)
-    out = []
-    for i, m in enumerate(rows):
+    out = [-1] * len(rows)
+    order = sorted(range(len(rows)), key=lambda i: (-_shell_density(rows[i]), i))
+    for i in order:
+        if not usable[i]:
+            continue
+        m = rows[i]
         best = -1
-        if usable[i]:
-            key = (math.floor(m["centre"][0] / SHELL_CELL), math.floor(m["centre"][2] / SHELL_CELL))
-            for j in cells.get(key, ()):
-                if j == i or not shell_is(m, rows[j], height, cap):
-                    continue
-                if best < 0 or rows[j]["source"] > rows[best]["source"] or (rows[j]["source"] == rows[best]["source"] and j < best):
-                    best = j
-        out.append(best)
+        key = (math.floor(m["centre"][0] / SHELL_CELL), math.floor(m["centre"][2] / SHELL_CELL))
+        for j in cells.get(key, ()):
+            if j == i or out[j] >= 0 or not shell_is(m, rows[j], height, cap):
+                continue
+            if best < 0 or rows[j]["source"] > rows[best]["source"] or (rows[j]["source"] == rows[best]["source"] and j < best):
+                best = j
+        out[i] = best
     return out
 
 

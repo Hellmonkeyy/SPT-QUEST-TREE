@@ -1077,9 +1077,10 @@ namespace QuestTree.QuestGraph
         internal const byte ShellByDensity = 1;
         internal const byte ShellByStencil = 2;
 
-        /// <summary>PART-10: one member as the shell rule sees it - its world box, source triangles, LOD level (0 with no group)
-        /// and whether it takes part at all (a member that is not a building here, foliage for one, is neither a shell nor a
-        /// sibling).</summary>
+        /// <summary>PART-10: one member as the shell rule sees it - its world box, source triangles, LOD level (0 with no group),
+        /// whether it takes part at all (a member that is not a building here, foliage for one, is neither a shell nor a
+        /// sibling), and whether it may be a SIBLING (fixes: only one that will be drawn - its group's source at the level read,
+        /// decodable; a member that is not may still be a shell).</summary>
         internal struct ShellBox
         {
             internal float Cx;
@@ -1091,8 +1092,10 @@ namespace QuestTree.QuestGraph
             internal long Source;
             internal int Level;
             internal bool Skip;
+            internal bool NoSibling;
 
-            internal ShellBox(float cx, float cy, float cz, float sx, float sy, float sz, long source, int level, bool skip = false)
+            internal ShellBox(float cx, float cy, float cz, float sx, float sy, float sz, long source, int level, bool skip = false,
+                bool noSibling = false)
             {
                 Cx = cx;
                 Cy = cy;
@@ -1103,6 +1106,7 @@ namespace QuestTree.QuestGraph
                 Source = source;
                 Level = level;
                 Skip = skip;
+                NoSibling = noSibling;
             }
 
             internal static ShellBox Of(Entry e, bool skip = false) =>
@@ -1154,19 +1158,29 @@ namespace QuestTree.QuestGraph
         /// <param name="bStencil">Whether b's does.</param>
         internal static byte ShellKind(ShellBox m, ShellBox b, ShellTests tests, Func<bool> mStencil, Func<bool> bStencil)
         {
-            if (m.Skip || b.Skip || m.Level != b.Level) return ShellNot;
-            if (m.Longest < ShellMinSideMetres || b.Longest < ShellMinSideMetres) return ShellNot;
-            if (CoverOf(m, b) < ShellCover) return ShellNot;
+            if (!BoxTests(m, b)) return ShellNot;
 
             if ((tests & ShellTests.Stencil) != 0 && m.Level == 0 && mStencil != null && mStencil() &&
                 (bStencil == null || !bStencil()))
                 return ShellByStencil;
 
-            if (!(m.Density < b.Density / ShellDensityRatio)) return ShellNot;
-            if ((tests & ShellTests.Height) != 0 && m.Sy < ShellHeightShare * b.Sy) return ShellNot;
-            if ((tests & ShellTests.SourceCap) != 0 && m.Source > ShellMaxSourceTriangles) return ShellNot;
+            return DensityTests(m, b, tests) ? ShellByDensity : ShellNot;
+        }
 
-            return ShellByDensity;
+        /// <summary>The box half of the rule: both take part, b may be a sibling, one LOD level, both boxes at least
+        /// <see cref="ShellMinSideMetres"/>, at least <see cref="ShellCover"/> of m's box inside b's.</summary>
+        private static bool BoxTests(ShellBox m, ShellBox b) =>
+            !m.Skip && !b.Skip && !b.NoSibling && m.Level == b.Level && m.Longest >= ShellMinSideMetres &&
+            b.Longest >= ShellMinSideMetres && CoverOf(m, b) >= ShellCover;
+
+        /// <summary>The density half: under 1/<see cref="ShellDensityRatio"/> of b's, and F4's guards when asked.</summary>
+        private static bool DensityTests(ShellBox m, ShellBox b, ShellTests tests)
+        {
+            if (!(m.Density < b.Density / ShellDensityRatio)) return false;
+            if ((tests & ShellTests.Height) != 0 && m.Sy < ShellHeightShare * b.Sy) return false;
+            if ((tests & ShellTests.SourceCap) != 0 && m.Source > ShellMaxSourceTriangles) return false;
+
+            return true;
         }
 
         /// <summary>Whether a hierarchy path names a stencil (PART-10: EFT's authoring convention for the low-poly shell inside a
@@ -1197,19 +1211,25 @@ namespace QuestTree.QuestGraph
         }
 
         /// <summary>
-        /// PART-10: every member's sibling when it is a shell of one (<see cref="ShellKind"/>), else -1, with the kind. The
-        /// sibling picked is the one with the most source triangles among those it is a shell of. Members are bucketed by
-        /// their box centre on a <see cref="ShellCellMetres"/> grid and each sibling is listed in every cell its box covers in
-        /// x and z - a member at least <see cref="ShellCover"/> inside a box has its centre inside it, so this finds exactly
-        /// the pairs a test of every pair finds (a sibling over <see cref="ShellMaxCellsPerBox"/> cells is tested against
-        /// every member). Unity-free.
+        /// PART-10: every member's sibling when it is a shell of one, else -1, with the kind (fixes: the sibling is always one
+        /// that will be DRAWN - it takes part, may be a sibling, is not a shell itself and, with a stencil test, does not name a
+        /// stencil). Two passes. The density pass judges the members in DESCENDING density - a density sibling is at least 20
+        /// times denser than its member, so it has been judged before the member is, and a member already found a shell is never
+        /// a sibling. The stencil pass then judges the level-0 members left whose path names a stencil against the non-stencil
+        /// siblings left (a stencil never serves as a sibling, so this pass does not depend on its own order). The sibling
+        /// picked is the one with the most source triangles, the lowest index on a tie. Members are bucketed by their box centre
+        /// on a <see cref="ShellCellMetres"/> grid and each sibling is listed in every cell its box covers in x and z - a member
+        /// at least <see cref="ShellCover"/> inside a box has its centre inside it, so this finds exactly what testing every pair
+        /// in the same order finds (<paramref name="everyPair"/>, the harness's reference). Unity-free.
         /// </summary>
         /// <param name="boxes">The members.</param>
         /// <param name="tests">The tests beyond rule A.</param>
-        /// <param name="stencilOf">Whether member i's path names a stencil, or null (the stencil test then never fires);
-        /// asked only for pairs that pass the box tests.</param>
+        /// <param name="stencilOf">Whether member i's path names a stencil, or null (no stencil test, and no member is excluded
+        /// as a sibling for its name); asked only for members in a pair that passes the box tests.</param>
         /// <param name="kinds">Each member's kind.</param>
-        internal static int[] FindShells(IList<ShellBox> boxes, ShellTests tests, Func<int, bool> stencilOf, out byte[] kinds)
+        /// <param name="everyPair">Test every pair instead of the grid's (the reference the grid is held to).</param>
+        internal static int[] FindShells(IList<ShellBox> boxes, ShellTests tests, Func<int, bool> stencilOf, out byte[] kinds,
+            bool everyPair = false)
         {
             var n = boxes.Count;
             var sibling = new int[n];
@@ -1219,6 +1239,7 @@ namespace QuestTree.QuestGraph
             var cells = new Dictionary<long, List<int>>();
             var wide = new List<int>();
             var stencil = new Dictionary<int, bool>();
+            var all = new List<int>();
 
             bool StencilAt(int i)
             {
@@ -1230,7 +1251,9 @@ namespace QuestTree.QuestGraph
             for (var j = 0; j < n; j++)
             {
                 var b = boxes[j];
-                if (b.Skip || b.Longest < ShellMinSideMetres) continue;
+                if (b.Skip || b.NoSibling || b.Longest < ShellMinSideMetres) continue;
+
+                all.Add(j);
 
                 var x0 = Cell(b.Cx - b.Sx * 0.5f);
                 var x1 = Cell(b.Cx + b.Sx * 0.5f);
@@ -1252,40 +1275,84 @@ namespace QuestTree.QuestGraph
                     }
             }
 
+            IEnumerable<int> SiblingsOf(ShellBox m)
+            {
+                if (everyPair) return all;
+
+                cells.TryGetValue(((long)Cell(m.Cx) << 32) ^ (uint)Cell(m.Cz), out var near);
+                if (near == null) return wide;
+                if (wide.Count == 0) return near;
+
+                var both = new List<int>(near);
+                both.AddRange(wide);
+                return both;
+            }
+
+            // the density pass: the densest first, so a sibling is judged before its members
+            var order = new int[n];
+            var density = new double[n];
             for (var i = 0; i < n; i++)
+            {
+                order[i] = i;
+                density[i] = boxes[i].Density;
+            }
+
+            Array.Sort(order, (a, b) =>
+            {
+                var c = density[b].CompareTo(density[a]);
+                return c != 0 ? c : a.CompareTo(b);
+            });
+
+            foreach (var i in order)
             {
                 var m = boxes[i];
                 if (m.Skip || m.Longest < ShellMinSideMetres) continue;
 
-                var key = ((long)Cell(m.Cx) << 32) ^ (uint)Cell(m.Cz);
-                cells.TryGetValue(key, out var near);
-
                 var best = -1;
-                byte bestKind = ShellNot;
 
-                foreach (var list in new[] { near, wide })
+                foreach (var j in SiblingsOf(m))
                 {
-                    if (list == null) continue;
+                    if (j == i || sibling[j] >= 0) continue;
 
-                    foreach (var j in list)
-                    {
-                        if (j == i) continue;
+                    var b = boxes[j];
+                    if (!BoxTests(m, b) || !DensityTests(m, b, tests)) continue;
+                    if (stencilOf != null && StencilAt(j)) continue;
 
-                        var mi = i;
-                        var bj = j;
-                        var kind = ShellKind(m, boxes[j], tests, () => StencilAt(mi), () => StencilAt(bj));
-                        if (kind == ShellNot) continue;
-
-                        if (best < 0 || boxes[j].Source > boxes[best].Source || (boxes[j].Source == boxes[best].Source && j < best))
-                        {
-                            best = j;
-                            bestKind = kind;
-                        }
-                    }
+                    if (best < 0 || b.Source > boxes[best].Source || (b.Source == boxes[best].Source && j < best)) best = j;
                 }
 
+                if (best < 0) continue;
+
                 sibling[i] = best;
-                kinds[i] = bestKind;
+                kinds[i] = ShellByDensity;
+            }
+
+            // the stencil pass: a level-0 member whose path names a stencil, against the non-stencil siblings left
+            if ((tests & ShellTests.Stencil) != 0 && stencilOf != null)
+            {
+                for (var i = 0; i < n; i++)
+                {
+                    var m = boxes[i];
+                    if (sibling[i] >= 0 || m.Skip || m.Level != 0 || m.Longest < ShellMinSideMetres) continue;
+
+                    var best = -1;
+
+                    foreach (var j in SiblingsOf(m))
+                    {
+                        if (j == i || sibling[j] >= 0) continue;
+
+                        var b = boxes[j];
+                        if (!BoxTests(m, b) || StencilAt(j)) continue;
+
+                        if (best < 0 || b.Source > boxes[best].Source || (b.Source == boxes[best].Source && j < best)) best = j;
+                    }
+
+                    // the member's own path is asked only now, when it has a sibling
+                    if (best < 0 || !StencilAt(i)) continue;
+
+                    sibling[i] = best;
+                    kinds[i] = ShellByStencil;
+                }
             }
 
             return sibling;
