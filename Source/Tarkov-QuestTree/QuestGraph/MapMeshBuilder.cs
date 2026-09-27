@@ -1442,6 +1442,9 @@ namespace QuestTree.QuestGraph
             internal int OverBudget;
             internal int DroppedTriangles;
 
+            /// <summary>PART-10 (F3): triangles of transparent submeshes left out at placement, over every read.</summary>
+            internal long TransparentFaces;
+
             /// <summary>Renderers refused for bounds bigger than the map (<see cref="SizeVerdict"/>) -
             /// the rain volumes, on Customs. Counted, because a map where this is in the thousands is a
             /// map whose filter wants looking at.</summary>
@@ -2143,6 +2146,11 @@ namespace QuestTree.QuestGraph
             internal int[] SlotMaterial;
             internal float[] SlotST;
 
+            /// <summary>PART-10 (F3): per slot, whether its material is TRANSPARENT (render queue over
+            /// <see cref="TransparentQueue"/>) - its triangles are left out at placement rather than drawn opaque and
+            /// side-projected (format v3 cannot mark a face see-through, so the viewer cannot do this).</summary>
+            internal bool[] SlotSkip;
+
             /// <summary>TexCoord0 per vertex (readable path), or null.</summary>
             internal Vector2[] LocalUV;
 
@@ -2244,6 +2252,10 @@ namespace QuestTree.QuestGraph
             internal double SurfaceArea;
 
             internal int Dropped;
+
+            /// <summary>PART-10 (F3): triangles of transparent submeshes left out at placement.</summary>
+            internal int TransparentFaces;
+
             internal long DecodedBytes;
             internal double WorkerMs;
             internal long WorkspaceBytes;
@@ -5120,6 +5132,7 @@ namespace QuestTree.QuestGraph
                 {
                     job.WorkerMs += outcome.WorkerMs;
                     job.DroppedTriangles += outcome.Dropped;
+                    job.TransparentFaces += outcome.TransparentFaces;
 
                     if (outcome.WorkspaceBytes > job.PeakWorkspaceBytes) job.PeakWorkspaceBytes = outcome.WorkspaceBytes;
                     if (outcome.DecodedBytes > job.PeakDecodedBytes) job.PeakDecodedBytes = outcome.DecodedBytes;
@@ -5409,6 +5422,7 @@ namespace QuestTree.QuestGraph
 
             source.SlotMaterial = new int[count];
             source.SlotST = new float[count * 4];
+            source.SlotSkip = new bool[count];
             HashSet<MaterialDiag> counted = null;
 
             for (var j = 0; j < count; j++)
@@ -5416,6 +5430,9 @@ namespace QuestTree.QuestGraph
                 var material = materials == null || materials.Length == 0 ? null : materials[Math.Min(j, materials.Length - 1)];
                 var id = MaterialId(job, material);
                 source.SlotMaterial[j] = id;
+
+                // PART-10 (F3): glass, decals, blended sheets - left out, not drawn opaque
+                source.SlotSkip[j] = material != null && material.renderQueue > TransparentQueue;
 
                 // WP8 (D4 commit 1): the triangles a left-out material draws, and the buildings it draws them in.
                 if (material != null && job.MaterialDiags.TryGetValue(material, out var diag))
@@ -5855,6 +5872,15 @@ namespace QuestTree.QuestGraph
                 }
 
                 var slot = t / 3 < lane.TriSlot.Count ? lane.TriSlot[t / 3] : -1;
+
+                // PART-10 (F3): a transparent submesh's triangle is left out - the window is a hole into the interior, which
+                // is the truth; not counted as dropped (that is the implausible-placement count)
+                if (slot >= 0 && source.SlotSkip != null && slot < source.SlotSkip.Length && source.SlotSkip[slot])
+                {
+                    outcome.TransparentFaces++;
+                    continue;
+                }
+
                 var material = textured && slot >= 0 && slot < source.SlotMaterial.Length ? source.SlotMaterial[slot] : -1;
 
                 lane.T.Add(Keep(lane, map, a, pa, uv, material, source, slot));
@@ -9037,6 +9063,10 @@ namespace QuestTree.QuestGraph
                 (job.Stopped ? $" Stopped early: {job.StoppedWhy}." : "") +
                 (job.DroppedTriangles > 0
                     ? $" {N(job.DroppedTriangles)} triangle(s) reached outside the extent and were dropped."
+                    : "") +
+                (job.TransparentFaces > 0
+                    ? $" {N(job.TransparentFaces)} triangle(s) of transparent submeshes (render queue > {TransparentQueue}) left out, " +
+                      "not side-projected."
                     : ""));
 
             ReportQuality(job);
