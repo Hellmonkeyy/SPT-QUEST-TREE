@@ -1928,6 +1928,14 @@ namespace QuestTree.QuestGraph
             internal int PrunedFoliage;
             internal int ShellsFromStored;
 
+            /// <summary>PART-10 (G3): each LOD group ResolveGroupUpgrades moved to detail - the finer level it kept and the
+            /// stored rows it dropped for it - so a later removal of that level's new rows puts the stored ones back; and how
+            /// many upgrades were undone that way.</summary>
+            internal readonly Dictionary<LODGroup, KeyValuePair<int, List<StoredEntry>>> GroupDropped =
+                new Dictionary<LODGroup, KeyValuePair<int, List<StoredEntry>>>();
+
+            internal int UpgradesUndone;
+
             /// <summary>PART-10: trees and bushes among the candidates and their source triangles; with them stored, the
             /// triangles left out for having no atlas range and the buildings removed for having none.</summary>
             internal int FoliageCandidates;
@@ -7182,6 +7190,9 @@ namespace QuestTree.QuestGraph
                             job.Triangles -= s.Meta.StoredTriangles;
                             job.Vertices -= job.Request.Base.Buildings[s.Index].VertexCount;
                         }
+
+                        // PART-10 (G3): what to put back if this level's new rows leave the file after all
+                        job.GroupDropped[pair.Key] = new KeyValuePair<int, List<StoredEntry>>(newLod, kept);
                     }
                 }
 
@@ -7287,9 +7298,13 @@ namespace QuestTree.QuestGraph
 
             if (remove.Count == 0) return;
 
+            // PART-10 (G3): an upgrade whose finer rows leave is undone whole (the extra rows count as rolled back)
+            var own = remove.Count;
+            UndoUpgrades(job, remove);
+
             RemoveNew(job, remove);
-            job.RolledBack -= remove.Count;      // not a LOD roll-back: counted as texture re-reads refused
-            job.TextureRefused += remove.Count;
+            job.RolledBack -= own;      // not a LOD roll-back: counted as texture re-reads refused
+            job.TextureRefused += own;
         }
 
         /// <summary>
@@ -7316,18 +7331,71 @@ namespace QuestTree.QuestGraph
                 triangles += job.File.Buildings[i].TriangleCount;
             }
 
-            if (remove.Count > 0)
+            var own = remove.Count;
+
+            if (own > 0)
             {
+                // PART-10 (G3): an upgrade whose finer rows leave is undone whole (the extra rows count as rolled back)
+                UndoUpgrades(job, remove);
+
                 RemoveNew(job, remove);
-                job.RolledBack -= remove.Count;      // not a LOD roll-back: counted as trees without a texture
-                job.FoliageRemoved += remove.Count;
+                job.RolledBack -= own;      // not a LOD roll-back: counted as trees without a texture
+                job.FoliageRemoved += own;
             }
 
             if (trees > 0)
                 Plugin.LogSource?.LogInfo(
                     $"QuestTree: foliage on {job.Request.Map} - {N(trees)} tree/bush building(s) stored this build: " +
-                    $"{N(job.FoliageFacesDropped)} face(s) without an atlas range left out, {N(remove.Count)} with no range at all " +
+                    $"{N(job.FoliageFacesDropped)} face(s) without an atlas range left out, {N(own)} with no range at all " +
                     $"removed ({N(triangles)} triangles) - never side-projected.");
+        }
+
+        /// <summary>
+        /// PART-10 (G3): new rows about to leave the file after ResolveGroupUpgrades - when one of them is of the finer level a
+        /// group was moved to, that upgrade is undone: every new row of that group at that level leaves too (a group is never
+        /// half detailed with its coarse copy gone, nor stored at two levels) and the stored rows the upgrade dropped come back
+        /// (never a pruned one). Before this, a building whose detail rows were removed after the fact simply vanished.
+        /// </summary>
+        /// <param name="job">The build.</param>
+        /// <param name="remove">The new rows leaving the file; grown by the rows of an undone upgrade.</param>
+        private static void UndoUpgrades(Job job, HashSet<int> remove)
+        {
+            if (job.GroupDropped.Count == 0 || remove.Count == 0) return;
+
+            var undone = new List<LODGroup>();
+
+            foreach (var i in remove)
+            {
+                if (i >= job.NewGroups.Count || i >= job.NewEntries.Count) continue;
+
+                var group = job.NewGroups[i];
+                if (group != null && !undone.Contains(group) && job.GroupDropped.TryGetValue(group, out var upgrade) &&
+                    job.NewEntries[i].Lod == upgrade.Key)
+                    undone.Add(group);
+            }
+
+            foreach (var group in undone)
+            {
+                var upgrade = job.GroupDropped[group];
+
+                for (var i = 0; i < job.NewGroups.Count && i < job.NewEntries.Count && i < job.File.Buildings.Count; i++)
+                    if (job.NewGroups[i] == group && job.NewEntries[i].Lod == upgrade.Key)
+                        remove.Add(i);
+
+                foreach (var s in upgrade.Value)
+                {
+                    if (!s.Drop || s.Pruned != 0) continue;
+
+                    s.Drop = false;
+                    job.Triangles += s.Meta.StoredTriangles;
+                    job.Vertices += job.Request.Base.Buildings[s.Index].VertexCount;
+                    job.Ledger.Stored += s.Meta.StoredTriangles;
+                }
+
+                job.GroupDropped.Remove(group);
+                job.GroupsToDetail--;
+                job.UpgradesUndone++;
+            }
         }
 
         /// <summary>WP2: new buildings taken back out of the file (see the summary above SettleTextureRereads).</summary>
@@ -9976,15 +10044,33 @@ namespace QuestTree.QuestGraph
         private static int RemoveUnfinished(Job job)
         {
             var file = job.File;
-            var removed = 0;
+            var remove = new HashSet<int>();
+
+            for (var i = 0; i < file.Buildings.Count; i++)
+            {
+                var b = file.Buildings[i];
+                if (b.Y == null || b.Y.Length != b.X.Length) remove.Add(i);
+            }
+
+            var unfinished = remove.Count;
+            if (unfinished == 0) return 0;
+
+            // PART-10 (G3): a group moved to detail whose detail rows leave here gets its stored coarse rows back (and loses
+            // the rest of its detail rows, so it is one level, not two)
+            var undoneBefore = job.UpgradesUndone;
+            UndoUpgrades(job, remove);
+
+            if (job.UpgradesUndone > undoneBefore)
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: {N(job.UpgradesUndone - undoneBefore)} LOD group(s) of {job.Request.Map} lost their new detail rows after " +
+                    $"the upgrade; their stored coarse rows are kept instead ({N(remove.Count - unfinished)} more new row(s) of " +
+                    "those groups left out with them).");
 
             for (var i = file.Buildings.Count - 1; i >= 0; i--)
             {
-                var b = file.Buildings[i];
-                if (b.Y != null && b.Y.Length == b.X.Length) continue;
+                if (!remove.Contains(i)) continue;
 
                 file.Buildings.RemoveAt(i);
-                removed++;
 
                 if (i >= job.NewEntries.Count) continue;
 
@@ -9996,7 +10082,7 @@ namespace QuestTree.QuestGraph
                 if (c?.Replaces != null && c.Replaces.Drop) c.Replaces.Drop = false;
             }
 
-            return removed;
+            return unfinished;
         }
 
         /// <summary>
@@ -10352,6 +10438,9 @@ namespace QuestTree.QuestGraph
                     : "") +
                 (job.PrunedFoliage > 0
                     ? $"; pruned {N(job.PrunedFoliage)} stored tree/bush row(s) ('3D map: include trees and bushes' is off)"
+                    : "") +
+                (job.UpgradesUndone > 0
+                    ? $"; {N(job.UpgradesUndone)} LOD upgrade(s) undone - their detail rows left after the fact, the stored coarse rows kept"
                     : "") +
                 (result.Unchanged ? "; unchanged - the stored mesh is kept" : "") + ".");
         }

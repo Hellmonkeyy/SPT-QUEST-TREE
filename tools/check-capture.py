@@ -119,8 +119,15 @@ source, same group) under the index column, with rule A's count (no height guard
 test needs a renderer's path, which the sidecar does not hold, so it is the client's alone. Never an ERROR: the next capture
 prunes these rows (MapMeshBuilder.PruneStored), after which --shells reports 0.
 
+PART-10: the sliver WARN of --mesh-quality is measured against the SOURCES, not an absolute share. Most remaining slivers are the
+game's own geometry (Customs after Parts 01-08: sliver area 16.6 % in the decimated sources, 13.7 % stored), so a fixed
+threshold warns on every stock map for triangles no decimator made. Given --source-slivers PCT - the client's building-quality
+line, "sliver area N % in the sources" - the WARN is the stored sliver AREA share over PCT + 3 points; the quality line says
+which rule it used. Without it, the pre-PART-10 rule (over 4 % of the triangles) stays, and the line says so. This holds
+until the sliver post-pass can be evaluated on decimated buildings alone.
+
 Usage:  python tools/check-capture.py [captures-root] [zones-folder] [--compare OLD_ROOT] [--mesh-quality]
-                                      [--legacy-view] [--pixels] [--shells]
+                                      [--legacy-view] [--pixels] [--shells] [--source-slivers PCT]
         python tools/check-capture.py --compare-dir FOLDER_A FOLDER_B
         python tools/check-capture.py --png-info FILE
         defaults: C:\\Games\\SPT\\BepInEx\\plugins\\QuestTree\\captures
@@ -135,6 +142,9 @@ import sys
 import zlib
 from pathlib import Path
 
+SOURCE_SLIVERS = None     # --source-slivers PCT (PART-10): the sources' sliver area share the sliver WARN is held to
+
+
 def _arguments(argv):
     """(positional arguments, --compare root or None, flags, --png-info file or None, --compare-dir (A, B) or
     None). Kept positional for the two roots every caller already passes; every --flag, with the arguments it
@@ -142,7 +152,17 @@ def _arguments(argv):
     positional, compare, k = [], None, 0
     flags = set()
     png_info, compare_dir = None, None
+    global SOURCE_SLIVERS
     while k < len(argv):
+        if argv[k] == "--source-slivers":
+            try:
+                SOURCE_SLIVERS = float(argv[k + 1])
+            except (IndexError, ValueError):
+                print("CAPTURE CHECK FAILED: --source-slivers needs a percentage after it (the building-quality line's "
+                      "'sliver area N % in the sources')")
+                sys.exit(1)
+            k += 2
+            continue
         if argv[k] in ("--mesh-quality", "--legacy-view", "--pixels", "--shells"):
             flags.add(argv[k])
             k += 1
@@ -1027,7 +1047,8 @@ QUALITY_SIDE_COS = 0.766
 QUALITY_LEGACY_MIN_SCORE = 0.35
 QUALITY_WHITE = 235
 QUALITY_SEAM_FACTOR = 4.0
-QUALITY_WARN_SLIVERS = 4.0        # % of triangles
+QUALITY_WARN_SLIVERS = 4.0        # % of triangles (without --source-slivers)
+QUALITY_SLIVER_SOURCE_SLACK = 3.0  # points of sliver AREA over the sources' share (--source-slivers, PART-10)
 QUALITY_WARN_APEXES = 200
 QUALITY_WARN_P10 = 0.5            # triangles per m2
 QUALITY_WARN_SIDE = 25.0          # % of the area
@@ -1082,6 +1103,7 @@ def mesh_quality(mesh, sides=None, legacy=False):
     weld = 1.0 / QUALITY_WELD
 
     triangles = slivers = spikes = apexes = 0
+    sliver_area = all_area = 0.0
     apex_buildings = 0
     per_m2 = []
     area_by = [0.0, 0.0, 0.0, 0.0]          # atlas, top, side, tint
@@ -1142,8 +1164,10 @@ def mesh_quality(mesh, sides=None, legacy=False):
             if e12 > emax:
                 emax = e12
             sliver = emax >= min_edge2 and emax > QUALITY_SLIVER_ASPECT * cross
+            all_area += area
             if sliver:
                 slivers += 1
+                sliver_area += area
             if emax > spike2 and emax > diag_spike2:
                 spikes += 1
 
@@ -1236,6 +1260,7 @@ def mesh_quality(mesh, sides=None, legacy=False):
     return {
         "triangles": triangles,
         "slivers": slivers,
+        "sliverArea": 100.0 * sliver_area / all_area if all_area > 0 else 0.0,
         "spikes": spikes,
         "apexes": apexes,
         "apexBuildings": apex_buildings,
@@ -1394,8 +1419,20 @@ def quality_line(meta, folder, key, mesh, warnings):
     if pages is not None:
         line += (f", pages: white flat tiles {pages[0]}, normal-map-like tiles {pages[1]}, wrap seams > 4x "
                  f"{pages[2]} of {pages[3]}")
-    if pct > QUALITY_WARN_SLIVERS:
-        warnings.append(f"{key}: slivers are {pct:.1f} % of the triangles, over {QUALITY_WARN_SLIVERS:g} %")
+    # PART-10: the sliver WARN against the sources' own share, when it is given
+    area_pct = stats["sliverArea"]
+    if SOURCE_SLIVERS is not None:
+        limit = SOURCE_SLIVERS + QUALITY_SLIVER_SOURCE_SLACK
+        line += (f"; sliver WARN rule: stored sliver area {area_pct:.1f} % against the sources' {SOURCE_SLIVERS:g} % + "
+                 f"{QUALITY_SLIVER_SOURCE_SLACK:g} points (--source-slivers)")
+        if area_pct > limit:
+            warnings.append(f"{key}: slivers cover {area_pct:.1f} % of the building area, over the sources' "
+                            f"{SOURCE_SLIVERS:g} % + {QUALITY_SLIVER_SOURCE_SLACK:g} points")
+    else:
+        line += (f"; sliver WARN rule: over {QUALITY_WARN_SLIVERS:g} % of the triangles (sliver area {area_pct:.1f} %; pass "
+                 f"--source-slivers PCT, the building-quality line's sources' share, to measure against the sources)")
+        if pct > QUALITY_WARN_SLIVERS:
+            warnings.append(f"{key}: slivers are {pct:.1f} % of the triangles, over {QUALITY_WARN_SLIVERS:g} %")
     if stats["apexes"] > QUALITY_WARN_APEXES:
         warnings.append(f"{key}: {stats['apexes']} spike apexes, over {QUALITY_WARN_APEXES}")
     if stats["perM2Buildings"] and p10 < QUALITY_WARN_P10:

@@ -5453,7 +5453,9 @@ namespace QuestTree.QuestGraph
 
             try
             {
-                found = FindObjectsOfType<Koenigz.PerfectCulling.EFT.ScreenDistanceSwitcher>();
+                // PART-10 (hardening): a switcher on an inactive object too - its control group's proxies are still marked
+                // (only the renderers are used, so this is harmless)
+                found = FindObjectsOfType<Koenigz.PerfectCulling.EFT.ScreenDistanceSwitcher>(true);
             }
             catch (Exception)
             {
