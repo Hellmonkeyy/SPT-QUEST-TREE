@@ -1954,6 +1954,7 @@ namespace QuestTree.QuestGraph
 
             internal int PrunedLevels;
             internal int PrunedFoliage;
+            internal int PrunedDecals;
 
             /// <summary>PART-10 (fixes): renderers counted as all-transparent, so a renderer reached again (a fallback's probe)
             /// is counted once.</summary>
@@ -1974,6 +1975,11 @@ namespace QuestTree.QuestGraph
             internal long FoliageTriangles;
             internal long FoliageFacesDropped;
             internal int FoliageRemoved;
+
+            /// <summary>PART-10 (decals): decal volumes among the candidates and their source triangles - always left out.</summary>
+            internal int DecalCandidates;
+
+            internal long DecalTriangles;
 
             internal int Logged;
 
@@ -2155,6 +2161,10 @@ namespace QuestTree.QuestGraph
             /// <summary>PART-10: a tree or a bush - every material on a SpeedTree shader. Stored only with
             /// Request.IncludeFoliage, and then only its faces with an atlas range.</summary>
             internal bool Foliage;
+
+            /// <summary>PART-10 (decals): a decal volume - every material on a decal shader (MapMeshIndex.DecalShaders). Never
+            /// stored: the game projects it onto the surfaces beneath and draws no surface of its own.</summary>
+            internal bool Decal;
         }
 
         /// <summary>
@@ -2442,16 +2452,19 @@ namespace QuestTree.QuestGraph
             internal Candidate ReplacedBy;
 
             /// <summary>PART-10 (R1): why it was PRUNED - dropped for good, never put back by a roll-back
-            /// (<see cref="PrunedShell"/>, <see cref="PrunedLevel"/>, <see cref="PrunedFoliage"/>), 0 when it was not.</summary>
+            /// (<see cref="PrunedShell"/>, <see cref="PrunedLevel"/>, <see cref="PrunedFoliage"/>, <see cref="PrunedDecal"/>),
+            /// 0 when it was not.</summary>
             internal byte Pruned;
         }
 
         /// <summary>PART-10 (R1): a stored row pruned as a shell (F4's rule over the rows at load, or its present renderer marked
-        /// by MarkShells), as a coarser LOD level of a group stored at a finer one, or as a tree while trees are left out.</summary>
+        /// by MarkShells), as a coarser LOD level of a group stored at a finer one, as a tree while trees are left out, or as a
+        /// decal volume (always).</summary>
         private const byte PrunedShell = 1;
 
         private const byte PrunedLevel = 2;
         private const byte PrunedFoliage = 3;
+        private const byte PrunedDecal = 4;
 
         /// <summary>WP2: the stored mesh's identities, looked up by path hash and by group path hash.</summary>
         private sealed class StoredIndex
@@ -3299,6 +3312,7 @@ namespace QuestTree.QuestGraph
                     Bounds = bounds,
                     Volume = Math.Abs(size.x * size.y * size.z),
                     Foliage = IsFoliage(renderer),
+                    Decal = IsDecal(renderer),
                 });
             }
 
@@ -3396,24 +3410,36 @@ namespace QuestTree.QuestGraph
         /// <summary>PART-10: whether a renderer is a tree or a bush - every material on a SpeedTree shader
         /// (MapMeshIndex.FoliageShaders). A rule about the game's shaders, never about a map.</summary>
         /// <param name="renderer">The renderer.</param>
-        private static bool IsFoliage(Renderer renderer)
+        private static bool IsFoliage(Renderer renderer) => MapMeshIndex.FoliageShaders(ShaderNames(renderer));
+
+        /// <summary>PART-10 (decals): whether a renderer is a decal volume - every material on a decal shader
+        /// (MapMeshIndex.DecalShaders). A rule about the game's shaders, never about a map. The 2026-09-27 screenshot's
+        /// smeared box around a detailed building: EFT's "Decal/Ultra Deferred Decal Of God" drip and dirt volumes are boxes the
+        /// size of the wall they stain (render queue 2005-2206, so F2's transparent test passes them), stored as buildings and
+        /// drawn over the wall; F4's density rule caught only the ones 80 % inside a 15 m sibling of the same level.</summary>
+        /// <param name="renderer">The renderer.</param>
+        private static bool IsDecal(Renderer renderer) => MapMeshIndex.DecalShaders(ShaderNames(renderer));
+
+        /// <summary>Each material's shader name (null for no material or no shader), or null with no materials.</summary>
+        /// <param name="renderer">The renderer.</param>
+        private static string[] ShaderNames(Renderer renderer)
         {
             var materials = renderer.sharedMaterials;
-            if (materials == null || materials.Length == 0) return false;
+            if (materials == null || materials.Length == 0) return null;
 
             var shaders = new string[materials.Length];
             for (var i = 0; i < materials.Length; i++)
                 shaders[i] = materials[i] != null && materials[i].shader != null ? materials[i].shader.name : null;
 
-            return MapMeshIndex.FoliageShaders(shaders);
+            return shaders;
         }
 
-        /// <summary>PART-10: whether a candidate is left out of this build - a shell (F4), or a tree or bush while
-        /// Request.IncludeFoliage is off.</summary>
+        /// <summary>PART-10: whether a candidate is left out of this build - a shell (F4), a decal volume, or a tree or bush
+        /// while Request.IncludeFoliage is off.</summary>
         /// <param name="job">The build.</param>
         /// <param name="c">The candidate.</param>
         private static bool Left(Job job, Candidate c) =>
-            c.Shell || job.ShellRenderers.Contains(c.Renderer) || (c.Foliage && !job.Request.IncludeFoliage);
+            c.Shell || c.Decal || job.ShellRenderers.Contains(c.Renderer) || (c.Foliage && !job.Request.IncludeFoliage);
 
         /// <summary>Whether a renderer is a helper volume the game draws nothing useful with: every
         /// material a plain Standard or Unlit one with no main texture, and bounds over
@@ -3983,7 +4009,8 @@ namespace QuestTree.QuestGraph
             2d * (Math.Abs(w * h) + Math.Abs(w * d) + Math.Abs(h * d));
 
         /// <summary>
-        /// PART-10 (F4): after the budget pass and before anything is planned or read - the trees and bushes counted (left out
+        /// PART-10 (F4): after the budget pass and before anything is planned or read - the decal volumes counted and left out
+        /// (<see cref="IsDecal"/>), the trees and bushes counted (left out
         /// unless Request.IncludeFoliage), and the SHELLS marked: every candidate that is the low-poly copy of a same-level
         /// sibling by <see cref="MapMeshIndex.FindShells"/> with <see cref="MapMeshIndex.ShellTests.Safe"/> - both boxes at
         /// least 15 m, at least 80 % of its box inside the sibling's, at least half its height, under 1/20 of its density and at
@@ -4022,6 +4049,38 @@ namespace QuestTree.QuestGraph
                         : "left out of the 3D map ('3D map: include trees and bushes' is off)") +
                     $"; samples: {string.Join(" | ", samples.ToArray())}.");
 
+            // the decal volumes - always left out; every distinct shader is named, so a real building material matched by the
+            // name test would show here
+            var decals = new List<string>();
+            var decalShaders = new SortedSet<string>(StringComparer.Ordinal);
+            foreach (var c in candidates)
+            {
+                if (!c.Decal) continue;
+
+                job.DecalCandidates++;
+                job.DecalTriangles += Math.Max(0L, c.SourceTriangles);
+                if (decals.Count < FoliageSamplesLogged) decals.Add(SafePath(c.Renderer));
+
+                try
+                {
+                    var names = ShaderNames(c.Renderer);
+                    if (names != null)
+                        foreach (var name in names)
+                            if (!string.IsNullOrEmpty(name)) decalShaders.Add(name);
+                }
+                catch (Exception)
+                {
+                    // a renderer gone since it was listed: its path is still sampled above
+                }
+            }
+
+            if (job.DecalCandidates > 0)
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: decals on {job.Request.Map} - {N(job.DecalCandidates)} renderer(s) whose materials are all on a decal " +
+                    $"shader, {N(job.DecalTriangles)} source triangles, left out of the 3D map (the game projects a decal onto the " +
+                    $"surfaces under its volume and draws no surface of its own; stored as a building it is a box drawn over the wall " +
+                    $"it stains); shaders: {string.Join(", ", new List<string>(decalShaders).ToArray())}; samples: {string.Join(" | ", decals.ToArray())}.");
+
             if (ShellRule)
             {
                 // the shells: a member judged against the siblings that will be drawn
@@ -4031,7 +4090,7 @@ namespace QuestTree.QuestGraph
                     var level = ShellLevel(job, c);
                     var centre = c.Bounds.center;
                     var size = c.Bounds.size;
-                    var skip = c.Foliage || level < 0 || c.SourceTriangles <= 0;
+                    var skip = c.Foliage || c.Decal || level < 0 || c.SourceTriangles <= 0;
                     var noSibling = !IsSource(job, c) || !Decodable(c) || Left(job, c);
                     boxes.Add(new MapMeshIndex.ShellBox(centre.x, centre.y, centre.z, size.x, size.y, size.z, c.SourceTriangles, level,
                         skip, noSibling));
@@ -4074,7 +4133,7 @@ namespace QuestTree.QuestGraph
             }
 
             // the stored copies of what is left out, pruned - its own step, so a throw leaves them stored and the build going
-            Step(job, "the stored copies of the shells and trees", () => PruneSeen(job));
+            Step(job, "the stored copies of the shells, decals and trees", () => PruneSeen(job));
         }
 
         /// <summary>PART-10 (fixes): a list logged whole, <see cref="ShellDropsLogged"/> entries to an Info line.</summary>
@@ -4108,7 +4167,7 @@ namespace QuestTree.QuestGraph
 
         /// <summary>
         /// PART-10 (R1, fixes): the stored rows whose PRESENT renderer MarkShells leaves out - marked a shell by the live rule
-        /// (the stencil test included), or a tree while trees are off - are pruned, and the renderer no longer replaces or skips
+        /// (the stencil test included), a decal volume, or a tree while trees are off - are pruned, and the renderer no longer replaces or skips
         /// against them; then each group's stored rows and level are taken again. A row whose renderer is absent stays until it
         /// is seen. The same live rule refuses the renderer at every later stop, so a pruned row is never read back. The rows
         /// are chosen first and then pruned, and every one is logged by row, path hash, box and path.
@@ -4132,12 +4191,12 @@ namespace QuestTree.QuestGraph
             foreach (var c in hits)
             {
                 var m = c.Matched;
-                if (!PruneEntry(job, m, c.Foliage ? PrunedFoliage : PrunedShell)) continue;
+                if (!PruneEntry(job, m, c.Decal ? PrunedDecal : c.Foliage ? PrunedFoliage : PrunedShell)) continue;
 
                 c.Kind = KindNew;
                 c.Reason = MapMeshIndex.ReasonNone;
                 c.Replaces = null;
-                entries.Add((c.Foliage ? "tree " : "shell ") + RowEntry(m));
+                entries.Add((c.Decal ? "decal " : c.Foliage ? "tree " : "shell ") + RowEntry(m));
             }
 
             ReattachStored(job);
@@ -4388,7 +4447,7 @@ namespace QuestTree.QuestGraph
         /// counted by why. False when it was dropped already.</summary>
         /// <param name="job">The build.</param>
         /// <param name="e">The row.</param>
-        /// <param name="why">PrunedShell, PrunedLevel or PrunedFoliage.</param>
+        /// <param name="why">PrunedShell, PrunedLevel, PrunedFoliage or PrunedDecal.</param>
         private static bool PruneEntry(Job job, StoredEntry e, byte why)
         {
             if (e == null || e.Drop) return false;
@@ -4401,6 +4460,7 @@ namespace QuestTree.QuestGraph
 
             if (why == PrunedLevel) job.PrunedLevels++;
             else if (why == PrunedFoliage) job.PrunedFoliage++;
+            else if (why == PrunedDecal) job.PrunedDecals++;
             else job.PrunedShells++;
 
             return true;
@@ -4885,6 +4945,7 @@ namespace QuestTree.QuestGraph
             job.PrunedShells = 0;
             job.PrunedLevels = 0;
             job.PrunedFoliage = 0;
+            job.PrunedDecals = 0;
             job.RetargetQueue.Clear();
             job.Claimed.Clear();
             job.Met.Clear();
@@ -5294,6 +5355,7 @@ namespace QuestTree.QuestGraph
                 Surface = BoxSurface(size),
                 Height = Math.Abs((double)size.y),
                 Foliage = IsFoliage(renderer),
+                Decal = IsDecal(renderer),
             };
 
             candidate.Stride = candidate.Stream >= 0 ? mesh.GetVertexBufferStride(candidate.Stream) : 0;
@@ -10381,7 +10443,7 @@ namespace QuestTree.QuestGraph
             result.Kept = storedKept;
             result.Added = buildings.Count - storedKept;
             // PART-10 (R1): a pruned row left the file, but nothing replaced it
-            result.Replaced = dropped - job.PrunedShells - job.PrunedLevels - job.PrunedFoliage;
+            result.Replaced = dropped - job.PrunedShells - job.PrunedLevels - job.PrunedFoliage - job.PrunedDecals;
             result.Skipped = job.Skipped;
             result.Retargeted = job.Retargeted.Count + job.RetargetedRead;
 
@@ -10513,6 +10575,9 @@ namespace QuestTree.QuestGraph
                     : "") +
                 (job.PrunedFoliage > 0
                     ? $"; pruned {N(job.PrunedFoliage)} stored tree/bush row(s) ('3D map: include trees and bushes' is off)"
+                    : "") +
+                (job.PrunedDecals > 0
+                    ? $"; pruned {N(job.PrunedDecals)} stored decal volume(s) (a box the game projects onto the wall beneath, never a surface)"
                     : "") +
                 (job.UpgradesUndone > 0
                     ? $"; {N(job.UpgradesUndone)} LOD upgrade(s) undone - their detail rows left after the fact, the stored coarse rows kept"

@@ -1295,6 +1295,28 @@ namespace QuestTree.QuestGraph
             return any;
         }
 
+        /// <summary>PART-10 (decals): whether a renderer's materials are all on a DECAL shader - EFT's
+        /// "Decal/Ultra Deferred Decal Of God" dirt, drip and damage volumes, ignoring case; null entries are passed over, and
+        /// at least one must be a decal. The game projects a decal onto the surfaces under its volume and draws none of the
+        /// volume itself, so as a building it is a box the size of the wall it stains, drawn over that wall.</summary>
+        /// <param name="shaders">Each material's shader name, null for none.</param>
+        internal static bool DecalShaders(IEnumerable<string> shaders)
+        {
+            if (shaders == null) return false;
+
+            var any = false;
+
+            foreach (var shader in shaders)
+            {
+                if (string.IsNullOrEmpty(shader)) continue;
+                if (shader.IndexOf("Decal", StringComparison.OrdinalIgnoreCase) < 0) return false;
+
+                any = true;
+            }
+
+            return any;
+        }
+
         /// <summary>
         /// PART-10: every member's sibling when it is a shell of one, else -1, with the kind (fixes: the sibling is always one
         /// that will be DRAWN - it takes part, may be a sibling, is not a shell itself and, with a stencil test, does not name a

@@ -323,7 +323,10 @@ captures\<key>` to hold the accumulated mesh to (every building present - fewer 
 the relief and the height range held, the textures as sharp), and **3D map: include trees and bushes** (off: a
 renderer whose materials are all on a SpeedTree shader is foliage and is left out of the model - the picture
 already shows the canopy - and a stored tree is pruned the next time it is seen; on, trees are stored, and a
-leaf face without an atlas texture is dropped rather than painted from a side view). A change of the mod's mesh recipe, the
+leaf face without an atlas texture is dropped rather than painted from a side view). A renderer whose materials are all on a
+decal shader (the game's drip, dirt and damage volumes: boxes it projects onto the wall beneath, with no surface of their own)
+is never stored - as a building it was the smeared box drawn around a detailed building - and a stored one is pruned the next
+time it is seen. A change of the mod's mesh recipe, the
 game version, the map's rectangle, its floors or the render mask rebuilds from scratch once by itself.
 
 **A stop renders only the tiles it can improve.** A floor or side view is rendered in tiles of 1024 x 1024
