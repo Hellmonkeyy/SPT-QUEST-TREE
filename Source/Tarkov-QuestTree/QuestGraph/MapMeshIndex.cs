@@ -876,6 +876,91 @@ namespace QuestTree.QuestGraph
         }
 
         /// <summary>
+        /// 1.19.0 hotfix: one slice of the stored buildings' requantise (MapMeshBuilder.RequantiseChunk) - rows from
+        /// <paramref name="upTo"/> until <paramref name="count"/> or until <paramref name="budget"/> vertices were done. The
+        /// index advances past EVERY row it looks at, a skipped one (a pruned or dropped row, a re-targeted one) and one
+        /// with no vertices included, so a slice either finishes the rows or moves at least one row on. The new index.
+        /// Unity-free, for the harness.
+        /// </summary>
+        /// <param name="upTo">The first row not done.</param>
+        /// <param name="count">The rows.</param>
+        /// <param name="budget">Vertices a slice may do.</param>
+        /// <param name="skip">Whether row i is left as it is.</param>
+        /// <param name="work">Requantises row i; its vertex count (negative is taken as none).</param>
+        internal static int RequantiseSpan(int upTo, int count, long budget, Func<int, bool> skip, Func<int, long> work)
+        {
+            if (upTo < 0) upTo = 0;
+            var done = 0L;
+
+            while (upTo < count && done < budget)
+            {
+                var i = upTo++;
+                if (skip != null && skip(i)) continue;
+
+                done += Math.Max(0L, work(i));
+            }
+
+            return upTo;
+        }
+
+        /// <summary>
+        /// 1.19.0 hotfix: the bound on a loop that runs a slice a pass - the build's quantise and requantise loops. A pass
+        /// is allowed only while the loop's progress counter moves forward and the passes stay under a ceiling; otherwise
+        /// <see cref="Pass"/> says no and <see cref="Why"/> names the reason, and the loop is abandoned with a logged line
+        /// rather than spun. Unity-free, for the harness.
+        /// </summary>
+        internal sealed class LoopBound
+        {
+            private readonly string _what;
+            private readonly long _maxPasses;
+            private long _passes;
+            private long _last = long.MinValue;
+
+            /// <param name="what">The loop, for the reason.</param>
+            /// <param name="maxPasses">The passes it may take at most (at least 1).</param>
+            internal LoopBound(string what, long maxPasses)
+            {
+                _what = what ?? "a loop";
+                _maxPasses = Math.Max(1L, maxPasses);
+            }
+
+            /// <summary>The passes allowed so far.</summary>
+            internal long Passes => _passes;
+
+            /// <summary>Why the last <see cref="Pass"/> said no, or null.</summary>
+            internal string Why { get; private set; }
+
+            /// <summary>Whether the loop may take another pass, given its progress counter NOW (before the pass). No when
+            /// the counter has not moved since the previous pass, or the passes would go over the ceiling.</summary>
+            /// <param name="progress">The loop's counter - rows or cells done.</param>
+            internal bool Pass(long progress)
+            {
+                if (Why != null) return false;
+
+                if (_passes > 0 && progress <= _last)
+                {
+                    Why = $"{_what} made no progress in a pass (stuck at {progress:#,##0}) - abandoned after {_passes:#,##0} pass(es)";
+                    return false;
+                }
+
+                if (_passes >= _maxPasses)
+                {
+                    Why = $"{_what} ran {_passes:#,##0} passes, its ceiling - abandoned at {progress:#,##0}";
+                    return false;
+                }
+
+                _passes++;
+                _last = progress;
+                return true;
+            }
+
+            /// <summary>The ceiling for a loop over <paramref name="items"/> that moves at least one item a pass (a slice's
+            /// budget can be spent on one big item, so every item may take a pass of its own): items + 16.</summary>
+            /// <param name="items">The rows or cells the loop goes over.</param>
+            internal static long CeilingFor(long items) => Math.Max(0L, items) + 16L;
+        }
+
+        /// <summary>
         /// WP2 (fixes 5): a texture re-read, settled once the atlas has mapped it - it replaces the stored copy only when
         /// it ended with at least one atlas range (a textured tile or a flat one the atlas draws). One that ended with
         /// none is refused, and its stored row records the attempt (clean) and that a texture was tried, so it is not read

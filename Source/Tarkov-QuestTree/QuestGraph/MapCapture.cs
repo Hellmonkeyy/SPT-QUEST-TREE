@@ -1030,6 +1030,70 @@ namespace QuestTree.QuestGraph
         /// Each is measured in seconds, not tens of them.</summary>
         private const double FinishAllowanceSeconds = 60d;
 
+        /// <summary>1.19.0 hotfix: the longest the capture waits for the mesh file's deflate and hash on a worker (about
+        /// five seconds at today's sizes) before it gives the mesh up for this capture - inside FinishAllowanceSeconds.</summary>
+        private const double SerialiseWaitSeconds = 45d;
+
+        /// <summary>
+        /// 1.19.0 hotfix: the managed heap growth, in bytes since the last collection this class forced, at which
+        /// <see cref="CollectGarbage"/> collects. A capture stop allocates about 2 GB it drops again (the stored mesh's
+        /// load and parse, the builder's copies, the deflate, the floors' and sides' pictures and encodes), so this
+        /// collects once or twice a stop.
+        /// </summary>
+        private const long CollectEveryBytes = 1L << 30;
+
+        /// <summary>The managed heap right after the last collection <see cref="CollectGarbage"/> forced, or -1.</summary>
+        private static long _heapAfterCollect = -1;
+
+        /// <summary>
+        /// 1.19.0 hotfix: a garbage collection that HAPPENS in a raid. EFT switches Unity's collector off for the whole
+        /// raid (BaseLocalGame.PrepareSession sets InGameMemoryManagement.GCEnabled = false, which is
+        /// GarbageCollector.GCMode = Disabled on any machine with 12 GB or more), and with the collector off a
+        /// GC.Collect() does nothing - EFT's own InGameMemoryManagement.Collect switches it on around its GC.Collect for
+        /// that reason. So every GC.Collect this capture made was a no-op, nothing a capture dropped was ever reclaimed
+        /// before the raid ended, and a 22-stop campaign reached 52 GB private and hung. This switches the collector on,
+        /// collects and puts the game's mode back - EFT's own sequence - once the heap has grown
+        /// <see cref="CollectEveryBytes"/> since the last time. Never throws.
+        /// </summary>
+        /// <param name="where">Where in the capture, for the debug line.</param>
+        private static void CollectGarbage(string where)
+        {
+            try
+            {
+                var before = GC.GetTotalMemory(false);
+                if (_heapAfterCollect >= 0 && before - _heapAfterCollect < CollectEveryBytes) return;
+
+                var mode = UnityEngine.Scripting.GarbageCollector.GCMode;
+                var clock = Stopwatch.StartNew();
+
+                try
+                {
+                    if (mode != UnityEngine.Scripting.GarbageCollector.Mode.Enabled)
+                        UnityEngine.Scripting.GarbageCollector.GCMode = UnityEngine.Scripting.GarbageCollector.Mode.Enabled;
+
+                    GC.Collect();
+                }
+                finally
+                {
+                    if (mode != UnityEngine.Scripting.GarbageCollector.Mode.Enabled)
+                        UnityEngine.Scripting.GarbageCollector.GCMode = mode;
+                }
+
+                var after = GC.GetTotalMemory(false);
+                _heapAfterCollect = after;
+
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: garbage collected {where} - managed heap {GB(before)} -> {GB(after)} GB in " +
+                    $"{clock.ElapsedMilliseconds} ms (the game's collector mode: {mode}).");
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug($"QuestTree: a garbage collection {where} failed ({ex.GetType().Name}: {ex.Message}).");
+            }
+        }
+
+        private static string GB(long bytes) => (bytes / (1024d * 1024d * 1024d)).ToString("0.00", CultureInfo.InvariantCulture);
+
         /// <summary>Seconds a capture waits, before it commits, for an upload of the same map to finish reading a file on
         /// a worker (WP3 Phase A, MapTransfer.IsReadingCapture). A read is one file - frames - so this bounds only a hung
         /// disk, after which the commit goes ahead as it always did.</summary>
@@ -1512,7 +1576,7 @@ namespace QuestTree.QuestGraph
                     // Skipped on the LAST floor: there is no next floor to make room for, Cleanup in
                     // the finally is about to drop everything anyway, and the collect is tens of
                     // milliseconds on the frame the player gets control back in.
-                    if (!ReferenceEquals(floor, plan.Floors[plan.Floors.Count - 1])) GC.Collect();
+                    if (!ReferenceEquals(floor, plan.Floors[plan.Floors.Count - 1])) CollectGarbage($"after {plan.Key}'s floor");
                 }
 
                 // WP4 B2, BARRIER 2: every floor's encode staged before anything reads Bytes (BeginMesh's gate, WillBeNamed,
@@ -1699,7 +1763,23 @@ namespace QuestTree.QuestGraph
                         // (DropStaged) can never race a worker still writing a .tmp.
                         var serialised = SerialiseMesh(plan, mesh);
 
-                        while (serialised != null && !serialised.IsCompleted) yield return null;
+                        // 1.19.0 hotfix: bounded, as every other wait on a worker in this capture is - a worker that has
+                        // not finished in SerialiseWaitSeconds costs this capture its mesh (the meta names the stored one
+                        // or none), never the capture; and StageMesh is never handed an unfinished task, whose Result
+                        // would block this thread
+                        var serialiseClock = Stopwatch.StartNew();
+
+                        while (serialised != null && !serialised.IsCompleted &&
+                               serialiseClock.Elapsed.TotalSeconds < SerialiseWaitSeconds)
+                            yield return null;
+
+                        if (serialised != null && !serialised.IsCompleted)
+                        {
+                            Plugin.LogSource?.LogWarning(
+                                $"QuestTree: the 3D mesh of {plan.Key} was not serialised within {SerialiseWaitSeconds:0} s - " +
+                                "it is not written this capture; the pictures are unaffected.");
+                            serialised = null;
+                        }
 
                         StageMesh(plan, mesh, serialised);
                     }
@@ -8721,7 +8801,7 @@ namespace QuestTree.QuestGraph
 
                 // Between sides, as between floors, and after the yield so Unity's deferred Destroy of
                 // the side's texture has happened; not after the last, where nothing is coming.
-                if (i < MapSideView.Directions.Length - 1) GC.Collect();
+                if (i < MapSideView.Directions.Length - 1) CollectGarbage($"after {plan.Key}'s side {MapSideView.Directions[i]}");
             }
 
             RestoreTopCamera();
@@ -10050,7 +10130,16 @@ namespace QuestTree.QuestGraph
                 yield break;
             }
 
-            while (!write.IsCompleted) yield return null;
+            // 1.19.0 hotfix: bounded like the capture's own serialise
+            var writeClock = Stopwatch.StartNew();
+            while (!write.IsCompleted && writeClock.Elapsed.TotalSeconds < SerialiseWaitSeconds) yield return null;
+
+            if (!write.IsCompleted)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: the verification mesh of {plan.Key} was not serialised within {SerialiseWaitSeconds:0} s - not written.");
+                yield break;
+            }
 
             try
             {
@@ -10416,7 +10505,7 @@ namespace QuestTree.QuestGraph
                 _meshBuild = build;
                 _meshRequest = request;
 
-                GC.Collect();
+                CollectGarbage($"before {plan.Key}'s 3D mesh");
 
                 return result;
             }

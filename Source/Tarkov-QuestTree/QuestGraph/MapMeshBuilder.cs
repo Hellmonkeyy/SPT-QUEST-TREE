@@ -1369,8 +1369,19 @@ namespace QuestTree.QuestGraph
                 if (job.Stored != null && band.Quantised == 0)
                     Step(job, $"the stored relief of \"{band.Source.Name}\"", () => FillFromBase(job, band));
 
+                // 1.19.0 hotfix: every slice loop on this path is bounded - progress each pass and a ceiling on passes -
+                // and an abandon is a logged line, never a spin
+                var bandBound = new MapMeshIndex.LoopBound($"quantising \"{band.Source.Name}\"",
+                    MapMeshIndex.LoopBound.CeilingFor(band.Cells));
+
                 while (band.Quantised < band.Cells)
                 {
+                    if (!bandBound.Pass(band.Quantised))
+                    {
+                        job.Note("the loop's bound", new InvalidOperationException(bandBound.Why));
+                        break;
+                    }
+
                     if (!Step(job, $"quantising \"{band.Source.Name}\"", () => QuantiseChunk(job, band))) break;
 
                     yield return null;
@@ -1381,8 +1392,16 @@ namespace QuestTree.QuestGraph
 
             // The buildings' heights, and their bands - which can only be chosen now, because a band
             // is a band once FinishBand has put it in the file and not before.
+            var heightsBound = new MapMeshIndex.LoopBound("the buildings' heights", MapMeshIndex.LoopBound.CeilingFor(job.PendingY.Count));
+
             while (job.QuantisedUpTo < job.PendingY.Count)
             {
+                if (!heightsBound.Pass(job.QuantisedUpTo))
+                {
+                    job.Note("the loop's bound", new InvalidOperationException(heightsBound.Why));
+                    break;
+                }
+
                 if (!Step(job, "the buildings' heights", () => QuantiseBuildings(job))) break;
 
                 yield return null;
@@ -1392,8 +1411,17 @@ namespace QuestTree.QuestGraph
 
             // WP2 (D4): a widened range requantises the stored buildings' heights once, into arrays of their own - the
             // stored ones are not changed until the merge, so a throw before it leaves the base as it was.
+            var storedBound = new MapMeshIndex.LoopBound("the stored buildings' heights",
+                MapMeshIndex.LoopBound.CeilingFor(job.Request.Base?.Buildings.Count ?? 0));
+
             while (job.RangeWidened && job.RequantisedY != null && job.RequantisedUpTo < job.Request.Base.Buildings.Count)
             {
+                if (!storedBound.Pass(job.RequantisedUpTo))
+                {
+                    job.Note("the loop's bound", new InvalidOperationException(storedBound.Why));
+                    break;
+                }
+
                 if (!Step(job, "the stored buildings' heights", () => RequantiseChunk(job))) break;
 
                 yield return null;
@@ -3049,17 +3077,16 @@ namespace QuestTree.QuestGraph
         private static void RequantiseChunk(Job job)
         {
             var stored = job.Request.Base;
-            var done = 0L;
 
-            while (job.RequantisedUpTo < stored.Buildings.Count && done < QuantisePerFrameVertices)
-            {
-                var i = job.RequantisedUpTo++;
-                var e = job.Stored.All[i];
-                if (e.Drop || job.Retargeted.ContainsKey(i)) continue;
-
-                job.RequantisedY[i] = Requantise(stored.Buildings[i].Y, stored, job.File);
-                done += stored.Buildings[i].VertexCount;
-            }
+            // 1.19.0 hotfix: through the harness-tested slice - it moves past every row it looks at, a pruned or dropped
+            // row and one with no vertices included, so the loop above always ends
+            job.RequantisedUpTo = MapMeshIndex.RequantiseSpan(job.RequantisedUpTo, stored.Buildings.Count, QuantisePerFrameVertices,
+                i => job.Stored.All[i].Drop || job.Retargeted.ContainsKey(i),
+                i =>
+                {
+                    job.RequantisedY[i] = Requantise(stored.Buildings[i].Y, stored, job.File);
+                    return stored.Buildings[i].VertexCount;
+                });
         }
 
         /// <summary>Height codes from one file's range into another's.</summary>
