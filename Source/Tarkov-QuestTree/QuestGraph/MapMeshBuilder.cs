@@ -1920,6 +1920,14 @@ namespace QuestTree.QuestGraph
             internal int ShellsByStencil;
             internal long ShellTriangles;
 
+            /// <summary>PART-10 (R1): stored rows pruned - as shells, as coarse LOD levels, as trees - and the shell rows pruned at
+            /// load whose renderer was then met (marked a shell by Classify).</summary>
+            internal int PrunedShells;
+
+            internal int PrunedLevels;
+            internal int PrunedFoliage;
+            internal int ShellsFromStored;
+
             /// <summary>PART-10: trees and bushes among the candidates and their source triangles; with them stored, the
             /// triangles left out for having no atlas range and the buildings removed for having none.</summary>
             internal int FoliageCandidates;
@@ -2393,7 +2401,18 @@ namespace QuestTree.QuestGraph
             /// <summary>WP2 (fixes 2): the candidate reading it again this build (a re-read, a changed signature, a
             /// re-target), whose outcome settles it.</summary>
             internal Candidate ReplacedBy;
+
+            /// <summary>PART-10 (R1): why it was PRUNED - dropped for good, never put back by a roll-back
+            /// (<see cref="PrunedShell"/>, <see cref="PrunedLevel"/>, <see cref="PrunedFoliage"/>), 0 when it was not.</summary>
+            internal byte Pruned;
         }
+
+        /// <summary>PART-10 (R1): a stored row pruned as a shell (F4's rule over the rows at load, or its present renderer marked
+        /// by MarkShells), as a coarser LOD level of a group stored at a finer one, or as a tree while trees are left out.</summary>
+        private const byte PrunedShell = 1;
+
+        private const byte PrunedLevel = 2;
+        private const byte PrunedFoliage = 3;
 
         /// <summary>WP2: the stored mesh's identities, looked up by path hash and by group path hash.</summary>
         private sealed class StoredIndex
@@ -3963,7 +3982,11 @@ namespace QuestTree.QuestGraph
                         : "left out of the 3D map ('3D map: include trees and bushes' is off)") +
                     $"; samples: {string.Join(" | ", samples.ToArray())}.");
 
-            if (!ShellRule) return;
+            if (!ShellRule)
+            {
+                PruneSeen(job);
+                return;
+            }
 
             // the shells
             var boxes = new List<MapMeshIndex.ShellBox>(candidates.Count);
@@ -3984,6 +4007,17 @@ namespace QuestTree.QuestGraph
 
             for (var i = 0; i < candidates.Count; i++)
             {
+                // PART-10 (R1): a renderer whose stored row was pruned at load as a shell (Classify marked it)
+                if (sibling[i] < 0 && candidates[i].Shell)
+                {
+                    job.ShellsFromStored++;
+
+                    if (drops.Count < ShellDropsLogged)
+                        drops.Add($"#{drops.Count + 1} '{SafePath(candidates[i].Renderer)}' (level {boxes[i].Level}, " +
+                                  $"{N(candidates[i].SourceTriangles)} source triangles, its stored row pruned at load)");
+                    continue;
+                }
+
                 if (sibling[i] < 0) continue;
 
                 var c = candidates[i];
@@ -4003,16 +4037,44 @@ namespace QuestTree.QuestGraph
                               $"'{SafePath(c.ShellOf.Renderer)}' ({N(c.ShellOf.SourceTriangles)})");
             }
 
+            PruneSeen(job);
+
             Plugin.LogSource?.LogInfo(
                 $"QuestTree: shells on {job.Request.Map} - {N(hits)} member(s) left out as the low-poly copy of a same-level sibling " +
                 $"({N(job.ShellsByDensity)} by density: both at least {MapMeshIndex.ShellMinSideMetres.ToString("0", f1)} m, " +
                 $"{(MapMeshIndex.ShellCover * 100d).ToString("0", f1)} % inside, at least " +
                 $"{(MapMeshIndex.ShellHeightShare * 100d).ToString("0", f1)} % of its height, under 1/" +
                 $"{MapMeshIndex.ShellDensityRatio.ToString("0", f1)} of its density, at most {N(MapMeshIndex.ShellMaxSourceTriangles)} " +
-                $"source triangles; {N(job.ShellsByStencil)} by a stencil path; {N(job.ShellTriangles)} source triangles)" +
+                $"source triangles; {N(job.ShellsByStencil)} by a stencil path; {N(job.ShellTriangles)} source triangles" +
+                (job.ShellsFromStored > 0 ? $"; {N(job.ShellsFromStored)} more whose stored row was pruned at load" : "") +
+                (job.Stored != null ? $"; stored rows pruned: {N(job.PrunedShells)} shell(s), {N(job.PrunedFoliage)} tree(s)" : "") + ")" +
                 (drops.Count > 0
-                    ? $"; {(drops.Count < hits ? $"the first {N(drops.Count)}" : "each")}: {string.Join(" | ", drops.ToArray())}"
+                    ? $"; {(drops.Count < hits + job.ShellsFromStored ? $"the first {N(drops.Count)}" : "each")}: {string.Join(" | ", drops.ToArray())}"
                     : "") + ".");
+        }
+
+        /// <summary>
+        /// PART-10 (R1): the stored rows whose renderer MarkShells leaves out - a shell (the stencil test included, which needs
+        /// the renderer's path), or a tree while trees are off - are pruned, and the renderer no longer replaces or skips
+        /// against them; then each group's stored rows and level are taken again. With the rule rolled back only the trees are.
+        /// </summary>
+        /// <param name="job">The build.</param>
+        private static void PruneSeen(Job job)
+        {
+            if (job.Stored == null) return;
+
+            foreach (var c in job.Candidates)
+            {
+                var m = c.Matched;
+                if (m == null || m.Drop || !Left(job, c)) continue;
+
+                PruneEntry(job, m, c.Foliage ? PrunedFoliage : PrunedShell);
+                c.Kind = KindNew;
+                c.Reason = MapMeshIndex.ReasonNone;
+                c.Replaces = null;
+            }
+
+            ReattachStored(job);
         }
 
         /// <summary>PART-10: the LOD level the shell rule compares a candidate at - the level of its group's ladder that lists
@@ -4215,6 +4277,9 @@ namespace QuestTree.QuestGraph
             // last: anything above that threw leaves the build from scratch
             job.Stored = stored;
 
+            // PART-10 (R1): what the stored mesh should never have held leaves it now - no rescan, no recipe bump
+            PruneStored(job);
+
             // the load's transient peak: the file as read, and its arrays
             var arrays = file.ApproximateBytes();
 
@@ -4223,7 +4288,80 @@ namespace QuestTree.QuestGraph
                 $"{N(triangles)} triangles, {N(file.AtlasPages)} page(s); the load held {(request.BaseFileBytes / 1048576d).ToString("0.0", CultureInfo.InvariantCulture)} MB " +
                 $"deflated and holds {(arrays / 1048576d).ToString("0.0", CultureInfo.InvariantCulture)} MB of arrays" +
                 (sameBands ? "" : "; the floor bands' heights changed, so the stored relief is not reused and the stored buildings are re-levelled") +
+                (job.PrunedShells + job.PrunedLevels > 0
+                    ? $"; pruned at load: {N(job.PrunedShells)} coincident shell(s), {N(job.PrunedLevels)} coarse level(s)"
+                    : "") +
                 ".");
+        }
+
+        /// <summary>
+        /// PART-10 (R1): the stored rows pruned at load, with the tests the candidates get, over the rows alone (the sidecar has
+        /// every field they need): a group's rows at a level coarser than that group's finest stored level (KeepLowestLevel on
+        /// the stored rows), then F4's safe rule (<see cref="MapMeshIndex.FindShells"/>, <see cref="MapMeshIndex.ShellTests.Safe"/>)
+        /// over what is left - no renderer is known yet, so the stencil test and the tree test run on the rows whose renderer
+        /// is met, in MarkShells. A pruned row is dropped for good (the merge leaves it out; a roll-back never puts it back) and
+        /// the totals follow; Classify then treats a renderer that matches it as new, and one pruned as a shell stays one.
+        /// </summary>
+        /// <param name="job">The build.</param>
+        private static void PruneStored(Job job)
+        {
+            var all = job.Stored.All;
+            var rows = new List<MapMeshIndex.Entry>(all.Count);
+            foreach (var e in all) rows.Add(e.Meta);
+
+            var keep = MapMeshIndex.KeepLowestLevel(rows);
+            for (var i = 0; i < all.Count; i++)
+                if (!keep[i])
+                    PruneEntry(job, all[i], PrunedLevel);
+
+            if (!ShellRule) return;
+
+            var boxes = new List<MapMeshIndex.ShellBox>(all.Count);
+            foreach (var e in all) boxes.Add(MapMeshIndex.ShellBox.Of(e.Meta, e.Drop || e.Meta.SourceTriangles <= 0));
+
+            var sibling = MapMeshIndex.FindShells(boxes, MapMeshIndex.ShellTests.Safe, null, out _);
+            for (var i = 0; i < all.Count; i++)
+                if (sibling[i] >= 0)
+                    PruneEntry(job, all[i], PrunedShell);
+        }
+
+        /// <summary>PART-10 (R1): one stored row pruned - dropped and settled, its triangles and vertices out of the totals,
+        /// counted by why. False when it was dropped already.</summary>
+        /// <param name="job">The build.</param>
+        /// <param name="e">The row.</param>
+        /// <param name="why">PrunedShell, PrunedLevel or PrunedFoliage.</param>
+        private static bool PruneEntry(Job job, StoredEntry e, byte why)
+        {
+            if (e == null || e.Drop) return false;
+
+            e.Drop = true;
+            e.Settled = true;
+            e.Pruned = why;
+            job.Triangles -= e.Meta.StoredTriangles;
+            job.Vertices -= job.Request.Base.Buildings[e.Index].VertexCount;
+
+            if (why == PrunedLevel) job.PrunedLevels++;
+            else if (why == PrunedFoliage) job.PrunedFoliage++;
+            else job.PrunedShells++;
+
+            return true;
+        }
+
+        /// <summary>PART-10 (R1): after rows were pruned, each group's stored rows are the ones left and its stored level their
+        /// finest (none left: the group is not stored).</summary>
+        /// <param name="job">The build.</param>
+        private static void ReattachStored(Job job)
+        {
+            foreach (var state in job.Groups.Values)
+            {
+                if (state?.Stored == null) continue;
+
+                state.Stored.RemoveAll(e => e.Drop);
+                state.StoredLod = int.MaxValue;
+                foreach (var e in state.Stored) state.StoredLod = Math.Min(state.StoredLod, e.Meta.Lod);
+
+                if (state.Stored.Count == 0) state.Stored = null;
+            }
         }
 
         /// <summary>
@@ -4286,9 +4424,24 @@ namespace QuestTree.QuestGraph
             var m = job.Stored.Match(c.PathHash, c.Bounds.center, c.Bounds.size, c.SubFirst, c.SubEnd, c.SourceTriangles,
                 c.Mesh.vertexCount, null, out var same);
 
-            if (m == null)
+            // PART-10 (R1): a row pruned at load is no match - the renderer is new; one pruned as a shell stays a shell (the
+            // stored decision holds, so a rule that saw it differently cannot read it back and prune it again at every stop)
+            if (m == null || m.Drop)
             {
                 c.Kind = KindNew;
+
+                if (m != null)
+                {
+                    m.Seen = true;
+                    m.SeenBy = c;
+
+                    if (m.Pruned == PrunedShell && ShellRule)
+                    {
+                        c.Shell = true;
+                        job.ShellRenderers.Add(c.Renderer);
+                    }
+                }
+
                 return;
             }
 
@@ -4462,6 +4615,9 @@ namespace QuestTree.QuestGraph
 
             foreach (var e in list)
             {
+                // PART-10 (R1): a pruned row is not the group's
+                if (e.Drop) continue;
+
                 if (!MapMeshIndex.Near(e.Meta.Gx, at.x) || !MapMeshIndex.Near(e.Meta.Gy, at.y) || !MapMeshIndex.Near(e.Meta.Gz, at.z))
                     continue;
 
@@ -4499,7 +4655,9 @@ namespace QuestTree.QuestGraph
             {
                 if (c.Group == null || !job.Groups.TryGetValue(c.Group, out var state) || state?.Stored == null) continue;
                 if (CurrentLod(job, c) < state.StoredLod)
-                    foreach (var e in state.Stored) upgrading.Add(e);
+                    foreach (var e in state.Stored)
+                        if (!e.Drop)
+                            upgrading.Add(e);
             }
 
             job.RamMb = SystemInfo.systemMemorySize;
@@ -4672,6 +4830,9 @@ namespace QuestTree.QuestGraph
             job.StoredTiles = null;
             job.PackState = AtlasPackState.Empty;
             job.Skipped = 0;
+            job.PrunedShells = 0;
+            job.PrunedLevels = 0;
+            job.PrunedFoliage = 0;
             job.RetargetQueue.Clear();
             job.Claimed.Clear();
             job.Met.Clear();
@@ -4817,6 +4978,9 @@ namespace QuestTree.QuestGraph
             // two are never counted twice; the coarse copies of a group read at a finer level are
             foreach (var e in job.Stored.All)
             {
+                // PART-10 (R1): a pruned row is not in the file
+                if (e.Drop) continue;
+
                 if (replaced.Contains(e)) continue;
 
                 if (upgrading.Contains(e))
@@ -10055,7 +10219,8 @@ namespace QuestTree.QuestGraph
 
             result.Kept = storedKept;
             result.Added = buildings.Count - storedKept;
-            result.Replaced = dropped;
+            // PART-10 (R1): a pruned row left the file, but nothing replaced it
+            result.Replaced = dropped - job.PrunedShells - job.PrunedLevels - job.PrunedFoliage;
             result.Skipped = job.Skipped;
             result.Retargeted = job.Retargeted.Count + job.RetargetedRead;
 
@@ -10182,6 +10347,12 @@ namespace QuestTree.QuestGraph
                     : "") +
                 (job.GroupsNotRetried > 0 ? $"; {N(job.GroupsNotRetried)} LOD group(s) not tried at a finer level again (tried at this target before)" : "") +
                 (job.RetargetsFailed > 0 ? $"; {N(job.RetargetsFailed)} re-target(s) did not land" : "") +
+                (job.PrunedShells + job.PrunedLevels > 0
+                    ? $"; pruned {N(job.PrunedShells + job.PrunedLevels)} coincident shell(s) / coarse level(s)"
+                    : "") +
+                (job.PrunedFoliage > 0
+                    ? $"; pruned {N(job.PrunedFoliage)} stored tree/bush row(s) ('3D map: include trees and bushes' is off)"
+                    : "") +
                 (result.Unchanged ? "; unchanged - the stored mesh is kept" : "") + ".");
         }
 

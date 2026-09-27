@@ -111,8 +111,16 @@ WP3 (upload once): a captures\\.upload-owed marker at the root of the captures f
 upload was owed when the game last closed; each is a WARN ("an upload of X was owed when the game last closed"),
 never an ERROR - the capture is fine, and the next session's first Maps-tab open offers it again.
 
+PART-10 (R2): with --shells, each sidecar's rows are held to the builder's shell rule (MapMeshIndex.FindShells with
+ShellTests.Safe): a row whose box is at least 80 % inside a same-level sibling's, both at least 15 m, at least half the
+sibling's height, under 1/20 of its density (source triangles per m2 of box surface) and at most 1,000 source triangles is
+the low-poly copy the viewer z-fights against the detailed walls. Each hit is printed as (row, source, box, sibling row,
+source, same group) under the index column, with rule A's count (no height guard, no source cap) beside it. The stencil
+test needs a renderer's path, which the sidecar does not hold, so it is the client's alone. Never an ERROR: the next capture
+prunes these rows (MapMeshBuilder.PruneStored), after which --shells reports 0.
+
 Usage:  python tools/check-capture.py [captures-root] [zones-folder] [--compare OLD_ROOT] [--mesh-quality]
-                                      [--legacy-view] [--pixels]
+                                      [--legacy-view] [--pixels] [--shells]
         python tools/check-capture.py --compare-dir FOLDER_A FOLDER_B
         python tools/check-capture.py --png-info FILE
         defaults: C:\\Games\\SPT\\BepInEx\\plugins\\QuestTree\\captures
@@ -135,7 +143,7 @@ def _arguments(argv):
     flags = set()
     png_info, compare_dir = None, None
     while k < len(argv):
-        if argv[k] in ("--mesh-quality", "--legacy-view", "--pixels"):
+        if argv[k] in ("--mesh-quality", "--legacy-view", "--pixels", "--shells"):
             flags.add(argv[k])
             k += 1
             continue
@@ -169,6 +177,7 @@ _POSITIONAL, COMPARE, _FLAGS, PNG_INFO, COMPARE_DIR = _arguments(sys.argv[1:])
 MESH_QUALITY = "--mesh-quality" in _FLAGS
 LEGACY_VIEW = "--legacy-view" in _FLAGS
 PIXELS = "--pixels" in _FLAGS
+SHELLS = "--shells" in _FLAGS
 CAPTURES = Path(_POSITIONAL[0]) if len(_POSITIONAL) > 0 else Path(
     r"C:\Games\SPT\BepInEx\plugins\QuestTree\captures")
 ZONES = Path(_POSITIONAL[1]) if len(_POSITIONAL) > 1 else Path(
@@ -1649,6 +1658,103 @@ def read_index(data):
     return index
 
 
+# PART-10 (R2): MapMeshIndex's shell rule constants
+SHELL_MIN_SIDE = 15.0           # ShellMinSideMetres
+SHELL_COVER = 0.8               # ShellCover
+SHELL_DENSITY_RATIO = 20.0      # ShellDensityRatio
+SHELL_HEIGHT_SHARE = 0.5        # ShellHeightShare
+SHELL_MAX_SOURCE = 1000         # ShellMaxSourceTriangles
+SHELL_CELL = 16.0               # ShellCellMetres
+
+
+def _shell_overlap(ca, sa, cb, sb):
+    lo = max(ca - sa * 0.5, cb - sb * 0.5)
+    hi = min(ca + sa * 0.5, cb + sb * 0.5)
+    return hi - lo if hi > lo else 0.0
+
+
+def shell_is(m, b, height=True, cap=True):
+    """MapMeshIndex.ShellKind's density test (no stencil test: the sidecar holds no paths) on two rows' boxes: m is the
+    low-poly copy of b. height and cap are F4's guards (both on is the builder's rule; both off is rule A)."""
+    (mx, my, mz), (msx, msy, msz) = m["centre"], [abs(v) for v in m["size"]]
+    (bx, by, bz), (bsx, bsy, bsz) = b["centre"], [abs(v) for v in b["size"]]
+    if grade_level(m["grade"]) != grade_level(b["grade"]):
+        return False
+    if max(msx, msy, msz) < SHELL_MIN_SIDE or max(bsx, bsy, bsz) < SHELL_MIN_SIDE:
+        return False
+    volume = msx * msy * msz
+    if not volume > 0:
+        return False
+    cover = (_shell_overlap(mx, msx, bx, bsx) * _shell_overlap(my, msy, by, bsy) *
+             _shell_overlap(mz, msz, bz, bsz)) / volume
+    if cover < SHELL_COVER:
+        return False
+
+    def density(src, sx, sy, sz):
+        surface = 2.0 * (sx * sy + sx * sz + sy * sz)
+        return src / surface if surface > 0 else float("inf")
+
+    if not density(m["source"], msx, msy, msz) < density(b["source"], bsx, bsy, bsz) / SHELL_DENSITY_RATIO:
+        return False
+    if height and msy < SHELL_HEIGHT_SHARE * bsy:
+        return False
+    if cap and m["source"] > SHELL_MAX_SOURCE:
+        return False
+    return True
+
+
+def find_shells(rows, height=True, cap=True):
+    """MapMeshIndex.FindShells over sidecar rows: each row's sibling (the one with the most source triangles among those it
+    is a shell of, the lowest row on a tie) or -1. A sibling is listed in every 16 m cell its box covers, one cell wider
+    each way than the builder's float grid, so this is the every-pair test exactly."""
+    cells = {}
+    usable = [r["source"] > 0 and max(abs(v) for v in r["size"]) >= SHELL_MIN_SIDE for r in rows]
+    for j, b in enumerate(rows):
+        if not usable[j]:
+            continue
+        (cx, _, cz), (sx, _, sz) = b["centre"], [abs(v) for v in b["size"]]
+        for x in range(math.floor((cx - sx * 0.5) / SHELL_CELL) - 1, math.floor((cx + sx * 0.5) / SHELL_CELL) + 2):
+            for z in range(math.floor((cz - sz * 0.5) / SHELL_CELL) - 1, math.floor((cz + sz * 0.5) / SHELL_CELL) + 2):
+                cells.setdefault((x, z), []).append(j)
+    out = []
+    for i, m in enumerate(rows):
+        best = -1
+        if usable[i]:
+            key = (math.floor(m["centre"][0] / SHELL_CELL), math.floor(m["centre"][2] / SHELL_CELL))
+            for j in cells.get(key, ()):
+                if j == i or not shell_is(m, rows[j], height, cap):
+                    continue
+                if best < 0 or rows[j]["source"] > rows[best]["source"] or (rows[j]["source"] == rows[best]["source"] and j < best):
+                    best = j
+        out.append(best)
+    return out
+
+
+def shells_report(rows):
+    """--shells: the builder's rule over the rows, each hit as (row, source, box, sibling row, source, same group), and rule
+    A's count beside it. Returns the lines to print under the index column."""
+    groups = index_groups(rows)
+    safe = find_shells(rows)
+    loose = find_shells(rows, height=False, cap=False)
+    hits = [i for i, s in enumerate(safe) if s >= 0]
+    loose_hits = [i for i, s in enumerate(loose) if s >= 0]
+    thin = sum(1 for i in loose_hits if abs(rows[i]["size"][1]) < SHELL_HEIGHT_SHARE * abs(rows[loose[i]]["size"][1]))
+
+    def box(r):
+        sx, sy, sz = (abs(v) for v in r["size"])
+        return f"{sx:.1f}x{sy:.1f}x{sz:.1f} m at ({r['centre'][0]:.0f}, {r['centre'][2]:.0f})"
+
+    lines = [f"shells (PART-10): {len(hits)} row(s), {sum(rows[i]['source'] for i in hits):,} source triangles, are the "
+             f"low-poly copy of a same-level sibling by the builder's rule (rule A without the height guard and the source cap: "
+             f"{len(loose_hits)} row(s), {thin} of them under half the sibling's height)"]
+    for i in hits:
+        s = safe[i]
+        same = groups[i] >= 0 and groups[i] == groups[s]
+        lines.append(f"  shell: row {i}, src {rows[i]['source']:,}, box {box(rows[i])}, level {grade_level(rows[i]['grade'])} - "
+                     f"sibling row {s}, src {rows[s]['source']:,}, box {box(rows[s])}, same group {'yes' if same else 'no'}")
+    return lines
+
+
 def grade_level(grade):
     """The LOD level a grade says (MapMeshBuilder.GradeFor: sub for level 0, 10 + 4 x lod + sub above)."""
     return 0 if grade < 10 else (grade - 10) // 4
@@ -1848,8 +1954,9 @@ def check_mesh_index(meta, folder, key, mesh, mesh_sha, errors, warnings):
 
     distribution = ", ".join(f"{s}:{n:,}" for s, n in sorted(stops.items()))
     last = max(stops) if stops else 0
+    shells = ("\n    " + "\n    ".join(shells_report(rows))) if SHELLS else ""
     return (f"index: {len(rows)} identities, {len(index['materials'])} materials, stops 1..{last} "
-            f"(captured at stops: {distribution or '-'})" + (" - WRONG" if len(errors) > problems else ""))
+            f"(captured at stops: {distribution or '-'})" + (" - WRONG" if len(errors) > problems else "") + shells)
 
 
 def check_pixels(meta, folder, key, errors, warnings):
