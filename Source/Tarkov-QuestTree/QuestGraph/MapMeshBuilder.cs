@@ -169,6 +169,10 @@ namespace QuestTree.QuestGraph
         /// building to look at from above; a 2.5 m wall is.</summary>
         private const float MinBuildingHeight = 2.5f;
 
+        /// <summary>PART-10 (F2, F3): the highest render queue drawn opaque - over it (3000 Transparent, 2501+) a material is
+        /// blended, and the model, which draws everything opaque, leaves it out rather than draw glass as a wall.</summary>
+        private const int TransparentQueue = 2500;
+
         /// <summary>Metres outside the extent a renderer's bounds CENTRE may still sit and be kept.
         /// Twenty, because a hangar straddling the extent's edge is half of the map's skyline and its
         /// centre can easily be outside the rectangle the harvest measured.</summary>
@@ -1653,6 +1657,9 @@ namespace QuestTree.QuestGraph
             internal int ProxySkipped;
 
             internal int ShadowOnlySkipped;
+
+            /// <summary>PART-10 (F2): renderers skipped because every material is transparent.</summary>
+            internal int TransparentSkipped;
 
             internal int VolumeSkipped;
 
@@ -3147,6 +3154,13 @@ namespace QuestTree.QuestGraph
                 // have been buildings - not of every pooled weapon part in the scene.
                 if (Invisible(job, renderer)) continue;
 
+                // PART-10 (F2): the game draws it see-through; the model could only draw it opaque
+                if (AllTransparent(renderer))
+                {
+                    job.TransparentSkipped++;
+                    continue;
+                }
+
                 var filter = renderer.GetComponent<MeshFilter>();
                 var mesh = filter != null ? filter.sharedMesh : null;
                 if (mesh == null || mesh.vertexCount < 3) continue;
@@ -3237,6 +3251,22 @@ namespace QuestTree.QuestGraph
             }
 
             return false;
+        }
+
+        /// <summary>PART-10 (F2): whether every material of a renderer is TRANSPARENT (render queue over 2500 - sorted blending,
+        /// glass, a decal). The game draws it see-through; the model can only draw it opaque (atlas pages are opaque, and the
+        /// fallbacks are opaque projections), so it is never stored. False for no materials, or any null or opaque one.</summary>
+        /// <param name="renderer">The renderer.</param>
+        private static bool AllTransparent(Renderer renderer)
+        {
+            var materials = renderer.sharedMaterials;
+            if (materials == null || materials.Length == 0) return false;
+
+            foreach (var material in materials)
+                if (material == null || material.renderQueue <= TransparentQueue)
+                    return false;
+
+            return true;
         }
 
         /// <summary>Whether a renderer is a helper volume the game draws nothing useful with: every
@@ -4789,6 +4819,13 @@ namespace QuestTree.QuestGraph
             if ((job.Request.RenderMask & (1 << layer)) == 0) return null;
             if ((NotBuildingMask() & (1 << layer)) != 0) return null;
             if (Invisible(job, renderer)) return null;
+
+            // PART-10 (F2): as FilterChunk
+            if (AllTransparent(renderer))
+            {
+                job.TransparentSkipped++;
+                return null;
+            }
 
             var bounds = renderer.bounds;
             var size = bounds.size;
@@ -9198,7 +9235,7 @@ namespace QuestTree.QuestGraph
         private static void ReportHidden(Job job)
         {
             var included = job.GameCulledBySwitcher + job.GameCulledByOcclusion;
-            if (job.HiddenSkipped == 0 && included == 0 && job.ProxySkipped == 0) return;
+            if (job.HiddenSkipped == 0 && included == 0 && job.ProxySkipped == 0 && job.TransparentSkipped == 0) return;
 
             var roots = new List<KeyValuePair<string, int>>(job.HiddenRoots);
             roots.Sort((a, b) => b.Value.CompareTo(a.Value));
@@ -9217,6 +9254,7 @@ namespace QuestTree.QuestGraph
                 $"scene root: {(top.Count > 0 ? string.Join(", ", top.ToArray()) : "none")}; included as game-culled " +
                 $"{N(included)} (switcher content {N(job.GameCulledBySwitcher)}, occlusion groups {N(job.GameCulledByOcclusion)}), " +
                 $"proxies excluded {N(job.ProxySkipped)}" + (IncludeGameCulled ? "" : " (game-culled inclusion rolled back)") +
+                $", all-transparent skipped {N(job.TransparentSkipped)}" +
                 (samples.Count > 0
                     ? $"; samples ({HiddenSamplesPerRoot} a root, top {HiddenSampleRoots} roots): {string.Join(" | ", samples.ToArray())}"
                     : ""));
