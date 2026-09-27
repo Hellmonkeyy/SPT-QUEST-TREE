@@ -1022,6 +1022,260 @@ namespace QuestTree.QuestGraph
         internal static bool Collide(Entry a, Entry b) =>
             a.Dup == b.Dup && SameObject(a, b.PathHash, b.Cx, b.Cy, b.Cz, b.Sx, b.Sy, b.Sz);
 
+        // --- PART-10: coincident members (shells) -------------------------------------------------------------------
+
+        /// <summary>PART-10: both boxes' longest side, metres, for a member to be judged against a sibling - a building-sized
+        /// pair, not a crate inside a shed.</summary>
+        internal const float ShellMinSideMetres = 15f;
+
+        /// <summary>PART-10: the share of a member's box volume a sibling's box must hold.</summary>
+        internal const double ShellCover = 0.8;
+
+        /// <summary>PART-10: a member is a shell when its density (source triangles per m2 of box surface) is under the
+        /// sibling's divided by this.</summary>
+        internal const double ShellDensityRatio = 20d;
+
+        /// <summary>PART-10 (F4's height guard): a member under this share of its sibling's height is a roof or a floor slab,
+        /// never a shell - dropping one leaves a building roofless or floorless in the peeled 3D view.</summary>
+        internal const double ShellHeightShare = 0.5;
+
+        /// <summary>PART-10 (F4): the most source triangles a shell may have.</summary>
+        internal const long ShellMaxSourceTriangles = 1000;
+
+        /// <summary>PART-10: the grid the members are bucketed on, metres (box centres; a sibling is listed in every cell
+        /// its box covers, so the bucketing finds exactly what a test of every pair finds).</summary>
+        internal const float ShellCellMetres = 16f;
+
+        /// <summary>PART-10: a sibling whose box covers more grid cells than this is tested against every member instead.</summary>
+        internal const int ShellMaxCellsPerBox = 4096;
+
+        /// <summary>PART-10: what <see cref="FindShells"/> holds a member to beyond rule A (both boxes at least
+        /// <see cref="ShellMinSideMetres"/>, at least <see cref="ShellCover"/> of the member's box inside the sibling's, one LOD
+        /// level, density under 1/<see cref="ShellDensityRatio"/> of the sibling's). None is rule A, the diagnostic's; Safe is
+        /// F4's rule.</summary>
+        [Flags]
+        internal enum ShellTests
+        {
+            None = 0,
+
+            /// <summary>The member is at least <see cref="ShellHeightShare"/> of the sibling's height.</summary>
+            Height = 1,
+
+            /// <summary>The member has at most <see cref="ShellMaxSourceTriangles"/> source triangles.</summary>
+            SourceCap = 2,
+
+            /// <summary>A level-0 member whose hierarchy path names a stencil is a shell of a level-0 sibling that does not,
+            /// whatever its density (EFT authors a low-poly stencil shell per building inside its LOD0).</summary>
+            Stencil = 4,
+
+            Safe = Height | SourceCap | Stencil,
+        }
+
+        /// <summary>What made a member a shell (<see cref="FindShells"/>'s kinds).</summary>
+        internal const byte ShellNot = 0;
+
+        internal const byte ShellByDensity = 1;
+        internal const byte ShellByStencil = 2;
+
+        /// <summary>PART-10: one member as the shell rule sees it - its world box, source triangles, LOD level (0 with no group)
+        /// and whether it takes part at all (a member that is not a building here, foliage for one, is neither a shell nor a
+        /// sibling).</summary>
+        internal struct ShellBox
+        {
+            internal float Cx;
+            internal float Cy;
+            internal float Cz;
+            internal float Sx;
+            internal float Sy;
+            internal float Sz;
+            internal long Source;
+            internal int Level;
+            internal bool Skip;
+
+            internal ShellBox(float cx, float cy, float cz, float sx, float sy, float sz, long source, int level, bool skip = false)
+            {
+                Cx = cx;
+                Cy = cy;
+                Cz = cz;
+                Sx = Math.Abs(sx);
+                Sy = Math.Abs(sy);
+                Sz = Math.Abs(sz);
+                Source = source;
+                Level = level;
+                Skip = skip;
+            }
+
+            internal static ShellBox Of(Entry e, bool skip = false) =>
+                new ShellBox(e.Cx, e.Cy, e.Cz, e.Sx, e.Sy, e.Sz, e.SourceTriangles, e.Lod, skip);
+
+            internal float Longest => Math.Max(Sx, Math.Max(Sy, Sz));
+
+            internal double Volume => (double)Sx * Sy * Sz;
+
+            /// <summary>Source triangles per m2 of the box's surface, 2(wh + wd + hd).</summary>
+            internal double Density
+            {
+                get
+                {
+                    var surface = 2d * ((double)Sx * Sy + (double)Sx * Sz + (double)Sy * Sz);
+                    return surface > 0d ? Source / surface : double.PositiveInfinity;
+                }
+            }
+        }
+
+        /// <summary>The share of a's box volume inside b's box, 0..1 (0 for a box with no volume).</summary>
+        internal static double CoverOf(ShellBox a, ShellBox b)
+        {
+            var volume = a.Volume;
+            if (!(volume > 0d)) return 0d;
+
+            return Overlap(a.Cx, a.Sx, b.Cx, b.Sx) * Overlap(a.Cy, a.Sy, b.Cy, b.Sy) * Overlap(a.Cz, a.Sz, b.Cz, b.Sz) / volume;
+        }
+
+        private static double Overlap(float ca, float sa, float cb, float sb)
+        {
+            var lo = Math.Max((double)ca - sa * 0.5, (double)cb - sb * 0.5);
+            var hi = Math.Min((double)ca + sa * 0.5, (double)cb + sb * 0.5);
+            return hi > lo ? hi - lo : 0d;
+        }
+
+        /// <summary>
+        /// PART-10: whether member m is a shell of sibling b - <see cref="ShellByDensity"/>, <see cref="ShellByStencil"/> or
+        /// <see cref="ShellNot"/>. Rule A (every test): both boxes' longest side at least <see cref="ShellMinSideMetres"/>, one
+        /// LOD level, at least <see cref="ShellCover"/> of m's box inside b's, and m's density under b's /
+        /// <see cref="ShellDensityRatio"/>; <paramref name="tests"/> adds the height guard and the source cap (F4), and the
+        /// stencil test, which takes the place of the density, the height and the source tests for a level-0 member whose
+        /// path names a stencil against a level-0 sibling whose path does not.
+        /// </summary>
+        /// <param name="m">The member.</param>
+        /// <param name="b">The sibling.</param>
+        /// <param name="tests">The tests beyond rule A.</param>
+        /// <param name="mStencil">Whether m's hierarchy path names a stencil (asked only when it matters).</param>
+        /// <param name="bStencil">Whether b's does.</param>
+        internal static byte ShellKind(ShellBox m, ShellBox b, ShellTests tests, Func<bool> mStencil, Func<bool> bStencil)
+        {
+            if (m.Skip || b.Skip || m.Level != b.Level) return ShellNot;
+            if (m.Longest < ShellMinSideMetres || b.Longest < ShellMinSideMetres) return ShellNot;
+            if (CoverOf(m, b) < ShellCover) return ShellNot;
+
+            if ((tests & ShellTests.Stencil) != 0 && m.Level == 0 && mStencil != null && mStencil() &&
+                (bStencil == null || !bStencil()))
+                return ShellByStencil;
+
+            if (!(m.Density < b.Density / ShellDensityRatio)) return ShellNot;
+            if ((tests & ShellTests.Height) != 0 && m.Sy < ShellHeightShare * b.Sy) return ShellNot;
+            if ((tests & ShellTests.SourceCap) != 0 && m.Source > ShellMaxSourceTriangles) return ShellNot;
+
+            return ShellByDensity;
+        }
+
+        /// <summary>Whether a hierarchy path names a stencil (PART-10: EFT's authoring convention for the low-poly shell inside a
+        /// building's LOD0 - "tank_pump_build2/stencil", "Market_Small_01_Stencil_LOD0"), ignoring case.</summary>
+        /// <param name="path">The renderer's hierarchy path.</param>
+        internal static bool StencilPath(string path) =>
+            path != null && path.IndexOf("stencil", StringComparison.OrdinalIgnoreCase) >= 0;
+
+        /// <summary>
+        /// PART-10: every member's sibling when it is a shell of one (<see cref="ShellKind"/>), else -1, with the kind. The
+        /// sibling picked is the one with the most source triangles among those it is a shell of. Members are bucketed by
+        /// their box centre on a <see cref="ShellCellMetres"/> grid and each sibling is listed in every cell its box covers in
+        /// x and z - a member at least <see cref="ShellCover"/> inside a box has its centre inside it, so this finds exactly
+        /// the pairs a test of every pair finds (a sibling over <see cref="ShellMaxCellsPerBox"/> cells is tested against
+        /// every member). Unity-free.
+        /// </summary>
+        /// <param name="boxes">The members.</param>
+        /// <param name="tests">The tests beyond rule A.</param>
+        /// <param name="stencilOf">Whether member i's path names a stencil, or null (the stencil test then never fires);
+        /// asked only for pairs that pass the box tests.</param>
+        /// <param name="kinds">Each member's kind.</param>
+        internal static int[] FindShells(IList<ShellBox> boxes, ShellTests tests, Func<int, bool> stencilOf, out byte[] kinds)
+        {
+            var n = boxes.Count;
+            var sibling = new int[n];
+            kinds = new byte[n];
+            for (var i = 0; i < n; i++) sibling[i] = -1;
+
+            var cells = new Dictionary<long, List<int>>();
+            var wide = new List<int>();
+            var stencil = new Dictionary<int, bool>();
+
+            bool StencilAt(int i)
+            {
+                if (stencilOf == null) return false;
+                if (!stencil.TryGetValue(i, out var s)) stencil[i] = s = stencilOf(i);
+                return s;
+            }
+
+            for (var j = 0; j < n; j++)
+            {
+                var b = boxes[j];
+                if (b.Skip || b.Longest < ShellMinSideMetres) continue;
+
+                var x0 = Cell(b.Cx - b.Sx * 0.5f);
+                var x1 = Cell(b.Cx + b.Sx * 0.5f);
+                var z0 = Cell(b.Cz - b.Sz * 0.5f);
+                var z1 = Cell(b.Cz + b.Sz * 0.5f);
+
+                if ((x1 - x0 + 1L) * (z1 - z0 + 1L) > ShellMaxCellsPerBox)
+                {
+                    wide.Add(j);
+                    continue;
+                }
+
+                for (var x = x0; x <= x1; x++)
+                    for (var z = z0; z <= z1; z++)
+                    {
+                        var key = ((long)x << 32) ^ (uint)z;
+                        if (!cells.TryGetValue(key, out var list)) cells[key] = list = new List<int>();
+                        list.Add(j);
+                    }
+            }
+
+            for (var i = 0; i < n; i++)
+            {
+                var m = boxes[i];
+                if (m.Skip || m.Longest < ShellMinSideMetres) continue;
+
+                var key = ((long)Cell(m.Cx) << 32) ^ (uint)Cell(m.Cz);
+                cells.TryGetValue(key, out var near);
+
+                var best = -1;
+                byte bestKind = ShellNot;
+
+                foreach (var list in new[] { near, wide })
+                {
+                    if (list == null) continue;
+
+                    foreach (var j in list)
+                    {
+                        if (j == i) continue;
+
+                        var mi = i;
+                        var bj = j;
+                        var kind = ShellKind(m, boxes[j], tests, () => StencilAt(mi), () => StencilAt(bj));
+                        if (kind == ShellNot) continue;
+
+                        if (best < 0 || boxes[j].Source > boxes[best].Source || (boxes[j].Source == boxes[best].Source && j < best))
+                        {
+                            best = j;
+                            bestKind = kind;
+                        }
+                    }
+                }
+
+                sibling[i] = best;
+                kinds[i] = bestKind;
+            }
+
+            return sibling;
+        }
+
+        private static int Cell(float v)
+        {
+            var c = Math.Floor(v / ShellCellMetres);
+            return c < int.MinValue / 2 ? int.MinValue / 2 : c > int.MaxValue / 2 ? int.MaxValue / 2 : (int)c;
+        }
+
         /// <summary>
         /// Whether a stored relief band can be filled into this build's: the same level, the same grid (width, height)
         /// and the same derived cell to the bit (PART-03: the cell is derived from the extent, so a base built under

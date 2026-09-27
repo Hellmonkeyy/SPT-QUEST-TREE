@@ -1266,6 +1266,9 @@ namespace QuestTree.QuestGraph
                     Step(job, "the LOD upgrades", () => ResolveGroupUpgrades(job));
                 }
 
+                // PART-10 (F1): the coincident members - named, so the shell rule is judged against real paths
+                Step(job, "the coincident members", () => ReportShells(job));
+
                 Step(job, "the buildings' log line", () => ReportBuildings(job));
                 Step(job, "the hidden renderers' line", () => ReportHidden(job));
             }
@@ -9035,6 +9038,157 @@ namespace QuestTree.QuestGraph
                 $"fell back: as-is {N(job.StoredUndecimated)}, LOD1 {N(job.FellBackTo[1])}, LOD2 {N(job.FellBackTo[2])}, " +
                 $"LOD3+ {N(job.FellBackTo[3])}, clustered {N(job.ClusteredStored)}; sliver area {s0.ToString("0.0", f1)} % in " +
                 $"the sources, {s1.ToString("0.0", f1)} % stored.");
+        }
+
+        /// <summary>PART-10 (F1): the coincident members named in their line.</summary>
+        private const int ShellReportRows = 20;
+
+        /// <summary>
+        /// PART-10 (F1): the coincident members' line, once a build - every kept stored building and every new one at least
+        /// <see cref="MapMeshIndex.ShellMinSideMetres"/> across whose box is at least <see cref="MapMeshIndex.ShellCover"/> inside
+        /// a same-level sibling's at under 1/<see cref="MapMeshIndex.ShellDensityRatio"/> of its density (rule A, without F4's
+        /// guards), counted, and the first <see cref="ShellReportRows"/> NAMED: hierarchy path, layer, each material's shader,
+        /// render queue and main texture, shadow casting, enabled, forceRenderingOff, whether a culling system owns it, its LOD
+        /// group and level, triangles and density, and the sibling's path. A stored row's renderer is the candidate that matched
+        /// it this build (SeenBy), a new building's its own. The builder scans the whole extent, so one stop names every member
+        /// on the map. No behaviour change: this decides between F2, F3 and F4 with data.
+        /// </summary>
+        /// <param name="job">The build.</param>
+        private static void ReportShells(Job job)
+        {
+            if (job.File == null) return;
+
+            var f1 = CultureInfo.InvariantCulture;
+            var boxes = new List<MapMeshIndex.ShellBox>();
+            var rowOf = new List<StoredEntry>();      // the stored row, or null for a new building
+            var newOf = new List<int>();              // the new building's index, or -1
+
+            if (job.Stored != null)
+                foreach (var e in job.Stored.All)
+                {
+                    if (e.Drop) continue;
+
+                    boxes.Add(MapMeshIndex.ShellBox.Of(e.Meta));
+                    rowOf.Add(e);
+                    newOf.Add(-1);
+                }
+
+            for (var i = 0; i < job.NewEntries.Count && i < job.File.Buildings.Count; i++)
+            {
+                boxes.Add(MapMeshIndex.ShellBox.Of(job.NewEntries[i]));
+                rowOf.Add(null);
+                newOf.Add(i);
+            }
+
+            var sibling = MapMeshIndex.FindShells(boxes, MapMeshIndex.ShellTests.None, null, out _);
+
+            int hits = 0, ofStored = 0, thin = 0;
+            var triangles = 0L;
+            var rows = new List<string>();
+
+            Candidate CandidateAt(int k) =>
+                rowOf[k] != null ? rowOf[k].SeenBy : newOf[k] >= 0 && newOf[k] < job.NewCandidates.Count ? job.NewCandidates[newOf[k]] : null;
+
+            string Which(int k) => rowOf[k] != null ? $"stored row {rowOf[k].Index}" : $"new building {newOf[k]}";
+
+            string PathAt(int k)
+            {
+                var r = CandidateAt(k)?.Renderer;
+                if (r == null)
+                    return rowOf[k] != null
+                        ? $"path hash {rowOf[k].Meta.PathHash:x16} (its renderer was not met this build)"
+                        : "(no renderer)";
+
+                try
+                {
+                    return "'" + HierarchyPath(r.transform) + "'";
+                }
+                catch (Exception ex)
+                {
+                    return $"(unreadable: {ex.GetType().Name})";
+                }
+            }
+
+            string Box(MapMeshIndex.ShellBox b) =>
+                $"{b.Sx.ToString("0.0", f1)}x{b.Sy.ToString("0.0", f1)}x{b.Sz.ToString("0.0", f1)} m at ({b.Cx.ToString("0", f1)}, " +
+                $"{b.Cz.ToString("0", f1)}), {N(b.Source)} source triangles, {b.Density.ToString("0.000", f1)}/m2";
+
+            for (var k = 0; k < boxes.Count; k++)
+            {
+                var s = sibling[k];
+                if (s < 0) continue;
+
+                hits++;
+                triangles += boxes[k].Source;
+                if (rowOf[k] != null) ofStored++;
+                if (boxes[k].Sy < MapMeshIndex.ShellHeightShare * boxes[s].Sy) thin++;
+
+                if (rows.Count >= ShellReportRows) continue;
+
+                var c = CandidateAt(k);
+                var group = rowOf[k] != null ? rowOf[k].Meta.GroupKey : job.NewEntries[newOf[k]].GroupKey;
+                var ratio = boxes[k].Density > 0d ? boxes[s].Density / boxes[k].Density : double.PositiveInfinity;
+
+                rows.Add($"#{rows.Count + 1} {Which(k)} {PathAt(k)} [{DescribeRenderer(job, c)}; level {boxes[k].Level}, group key " +
+                         $"{group}; {Box(boxes[k])} = 1/{(double.IsInfinity(ratio) ? "inf" : ratio.ToString("0", f1))} of its sibling's] " +
+                         $"inside {Which(s)} {PathAt(s)} [{Box(boxes[s])}]");
+            }
+
+            Plugin.LogSource?.LogInfo(
+                $"QuestTree: coincident members on {job.Request.Map} - {N(hits)} building(s) at least " +
+                $"{MapMeshIndex.ShellMinSideMetres.ToString("0", f1)} m across whose box is at least " +
+                $"{(MapMeshIndex.ShellCover * 100d).ToString("0", f1)} % inside a same-level sibling's at under 1/" +
+                $"{MapMeshIndex.ShellDensityRatio.ToString("0", f1)} of its density ({N(triangles)} source triangles; {N(ofStored)} " +
+                $"stored, {N(hits - ofStored)} new; {N(thin)} under {(MapMeshIndex.ShellHeightShare * 100d).ToString("0", f1)} % " +
+                $"of the sibling's height - roofs or slabs)" +
+                (rows.Count > 0
+                    ? $"; {(rows.Count < hits ? $"the first {N(rows.Count)}" : "each")}: {string.Join(" | ", rows.ToArray())}"
+                    : "") + ".");
+        }
+
+        /// <summary>PART-10 (F1): what a renderer is, for the coincident line - layer, each material's shader, render queue and
+        /// main texture, shadow casting, enabled, forceRenderingOff, whether a culling system owns it (Request.GameCulled),
+        /// and its LOD group's path.</summary>
+        /// <param name="job">The build.</param>
+        /// <param name="c">Its candidate, or null.</param>
+        private static string DescribeRenderer(Job job, Candidate c)
+        {
+            var r = c?.Renderer;
+            if (r == null) return "no renderer";
+
+            try
+            {
+                var layer = r.gameObject.layer;
+                var materials = new List<string>();
+                var shared = r.sharedMaterials;
+
+                if (shared != null)
+                    foreach (var m in shared)
+                    {
+                        if (m == null)
+                        {
+                            materials.Add("null");
+                            continue;
+                        }
+
+                        var shader = m.shader != null ? m.shader.name : "?";
+                        var texture = m.HasProperty("_MainTex") && m.mainTexture != null ? m.mainTexture.name : "-";
+                        materials.Add($"{shader}|{m.renderQueue}|{texture}");
+                    }
+
+                var group = c.Group;
+                if (group == null) job.LodOf.TryGetValue(r, out group);
+
+                var culled = job.Request.GameCulled != null && job.Request.GameCulled.Contains(r);
+
+                return $"layer {layer} {LayerMask.LayerToName(layer)}; materials {string.Join(", ", materials.ToArray())}; " +
+                       $"shadows {r.shadowCastingMode}, enabled {r.enabled}, forceRenderingOff {r.forceRenderingOff}, " +
+                       $"game-culled {culled}; LOD group {(group != null ? "'" + HierarchyPath(group.transform) + "'" : "none")}";
+            }
+            catch (Exception ex)
+            {
+                return $"unreadable ({ex.GetType().Name})";
+            }
         }
 
         /// <summary>The hidden renderers, once a capture - what the "switched off" filter dropped, by scene root with
