@@ -167,13 +167,16 @@ is never removed because it was not loaded this time - only replaced - so someth
 from a map within one game version stays until a rebuild. A stop that added nothing keeps the stored
 files as they were. The sidecar is local: it is never uploaded or shipped, the viewer never reads it,
 and without it (or with one that does not match the mesh) the next capture simply builds from scratch
-and writes one. Three settings, in the F12 menu under **Advanced** only: **3D map: add to the stored
+and writes one. Four settings, in the F12 menu under **Advanced** only: **3D map: add to the stored
 mesh** (on; off rebuilds from scratch at every capture, the last one winning - the old behaviour),
 **3D map: rebuild from scratch on the next capture** (a one-shot that turns itself off once a mesh is
 written), and **3D map: verify the last campaign stop (debug)**, which at a campaign's last stop also
 builds the mesh from scratch into `<key>-mesh.verify.bin` for `python tools/compare-mesh.py
 captures\<key>` to hold the accumulated mesh to (every building present - fewer triangles is a warning, a failure with `--strict` -
-the relief and the height range held, the textures as sharp). A change of the mod's mesh recipe, the
+the relief and the height range held, the textures as sharp), and **3D map: include trees and bushes** (off: a
+renderer whose materials are all on a SpeedTree shader is foliage and is left out of the model - the picture
+already shows the canopy - and a stored tree is pruned the next time it is seen; on, trees are stored, and a
+leaf face without an atlas texture is dropped rather than painted from a side view). A change of the mod's mesh recipe, the
 game version, the map's rectangle, its floors or the render mask rebuilds from scratch once by itself.
 
 **A stop renders only the tiles it can improve.** A floor or side view is rendered in tiles of 1024 x 1024
@@ -264,6 +267,13 @@ The checker compares pictures by pixels:
   sidecar is RGB with R = G = B at every pixel.
 - `--compare ROOT_B --pixels` compares the pictures both metas name, for two roots holding the same capture.
   `--png-info FILE` prints a PNG's chunks.
+- `--mesh-quality` prints the model's statistics: sliver and spike triangles, spike apexes, triangles per square
+  metre of surface, faces by texture source, atlas density outliers, crease vertices and, on the local pages, white
+  flat and normal-map-like tiles. Slivers are a warning over 4 % of the triangles, or over the sources' own share
+  plus 3 points when `--source-slivers PCT` gives the figure from the capture's building-quality log line.
+  `--shells` lists every stored building the same-box shell rule would leave out (a low-poly copy inside a
+  same-level sibling), with its sibling; a capture prunes them through their live renderers, so the list falls
+  to the rows the client keeps on purpose.
 
 **The campaign keeps a journal.** Every run appends its stop lines to
 `captures\<key>\<key>.campaign.txt` beside the pictures, the last twenty runs of that map, because the
