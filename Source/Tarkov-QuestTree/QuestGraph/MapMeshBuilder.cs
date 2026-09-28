@@ -630,6 +630,31 @@ namespace QuestTree.QuestGraph
         private const float PropMinLongSide = 1.5f;
 
         /// <summary>
+        /// PART-11 (3.3): a prop's own target - its box surface at this density, at least AreaBudget.MinTriangles and at most
+        /// <see cref="PropMaxTriangles"/> - and the props' SHARE of the map's cap. Props are budgeted apart from buildings
+        /// so a barrel never costs a wall: once the cap is known from the buildings alone, props are admitted largest box
+        /// volume first until the sum of their min(source, target) - with what stored props already hold - reaches the
+        /// share; the rest are left this build (PropLeft) and counted. Then the plan runs over buildings and admitted
+        /// props together and the cap is derived again over that demand (the shipped-size bound holds over the whole).
+        /// A prop is planned as a building with its surface and footprint CAPPED so the plan's basis and legacy floor give
+        /// its own target (BudgetAsProp) - the pattern of a tree's FoliageBudgetSurface. When the buildings' cap is already
+        /// held by the shipped-size bound or the memory ceiling, the second derivation cannot grow and the plan's one scale
+        /// pays for the admitted props out of the buildings' targets - the maintainer's decision (2026-09-28: the props get
+        /// 20 % of the cap; the size bound holds over the whole); the verification campaign reads the buildings line's
+        /// "scaled x". Recipe parts from PART-11's bump.
+        /// </summary>
+        private const double PropTrianglesPerSquareMetre = 8d;
+
+        private const int PropMaxTriangles = 400;
+        private const double PropShareOfCap = 0.20;
+
+        /// <summary>PART-11 (3.3): a prop is never STORED past this many times its limit (its target x the decimator's hard
+        /// limit factor): the ladder's over-budget, as-is-before-the-next-level and as-is-within-the-headroom paths, which
+        /// store a building whole when its decimation stops short, are closed to a prop past it - it is clustered to its
+        /// limit instead. A crate the decimator could not bring to 400 is a crate, not a 20,000-triangle one.</summary>
+        private const int PropOverLimitFactor = 2;
+
+        /// <summary>
         /// HQ S3.13: the SHIPPED-SIZE bound on the map's cap - the maintainer's decision (2026-09-27): a shipped mesh
         /// file stays under 90 MiB so package.ps1 -RefreshMaps can commit it (GitHub refuses a file over 100 MB). The
         /// bound in triangles is this over the deflated bytes one triangle costs, MEASURED from the stored file when
@@ -1732,6 +1757,20 @@ namespace QuestTree.QuestGraph
             /// <summary>PART-11 (3.2): the prop candidates FilterChunk made (the class on).</summary>
             internal int PropCandidates;
 
+            /// <summary>PART-11 (3.3): the props' share this build (triangles), what stored props hold of it, the new props
+            /// admitted (and what they want), the ones left out for the share, and the prop groups read at their coarsest
+            /// level.</summary>
+            internal long PropShare;
+
+            internal long PropStoredHeld;
+            internal int PropsAdmitted;
+            internal long PropsAdmittedTriangles;
+            internal int PropsLeftForShare;
+            internal int PropGroupsAtCoarsest;
+
+            /// <summary>PART-11 (3.3): props whose result or source passed PropOverLimitFactor x their limit - clustered instead.</summary>
+            internal int PropsOverBound;
+
             /// <summary>Buildings refused because no transform put their vertices inside their own
             /// renderer's bounds - see <see cref="Place"/>.</summary>
             internal int Implausible;
@@ -2456,6 +2495,12 @@ namespace QuestTree.QuestGraph
             /// (<see cref="PropsAsClass"/>). Budgeted from the props' share, read at its group's coarsest level, its tiles
             /// capped; never a shell nor a sibling for one.</summary>
             internal bool Prop;
+
+            /// <summary>PART-11 (3.3): a prop left out of this build for the props' share (AdmitProps) - Left.</summary>
+            internal bool PropLeft;
+
+            /// <summary>PART-11 (3.3): a prop's own target (PropTarget of its true box surface), 0 for a building.</summary>
+            internal int PropWant;
         }
 
         /// <summary>
@@ -2493,6 +2538,9 @@ namespace QuestTree.QuestGraph
             /// prop rule (AllProps). Its members drive its ladder as a building's do (DrivesLevel); a prop under a
             /// building's group does not.</summary>
             internal bool AllProps;
+
+            /// <summary>PART-11 (3.3): a props' group started at its coarsest level.</summary>
+            internal bool PropCoarse;
 
             /// <summary>Renderers of the current level stored or on a worker. The group may move only while it is 0.</summary>
             internal int Committed;
@@ -3938,7 +3986,8 @@ namespace QuestTree.QuestGraph
         /// <param name="c">The candidate.</param>
         private static bool Left(Job job, Candidate c) =>
             c.Shell || c.Decal || job.ShellRenderers.Contains(c.Renderer) || (c.Foliage && !job.Request.IncludeFoliage) ||
-            (c.Foliage && FoliageAtCoarsest && c.SourceTriangles > FoliageMaxTriangles);
+            (c.Foliage && FoliageAtCoarsest && c.SourceTriangles > FoliageMaxTriangles) ||
+            (c.Prop && c.PropLeft);   // PART-11 (3.3): over the props' share this build
 
         /// <summary>Whether a renderer is a helper volume the game draws nothing useful with: every
         /// material a plain Standard or Unlit one with no main texture, and bounds over
@@ -4290,6 +4339,13 @@ namespace QuestTree.QuestGraph
                 job.FoliageGroupsAtCoarsest++;
                 job.FoliageCoarseLod[Math.Max(0, Math.Min(3, ladder[ladder.Count - 1].Lod))]++;
             }
+            // PART-11 (3.3): so does a props' ladder - a solid's coarsest level, decimated further when over its target
+            else if (PropsAsClass && ladder.Count > 1 && state.AllProps)
+            {
+                state.Current = ladder.Count - 1;
+                state.PropCoarse = true;
+                job.PropGroupsAtCoarsest++;
+            }
 
             state.GroupKey = MapMeshFile.Building.KeyFor(HierarchyPath(group.transform),
                 group.transform.TransformPoint(group.localReferencePoint));
@@ -4541,6 +4597,7 @@ namespace QuestTree.QuestGraph
 
                     // HQ S3.12: a tree is budgeted at a tree's share, not a building's for its box
                     if (candidate.Foliage && FoliageAtCoarsest) candidate.Surface = Math.Min(candidate.Surface, FoliageBudgetSurface);
+                    if (candidate.Prop && PropsAsClass) BudgetAsProp(candidate);   // PART-11 (3.3)
 
                     if (candidate.Group == null && candidate.SourceTriangles > MaxSourceTriangles) job.InputGuarded++;
 
@@ -4838,39 +4895,66 @@ namespace QuestTree.QuestGraph
             }
 
             var sources = new List<Candidate>();
+            var props = new List<Candidate>();
 
             foreach (var candidate in job.Candidates)
                 if (candidate.SourceTriangles > 0 && candidate.SourceTriangles <= MaxSourceTriangles &&
                     IsSource(job, candidate) && !Left(job, candidate))
-                    sources.Add(candidate);
+                {
+                    // PART-11 (3.3): the props wait for the cap the buildings alone derive
+                    if (PropsAsClass && candidate.Prop) props.Add(candidate);
+                    else sources.Add(candidate);
+                }
 
-            var surfaces = new double[sources.Count];
-            var footprints = new double[sources.Count];
-            var heights = new double[sources.Count];
-            var triangles = new long[sources.Count];
-
-            for (var i = 0; i < sources.Count; i++)
-            {
-                surfaces[i] = sources[i].Surface;
-                footprints[i] = sources[i].Footprint;
-                heights[i] = sources[i].Height;
-                triangles[i] = sources[i].SourceTriangles;
-            }
-
-            // D4-D6: what the buildings need at scale 1, what this machine holds, and the cap from both.
-            var legacy = AreaBudget.LegacyTargets(footprints, triangles, out _);
-            var demand = AreaBudget.Demand(surfaces, footprints, heights, legacy, triangles);
+            double[] surfaces = null, footprints = null, heights = null;
+            long[] triangles = null;
 
             job.RamMb = SystemInfo.systemMemorySize;
             job.VramMb = SystemInfo.graphicsMemorySize;
             job.MemoryCeiling = MemoryCeiling(job.RamMb, job.VramMb);
+
+            // D4-D6: what the buildings need at scale 1, what this machine holds, and the cap from both.
+            long CapOver(out long demandOf)
+            {
+                surfaces = new double[sources.Count];
+                footprints = new double[sources.Count];
+                heights = new double[sources.Count];
+                triangles = new long[sources.Count];
+
+                for (var i = 0; i < sources.Count; i++)
+                {
+                    surfaces[i] = sources[i].Surface;
+                    footprints[i] = sources[i].Footprint;
+                    heights[i] = sources[i].Height;
+                    triangles[i] = sources[i].SourceTriangles;
+                }
+
+                var legacy = AreaBudget.LegacyTargets(footprints, triangles, out _);
+                demandOf = AreaBudget.Demand(surfaces, footprints, heights, legacy, triangles);
+
+                // What the OLD rule would have reserved on this list, for the cap's headroom floor (see CapFor).
+                var legacyReserved = 0L;
+                for (var i = 0; i < sources.Count; i++) legacyReserved += Math.Min(triangles[i], legacy[i]);
+
+                return CapFor(demandOf, legacyReserved, job.MemoryCeiling, SizeBoundFor(job));
+            }
+
+            var cap = CapOver(out var demand);
+
+            // PART-11 (3.3): the props admitted to their share of that cap join the plan, and the cap is derived again
+            if (PropsAsClass) job.PropShare = PropShareOf(cap);
+            if (props.Count > 0)
+            {
+                var admitted = AdmitProps(job, props, cap, 0L);
+
+                if (admitted.Count > 0)
+                {
+                    sources.AddRange(admitted);
+                    cap = CapOver(out demand);
+                }
+            }
+
             job.Demand = demand;
-
-            // What the OLD rule would have reserved on this list, for the cap's headroom floor (see CapFor).
-            var legacyReserved = 0L;
-            for (var i = 0; i < sources.Count; i++) legacyReserved += Math.Min(triangles[i], legacy[i]);
-
-            var cap = CapFor(demand, legacyReserved, job.MemoryCeiling, SizeBoundFor(job));
             job.Cap = cap;
 
             // Nothing is reserved yet (the budget runs before the pipeline), so the ledger is replaced whole.
@@ -5340,11 +5424,16 @@ namespace QuestTree.QuestGraph
         private static void ApplyUnionBudget(Job job)
         {
             var flex = new List<Candidate>();
+            var heldProps = new List<Candidate>();
 
             foreach (var c in job.Candidates)
                 if (c.SourceTriangles > 0 && c.SourceTriangles <= MaxSourceTriangles && IsSource(job, c) && c.Kind != KindSkip &&
                     !Left(job, c))
-                    flex.Add(c);
+                {
+                    // PART-11 (3.3): a NEW prop waits for the cap; a stored one being read again is in the union already
+                    if (PropsAsClass && c.Prop && c.Kind == KindNew) heldProps.Add(c);
+                    else flex.Add(c);
+                }
 
             // the coarse stored buildings of a group read at a finer level now
             var upgrading = new HashSet<StoredEntry>();
@@ -5363,9 +5452,32 @@ namespace QuestTree.QuestGraph
 
             var plan = PlanUnionOf(job, flex, upgrading, out var union, out var cap, out var demand);
 
+            var converted = false;
+
+            // PART-11 (3.3): the props' share over the union - what stored props hold counts first, the new ones largest
+            // first into what is left; the admitted join the plan, which is then made again below, and the retry headroom
+            // judged meanwhile is net of what they want
+            var propsWant = 0L;
+            if (PropsAsClass) job.PropShare = PropShareOf(cap);
+            if (heldProps.Count > 0)
+            {
+                var storedHeld = 0L;
+                foreach (var e in job.Stored.All)
+                    if (!e.Drop && e.Meta.Prop) storedHeld += Math.Max(0, e.Meta.StoredTriangles);
+
+                var wantedBefore = job.PropsAdmittedTriangles;
+                var admitted = AdmitProps(job, heldProps, cap, storedHeld);
+                propsWant = job.PropsAdmittedTriangles - wantedBefore;
+
+                if (admitted.Count > 0)
+                {
+                    flex.AddRange(admitted);
+                    converted = true;
+                }
+            }
+
             // the shortfall: a stored building whose target at the scale a re-read WILL use (s_Fit) passes what is stored
             // by more than UpgradeShortfall, and whose source holds more than is stored, is read again
-            var converted = false;
             for (var k = 0; k < union.Count; k++)
             {
                 var e = union[k].Entry;
@@ -5407,7 +5519,7 @@ namespace QuestTree.QuestGraph
                 sourcesOf[c.Group] = sum + Math.Max(0L, c.SourceTriangles);
             }
 
-            var planHeadroom = (long)(cap * BudgetShare) - plan.FixedCost - plan.Want;
+            var planHeadroom = (long)(cap * BudgetShare) - plan.FixedCost - plan.Want - propsWant;
             var retryLeft = RetryBudgetTriangles();
 
             // the tried groups, in flex order - then (S2 review) the ones not yet tried again this session first
@@ -5574,6 +5686,87 @@ namespace QuestTree.QuestGraph
             job.Budgeted = job.Candidates.Count;
         }
 
+        // --- PART-11 (3.3): the props' share -----------------------------------------------------------------
+
+        /// <summary>A prop's own target: its box surface at <see cref="PropTrianglesPerSquareMetre"/>, at least
+        /// AreaBudget.MinTriangles, at most <see cref="PropMaxTriangles"/>.</summary>
+        /// <param name="boxSurface">Its true world box surface, m2.</param>
+        internal static int PropTarget(double boxSurface) =>
+            (int)Math.Min(PropMaxTriangles, Math.Max(AreaBudget.MinTriangles, Math.Max(0d, boxSurface) * PropTrianglesPerSquareMetre));
+
+        /// <summary>A prop planned as a building would be, with its surface capped so the plan's basis (at the buildings'
+        /// density) gives its own target, and its footprint capped so its pre-WP7 floor is the MINIMUM (24): the legacy
+        /// rule bisects the whole list against its own planned cap, and thousands of props with real floors would lower
+        /// every building's floor (Q1: no building's target goes down). So the union plan reserves a prop's share, not a
+        /// building's for its box; the storey floor of a prop under the building height is under the minimum. The pattern
+        /// of a tree's FoliageBudgetSurface. Its true target is kept in PropWant.</summary>
+        /// <param name="c">The prop candidate, its Surface and Footprint set from its bounds.</param>
+        private static void BudgetAsProp(Candidate c)
+        {
+            var target = PropTarget(BoxSurface(c.Bounds.size));
+            c.PropWant = target;
+            c.Surface = Math.Min(c.Surface, target / AreaBudget.TrianglesPerSquareMetre);
+            c.Footprint = Math.Min(c.Footprint, AreaBudget.MinTriangles / AreaBudget.LegacyTrianglesPerSquareMetre);
+        }
+
+        /// <summary>The props' share of a cap, triangles.</summary>
+        /// <param name="cap">The map's cap.</param>
+        internal static long PropShareOf(long cap) => (long)(Math.Max(0L, cap) * PropShareOfCap);
+
+        /// <summary>
+        /// Admits new prop candidates to the props' share of the cap, LARGEST BOX VOLUME FIRST: each takes min(its source,
+        /// its own target) of the share while that fits beside what is taken (what stored props already hold first); one that
+        /// does not fit is left this build (PropLeft, counted) and the next smaller is tried - a bound on the sum, not a cut
+        /// at the first refusal, so a huge prop cannot shut out every small one behind it. The admitted are returned in
+        /// that order; the counts go to the buildings line. Not through here: a prop under a BUILDING's group whose group
+        /// falls to a coarser level - its level's candidates are made on the spot (MakeLevel) and read within the ledger's
+        /// headroom, a small overshoot of the share the ledger still bounds.
+        /// </summary>
+        /// <param name="job">The build.</param>
+        /// <param name="props">The new prop candidates (sorted here).</param>
+        /// <param name="cap">The cap derived from the buildings alone (or the union without the new props).</param>
+        /// <param name="storedHeld">What stored props already hold, triangles.</param>
+        private static List<Candidate> AdmitProps(Job job, List<Candidate> props, long cap, long storedHeld)
+        {
+            var share = PropShareOf(cap);
+            var used = Math.Max(0L, storedHeld);
+            var admitted = new List<Candidate>();
+
+            // largest first; ties (identical props) broken by source size and then position, so the order is the scene's
+            props.Sort((a, b) =>
+            {
+                var byVolume = b.Volume.CompareTo(a.Volume);
+                if (byVolume != 0) return byVolume;
+                var bySource = b.SourceTriangles.CompareTo(a.SourceTriangles);
+                if (bySource != 0) return bySource;
+                var byX = a.Bounds.center.x.CompareTo(b.Bounds.center.x);
+                return byX != 0 ? byX : a.Bounds.center.z.CompareTo(b.Bounds.center.z);
+            });
+
+            foreach (var c in props)
+            {
+                var want = Math.Min(c.SourceTriangles, (long)Math.Max(1, c.PropWant));
+
+                if (used + want <= share)
+                {
+                    used += want;
+                    admitted.Add(c);
+                    job.PropsAdmitted++;
+                    job.PropsAdmittedTriangles += want;
+                }
+                else
+                {
+                    c.PropLeft = true;
+                    job.PropsLeftForShare++;
+                }
+            }
+
+            job.PropShare = share;
+            job.PropStoredHeld = storedHeld;
+
+            return admitted;
+        }
+
         /// <summary>WP2 (fixes): the stored mesh refused in the middle of the budget pass - everything it set undone, so
         /// the build goes on from scratch (the stored mesh is then replaced by this build's, as a refused base always is).
         /// Only before the building loop: nothing is claimed, committed or launched yet but what classification did.</summary>
@@ -5606,7 +5799,14 @@ namespace QuestTree.QuestGraph
                 c.Replaces = null;
                 c.Matched = null;
                 c.Retarget = false;
+                c.PropLeft = false;   // PART-11 (3.3): the share is judged again from scratch
             }
+
+            job.PropShare = 0;
+            job.PropStoredHeld = 0;
+            job.PropsAdmitted = 0;
+            job.PropsAdmittedTriangles = 0;
+            job.PropsLeftForShare = 0;
 
             foreach (var state in job.Groups.Values)
             {
@@ -6033,6 +6233,7 @@ namespace QuestTree.QuestGraph
             };
 
             if (candidate.Foliage && FoliageAtCoarsest) candidate.Surface = Math.Min(candidate.Surface, FoliageBudgetSurface);   // HQ S3.12
+            if (candidate.Prop && PropsAsClass) BudgetAsProp(candidate);   // PART-11 (3.3)
 
             candidate.Stride = candidate.Stream >= 0 ? mesh.GetVertexBufferStride(candidate.Stream) : 0;
             UvLayout(candidate);
@@ -6490,16 +6691,24 @@ namespace QuestTree.QuestGraph
                 var source = outcome.Source;
                 var fits = source.Triangles - (long)limit <= job.Ledger.Headroom;
 
+                // PART-11 (3.3): a prop is stored past its limit only within PropOverLimitFactor; the paths that would store
+                // it whole are closed to it, and it is clustered to its limit instead (step 6)
+                var propBound = candidate.Prop && PropsAsClass;
+                var propCeiling = (long)limit * PropOverLimitFactor;
+                var overBound = false;
+
                 if (!LevelLadder)
                 {
                     // The pre-WP8 order (rollback). WP2 (fixes 3): past the hard cap, or as it is not fitting, is not clean.
+                    // PART-11: a prop past its ceiling is clustered here too.
                     if (job.PastHard || !fits) candidate.CleanAttempt = false;
+                    var propAsIs = !propBound || source.Triangles <= propCeiling;
 
                     if (!job.PastHard)
                     {
                         if (EnqueueNextLevel(job, candidate)) return;
 
-                        if (fits)
+                        if (fits && propAsIs)
                         {
                             AsIs(source);
                             return;
@@ -6509,7 +6718,7 @@ namespace QuestTree.QuestGraph
                         return;
                     }
 
-                    if (fits && Store(source, GradeAsIs) == Stored)
+                    if (fits && propAsIs && Store(source, GradeAsIs) == Stored)
                     {
                         job.StoredUndecimated++;
                         return;
@@ -6523,6 +6732,12 @@ namespace QuestTree.QuestGraph
 
                 // 2. the strict decimation over its limit, paid from the over-budget pool and the headroom
                 var over = outcome.OverBudget;
+                if (propBound && over != null && over.Triangles > propCeiling)
+                {
+                    overBound = true;
+                    over = null;
+                }
+
                 if (over != null)
                 {
                     var extra = over.Triangles - (long)limit;
@@ -6556,7 +6771,7 @@ namespace QuestTree.QuestGraph
 
                 // 3. the source as it is, BEFORE any coarser level - bounded by the factor and the headroom
                 // (HQ S2.7: AsIsMaxFactor, 8 x, past the old 4 x)
-                var asIsFactor = AsIsBeforeNextLevel ? AsIsMaxFactor : OverBudgetMaxFactor;
+                var asIsFactor = propBound ? PropOverLimitFactor : AsIsBeforeNextLevel ? AsIsMaxFactor : OverBudgetMaxFactor;
                 if (fits && source.Triangles <= (long)limit * asIsFactor)
                 {
                     if (source.Triangles > (long)limit * OverBudgetMaxFactor) job.AsIsBeforeLevel++;
@@ -6569,7 +6784,7 @@ namespace QuestTree.QuestGraph
 
                 // HQ S2 review: a group tried again because the headroom holds its sources stores them as they are, whatever
                 // the factor, before its next level - so a retry the decimator cannot improve lands and is not repeated
-                if (candidate.RetryHeadroom && fits)
+                if (candidate.RetryHeadroom && fits && !propBound)
                 {
                     job.AsIsForRetry++;
                     AsIs(source);
@@ -6579,12 +6794,15 @@ namespace QuestTree.QuestGraph
                 // 4. the group's NEXT level
                 if (EnqueueNextLevel(job, candidate)) return;
 
-                // 5. too big for the factor but inside the headroom: as it is, rather than a cluster
-                if (fits)
+                // 5. too big for the factor but inside the headroom: as it is, rather than a cluster (never a prop, PART-11)
+                if (fits && !propBound)
                 {
                     AsIs(source);
                     return;
                 }
+
+                // counted once, and only when it really was over the ceiling (not merely short of headroom)
+                if (propBound && (overBound || source.Triangles > propCeiling)) job.PropsOverBound++;
 
                 // 6. the source clustered to its limit, on a worker - before the hard cap only; else abandoned
                 if (!job.PastHard)
@@ -10813,6 +11031,13 @@ namespace QuestTree.QuestGraph
                       $"{(job.PeakCacheBytes / (1024d * 1024d)).ToString("0.0", f1)} MB of {SharedMeshCacheBytes >> 20} MB" +
                       (job.CacheRefused > 0 ? $", {N(job.CacheRefused)} read(s) not held for the room" : "") + ")."
                     : ".") +
+                (PropsAsClass
+                    ? $" Props: {N(job.PropsAdmitted)} admitted of {N(job.PropsAdmitted + job.PropsLeftForShare)} new (share " +
+                      $"{(PropShareOfCap * 100d).ToString("0", f1)} % of the buildings' cap = {N(job.PropShare)} triangles, {N(job.PropStoredHeld)} held by " +
+                      $"stored props, {N(job.PropsAdmittedTriangles)} wanted by the admitted at {PropTrianglesPerSquareMetre.ToString("0", f1)}/m2 " +
+                      $"up to {N(PropMaxTriangles)}; {N(job.PropsLeftForShare)} left out for the share; {N(job.PropGroupsAtCoarsest)} prop " +
+                      $"LOD group(s) met at their coarsest level; {N(job.PropsOverBound)} over {PropOverLimitFactor} x their limit clustered instead)."
+                    : "") +
                 (job.PastHard ? $" Hard cap reached with {N(job.CutAtHardCap)} candidate(s) not looked at." : "") +
                 (job.Abandoned + job.AbandonedAtHard > 0
                     ? $" {N(job.Abandoned)} coarse fallback(s) abandoned at the drain deadline, a cap or an abort; " +
