@@ -1932,7 +1932,7 @@ def check_mesh_index(meta, folder, key, mesh, mesh_sha, errors, warnings):
                       f"{sorted(levels_of[g])}) - PART-04's rule keeps the lowest level of a group wholesale")
 
     # 6b. HQ S2.9: rows at a LOD level above 0, and rows under-served against the live target
-    coarse = [r for r in rows if grade_level(r["grade"]) > 0]
+    coarse = [r for r in rows if grade_level(r["grade"]) > 0 and not r.get("foliage")]   # a tree is coarse by design
     coarse_groups = {r["groupHash"] for r in coarse if r["groupHash"]}
     coarse_triangles = sum(r["stored"] for r in coarse)
     under = 0

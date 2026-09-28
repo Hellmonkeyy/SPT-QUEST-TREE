@@ -142,6 +142,7 @@ GITHUB_FILE_LIMIT = 100_000_000
 # The relief cell rule, identical to MapMeshBuilder.ReliefCellFor and check-capture.py's relief_cell_for.
 RELIEF_PREFERRED_CELL = 0.5    # HQ S3.13: was 1.0
 RELIEF_PRE_HQ_CELL = 1.0       # the preferred cell between WP7 and HQ S3.13 - a WARN, as the pre-WP7 2 m is
+RELIEF_PRE_HQ_CELL = 1.0       # the preferred cell between WP7 and HQ S3.13 - a WARN, as the pre-WP7 2 m is
 RELIEF_CELL_STEP = 0.5
 RELIEF_PRE_WP7_CELL = 2.0
 
@@ -505,6 +506,10 @@ def check_mesh(meta, folder, key, extent, levels, errors):
         if abs(band["cell"] - RELIEF_PRE_WP7_CELL) <= 1e-6 and abs(derived - RELIEF_PREFERRED_CELL) <= 1e-6:
             WARNINGS.append(f"{where}: {rel} band {band['level']} was captured before WP7 at 2 m - the rule now "
                             f"gives {derived:g} m for this extent")
+        elif abs(band["cell"] - RELIEF_PRE_HQ_CELL) <= 1e-6 and abs(derived - RELIEF_PREFERRED_CELL) <= 1e-6:
+            # HQ S3.13 halved the preferred cell; a set captured at 1 m draws on every reader, so it ships with a note
+            WARNINGS.append(f"{where}: {rel} band {band['level']} was captured before the high-quality build at 1 m - "
+                            f"the rule now gives {derived:g} m for this extent; re-capture it for the finer relief")
         elif abs(band["cell"] - RELIEF_PRE_HQ_CELL) <= 1e-6 and abs(derived - RELIEF_PREFERRED_CELL) <= 1e-6:
             # HQ S3.13 halved the preferred cell; a set captured at 1 m draws on every reader, so it ships with a note
             WARNINGS.append(f"{where}: {rel} band {band['level']} was captured before the high-quality build at 1 m - "

@@ -520,6 +520,10 @@ namespace QuestTree.QuestGraph
         /// </summary>
         private const double TexelsPerMetre = 128d;
 
+        /// <summary>HQ (test 2026-09-28): the fit is a DRY RUN of the shelf packer, not a pixel-area share - a 4096 px page
+        /// holds nine 1024 px tiles on shelves (58 % of its area), and an area share of 85 % planned 114 such tiles for eight
+        /// pages, left 183 tiles unplaced and drew their buildings as flat grey slabs. The share is kept as the bisection's
+        /// starting guess only.</summary>
         private const double AtlasPagePixelShare = 0.85d;
 
         /// <summary>HQ S3 review (low): the fit never brings a tile that wanted the cap under this side - past that the
@@ -687,7 +691,7 @@ namespace QuestTree.QuestGraph
         /// </summary>
         internal static readonly string MeshRecipe = string.Join(";", new[]
         {
-            "r6", RecipePart(MapMeshFile.Version), RecipePart(MapMeshIndex.Version),
+            "r7", RecipePart(MapMeshFile.Version), RecipePart(MapMeshIndex.Version),
             // HQ S3.13: the high-quality constants
             RecipePart(TexelsPerMetre), RecipePart(AtlasPagePixelShare), RecipePart(CutoutAlphaTiles),
             RecipePart(FoliageAtCoarsest), RecipePart(FoliageMaxTriangles), RecipePart(FoliageTileMax), RecipePart(ShippedMeshBytes),
@@ -9048,8 +9052,6 @@ namespace QuestTree.QuestGraph
         private static void WantTileSides(Job job)
         {
             var basePages = job.Stored != null ? job.Request.Base.AtlasPages : 0;
-            var pageArea = (double)MapMeshFile.AtlasPageSize * MapMeshFile.AtlasPageSize;
-            var budget = AtlasPagePixelShare * MapMeshFile.MaxAtlasPages * pageArea - basePages * pageArea;
 
             var wanted = new double[job.Materials.Count];
             for (var m = 0; m < job.Materials.Count; m++)
@@ -9074,42 +9076,71 @@ namespace QuestTree.QuestGraph
                 return (int)Math.Min(cap, Math.Max(Math.Min(MinFittedTileSide, basis), basis * scale));
             }
 
-            double Padded(int m, double scale)
+            // the tiles the packer will be asked to place: every textured material not keeping a stored rect, and a flat
+            // tile for every material in use (Layout's own rule, so the dry run packs what Layout packs)
+            var fresh = new List<int>();
+            var flats = 0;
+            for (var m = 0; m < job.Materials.Count; m++)
             {
                 var info = job.Materials[m];
-                var side = SideAt(m, scale);
-                var w = TileSide(info.Texture.width, side) + 2 * AtlasPadding;
-                var h = TileSide(info.Texture.height, side) + 2 * AtlasPadding;
-                return (double)w * h;
+                var used = info.Textured || info.Flat;
+                if (!used) continue;
+
+                var keepsRect = info.Stored != null && info.Stored.Page >= 0 && info.Stored.Page < basePages;
+                if (info.Textured && info.Texture != null && info.Texture.dimension == TextureDimension.Tex2D && !keepsRect) fresh.Add(m);
+                if (!(info.Stored != null && info.Stored.FlatPage >= 0 && info.Stored.FlatPage < basePages)) flats++;
             }
 
-            double Sum(double scale)
+            bool Fits(double scale)
             {
-                var sum = 0d;
-                for (var m = 0; m < job.Materials.Count; m++)
+                var n = fresh.Count + flats;
+                if (n == 0) return true;
+
+                var widths = new int[n];
+                var heights = new int[n];
+                var groups = new int[n];
+                var k = 0;
+
+                foreach (var m in fresh)
                 {
                     var info = job.Materials[m];
-                    if (!info.Textured || info.Texture == null || info.Texture.dimension != TextureDimension.Tex2D) continue;
-                    if (info.Stored != null && info.Stored.Page >= 0 && info.Stored.Page < basePages) continue;   // keeps its rect
-                    sum += Padded(m, scale);
+                    var side = SideAt(m, scale);
+                    widths[k] = TileSide(info.Texture.width, side);
+                    heights[k] = TileSide(info.Texture.height, side);
+                    groups[k] = 0;
+                    k++;
                 }
 
-                return sum;
+                for (; k < n; k++)
+                {
+                    widths[k] = AtlasFlatPixels;
+                    heights[k] = AtlasFlatPixels;
+                    groups[k] = 1;
+                }
+
+                var pages = new int[n];
+                var xs = new int[n];
+                var ys = new int[n];
+                var limits = new[] { flats > 0 || job.StoredFlats ? MapMeshFile.MaxAtlasPages - 1 : MapMeshFile.MaxAtlasPages, MapMeshFile.MaxAtlasPages };
+                var state = job.PackState;   // a struct: the dry run advances a copy
+
+                AtlasPacker.PackFrom(ref state, widths, heights, MapMeshFile.AtlasPageSize, MapMeshFile.MaxAtlasPages, AtlasPadding,
+                    pages, xs, ys, groups, limits);
+
+                for (var i = 0; i < n; i++)
+                    if (pages[i] < 0) return false;
+
+                return true;
             }
 
             var scale = 1d;
-            if (budget <= 0d)
-            {
-                // the stored pages leave no room at all: the smallest fit, and the packer says what did not place
-                scale = 0d;
-            }
-            else if (Sum(1d) > budget)
+            if (!Fits(1d))
             {
                 double lo = 0d, hi = 1d;
-                for (var step = 0; step < 50; step++)
+                for (var step = 0; step < 40; step++)
                 {
                     var mid = (lo + hi) / 2d;
-                    if (Sum(mid) <= budget) lo = mid;
+                    if (Fits(mid)) lo = mid;
                     else hi = mid;
                 }
 
@@ -10560,7 +10591,7 @@ namespace QuestTree.QuestGraph
 
             return $"; tile sides: {N(s128)} <=128, {N(s256)} 256, {N(s512)} 512, {N(s1024)} 1024 (wanted " +
                    $"{TexelsPerMetre.ToString("0", CultureInfo.InvariantCulture)} texels/m, scaled x" +
-                   $"{job.TileScale.ToString("0.00", CultureInfo.InvariantCulture)} to fit {MapMeshFile.MaxAtlasPages} pages, cap " +
+                   $"{job.TileScale.ToString("0.00", CultureInfo.InvariantCulture)} by a dry run of the packer to fit {MapMeshFile.MaxAtlasPages} pages, cap " +
                    $"{AtlasTileMax} px), {N(coarser)} captured from a coarser resident mip";
         }
 
@@ -11119,7 +11150,7 @@ namespace QuestTree.QuestGraph
 
             void Count(MapMeshIndex.Entry m)
             {
-                if (m == null || MapMeshIndex.LevelOfGrade(m.Grade) <= 0) return;
+                if (m == null || m.Foliage || MapMeshIndex.LevelOfGrade(m.Grade) <= 0) return;   // a tree is coarse by design
                 rows++;
                 triangles += Math.Max(0, m.StoredTriangles);
                 if (m.GroupPathHash != 0UL) groups.Add(m.GroupPathHash);
@@ -11131,7 +11162,7 @@ namespace QuestTree.QuestGraph
 
             foreach (var m in job.NewEntries) Count(m);
 
-            return $"; stored at LOD>0 after this stop: {N(groups.Count)} group(s), {N(rows)} row(s), {N(triangles)} triangles";
+            return $"; stored at LOD>0 after this stop (trees aside): {N(groups.Count)} group(s), {N(rows)} row(s), {N(triangles)} triangles";
         }
 
         /// <summary>WP2 (2.11): the accumulation line - what the build did to the stored mesh (the from-scratch path

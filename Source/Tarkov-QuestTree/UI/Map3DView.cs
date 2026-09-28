@@ -127,7 +127,7 @@ namespace QuestTree.UI
         /// </summary>
         private static readonly LightShadows ShadowMode = LightShadows.Soft;
 
-        private static readonly float ShadowStrength = 0.65f;
+        private static readonly float ShadowStrength = 0.45f;   // test 2026-09-28: 0.65 read as a dark map
         private static readonly int ShadowCascadeCount = 2;
         private static readonly ShadowResolution ShadowMapResolution = ShadowResolution.VeryHigh;
         private static readonly float ShadowDistanceOfView = 2.5f;
@@ -154,9 +154,10 @@ namespace QuestTree.UI
         /// </summary>
         private static readonly bool AmbientTrilight = true;
 
-        private static readonly Color AmbientSky = new Color(0.62f, 0.68f, 0.78f);
-        private static readonly Color AmbientEquator = new Color(0.45f, 0.45f, 0.45f);
-        private static readonly Color AmbientGround = new Color(0.22f, 0.20f, 0.18f);
+        // test 2026-09-28: brighter than the menu's Flat 0.6 the view had before - the first values read as dusk
+        private static readonly Color AmbientSky = new Color(0.90f, 0.93f, 1.00f);
+        private static readonly Color AmbientEquator = new Color(0.72f, 0.72f, 0.72f);
+        private static readonly Color AmbientGround = new Color(0.45f, 0.43f, 0.40f);
 
         /// <summary>
         /// HQ S1.4: a sky behind the map - one vertex-coloured dome the size of the far clip, centred on the camera
