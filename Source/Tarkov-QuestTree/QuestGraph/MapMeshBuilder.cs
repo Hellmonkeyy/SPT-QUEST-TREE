@@ -10644,7 +10644,6 @@ namespace QuestTree.QuestGraph
         /// with its source triangles (GetIndexCount, no array), its first material and whether it carries a collider (the
         /// ones that also shape the relief). Everything derived from the scene; nothing is stored differently.
         /// </summary>
-        /// <param name="job">The build.</param>
         /// <param name="renderer">The renderer the size rule left out.</param>
         /// <param name="bounds">Its world bounds.</param>
         /// <param name="minX">The extent, with the centre margin.</param>
