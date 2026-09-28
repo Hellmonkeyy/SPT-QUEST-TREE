@@ -110,6 +110,13 @@ namespace QuestTree.UI
         /// (0 = never) - a safety valve should a render texture ever lose its contents between changes.</summary>
         private static readonly int RenderHeartbeatFrames = 0;
 
+        /// <summary>HQ S1.2: multisampling on the private render texture (1 = off, as before). The texture is up to
+        /// 4096 x 4096 (EnsureRenderTexture), and at 4 samples that would be over half a gigabyte, so a texture over
+        /// <see cref="MsaaPixelCap"/> pixels is made without it - a rule about the texture, never about a map.</summary>
+        private static readonly int RenderMsaa = 4;
+
+        private static readonly long MsaaPixelCap = 8_000_000;
+
         /// <summary>Vertices per mesh chunk. Unity takes more than this in one mesh with
         /// <see cref="IndexFormat.UInt32"/>, but a chunked mesh is a mesh that can be freed and drawn in
         /// pieces, and the relief of a 4-million-cell band would otherwise be one 96 MB buffer.</summary>
@@ -789,7 +796,7 @@ namespace QuestTree.UI
             _camera.targetTexture = _rt;
             _camera.cullingMask = _privateMask;
             _camera.useOcclusionCulling = false;
-            _camera.allowMSAA = false;
+            _camera.allowMSAA = RenderMsaa > 1;
 
             // Forward, for the oblique cut: see PrivateCameraPath.
             _camera.renderingPath = PrivateCameraPath;
@@ -1244,11 +1251,20 @@ namespace QuestTree.UI
 
             var previous = _rt;
 
-            _rt = new RenderTexture(width, height, 24, RenderTextureFormat.ARGB32) { name = "QuestTreeMap3D" };
+            // HQ S1.2: multisampled when the texture is small enough for it; Unity resolves the samples when the
+            // RawImage reads it.
+            var samples = RenderMsaa > 1 && (long)width * height <= MsaaPixelCap ? RenderMsaa : 1;
+
+            _rt = new RenderTexture(width, height, 24, RenderTextureFormat.ARGB32)
+            {
+                name = "QuestTreeMap3D",
+                antiAliasing = samples
+            };
             _rt.Create();
 
             _rtWidth = width;
             _rtHeight = height;
+            _rtSamples = samples;
 
             if (_camera != null) _camera.targetTexture = _rt;
             if (_image != null) _image.texture = _rt;
@@ -2000,6 +2016,9 @@ namespace QuestTree.UI
 
         /// <summary>Draw calls submitted this frame - see <see cref="Submit"/>.</summary>
         private int _drawCalls;
+
+        /// <summary>HQ S1.2: the samples the render texture was made with, for the first-frame line.</summary>
+        private int _rtSamples = 1;
 
         /// <summary>HQ S1.1: what the last rendered frame showed, and what has to differ for the next one to render -
         /// the view version, the cut height and the tile store's version; a build just finished forces one; a
@@ -5028,8 +5047,9 @@ namespace QuestTree.UI
 
                     Plugin.LogSource?.LogInfo(string.Format(
                         CultureInfo.InvariantCulture,
-                        "QuestTree: 3D map for {0} - first frame drawn in {1:0.0} ms, render {2:0.0} ms, {3} draw call(s), cut {4}.",
-                        _mapKey, clock.Elapsed.TotalMilliseconds, _renderMs, _drawCalls, CutText()));
+                        "QuestTree: 3D map for {0} - first frame drawn in {1:0.0} ms, render {2:0.0} ms, {3} draw call(s), cut {4}, " +
+                        "msaa {5}x.",
+                        _mapKey, clock.Elapsed.TotalMilliseconds, _renderMs, _drawCalls, CutText(), _rtSamples));
                 }
             }
             catch (Exception ex)
