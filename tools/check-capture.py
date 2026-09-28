@@ -1053,6 +1053,13 @@ QUALITY_SLIVER_SOURCE_SLACK = 3.0  # points of sliver AREA over the sources' sha
 QUALITY_WARN_APEXES = 200
 QUALITY_WARN_P10 = 0.5            # triangles per m2
 QUALITY_WARN_SIDE = 25.0          # % of the area
+# HQ S2.9: the sidecar's rows at a LOD level above 0 (PART-00 section 6 asks for none after the last stop), and the
+# under-served rows - stored under this share of min(source, the live target: INDEX_TARGET_PER_M2 x box surface,
+# clamped INDEX_TARGET_MIN..INDEX_TARGET_MAX, the recipe's AreaBudget at scale 1)
+INDEX_TARGET_PER_M2 = 20.0
+INDEX_TARGET_MIN = 24
+INDEX_TARGET_MAX = 250_000
+INDEX_UNDER_SERVED_SHARE = 0.5
 
 
 def _percentile(sorted_values, p):
@@ -1903,6 +1910,22 @@ def check_mesh_index(meta, folder, key, mesh, mesh_sha, errors, warnings):
         errors.append(f"{key}: {name} stores {len(mixed)} LOD group(s) at two levels at once (first: levels "
                       f"{sorted(levels_of[g])}) - PART-04's rule keeps the lowest level of a group wholesale")
 
+    # 6b. HQ S2.9: rows at a LOD level above 0, and rows under-served against the live target
+    coarse = [r for r in rows if grade_level(r["grade"]) > 0]
+    coarse_groups = {r["groupHash"] for r in coarse if r["groupHash"]}
+    coarse_triangles = sum(r["stored"] for r in coarse)
+    under = 0
+    for r in rows:
+        target = min(INDEX_TARGET_MAX, max(INDEX_TARGET_MIN, int(INDEX_TARGET_PER_M2 * r["surface"])))
+        want = min(r["source"], target)
+        if want > 0 and r["stored"] < INDEX_UNDER_SERVED_SHARE * want:
+            under += 1
+    lod_text = (f"rows at LOD>0: {len(coarse)} ({coarse_triangles:,} triangles, {len(coarse_groups)} group(s)); "
+                f"under-served: {under} (stored under {INDEX_UNDER_SERVED_SHARE:g} x min(source, target))")
+    if coarse:
+        warnings.append(f"{key}: {name} holds {len(coarse)} row(s) at a LOD level above 0 ({coarse_triangles:,} triangles in "
+                        f"{len(coarse_groups)} group(s)) - PART-00 section 6 asks for none after the last stop")
+
     # 7. provenance
     captures = meta.get("captures") if isinstance(meta.get("captures"), int) else None
     stops = {}
@@ -2004,7 +2027,7 @@ def check_mesh_index(meta, folder, key, mesh, mesh_sha, errors, warnings):
     last = max(stops) if stops else 0
     shells = ("\n    " + "\n    ".join(shells_report(rows))) if SHELLS else ""
     return (f"index: {len(rows)} identities, {len(index['materials'])} materials, stops 1..{last} "
-            f"(captured at stops: {distribution or '-'})" + (" - WRONG" if len(errors) > problems else "") + shells)
+            f"(captured at stops: {distribution or '-'}); " + lod_text + (" - WRONG" if len(errors) > problems else "") + shells)
 
 
 def check_pixels(meta, folder, key, errors, warnings):
