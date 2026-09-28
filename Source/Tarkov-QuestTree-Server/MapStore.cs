@@ -158,7 +158,7 @@ namespace QuestTreeServer
         /// name, since no stage W client reads one. 3 since stage X (wrapped textures): each range also carries
         /// its tile's pixel rect on its page and the raw-UV bounds its vertices are quantised over, and a
         /// vertex may belong to one range only. v2 and v1 are refused by name.</summary>
-        private const int MeshVersion = 3;
+        private const int MeshVersion = 4;   // HQ S3.13: MapMeshFile.Version 4 - the alpha-page mask byte, tiles to 1024 px
 
         /// <summary>A range's tile side, in pixels: a multiple of 4 from 4 to 256 (stage X - one repeat of a
         /// material, at most 256 px, cut out of its page by the viewer).</summary>

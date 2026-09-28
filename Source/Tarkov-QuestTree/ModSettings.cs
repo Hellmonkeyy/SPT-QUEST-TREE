@@ -963,7 +963,7 @@ namespace QuestTree
                 "mesh. This costs one extra full mesh phase at that stop.");
 
             MeshFoliage = config.Bind(
-                "Advanced", "3D map: include trees and bushes", false,
+                "Advanced", "3D map: include trees and bushes", true,
                 "On, the 3D map's mesh keeps trees and bushes (renderers drawn with the game's SpeedTree shaders), each read at " +
                 "its coarsest level and never decimated, its leaf cards cut out on their own alpha; only their faces with a real " +
                 "texture are kept. About a million triangles and a page of leaf textures on a wooded map. Off, they are left " +

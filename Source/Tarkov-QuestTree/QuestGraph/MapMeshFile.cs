@@ -66,11 +66,11 @@ namespace QuestTree.QuestGraph
         /// <summary>The layout version, written into the header and checked on read. Bumped by ANY
         /// change to the byte layout, including an added field: readers refuse what they do not
         /// know.</summary>
-        internal const int Version = 3;
+        internal const int Version = 4;   // HQ S3.13: the alpha-page mask byte (AlphaMaskVersion) and tiles to 1024 px
 
         /// <summary>A tile's largest side in pixels (stage X): each material's texture is captured at min(its size,
         /// this), rounded down to a multiple of <see cref="TileAlign"/>.</summary>
-        internal const int AtlasTileMax = 256;
+        internal const int AtlasTileMax = 1024;   // HQ S3.13: was 256; a tile is sized by its use (MapMeshBuilder.WantTileSides)
 
         /// <summary>A tile's sides are multiples of this (and at least this): the viewer compresses each tile it cuts
         /// out of its page to DXT1, which works in 4 x 4 blocks.</summary>

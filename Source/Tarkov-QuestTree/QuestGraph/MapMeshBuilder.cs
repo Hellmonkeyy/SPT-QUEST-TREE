@@ -71,7 +71,7 @@ namespace QuestTree.QuestGraph
 
         /// <summary>The relief cell every extent gets when it fits the format's band cap at it: one metre
         /// (WP7; was a fixed 2 m). Rollback: 2f.</summary>
-        internal const float PreferredReliefCellMetres = 1f;
+        internal const float PreferredReliefCellMetres = 0.5f;   // HQ S3.13: was 1 m
 
         /// <summary>The step the cell grows by when an extent does not fit <see cref="MapMeshFile.MaxCellsPerBand"/>
         /// at the preferred cell: half a metre at a time, so a larger map degrades by as little as it must.</summary>
@@ -356,6 +356,11 @@ namespace QuestTree.QuestGraph
         /// <summary>CapFor with the old rule reserving the whole demand: the plain floor of 3 M.</summary>
         internal static long CapFor(long demand, long memoryCeiling) => CapFor(demand, demand, memoryCeiling);
 
+        /// <summary>HQ S3.13: CapFor under the shipped-size bound too (<see cref="ShippedMeshBytes"/>), never below the
+        /// memory floor.</summary>
+        internal static long CapFor(long demand, long legacyReserved, long memoryCeiling, long sizeBound) =>
+            Math.Max(MemoryFloorTriangles, Math.Min(CapFor(demand, legacyReserved, memoryCeiling), Math.Max(1L, sizeBound)));
+
         /// <summary>The share of the map's cap the area budget plans with. The rest is
         /// never reserved: it is the headroom a decimation's overshoot (up to its hard limit), a group's
         /// coarse fallback or a source stored as it is is paid from, so the buildings at the end of the list
@@ -435,14 +440,14 @@ namespace QuestTree.QuestGraph
 
         /// <summary>The largest source the quadric decimation is run on. Its workspace is ~470 bytes a
         /// source triangle (measured: 51.8 MB for 110,592) and it runs at 1-2 microseconds a triangle, so
-        /// 120,000 is ~56 MB and well under the per-building cap; a larger source goes to its coarse level, or is stored as it is, or clustered -
-        /// never dropped.</summary>
-        internal const int MaxDecimatedSource = 120_000;
+        /// 200,000 (HQ S3.13; was 120,000) is ~94 MB a lane, two lanes inside the 256 MiB budget, and well under the
+        /// per-building cap; a larger source goes to its coarse level, or is stored as it is, or clustered - never dropped.</summary>
+        internal const int MaxDecimatedSource = 200_000;
 
         /// <summary>Milliseconds of WORKER time one building's decimation may take before it is abandoned
-        /// for the building's next path (coarse level, as it is, clustered). Twice what the largest source
-        /// the decimator is given needs at the measured rate.</summary>
-        internal const double DecimateBuildingMs = 600d;
+        /// for the building's next path (coarse level, as it is, clustered). Two and a half times what the largest source
+        /// the decimator is given needs at the measured rate (HQ S3.13: 1,000 for 200,000 triangles; was 600).</summary>
+        internal const double DecimateBuildingMs = 1000d;
 
         /// <summary>Buildings on workers at once. Two (second review, H2): the memory budget is 256 MiB and
         /// a decimating flight is ~60 MB at MaxDecimatedSource.</summary>
@@ -531,7 +536,7 @@ namespace QuestTree.QuestGraph
         /// them as before. Folded into the recipe by the bump commit (S3.13), where the file format that carries the
         /// mask (v4) arrives; until then a v3 file has no mask and the viewer draws these tiles opaque.
         /// </summary>
-        internal static readonly bool CutoutAlphaTiles = false;
+        internal static readonly bool CutoutAlphaTiles = true;
 
         /// <summary>
         /// HQ S3.12: a TREE or BUSH (every renderer of every level of its LOD group on a SpeedTree shader) is read at its
@@ -551,6 +556,32 @@ namespace QuestTree.QuestGraph
         /// <summary>HQ S3.12: the box surface a tree is BUDGETED at - the surface whose target at the density rule is
         /// FoliageMaxTriangles - so the union plan reserves a tree's own share, not a building's for its box.</summary>
         private static double FoliageBudgetSurface => FoliageMaxTriangles / AreaBudget.TrianglesPerSquareMetre;
+
+        /// <summary>
+        /// HQ S3.13: the SHIPPED-SIZE bound on the map's cap - the maintainer's decision (2026-09-27): a shipped mesh
+        /// file stays under 90 MiB so package.ps1 -RefreshMaps can commit it (GitHub refuses a file over 100 MB). The
+        /// bound in triangles is this over the deflated bytes one triangle costs, MEASURED from the stored file when
+        /// there is one (its bytes over its triangles - Customs: 8.2) and <see cref="DefaultDeflatedBytesPerTriangle"/>
+        /// before the first build. Derived from the file, never from a map; when it binds, the flex scale re-targets the
+        /// over-served stored buildings largest-excess-first as it does for any binding cap.
+        /// </summary>
+        internal const long ShippedMeshBytes = 90L << 20;
+
+        private const double DefaultDeflatedBytesPerTriangle = 9d;
+
+        /// <summary>HQ S3.13: the shipped-size bound for a build, in triangles, and the bytes a triangle was measured at.</summary>
+        /// <param name="job">The build.</param>
+        private static long SizeBoundFor(Job job)
+        {
+            var perTriangle = DefaultDeflatedBytesPerTriangle;
+
+            if (job.Stored != null && job.Request.BaseFileBytes > 0 && job.StoredTriangles > 0)
+                perTriangle = Math.Max(2d, Math.Min(64d, job.Request.BaseFileBytes / (double)job.StoredTriangles));
+
+            job.BytesPerTriangle = perTriangle;
+            job.SizeBound = (long)(ShippedMeshBytes / perTriangle);
+            return job.SizeBound;
+        }
 
         /// <summary>Seconds the capture sets aside for the atlas out of its budget (taken off the building
         /// phase's), and the ONE cap over the whole atlas phase - measuring, packing, capturing, filling, handing
@@ -652,7 +683,10 @@ namespace QuestTree.QuestGraph
         /// </summary>
         internal static readonly string MeshRecipe = string.Join(";", new[]
         {
-            "r5", RecipePart(MapMeshFile.Version), RecipePart(MapMeshIndex.Version),
+            "r6", RecipePart(MapMeshFile.Version), RecipePart(MapMeshIndex.Version),
+            // HQ S3.13: the high-quality constants
+            RecipePart(TexelsPerMetre), RecipePart(AtlasPagePixelShare), RecipePart(CutoutAlphaTiles),
+            RecipePart(FoliageAtCoarsest), RecipePart(FoliageMaxTriangles), RecipePart(FoliageTileMax), RecipePart(ShippedMeshBytes),
             RecipePart(AreaBudget.TrianglesPerSquareMetre), RecipePart(AreaBudget.MinTriangles),
             RecipePart(AreaBudget.MaxTrianglesPerBuilding), RecipePart(AreaBudget.TrianglesPerStorey),
             RecipePart(AreaBudget.StoreyMetres), AreaBudget.BudgetBasis.ToString(), RecipePart(AreaBudget.SurfacePerFootprint),
@@ -1673,6 +1707,11 @@ namespace QuestTree.QuestGraph
             /// from, for the building line.</summary>
             internal long Demand;
             internal long MemoryCeiling;
+
+            /// <summary>HQ S3.13: the shipped-size bound on the cap, and the deflated bytes a triangle it was derived at.</summary>
+            internal long SizeBound;
+
+            internal double BytesPerTriangle;
             internal int RamMb;
             internal int VramMb;
 
@@ -4486,7 +4525,7 @@ namespace QuestTree.QuestGraph
             var legacyReserved = 0L;
             for (var i = 0; i < sources.Count; i++) legacyReserved += Math.Min(triangles[i], legacy[i]);
 
-            var cap = CapFor(demand, legacyReserved, job.MemoryCeiling);
+            var cap = CapFor(demand, legacyReserved, job.MemoryCeiling, SizeBoundFor(job));
             job.Cap = cap;
 
             // Nothing is reserved yet (the budget runs before the pipeline), so the ledger is replaced whole.
@@ -5411,7 +5450,7 @@ namespace QuestTree.QuestGraph
             var legacyReserved = 0L;
             for (var k = 0; k < n; k++) legacyReserved += Math.Min(sources[k], legacy[k]);
 
-            cap = CapFor(demand, legacyReserved, job.MemoryCeiling);
+            cap = CapFor(demand, legacyReserved, job.MemoryCeiling, SizeBoundFor(job));
 
             return AreaBudget.PlanUnion(surfaces, footprints, heights, sources, stored, extraFixed, cap, carried, retargetTried);
         }
@@ -10080,7 +10119,8 @@ namespace QuestTree.QuestGraph
                 $"QuestTree: buildings for {job.Request.Map} - {N(job.Kept)} of {N(job.Candidates.Count)} " +
                 $"candidates kept, {N(job.Triangles)} triangles stored of the {N(job.Cap)} cap (demand {N(job.Demand)}, " +
                 $"memory ceiling {N(job.MemoryCeiling)} from RAM {N(job.RamMb)} MB / VRAM {N(job.VramMb)} MB, absolute " +
-                $"{N(BuilderAbsoluteTriangles)}); {AreaBudget.TrianglesPerSquareMetre.ToString("0.0", f1)}/m2 of box surface " +
+                $"{N(BuilderAbsoluteTriangles)}, shipped-size bound {N(job.SizeBound)} from {ShippedMeshBytes >> 20} MiB at " +
+                $"{job.BytesPerTriangle.ToString("0.0", f1)} B/triangle); {AreaBudget.TrianglesPerSquareMetre.ToString("0.0", f1)}/m2 of box surface " +
                 $"(at least {N(AreaBudget.TrianglesPerStorey)} a {AreaBudget.StoreyMetres.ToString("0", f1)} m storey), " +
                 $"scaled x{job.BudgetScale.ToString("0.00", f1)}, {N(job.HeldAtFloor)} building(s) held at their pre-WP7 floor; " +
                 $"surface: box {N(job.BoxSurface)} m2, triangles {N(job.MeasuredSurface)} m2 (ratio " +
@@ -14124,7 +14164,7 @@ namespace QuestTree.QuestGraph
         internal static readonly BasisArea BudgetBasis = BasisArea.Surface;
 
         /// <summary>Triangles per m2 of box SURFACE (was 6.0 of footprint). Rollback: 6.0.</summary>
-        internal const double TrianglesPerSquareMetre = 20.0;
+        internal const double TrianglesPerSquareMetre = 30.0;   // HQ S3.13: was 20
 
         internal const int MinTriangles = 24;
 

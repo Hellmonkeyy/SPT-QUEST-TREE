@@ -215,7 +215,8 @@ PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
 # Write() doc comment is the byte table these constants and read_mesh() below follow. The caps are
 # ITS caps: a file this script accepts and the client refuses would be a check that cannot fail.
 MESH_MAGIC = b"QTM1"
-MESH_VERSION = 3            # MapMeshFile.Version (stage W: 2 added the atlas; stage X: 3 wraps the tiles)
+MESH_VERSION = 4            # MapMeshFile.Version (stage W: 2 added the atlas; stage X: 3 wraps the tiles; HQ S3.13: 4 adds
+                            # the alpha-page mask byte after the page count and tiles to 1024 px)
 MESH_NO_HIT = 0xFFFF        # MapMeshFile.NoHit
 MESH_MAX_QUANTISED = 0xFFFE  # MapMeshFile.MaxQuantised: a coordinate is min + (max - min) x code / this
 MESH_MAX_BANDS = 8
@@ -247,7 +248,7 @@ def inflate_bound(cells, triangles):
 
 # The relief cell rule, identical to MapMeshBuilder.ReliefCellFor: 1 m wherever the extent fits
 # 4,000,000 cells a band at it, coarser by half a metre at a time only when it does not.
-RELIEF_PREFERRED_CELL = 1.0
+RELIEF_PREFERRED_CELL = 0.5    # HQ S3.13: was 1.0
 RELIEF_CELL_STEP = 0.5
 RELIEF_PRE_WP7_CELL = 2.0
 
@@ -821,6 +822,7 @@ def read_mesh(data, bound=MESH_MAX_INFLATED_BYTES, keep=False):
         "yMin": cur.f32("the y range"),
         "yMax": cur.f32("the y range"),
         "atlasPages": cur.i32("the atlas page count"),
+        "alphaPages": 0,
         "bands": [],
         "textured": 0,
         "ranges": 0,
@@ -845,6 +847,11 @@ def read_mesh(data, bound=MESH_MAX_INFLATED_BYTES, keep=False):
         raise MeshError(f"has an empty y range: {mesh['yMin']:g}..{mesh['yMax']:g}")
     if not 0 <= mesh["atlasPages"] <= MESH_MAX_ATLAS_PAGES:
         raise MeshError(f"claims {mesh['atlasPages']} atlas pages; the cap is {MESH_MAX_ATLAS_PAGES}")
+    # HQ S3.13 (v4): the alpha-page mask, a bit per page below the count
+    if version >= 4:
+        mesh["alphaPages"] = cur.take(1, "the alpha-page mask")[0]
+        if mesh["alphaPages"] >> mesh["atlasPages"]:
+            raise MeshError(f"has an alpha-page mask 0x{mesh['alphaPages']:02X} naming a page past its {mesh['atlasPages']} page(s)")
 
     bands = cur.i32("the band count")
     if bands < 0 or bands > MESH_MAX_BANDS:
@@ -1619,7 +1626,8 @@ def check_mesh(meta, folder, key, extent, levels, errors, warnings):
 # that describes it wrongly (the rows disagree with the mesh, two rows of one identity, two levels of one LOD group) is
 # an ERROR - that is a builder bug the next capture would build on.
 INDEX_MAGIC = b"QTMI"
-INDEX_VERSION = 4               # MapMeshIndex.Version (2: triedTarget/triedLevel, unplacedPages; 3: retargetTried/textureTried;
+INDEX_VERSION = 5               # MapMeshIndex.Version (2: triedTarget/triedLevel, unplacedPages; 3: retargetTried/textureTried;
+                                # HQ S3.13: 5 adds a foliage byte to every building row;
                                 # 4: uncleanAttempts)
 INDEX_SUFFIX = "-mesh.index"    # MapMeshIndex.Suffix
 INDEX_MAX_RECIPE = 512
@@ -1630,7 +1638,7 @@ INDEX_SLACK = 0.25              # MapMeshIndex.IdentitySlackMetres
 INDEX_FLAT_PIXELS = 4           # MapMeshBuilder.AtlasFlatPixels
 INDEX_PADDING = 8               # MapMeshBuilder.AtlasPadding
 INDEX_MATERIAL = struct.Struct("<Q10iBBBBBfHB")
-INDEX_BUILDING = struct.Struct("<Q4i6fQ3fiBBB3fifHiBiBBB")
+INDEX_BUILDING = struct.Struct("<Q4i6fQ3fiBBB3fifHiBiBBBB")   # HQ S3.13: + the foliage byte
 
 
 def read_index(data):
@@ -1699,7 +1707,7 @@ def read_index(data):
             "centre": v[5:8], "size": v[8:11], "groupHash": v[11], "groupPos": v[12:15], "groupKey": v[15],
             "levelIndex": v[16], "grade": v[17], "dup": v[18], "footprint": v[19], "surface": v[20], "height": v[21],
             "stored": v[22], "centroid": v[23], "capturedAt": v[24], "triedTarget": v[25], "triedLevel": v[26],
-            "retargetTried": v[27], "textureTried": v[28], "uncleanAttempts": v[29], "keys": keys})
+            "retargetTried": v[27], "textureTried": v[28], "uncleanAttempts": v[29], "foliage": v[30], "keys": keys})
     if cur.at != len(body):
         raise MeshError(f"carries {len(body) - cur.at} byte(s) after its last building")
     return index

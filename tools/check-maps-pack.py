@@ -117,7 +117,7 @@ META_SUFFIX = ".map.json"
 # class's own, repeated here because this script runs with no access to it.
 MESH_SUFFIX = "-mesh.bin"
 MESH_MAGIC = b"QTM1"
-MESH_VERSION = 3                    # MapMeshFile.Version (2 since stage W: atlas pages, UVs, ranges;
+MESH_VERSION = 4                    # MapMeshFile.Version (2 since stage W: atlas pages, UVs, ranges; HQ S3.13: 4, alpha mask;
                                     # 3 since stage X: each range's tile rect and raw-UV bounds)
 MESH_TILE_MIN, MESH_TILE_MAX = 4, 256   # MapMeshFile.TileAlign .. AtlasTileMax: a tile side, a multiple of 4
 MESH_ATLAS_PAGE = 4096                  # MapMeshFile.AtlasPageSize: a tile rect lies inside it
@@ -140,7 +140,7 @@ MESH_MAX_FILE_BYTES = 512 * 1024 * 1024
 # GitHub refuses a file over 100 MB in a push, and the seed folder is not ignored.
 GITHUB_FILE_LIMIT = 100_000_000
 # The relief cell rule, identical to MapMeshBuilder.ReliefCellFor and check-capture.py's relief_cell_for.
-RELIEF_PREFERRED_CELL = 1.0
+RELIEF_PREFERRED_CELL = 0.5    # HQ S3.13: was 1.0
 RELIEF_CELL_STEP = 0.5
 RELIEF_PRE_WP7_CELL = 2.0
 
@@ -277,6 +277,10 @@ def mesh_header(path, bound=MESH_MAX_INFLATED):
         atlas_pages = i32("its atlas page count")
         if atlas_pages < 0 or atlas_pages > MESH_MAX_ATLAS_PAGES:
             return None, f"claims {atlas_pages:,} atlas pages, past the {MESH_MAX_ATLAS_PAGES} a map may have"
+        if version >= 4:   # HQ S3.13: the alpha-page mask byte
+            alpha_mask = take(1, "its alpha-page mask")[0]
+            if alpha_mask >> atlas_pages:
+                return None, f"has an alpha-page mask 0x{alpha_mask:02X} naming a page past its {atlas_pages} page(s)"
         if not (max_x > min_x and max_z > min_z):
             return None, f"has an empty extent: x {min_x:g}..{max_x:g}, z {min_z:g}..{max_z:g}"
         if not (y_max > y_min):

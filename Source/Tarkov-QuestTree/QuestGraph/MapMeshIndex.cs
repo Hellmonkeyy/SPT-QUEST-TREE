@@ -33,7 +33,7 @@ namespace QuestTree.QuestGraph
         /// which only costs one from-scratch capture. 2 (WP2 fixes 2): each building's triedTarget and triedLevel, each
         /// material's unplacedPages. 3 (WP2 fixes 3): each building's retargetTried and textureTried. 4 (WP2 fixes 4): each
         /// building's uncleanAttempts.</summary>
-        internal const int Version = 4;
+        internal const int Version = 5;   // HQ S3.13: the foliage byte on every building row (FoliageFlagVersion)
 
         /// <summary>WP2 (fixes 4): how many unclean attempts in a row leave a row untried - the next one is recorded as if it
         /// were clean, so a building whose decimation or cluster always times out is not read at every stop.</summary>
