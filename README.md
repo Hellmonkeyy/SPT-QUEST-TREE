@@ -281,18 +281,18 @@ half tall inside the rectangle, on the layers the picture draws, taking the MOST
 level-of-detail step whenever its source totals at most a million triangles (and the last real
 step, never an impostor card, when it is bigger), reading the triangles either from the mesh directly
 or - for the fifth or so that live only on the graphics card - off the card itself, and reducing
-each building with our own decimation only where it is past its budget: 20 triangles for every square
+each building with our own decimation only where it is past its budget: 30 triangles for every square
 metre of its surface (its bounding box's six faces), up to 250,000 a building, and never less than the
 footprint rule before this release would have given it. The map's cap is derived per capture from
 what its buildings need and what this machine's memory holds (a sixteenth of RAM, an eighth of video
 memory, never under three million triangles, never over twenty million) - on a 16 GB machine Customs
-keeps every building at its full source or its surface target, about 6.8 million triangles, where it
-kept at most three. The log's building line names the cap, what it came from, and how many buildings
+keeps every building at its full source or its surface target - about ten million triangles, under the
+90 MiB file bound - where it kept at most three. The log's building line names the cap, what it came from, and how many buildings
 sat at their old floor. One line in the log says when
 the scene is being held for it, because the map's hidden geometry is switched on for as long as the
 build runs and the player can see that happen. The result is quantised to sixteen bits and deflated
-into `captures\<key>\<key>-mesh.bin` beside the pictures - on a stock map about 50-90 MB, sized by
-the capturing machine and the map's surfaces - and the meta gains a `mesh` block naming it with its SHA-256. It is an
+into `captures\<key>\<key>-mesh.bin` beside the pictures - under 90 MB by rule, sized by the map's surfaces
+and the capturing machine - and the meta gains a `mesh` block naming it with its SHA-256. It is an
 addition, never a condition: a mesh phase that fails loses the mesh and nothing else, a relief with
 no buildings in it is a complete file, and every map captured before this release carries on
 drawing flat. Automatic capture, which comes round every few seconds, builds it only for a map that
@@ -320,14 +320,35 @@ mesh** (on; off rebuilds from scratch at every capture, the last one winning - t
 written), and **3D map: verify the last campaign stop (debug)**, which at a campaign's last stop also
 builds the mesh from scratch into `<key>-mesh.verify.bin` for `python tools/compare-mesh.py
 captures\<key>` to hold the accumulated mesh to (every building present - fewer triangles is a warning, a failure with `--strict` -
-the relief and the height range held, the textures as sharp), and **3D map: include trees and bushes** (off: a
-renderer whose materials are all on a SpeedTree shader is foliage and is left out of the model - the picture
-already shows the canopy - and a stored tree is pruned the next time it is seen; on, trees are stored, and a
-leaf face without an atlas texture is dropped rather than painted from a side view). A renderer whose materials are all on a
+the relief and the height range held, the textures as sharp), and **3D map: include trees and bushes** (on: a
+renderer whose materials are all on a SpeedTree shader is a tree or a bush, read at its coarsest level, never decimated,
+its leaf cards cut out on their own alpha, and a leaf face without an atlas texture is dropped rather than painted from
+a side view; off, they are left out of the model - the picture already shows the canopy - and a stored tree is pruned
+the next time it is seen). A renderer whose materials are all on a
 decal shader (the game's drip, dirt and damage volumes: boxes it projects onto the wall beneath, with no surface of their own)
 is never stored - as a building it was the smeared box drawn around a detailed building - and a stored one is pruned the next
 time it is seen. A change of the mod's mesh recipe, the
 game version, the map's rectangle, its floors or the render mask rebuilds from scratch once by itself.
+
+**The 3D map is high quality.** Four things changed together, all derived at capture time and none keyed on a map.
+*Geometry:* a decimation that stopped at the error guard over its limit is stored from the whole of the ledger's
+headroom (it was paid from a pool of 5 % of the cap, spent after 52 buildings on Customs while 201 buildings fell to
+the game's coarser LOD); a source the decimator cannot bring in is stored as it is within 8 x its limit before its
+group falls to a coarser level; a group left coarse is tried again at its finer level when the headroom holds its
+sources; and the budget is 30 triangles for every square metre of a building's box surface (was 20). The accumulation
+line ends every stop with "stored at LOD>0 after this stop", which a finished campaign must bring to 0. *Textures:* a
+material's atlas tile is sized by its use - 128 texels for every metre one repeat covers, up to 1024 px (was 256 for
+all) - with one scale over the map to fit the eight pages; a cutout material (a fence, a grate, a railing, a leaf card)
+is textured with its alpha kept, thresholded at its own cutoff, on an ALPHA page the viewer cuts as DXT5 and clips;
+to a host the page still goes as a JPEG, and its alpha travels beside it as `<key>-atlas-<n>-alpha.png`. *Trees and
+bushes* are on by default, each read at its coarsest level and never decimated. *The viewer* renders only when the
+view changes, at 4x multisampling, with soft shadows from the one light, a hemisphere ambient and a sky - all put back
+the moment the frame is drawn. The relief is 0.5 m a cell where the extent fits four million cells a band. A mesh file
+is held under 90 MiB by rule: the map's cap is also the file bound over the deflated bytes a triangle costs, measured
+on the stored file. The mesh format is v4 (the alpha-page mask) and the sidecar v5 (a foliage byte): **update the
+server mod together with the client** - an older host refuses a v4 mesh - and every stored mesh rebuilds from scratch
+once. `tools/check-capture.py` reads the new formats, names the tile-side histogram, the alpha pages, the tree rows and
+the rows at LOD>0, and warns on spike apexes over 50 and a density p10 under 1.0.
 
 **A stop renders only the tiles it can improve.** A floor or side view is rendered in tiles of 1024 x 1024
 pixels, and until now every tile was rendered at every capture. Most of them were then thrown away pixel by

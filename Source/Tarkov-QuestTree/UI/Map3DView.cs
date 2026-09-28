@@ -2093,6 +2093,14 @@ namespace QuestTree.UI
         private bool _forceRender;
         private bool _unsettled;
 
+        /// <summary>HQ S4: clean frames since the last render, and the view version the settled line was last said for -
+        /// after <see cref="SettledFrames"/> clean frames following a move, one Info line names the camera, so a screenshot's
+        /// pose can be repeated (the PART-00 landmark screenshots).</summary>
+        private int _cleanFrames;
+
+        private int _settledViewVersion = int.MinValue;
+        private const int SettledFrames = 90;
+
         /// <summary>HQ S1.1: frames that reached the draw decision, and how many of them rendered - the release line.</summary>
         private long _framesSeen;
 
@@ -5166,9 +5174,18 @@ namespace QuestTree.UI
                 if (!dirty)
                 {
                     PlaceOverlays();
+
+                    // HQ S4: the view has been still for a while after a move - say where the camera is, once
+                    if (++_cleanFrames == SettledFrames && _settledViewVersion != ViewVersion)
+                    {
+                        _settledViewVersion = ViewVersion;
+                        SaySettled();
+                    }
+
                     return;
                 }
 
+                _cleanFrames = 0;
                 _forceRender = false;
                 _unsettled = false;
                 _renderedViewVersion = ViewVersion;
@@ -5553,6 +5570,28 @@ namespace QuestTree.UI
                 "QuestTree: 3D map face-source debug for {0} - camera at ({1:0.0}, {2:0.0}, {3:0.0}), pitch {4:0.0}, yaw {5:0.0}; " +
                 "atlas textured, flat tile magenta, top blue, side orange, tint grey.",
                 _mapKey, at.x, at.y, at.z, angles.x, angles.y));
+        }
+
+        /// <summary>HQ S4: the camera's pose, once the view has settled after a move - position, pitch, yaw, distance and the
+        /// floor - so a landmark screenshot can be taken again from the same place.</summary>
+        private void SaySettled()
+        {
+            if (_camera == null) return;
+
+            try
+            {
+                var at = _camera.transform.position;
+                var angles = _camera.transform.eulerAngles;
+
+                Plugin.LogSource?.LogInfo(string.Format(CultureInfo.InvariantCulture,
+                    "QuestTree: 3D map view of {0} settled - camera at ({1:0.0}, {2:0.0}, {3:0.0}), pitch {4:0.0}, yaw {5:0.0}, " +
+                    "distance {6:0.0} m, focus ({7:0.0}, {8:0.0}), floor {9}.",
+                    _mapKey, at.x, at.y, at.z, angles.x, angles.y, _distance, _focus.x, _focus.y, _selectedLevel));
+            }
+            catch (Exception)
+            {
+                // a line, not a feature
+            }
         }
 
         /// <summary>The material a side's faces are drawn with while the side has no picture: the entry's

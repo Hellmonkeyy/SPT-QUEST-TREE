@@ -111,14 +111,35 @@ mesh** (on; off rebuilds from scratch at every capture, the last one winning - t
 written), and **3D map: verify the last campaign stop (debug)**, which at a campaign's last stop also
 builds the mesh from scratch into `<key>-mesh.verify.bin` for `python tools/compare-mesh.py
 captures\<key>` to hold the accumulated mesh to (every building present - fewer triangles is a warning, a failure with `--strict` -
-the relief and the height range held, the textures as sharp), and **3D map: include trees and bushes** (off: a
-renderer whose materials are all on a SpeedTree shader is foliage and is left out of the model - the picture
-already shows the canopy - and a stored tree is pruned the next time it is seen; on, trees are stored, and a
-leaf face without an atlas texture is dropped rather than painted from a side view). A renderer whose materials are all on a
+the relief and the height range held, the textures as sharp), and **3D map: include trees and bushes** (on: a
+renderer whose materials are all on a SpeedTree shader is a tree or a bush, read at its coarsest level, never decimated,
+its leaf cards cut out on their own alpha, and a leaf face without an atlas texture is dropped rather than painted from
+a side view; off, they are left out of the model - the picture already shows the canopy - and a stored tree is pruned
+the next time it is seen). A renderer whose materials are all on a
 decal shader (the game's drip, dirt and damage volumes: boxes it projects onto the wall beneath, with no surface of their own)
 is never stored - as a building it was the smeared box drawn around a detailed building - and a stored one is pruned the next
 time it is seen. A change of the mod's mesh recipe, the
 game version, the map's rectangle, its floors or the render mask rebuilds from scratch once by itself.
+
+**The 3D map is high quality.** Four things changed together, all derived at capture time and none keyed on a map.
+*Geometry:* a decimation that stopped at the error guard over its limit is stored from the whole of the ledger's
+headroom (it was paid from a pool of 5 % of the cap, spent after 52 buildings on Customs while 201 buildings fell to
+the game's coarser LOD); a source the decimator cannot bring in is stored as it is within 8 x its limit before its
+group falls to a coarser level; a group left coarse is tried again at its finer level when the headroom holds its
+sources; and the budget is 30 triangles for every square metre of a building's box surface (was 20). The accumulation
+line ends every stop with "stored at LOD>0 after this stop", which a finished campaign must bring to 0. *Textures:* a
+material's atlas tile is sized by its use - 128 texels for every metre one repeat covers, up to 1024 px (was 256 for
+all) - with one scale over the map to fit the eight pages; a cutout material (a fence, a grate, a railing, a leaf card)
+is textured with its alpha kept, thresholded at its own cutoff, on an ALPHA page the viewer cuts as DXT5 and clips;
+to a host the page still goes as a JPEG, and its alpha travels beside it as `<key>-atlas-<n>-alpha.png`. *Trees and
+bushes* are on by default, each read at its coarsest level and never decimated. *The viewer* renders only when the
+view changes, at 4x multisampling, with soft shadows from the one light, a hemisphere ambient and a sky - all put back
+the moment the frame is drawn. The relief is 0.5 m a cell where the extent fits four million cells a band. A mesh file
+is held under 90 MiB by rule: the map's cap is also the file bound over the deflated bytes a triangle costs, measured
+on the stored file. The mesh format is v4 (the alpha-page mask) and the sidecar v5 (a foliage byte): **update the
+server mod together with the client** - an older host refuses a v4 mesh - and every stored mesh rebuilds from scratch
+once. `tools/check-capture.py` reads the new formats, names the tile-side histogram, the alpha pages, the tree rows and
+the rows at LOD>0, and warns on spike apexes over 50 and a density p10 under 1.0.
 
 **A stop renders only the tiles it can improve.** A floor or side view is rendered in tiles of 1024 x 1024
 pixels, and until now every tile was rendered at every capture. Most of them were then thrown away pixel by
@@ -426,16 +447,16 @@ The checker compares pictures by pixels:
   only beside a mesh, and that no page file goes unnamed.
 - **Extreme detail is the only detail.** There is no quality setting and no per-map number: every
   budget is derived at capture time from what the scanner measures, the machine and the file itself.
-  A building's target is 20 triangles for every square metre of its bounding box's SURFACE (was 6 per
-  square metre of footprint), 24 to 250,000 a building, and never below the target the old footprint
+  A building's target is 30 triangles for every square metre of its bounding box's SURFACE (20 in this
+  release's first builds, 6 per square metre of footprint before), 24 to 250,000 a building, and never below the target the old footprint
   rule would have given the same building on the same list - so no building gets less than before, on
   any machine. A 62 m pylon on a 5x15 m footprint went from 288 triangles to its full source. The map's
   cap is the least of what the buildings need at that density divided by 0.9, this machine's memory
   ceiling (a sixteenth of RAM and an eighth of video memory at 64 bytes a triangle, never under the old
-  3,000,000) and 20,000,000; on a 16 GB / 8 GB machine Customs stores about 6.8 million triangles at
-  scale 1 where it stored at most three. The relief cell is 1 m wherever the extent fits 4 million
+  3,000,000), 20,000,000 and the 90 MiB file bound; on a 16 GB / 8 GB machine Customs stores about ten million
+  triangles at scale 1 where it stored at most three. The relief cell is 0.5 m wherever the extent fits 4 million
   cells a band and half a metre coarser at a time only where it does not, so every stock map runs at
-  1 m and no extent can lose its mesh by throwing. The file stays version 3: its caps became hard
+  0.5 or 1 m and no extent can lose its mesh by throwing. The file is version 4 (the alpha-page mask): its caps are hard
   bounds that only refuse hostile files - 40,000,000 triangles, 80,000,000 vertices and 1,000,000
   triangles a building - and a reader from before this change refuses a larger file by name while
   every earlier file reads unchanged. A building whose atlas split would pass a vertex cap stays

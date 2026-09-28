@@ -1057,8 +1057,9 @@ QUALITY_WHITE = 235
 QUALITY_SEAM_FACTOR = 4.0
 QUALITY_WARN_SLIVERS = 4.0        # % of triangles (without --source-slivers)
 QUALITY_SLIVER_SOURCE_SLACK = 3.0  # points of sliver AREA over the sources' share (--source-slivers, PART-10)
-QUALITY_WARN_APEXES = 200
-QUALITY_WARN_P10 = 0.5            # triangles per m2
+QUALITY_WARN_APEXES = 50          # HQ S4: was 200 - PART-00 section 6 re-baselined: spike APEXES (ours) under 50; the long
+                                  # real edges the game authors are not counted against the decimator
+QUALITY_WARN_P10 = 1.0            # triangles per m2 (HQ S4: was 0.5; Customs measures 1.17 before the HQ plan)
 QUALITY_WARN_SIDE = 25.0          # % of the area
 # HQ S2.9: the sidecar's rows at a LOD level above 0 (PART-00 section 6 asks for none after the last stop; a group
 # whose LOD0 is over the builder's 1 M source guard legitimately stays coarse, so the WARN can name such a map), and
@@ -1436,6 +1437,16 @@ def quality_line(meta, folder, key, mesh, warnings):
     if pages is not None:
         line += (f", pages: white flat tiles {pages[0]}, normal-map-like tiles {pages[1]}, wrap seams > 4x "
                  f"{pages[2]} of {pages[3]}")
+    # HQ S4: the tile sides in use (the atlas's own histogram), the pages used and the alpha pages
+    sides = {"<=128": 0, "256": 0, "512": 0, "1024": 0}
+    for (_page, _tx, _ty, tw, th) in stats["tiles"]:
+        side = max(tw, th)
+        key = "<=128" if side <= 128 else "256" if side <= 256 else "512" if side <= 512 else "1024"
+        sides[key] += 1
+    alpha_mask = mesh.get("alphaPages", 0)
+    alpha_pages = bin(alpha_mask).count("1")
+    line += (f", tile sides: {sides['<=128']} <=128 / {sides['256']} 256 / {sides['512']} 512 / {sides['1024']} 1024, "
+             f"pages used {mesh['atlasPages']} of {MESH_MAX_ATLAS_PAGES} ({alpha_pages} alpha)")
     # PART-10: the sliver WARN against the sources' own share, when it is given
     area_pct = stats["sliverArea"]
     if SOURCE_SLIVERS is not None:
@@ -1930,8 +1941,10 @@ def check_mesh_index(meta, folder, key, mesh, mesh_sha, errors, warnings):
         want = min(r["source"], target)
         if want > 0 and r["stored"] < INDEX_UNDER_SERVED_SHARE * want:
             under += 1
+    trees = [r for r in rows if r.get("foliage")]
     lod_text = (f"rows at LOD>0: {len(coarse)} ({coarse_triangles:,} triangles, {len(coarse_groups)} group(s)); "
-                f"under-served: {under} (stored under {INDEX_UNDER_SERVED_SHARE:g} x min(source, target))")
+                f"under-served: {under} (stored under {INDEX_UNDER_SERVED_SHARE:g} x min(source, target)); "
+                f"tree rows: {len(trees)} ({sum(r['stored'] for r in trees):,} triangles, max {max((r['stored'] for r in trees), default=0):,} a tree)")
     if coarse:
         warnings.append(f"{key}: {name} holds {len(coarse)} row(s) at a LOD level above 0 ({coarse_triangles:,} triangles in "
                         f"{len(coarse_groups)} group(s)) - PART-00 section 6 asks for none after the last stop")
