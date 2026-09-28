@@ -648,6 +648,13 @@ namespace QuestTree.QuestGraph
         private const int PropMaxTriangles = 400;
         private const double PropShareOfCap = 0.20;
 
+        /// <summary>PART-11 (3.4): a material only props use is tiled at <see cref="PropTexelsPerMetre"/> texels a metre up
+        /// to <see cref="PropTileMax"/> px (a building's at TexelsPerMetre up to AtlasTileMax); one a building also uses
+        /// keeps the building's side. Recipe parts from PART-11's bump.</summary>
+        private const int PropTileMax = 256;
+
+        private const double PropTexelsPerMetre = 64d;
+
         /// <summary>PART-11 (3.3): a prop is never STORED past this many times its limit (its target x the decimator's hard
         /// limit factor): the ladder's over-budget, as-is-before-the-next-level and as-is-within-the-headroom paths, which
         /// store a building whole when its decimation stops short, are closed to a prop past it - it is clustered to its
@@ -7022,6 +7029,14 @@ namespace QuestTree.QuestGraph
                 }
 
                 var info = id >= 0 ? job.Materials[id] : null;
+
+                // PART-11 (3.4): the material's users, for the tile caps
+                if (info != null)
+                {
+                    if (candidate.Prop && PropsAsClass) info.UsedByProp = true;
+                    else info.UsedByBuilding = true;
+                }
+
                 source.SlotST[j * 4] = info?.ScaleU ?? 1f;
                 source.SlotST[j * 4 + 1] = info?.ScaleV ?? 1f;
                 source.SlotST[j * 4 + 2] = info?.OffsetU ?? 0f;
@@ -8787,6 +8802,16 @@ namespace QuestTree.QuestGraph
             /// <summary>HQ S3.12: on a SpeedTree shader - a leaf or bark material, its tile capped at FoliageTileMax.</summary>
             internal bool Foliage;
 
+            /// <summary>PART-11 (3.4): who used the material this build - a prop, a building (a tree counts as one) - so a
+            /// material only props use is tiled at the props' texel density and cap (<see cref="PropOnly"/>).</summary>
+            internal bool UsedByProp;
+
+            internal bool UsedByBuilding;
+
+            /// <summary>Only props used it this build, and no stored building holds a tile of it (a stored building never
+            /// passes through Slots, so its use is its stored row).</summary>
+            internal bool PropOnly => UsedByProp && !UsedByBuilding && Stored == null;
+
             /// <summary>WP2 (2.10): the material's key (MaterialKey), its stored tile row when the stored atlas has one,
             /// the texture's resident mip when it was registered (MapMeshIndex.MipUnknown when not streamed), whether its
             /// textured tile was left flat past the capture share or failed to capture this build, and whether its
@@ -9879,7 +9904,8 @@ namespace QuestTree.QuestGraph
                 var metresPerRepeat = Math.Sqrt(info.WorldArea / info.UvArea);
                 if (!IsFinite(metresPerRepeat) || metresPerRepeat <= 0d) continue;
 
-                wanted[m] = TexelsPerMetre * metresPerRepeat;
+                // PART-11 (3.4): a material only props use wants the props' density
+                wanted[m] = (info.PropOnly ? PropTexelsPerMetre : TexelsPerMetre) * metresPerRepeat;
             }
 
             // S3 review (low): an unmeasured material wants its cap, and is scaled with the rest; no fitted side under
@@ -9887,7 +9913,9 @@ namespace QuestTree.QuestGraph
             int SideAt(int m, double scale)
             {
                 var info = job.Materials[m];
-                var cap = info.Foliage ? Math.Min(FoliageTileMax, AtlasTileMax) : AtlasTileMax;
+                var cap = info.Foliage ? Math.Min(FoliageTileMax, AtlasTileMax)
+                    : info.PropOnly ? Math.Min(PropTileMax, AtlasTileMax)   // PART-11 (3.4)
+                    : AtlasTileMax;
                 var basis = wanted[m] > 0d ? Math.Min(cap, wanted[m]) : cap;
                 return (int)Math.Min(cap, Math.Max(Math.Min(MinFittedTileSide, basis), basis * scale));
             }
@@ -11567,7 +11595,7 @@ namespace QuestTree.QuestGraph
         /// <param name="job">The build.</param>
         private static string TileSidesClause(Job job)
         {
-            int s128 = 0, s256 = 0, s512 = 0, s1024 = 0, coarser = 0;
+            int s128 = 0, s256 = 0, s512 = 0, s1024 = 0, coarser = 0, propOnly = 0;
 
             foreach (var m in job.Materials)
             {
@@ -11579,13 +11607,18 @@ namespace QuestTree.QuestGraph
                 else s1024++;
 
                 if (m.CapturedNow && m.Mip != MapMeshIndex.MipUnknown && m.Mip > 0) coarser++;
+                if (m.PropOnly && m.CapturedNow) propOnly++;   // sized by the prop rule this build, not a stored rect kept
             }
 
             return $"; tile sides: {N(s128)} <=128, {N(s256)} 256, {N(s512)} 512, {N(s1024)} 1024 (wanted " +
                    $"{TexelsPerMetre.ToString("0", CultureInfo.InvariantCulture)} texels/m, scaled x" +
                    $"{job.TileScale.ToString("0.00", CultureInfo.InvariantCulture)} by a dry run of the packer to fit {MapMeshFile.MaxAtlasPages} pages" +
                    (job.TileFitLanded ? "" : " - THE FIT DID NOT LAND, some tiles are left unplaced") + ", cap " +
-                   $"{AtlasTileMax} px), {N(coarser)} captured from a coarser resident mip";
+                   $"{AtlasTileMax} px" +
+                   (PropsAsClass
+                       ? $"; {N(propOnly)} captured for props only at {PropTexelsPerMetre.ToString("0", CultureInfo.InvariantCulture)} texels/m, cap {PropTileMax} px"
+                       : "") +
+                   $"), {N(coarser)} captured from a coarser resident mip";
         }
 
         /// <summary>WP2: the textures line's account of the stored atlas.</summary>
