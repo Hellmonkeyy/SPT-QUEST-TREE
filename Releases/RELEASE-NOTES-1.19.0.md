@@ -194,14 +194,20 @@ material's atlas tile is sized by its use - 128 texels for every metre one repea
 all) - with one scale over the map to fit the eight pages; a cutout material (a fence, a grate, a railing, a leaf card)
 is textured with its alpha kept, thresholded at its own cutoff, on an ALPHA page the viewer cuts as DXT5 and clips;
 to a host the page still goes as a JPEG, and its alpha travels beside it as `<key>-atlas-<n>-alpha.png`. *Trees and
-bushes* are on by default, each read at its coarsest level and never decimated. *The viewer* renders only when the
-view changes, at 4x multisampling, with soft shadows from the one light, a hemisphere ambient and a sky - all put back
-the moment the frame is drawn. The relief is 0.5 m a cell where the extent fits four million cells a band. A mesh file
-is held under 90 MiB by rule: the map's cap is also the file bound over the deflated bytes a triangle costs, measured
-on the stored file. The mesh format is v4 (the alpha-page mask) and the sidecar v5 (a foliage byte): **update the
-server mod together with the client** - an older host refuses a v4 mesh - and every stored mesh rebuilds from scratch
-once. `tools/check-capture.py` reads the new formats, names the tile-side histogram, the alpha pages, the tree rows and
-the rows at LOD>0, and warns on spike apexes over 50 and a density p10 under 1.0.
+bushes* are on by default, each read at its coarsest level and never decimated. *Props* - the tanks, vehicles,
+containers, fences, pipes and crates under the building size rule (a long side of 1.5 m or more; text labels, foliage
+and decals excluded) - are a class of their own: a props' own LOD group is read at its coarsest level, they are
+budgeted apart from buildings at 8 triangles a square metre up to 400 each from a share of 20 % of the map's cap
+(largest first; those that do not fit are left out and judged again at the next capture against what the stored props
+leave of the share), a texture only props use is tiled at 64 texels a metre up to 256 px, and the meshes they share
+are read once and served from a cache. *The viewer* renders only when the view changes, at 4x multisampling, with soft
+shadows from the one light, a hemisphere ambient and a sky - all put back the moment the frame is drawn. The relief is
+0.5 m a cell where the extent fits four million cells a band. A mesh file is held under 90 MiB by rule: the map's cap
+is also the file bound over the deflated bytes a triangle costs, measured on the stored file. The mesh format is v4
+(the alpha-page mask) and the sidecar v6 (a kind byte: building, tree, prop): **update the server mod together with the
+client** - an older host refuses a v4 mesh - and every stored mesh rebuilds from scratch once. `tools/check-capture.py`
+reads the new formats, names the tile-side histogram, the alpha pages, the tree and prop rows and the rows at LOD>0,
+and warns on spike apexes over 50 and a density p10 under 1.0.
 
 **A stop renders only the tiles it can improve.** A floor or side view is rendered in tiles of 1024 x 1024
 pixels, and until now every tile was rendered at every capture. Most of them were then thrown away pixel by

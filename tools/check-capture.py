@@ -1658,9 +1658,9 @@ def check_mesh(meta, folder, key, extent, levels, errors, warnings):
 # that describes it wrongly (the rows disagree with the mesh, two rows of one identity, two levels of one LOD group) is
 # an ERROR - that is a builder bug the next capture would build on.
 INDEX_MAGIC = b"QTMI"
-INDEX_VERSION = 5               # MapMeshIndex.Version (2: triedTarget/triedLevel, unplacedPages; 3: retargetTried/textureTried;
-                                # HQ S3.13: 5 adds a foliage byte to every building row;
-                                # 4: uncleanAttempts)
+INDEX_VERSION = 6               # MapMeshIndex.Version: 2 triedTarget/triedLevel, unplacedPages; 3 retargetTried/textureTried;
+                                # 4 uncleanAttempts; 5 a foliage byte on every building row (HQ S3.13); 6 that byte read as the
+                                # row's kind, 2 = prop (PART-11)
 INDEX_SUFFIX = "-mesh.index"    # MapMeshIndex.Suffix
 INDEX_MAX_RECIPE = 512
 INDEX_MAX_GAME = 128

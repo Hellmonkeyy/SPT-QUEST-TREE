@@ -32,8 +32,8 @@ namespace QuestTree.QuestGraph
         /// <summary>The layout's version. A change to the byte table below is a new number; the reader refuses others,
         /// which only costs one from-scratch capture. 2 (WP2 fixes 2): each building's triedTarget and triedLevel, each
         /// material's unplacedPages. 3 (WP2 fixes 3): each building's retargetTried and textureTried. 4 (WP2 fixes 4): each
-        /// building's uncleanAttempts.</summary>
-        internal const int Version = 5;   // HQ S3.13: the foliage byte on every building row (FoliageFlagVersion)
+        /// building's uncleanAttempts. 5 (HQ S3.13): the foliage byte. 6 (PART-11): that byte read as the row's kind, 2 = prop.</summary>
+        internal const int Version = 6;   // PART-11 (3.6): the kind byte on every building row may say prop (KindProp)
 
         /// <summary>WP2 (fixes 4): how many unclean attempts in a row leave a row untried - the next one is recorded as if it
         /// were clean, so a building whose decimation or cluster always times out is not read at every stop.</summary>

@@ -621,10 +621,10 @@ namespace QuestTree.QuestGraph
         /// containers, fences, pipes, crates: 27.7 M source triangles on Customs that the map was missing (the 2026-09-28
         /// census). A prop is its own class - a budget share, a texel cap, its coarsest LOD level - and is never a shell nor
         /// a sibling for one. Rules about sizes, shaders and components, never about a map. False leaves the size rule as it
-        /// was: the census counts them and nothing is stored differently. Folded into the recipe by PART-11's bump commit,
-        /// which turns it on.
+        /// was: the census counts them and nothing is stored differently. In the recipe (r8, with the sidecar v6) since
+        /// PART-11's bump commit, which turned it on: every stored mesh rebuilt from scratch once.
         /// </summary>
-        internal static readonly bool PropsAsClass = false;
+        internal static readonly bool PropsAsClass = true;
 
         /// <summary>The smallest long side a prop may have, metres - the census's smallest band.</summary>
         private const float PropMinLongSide = 1.5f;
@@ -641,7 +641,7 @@ namespace QuestTree.QuestGraph
         /// held by the shipped-size bound or the memory ceiling, the second derivation cannot grow and the plan's one scale
         /// pays for the admitted props out of the buildings' targets - the maintainer's decision (2026-09-28: the props get
         /// 20 % of the cap; the size bound holds over the whole); the verification campaign reads the buildings line's
-        /// "scaled x". Recipe parts from PART-11's bump.
+        /// "scaled x". Recipe parts since r8 (PART-11's bump).
         /// </summary>
         private const double PropTrianglesPerSquareMetre = 8d;
 
@@ -650,7 +650,7 @@ namespace QuestTree.QuestGraph
 
         /// <summary>PART-11 (3.4): a material only props use is tiled at <see cref="PropTexelsPerMetre"/> texels a metre up
         /// to <see cref="PropTileMax"/> px (a building's at TexelsPerMetre up to AtlasTileMax); one a building also uses
-        /// keeps the building's side. Recipe parts from PART-11's bump.</summary>
+        /// keeps the building's side. Recipe parts since r8 (PART-11's bump).</summary>
         private const int PropTileMax = 256;
 
         private const double PropTexelsPerMetre = 64d;
@@ -658,7 +658,8 @@ namespace QuestTree.QuestGraph
         /// <summary>PART-11 (3.3): a prop is never STORED past this many times its limit (its target x the decimator's hard
         /// limit factor): the ladder's over-budget, as-is-before-the-next-level and as-is-within-the-headroom paths, which
         /// store a building whole when its decimation stops short, are closed to a prop past it - it is clustered to its
-        /// limit instead. A crate the decimator could not bring to 400 is a crate, not a 20,000-triangle one.</summary>
+        /// limit instead. A crate the decimator could not bring to 400 is a crate, not a 20,000-triangle one. A recipe part
+        /// since r8.</summary>
         private const int PropOverLimitFactor = 2;
 
         /// <summary>
@@ -782,12 +783,17 @@ namespace QuestTree.QuestGraph
         /// the new buildings with the stored ones at what they hold, unclean attempts counted - sidecar v4), so every index an
         /// earlier WP2 build wrote is discarded once. Fixes 5 did NOT bump it: its rules read a stored r5 mesh as they find
         /// it (a range kept within tolerance, a texture re-read settled after the atlas), and a bump would throw away every
-        /// accumulated mesh for nothing. Declared AFTER every static field of this class it reads (static initialisers run in
+        /// accumulated mesh for nothing. "r6" and "r7" since the HQ plan's bumps (the decal rule; S3.13's constants, mesh v4,
+        /// sidecar v5), "r8" since PART-11's bump (the prop class and its constants, sidecar v6). Declared AFTER every static field of this class it reads (static initialisers run in
         /// textual order - NotBuildingLayerNames above it would otherwise still be null).
         /// </summary>
         internal static readonly string MeshRecipe = string.Join(";", new[]
         {
-            "r7", RecipePart(MapMeshFile.Version), RecipePart(MapMeshIndex.Version),
+            "r8", RecipePart(MapMeshFile.Version), RecipePart(MapMeshIndex.Version),
+            // PART-11 (3.6): the prop class
+            RecipePart(PropsAsClass), RecipePart(PropMinLongSide), RecipePart(PropTrianglesPerSquareMetre), RecipePart(PropMaxTriangles),
+            RecipePart(PropShareOfCap), RecipePart(PropTileMax), RecipePart(PropTexelsPerMetre), RecipePart(PropOverLimitFactor),
+            string.Join(",", MapMeshIndex.TextShaderMarks),
             // HQ S3.13: the high-quality constants
             RecipePart(TexelsPerMetre), RecipePart(CutoutAlphaTiles),
             RecipePart(FoliageAtCoarsest), RecipePart(FoliageMaxTriangles), RecipePart(FoliageTileMax), RecipePart(ShippedMeshBytes),
