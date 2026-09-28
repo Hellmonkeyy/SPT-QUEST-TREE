@@ -242,6 +242,25 @@ namespace QuestTree.QuestGraph
         internal static readonly double RetryHeadroomFactor = 1.5;
         internal static readonly double RetrySeconds = 10d;
 
+        /// <summary>
+        /// PART-11 (1): the SHARED-MESH READ CACHE. The builder reads every candidate's mesh out of Unity on its own -
+        /// a readable mesh's vertices, triangles and UVs are copied per candidate, a GPU mesh is read back per candidate
+        /// - although a static batch's members all hold the batch's one combined mesh and a site's props are five
+        /// hundred renderers of the same barrel. With this on, the arrays a read produces are HELD, per mesh, while
+        /// another candidate made on the same mesh is still to be read (<see cref="MeshRead.Uses"/> counted where
+        /// candidates are made), and that candidate is served the same arrays instead of Unity being asked again. The
+        /// arrays are never written in place (Process reads them and writes world positions into arrays of its own), so
+        /// what a served candidate stores is byte-identical to what its own read would have stored: the same arrays
+        /// through the same transform. Held under <see cref="SharedMeshCacheBytes"/> in all (a mesh over the room left
+        /// is read again, as before), let go of as the last candidate on a mesh is read, and cleared with the building
+        /// phase. A cache of Unity's OUTPUT, keyed on the Mesh object - nothing about a map. False reads every candidate
+        /// on its own, as before. NOT in the recipe: it changes when a mesh is read, never what is stored.
+        /// </summary>
+        internal static readonly bool SharedMeshCache = true;
+
+        /// <summary>The most the cache holds at once, bytes - the peak is on the working-set line.</summary>
+        internal static readonly long SharedMeshCacheBytes = 256L << 20;
+
         /// <summary>HQ S2.8: source triangles decimated per worker-millisecond, measured by the last build that decimated for
         /// over a second (<see cref="ReportQuality"/>), else this default (Customs' first build: 2.8 M in 11.7 s on 2 lanes).</summary>
         private const double DefaultDecimationRate = 120d;
@@ -1358,6 +1377,7 @@ namespace QuestTree.QuestGraph
 
                         if (job.Stopped || !take)
                         {
+                            UncountUse(job, candidate.Mesh);
                             ReturnCredit(job, candidate);
                             continue;
                         }
@@ -1373,6 +1393,7 @@ namespace QuestTree.QuestGraph
                                 skipped.UncleanLods.Add(skippedLod);
                             candidate.CleanAttempt = false;
                             RecordTried(job, candidate);
+                            UncountUse(job, candidate.Mesh);
                             ReturnCredit(job, candidate);
                             continue;
                         }
@@ -1383,6 +1404,7 @@ namespace QuestTree.QuestGraph
                         if (limit <= 0)
                         {
                             job.OverBudget++;
+                            UncountUse(job, candidate.Mesh);
                             ReturnCredit(job, candidate);
                             continue;
                         }
@@ -1472,6 +1494,7 @@ namespace QuestTree.QuestGraph
                 Step(job, "the buildings' log line", () => ReportBuildings(job));
                 Step(job, "the hidden renderers' line", () => ReportHidden(job));
                 Step(job, "the props census line", () => ReportProps(job));
+                Step(job, "the mesh cache", () => ForgetMeshReads(job));
             }
 
             // --- stage W: the atlas -----------------------------------------------------------------------
@@ -1782,6 +1805,18 @@ namespace QuestTree.QuestGraph
 
             /// <summary>The source just captured on the main thread, waiting to be launched.</summary>
             internal Source Captured;
+
+            /// <summary>PART-11 (1): the shared-mesh read cache, by mesh - see <see cref="SharedMeshCache"/>.</summary>
+            internal readonly Dictionary<Mesh, MeshRead> MeshReads = new Dictionary<Mesh, MeshRead>();
+
+            internal long CacheBytes;
+            internal long PeakCacheBytes;
+
+            /// <summary>Reads served from the cache, meshes whose arrays it held, and reads it could not hold for the room.</summary>
+            internal int CacheHits;
+
+            internal int CacheHeld;
+            internal int CacheRefused;
 
             /// <summary>The workers' pooled scratch.</summary>
             internal readonly Stack<Lane> Workspaces = new Stack<Lane>();
@@ -2504,6 +2539,10 @@ namespace QuestTree.QuestGraph
 
             internal int UvSize;
 
+            /// <summary>PART-11 (1): the vertices (readable) or the stream's bytes (GPU) came from the shared-mesh cache,
+            /// not from a read of this candidate's own - a GPU source so served is not counted as a readback.</summary>
+            internal bool Served;
+
             // the GPU path
             internal bool FromGpu;
             internal byte[] VertexBytes;
@@ -2541,6 +2580,37 @@ namespace QuestTree.QuestGraph
                 if (Parts != null) foreach (var part in Parts) bytes += part.Length * 4L;
                 return bytes;
             }
+        }
+
+        /// <summary>PART-11 (1): one mesh's place in the shared-mesh read cache - how many candidates were made on it,
+        /// how many have taken their read, and the arrays held for the ones still to come (null until a read on a mesh
+        /// another candidate still wants fills them). The readable path holds the vertices, the UVs and each submesh's
+        /// triangles as GetTriangles handed them over (a null part is a submesh that had none); the GPU path holds the
+        /// position stream's bytes and the index buffer's, with the stream they came from.</summary>
+        private sealed class MeshRead
+        {
+            internal int Uses;
+            internal int Reads;
+
+            internal Vector3[] Local;
+            internal Vector2[] UV;
+            internal bool UvTried;
+            internal Dictionary<int, int[]> Parts;
+
+            internal int Stream = -1;
+            internal byte[] VertexBytes;
+            internal byte[] IndexBytes;
+
+            /// <summary>What it holds, bytes - the cache's share of <see cref="SharedMeshCacheBytes"/>.</summary>
+            internal long Bytes;
+
+            /// <summary>Whether this mesh has been counted among the held (once, however often it is held and let go).</summary>
+            internal bool Counted;
+
+            /// <summary>Whether another candidate made on this mesh is still to be read once this one has taken its read.</summary>
+            internal bool Wanted => Uses > Reads;
+
+            internal bool Holds => Local != null || VertexBytes != null;
         }
 
         /// <summary>What a worker made of a source. <see cref="Mesh"/> is the building to store when it fits
@@ -3666,6 +3736,7 @@ namespace QuestTree.QuestGraph
                     Foliage = IsFoliage(renderer),
                     Decal = IsDecal(renderer),
                 });
+                CountUse(job, mesh);
             }
 
             if (job.Scanned >= job.RendererCount) job.Renderers = null;
@@ -5394,6 +5465,9 @@ namespace QuestTree.QuestGraph
                 RegisterDeficient(job, c);
             }
 
+            foreach (var c in job.Candidates)
+                if (c.Kind == KindSkip) UncountUse(job, c.Mesh);
+
             job.Candidates.RemoveAll(c => c.Kind == KindSkip);
             job.Budgeted = job.Candidates.Count;
         }
@@ -5711,7 +5785,11 @@ namespace QuestTree.QuestGraph
             job.FellBack++;
             job.FellBackTo[Math.Max(1, Math.Min(3, state.Levels[next].Lod))]++;
 
-            foreach (var c in made[next]) job.Extra.Enqueue(c);
+            foreach (var c in made[next])
+            {
+                job.Extra.Enqueue(c);
+                CountUse(job, c.Mesh);   // PART-11 (1): counted as queued, not as made - MakeLevel makes levels it never queues
+            }
 
             foreach (var renderer in kept[next])
             {
@@ -5839,6 +5917,121 @@ namespace QuestTree.QuestGraph
             candidate.SourceTriangles = SubmeshTriangles(candidate);
 
             return candidate;
+        }
+
+        // --- PART-11 (1): the shared-mesh read cache ------------------------------------------------------
+
+        /// <summary>A candidate on this mesh is in line to be read (FilterChunk's list, a fallback's queue): one more
+        /// read to expect. A candidate that leaves the line without a read is uncounted where it leaves (UncountUse),
+        /// so a shared mesh's arrays are let go of as its last reader passes - an over-count only holds them longer,
+        /// under the cache's room; an under-count would be a miss, never a wrong building.</summary>
+        /// <param name="job">The build.</param>
+        /// <param name="mesh">The candidate's mesh.</param>
+        private static void CountUse(Job job, Mesh mesh)
+        {
+            if (!SharedMeshCache || mesh == null) return;
+
+            if (!job.MeshReads.TryGetValue(mesh, out var read) || read == null)
+            {
+                read = new MeshRead();
+                job.MeshReads[mesh] = read;
+            }
+
+            read.Uses++;
+        }
+
+        /// <summary>A candidate that leaves the line without a read - the plan's KindSkip, the loop's refusals (not
+        /// wanted, past the soft cap to a coarser level, no room) - is one read fewer to expect on its mesh.</summary>
+        /// <param name="job">The build.</param>
+        /// <param name="mesh">The candidate's mesh.</param>
+        private static void UncountUse(Job job, Mesh mesh)
+        {
+            if (!SharedMeshCache || mesh == null) return;
+            if (!job.MeshReads.TryGetValue(mesh, out var read) || read == null) return;
+
+            if (read.Uses > read.Reads) read.Uses--;
+            if (!read.Wanted) Forget(job, read);
+        }
+
+        /// <summary>The cache's entry for a candidate about to be read - its read counted - or null when the cache is
+        /// off or the mesh is gone. Called ONCE per read, at its start.</summary>
+        /// <param name="job">The build.</param>
+        /// <param name="candidate">The candidate.</param>
+        private static MeshRead TakeRead(Job job, Candidate candidate)
+        {
+            if (!SharedMeshCache) return null;
+
+            var mesh = candidate.Mesh;
+            if (mesh == null) return null;
+
+            if (!job.MeshReads.TryGetValue(mesh, out var read) || read == null)
+            {
+                // a candidate made somewhere CountUse was not - held to nothing, so it is never wanted
+                read = new MeshRead();
+                job.MeshReads[mesh] = read;
+            }
+
+            read.Reads++;
+            return read;
+        }
+
+        /// <summary>Whether the cache may hold <paramref name="bytes"/> more for this mesh: another candidate on it is
+        /// still to be read and the room is there. Books the bytes when it says yes; counts the refusal when not and
+        /// this is the read's main array (the vertices, the GPU bytes) - one refusal per read, not per submesh.</summary>
+        /// <param name="job">The build.</param>
+        /// <param name="read">The mesh's entry.</param>
+        /// <param name="bytes">What the arrays weigh.</param>
+        /// <param name="main">Whether these are the read's main arrays, whose refusal is the one counted.</param>
+        private static bool Retain(Job job, MeshRead read, long bytes, bool main)
+        {
+            if (read == null || !read.Wanted || bytes <= 0) return false;
+
+            if (job.CacheBytes + bytes > SharedMeshCacheBytes)
+            {
+                if (main) job.CacheRefused++;
+                return false;
+            }
+
+            if (!read.Counted)
+            {
+                read.Counted = true;
+                job.CacheHeld++;
+            }
+
+            read.Bytes += bytes;
+            job.CacheBytes += bytes;
+            if (job.CacheBytes > job.PeakCacheBytes) job.PeakCacheBytes = job.CacheBytes;
+
+            return true;
+        }
+
+        /// <summary>Lets a mesh's arrays go once the last candidate on it has taken its read (the read itself keeps
+        /// the arrays it was handed until its worker is done with them).</summary>
+        /// <param name="job">The build.</param>
+        /// <param name="read">The mesh's entry, or null.</param>
+        private static void Forget(Job job, MeshRead read)
+        {
+            if (read == null || read.Wanted) return;
+
+            job.CacheBytes -= read.Bytes;
+            if (job.CacheBytes < 0) job.CacheBytes = 0;
+
+            read.Bytes = 0;
+            read.Local = null;
+            read.UV = null;
+            read.UvTried = false;
+            read.Parts = null;
+            read.VertexBytes = null;
+            read.IndexBytes = null;
+            read.Stream = -1;
+        }
+
+        /// <summary>The cache, cleared with the building phase - the atlas that follows wants the memory.</summary>
+        /// <param name="job">The build.</param>
+        private static void ForgetMeshReads(Job job)
+        {
+            job.MeshReads.Clear();
+            job.CacheBytes = 0;
         }
 
         // --- reading a building ---------------------------------------------------------------------------
@@ -6099,7 +6292,7 @@ namespace QuestTree.QuestGraph
                     if (flight.Source != null && flight.Source.FromGpu)
                     {
                         if (outcome.Undecodable) job.Unreadable++;
-                        else job.GpuRead++;
+                        else if (!flight.Source.Served) job.GpuRead++;
                     }
 
                     if (outcome.Implausible) job.Implausible++;
@@ -6303,84 +6496,148 @@ namespace QuestTree.QuestGraph
         private static IEnumerator CaptureReadable(Job job, Candidate candidate)
         {
             var mesh = candidate.Mesh;
-            Vector3[] local = null;
+            var cache = TakeRead(job, candidate);
 
-            // One call, however large the mesh - it cannot be split - so its milliseconds are logged.
-            var clock = Stopwatch.StartNew();
-            Step(job, "a readable building", () => local = mesh.vertices);
-            job.PeakReadableMs = Math.Max(job.PeakReadableMs, clock.Elapsed.TotalMilliseconds);
-
-            if (local == null || local.Length < 3) yield break;
-
-            var parts = new List<int[]>();
-            var partSlots = new List<int>();
-
-            for (var s = candidate.SubFirst; s < candidate.SubEnd; s++)
+            try
             {
-                if (FrameSpent(job))
+                Vector3[] local = null;
+                var hit = false;
+
+                // PART-11 (1): the vertices another candidate's read left in the cache, else Unity's.
+                if (cache?.Local != null)
                 {
-                    yield return null;
-                    job.FrameClock.Restart();
+                    local = cache.Local;
+                    hit = true;
+                }
+                else
+                {
+                    // One call, however large the mesh - it cannot be split - so its milliseconds are logged.
+                    var clock = Stopwatch.StartNew();
+                    Step(job, "a readable building", () => local = mesh.vertices);
+                    job.PeakReadableMs = Math.Max(job.PeakReadableMs, clock.Elapsed.TotalMilliseconds);
+
+                    if (local != null && local.Length >= 3 && Retain(job, cache, local.Length * 12L, main: true)) cache.Local = local;
                 }
 
-                var sub = s;
+                if (local == null || local.Length < 3) yield break;
 
-                // GetTriangles applies the submesh's base vertex for us, so these index the array above.
-                clock.Restart();
-                Step(job, "a readable building's triangles", () =>
+                var parts = new List<int[]>();
+                var partSlots = new List<int>();
+
+                for (var s = candidate.SubFirst; s < candidate.SubEnd; s++)
                 {
-                    if (mesh.GetTopology(sub) != MeshTopology.Triangles) return;
+                    var sub = s;
 
-                    var indices = mesh.GetTriangles(sub);
-                    if (indices == null || indices.Length < 3) return;
-
-                    parts.Add(indices);
-                    partSlots.Add(sub - candidate.SubFirst);
-                });
-                job.PeakReadableMs = Math.Max(job.PeakReadableMs, clock.Elapsed.TotalMilliseconds);
-            }
-
-            if (parts.Count == 0) yield break;
-
-            // TexCoord0, when the mesh has one per vertex (stage W).
-            Vector2[] uvs = null;
-            Step(job, "a readable building's UVs", () =>
-            {
-                if (candidate.UvStream < 0) return;
-
-                // A static-batch member's mesh is the whole batch: its UV array is read only when this member's
-                // own vertex range is a real share of it (stage W review, M5).
-                if (candidate.Renderer.isPartOfStaticBatch)
-                {
-                    int lo = int.MaxValue, hi = -1;
-                    foreach (var part in parts)
-                        foreach (var index in part)
+                    // The submesh's triangles as a previous read on this mesh had them (null: it had none), else Unity's.
+                    if (cache?.Parts != null && cache.Parts.TryGetValue(sub, out var known))
+                    {
+                        if (known != null)
                         {
-                            if (index < lo) lo = index;
-                            if (index > hi) hi = index;
+                            parts.Add(known);
+                            partSlots.Add(sub - candidate.SubFirst);
                         }
 
-                    if (hi < lo || (long)(hi - lo + 1) * StaticBatchUvShare < local.Length)
+                        continue;
+                    }
+
+                    if (FrameSpent(job))
                     {
-                        job.StaticBatchUvSkipped++;
-                        return;
+                        yield return null;
+                        job.FrameClock.Restart();
+                    }
+
+                    // GetTriangles applies the submesh's base vertex for us, so these index the array above.
+                    int[] indices = null;
+                    var clock = Stopwatch.StartNew();
+                    var ran = Step(job, "a readable building's triangles", () =>
+                    {
+                        if (mesh.GetTopology(sub) != MeshTopology.Triangles) return;
+
+                        var read = mesh.GetTriangles(sub);
+                        if (read == null || read.Length < 3) return;
+
+                        indices = read;
+                    });
+                    job.PeakReadableMs = Math.Max(job.PeakReadableMs, clock.Elapsed.TotalMilliseconds);
+
+                    if (indices != null)
+                    {
+                        parts.Add(indices);
+                        partSlots.Add(sub - candidate.SubFirst);
+                    }
+
+                    // Held only beside held vertices (the parts index them), only from a step that ran (a swallowed
+                    // exception is not "no triangles"), and never for a static batch's member: its submeshes are its own
+                    // and no other member asks for them - only the batch's vertices and UVs are shared.
+                    if (ran && cache != null && cache.Local != null && !candidate.Renderer.isPartOfStaticBatch &&
+                        Retain(job, cache, 8L + (indices?.Length ?? 0) * 4L, main: false))
+                    {
+                        if (cache.Parts == null) cache.Parts = new Dictionary<int, int[]>();
+                        cache.Parts[sub] = indices;
                     }
                 }
 
-                var read = mesh.uv;
-                if (read != null && read.Length == local.Length) uvs = read;
-            });
+                if (parts.Count == 0) yield break;
 
-            Step(job, "a readable building's placement", () =>
+                // TexCoord0, when the mesh has one per vertex (stage W).
+                Vector2[] uvs = null;
+                Step(job, "a readable building's UVs", () =>
+                {
+                    if (candidate.UvStream < 0) return;
+
+                    // A static-batch member's mesh is the whole batch: its UV array is read only when this member's
+                    // own vertex range is a real share of it (stage W review, M5).
+                    if (candidate.Renderer.isPartOfStaticBatch)
+                    {
+                        int lo = int.MaxValue, hi = -1;
+                        foreach (var part in parts)
+                            foreach (var index in part)
+                            {
+                                if (index < lo) lo = index;
+                                if (index > hi) hi = index;
+                            }
+
+                        if (hi < lo || (long)(hi - lo + 1) * StaticBatchUvShare < local.Length)
+                        {
+                            job.StaticBatchUvSkipped++;
+                            return;
+                        }
+                    }
+
+                    // The UVs a previous read on this mesh had (UvTried with none: the mesh has no per-vertex UV), else Unity's.
+                    if (cache != null && cache.UvTried && cache.Local != null)
+                    {
+                        uvs = cache.UV;
+                        return;
+                    }
+
+                    var read = mesh.uv;
+                    if (read != null && read.Length == local.Length) uvs = read;
+
+                    if (cache != null && cache.Local != null && Retain(job, cache, 8L + (uvs?.Length ?? 0) * 8L, main: false))
+                    {
+                        cache.UvTried = true;
+                        cache.UV = uvs;
+                    }
+                });
+
+                Step(job, "a readable building's placement", () =>
+                {
+                    var source = NewSource(job, candidate);
+                    source.Local = local;
+                    source.Parts = parts;
+                    source.PartSlot = partSlots;
+                    source.LocalUV = uvs;
+                    source.Served = hit;
+                    Slots(job, candidate, source);
+                    job.Captured = source;
+                    if (hit) job.CacheHits++;
+                });
+            }
+            finally
             {
-                var source = NewSource(job, candidate);
-                source.Local = local;
-                source.Parts = parts;
-                source.PartSlot = partSlots;
-                source.LocalUV = uvs;
-                Slots(job, candidate, source);
-                job.Captured = source;
-            });
+                Forget(job, cache);
+            }
         }
 
         /// <summary>Stage W: each of the candidate's submesh slots' material, registered, with its texture's
@@ -7031,6 +7288,34 @@ namespace QuestTree.QuestGraph
         /// <param name="candidate">The candidate.</param>
         private static IEnumerator ReadFromGpu(Job job, Candidate candidate)
         {
+            // PART-11 (1): the stream's bytes another candidate's readback of this mesh left in the cache - no readback.
+            var cache = TakeRead(job, candidate);
+
+            if (cache?.VertexBytes != null && cache.IndexBytes != null && cache.Stream == candidate.Stream)
+            {
+                try
+                {
+                    var held = cache;
+                    Step(job, "a building's layout", () => job.Captured = GpuSource(job, candidate, held.VertexBytes, held.IndexBytes));
+
+                    if (job.Captured == null)
+                    {
+                        job.Unreadable++;
+                    }
+                    else
+                    {
+                        job.Captured.Served = true;
+                        job.CacheHits++;
+                    }
+                }
+                finally
+                {
+                    Forget(job, cache);
+                }
+
+                yield break;
+            }
+
             GraphicsBuffer vertexBuffer = null;
             GraphicsBuffer indexBuffer = null;
 
@@ -7122,6 +7407,9 @@ namespace QuestTree.QuestGraph
 
                 Release(vertexBuffer);
                 Release(indexBuffer);
+
+                // the last candidate on this mesh, whatever became of its read
+                Forget(job, cache);
             }
 
             if (vertexBytes == null || indexBytes == null)
@@ -7133,7 +7421,20 @@ namespace QuestTree.QuestGraph
             // The bytes and the layout to decode them with, into job.Captured; the decode is the worker's.
             Step(job, "a building's layout", () => job.Captured = GpuSource(job, candidate, vertexBytes, indexBytes));
 
-            if (job.Captured == null) job.Unreadable++;
+            if (job.Captured == null)
+            {
+                job.Unreadable++;
+                yield break;
+            }
+
+            // PART-11 (1): held for the candidates still to be read on this mesh, when there is room - once the layout
+            // is known to decode (a position format this build cannot decode is not worth holding for its siblings).
+            if (cache != null && Retain(job, cache, vertexBytes.Length + (long)indexBytes.Length, main: true))
+            {
+                cache.VertexBytes = vertexBytes;
+                cache.IndexBytes = indexBytes;
+                cache.Stream = candidate.Stream;
+            }
         }
 
         /// <summary>Waits for one accepted readback before its buffer is released. Guarded on its own:
@@ -10375,7 +10676,12 @@ namespace QuestTree.QuestGraph
                 $"{N(job.ThinSkipped)} thin LODs skipped, " +
                 $"{job.BuildingClock.Elapsed.TotalSeconds.ToString("0.0", f1)} s (soft cap {N(job.SoftSeconds)} s, hard " +
                 $"{N(job.HardSeconds)} s, relief {job.ReliefSeconds.ToString("0.0", f1)} s), longest readable read " +
-                $"{job.PeakReadableMs.ToString("0", f1)} ms." +
+                $"{job.PeakReadableMs.ToString("0", f1)} ms" +
+                (SharedMeshCache
+                    ? $", {N(job.CacheHits)} mesh read(s) served from the cache ({N(job.CacheHeld)} shared mesh(es) held, peak " +
+                      $"{(job.PeakCacheBytes / (1024d * 1024d)).ToString("0.0", f1)} MB of {SharedMeshCacheBytes >> 20} MB" +
+                      (job.CacheRefused > 0 ? $", {N(job.CacheRefused)} read(s) not held for the room" : "") + ")."
+                    : ".") +
                 (job.PastHard ? $" Hard cap reached with {N(job.CutAtHardCap)} candidate(s) not looked at." : "") +
                 (job.Abandoned + job.AbandonedAtHard > 0
                     ? $" {N(job.Abandoned)} coarse fallback(s) abandoned at the drain deadline, a cap or an abort; " +
@@ -10998,7 +11304,9 @@ namespace QuestTree.QuestGraph
             if (job.Stored != null)
                 foreach (var band in job.Request.Base.Bands) baseRelief += band.CellCount * 3L + 64L;
 
-            var peak = relief + floats + job.RendererCount * 8L + job.PeakReadbackBytes +
+            // PART-11 (1): the shared-mesh cache's peak, on top - a flight's Source.Bytes already counts the arrays it was
+            // served, so a held array is summed twice here; an overstatement, like the sum of peaks it joins.
+            var peak = relief + floats + job.RendererCount * 8L + job.PeakReadbackBytes + job.PeakCacheBytes +
                        result.BuildingBytes + candidates + buffers + baseRelief;
 
             // WP7: said at Info, against the memory ceiling it rests on (D5: M triangles at 64 B, a sixteenth of
@@ -11016,8 +11324,9 @@ namespace QuestTree.QuestGraph
                 (baseRelief > 0 ? $"the stored mesh's relief {N(baseRelief)} B, " : "") +
                 $"pipeline peak {N(job.PeakPipelineBytes)} B over up to {N(job.PeakWorkers)} worker(s), " +
                 $"{N(job.LanesDropped)} lane(s) dropped for size, largest readback " +
-                $"{(job.PeakReadbackBytes / 1024d).ToString("0", CultureInfo.InvariantCulture)} KB), " +
-                "excluding the arrays Unity allocates for mesh.vertices and GetTriangles.");
+                $"{(job.PeakReadbackBytes / 1024d).ToString("0", CultureInfo.InvariantCulture)} KB, shared-mesh cache peak " +
+                $"{(job.PeakCacheBytes / 1024d).ToString("0", CultureInfo.InvariantCulture)} KB), " +
+                "excluding the per-read arrays Unity allocates for mesh.vertices and GetTriangles.");
 
             Step(job, "the accumulation line", () => ReportAccumulation(job, result));
         }
