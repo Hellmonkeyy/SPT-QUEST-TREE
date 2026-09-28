@@ -87,6 +87,22 @@ namespace QuestTree
             return b == 0 && i == 0 && colour == 0;
         }
 
+        /// <summary>The text with no markup at all, for sorting, searching and measuring: a dressed name loses its
+        /// tags, an escaped name is unwrapped (its broken closes made whole again), anything else is itself. Never
+        /// for display - a stripped name would parse again.</summary>
+        public static string Plain(string text)
+        {
+            if (string.IsNullOrEmpty(text) || text.IndexOf('<') < 0) return text;
+
+            if (AlreadyWrapped(text))
+                return text.Substring(Open.Length, text.Length - Open.Length - Close.Length).Replace(ZeroWidth, "");
+
+            return Dressed(text) ? Tags.Replace(text, "") : text;
+        }
+
+        private static readonly System.Text.RegularExpressions.Regex Tags =
+            new System.Text.RegularExpressions.Regex("<[^<>]*>", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
         /// <summary>Whether this string is one Safe produced: opens with the tag, ends with it, and
         /// carries no other close in between.</summary>
         private static bool AlreadyWrapped(string text)

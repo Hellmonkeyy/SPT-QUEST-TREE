@@ -214,7 +214,7 @@ namespace QuestTree.UI
                 return;
             }
 
-            var items = payload.Items.OrderBy(i => i.Name, StringComparer.OrdinalIgnoreCase).ToList();
+            var items = payload.Items.OrderBy(i => RichText.Plain(i.Name), StringComparer.OrdinalIgnoreCase).ToList();
             var done = items.Count(i => i.IsSatisfied);
 
             Section(parent, ref y, $"Collector items      {done} / {items.Count}");

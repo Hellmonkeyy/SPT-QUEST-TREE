@@ -513,18 +513,12 @@ namespace QuestTree.QuestGraph
         /// <summary>
         /// HQ S3.10: a material's tile is sized by its USE, not by its texture alone - this many texels for every metre
         /// of wall one repeat of it covers (metres a repeat = sqrt(world area / UV area over every triangle drawn with
-        /// it, MeasureUse), capped by the texture's own size and AtlasTileMax. Then ONE scale over the map, bisected as
-        /// AreaBudget's, brings the sum of the padded tiles inside <see cref="AtlasPagePixelShare"/> of the page cap,
-        /// so a map of many materials trades sharpness evenly rather than leaving tiles unplaced. Derived from the
-        /// scene, never from a map. Folded into the recipe by the bump commit (S3.13).
+        /// it, MeasureUse), capped by the texture's own size and AtlasTileMax. Then ONE scale over the map, bisected on a
+        /// DRY RUN of the shelf packer (WantTileSides - a 4096 px page holds nine 1024 px tiles on shelves, which no area
+        /// share predicts), so a map of many materials trades sharpness evenly rather than leaving tiles unplaced.
+        /// Derived from the scene, never from a map. Folded into the recipe by the bump commit (S3.13).
         /// </summary>
         private const double TexelsPerMetre = 128d;
-
-        /// <summary>HQ (test 2026-09-28): the fit is a DRY RUN of the shelf packer, not a pixel-area share - a 4096 px page
-        /// holds nine 1024 px tiles on shelves (58 % of its area), and an area share of 85 % planned 114 such tiles for eight
-        /// pages, left 183 tiles unplaced and drew their buildings as flat grey slabs. The share is kept as the bisection's
-        /// starting guess only.</summary>
-        private const double AtlasPagePixelShare = 0.85d;
 
         /// <summary>HQ S3 review (low): the fit never brings a tile that wanted the cap under this side - past that the
         /// packer leaves tiles unplaced (counted, as before) rather than the whole atlas going to 4 px.</summary>
@@ -568,6 +562,10 @@ namespace QuestTree.QuestGraph
         /// Runs every stop on the re-cast relief, so it is not in the recipe; false leaves the relief as cast.
         /// </summary>
         internal static readonly bool GroundUnderBuildings = true;
+
+        /// <summary>How far under a cell's cast hit a building triangle may lie and still count as covering the cell (a
+        /// floor slab at the hit itself, a threshold a step down); anything deeper is under the ground.</summary>
+        private const float BelowHitSlackMetres = 1.5f;
 
         private const int FoliageMaxTriangles = 3_000;
         private const int FoliageTileMax = 512;
@@ -704,7 +702,7 @@ namespace QuestTree.QuestGraph
         {
             "r7", RecipePart(MapMeshFile.Version), RecipePart(MapMeshIndex.Version),
             // HQ S3.13: the high-quality constants
-            RecipePart(TexelsPerMetre), RecipePart(AtlasPagePixelShare), RecipePart(CutoutAlphaTiles),
+            RecipePart(TexelsPerMetre), RecipePart(CutoutAlphaTiles),
             RecipePart(FoliageAtCoarsest), RecipePart(FoliageMaxTriangles), RecipePart(FoliageTileMax), RecipePart(ShippedMeshBytes),
             RecipePart(RequestFullMips), RecipePart(DefaultDeflatedBytesPerTriangle),
             RecipePart(AreaBudget.TrianglesPerSquareMetre), RecipePart(AreaBudget.MinTriangles),
@@ -1824,8 +1822,11 @@ namespace QuestTree.QuestGraph
             internal readonly Dictionary<Material, int> MaterialIds = new Dictionary<Material, int>();
             internal readonly List<float[]> PendingUV = new List<float[]>();
 
-            /// <summary>HQ S3.10: the one scale the wanted tile sides were brought down by to fit the pages (1 = none).</summary>
+            /// <summary>HQ S3.10: the one scale the wanted tile sides were brought down by to fit the pages (1 = none), and
+            /// whether the dry run placed every tile at it (false: Layout will leave some unplaced, and says so).</summary>
             internal double TileScale = 1d;
+
+            internal bool TileFitLanded = true;
             internal readonly List<int[]> PendingTriMat = new List<int[]>();
             internal long PendingUVBytes;
             internal long PendingTriMatBytes;
@@ -9055,9 +9056,11 @@ namespace QuestTree.QuestGraph
 
         /// <summary>
         /// HQ S3.10: every textured material's wanted tile side - <see cref="TexelsPerMetre"/> x the metres one repeat
-        /// covers (sqrt of its world area over its UV area) - then one scale over the map, bisected, until the padded
-        /// tiles of the materials NOT already stored fit what the pages have left (<see cref="AtlasPagePixelShare"/> of
-        /// the cap, less a full page for every stored one). A material with no measured use keeps its texture's size.
+        /// covers (sqrt of its world area over its UV area) - then one scale over the map, bisected on a dry run of the
+        /// shelf packer over the very requests Layout will make (the materials not keeping a stored rect, and a flat tile
+        /// each), from a copy of the stored packing state, until every tile places. The final scale is verified once
+        /// more; when even the smallest fit does not place, the line says so. A material with no measured use wants its
+        /// cap, scaled with the rest, and no fitted side goes under MinFittedTileSide.
         /// </summary>
         /// <param name="job">The build.</param>
         private static void WantTileSides(Job job)
@@ -9132,7 +9135,8 @@ namespace QuestTree.QuestGraph
                 var pages = new int[n];
                 var xs = new int[n];
                 var ys = new int[n];
-                var limits = new[] { flats > 0 || job.StoredFlats ? MapMeshFile.MaxAtlasPages - 1 : MapMeshFile.MaxAtlasPages, MapMeshFile.MaxAtlasPages };
+                // Layout's and LayoutAccumulated's own rule: one page fewer for textured tiles when this build packs flats
+                var limits = new[] { flats > 0 ? MapMeshFile.MaxAtlasPages - 1 : MapMeshFile.MaxAtlasPages, MapMeshFile.MaxAtlasPages };
                 var state = job.PackState;   // a struct: the dry run advances a copy
 
                 AtlasPacker.PackFrom(ref state, widths, heights, MapMeshFile.AtlasPageSize, MapMeshFile.MaxAtlasPages, AtlasPadding,
@@ -9158,7 +9162,10 @@ namespace QuestTree.QuestGraph
                 scale = lo;
             }
 
+            // the packer is not quite monotone in the scale (sides round to 4 px and re-sort): the scale chosen is checked
+            // once as it will be used, and a fit that does not land is said, not assumed
             job.TileScale = scale;
+            job.TileFitLanded = Fits(scale);
 
             for (var m = 0; m < job.Materials.Count; m++)
             {
@@ -10602,7 +10609,8 @@ namespace QuestTree.QuestGraph
 
             return $"; tile sides: {N(s128)} <=128, {N(s256)} 256, {N(s512)} 512, {N(s1024)} 1024 (wanted " +
                    $"{TexelsPerMetre.ToString("0", CultureInfo.InvariantCulture)} texels/m, scaled x" +
-                   $"{job.TileScale.ToString("0.00", CultureInfo.InvariantCulture)} by a dry run of the packer to fit {MapMeshFile.MaxAtlasPages} pages, cap " +
+                   $"{job.TileScale.ToString("0.00", CultureInfo.InvariantCulture)} by a dry run of the packer to fit {MapMeshFile.MaxAtlasPages} pages" +
+                   (job.TileFitLanded ? "" : " - THE FIT DID NOT LAND, some tiles are left unplaced") + ", cap " +
                    $"{AtlasTileMax} px), {N(coarser)} captured from a coarser resident mip";
         }
 
@@ -11187,6 +11195,12 @@ namespace QuestTree.QuestGraph
             var sz = (file.MaxZ - file.MinZ) / q / cell;
             var covered = new bool[w * h];
             var buildingsCovering = 0;
+            var heights = top.Heights;
+
+            // a triangle covers a cell only when it is AT OR ABOVE the cell's cast hit (less a slack): a bunker or a car
+            // park under the ground is below the hit and must not flatten the hill over it
+            var span = file.YMax - file.YMin;
+            var slackCodes = span > 0f ? (int)Math.Ceiling(BelowHitSlackMetres * q / span) : 0;
 
             for (var i = 0; i < file.Buildings.Count; i++)
             {
@@ -11209,6 +11223,8 @@ namespace QuestTree.QuestGraph
                     // the triangle's footprint (twice its area in cells): a vertical face covers nothing
                     var area2 = (x1 - x0) * (z2 - z0) - (x2 - x0) * (z1 - z0);
                     if (Math.Abs(area2) < 1e-3) continue;
+
+                    var topCode = Math.Max(b.Y[v0], Math.Max(b.Y[v1], b.Y[v2]));
 
                     var minCol = Math.Max(0, (int)Math.Floor(Math.Min(x0, Math.Min(x1, x2))));
                     var maxCol = Math.Min(w - 1, (int)Math.Floor(Math.Max(x0, Math.Max(x1, x2))));
@@ -11233,7 +11249,11 @@ namespace QuestTree.QuestGraph
 
                             if (e0 < 0d || e1 < 0d || e2 < 0d) continue;
 
-                            covered[row * w + col] = true;
+                            var n = row * w + col;
+                            var hit = heights[n];
+                            if (hit == MapMeshFile.NoHit || topCode + slackCodes < hit) continue;   // under the ground, or no ground
+
+                            covered[n] = true;
                             touched = true;
                         }
                     }
@@ -11243,7 +11263,6 @@ namespace QuestTree.QuestGraph
             }
 
             // the flood: every uncovered measured cell next to a covered one seeds its own height inward
-            var heights = top.Heights;
             var fill = new ushort[w * h];
             var queue = new Queue<int>();
 
@@ -11286,6 +11305,7 @@ namespace QuestTree.QuestGraph
             }
 
             var lowered = 0;
+            var keptLower = 0;
             var coveredCells = 0;
 
             for (var n = 0; n < w * h; n++)
@@ -11294,17 +11314,19 @@ namespace QuestTree.QuestGraph
                 coveredCells++;
                 if (!reached[n] || heights[n] == MapMeshFile.NoHit) continue;
 
-                if (heights[n] != fill[n])
+                // only ever DOWN: a cell the cast already measured lower than the edge (a sunken yard) keeps its hit
+                if (fill[n] < heights[n])
                 {
                     heights[n] = fill[n];
                     lowered++;
                 }
+                else if (fill[n] > heights[n]) keptLower++;
             }
 
             Plugin.LogSource?.LogInfo(
                 $"QuestTree: relief under {job.Request.Map}'s buildings - {N(coveredCells)} cell(s) under {N(buildingsCovering)} building(s) " +
                 $"({(100d * coveredCells / Math.Max(1, w * h)).ToString("0.0", CultureInfo.InvariantCulture)} % of the top band), " +
-                $"{N(lowered)} lowered to the ground at the buildings' edges, in {clock.ElapsedMilliseconds} ms.");
+                $"{N(lowered)} lowered to the ground at the buildings' edges, {N(keptLower)} already lower and kept, in {clock.ElapsedMilliseconds} ms.");
         }
 
         /// <summary>HQ S2.8: the buildings stored at a LOD level above 0 after this stop - kept stored rows and this

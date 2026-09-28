@@ -318,7 +318,8 @@ namespace QuestTree.UI
             var min = LayoutMetrics.NodeWidth;
             var max = LayoutMetrics.MaxNodeWidth;
 
-            var name = chain != null && chain.Collapsed ? chain.Title : DisplayName(node);
+            // measured and cut as PLAIN text: a dressed name's tags are not glyphs, and a cut inside a tag would show it
+            var name = RichText.Plain(chain != null && chain.Collapsed ? chain.Title : DisplayName(node));
 
             // One line if the whole name fits inside the clamp.
             var oneLine = EstimateWidth(name, LayoutMetrics.TitleFontSize) + chrome;
@@ -545,15 +546,17 @@ namespace QuestTree.UI
 
             // Glyph and badges live top-right; RefreshBadges above has just counted them.
             var titleWidth = size.x - LayoutMetrics.TitleInsetX - 44f - BadgeInset;
-            var (head, tail) = TitleParts(DisplayName(node));
+            var plainName = RichText.Plain(DisplayName(node));
+            var (head, tail) = TitleParts(plainName);
 
             // The head line only has to name the series, so it may lose its tail; the single-line
-            // and episode forms keep theirs, because that is what tells one box from the next.
+            // and episode forms keep theirs, because that is what tells one box from the next. The title is
+            // the PLAIN name: a box's title is cut to its width, and a cut inside a colour tag would show the tag.
             _title.text = GameStyle.Safe(
-                chain != null && chain.Collapsed ? FitToWidth(chain.Title, titleWidth)
+                chain != null && chain.Collapsed ? FitToWidth(RichText.Plain(chain.Title), titleWidth)
                 : _tall && tail != null
                     ? FitToWidth(head, titleWidth, protectTail: false) + "\n" + FitToWidth(tail, titleWidth)
-                    : FitToWidth(DisplayName(node), titleWidth));
+                    : FitToWidth(plainName, titleWidth));
 
             ((RectTransform)transform).sizeDelta = size;
 

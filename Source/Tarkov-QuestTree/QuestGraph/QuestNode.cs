@@ -232,7 +232,7 @@ namespace QuestTree.QuestGraph
             {
                 if (string.IsNullOrEmpty(part)) continue;
                 if (builder.Length > 0) builder.Append('\n');
-                builder.Append(part.ToLowerInvariant());
+                builder.Append(RichText.Plain(part).ToLowerInvariant());   // a dressed name's tags are not searchable text
             }
 
             SearchText = builder.ToString();
@@ -250,10 +250,10 @@ namespace QuestTree.QuestGraph
             if (Contains(Name, needle)) return null;   // matched on its own name: self-evident
 
             foreach (var reward in Rewards)
-                if (Contains(reward?.Name, needle)) return $"reward: {reward.Name}";
+                if (Contains(reward?.Name, needle)) return $"reward: {RichText.Plain(reward.Name)}";
 
             foreach (var unlock in Unlocks)
-                if (Contains(unlock?.Name, needle)) return $"unlocks: {unlock.Name}";
+                if (Contains(unlock?.Name, needle)) return $"unlocks: {RichText.Plain(unlock.Name)}";
 
             foreach (var objective in StatedObjectives)
             {
@@ -273,7 +273,7 @@ namespace QuestTree.QuestGraph
 
         private static bool Contains(string haystack, string needle) =>
             !string.IsNullOrEmpty(haystack) &&
-            haystack.IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0;
+            RichText.Plain(haystack).IndexOf(needle, StringComparison.OrdinalIgnoreCase) >= 0;
 
         public QuestNode(QuestDto dto)
         {
