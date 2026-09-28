@@ -249,7 +249,7 @@ namespace QuestTree.QuestGraph
         /// past six at q90 is encoded again at q80, and one past six even then is not offered but still POSTED
         /// empty, so the host drops it rather than waiting for it,
         /// and the buildings drawn from it fall back to the sides and tints they had before pages.</summary>
-        private const int MaxAtlasPageBytes = 6 * 1024 * 1024;
+        private const int MaxAtlasPageBytes = 12 * 1024 * 1024;   // HQ S3.10: the host's cap moved with it (MapStore)
 
         /// <summary>The four sides a capture may carry an oblique picture from, in the order they are
         /// posted and fetched - the host's own order (MapStore.SideDirs), so both halves walk them

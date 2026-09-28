@@ -164,7 +164,7 @@ namespace QuestTreeServer
         /// material, at most 256 px, cut out of its page by the viewer).</summary>
         private const int MinTileSide = 4;
 
-        private const int MaxTileSide = 256;
+        private const int MaxTileSide = 1024;   // HQ S3.10: tiles sized by use, up to MapMeshFile.AtlasTileMax (1024 from the bump)
 
         /// <summary>The atlas page's side, which a tile rect must lie inside (MapMeshFile.AtlasPageSize).</summary>
         private const int AtlasPageSide = 4096;
@@ -233,7 +233,7 @@ namespace QuestTreeServer
         /// Six is that with room, and still far under what one post can carry (a 6 MB page is ~8.3 MB of
         /// base64). The client holds a page to the same six before it posts it
         /// (MapTransfer.MaxAtlasPageBytes).</summary>
-        private const int MaxAtlasPageBytes = 6 * 1024 * 1024;
+        private const int MaxAtlasPageBytes = 12 * 1024 * 1024;   // HQ S3.10: pages of 1024 px tiles weigh more at q90
 
         /// <summary>A page's base64 ceiling, checked BEFORE decoding, for
         /// <see cref="MaxEncodedChars"/>' reason.</summary>

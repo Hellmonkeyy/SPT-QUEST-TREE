@@ -230,7 +230,7 @@ MESH_MAX_FILE_BYTES = 512 * 1024 * 1024      # the protocol absolute (MapStore.M
 MESH_MAX_ATLAS_PAGES = 8               # MapMeshFile.MaxAtlasPages
 MESH_MAX_RANGES_PER_BUILDING = 64      # MapMeshFile.MaxRangesPerBuilding
 ATLAS_PAGE_SIZE = 4096                 # MapMeshFile.AtlasPageSize
-ATLAS_TILE_MAX = 256                   # MapMeshFile.AtlasTileMax
+ATLAS_TILE_MAX = 1024                  # MapMeshFile.AtlasTileMax (HQ S3.10: 1024 from the recipe bump; accepts older 256 files)
 ATLAS_TILE_ALIGN = 4                   # MapMeshFile.TileAlign (the viewer's DXT1 blocks)
 # What the file may inflate to: the host's D14 rule from the meta's DECLARED counts - 3 B a cell, 42 B a
 # triangle (12 of indices, at most 3 vertices x 10 B), 2,328 B a building slot (counts and 64 ranges) for

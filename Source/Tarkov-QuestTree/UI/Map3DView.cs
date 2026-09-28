@@ -2995,10 +2995,11 @@ namespace QuestTree.UI
                 return store;
             }
 
-            /// <summary>A tile's identity: page (3 bits), x and y (13 each), w and h (9 each, up to 256... 511).</summary>
+            /// <summary>A tile's identity: page (3 bits), x and y (13 each), w and h (11 each, up to 2047 - HQ S3.10 widened
+            /// them from 9, where a 512 px side masked to 0).</summary>
             private static long KeyOf(int page, int x, int y, int w, int h) =>
-                ((long)page << 44) | ((long)(x & 0x1FFF) << 31) | ((long)(y & 0x1FFF) << 18) | ((long)(w & 0x1FF) << 9) |
-                (long)(h & 0x1FF);
+                ((long)page << 48) | ((long)(x & 0x1FFF) << 35) | ((long)(y & 0x1FFF) << 22) | ((long)(w & 0x7FF) << 11) |
+                (long)(h & 0x7FF);
 
             /// <summary>WORKER-SAFE (the index is complete before any prep starts and never changes): the tile a
             /// range draws, or -1.</summary>

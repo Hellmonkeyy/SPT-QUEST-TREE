@@ -234,7 +234,7 @@ namespace QuestTree.QuestGraph
         /// buildings hold and the new ones want - is at least <see cref="RetryHeadroomFactor"/> x the finer level's source
         /// triangles: with S2.6 and S2.7 a read that fits the headroom lands, so the retry converges. The retries of one
         /// stop are bounded by <see cref="RetrySeconds"/> of worker time at the decimation rate measured in this raid
-        /// (<see cref="DecimationRateFor"/>); groups past the bound wait for the next stop. Before: 53 groups on Customs
+        /// (<see cref="RetryBudgetTriangles"/>); groups past the bound wait for the next stop. Before: 53 groups on Customs
         /// stayed at LOD1 for 62 stops with 1.9 M triangles of headroom. False gates as before. Not in the recipe.
         /// </summary>
         internal static readonly bool RetryWhenHeadroomGrew = true;
@@ -504,6 +504,23 @@ namespace QuestTree.QuestGraph
         /// the pixels those repeats may add up to, the border each tile keeps, the flat tile's side, and the
         /// slack a UV may have past a whole repeat before it needs another.</summary>
         private const int AtlasTileMax = MapMeshFile.AtlasTileMax;
+
+        /// <summary>
+        /// HQ S3.10: a material's tile is sized by its USE, not by its texture alone - this many texels for every metre
+        /// of wall one repeat of it covers (metres a repeat = sqrt(world area / UV area over every triangle drawn with
+        /// it, MeasureUse), capped by the texture's own size and AtlasTileMax. Then ONE scale over the map, bisected as
+        /// AreaBudget's, brings the sum of the padded tiles inside <see cref="AtlasPagePixelShare"/> of the page cap,
+        /// so a map of many materials trades sharpness evenly rather than leaving tiles unplaced. Derived from the
+        /// scene, never from a map. Folded into the recipe by the bump commit (S3.13).
+        /// </summary>
+        private const double TexelsPerMetre = 128d;
+
+        private const double AtlasPagePixelShare = 0.85d;
+
+        /// <summary>HQ S3.10: a streamed texture is asked for its full mip chain when its material is registered, so the
+        /// capture frames later blits from the finest level rather than the one resident where the player stood; a tile
+        /// still taken from a coarser mip keeps the existing upgrade path (Tile.Deficient). False leaves the request alone.</summary>
+        private static readonly bool RequestFullMips = true;
 
         /// <summary>Seconds the capture sets aside for the atlas out of its budget (taken off the building
         /// phase's), and the ONE cap over the whole atlas phase - measuring, packing, capturing, filling, handing
@@ -1717,6 +1734,9 @@ namespace QuestTree.QuestGraph
 
             internal readonly Dictionary<Material, int> MaterialIds = new Dictionary<Material, int>();
             internal readonly List<float[]> PendingUV = new List<float[]>();
+
+            /// <summary>HQ S3.10: the one scale the wanted tile sides were brought down by to fit the pages (1 = none).</summary>
+            internal double TileScale = 1d;
             internal readonly List<int[]> PendingTriMat = new List<int[]>();
             internal long PendingUVBytes;
             internal long PendingTriMatBytes;
@@ -7810,6 +7830,13 @@ namespace QuestTree.QuestGraph
             /// <summary>WP2: captured by this build (not only copied from the stored row).</summary>
             internal bool CapturedNow;
 
+            /// <summary>HQ S3.10: the world area and the UV area of every triangle drawn with it (MeasureUse), and the tile
+            /// side its use wants after the map-wide fit (WantTileSides); 0 = unmeasured, the texture's own size.</summary>
+            internal double WorldArea;
+
+            internal double UvArea;
+            internal int Wanted;
+
             /// <summary>WP2 (fixes 2): a tile of it found no room this build (the pages were full).</summary>
             internal bool Unplaced;
         }
@@ -8065,6 +8092,19 @@ namespace QuestTree.QuestGraph
                     // WP2 (2.10): what the stored atlas knows the material by, and its tile there if it has one
                     info.Key = MaterialKey(material, info);
                     info.Mip = MipOf(info.Texture);
+
+                    // HQ S3.10: the full chain asked for, so the capture frames later reads the finest level
+                    if (RequestFullMips)
+                    {
+                        try
+                        {
+                            if (info.Texture is Texture2D streamed && streamed.streamingMipmaps) streamed.requestedMipmapLevel = 0;
+                        }
+                        catch (Exception)
+                        {
+                            // not a streamed texture, or the request is refused: the resident level is captured
+                        }
+                    }
                     if (job.StoredTiles != null && job.StoredTiles.TryGetValue(info.Key, out var row)) info.Stored = row;
 
                     id = job.Materials.Count;
@@ -8177,6 +8217,9 @@ namespace QuestTree.QuestGraph
                         job.FrameClock.Restart();
                     }
                 }
+
+                // HQ S3.10: each textured tile's side from its use, fitted to the pages
+                Step(job, "the tile sides", () => WantTileSides(job));
 
                 // 2. the tiles, packed
                 var requests = new List<int[]>();       // material, kind (0 textured, 1 flat), w, h, page, x, y
@@ -8494,8 +8537,16 @@ namespace QuestTree.QuestGraph
             var mats = job.PendingTriMat[i];
             if (uv == null || mats == null) return;
 
-            var indices = job.File.Buildings[i].Indices;
+            var b = job.File.Buildings[i];
+            var indices = b.Indices;
             var uses = new List<AtlasUse>();
+
+            // HQ S3.10: the dequantised positions, for the world area each material covers
+            var file = job.File;
+            var q = (double)MapMeshFile.MaxQuantised;
+            var sx = (file.MaxX - file.MinX) / q;
+            var sy = (file.YMax - file.YMin) / q;
+            var sz = (file.MaxZ - file.MinZ) / q;
 
             for (var t = 0; t < mats.Length; t++)
             {
@@ -8521,6 +8572,30 @@ namespace QuestTree.QuestGraph
                     if (uu > use.MaxU) use.MaxU = uu;
                     if (vv < use.MinV) use.MinV = vv;
                     if (vv > use.MaxV) use.MaxV = vv;
+                }
+
+                // HQ S3.10: this triangle's world and UV area, onto the material
+                if (b.X != null && b.Y != null && b.Z != null)
+                {
+                    int v0 = (int)indices[t * 3], v1 = (int)indices[t * 3 + 1], v2 = (int)indices[t * 3 + 2];
+                    if (v0 < b.X.Length && v1 < b.X.Length && v2 < b.X.Length)
+                    {
+                        double ax = (b.X[v1] - (double)b.X[v0]) * sx, ay = (b.Y[v1] - (double)b.Y[v0]) * sy, az = (b.Z[v1] - (double)b.Z[v0]) * sz;
+                        double bx = (b.X[v2] - (double)b.X[v0]) * sx, by = (b.Y[v2] - (double)b.Y[v0]) * sy, bz = (b.Z[v2] - (double)b.Z[v0]) * sz;
+                        double cx = ay * bz - az * by, cy = az * bx - ax * bz, cz = ax * by - ay * bx;
+                        var world = 0.5 * Math.Sqrt(cx * cx + cy * cy + cz * cz);
+
+                        double du1 = uv[v1 * 2] - (double)uv[v0 * 2], dv1 = uv[v1 * 2 + 1] - (double)uv[v0 * 2 + 1];
+                        double du2 = uv[v2 * 2] - (double)uv[v0 * 2], dv2 = uv[v2 * 2 + 1] - (double)uv[v0 * 2 + 1];
+                        var uvArea = 0.5 * Math.Abs(du1 * dv2 - du2 * dv1);
+
+                        if (IsFinite(world) && IsFinite(uvArea) && world > 0d && uvArea > 0d)
+                        {
+                            var info = job.Materials[m];
+                            info.WorldArea += world;
+                            info.UvArea += uvArea;
+                        }
+                    }
                 }
             }
 
@@ -8571,8 +8646,8 @@ namespace QuestTree.QuestGraph
 
                 if (info.Textured && info.Texture != null && info.Texture.dimension == TextureDimension.Tex2D)
                 {
-                    var w = TileSide(info.Texture.width);
-                    var h = TileSide(info.Texture.height);
+                    var w = TileSide(info.Texture.width, WantedOf(info));
+                    var h = TileSide(info.Texture.height, WantedOf(info));
                     requests.Add(new[] { m, 0, w, h, -1, 0, 0 });
                 }
 
@@ -8665,7 +8740,7 @@ namespace QuestTree.QuestGraph
                     if (!used) continue;
 
                     if (info.Textured && tex2d)
-                        fresh.Add(new[] { m, 0, TileSide(info.Texture.width), TileSide(info.Texture.height), -1, 0, 0 });
+                        fresh.Add(new[] { m, 0, TileSide(info.Texture.width, WantedOf(info)), TileSide(info.Texture.height, WantedOf(info)), -1, 0, 0 });
 
                     fresh.Add(new[] { m, 1, AtlasFlatPixels, AtlasFlatPixels, -1, 0, 0 });
                     continue;
@@ -8688,7 +8763,9 @@ namespace QuestTree.QuestGraph
                     info.Captured = row.Captured;
                     info.OpaqueShare = row.OpaqueShare;
 
-                    if (tex2d && TileSide(info.Texture.width) == row.W && TileSide(info.Texture.height) == row.H && row.Deficient(info.Mip))
+                    // HQ S3.10: a stored tile keeps its SIZE (its rect cannot grow, and stored ranges name it); a deficient
+                    // one is captured again at that size
+                    if (tex2d && TileSide(info.Texture.width, row.W) == row.W && TileSide(info.Texture.height, row.H) == row.H && row.Deficient(info.Mip))
                     {
                         requests.Add(new[] { m, 2, row.W, row.H, row.Page, row.X, row.Y });
                         info.Upgrade = true;
@@ -8696,7 +8773,7 @@ namespace QuestTree.QuestGraph
                 }
                 else if (used && info.Textured && tex2d)
                 {
-                    fresh.Add(new[] { m, 0, TileSide(info.Texture.width), TileSide(info.Texture.height), -1, 0, 0 });
+                    fresh.Add(new[] { m, 0, TileSide(info.Texture.width, WantedOf(info)), TileSide(info.Texture.height, WantedOf(info)), -1, 0, 0 });
                 }
 
                 if (row.FlatPage >= 0 && row.FlatPage < basePages)
@@ -8782,8 +8859,89 @@ namespace QuestTree.QuestGraph
         /// <see cref="MapMeshFile.TileAlign"/>, at least that - the viewer compresses each tile to DXT1, in 4 x 4
         /// blocks.</summary>
         /// <param name="texture">The texture's side in pixels.</param>
-        internal static int TileSide(int texture) =>
-            Math.Max(MapMeshFile.TileAlign, Math.Min(texture, AtlasTileMax) / MapMeshFile.TileAlign * MapMeshFile.TileAlign);
+        internal static int TileSide(int texture) => TileSide(texture, AtlasTileMax);
+
+        /// <summary>HQ S3.10: a tile's side for a texture side and the side its use wants - the smaller, capped at
+        /// AtlasTileMax, rounded down to a multiple of TileAlign, at least that.</summary>
+        /// <param name="texture">The texture's side in pixels.</param>
+        /// <param name="wanted">The side the use wants, in pixels.</param>
+        internal static int TileSide(int texture, int wanted) =>
+            Math.Max(MapMeshFile.TileAlign,
+                Math.Min(Math.Min(texture, Math.Max(MapMeshFile.TileAlign, wanted)), AtlasTileMax) / MapMeshFile.TileAlign * MapMeshFile.TileAlign);
+
+        /// <summary>HQ S3.10: the side a material's use wants, or the cap when it was not measured.</summary>
+        /// <param name="info">The material.</param>
+        private static int WantedOf(AtlasMaterial info) => info.Wanted > 0 ? info.Wanted : AtlasTileMax;
+
+        /// <summary>
+        /// HQ S3.10: every textured material's wanted tile side - <see cref="TexelsPerMetre"/> x the metres one repeat
+        /// covers (sqrt of its world area over its UV area) - then one scale over the map, bisected, until the padded
+        /// tiles of the materials NOT already stored fit what the pages have left (<see cref="AtlasPagePixelShare"/> of
+        /// the cap, less a full page for every stored one). A material with no measured use keeps its texture's size.
+        /// </summary>
+        /// <param name="job">The build.</param>
+        private static void WantTileSides(Job job)
+        {
+            var basePages = job.Stored != null ? job.Request.Base.AtlasPages : 0;
+            var pageArea = (double)MapMeshFile.AtlasPageSize * MapMeshFile.AtlasPageSize;
+            var budget = AtlasPagePixelShare * MapMeshFile.MaxAtlasPages * pageArea - basePages * pageArea;
+
+            var wanted = new double[job.Materials.Count];
+            for (var m = 0; m < job.Materials.Count; m++)
+            {
+                var info = job.Materials[m];
+                if (info.Texture == null || info.Texture.dimension != TextureDimension.Tex2D || info.WorldArea <= 0d || info.UvArea <= 0d)
+                    continue;
+
+                var metresPerRepeat = Math.Sqrt(info.WorldArea / info.UvArea);
+                if (!IsFinite(metresPerRepeat) || metresPerRepeat <= 0d) continue;
+
+                wanted[m] = TexelsPerMetre * metresPerRepeat;
+            }
+
+            double Padded(int m, double scale)
+            {
+                var info = job.Materials[m];
+                var side = wanted[m] > 0d ? (int)Math.Min(int.MaxValue / 2d, wanted[m] * scale) : AtlasTileMax;
+                var w = TileSide(info.Texture.width, side) + 2 * AtlasPadding;
+                var h = TileSide(info.Texture.height, side) + 2 * AtlasPadding;
+                return (double)w * h;
+            }
+
+            double Sum(double scale)
+            {
+                var sum = 0d;
+                for (var m = 0; m < job.Materials.Count; m++)
+                {
+                    var info = job.Materials[m];
+                    if (!info.Textured || info.Texture == null || info.Texture.dimension != TextureDimension.Tex2D) continue;
+                    if (info.Stored != null && info.Stored.Page >= 0 && info.Stored.Page < basePages) continue;   // keeps its rect
+                    sum += Padded(m, scale);
+                }
+
+                return sum;
+            }
+
+            var scale = 1d;
+            if (budget > 0d && Sum(1d) > budget)
+            {
+                double lo = 0d, hi = 1d;
+                for (var step = 0; step < 50; step++)
+                {
+                    var mid = (lo + hi) / 2d;
+                    if (Sum(mid) <= budget) lo = mid;
+                    else hi = mid;
+                }
+
+                scale = lo;
+            }
+
+            job.TileScale = scale;
+
+            for (var m = 0; m < job.Materials.Count; m++)
+                if (wanted[m] > 0d)
+                    job.Materials[m].Wanted = Math.Max(MapMeshFile.TileAlign, (int)Math.Min(AtlasTileMax, wanted[m] * scale));
+        }
 
         /// <summary>One material's texture as one repeat's pixels: Blit to a temporary RenderTexture at that size,
         /// ReadPixels into the scratch texture, the tint multiplied in, and the material's average colour taken
@@ -10153,10 +10311,36 @@ namespace QuestTree.QuestGraph
                 $"{N(job.TexturedBuildings)} building(s) textured ({Millions(job.TexturedTriangles)} triangles), " +
                 $"{N(job.UntexturedBuildings)} with UVs but no tile; {N(job.SeamsRelaxed)} decimated with their seams " +
                 $"relaxed, {N(job.ClusteredTextureless)} clustered without a texture" +
+                TileSidesClause(job) +
                 (job.Stored != null ? AccumulatedAtlas(job) : "") +
                 (job.AtlasAbandoned ? " - ABANDONED, no page kept." : "."));
 
             ReportMaterialDiags(job);
+        }
+
+        /// <summary>HQ S3.10: the textures line's histogram of the tile sides placed this build, the fit scale, and the
+        /// tiles captured from a coarser resident mip than the texture has.</summary>
+        /// <param name="job">The build.</param>
+        private static string TileSidesClause(Job job)
+        {
+            int s128 = 0, s256 = 0, s512 = 0, s1024 = 0, coarser = 0;
+
+            foreach (var m in job.Materials)
+            {
+                if (m.Page < 0 || !m.Textured) continue;
+                var side = Math.Max(m.TileW, m.TileH);
+                if (side <= 128) s128++;
+                else if (side <= 256) s256++;
+                else if (side <= 512) s512++;
+                else s1024++;
+
+                if (m.CapturedNow && m.Mip != MapMeshIndex.MipUnknown && m.Mip > 0) coarser++;
+            }
+
+            return $"; tile sides: {N(s128)} <=128, {N(s256)} 256, {N(s512)} 512, {N(s1024)} 1024 (wanted " +
+                   $"{TexelsPerMetre.ToString("0", CultureInfo.InvariantCulture)} texels/m, scaled x" +
+                   $"{job.TileScale.ToString("0.00", CultureInfo.InvariantCulture)} to fit {MapMeshFile.MaxAtlasPages} pages, cap " +
+                   $"{AtlasTileMax} px), {N(coarser)} captured from a coarser resident mip";
         }
 
         /// <summary>WP2: the textures line's account of the stored atlas.</summary>
@@ -10806,6 +10990,8 @@ namespace QuestTree.QuestGraph
         }
 
         private static bool IsFinite(float v) => !float.IsNaN(v) && !float.IsInfinity(v);
+
+        private static bool IsFinite(double v) => !double.IsNaN(v) && !double.IsInfinity(v);
 
         /// <summary>A count in millions, "6.3 M", for the building line's source triangles.</summary>
         /// <param name="value">The count.</param>
