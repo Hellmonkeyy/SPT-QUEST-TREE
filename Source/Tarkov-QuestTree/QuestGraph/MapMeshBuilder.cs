@@ -558,6 +558,17 @@ namespace QuestTree.QuestGraph
         /// </summary>
         internal static readonly bool FoliageAtCoarsest = true;
 
+        /// <summary>
+        /// Test 2026-09-28: the relief is cast from above and the top band keeps the FIRST hit, so under every building it
+        /// rose to the roof - a block the shape of the building, draped with the top-down picture, whose top z-fought the
+        /// real roof and whose sides fell from roof to ground in one cell as stretched pixels (the streaked walls and
+        /// roofs on every building near a ground mesh). With this on, once the mesh is merged, every cell the buildings
+        /// cover from above is lowered to the ground at the building's edge, flooded inward (LowerReliefUnderBuildings):
+        /// the relief passes under the building and meets its walls at the ground. Trees are not buildings for this.
+        /// Runs every stop on the re-cast relief, so it is not in the recipe; false leaves the relief as cast.
+        /// </summary>
+        internal static readonly bool GroundUnderBuildings = true;
+
         private const int FoliageMaxTriangles = 3_000;
         private const int FoliageTileMax = 512;
 
@@ -11029,6 +11040,10 @@ namespace QuestTree.QuestGraph
                 file.AlphaPages = (file.AlphaPages | basis.AlphaPages) & ((1 << pages) - 1);
             }
 
+            // test 2026-09-28: the relief under the buildings goes to the ground around them - its own step, so a throw
+            // leaves the relief as cast and the merge standing
+            if (GroundUnderBuildings) Step(job, "the ground under the buildings", () => LowerReliefUnderBuildings(job, file, rows));
+
             result.Accumulated = stored != null;
             result.BasePages = stored != null ? basis.AtlasPages : 0;
             result.StoredKept = storedKept;
@@ -11137,6 +11152,159 @@ namespace QuestTree.QuestGraph
             }
 
             return true;
+        }
+
+        /// <summary>
+        /// Test 2026-09-28: the top band's cells that the buildings cover from above are lowered to the ground at the
+        /// buildings' edges. Every non-vertical triangle of every building that is not a tree is rasterised onto the top
+        /// band's grid (the cells a ray from above would have hit on it); then the uncovered cells next to covered ones
+        /// seed a breadth-first flood over the covered cells, each covered cell taking the height code of the seed that
+        /// reaches it first - the ground at the nearest edge, so a slope carries under the building. A covered cell with
+        /// no hit stays a hole; a covered area with no uncovered neighbour at all (nothing around it was measured) is left
+        /// as cast. Arrays only; logged with the cells and buildings it touched and its time.
+        /// </summary>
+        /// <param name="job">The build, for the line.</param>
+        /// <param name="file">The merged file.</param>
+        /// <param name="rows">The sidecar rows, one per building in order (their foliage flag).</param>
+        private static void LowerReliefUnderBuildings(Job job, MapMeshFile file, List<MapMeshIndex.Entry> rows)
+        {
+            if (file?.Bands == null || file.Bands.Count == 0 || file.Buildings == null) return;
+
+            var clock = Stopwatch.StartNew();
+
+            // the top band: the highest level
+            MapMeshFile.ReliefBand top = null;
+            foreach (var band in file.Bands)
+                if (band != null && band.Heights != null && (top == null || band.Level > top.Level)) top = band;
+
+            if (top == null || top.Width < 2 || top.Height < 2) return;
+
+            var w = top.Width;
+            var h = top.Height;
+            var cell = (double)top.CellMetres;
+            var q = (double)MapMeshFile.MaxQuantised;
+            var sx = (file.MaxX - file.MinX) / q / cell;   // a quantised x code to a column, fractional
+            var sz = (file.MaxZ - file.MinZ) / q / cell;
+            var covered = new bool[w * h];
+            var buildingsCovering = 0;
+
+            for (var i = 0; i < file.Buildings.Count; i++)
+            {
+                var b = file.Buildings[i];
+                if (b?.Indices == null || b.X == null || b.Z == null || b.Y == null) continue;
+                if (i < rows.Count && rows[i] != null && rows[i].Foliage) continue;
+
+                var touched = false;
+                var indices = b.Indices;
+
+                for (var t = 0; t + 2 < indices.Length; t += 3)
+                {
+                    int v0 = (int)indices[t], v1 = (int)indices[t + 1], v2 = (int)indices[t + 2];
+                    if (v0 >= b.X.Length || v1 >= b.X.Length || v2 >= b.X.Length) continue;
+
+                    double x0 = b.X[v0] * sx, z0 = b.Z[v0] * sz;
+                    double x1 = b.X[v1] * sx, z1 = b.Z[v1] * sz;
+                    double x2 = b.X[v2] * sx, z2 = b.Z[v2] * sz;
+
+                    // the triangle's footprint (twice its area in cells): a vertical face covers nothing
+                    var area2 = (x1 - x0) * (z2 - z0) - (x2 - x0) * (z1 - z0);
+                    if (Math.Abs(area2) < 1e-3) continue;
+
+                    var minCol = Math.Max(0, (int)Math.Floor(Math.Min(x0, Math.Min(x1, x2))));
+                    var maxCol = Math.Min(w - 1, (int)Math.Floor(Math.Max(x0, Math.Max(x1, x2))));
+                    var minRow = Math.Max(0, (int)Math.Floor(Math.Min(z0, Math.Min(z1, z2))));
+                    var maxRow = Math.Min(h - 1, (int)Math.Floor(Math.Max(z0, Math.Max(z1, z2))));
+                    if (minCol > maxCol || minRow > maxRow) continue;
+
+                    var inv = 1d / area2;
+
+                    for (var row = minRow; row <= maxRow; row++)
+                    {
+                        var pz = row + 0.5;
+
+                        for (var col = minCol; col <= maxCol; col++)
+                        {
+                            var px = col + 0.5;
+
+                            // barycentric edge functions, sign-normalised by the area
+                            var e0 = ((x1 - x0) * (pz - z0) - (px - x0) * (z1 - z0)) * inv;
+                            var e1 = ((x2 - x1) * (pz - z1) - (px - x1) * (z2 - z1)) * inv;
+                            var e2 = ((x0 - x2) * (pz - z2) - (px - x2) * (z0 - z2)) * inv;
+
+                            if (e0 < 0d || e1 < 0d || e2 < 0d) continue;
+
+                            covered[row * w + col] = true;
+                            touched = true;
+                        }
+                    }
+                }
+
+                if (touched) buildingsCovering++;
+            }
+
+            // the flood: every uncovered measured cell next to a covered one seeds its own height inward
+            var heights = top.Heights;
+            var fill = new ushort[w * h];
+            var queue = new Queue<int>();
+
+            for (var n = 0; n < w * h; n++)
+            {
+                if (covered[n] || heights[n] == MapMeshFile.NoHit) continue;
+
+                var col = n % w;
+                var row = n / w;
+                var seeds = (col > 0 && covered[n - 1]) || (col + 1 < w && covered[n + 1]) ||
+                            (row > 0 && covered[n - w]) || (row + 1 < h && covered[n + w]);
+                if (!seeds) continue;
+
+                fill[n] = heights[n];
+                queue.Enqueue(n);
+            }
+
+            var reached = new bool[w * h];
+            foreach (var n in queue) reached[n] = true;
+
+            while (queue.Count > 0)
+            {
+                var n = queue.Dequeue();
+                var col = n % w;
+                var row = n / w;
+                var code = fill[n];
+
+                void Visit(int m)
+                {
+                    if (reached[m] || !covered[m]) return;
+                    reached[m] = true;
+                    fill[m] = code;
+                    queue.Enqueue(m);
+                }
+
+                if (col > 0) Visit(n - 1);
+                if (col + 1 < w) Visit(n + 1);
+                if (row > 0) Visit(n - w);
+                if (row + 1 < h) Visit(n + w);
+            }
+
+            var lowered = 0;
+            var coveredCells = 0;
+
+            for (var n = 0; n < w * h; n++)
+            {
+                if (!covered[n]) continue;
+                coveredCells++;
+                if (!reached[n] || heights[n] == MapMeshFile.NoHit) continue;
+
+                if (heights[n] != fill[n])
+                {
+                    heights[n] = fill[n];
+                    lowered++;
+                }
+            }
+
+            Plugin.LogSource?.LogInfo(
+                $"QuestTree: relief under {job.Request.Map}'s buildings - {N(coveredCells)} cell(s) under {N(buildingsCovering)} building(s) " +
+                $"({(100d * coveredCells / Math.Max(1, w * h)).ToString("0.0", CultureInfo.InvariantCulture)} % of the top band), " +
+                $"{N(lowered)} lowered to the ground at the buildings' edges, in {clock.ElapsedMilliseconds} ms.");
         }
 
         /// <summary>HQ S2.8: the buildings stored at a LOD level above 0 after this stop - kept stored rows and this
