@@ -2889,6 +2889,13 @@ namespace QuestTree.UI
             /// <summary>Main-thread time a frame spends cutting tiles, in milliseconds (a tile is about 1 ms).</summary>
             private const double TileBudgetMs = 4d;
 
+            /// <summary>HQ S1.5: anisotropic filtering on every tile - walls seen at a grazing angle keep their texture.</summary>
+            private static readonly int TileAniso = 16;
+
+            /// <summary>HQ S1.5: tiles up to this many pixels are DXT-compressed at high quality (slower, fewer block
+            /// artefacts); larger ones at the fast setting so a cut stays inside <see cref="TileBudgetMs"/>.</summary>
+            private static readonly int TileCompressHighQualityMaxPixels = 65_536;
+
             /// <summary>One tile: its rect on its page, and its texture once cut.</summary>
             internal sealed class Tile
             {
@@ -3168,7 +3175,7 @@ namespace QuestTree.UI
                         name = $"QuestTreeMap3D-tile{index}",
                         wrapMode = TextureWrapMode.Repeat,
                         filterMode = FilterMode.Trilinear,
-                        anisoLevel = 4
+                        anisoLevel = TileAniso
                     };
 
                     texture.SetPixels32(buffer);
@@ -3176,7 +3183,7 @@ namespace QuestTree.UI
 
                     // DXT1 needs 4 x 4 blocks; the builder aligns every tile, and one that is not stays RGB24.
                     if (tile.W % MapMeshFile.TileAlign == 0 && tile.H % MapMeshFile.TileAlign == 0)
-                        texture.Compress(highQuality: false);
+                        texture.Compress(highQuality: size <= TileCompressHighQualityMaxPixels);
 
                     // Uploaded and the CPU copy freed.
                     texture.Apply(updateMipmaps: false, makeNoLongerReadable: true);
