@@ -39,6 +39,9 @@ namespace QuestTree.QuestGraph
         /// were clean, so a building whose decimation or cluster always times out is not read at every stop.</summary>
         internal const int MaxUncleanAttempts = 3;
 
+        /// <summary>HQ S3.12: the sidecar versions whose building rows carry the foliage byte after the unclean attempts.</summary>
+        internal const int FoliageFlagVersion = 5;
+
         /// <summary>The first four bytes inside the deflate block.</summary>
         internal const string Magic = "QTMI";
 
@@ -278,6 +281,10 @@ namespace QuestTree.QuestGraph
             /// <see cref="MaxUncleanAttempts"/>), 0 after a clean one.</summary>
             internal byte UncleanAttempts;
 
+            /// <summary>HQ S3.12: a tree or bush (its renderer's materials all on a SpeedTree shader), for the checker's tree
+            /// rows. In the row from <see cref="FoliageFlagVersion"/>.</summary>
+            internal bool Foliage;
+
             /// <summary>Each atlas range's material key, in the order of the mesh building's Ranges.</summary>
             internal ulong[] RangeMaterials = new ulong[0];
 
@@ -459,6 +466,7 @@ namespace QuestTree.QuestGraph
                         w.Write(e.RetargetTried);
                         w.Write(e.TextureTried);
                         w.Write(e.UncleanAttempts);
+                        if (Version >= FoliageFlagVersion) w.Write(e.Foliage ? (byte)1 : (byte)0);
                         w.Write((byte)e.RangeMaterials.Length);
                         foreach (var key in e.RangeMaterials) w.Write(key);
                     }
@@ -647,6 +655,8 @@ namespace QuestTree.QuestGraph
                     CapturedAt = r.ReadUInt16(), TriedTarget = r.ReadInt32(), TriedLevel = r.ReadByte(),
                     RetargetTried = r.ReadInt32(), TextureTried = r.ReadByte(), UncleanAttempts = r.ReadByte(),
                 };
+
+                if (Version >= FoliageFlagVersion) e.Foliage = r.ReadByte() != 0;
 
                 if (e.StoredTriangles < 0) throw new InvalidDataException($"building {i} has a negative triangle count");
 

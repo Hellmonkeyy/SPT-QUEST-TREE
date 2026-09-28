@@ -533,6 +533,25 @@ namespace QuestTree.QuestGraph
         /// </summary>
         internal static readonly bool CutoutAlphaTiles = false;
 
+        /// <summary>
+        /// HQ S3.12: a TREE or BUSH (every renderer of every level of its LOD group on a SpeedTree shader) is read at its
+        /// COARSEST real level - the author's own reduction of the same leaf cards (a SpeedTree LOD2 is a few hundred
+        /// triangles) - and never decimated: the collapse guards refuse most leaf-card collapses and what passes tears
+        /// the cards. Its target is its source up to <see cref="FoliageMaxTriangles"/>; one denser than that at its
+        /// coarsest level is left out and counted. Its leaf materials are cutout with their alpha kept (S3.11) at tiles up
+        /// to <see cref="FoliageTileMax"/>. Rules about the game's authoring, never about a map. Folded into the recipe by
+        /// the bump commit (S3.13), which also turns the trees setting on by default. False starts a tree's ladder at its
+        /// finest level as any building's.
+        /// </summary>
+        internal static readonly bool FoliageAtCoarsest = true;
+
+        private const int FoliageMaxTriangles = 3_000;
+        private const int FoliageTileMax = 512;
+
+        /// <summary>HQ S3.12: the box surface a tree is BUDGETED at - the surface whose target at the density rule is
+        /// FoliageMaxTriangles - so the union plan reserves a tree's own share, not a building's for its box.</summary>
+        private static double FoliageBudgetSurface => FoliageMaxTriangles / AreaBudget.TrianglesPerSquareMetre;
+
         /// <summary>Seconds the capture sets aside for the atlas out of its budget (taken off the building
         /// phase's), and the ONE cap over the whole atlas phase - measuring, packing, capturing, filling, handing
         /// pages to the encoders and mapping the buildings (stage W review, H1). Past it the atlas is abandoned.</summary>
@@ -2082,6 +2101,13 @@ namespace QuestTree.QuestGraph
             internal long FoliageFacesDropped;
             internal int FoliageRemoved;
 
+            /// <summary>HQ S3.12: tree groups started at their coarsest level, by that level, and trees left out as too dense
+            /// at their coarsest level.</summary>
+            internal int FoliageGroupsAtCoarsest;
+
+            internal readonly int[] FoliageCoarseLod = new int[4];
+            internal int FoliageTooDense;
+
             /// <summary>PART-10 (decals): decal volumes among the candidates and their source triangles - always left out.</summary>
             internal int DecalCandidates;
 
@@ -2305,6 +2331,9 @@ namespace QuestTree.QuestGraph
 
             /// <summary>The level being read, an index into <see cref="Levels"/>.</summary>
             internal int Current;
+
+            /// <summary>HQ S3.12: a tree's group, started at its coarsest level (FoliageAtCoarsest).</summary>
+            internal bool FoliageCoarse;
 
             /// <summary>Renderers of the current level stored or on a worker. The group may move only while it is 0.</summary>
             internal int Committed;
@@ -3531,6 +3560,21 @@ namespace QuestTree.QuestGraph
         /// <param name="renderer">The renderer.</param>
         private static bool IsDecal(Renderer renderer) => MapMeshIndex.DecalShaders(ShaderNames(renderer));
 
+        /// <summary>HQ S3.12: whether one material is on a SpeedTree shader.</summary>
+        /// <param name="material">The material.</param>
+        private static bool FoliageShader(Material material)
+        {
+            try
+            {
+                var name = material != null && material.shader != null ? material.shader.name : null;
+                return !string.IsNullOrEmpty(name) && name.IndexOf("SpeedTree", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
         /// <summary>Each material's shader name (null for no material or no shader), or null with no materials.</summary>
         /// <param name="renderer">The renderer.</param>
         private static string[] ShaderNames(Renderer renderer)
@@ -3550,7 +3594,8 @@ namespace QuestTree.QuestGraph
         /// <param name="job">The build.</param>
         /// <param name="c">The candidate.</param>
         private static bool Left(Job job, Candidate c) =>
-            c.Shell || c.Decal || job.ShellRenderers.Contains(c.Renderer) || (c.Foliage && !job.Request.IncludeFoliage);
+            c.Shell || c.Decal || job.ShellRenderers.Contains(c.Renderer) || (c.Foliage && !job.Request.IncludeFoliage) ||
+            (c.Foliage && FoliageAtCoarsest && c.SourceTriangles > FoliageMaxTriangles);
 
         /// <summary>Whether a renderer is a helper volume the game draws nothing useful with: every
         /// material a plain Standard or Unlit one with no main texture, and bounds over
@@ -3889,6 +3934,15 @@ namespace QuestTree.QuestGraph
             state.Levels.AddRange(ladder);
             foreach (var level in ladder) job.LevelRenderers += level.Set.Count;
 
+            // HQ S3.12: a tree's ladder starts at its coarsest real level
+            if (FoliageAtCoarsest && ladder.Count > 1 && AllFoliage(ladder))
+            {
+                state.Current = ladder.Count - 1;
+                state.FoliageCoarse = true;
+                job.FoliageGroupsAtCoarsest++;
+                job.FoliageCoarseLod[Math.Max(0, Math.Min(3, ladder[ladder.Count - 1].Lod))]++;
+            }
+
             state.GroupKey = MapMeshFile.Building.KeyFor(HierarchyPath(group.transform),
                 group.transform.TransformPoint(group.localReferencePoint));
 
@@ -3898,6 +3952,23 @@ namespace QuestTree.QuestGraph
             job.Groups[group] = state;
 
             return state;
+        }
+
+        /// <summary>HQ S3.12: whether every renderer of every level of a ladder is a tree or a bush (IsFoliage).</summary>
+        /// <param name="ladder">The group's usable levels.</param>
+        private static bool AllFoliage(List<LevelSet> ladder)
+        {
+            var any = false;
+
+            foreach (var level in ladder)
+                foreach (var renderer in level.List)
+                {
+                    if (renderer == null) continue;
+                    if (!IsFoliage(renderer)) return false;
+                    any = true;
+                }
+
+            return any;
         }
 
         /// <summary>Triangles across a level's renderers, and whether any of them draws with an impostor
@@ -4085,6 +4156,9 @@ namespace QuestTree.QuestGraph
                     candidate.Surface = BoxSurface(candidate.Bounds.size);
                     candidate.Height = Math.Abs((double)candidate.Bounds.size.y);
 
+                    // HQ S3.12: a tree is budgeted at a tree's share, not a building's for its box
+                    if (candidate.Foliage && FoliageAtCoarsest) candidate.Surface = Math.Min(candidate.Surface, FoliageBudgetSurface);
+
                     if (candidate.Group == null && candidate.SourceTriangles > MaxSourceTriangles) job.InputGuarded++;
 
                     // WP2: this renderer against the stored mesh - skipped, re-read or new (Classify).
@@ -4148,6 +4222,10 @@ namespace QuestTree.QuestGraph
                 job.FoliageCandidates++;
                 job.FoliageTriangles += Math.Max(0L, c.SourceTriangles);
                 if (samples.Count < FoliageSamplesLogged) samples.Add(SafePath(c.Renderer));
+
+                // HQ S3.12: a tree denser than the cap at the level its group reads is left out
+                if (FoliageAtCoarsest && job.Request.IncludeFoliage && c.SourceTriangles > FoliageMaxTriangles && IsSource(job, c))
+                    job.FoliageTooDense++;
             }
 
             if (job.FoliageCandidates > 0)
@@ -4156,7 +4234,12 @@ namespace QuestTree.QuestGraph
                     $"SpeedTree shader, {N(job.FoliageTriangles)} source triangles, " +
                     (job.Request.IncludeFoliage
                         ? "read ('3D map: include trees and bushes' is on) - their faces without an atlas texture are left out, never " +
-                          "side-projected"
+                          "side-projected" +
+                          (FoliageAtCoarsest
+                              ? $"; read at their coarsest level, never decimated ({N(job.FoliageGroupsAtCoarsest)} group(s): LOD1 " +
+                                $"{N(job.FoliageCoarseLod[1])}, LOD2 {N(job.FoliageCoarseLod[2])}, LOD3+ {N(job.FoliageCoarseLod[3])}), " +
+                                $"{N(job.FoliageTooDense)} too dense (over {N(FoliageMaxTriangles)} triangles there) left out"
+                              : "")
                         : "left out of the 3D map ('3D map: include trees and bushes' is off)") +
                     $"; samples: {string.Join(" | ", samples.ToArray())}.");
 
@@ -4439,6 +4522,13 @@ namespace QuestTree.QuestGraph
         private static int TargetFor(Job job, Candidate candidate)
         {
             if (candidate.Target > 0) return candidate.Target;
+
+            // HQ S3.12: a tree is stored as its coarsest level is - its source, up to the cap
+            if (candidate.Foliage && FoliageAtCoarsest)
+            {
+                candidate.Target = (int)Math.Max(1L, Math.Min(FoliageMaxTriangles, Math.Max(1L, candidate.SourceTriangles)));
+                return candidate.Target;
+            }
 
             // FlexScale: the scale the new buildings are read at - the budget's own on the from-scratch path, s_Fit (at
             // most s_G) onto a stored mesh whose union binds (WP2 D3).
@@ -5529,6 +5619,8 @@ namespace QuestTree.QuestGraph
                 Decal = IsDecal(renderer),
             };
 
+            if (candidate.Foliage && FoliageAtCoarsest) candidate.Surface = Math.Min(candidate.Surface, FoliageBudgetSurface);   // HQ S3.12
+
             candidate.Stride = candidate.Stream >= 0 ? mesh.GetVertexBufferStride(candidate.Stream) : 0;
             UvLayout(candidate);
             Placement(candidate);
@@ -5605,7 +5697,7 @@ namespace QuestTree.QuestGraph
         {
             source.Limit = limit;
             source.Target = Math.Max(1, Math.Min(TargetFor(job, candidate), limit));
-            source.MayDecimate = !job.DecimationStopped;
+            source.MayDecimate = !job.DecimationStopped && !(candidate.Foliage && FoliageAtCoarsest);
 
             var lane = job.Workspaces.Count > 0 ? job.Workspaces.Pop() : new Lane();
 
@@ -7081,6 +7173,7 @@ namespace QuestTree.QuestGraph
                 // WP2 (fixes 3): untried until a CLEAN attempt says otherwise (below)
                 TriedTarget = 0,
                 TriedLevel = MapMeshIndex.NeverTried,
+                Foliage = c.Foliage,
             };
 
             // WP2 (fixes 2, 3): the target it was read at and its level - only when its read was clean (a source stored as it is
@@ -7829,6 +7922,9 @@ namespace QuestTree.QuestGraph
             /// <summary>HQ S3.11: textured with its alpha kept, on an alpha page (CutoutAlphaTiles).</summary>
             internal bool CutoutAlpha;
 
+            /// <summary>HQ S3.12: on a SpeedTree shader - a leaf or bark material, its tile capped at FoliageTileMax.</summary>
+            internal bool Foliage;
+
             /// <summary>WP2 (2.10): the material's key (MaterialKey), its stored tile row when the stored atlas has one,
             /// the texture's resident mip when it was registered (MapMeshIndex.MipUnknown when not streamed), whether its
             /// textured tile was left flat past the capture share or failed to capture this build, and whether its
@@ -8076,7 +8172,10 @@ namespace QuestTree.QuestGraph
                         // into albedo alpha and a keyword can outlive a shader change - so a Geometry-queue material
                         // with the keyword would be judged on smoothness and left untextured. The keyword is still
                         // printed in the diagnostics line.
-                        Cutout = queue >= 2450,
+                        // HQ S3.12: a SpeedTree material clips its leaf cards in the shader whatever its queue - cutout, with
+                        // its alpha kept (S3.11)
+                        Cutout = queue >= 2450 || FoliageShader(material),
+                        Foliage = FoliageShader(material),
                         Cutoff = material.HasProperty("_Cutoff") ? material.GetFloat("_Cutoff") : 0.5f,
                     };
 
@@ -8916,7 +9015,8 @@ namespace QuestTree.QuestGraph
             double Padded(int m, double scale)
             {
                 var info = job.Materials[m];
-                var side = wanted[m] > 0d ? (int)Math.Min(int.MaxValue / 2d, wanted[m] * scale) : AtlasTileMax;
+                var cap = info.Foliage ? Math.Min(FoliageTileMax, AtlasTileMax) : AtlasTileMax;
+                var side = wanted[m] > 0d ? (int)Math.Min(cap, wanted[m] * scale) : cap;
                 var w = TileSide(info.Texture.width, side) + 2 * AtlasPadding;
                 var h = TileSide(info.Texture.height, side) + 2 * AtlasPadding;
                 return (double)w * h;
@@ -8953,8 +9053,13 @@ namespace QuestTree.QuestGraph
             job.TileScale = scale;
 
             for (var m = 0; m < job.Materials.Count; m++)
+            {
+                var cap = job.Materials[m].Foliage ? Math.Min(FoliageTileMax, AtlasTileMax) : AtlasTileMax;
                 if (wanted[m] > 0d)
-                    job.Materials[m].Wanted = Math.Max(MapMeshFile.TileAlign, (int)Math.Min(AtlasTileMax, wanted[m] * scale));
+                    job.Materials[m].Wanted = Math.Max(MapMeshFile.TileAlign, (int)Math.Min(cap, wanted[m] * scale));
+                else if (job.Materials[m].Foliage)
+                    job.Materials[m].Wanted = cap;
+            }
         }
 
         /// <summary>One material's texture as one repeat's pixels: Blit to a temporary RenderTexture at that size,

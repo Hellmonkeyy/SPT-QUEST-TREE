@@ -964,9 +964,11 @@ namespace QuestTree
 
             MeshFoliage = config.Bind(
                 "Advanced", "3D map: include trees and bushes", false,
-                "On, the 3D map's mesh keeps trees and bushes (renderers drawn with the game's SpeedTree shaders); only their " +
-                "faces with a real texture are kept. Off (the default), they are left out - the top-down picture already shows " +
-                "the canopy - and ones an earlier capture stored leave the mesh at the next capture.");
+                "On, the 3D map's mesh keeps trees and bushes (renderers drawn with the game's SpeedTree shaders), each read at " +
+                "its coarsest level and never decimated, its leaf cards cut out on their own alpha; only their faces with a real " +
+                "texture are kept. About a million triangles and a page of leaf textures on a wooded map. Off, they are left " +
+                "out - the top-down picture already shows the canopy - and ones an earlier capture stored leave the mesh at " +
+                "the next capture.");
 
             Entries.AddRange(new ConfigEntryBase[]
             {
