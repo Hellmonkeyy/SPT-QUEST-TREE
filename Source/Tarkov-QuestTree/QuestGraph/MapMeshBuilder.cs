@@ -7813,7 +7813,8 @@ namespace QuestTree.QuestGraph
                 // WP2 (fixes 3): untried until a CLEAN attempt says otherwise (below)
                 TriedTarget = 0,
                 TriedLevel = MapMeshIndex.NeverTried,
-                Foliage = c.Foliage,
+                // PART-11 (3.5): the row's kind - a tree's flag before it, a prop's from the class
+                Kind = c.Foliage ? MapMeshIndex.KindTree : c.Prop ? MapMeshIndex.KindProp : MapMeshIndex.KindBuilding,
             };
 
             // WP2 (fixes 2, 3): the target it was read at and its level - only when its read was clean (a source stored as it is
@@ -11915,7 +11916,7 @@ namespace QuestTree.QuestGraph
 
         /// <summary>
         /// Test 2026-09-28: the top band's cells that the buildings cover from above are lowered to the ground at the
-        /// buildings' edges. Every non-vertical triangle of every building that is not a tree is rasterised onto the top
+        /// buildings' edges. Every non-vertical triangle of every building that is not a tree or a prop is rasterised onto the top
         /// band's grid (the cells a ray from above would have hit on it); then the uncovered cells next to covered ones
         /// seed a breadth-first flood over the covered cells, each covered cell taking the height code of the seed that
         /// reaches it first - the ground at the nearest edge, so a slope carries under the building. A covered cell with
@@ -11924,7 +11925,7 @@ namespace QuestTree.QuestGraph
         /// </summary>
         /// <param name="job">The build, for the line.</param>
         /// <param name="file">The merged file.</param>
-        /// <param name="rows">The sidecar rows, one per building in order (their foliage flag).</param>
+        /// <param name="rows">The sidecar rows, one per building in order (their kind).</param>
         private static void LowerReliefUnderBuildings(Job job, MapMeshFile file, List<MapMeshIndex.Entry> rows)
         {
             if (file?.Bands == null || file.Bands.Count == 0 || file.Buildings == null) return;
@@ -11957,7 +11958,12 @@ namespace QuestTree.QuestGraph
             {
                 var b = file.Buildings[i];
                 if (b?.Indices == null || b.X == null || b.Z == null || b.Y == null) continue;
-                if (i < rows.Count && rows[i] != null && rows[i].Foliage) continue;
+                // a tree is not a building for the ground; nor is a prop (PART-11 3.5): where the top band is anchored to the
+                // terrain (TerrainAnchoredGround, a ground layer, a terrain hit under the cell) the ground under a crate or a
+                // car is the terrain already, and the pass is spared thousands of small boxes. Where it is not anchored (an
+                // interior band, no ground layer, a mesh floor) a prop's collider top stays a slab - the item 7 campaign checks
+                // car and container slabs on such ground
+                if (i < rows.Count && rows[i] != null && (rows[i].Foliage || rows[i].Prop)) continue;
 
                 var touched = false;
                 var indices = b.Indices;
@@ -12091,7 +12097,7 @@ namespace QuestTree.QuestGraph
 
             void Count(MapMeshIndex.Entry m)
             {
-                if (m == null || m.Foliage || MapMeshIndex.LevelOfGrade(m.Grade) <= 0) return;   // a tree is coarse by design
+                if (m == null || m.Foliage || m.Prop || MapMeshIndex.LevelOfGrade(m.Grade) <= 0) return;   // a tree or a prop is coarse by design
                 rows++;
                 triangles += Math.Max(0, m.StoredTriangles);
                 if (m.GroupPathHash != 0UL) groups.Add(m.GroupPathHash);
@@ -12103,7 +12109,7 @@ namespace QuestTree.QuestGraph
 
             foreach (var m in job.NewEntries) Count(m);
 
-            return $"; stored at LOD>0 after this stop (trees aside): {N(groups.Count)} group(s), {N(rows)} row(s), {N(triangles)} triangles";
+            return $"; stored at LOD>0 after this stop (trees and props aside): {N(groups.Count)} group(s), {N(rows)} row(s), {N(triangles)} triangles";
         }
 
         /// <summary>WP2 (2.11): the accumulation line - what the build did to the stored mesh (the from-scratch path

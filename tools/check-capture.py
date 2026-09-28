@@ -1124,12 +1124,16 @@ def mesh_quality(mesh, sides=None, legacy=False):
     sliver_area = all_area = 0.0
     apex_buildings = 0
     per_m2 = []
+    kinds = mesh.get("_kinds") or []        # PART-11 (3.5): the sidecar's kind per building, when it was read
+    other_kind = [0, 0]                     # trees, props left out of the density statistics
+    by_kind = [[0, 0, 0.0, 0.0] for _ in range(3)]   # per kind (building, tree, prop): triangles, slivers, sliver area, area
     area_by = [0.0, 0.0, 0.0, 0.0]          # atlas, top, side, tint
     density_area = density_outlier = 0.0
     atlas_vertices = crease_vertices = roof_vertices = roof_crease = 0
     tiles = {}
 
-    for b in mesh["kept"]:
+    for bi, b in enumerate(mesh["kept"]):
+        kind = kinds[bi] if bi < len(kinds) else INDEX_KIND_BUILDING
         xs = [min_x + sx * c for c in b["x"]]
         ys = [y0 + sy * c for c in b["y"]]
         zs = [min_z + sz * c for c in b["z"]]
@@ -1139,6 +1143,8 @@ def mesh_quality(mesh, sides=None, legacy=False):
         if n == 0 or count == 0:
             continue
         triangles += count
+        bk = by_kind[kind]
+        bk[0] += count
         diag = math.sqrt((max(xs) - min(xs)) ** 2 + (max(ys) - min(ys)) ** 2 + (max(zs) - min(zs)) ** 2)
         diag_spike2 = (QUALITY_SPIKE_DIAG * diag) ** 2
         apex_edge = max(QUALITY_APEX_EDGE, QUALITY_APEX_DIAG * diag)
@@ -1183,9 +1189,12 @@ def mesh_quality(mesh, sides=None, legacy=False):
                 emax = e12
             sliver = emax >= min_edge2 and emax > QUALITY_SLIVER_ASPECT * cross
             all_area += area
+            bk[3] += area
             if sliver:
                 slivers += 1
                 sliver_area += area
+                bk[1] += 1
+                bk[2] += area
             if emax > spike2 and emax > diag_spike2:
                 spikes += 1
 
@@ -1220,7 +1229,9 @@ def mesh_quality(mesh, sides=None, legacy=False):
         if found:
             apex_buildings += 1
 
-        if area_total >= QUALITY_MIN_SURFACE:
+        if kind != INDEX_KIND_BUILDING:
+            other_kind[kind - 1] += 1
+        elif area_total >= QUALITY_MIN_SURFACE:
             per_m2.append(count / area_total)
 
         # the atlas: texel density per range, crease vertices, and the tiles for the page checks
@@ -1284,6 +1295,8 @@ def mesh_quality(mesh, sides=None, legacy=False):
         "apexBuildings": apex_buildings,
         "perM2": (per_m2[0] if per_m2 else 0.0, _percentile(per_m2, 0.10), _percentile(per_m2, 0.50)),
         "perM2Buildings": len(per_m2),
+        "otherKind": other_kind,
+        "byKind": by_kind,
         "areaBy": [100.0 * a / total_area if total_area > 0 else 0.0 for a in area_by],
         "densityOutliers": 100.0 * density_outlier / density_area if density_area > 0 else 0.0,
         "creaseVertices": 100.0 * crease_vertices / atlas_vertices if atlas_vertices else 0.0,
@@ -1424,49 +1437,57 @@ def quality_line(meta, folder, key, mesh, warnings):
     stats = mesh_quality(mesh, sides, LEGACY_VIEW)
     tri = stats["triangles"]
     pct = 100.0 * stats["slivers"] / tri if tri else 0.0
+    # PART-11 (3.5): the sliver rules judge the BUILDINGS' share; trees and props are reported beside it
+    b_tri, b_slivers, b_sliver_area, b_area = stats["byKind"][INDEX_KIND_BUILDING]
+    pct_b = 100.0 * b_slivers / b_tri if b_tri else 0.0
+    area_pct = 100.0 * b_sliver_area / b_area if b_area > 0 else 0.0
+    kind_pct = ", ".join(f"{name} {100.0 * k[1] / k[0] if k[0] else 0.0:.1f} %"
+                         for name, k in zip(("buildings", "trees", "props"), stats["byKind"]))
     lo, p10, med = stats["perM2"]
-    atlas, top, side, tint = stats["areaBy"]
+    atlas, top, side_share, tint = stats["areaBy"]
     pages = page_checks(folder, meta, stats["tiles"])
-    line = (f"quality: slivers {stats['slivers']} ({pct:.1f} %), spikes {stats['spikes']}, spike apexes "
+    line = (f"quality: slivers {stats['slivers']} ({pct:.1f} %; {kind_pct}), spikes {stats['spikes']}, spike apexes "
             f"{stats['apexes']} in {stats['apexBuildings']} building(s), tri/m2 surface min {lo:.3f} / p10 {p10:.2f} "
-            f"/ median {med:.2f} over {stats['perM2Buildings']} building(s) >= {QUALITY_MIN_SURFACE:g} m2, faces by "
+            f"/ median {med:.2f} over {stats['perM2Buildings']} building(s) >= {QUALITY_MIN_SURFACE:g} m2 "
+            f"({stats['otherKind'][0]} tree(s), {stats['otherKind'][1]} prop(s) not judged), faces by "
             f"source (area, {'pre-WP8' if LEGACY_VIEW else 'WP8'} rule{'' if sides else ', no side pictures'}): atlas "
-            f"{atlas:.0f} / top {top:.0f} / side {side:.0f} / tint {tint:.0f} %, atlas density outliers "
+            f"{atlas:.0f} / top {top:.0f} / side {side_share:.0f} / tint {tint:.0f} %, atlas density outliers "
             f"{stats['densityOutliers']:.1f} %, crease vertices {stats['creaseVertices']:.1f} % (roof "
             f"{stats['roofCrease']:.1f} %)")
     if pages is not None:
         line += (f", pages: white flat tiles {pages[0]}, normal-map-like tiles {pages[1]}, wrap seams > 4x "
                  f"{pages[2]} of {pages[3]}")
     # HQ S4: the tile sides in use (the atlas's own histogram), the pages used and the alpha pages
-    sides = {"<=128": 0, "256": 0, "512": 0, "1024": 0}
+    # (its own names: `key` is the map's and `side_share` the side pictures', both used by the WARNs below - two false
+    # WARNs came from reusing them here)
+    side_hist = {"<=128": 0, "256": 0, "512": 0, "1024": 0}
     for (_page, _tx, _ty, tw, th) in stats["tiles"]:
-        side = max(tw, th)
-        key = "<=128" if side <= 128 else "256" if side <= 256 else "512" if side <= 512 else "1024"
-        sides[key] += 1
+        tile_side = max(tw, th)
+        bucket = "<=128" if tile_side <= 128 else "256" if tile_side <= 256 else "512" if tile_side <= 512 else "1024"
+        side_hist[bucket] += 1
     alpha_mask = mesh.get("alphaPages", 0)
     alpha_pages = bin(alpha_mask).count("1")
-    line += (f", tile sides: {sides['<=128']} <=128 / {sides['256']} 256 / {sides['512']} 512 / {sides['1024']} 1024, "
+    line += (f", tile sides: {side_hist['<=128']} <=128 / {side_hist['256']} 256 / {side_hist['512']} 512 / {side_hist['1024']} 1024, "
              f"pages used {mesh['atlasPages']} of {MESH_MAX_ATLAS_PAGES} ({alpha_pages} alpha)")
-    # PART-10: the sliver WARN against the sources' own share, when it is given
-    area_pct = stats["sliverArea"]
+    # PART-10: the sliver WARN against the sources' own share, when it is given - over the buildings (PART-11)
     if SOURCE_SLIVERS is not None:
         limit = SOURCE_SLIVERS + QUALITY_SLIVER_SOURCE_SLACK
-        line += (f"; sliver WARN rule: stored sliver area {area_pct:.1f} % against the sources' {SOURCE_SLIVERS:g} % + "
+        line += (f"; sliver WARN rule: stored sliver area {area_pct:.1f} % of the buildings' against the sources' {SOURCE_SLIVERS:g} % + "
                  f"{QUALITY_SLIVER_SOURCE_SLACK:g} points (--source-slivers)")
         if area_pct > limit:
             warnings.append(f"{key}: slivers cover {area_pct:.1f} % of the building area, over the sources' "
                             f"{SOURCE_SLIVERS:g} % + {QUALITY_SLIVER_SOURCE_SLACK:g} points")
     else:
-        line += (f"; sliver WARN rule: over {QUALITY_WARN_SLIVERS:g} % of the triangles (sliver area {area_pct:.1f} %; pass "
+        line += (f"; sliver WARN rule: over {QUALITY_WARN_SLIVERS:g} % of the buildings' triangles (their sliver area {area_pct:.1f} %; pass "
                  f"--source-slivers PCT, the building-quality line's sources' share, to measure against the sources)")
-        if pct > QUALITY_WARN_SLIVERS:
-            warnings.append(f"{key}: slivers are {pct:.1f} % of the triangles, over {QUALITY_WARN_SLIVERS:g} %")
+        if pct_b > QUALITY_WARN_SLIVERS:
+            warnings.append(f"{key}: slivers are {pct_b:.1f} % of the buildings' triangles, over {QUALITY_WARN_SLIVERS:g} %")
     if stats["apexes"] > QUALITY_WARN_APEXES:
         warnings.append(f"{key}: {stats['apexes']} spike apexes, over {QUALITY_WARN_APEXES}")
     if stats["perM2Buildings"] and p10 < QUALITY_WARN_P10:
         warnings.append(f"{key}: tri/m2 of surface p10 is {p10:.2f}, under {QUALITY_WARN_P10:g}")
-    if side > QUALITY_WARN_SIDE:
-        warnings.append(f"{key}: side pictures texture {side:.0f} % of the building area, over {QUALITY_WARN_SIDE:g} %")
+    if side_share > QUALITY_WARN_SIDE:
+        warnings.append(f"{key}: side pictures texture {side_share:.0f} % of the building area, over {QUALITY_WARN_SIDE:g} %")
     return line
 
 
@@ -1649,7 +1670,8 @@ INDEX_SLACK = 0.25              # MapMeshIndex.IdentitySlackMetres
 INDEX_FLAT_PIXELS = 4           # MapMeshBuilder.AtlasFlatPixels
 INDEX_PADDING = 8               # MapMeshBuilder.AtlasPadding
 INDEX_MATERIAL = struct.Struct("<Q10iBBBBBfHB")
-INDEX_BUILDING = struct.Struct("<Q4i6fQ3fiBBB3fifHiBiBBBB")   # HQ S3.13: + the foliage byte
+INDEX_BUILDING = struct.Struct("<Q4i6fQ3fiBBB3fifHiBiBBBB")   # HQ S3.13: + the foliage byte; PART-11: read as the KIND byte
+INDEX_KIND_BUILDING, INDEX_KIND_TREE, INDEX_KIND_PROP = 0, 1, 2   # MapMeshIndex.KindBuilding/KindTree/KindProp (PART-11 3.5)
 
 
 def read_index(data):
@@ -1718,7 +1740,10 @@ def read_index(data):
             "centre": v[5:8], "size": v[8:11], "groupHash": v[11], "groupPos": v[12:15], "groupKey": v[15],
             "levelIndex": v[16], "grade": v[17], "dup": v[18], "footprint": v[19], "surface": v[20], "height": v[21],
             "stored": v[22], "centroid": v[23], "capturedAt": v[24], "triedTarget": v[25], "triedLevel": v[26],
-            "retargetTried": v[27], "textureTried": v[28], "uncleanAttempts": v[29], "foliage": v[30], "keys": keys})
+            "retargetTried": v[27], "textureTried": v[28], "uncleanAttempts": v[29], "kind": v[30],
+            "foliage": v[30] == INDEX_KIND_TREE, "prop": v[30] == INDEX_KIND_PROP, "keys": keys})
+        if v[30] > INDEX_KIND_PROP:
+            raise MeshError(f"building {i} has kind {v[30]}, which this script reads no meaning into")
     if cur.at != len(body):
         raise MeshError(f"carries {len(body) - cur.at} byte(s) after its last building")
     return index
@@ -1932,19 +1957,26 @@ def check_mesh_index(meta, folder, key, mesh, mesh_sha, errors, warnings):
                       f"{sorted(levels_of[g])}) - PART-04's rule keeps the lowest level of a group wholesale")
 
     # 6b. HQ S2.9: rows at a LOD level above 0, and rows under-served against the live target
-    coarse = [r for r in rows if grade_level(r["grade"]) > 0 and not r.get("foliage")]   # a tree is coarse by design
+    coarse = [r for r in rows if grade_level(r["grade"]) > 0 and not r.get("foliage") and not r.get("prop")]   # a tree or a prop is coarse by design
     coarse_groups = {r["groupHash"] for r in coarse if r["groupHash"]}
     coarse_triangles = sum(r["stored"] for r in coarse)
     under = 0
     for r in rows:
+        if r.get("foliage") or r.get("prop"):
+            continue   # PART-11: a tree or a prop is stored at its own target, not the buildings' density
         target = min(INDEX_TARGET_MAX, max(INDEX_TARGET_MIN, int(INDEX_TARGET_PER_M2 * r["surface"])))
         want = min(r["source"], target)
         if want > 0 and r["stored"] < INDEX_UNDER_SERVED_SHARE * want:
             under += 1
     trees = [r for r in rows if r.get("foliage")]
+    props = [r for r in rows if r.get("prop")]
     lod_text = (f"rows at LOD>0: {len(coarse)} ({coarse_triangles:,} triangles, {len(coarse_groups)} group(s)); "
-                f"under-served: {under} (stored under {INDEX_UNDER_SERVED_SHARE:g} x min(source, target)); "
-                f"tree rows: {len(trees)} ({sum(r['stored'] for r in trees):,} triangles, max {max((r['stored'] for r in trees), default=0):,} a tree)")
+                f"under-served buildings: {under} (stored under {INDEX_UNDER_SERVED_SHARE:g} x min(source, target)); "
+                f"tree rows: {len(trees)} ({sum(r['stored'] for r in trees):,} triangles, max {max((r['stored'] for r in trees), default=0):,} a tree); "
+                f"prop rows: {len(props)} ({sum(r['stored'] for r in props):,} triangles, max {max((r['stored'] for r in props), default=0):,} a prop)")
+    # PART-11 (3.5): the quality statistics judge buildings apart from trees and props (a prop's low density is by design) -
+    # only when the rows line up with the mesh's buildings (a mismatch is an error above)
+    mesh["_kinds"] = [r["kind"] for r in rows] if len(rows) == len(shapes) else []
     if coarse:
         warnings.append(f"{key}: {name} holds {len(coarse)} row(s) at a LOD level above 0 ({coarse_triangles:,} triangles in "
                         f"{len(coarse_groups)} group(s)) - PART-00 section 6 asks for none after the last stop")

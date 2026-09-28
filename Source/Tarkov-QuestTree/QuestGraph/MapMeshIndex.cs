@@ -39,8 +39,18 @@ namespace QuestTree.QuestGraph
         /// were clean, so a building whose decimation or cluster always times out is not read at every stop.</summary>
         internal const int MaxUncleanAttempts = 3;
 
-        /// <summary>HQ S3.12: the sidecar versions whose building rows carry the foliage byte after the unclean attempts.</summary>
+        /// <summary>HQ S3.12: the sidecar versions whose building rows carry the KIND byte after the unclean attempts -
+        /// written as a foliage flag (0 or 1) by version 5; PART-11 (3.5) reads the same byte as the row's kind
+        /// (<see cref="KindBuilding"/>, <see cref="KindTree"/>, <see cref="KindProp"/>) and writes props as 2 from
+        /// PART-11's bump commit on.</summary>
         internal const int FoliageFlagVersion = 5;
+
+        /// <summary>PART-11 (3.5): what a row's kind byte says - a building, a tree or bush (HQ S3.12's foliage flag), or a
+        /// prop (PART-11's class).</summary>
+        internal const byte KindBuilding = 0;
+
+        internal const byte KindTree = 1;
+        internal const byte KindProp = 2;
 
         /// <summary>The first four bytes inside the deflate block.</summary>
         internal const string Magic = "QTMI";
@@ -281,9 +291,17 @@ namespace QuestTree.QuestGraph
             /// <see cref="MaxUncleanAttempts"/>), 0 after a clean one.</summary>
             internal byte UncleanAttempts;
 
-            /// <summary>HQ S3.12: a tree or bush (its renderer's materials all on a SpeedTree shader), for the checker's tree
-            /// rows. In the row from <see cref="FoliageFlagVersion"/>.</summary>
-            internal bool Foliage;
+            /// <summary>PART-11 (3.5): the row's kind - <see cref="KindBuilding"/>, <see cref="KindTree"/> (HQ S3.12: its
+            /// renderer's materials all on a SpeedTree shader) or <see cref="KindProp"/> - for the checker's rows by kind and
+            /// the props' share over a stored mesh. In the row from <see cref="FoliageFlagVersion"/> (as a 0/1 flag in
+            /// version 5; a stored 5 never holds a 2).</summary>
+            internal byte Kind;
+
+            /// <summary>HQ S3.12: a tree or bush - the row's kind is <see cref="KindTree"/>.</summary>
+            internal bool Foliage => Kind == KindTree;
+
+            /// <summary>PART-11: a prop - the row's kind is <see cref="KindProp"/>.</summary>
+            internal bool Prop => Kind == KindProp;
 
             /// <summary>Each atlas range's material key, in the order of the mesh building's Ranges.</summary>
             internal ulong[] RangeMaterials = new ulong[0];
@@ -466,7 +484,7 @@ namespace QuestTree.QuestGraph
                         w.Write(e.RetargetTried);
                         w.Write(e.TextureTried);
                         w.Write(e.UncleanAttempts);
-                        if (Version >= FoliageFlagVersion) w.Write(e.Foliage ? (byte)1 : (byte)0);
+                        if (Version >= FoliageFlagVersion) w.Write(e.Kind);
                         w.Write((byte)e.RangeMaterials.Length);
                         foreach (var key in e.RangeMaterials) w.Write(key);
                     }
@@ -656,7 +674,11 @@ namespace QuestTree.QuestGraph
                     RetargetTried = r.ReadInt32(), TextureTried = r.ReadByte(), UncleanAttempts = r.ReadByte(),
                 };
 
-                if (Version >= FoliageFlagVersion) e.Foliage = r.ReadByte() != 0;
+                if (Version >= FoliageFlagVersion)
+                {
+                    e.Kind = r.ReadByte();
+                    if (e.Kind > KindProp) throw new InvalidDataException($"building {i} has kind {e.Kind}, which this reads no meaning into");
+                }
 
                 if (e.StoredTriangles < 0) throw new InvalidDataException($"building {i} has a negative triangle count");
 
