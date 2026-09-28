@@ -228,6 +228,11 @@ namespace QuestTree.QuestGraph
         /// (MapStore.MaxAtlasPages).</summary>
         private const int MaxAtlasPages = 8;
 
+        /// <summary>HQ S3.11: an alpha MASK post and fetch name their page as page + this - a number no page has, so a host
+        /// from before masks drops the post as "not an atlas page" (and answers a fetch empty) while the page itself lands.
+        /// The host's own constant (MapStore.AlphaPageOffset).</summary>
+        private const int AlphaPageOffset = 1000;
+
         /// <summary>The long side an atlas page may have: the builder packs 4096 px pages, and a page is
         /// sent at its FULL size - never scaled to <see cref="MaxLongSide"/> as a floor is, because the mesh's
         /// UVs address it texel by texel and a halved page is every wall blurred.</summary>
@@ -1237,7 +1242,8 @@ namespace QuestTree.QuestGraph
 
                         if (task == null) yield break;
 
-                        if (!encoded) meta.Atlas?.Remove(page.AtlasEntry);
+                        // HQ S3.11: a mask that did not get through leaves its page in the meta (the page draws opaque)
+                        if (!encoded && page.AlphaOf == null) meta.Atlas?.Remove(page.AtlasEntry);
 
                         var verdict = JudgeSide(key, page, task, out var pageReason, out var pageMeshKept);
 
@@ -1561,7 +1567,7 @@ namespace QuestTree.QuestGraph
                 // the mesh's buildings and nothing else, so with no mesh to offer the meta names no pages
                 // (a host told about a page waits for it), and a page not on this disk is taken out of the
                 // meta here for the sides' reason.
-                var pages = ReadAtlas(key, meta, mesh != null, say);
+                var pages = ReadAtlas(key, meta, mesh != null, AlphaPagesOfMesh(mesh), say);
 
                 prep.Meta = meta;
                 prep.Floors = floors;
@@ -1919,6 +1925,37 @@ namespace QuestTree.QuestGraph
             return spanR > 0d && spanU > 0d;
         }
 
+        /// <summary>HQ S3.11: the alpha-page mask of a mesh about to be offered - the header's byte after the page count,
+        /// from format v4 - or 0 for none, an older format, or bytes that will not inflate that far.</summary>
+        /// <param name="mesh">The mesh file's bytes, deflated, or null.</param>
+        internal static int AlphaPagesOfMesh(byte[] mesh)
+        {
+            if (mesh == null || mesh.Length == 0) return 0;
+
+            try
+            {
+                using (var raw = new MemoryStream(mesh, false))
+                using (var inflate = new System.IO.Compression.DeflateStream(raw, System.IO.Compression.CompressionMode.Decompress))
+                using (var r = new BinaryReader(inflate))
+                {
+                    r.ReadBytes(4);                                   // the magic
+                    var version = r.ReadInt32();
+                    if (version < MapMeshFile.AlphaMaskVersion) return 0;
+
+                    r.ReadDouble(); r.ReadDouble(); r.ReadDouble(); r.ReadDouble();   // the extent
+                    r.ReadSingle(); r.ReadSingle();                                   // the y range
+                    var pages = r.ReadInt32();
+                    if (pages <= 0 || pages > MaxAtlasPages) return 0;
+
+                    return r.ReadByte() & ((1 << pages) - 1);
+                }
+            }
+            catch (Exception)
+            {
+                return 0;
+            }
+        }
+
         /// <summary>
         /// The capture's atlas pages that are actually on this disk, ready to post, in page order - or none,
         /// with the meta's atlas removed, when there is no mesh to offer (<paramref name="hasMesh"/>): a
@@ -1932,8 +1969,9 @@ namespace QuestTree.QuestGraph
         /// <param name="key">The map's internal id.</param>
         /// <param name="meta">The meta being offered; its <c>Atlas</c> is trimmed to what will be sent.</param>
         /// <param name="hasMesh">Whether a mesh will be offered with it.</param>
+        /// <param name="alphaPages">HQ S3.11: the mesh's alpha-page mask (AlphaPagesOfMesh): a mask upload goes before each such page.</param>
         /// <param name="say">Where its lines go - buffered on the upload's worker and said on the main thread (WP3 Phase A).</param>
-        private static List<FloorUpload> ReadAtlas(string key, MapCaptureMetaDto meta, bool hasMesh, LineBuffer say)
+        private static List<FloorUpload> ReadAtlas(string key, MapCaptureMetaDto meta, bool hasMesh, int alphaPages, LineBuffer say)
         {
             var pages = new List<FloorUpload>();
 
@@ -1960,6 +1998,19 @@ namespace QuestTree.QuestGraph
                     if (!File.Exists(picture)) continue;
 
                     kept.Add(page);
+
+                    // HQ S3.11: an alpha page's mask goes up BEFORE the page, so a set that completes on its last page
+                    // has the mask staged; a host from before masks drops the mask post and takes the page
+                    if ((alphaPages >> page.Page & 1) != 0)
+                        pages.Add(new FloorUpload
+                        {
+                            Level = SideLevel,
+                            Name = $"atlas page {page.Page.ToString(CultureInfo.InvariantCulture)}'s alpha mask",
+                            Path = picture,
+                            Atlas = page.Page + AlphaPageOffset,
+                            AtlasEntry = page,
+                            AlphaOf = page.Page
+                        });
 
                     pages.Add(new FloorUpload
                     {
@@ -2565,6 +2616,13 @@ namespace QuestTree.QuestGraph
         /// </summary>
         private static IEnumerator EncodeSteps(string key, FloorUpload floor, byte[] bytes, string readError, EncodeJob job)
         {
+            // HQ S3.11: an alpha mask is its page's alpha as an 8-bit grey PNG - one frame, on the main thread
+            if (floor.AlphaOf != null)
+            {
+                job.Ok = EncodeAlphaMask(key, floor, bytes, readError);
+                yield break;
+            }
+
             if (!UseArrayEncoder() || bytes == null)
             {
                 job.Ok = Encode(key, floor, bytes, readError);
@@ -2609,6 +2667,88 @@ namespace QuestTree.QuestGraph
                 if (s.Render != null) RenderTexture.ReleaseTemporary(s.Render);
                 if (s.Scaled != null) UnityEngine.Object.Destroy(s.Scaled);
                 if (s.Source != null) UnityEngine.Object.Destroy(s.Source);
+            }
+        }
+
+        /// <summary>HQ S3.11: a page's ALPHA MASK for the host - the page PNG decoded, its alpha written into every channel
+        /// of an RGB24 texture of the same size and encoded as a PNG (a binary mask deflates to a few hundred KB). A page
+        /// with no transparent pixel at all makes no mask: false, and the post goes up empty, which the host drops.</summary>
+        private static bool EncodeAlphaMask(string key, FloorUpload floor, byte[] bytes, string readError)
+        {
+            Texture2D source = null;
+            Texture2D grey = null;
+
+            try
+            {
+                if (bytes == null)
+                {
+                    Plugin.LogSource?.LogDebug($"QuestTree: {key} \"{floor.Name}\" could not be read ({readError ?? "IOException"}) - not offered.");
+                    return false;
+                }
+
+                if (!QuestTree.UI.DynamicMapsLibrary.PictureSize(bytes, out var declaredWidth, out var declaredHeight) ||
+                    declaredWidth > MaxAtlasPixels || declaredHeight > MaxAtlasPixels)
+                {
+                    Plugin.LogSource?.LogDebug($"QuestTree: {key} \"{floor.Name}\" is not a page of at most {MaxAtlasPixels} px - not offered.");
+                    return false;
+                }
+
+                source = new Texture2D(2, 2, TextureFormat.RGBA32, mipChain: false);
+                if (!source.LoadImage(bytes))
+                {
+                    Plugin.LogSource?.LogDebug($"QuestTree: {key} \"{floor.Name}\" would not decode - not offered.");
+                    return false;
+                }
+
+                if (!SizeMatches(key, floor, source.width, source.height)) return false;
+
+                var pixels = source.GetPixels32();
+                var transparent = 0;
+                for (var i = 0; i < pixels.Length; i++)
+                {
+                    var a = pixels[i].a;
+                    if (a < 255) transparent++;
+                    pixels[i] = new Color32(a, a, a, 255);
+                }
+
+                if (transparent == 0)
+                {
+                    Plugin.LogSource?.LogDebug($"QuestTree: {key} \"{floor.Name}\" has no transparent pixel - no mask is offered.");
+                    return false;
+                }
+
+                grey = new Texture2D(source.width, source.height, TextureFormat.RGB24, mipChain: false);
+                grey.SetPixels32(pixels);
+                grey.Apply(updateMipmaps: false);
+
+                var png = grey.EncodeToPNG();
+
+                if (png == null || png.Length == 0 || png.Length > MaxAtlasPageBytes)
+                {
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: {key} \"{floor.Name}\" is {Mb(png?.Length ?? 0)} MB as a PNG, over the {Mb(MaxAtlasPageBytes)} MB " +
+                        "a host takes per page - not offered; the page draws opaque on the host's clients.");
+                    return false;
+                }
+
+                floor.Base64 = Convert.ToBase64String(png);
+                floor.Bytes = png.Length;
+
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: {key} \"{floor.Name}\" {source.width}x{source.height} -> PNG mask, {Mb(png.Length)} MB " +
+                    $"({transparent:#,##0} transparent pixel(s)).");
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: {key} \"{floor.Name}\" could not be prepared for upload ({ex.GetType().Name}: {ex.Message}) - not offered.");
+                return false;
+            }
+            finally
+            {
+                if (grey != null) UnityEngine.Object.Destroy(grey);
+                if (source != null) UnityEngine.Object.Destroy(source);
             }
         }
 
@@ -3003,7 +3143,7 @@ namespace QuestTree.QuestGraph
                 Level = floor.Side != null || floor.Atlas != null ? SideLevel : floor.Level,
                 Side = floor.Side,
                 Atlas = floor.Atlas,
-                Format = "jpg",
+                Format = floor.AlphaOf != null ? "png" : "jpg",
                 ImageBase64 = floor.Base64 ?? ""
             };
 
@@ -3507,6 +3647,9 @@ namespace QuestTree.QuestGraph
             public int? Atlas;
 
             public MapCaptureAtlasDto AtlasEntry;
+
+            /// <summary>HQ S3.11: this upload is the alpha MASK of that page (Atlas = the page + AlphaPageOffset).</summary>
+            public int? AlphaOf;
 
             /// <summary>The size the meta promises this picture goes up at - the check
             /// <see cref="Encode"/> holds what it produced to.</summary>
@@ -4806,6 +4949,70 @@ namespace QuestTree.QuestGraph
         private static string AtlasFileName(string key, int page) =>
             $"{key}-atlas-{page.ToString(CultureInfo.InvariantCulture)}.jpg";
 
+        /// <summary>HQ S3.11: a page's alpha mask's file name beside it - the host's own name for it.</summary>
+        private static string AlphaFileName(string key, int page) =>
+            $"{key}-atlas-{page.ToString(CultureInfo.InvariantCulture)}-alpha.png";
+
+        /// <summary>HQ S3.11: a page's alpha mask from the host, checked (a PNG of the page's size hashing to the sha256
+        /// the host's index names), or null - <see cref="FetchAtlasPage"/> for the mask. A failure of any kind is final for
+        /// this session: the page is written without it and draws opaque, never fetched again for the mask's sake.</summary>
+        private static byte[] FetchAlphaMask(string key, MapCaptureAtlasDto page, string stamp, SyncResult result, out bool replaced)
+        {
+            replaced = false;
+            var label = $"atlas page {page.Page}'s alpha mask";
+
+            try
+            {
+                var body = JsonConvert.SerializeObject(new MapImageRequest { Map = key, Level = SideLevel, Atlas = page.Page + AlphaPageOffset });
+                var reply = Post(ImageRoute, body, MeshRequestTimeout);
+                var image = NotOurs<MapImageDto>(reply, out var excerpt);
+
+                if (image == null)
+                {
+                    result.Debug.Add($"QuestTree: the reply for {key}'s {label} was not the server half's - {excerpt}");
+                    return null;
+                }
+
+                if (string.IsNullOrEmpty(image.ImageBase64))
+                {
+                    result.Debug.Add($"QuestTree: the host sent no {label} for {key} - the page draws opaque.");
+                    return null;
+                }
+
+                if (!string.IsNullOrEmpty(image.Stamp) && !string.Equals(image.Stamp, stamp, StringComparison.Ordinal))
+                {
+                    replaced = true;
+                    result.Debug.Add($"QuestTree: the host's pictures of {key} changed while they were being fetched - the whole set is taken again next session.");
+                    return null;
+                }
+
+                var bytes = Convert.FromBase64String(image.ImageBase64);
+
+                if (bytes.Length == 0 || bytes.Length > MaxAtlasPageBytes || Extension(bytes) != ".png" ||
+                    !QuestTree.UI.DynamicMapsLibrary.PictureSize(bytes, out var width, out var height) ||
+                    width != page.Width || height != page.Height)
+                {
+                    result.Debug.Add($"QuestTree: the host's {label} of {key} is not a PNG of the page's size - the page draws opaque.");
+                    return null;
+                }
+
+                var hash = Sha256(bytes);
+
+                if (!string.Equals(hash, page.AlphaSha256 ?? "", StringComparison.OrdinalIgnoreCase))
+                {
+                    result.Debug.Add($"QuestTree: the host's {label} of {key} does not hash to the sha256 its index names - the page draws opaque.");
+                    return null;
+                }
+
+                return bytes;
+            }
+            catch (Exception ex)
+            {
+                result.Debug.Add($"QuestTree: the host's {label} of {key} could not be taken ({ex.GetBaseException().Message}) - the page draws opaque.");
+                return null;
+            }
+        }
+
         /// <summary>A JPEG's width and height from its frame header, or false. Walks the marker chain
         /// rather than trusting an offset - the frame header comes after however many other segments the
         /// encoder wrote - and decodes nothing: the same walk tools/check-maps-pack.py makes.</summary>
@@ -5036,6 +5243,25 @@ namespace QuestTree.QuestGraph
 
                     File.WriteAllBytes(Path.Combine(folder, name), picture);
 
+                    // HQ S3.11: the page's alpha mask, when the host's meta names one - taken beside the page; without it
+                    // (an older host, a mask that failed) the page draws opaque, which is what it was before masks
+                    string alphaName = null;
+                    string alphaSha = null;
+
+                    if (!string.IsNullOrEmpty(hostPage.AlphaFile))
+                    {
+                        var mask = FetchAlphaMask(key, hostPage, entry.Stamp, result, out var maskReplaced);
+                        if (maskReplaced) return written;
+
+                        if (mask != null)
+                        {
+                            alphaName = AlphaFileName(key, number);
+                            File.WriteAllBytes(Path.Combine(folder, alphaName), mask);
+                            alphaSha = hostPage.AlphaSha256;
+                            written += mask.Length;
+                        }
+                    }
+
                     pages.Add(new MapCaptureAtlasDto
                     {
                         File = name,
@@ -5043,7 +5269,9 @@ namespace QuestTree.QuestGraph
                         Width = hostPage.Width,
                         Height = hostPage.Height,
                         Tiles = hostPage.Tiles,
-                        Sha256 = hostPage.Sha256
+                        Sha256 = hostPage.Sha256,
+                        AlphaFile = alphaName,
+                        AlphaSha256 = alphaSha
                     });
 
                     written += picture.Length;

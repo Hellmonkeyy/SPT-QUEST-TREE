@@ -2848,9 +2848,14 @@ namespace QuestTree.UI
                 DropTiles();
 
                 var paths = new string[MaxAtlasPages];
-                for (var page = 0; page < _pages.Length; page++) paths[page] = _pages[page]?.Picture?.ImagePath;
+                var alphaPaths = new string[MaxAtlasPages];
+                for (var page = 0; page < _pages.Length; page++)
+                {
+                    paths[page] = _pages[page]?.Picture?.ImagePath;
+                    alphaPaths[page] = _pages[page]?.AlphaPath;
+                }
 
-                _tiles = TileStore.For(_file, _mapKey, paths);
+                _tiles = TileStore.For(_file, _mapKey, paths, alphaPaths);
             }
 
             _tiles.Users++;
@@ -2943,6 +2948,9 @@ namespace QuestTree.UI
 
             private readonly Dictionary<long, int> _index = new Dictionary<long, int>();
             private readonly string[] _paths = new string[MaxAtlasPages];
+
+            /// <summary>HQ S3.11: each page's alpha mask file, or null (a PNG page carries its own alpha).</summary>
+            private readonly string[] _alphaPaths = new string[MaxAtlasPages];
             private readonly bool[] _pageFailed = new bool[MaxAtlasPages];
             private readonly List<int>[] _tilesOfPage = new List<int>[MaxAtlasPages];
             private readonly Dictionary<int, Color32[]> _buffers = new Dictionary<int, Color32[]>();
@@ -2972,11 +2980,14 @@ namespace QuestTree.UI
             /// <param name="file">The parsed file.</param>
             /// <param name="mapKey">For the log lines.</param>
             /// <param name="paths">Each page's PNG by page number, null where the view has none.</param>
-            public static TileStore For(MapMeshFile file, string mapKey, string[] paths)
+            /// <param name="alphaPaths">HQ S3.11: each page's alpha mask file, or null.</param>
+            public static TileStore For(MapMeshFile file, string mapKey, string[] paths, string[] alphaPaths = null)
             {
                 var store = new TileStore { File = file, _mapKey = mapKey ?? "" };
 
                 for (var page = 0; page < MaxAtlasPages && page < paths.Length; page++) store._paths[page] = paths[page];
+                if (alphaPaths != null)
+                    for (var page = 0; page < MaxAtlasPages && page < alphaPaths.Length; page++) store._alphaPaths[page] = alphaPaths[page];
 
                 if (file?.Buildings != null)
                 {
@@ -3155,6 +3166,9 @@ namespace QuestTree.UI
                     _pageWidth = texture.width;
                     _pageHeight = texture.height;
                     _pixels = texture.GetPixels32();
+
+                    // HQ S3.11: a host page travelled as a JPEG, alpha 255 throughout - its mask puts the alpha back
+                    if (AlphaPage(_page) && !string.IsNullOrEmpty(_alphaPaths[_page])) ApplyAlphaMask(_page);
                     return true;
                 }
                 catch (Exception ex)
@@ -3249,6 +3263,43 @@ namespace QuestTree.UI
                 finally
                 {
                     Discard(texture);
+                }
+            }
+
+            /// <summary>HQ S3.11: the page's alpha mask (a grey PNG of the page's size) read and decoded, its red channel
+            /// written into the page pixels' alpha. Any failure leaves the page opaque and says so once, in debug.</summary>
+            private void ApplyAlphaMask(int page)
+            {
+                Texture2D mask = null;
+
+                try
+                {
+                    var bytes = System.IO.File.ReadAllBytes(_alphaPaths[page]);
+
+                    if (!DynamicMapsLibrary.PictureSize(bytes, out var width, out var height) || width != _pageWidth || height != _pageHeight)
+                    {
+                        Plugin.LogSource?.LogDebug($"QuestTree: atlas page {page} of '{_mapKey}' has a mask of another size ({width}x{height}) - drawn opaque.");
+                        return;
+                    }
+
+                    mask = new Texture2D(2, 2, TextureFormat.RGBA32, mipChain: false) { name = "QuestTreeMap3D-alphamask" };
+                    if (!mask.LoadImage(bytes, markNonReadable: false) || mask.width != _pageWidth || mask.height != _pageHeight)
+                    {
+                        Plugin.LogSource?.LogDebug($"QuestTree: atlas page {page} of '{_mapKey}' has a mask that would not decode - drawn opaque.");
+                        return;
+                    }
+
+                    var alpha = mask.GetPixels32();
+                    var n = Math.Min(alpha.Length, _pixels.Length);
+                    for (var i = 0; i < n; i++) _pixels[i].a = alpha[i].r;
+                }
+                catch (Exception ex)
+                {
+                    Plugin.LogSource?.LogDebug($"QuestTree: atlas page {page} of '{_mapKey}' has a mask that could not be read ({ex.GetType().Name}) - drawn opaque.");
+                }
+                finally
+                {
+                    Discard(mask);
                 }
             }
 

@@ -227,6 +227,14 @@ namespace QuestTreeServer
         /// the builder's own ceiling.</summary>
         private const int MaxAtlasPages = 8;
 
+        /// <summary>HQ S3.11: an alpha MASK post names its page as page + this (MapTransfer.AlphaPageOffset) - a number no
+        /// page has, so a host from before masks drops it as "not an atlas page" and the page itself still lands.</summary>
+        private const int AlphaPageOffset = 1000;
+
+        /// <summary>HQ S3.11: whether the mesh format this host stores carries the alpha-page mask byte after the page count
+        /// (MapMeshFile v4).</summary>
+        private static readonly bool MeshHasAlphaMask = MeshVersion >= 4;
+
         /// <summary>One atlas page's ceiling, decoded. A page is a 4096 px sheet of building textures, sent
         /// at its full size as a JPEG at quality 85 - never downscaled, since a texel lost here is a blurred
         /// wall on every client - and a sheet of dense brick and signage at that quality measures 2-4 MB.
@@ -327,6 +335,10 @@ namespace QuestTreeServer
         /// disk like the others.</summary>
         private static readonly Regex StoredAtlasFileName =
             new(@"^[A-Za-z0-9_\-]{1,64}-atlas-[0-7]\.jpg$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
+
+        /// <summary>HQ S3.11: a stored alpha MASK's file name - <c>&lt;key&gt;-atlas-&lt;n&gt;-alpha.png</c>.</summary>
+        private static readonly Regex StoredAlphaFileName =
+            new(@"^[A-Za-z0-9_\-]{1,64}-atlas-[0-7]-alpha\.png$", RegexOptions.Compiled | RegexOptions.IgnoreCase);
 
         /// <summary>A sha256 as this store will store one: 64 hex digits, lower case on the way out.
         /// Checked on the way in because it is printed into log lines and written into a served
@@ -509,6 +521,11 @@ namespace QuestTreeServer
             string? sideRefusal = null;
             var isAtlas = request.Atlas != null;
             int? pageNo = isAtlas && request.Atlas >= 0 && request.Atlas < MaxAtlasPages ? request.Atlas : null;
+
+            // HQ S3.11: an alpha mask post, by the page it belongs to
+            int? maskNo = isAtlas && request.Atlas >= AlphaPageOffset && request.Atlas < AlphaPageOffset + MaxAtlasPages
+                ? request.Atlas - AlphaPageOffset
+                : null;
             string? pageRefusal = null;
             var format = "jpg";
             var bytes = Array.Empty<byte>();
@@ -528,14 +545,17 @@ namespace QuestTreeServer
             }
             else if (isAtlas)
             {
-                var entry = meta.Atlas?.FirstOrDefault(p => p.Page == pageNo);
+                var wantedPage = maskNo ?? pageNo;
+                var entry = meta.Atlas?.FirstOrDefault(p => p.Page == wantedPage);
 
-                if (pageNo == null)
+                if (wantedPage == null)
                     pageRefusal = $"{request.Atlas} is not an atlas page (0 to {MaxAtlasPages - 1})";
                 else if (entry == null)
                     pageRefusal = meta.Mesh == null
                         ? "the set carries no 3D mesh for it to texture"
-                        : $"the capture's meta names no atlas page {pageNo}";
+                        : $"the capture's meta names no atlas page {wantedPage}";
+                else if (maskNo != null)
+                    pageRefusal = DecodeAlphaMask(request, entry, out bytes);
                 else
                     pageRefusal = DecodeAtlasPage(request, entry, out bytes);
             }
@@ -825,18 +845,20 @@ namespace QuestTreeServer
 
                     if (isAtlas)
                     {
-                        // A page staged, or - dropped - its marker, with any copy an earlier attempt staged
-                        // deleted so it cannot be promoted. Exactly the side's two cases below.
-                        if (pageNo != null && pageRefusal == null)
-                        {
-                            WriteAtomic(System.IO.Path.Combine(staging, StagedPageName(pageNo.Value)), bytes);
-                        }
-                        else if (pageNo != null)
-                        {
-                            WriteAtomic(System.IO.Path.Combine(staging, DroppedPageName(pageNo.Value)),
-                                Encoding.UTF8.GetBytes(pageRefusal!));
+                        // A page (or, HQ S3.11, its alpha mask) staged, or - dropped - its marker, with any copy an
+                        // earlier attempt staged deleted so it cannot be promoted. Exactly the side's two cases below.
+                        var stagedName = maskNo != null ? StagedMaskName(maskNo.Value) : pageNo != null ? StagedPageName(pageNo.Value) : null;
+                        var droppedName = maskNo != null ? DroppedMaskName(maskNo.Value) : pageNo != null ? DroppedPageName(pageNo.Value) : null;
 
-                            try { System.IO.File.Delete(System.IO.Path.Combine(staging, StagedPageName(pageNo.Value))); }
+                        if (stagedName != null && pageRefusal == null)
+                        {
+                            WriteAtomic(System.IO.Path.Combine(staging, stagedName), bytes);
+                        }
+                        else if (stagedName != null)
+                        {
+                            WriteAtomic(System.IO.Path.Combine(staging, droppedName!), Encoding.UTF8.GetBytes(pageRefusal!));
+
+                            try { System.IO.File.Delete(System.IO.Path.Combine(staging, stagedName)); }
                             catch { /* there may be none */ }
                         }
                     }
@@ -1048,6 +1070,14 @@ namespace QuestTreeServer
                     var side = dir == null ? null : set.Meta.Sides?.FirstOrDefault(s => s.Dir == dir);
 
                     file = side != null && StoredSideFileName.IsMatch(side.File ?? "") ? side.File : null;
+                }
+                else if (request.Atlas != null && request.Atlas >= AlphaPageOffset)
+                {
+                    // HQ S3.11: a page's ALPHA MASK, by its page number plus the offset - the name from the stored meta,
+                    // held to the stored-mask rule; a page with no mask answers empty.
+                    var page = set.Meta.Atlas?.FirstOrDefault(p => p.Page == request.Atlas - AlphaPageOffset);
+
+                    file = page?.AlphaFile != null && StoredAlphaFileName.IsMatch(page.AlphaFile) ? page.AlphaFile : null;
                 }
                 else if (request.Atlas != null)
                 {
@@ -1951,6 +1981,27 @@ namespace QuestTreeServer
                         file.Sha = page.Sha256;
                         prepared.Atlas.Add(file);
                         prepared.Bytes += file.Data.Length;
+
+                        // HQ S3.11: the page's alpha mask, when one was staged - named and hashed as the page is
+                        var maskPath = System.IO.Path.Combine(staging, StagedMaskName(page.Page));
+
+                        if (System.IO.File.Exists(maskPath))
+                        {
+                            var mask = Read(maskPath);
+
+                            mask.Name = AlphaName(key, page.Page);
+                            page.AlphaFile = mask.Name;
+                            page.AlphaSha256 = Convert.ToHexString(SHA256.HashData(mask.Data)).ToLowerInvariant();
+
+                            mask.Sha = page.AlphaSha256;
+                            prepared.Atlas.Add(mask);
+                            prepared.Bytes += mask.Data.Length;
+                        }
+                        else
+                        {
+                            page.AlphaFile = null;
+                            page.AlphaSha256 = null;
+                        }
                     }
 
                     meta.Atlas = ordered;
@@ -2578,6 +2629,30 @@ namespace QuestTreeServer
 
                             order.Add(pageFile);
                             kept.Add(page);
+
+                            // HQ S3.11: its alpha mask, when named - a mask that is not there or not itself is dropped
+                            // alone (the page draws opaque), never the page
+                            if (!string.IsNullOrEmpty(page.AlphaFile))
+                            {
+                                var maskFile = page.AlphaFile!;
+                                string? maskWhy = null;
+
+                                if (!StoredAlphaFileName.IsMatch(maskFile) || !System.IO.File.Exists(System.IO.Path.Combine(dir, maskFile)))
+                                    maskWhy = $"maps/{key} does not hold '{Clip(maskFile, MaxFreeTextLength)}'";
+                                else if (!string.Equals(ShaOf(maskFile), page.AlphaSha256 ?? "", StringComparison.OrdinalIgnoreCase))
+                                    maskWhy = $"maps/{key}/{maskFile} does not hash to the {Short(page.AlphaSha256 ?? "")} its meta names";
+
+                                if (maskWhy != null)
+                                {
+                                    NoteAtlasDropped(key, PageLabel(page.Page + AlphaPageOffset), meta.CapturedAt, maskWhy);
+                                    page.AlphaFile = null;
+                                    page.AlphaSha256 = null;
+                                }
+                                else
+                                {
+                                    order.Add(maskFile);
+                                }
+                            }
                         }
                     }
 
@@ -3172,6 +3247,45 @@ namespace QuestTreeServer
         /// the size the meta names, because the mesh's UVs address the page as that many texels, and
         /// package.ps1's gate holds a shipped page to exactly this. Empty means "the client could not
         /// encode this page after naming it".</summary>
+        /// <summary>HQ S3.11: an alpha MASK post's bytes, checked - a PNG, at most a page's bytes, exactly the page's
+        /// size - or why it is dropped.</summary>
+        private static string? DecodeAlphaMask(MapUploadRequest request, MapCaptureAtlasDto entry, out byte[] bytes)
+        {
+            bytes = Array.Empty<byte>();
+
+            if (Format(request.Format) != "png") return "an alpha mask must be a PNG";
+
+            var encoded = request.ImageBase64 ?? "";
+
+            if (encoded.Length == 0) return "the client could not encode it";
+
+            if (encoded.Length > MaxEncodedAtlasChars)
+                return $"it is larger than the {Mb(MaxAtlasPageBytes)} MB a page may be";
+
+            try
+            {
+                bytes = Convert.FromBase64String(encoded);
+            }
+            catch (FormatException)
+            {
+                bytes = Array.Empty<byte>();
+                return "it is not base64";
+            }
+
+            if (bytes.Length > MaxAtlasPageBytes)
+                return $"it is {bytes.Length:N0} bytes, past the {MaxAtlasPageBytes:N0} a page may be";
+
+            if (!MagicMatches("png", bytes)) return "its bytes do not start as a PNG does";
+
+            if (!PngSize(bytes, out var width, out var height))
+                return "its PNG header could not be read";
+
+            if (width != entry.Width || height != entry.Height)
+                return $"it is {width}x{height} px, not the {entry.Width}x{entry.Height} its page is";
+
+            return null;
+        }
+
         private static string? DecodeAtlasPage(MapUploadRequest request, MapCaptureAtlasDto entry, out byte[] bytes)
         {
             bytes = Array.Empty<byte>();
@@ -3318,7 +3432,17 @@ namespace QuestTreeServer
         }
 
         /// <summary>"atlas page 3", fit to print - a number is all a client can send, so nothing to clip.</summary>
-        private static string PageLabel(int? page) => $"atlas page {page?.ToString(CultureInfo.InvariantCulture) ?? "?"}";
+        private static string PageLabel(int? page) =>
+            page >= AlphaPageOffset
+                ? $"atlas page {(page.Value - AlphaPageOffset).ToString(CultureInfo.InvariantCulture)}'s alpha mask"
+                : $"atlas page {page?.ToString(CultureInfo.InvariantCulture) ?? "?"}";
+
+        /// <summary>HQ S3.11: a staged alpha mask, its dropped marker, and its stored name beside its page.</summary>
+        private static string StagedMaskName(int page) => $"atlas-{page.ToString(CultureInfo.InvariantCulture)}-alpha.png";
+
+        private static string DroppedMaskName(int page) => $"atlas-{page.ToString(CultureInfo.InvariantCulture)}-alpha.dropped";
+
+        private static string AlphaName(string key, int page) => $"{key}-atlas-{page.ToString(CultureInfo.InvariantCulture)}-alpha.png";
 
         /// <summary>A page's name in the staging folder. Not a number, so FilesByLevel never reads it as a
         /// floor.</summary>
@@ -3506,6 +3630,18 @@ namespace QuestTreeServer
                 {
                     problem = $"the mesh claims {atlasPages:N0} atlas pages, past the {MaxAtlasPages} a map may have";
                     return false;
+                }
+
+                // v4 (HQ S3.11): the alpha-page mask, a bit per page below the count
+                if (MeshHasAlphaMask)
+                {
+                    int alphaMask = reader.ReadByte();
+
+                    if ((alphaMask >> atlasPages) != 0)
+                    {
+                        problem = $"the mesh's alpha-page mask 0x{alphaMask:X2} names a page past its {atlasPages} page(s)";
+                        return false;
+                    }
                 }
 
                 if (!InWorld(minX) || !InWorld(minZ) || !InWorld(maxX) || !InWorld(maxZ) ||

@@ -923,12 +923,33 @@ namespace QuestTree.UI
             var height = (int?)Field(node, "height") ?? 0;
             if (width <= 0 || height <= 0) return "its size is not positive";
 
+            // HQ S3.11: the page's alpha mask beside it, when the meta names one that is on disk
+            string alphaPath = null;
+            var alphaDeclared = ((string)Field(node, "alphaFile") ?? "").Trim();
+
+            if (alphaDeclared.Length > 0)
+            {
+                try
+                {
+                    if (string.Equals(alphaDeclared, Path.GetFileName(alphaDeclared), StringComparison.Ordinal))
+                    {
+                        var candidate = Path.Combine(folder, alphaDeclared);
+                        if (File.Exists(candidate)) alphaPath = candidate;
+                    }
+                }
+                catch (Exception)
+                {
+                    alphaPath = null;
+                }
+            }
+
             page = new DynamicMapsLibrary.AtlasPage
             {
                 Page = number,
                 Width = width,
                 Height = height,
                 Tiles = (int?)Field(node, "tiles") ?? 0,
+                AlphaPath = alphaPath,
 
                 // A raster slot and nothing more, like a side picture.
                 Picture = new DynamicMapsLibrary.MapLayer

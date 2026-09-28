@@ -10345,10 +10345,8 @@ namespace QuestTree.QuestGraph
             ReportMaterialDiags(job);
         }
 
-        /// <summary>HQ S3.11: the alpha-page mask of a build - the stored file's (its pages keep their alpha) and every page a
-        /// material textured with its alpha this build sits on, all below the page count.</summary>
-        /// <param name="job">The build.</param>
-        /// <param name="pages">The file's page count.</param>
+        /// <summary>HQ S3.11: how many pages a mask names.</summary>
+        /// <param name="mask">The alpha-page mask.</param>
         private static int AlphaPageCount(int mask)
         {
             var n = 0;
@@ -10357,6 +10355,10 @@ namespace QuestTree.QuestGraph
             return n;
         }
 
+        /// <summary>HQ S3.11: the alpha-page mask of a build - the stored file's (its pages keep their alpha) and every page a
+        /// material textured with its alpha this build sits on, all below the page count.</summary>
+        /// <param name="job">The build.</param>
+        /// <param name="pages">The file's page count.</param>
         private static int AlphaMaskOf(Job job, int pages)
         {
             var mask = job.Stored != null ? job.Request.Base.AlphaPages : 0;

@@ -660,6 +660,26 @@ def check_atlas(meta, folder, key, has_mesh, errors):
         data = path.read_bytes()
         total += len(data)
 
+        # HQ S3.11: the page's alpha mask, when named - exactly <key>-atlas-<n>-alpha.png, present, hashing as named
+        alpha_rel = page.get("alphaFile")
+        if alpha_rel is not None:
+            alpha_wanted = f"{key}-atlas-{number_}-alpha.png"
+            if not isinstance(alpha_rel, str) or alpha_rel != alpha_wanted:
+                errors.append(f"{where}.alphaFile {alpha_rel!r} is not {alpha_wanted}")
+            else:
+                named.add(alpha_rel.lower())
+                alpha_path = folder / alpha_rel
+                if not alpha_path.is_file():
+                    errors.append(f"{where}.alphaFile {alpha_rel!r} does not exist in {folder}")
+                else:
+                    alpha_data = alpha_path.read_bytes()
+                    total += len(alpha_data)
+                    alpha_sha = page.get("alphaSha256")
+                    if alpha_data[:8] != b"\x89PNG\r\n\x1a\n":
+                        errors.append(f"{where}: {alpha_rel} is not a PNG")
+                    elif not isinstance(alpha_sha, str) or hashlib.sha256(alpha_data).hexdigest() != alpha_sha.lower():
+                        errors.append(f"{where}: {alpha_rel} does not hash to the alphaSha256 its meta names")
+
         meta_w, meta_h = page.get("width"), page.get("height")
         if any(isinstance(v, bool) or not isinstance(v, int) or v <= 0 for v in (meta_w, meta_h)):
             errors.append(f"{where}: width/height {meta_w!r}x{meta_h!r} are not positive integers")

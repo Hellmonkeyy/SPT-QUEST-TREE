@@ -361,7 +361,7 @@ $strayMapFiles = @($mapFiles | ForEach-Object {
     $named = $false
     if ($parts.Count -eq 2) {
         $keyPattern = [regex]::Escape($parts[0])
-        $named = $_.Name -match "^$keyPattern-(-?[0-9]+|side-[NSEW]|atlas-[0-7])\.jpg$" -or
+        $named = $_.Name -match "^$keyPattern-((-?[0-9]+|side-[NSEW]|atlas-[0-7])\.jpg|atlas-[0-7]-alpha\.png)$" -or
                  $_.Name -like "*.map.json" -or $_.Name -eq "$($parts[0])-mesh.bin"
     }
     if (-not $named) { $rel }
@@ -382,7 +382,7 @@ if ($strayMapFiles.Count -gt 0) {
 # that gate admitted as a page is judged as one.
 $maxImageBytes = 1.5MB
 $maxAtlasPageBytes = 6MB
-$isAtlasPage = { param($file) $file.Name -match "-atlas-[0-7]\.jpg$" }
+$isAtlasPage = { param($file) $file.Name -match "-atlas-[0-7](-alpha\.png|\.jpg)$" }
 $fatImages = @($mapFiles | Where-Object { $_.Name -like "*.jpg" -and -not (& $isAtlasPage $_) -and $_.Length -gt $maxImageBytes } |
     ForEach-Object { "{0} ({1:N1} MB)" -f $_.FullName.Substring($mapsDir.Length + 1), ($_.Length / 1MB) })
 if ($fatImages.Count -gt 0) {
@@ -409,7 +409,7 @@ if ($fatPages.Count -gt 0) {
 # look at.
 $warnMapsBytes = 80MB
 $mapsBytes = ($mapFiles | Measure-Object -Property Length -Sum).Sum
-$mapsMeshBytes = (@($mapFiles | Where-Object { $_.Name -like "*-mesh.bin" -or $_.Name -match "-atlas-[0-7]\.jpg$" }) | Measure-Object -Property Length -Sum).Sum
+$mapsMeshBytes = (@($mapFiles | Where-Object { $_.Name -like "*-mesh.bin" -or $_.Name -match "-atlas-[0-7](-alpha\.png|\.jpg)$" }) | Measure-Object -Property Length -Sum).Sum
 if ($null -eq $mapsBytes) { $mapsBytes = 0 }
 if ($null -eq $mapsMeshBytes) { $mapsMeshBytes = 0 }
 $meshShare = if ($mapsBytes -gt 0) { [math]::Round(100 * $mapsMeshBytes / $mapsBytes) } else { 0 }

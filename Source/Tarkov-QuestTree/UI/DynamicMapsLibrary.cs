@@ -457,6 +457,10 @@ namespace QuestTree.UI
             /// <summary>How many material tiles the builder packed into it, for the log.</summary>
             public int Tiles;
 
+            /// <summary>HQ S3.11: the page's alpha mask file (a grey PNG of its alpha, beside a host page that travelled as a
+            /// JPEG), or null - a capture's own PNG page carries its alpha itself.</summary>
+            public string AlphaPath;
+
             /// <summary>The page's raster slot: decoded by the floor loader, held in the floor cache, evicted
             /// and released by the same rules - exactly as a side picture is.</summary>
             public MapLayer Picture;

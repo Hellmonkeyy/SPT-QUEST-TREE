@@ -1186,6 +1186,15 @@ namespace QuestTreeServer
         /// stored to the hash of the JPEG it serves. From then on it is what a downloader and the packaging
         /// gate hold the page to.</summary>
         [JsonPropertyName("sha256")] public string Sha256 { get; set; } = "";
+
+        /// <summary>HQ S3.11: the page's ALPHA MASK - an 8-bit grey PNG of the page's alpha at the page's size, stored
+        /// as <c>&lt;key&gt;-atlas-&lt;page&gt;-alpha.png</c> - and its sha256, when the mesh marks the page an alpha page
+        /// (MapMeshFile.AlphaPages) and the mask was stored; null otherwise. A page travels as a JPEG, which has no alpha,
+        /// so the mask carries it. Posted as atlas = page + 1000 with format "png"; a host from before masks drops that
+        /// post ("not an atlas page") and never sets these, and the page draws opaque from it.</summary>
+        [JsonPropertyName("alphaFile")] public string? AlphaFile { get; set; }
+
+        [JsonPropertyName("alphaSha256")] public string? AlphaSha256 { get; set; }
     }
 
     /// <summary>Everything about one map's captured picture set except the pictures: exactly the

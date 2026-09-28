@@ -169,6 +169,12 @@ namespace QuestTree.QuestGraph
         [JsonProperty("height")] public int Height { get; set; }
         [JsonProperty("tiles")] public int Tiles { get; set; }
         [JsonProperty("sha256")] public string Sha256 { get; set; }
+
+        /// <summary>HQ S3.11: the page's alpha mask file (an 8-bit grey PNG of its alpha) and its sha256, when the page is
+        /// an alpha page and the host stored the mask; null otherwise. See the server's MapCaptureAtlasDto.</summary>
+        [JsonProperty("alphaFile")] public string AlphaFile { get; set; }
+
+        [JsonProperty("alphaSha256")] public string AlphaSha256 { get; set; }
     }
 
     /// <summary>
