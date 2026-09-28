@@ -160,8 +160,8 @@ namespace QuestTreeServer
         /// vertex may belong to one range only. v2 and v1 are refused by name.</summary>
         private const int MeshVersion = 4;   // HQ S3.13: MapMeshFile.Version 4 - the alpha-page mask byte, tiles to 1024 px
 
-        /// <summary>A range's tile side, in pixels: a multiple of 4 from 4 to 256 (stage X - one repeat of a
-        /// material, at most 256 px, cut out of its page by the viewer).</summary>
+        /// <summary>A range's tile side, in pixels: a multiple of 4 from 4 to 1024 (stage X - one repeat of a
+        /// material, sized by its use since HQ S3.10, cut out of its page by the viewer).</summary>
         private const int MinTileSide = 4;
 
         private const int MaxTileSide = 1024;   // HQ S3.10: tiles sized by use, up to MapMeshFile.AtlasTileMax (1024 from the bump)
@@ -238,9 +238,9 @@ namespace QuestTreeServer
         /// <summary>One atlas page's ceiling, decoded. A page is a 4096 px sheet of building textures, sent
         /// at its full size as a JPEG at quality 85 - never downscaled, since a texel lost here is a blurred
         /// wall on every client - and a sheet of dense brick and signage at that quality measures 2-4 MB.
-        /// Six is that with room, and still far under what one post can carry (a 6 MB page is ~8.3 MB of
-        /// base64). The client holds a page to the same six before it posts it
-        /// (MapTransfer.MaxAtlasPageBytes).</summary>
+        /// Twelve (HQ S3.10; six before tiles of 1024 px) is that with room, and still under what one post can
+        /// carry (a 12 MB page is ~16.6 MB of base64). The client holds a page to the same twelve before it posts
+        /// it (MapTransfer.MaxAtlasPageBytes).</summary>
         private const int MaxAtlasPageBytes = 12 * 1024 * 1024;   // HQ S3.10: pages of 1024 px tiles weigh more at q90
 
         /// <summary>A page's base64 ceiling, checked BEFORE decoding, for
@@ -832,6 +832,12 @@ namespace QuestTreeServer
                         meta.Atlas?.RemoveAll(p => p.Page == pageNo);
 
                         if (meta.Atlas != null && meta.Atlas.Count == 0) meta.Atlas = null;
+                    }
+                    else if (isAtlas && maskNo != null && pageRefusal == null)
+                    {
+                        // HQ S3.11 (S3 review): a mask is dropped for the budget as a page is; its page stays
+                        pageRefusal = overBudget;
+                        bytes = Array.Empty<byte>();
                     }
                     else if (!isSide && !isAtlas)
                     {
@@ -3242,11 +3248,6 @@ namespace QuestTreeServer
         // Atlas pages
         // ---------------------------------------------------------------------------------------
 
-        /// <summary>An atlas page post's picture, decoded and checked, or the reason it is DROPPED. A
-        /// side's checks with a page's size cap, plus one a side does not get: the JPEG's own frame must be
-        /// the size the meta names, because the mesh's UVs address the page as that many texels, and
-        /// package.ps1's gate holds a shipped page to exactly this. Empty means "the client could not
-        /// encode this page after naming it".</summary>
         /// <summary>HQ S3.11: an alpha MASK post's bytes, checked - a PNG, at most a page's bytes, exactly the page's
         /// size - or why it is dropped.</summary>
         private static string? DecodeAlphaMask(MapUploadRequest request, MapCaptureAtlasDto entry, out byte[] bytes)
@@ -3286,6 +3287,11 @@ namespace QuestTreeServer
             return null;
         }
 
+        /// <summary>An atlas page post's picture, decoded and checked, or the reason it is DROPPED. A
+        /// side's checks with a page's size cap, plus one a side does not get: the JPEG's own frame must be
+        /// the size the meta names, because the mesh's UVs address the page as that many texels, and
+        /// package.ps1's gate holds a shipped page to exactly this. Empty means "the client could not
+        /// encode this page after naming it".</summary>
         private static string? DecodeAtlasPage(MapUploadRequest request, MapCaptureAtlasDto entry, out byte[] bytes)
         {
             bytes = Array.Empty<byte>();

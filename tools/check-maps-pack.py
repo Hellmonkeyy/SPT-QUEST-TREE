@@ -119,7 +119,7 @@ MESH_SUFFIX = "-mesh.bin"
 MESH_MAGIC = b"QTM1"
 MESH_VERSION = 4                    # MapMeshFile.Version (2 since stage W: atlas pages, UVs, ranges; HQ S3.13: 4, alpha mask;
                                     # 3 since stage X: each range's tile rect and raw-UV bounds)
-MESH_TILE_MIN, MESH_TILE_MAX = 4, 256   # MapMeshFile.TileAlign .. AtlasTileMax: a tile side, a multiple of 4
+MESH_TILE_MIN, MESH_TILE_MAX = 4, 1024  # MapMeshFile.TileAlign .. AtlasTileMax: a tile side, a multiple of 4 (HQ S3.13: 1024)
 MESH_ATLAS_PAGE = 4096                  # MapMeshFile.AtlasPageSize: a tile rect lies inside it
 MESH_MAX_ATLAS_PAGES = 8            # MapMeshFile.MaxAtlasPages
 MESH_MAX_RANGES = 64                # MapMeshFile.MaxRangesPerBuilding

@@ -687,6 +687,7 @@ namespace QuestTree.QuestGraph
             // HQ S3.13: the high-quality constants
             RecipePart(TexelsPerMetre), RecipePart(AtlasPagePixelShare), RecipePart(CutoutAlphaTiles),
             RecipePart(FoliageAtCoarsest), RecipePart(FoliageMaxTriangles), RecipePart(FoliageTileMax), RecipePart(ShippedMeshBytes),
+            RecipePart(RequestFullMips), RecipePart(DefaultDeflatedBytesPerTriangle),
             RecipePart(AreaBudget.TrianglesPerSquareMetre), RecipePart(AreaBudget.MinTriangles),
             RecipePart(AreaBudget.MaxTrianglesPerBuilding), RecipePart(AreaBudget.TrianglesPerStorey),
             RecipePart(AreaBudget.StoreyMetres), AreaBudget.BudgetBasis.ToString(), RecipePart(AreaBudget.SurfacePerFootprint),
@@ -8693,12 +8694,19 @@ namespace QuestTree.QuestGraph
             var indices = b.Indices;
             var uses = new List<AtlasUse>();
 
-            // HQ S3.10: the dequantised positions, for the world area each material covers
+            // HQ S3.10: the positions in metres, for the world area each material covers. x and z are quantised over
+            // the extent already; the HEIGHTS of a new building are still the metres in PendingY (QuantiseBuildings runs
+            // after the atlas, and the y range is not set yet) - S3 review: b.Y is empty here, and reading it threw
             var file = job.File;
             var q = (double)MapMeshFile.MaxQuantised;
             var sx = (file.MaxX - file.MinX) / q;
-            var sy = (file.YMax - file.YMin) / q;
             var sz = (file.MaxZ - file.MinZ) / q;
+            var metres = i < job.PendingY.Count ? job.PendingY[i] : null;
+            var quantisedY = b.Y != null && b.X != null && b.Y.Length == b.X.Length && b.Y.Length > 0;
+            var sy = quantisedY && IsFinite(file.YMin) && IsFinite(file.YMax) ? (file.YMax - file.YMin) / q : 0d;
+            var heights = quantisedY || (metres != null && b.X != null && metres.Length == b.X.Length);
+
+            double YOf(int v) => quantisedY ? file.YMin + b.Y[v] * sy : metres[v];
 
             for (var t = 0; t < mats.Length; t++)
             {
@@ -8727,13 +8735,14 @@ namespace QuestTree.QuestGraph
                 }
 
                 // HQ S3.10: this triangle's world and UV area, onto the material
-                if (b.X != null && b.Y != null && b.Z != null)
+                if (b.X != null && b.Z != null && heights && b.Z.Length == b.X.Length)
                 {
                     int v0 = (int)indices[t * 3], v1 = (int)indices[t * 3 + 1], v2 = (int)indices[t * 3 + 2];
                     if (v0 < b.X.Length && v1 < b.X.Length && v2 < b.X.Length)
                     {
-                        double ax = (b.X[v1] - (double)b.X[v0]) * sx, ay = (b.Y[v1] - (double)b.Y[v0]) * sy, az = (b.Z[v1] - (double)b.Z[v0]) * sz;
-                        double bx = (b.X[v2] - (double)b.X[v0]) * sx, by = (b.Y[v2] - (double)b.Y[v0]) * sy, bz = (b.Z[v2] - (double)b.Z[v0]) * sz;
+                        double y0 = YOf(v0), y1 = YOf(v1), y2 = YOf(v2);
+                        double ax = (b.X[v1] - (double)b.X[v0]) * sx, ay = y1 - y0, az = (b.Z[v1] - (double)b.Z[v0]) * sz;
+                        double bx = (b.X[v2] - (double)b.X[v0]) * sx, by = y2 - y0, bz = (b.Z[v2] - (double)b.Z[v0]) * sz;
                         double cx = ay * bz - az * by, cy = az * bx - ax * bz, cz = ax * by - ay * bx;
                         var world = 0.5 * Math.Sqrt(cx * cx + cy * cy + cz * cz);
 

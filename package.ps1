@@ -374,14 +374,14 @@ if ($strayMapFiles.Count -gt 0) {
 # release cannot afford: the budget is the whole set, and one 4 MB floor is three normal ones. The cap
 # is a ceiling on the capture settings, not a guess about content.
 #
-# ATLAS PAGES have their OWN gate, 6 MB, and are left out of the 1.5 MB one: a page is a 4096 px sheet of
-# building textures stored at q85 and never downscaled (MapTransfer.MaxAtlasPixels), which is 2-4 MB by
-# design - the 1.5 MB picture gate would fail every real page. Six is the host's and the client's own cap
-# on one page (MapStore.MaxAtlasPageBytes, MapTransfer.MaxAtlasPageBytes), so a page past it here is one no
-# host would have stored and no client would download. Matched by GATE 1's exact name, so only a file
-# that gate admitted as a page is judged as one.
+# ATLAS PAGES have their OWN gate, 12 MB, and are left out of the 1.5 MB one: a page is a 4096 px sheet of
+# building textures stored at q90 and never downscaled (MapTransfer.MaxAtlasPixels), which is 2-4 MB at 256 px
+# tiles and more at 1024 (HQ S3.10) - the 1.5 MB picture gate would fail every real page. Twelve is the host's
+# and the client's own cap on one page (MapStore.MaxAtlasPageBytes, MapTransfer.MaxAtlasPageBytes), so a page
+# past it here is one no host would have stored and no client would download. Matched by GATE 1's exact name,
+# so only a file that gate admitted as a page (or its alpha mask) is judged as one.
 $maxImageBytes = 1.5MB
-$maxAtlasPageBytes = 6MB
+$maxAtlasPageBytes = 12MB
 $isAtlasPage = { param($file) $file.Name -match "-atlas-[0-7](-alpha\.png|\.jpg)$" }
 $fatImages = @($mapFiles | Where-Object { $_.Name -like "*.jpg" -and -not (& $isAtlasPage $_) -and $_.Length -gt $maxImageBytes } |
     ForEach-Object { "{0} ({1:N1} MB)" -f $_.FullName.Substring($mapsDir.Length + 1), ($_.Length / 1MB) })

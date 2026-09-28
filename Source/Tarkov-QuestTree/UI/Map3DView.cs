@@ -389,6 +389,10 @@ namespace QuestTree.UI
 
             /// <summary>For an atlas group: the tile (<see cref="TileStore"/> index) its material draws. -1 for a side.</summary>
             public int Tile = -1;
+
+            /// <summary>HQ S3.11 (S3 review): an alpha-page tile this view cannot clip (no cutout shader resolved) - drawn
+            /// with the floor's fallback rather than as an opaque tile, as such materials were before alpha tiles.</summary>
+            public bool Unclippable;
         }
 
         /// <summary>The compass sides in slot order. Slot i of <see cref="Built.Sides"/> and of a view's
@@ -1655,18 +1659,20 @@ namespace QuestTree.UI
                             // by Draw from this view's TileStore once the tile is cut.
                             if (!into.AtlasByTile.TryGetValue(tile, out var group))
                             {
-                                var material = Matte(new Material(_buildingShader) { name = $"QuestTreeMap3D-tile{tile}-{level}" });
-
-                                // HQ S3.11: a tile on an alpha page clips on it - the ground's own cutout recipe, when the
-                                // building shader is the one that recipe was resolved for
+                                // HQ S3.11: a tile on an alpha page clips on it - the ground's cutout shader and recipe
+                                // (S3 review: the shader ResolveGroundShader found, whichever it was; with none, the tile is
+                                // not drawn opaque but left to the floor's fallback)
                                 var store = _heldTiles ?? _tiles;
-                                if (store != null && store.AlphaTile(tile) && _groundCutout && ReferenceEquals(_groundShader, _buildingShader))
-                                    MakeCutout(material);
+                                var alphaTile = store != null && store.AlphaTile(tile);
+                                var clippable = alphaTile && _groundCutout && _groundShader != null;
+                                var material = Matte(new Material(clippable ? _groundShader : _buildingShader) { name = $"QuestTreeMap3D-tile{tile}-{level}" });
+                                if (clippable) MakeCutout(material);
 
                                 group = new SideTexture
                                 {
                                     Tile = tile,
-                                    Material = material
+                                    Material = material,
+                                    Unclippable = alphaTile && !clippable
                                 };
 
                                 into.AtlasByTile[tile] = group;
@@ -5466,7 +5472,7 @@ namespace QuestTree.UI
 
                     if (material.mainTexture == null && tiles != null && !tiles.TileFailed(atlas.Tile)) _unsettled = true;
 
-                    var draw = material.mainTexture != null ? material : SideFallbackFor(meshes, floor.Level, walls);
+                    var draw = material.mainTexture != null && !atlas.Unclippable ? material : SideFallbackFor(meshes, floor.Level, walls);
 
                     // debug: a FLAT tile (the atlas's 4 x 4 colour for a material without a texture) in magenta
                     if (debug && material.mainTexture != null && material.mainTexture.width <= 4)
