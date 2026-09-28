@@ -117,6 +117,34 @@ namespace QuestTree.UI
 
         private static readonly long MsaaPixelCap = 8_000_000;
 
+        /// <summary>
+        /// HQ S1.3: the directional light casts shadows (None = the flat look, as before). The shadow settings are
+        /// QualitySettings, global and the player's: every one is saved before the render and put back after it
+        /// (RenderNow), so the player's preset - which may have shadows off entirely - is untouched outside the bracket.
+        /// The shadow distance is derived from the view each render: <see cref="ShadowDistanceOfView"/> times the
+        /// camera's distance, at least <see cref="ShadowDistanceMin"/> metres and never past the far clip - a close
+        /// dollhouse gets a sharp map and the whole-map view a coarse one.
+        /// </summary>
+        private static readonly LightShadows ShadowMode = LightShadows.Soft;
+
+        private static readonly float ShadowStrength = 0.65f;
+        private static readonly int ShadowCascadeCount = 2;
+        private static readonly ShadowResolution ShadowMapResolution = ShadowResolution.VeryHigh;
+        private static readonly float ShadowDistanceOfView = 2.5f;
+        private static readonly float ShadowDistanceMin = 100f;
+
+        /// <summary>
+        /// HQ S1.3: the two fallbacks for the untested case - Forward's screen-space shadow collect pass under the
+        /// oblique near plane of the floor cut (ApplyCut). If shadows sit right on the top floor but slide with the
+        /// camera once a lower floor is cut: first try <see cref="ScreenSpaceShadowsOff"/> (Standard then samples the
+        /// cascade map per fragment from the world position; needs that shader variant in the game's build); if that
+        /// draws no shadows at all, set <see cref="ShadowsUnderCut"/> false - shadows stay on for uncut frames and go
+        /// off for the cut ones.
+        /// </summary>
+        private static readonly bool ShadowsUnderCut = true;
+
+        private static readonly bool ScreenSpaceShadowsOff = false;
+
         /// <summary>Vertices per mesh chunk. Unity takes more than this in one mesh with
         /// <see cref="IndexFormat.UInt32"/>, but a chunked mesh is a mesh that can be freed and drawn in
         /// pieces, and the relief of a 4-million-cell band would otherwise be one 96 MB buffer.</summary>
@@ -810,7 +838,8 @@ namespace QuestTree.UI
             _light = _lightGo.GetComponent<Light>();
             _light.type = LightType.Directional;
             _light.intensity = LightIntensity;
-            _light.shadows = LightShadows.None;
+            _light.shadows = ShadowMode;
+            _light.shadowStrength = ShadowStrength;
             _light.cullingMask = _privateMask;
             _light.enabled = false;
             _lightGo.transform.rotation = Quaternion.Euler(50f, -30f, 0f);
@@ -5048,8 +5077,9 @@ namespace QuestTree.UI
                     Plugin.LogSource?.LogInfo(string.Format(
                         CultureInfo.InvariantCulture,
                         "QuestTree: 3D map for {0} - first frame drawn in {1:0.0} ms, render {2:0.0} ms, {3} draw call(s), cut {4}, " +
-                        "msaa {5}x.",
-                        _mapKey, clock.Elapsed.TotalMilliseconds, _renderMs, _drawCalls, CutText(), _rtSamples));
+                        "msaa {5}x, shadows {6} ({7} cascade(s), {8:0} m).",
+                        _mapKey, clock.Elapsed.TotalMilliseconds, _renderMs, _drawCalls, CutText(), _rtSamples,
+                        ShadowMode, ShadowMode == LightShadows.None ? 0 : ShadowCascadeCount, _shadowDistanceRendered));
                 }
             }
             catch (Exception ex)
@@ -5386,12 +5416,46 @@ namespace QuestTree.UI
             var fog = RenderSettings.fog;
             var oblique = false;
 
+            // HQ S1.3: the player's shadow settings, put back in the finally whatever happens in between.
+            var shadowsWere = QualitySettings.shadows;
+            var resolutionWas = QualitySettings.shadowResolution;
+            var distanceWas = QualitySettings.shadowDistance;
+            var cascadesWere = QualitySettings.shadowCascades;
+            var projectionWas = QualitySettings.shadowProjection;
+            var shadowsSet = false;
+            var collectWas = BuiltinShaderMode.UseBuiltin;
+            var collectSet = false;
+
             try
             {
                 RenderSettings.fog = false;
                 _light.enabled = true;
 
                 oblique = ApplyCut();
+
+                if (ShadowMode != LightShadows.None)
+                {
+                    var under = !oblique || ShadowsUnderCut;
+                    _light.shadows = under ? ShadowMode : LightShadows.None;
+
+                    if (under)
+                    {
+                        QualitySettings.shadows = ShadowQuality.All;
+                        QualitySettings.shadowResolution = ShadowMapResolution;
+                        QualitySettings.shadowDistance = ShadowDistanceFor(_distance);
+                        QualitySettings.shadowCascades = ShadowCascadeCount;
+                        QualitySettings.shadowProjection = ShadowProjection.StableFit;
+                        shadowsSet = true;
+                        _shadowDistanceRendered = QualitySettings.shadowDistance;
+
+                        if (ScreenSpaceShadowsOff)
+                        {
+                            collectWas = GraphicsSettings.GetShaderMode(BuiltinShaderType.ScreenSpaceShadows);
+                            GraphicsSettings.SetShaderMode(BuiltinShaderType.ScreenSpaceShadows, BuiltinShaderMode.Disabled);
+                            collectSet = true;
+                        }
+                    }
+                }
 
                 var clock = _timeRender ? Stopwatch.StartNew() : null;
                 _camera.Render();
@@ -5411,12 +5475,36 @@ namespace QuestTree.UI
                 try { RenderSettings.fog = fog; } catch (Exception) { /* nothing further to try */ }
                 try { if (_light != null) _light.enabled = false; } catch (Exception) { /* as above */ }
 
+                // HQ S1.3: the shadow settings are the player's, each put back on its own.
+                if (shadowsSet)
+                {
+                    try { QualitySettings.shadows = shadowsWere; } catch (Exception) { /* as above */ }
+                    try { QualitySettings.shadowResolution = resolutionWas; } catch (Exception) { /* as above */ }
+                    try { QualitySettings.shadowDistance = distanceWas; } catch (Exception) { /* as above */ }
+                    try { QualitySettings.shadowCascades = cascadesWere; } catch (Exception) { /* as above */ }
+                    try { QualitySettings.shadowProjection = projectionWas; } catch (Exception) { /* as above */ }
+                }
+
+                if (collectSet)
+                {
+                    try { GraphicsSettings.SetShaderMode(BuiltinShaderType.ScreenSpaceShadows, collectWas); } catch (Exception) { /* as above */ }
+                }
+
                 // The oblique projection lives ONLY inside this bracket: every other reader of the camera
                 // (TryProject, PanBy, the next ApplyCut) sees its own perspective, recomputed from the field of
                 // view, the aspect and the clip planes.
                 try { if (oblique && _camera != null) _camera.ResetProjectionMatrix(); } catch (Exception) { /* as above */ }
             }
         }
+
+        /// <summary>HQ S1.3: the shadow distance of the last render, in metres - the view-derived value. See RenderNow.</summary>
+        private float _shadowDistanceRendered;
+
+        /// <summary>HQ S1.3: the shadow distance for a camera at <paramref name="distance"/> metres from its focus -
+        /// <see cref="ShadowDistanceOfView"/> times that, at least <see cref="ShadowDistanceMin"/>, never past the far
+        /// clip. Derived from the view, never from a map.</summary>
+        private static float ShadowDistanceFor(float distance) =>
+            Mathf.Clamp(ShadowDistanceOfView * Mathf.Max(0f, distance), ShadowDistanceMin, FarClip);
 
         /// <summary>Time the next render, for the first-frame line. Set by <see cref="Finish"/> and whenever the
         /// cut height changes, so the first frame after a floor switch is timed too.</summary>
