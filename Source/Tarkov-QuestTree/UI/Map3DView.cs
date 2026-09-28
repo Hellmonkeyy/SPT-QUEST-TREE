@@ -115,7 +115,7 @@ namespace QuestTree.UI
         /// <see cref="MsaaPixelCap"/> pixels is made without it - a rule about the texture, never about a map.</summary>
         private static readonly int RenderMsaa = 4;
 
-        private static readonly long MsaaPixelCap = 8_000_000;
+        private static readonly long MsaaPixelCap = 4_000_000;
 
         /// <summary>
         /// HQ S1.3: the directional light casts shadows (None = the flat look, as before). The shadow settings are
@@ -139,9 +139,11 @@ namespace QuestTree.UI
         /// camera once a lower floor is cut: first try <see cref="ScreenSpaceShadowsOff"/> (Standard then samples the
         /// cascade map per fragment from the world position; needs that shader variant in the game's build); if that
         /// draws no shadows at all, set <see cref="ShadowsUnderCut"/> false - shadows stay on for uncut frames and go
-        /// off for the cut ones.
+        /// off for the cut ones. S1 review: OFF by default for a second reason - the cut is only the camera's near
+        /// plane, so the geometry it removes from view (upper storeys, roofs) would still cast onto the exposed floor;
+        /// a cut frame is drawn without shadows, an uncut one (the top floor, a one-band map) with them.
         /// </summary>
-        private static readonly bool ShadowsUnderCut = true;
+        private static readonly bool ShadowsUnderCut = false;
 
         private static readonly bool ScreenSpaceShadowsOff = false;
 
@@ -5073,6 +5075,7 @@ namespace QuestTree.UI
                 _framesSeen++;
 
                 var dirty = !RenderOnChange || _forceRender || first || pumped || resized || _unsettled ||
+                            (_rt != null && !_rt.IsCreated()) ||
                             _renderedViewVersion != ViewVersion || !SameCut(_cutY, _renderedCutY) ||
                             tileVersion != _renderedTileVersion ||
                             (RenderHeartbeatFrames > 0 && _framesSeen % RenderHeartbeatFrames == 0);
@@ -5095,7 +5098,8 @@ namespace QuestTree.UI
 
                 Place();
 
-                if (SkyDome) DrawSky();
+                // S1 review: no dome on a cut floor - the oblique near plane would clip its upper half to a hard edge
+                if (SkyDome && float.IsNaN(_cutY)) DrawSky();
 
                 for (var i = 0; i < _floors.Count; i++) Draw(_floors[i]);
 
@@ -5253,7 +5257,8 @@ namespace QuestTree.UI
             // so the frame that has it draws it.
             if (!_flatColours && ground.mainTexture == null)
             {
-                _unsettled = true;
+                // S1 review: a floor with no layer at all never gets a picture - not worth a frame a frame
+                if (floor.Layer != null) _unsettled = true;
                 return;
             }
 
@@ -5302,7 +5307,15 @@ namespace QuestTree.UI
                 var owner = FloorAt(roof.Level) ?? FloorAt(_selectedLevel);
                 var material = owner != null && owner.BuildingMaterial != null ? owner.BuildingMaterial : walls;
 
-                if (material == null || (!_flatColours && material.mainTexture == null)) continue;
+                if (material == null) continue;
+
+                // S1 review: the owner's picture is not here yet - this frame is not whole (its Draw may put the
+                // texture on the material later this same frame, after this roof was skipped)
+                if (!_flatColours && material.mainTexture == null)
+                {
+                    _unsettled = true;
+                    continue;
+                }
 
                 var mesh = roof.Mesh;
                 if (mesh != null) Submit(mesh, debug ? DebugOr(DebugTop, material) : material);
@@ -5556,6 +5569,7 @@ namespace QuestTree.UI
             var ambientEquatorWas = RenderSettings.ambientEquatorColor;
             var ambientGroundWas = RenderSettings.ambientGroundColor;
             var ambientIntensityWas = RenderSettings.ambientIntensity;
+            var ambientProbeWas = RenderSettings.ambientProbe;
             var ambientSet = false;
 
             try
@@ -5625,6 +5639,10 @@ namespace QuestTree.UI
                     try { RenderSettings.ambientEquatorColor = ambientEquatorWas; } catch (Exception) { /* as above */ }
                     try { RenderSettings.ambientGroundColor = ambientGroundWas; } catch (Exception) { /* as above */ }
                     try { RenderSettings.ambientIntensity = ambientIntensityWas; } catch (Exception) { /* as above */ }
+
+                    // LAST: the probe Unity recomputed from the Trilight colours goes back to the scene's own (a Skybox or
+                    // Custom probe is not rebuilt by putting the mode back)
+                    try { RenderSettings.ambientProbe = ambientProbeWas; } catch (Exception) { /* as above */ }
                 }
 
                 // HQ S1.3: the shadow settings are the player's, each put back on its own.
