@@ -1305,6 +1305,32 @@ namespace QuestTree.QuestGraph
             return any;
         }
 
+        /// <summary>PART-11 (3.2): whether ANY of a renderer's materials is on a TEXT or SPRITE shader - Unity's TextMesh
+        /// ("GUI/Text Shader"), TextMesh Pro ("TextMeshPro/..."), the UI and sprite families - the labels another mod hangs
+        /// in the world on a building layer (the census's SenseExfil samples). Such a renderer is never a prop. A rule about
+        /// shaders, never about a mod's name; case-sensitive, as Unity names its families, so no world shader is matched by
+        /// a segment that happens to end in "ui"; null entries passed over. "Text" alone is not a mark: it would match
+        /// "Texture". "UI/" also matches "GUI/Text Shader".</summary>
+        /// <param name="shaders">Each material's shader name, null for none.</param>
+        internal static bool TextShaders(IEnumerable<string> shaders)
+        {
+            if (shaders == null) return false;
+
+            foreach (var shader in shaders)
+            {
+                if (string.IsNullOrEmpty(shader)) continue;
+
+                foreach (var mark in TextShaderMarks)
+                    if (shader.IndexOf(mark, StringComparison.Ordinal) >= 0)
+                        return true;
+            }
+
+            return false;
+        }
+
+        /// <summary>The marks of a text, UI or sprite shader's name (<see cref="TextShaders"/>).</summary>
+        internal static readonly string[] TextShaderMarks = { "UI/", "TextMeshPro", "Text Shader", "Sprites/" };
+
         /// <summary>PART-10 (decals): whether a renderer's materials are all on a DECAL shader - EFT's
         /// "Decal/Ultra Deferred Decal Of God" dirt, drip and damage volumes, ignoring case; null entries are passed over, and
         /// at least one must be a decal. The game projects a decal onto the surfaces under its volume and draws none of the

@@ -612,6 +612,24 @@ namespace QuestTree.QuestGraph
         private static double FoliageBudgetSurface => FoliageMaxTriangles / AreaBudget.TrianglesPerSquareMetre;
 
         /// <summary>
+        /// PART-11 (3.2): the PROP class. A renderer the size rule leaves out (<see cref="SizeSmall"/>: a long side under
+        /// <see cref="MinBuildingLongSide"/> or under <see cref="MinBuildingHeight"/> tall) is a prop candidate when its
+        /// long side is at least <see cref="PropMinLongSide"/> (the census's smallest band; under it is tens of thousands
+        /// of renderers of nothing the map needs), it is enabled, it is not foliage, a decal or text (a TextMesh, a
+        /// TextMesh Pro label, a UI or sprite shader - MapMeshIndex.TextShaders), and it passes the gates a building
+        /// passes (the extent, the hidden and transparent rules). The Scav Base's tanks, floors and walls, vehicles,
+        /// containers, fences, pipes, crates: 27.7 M source triangles on Customs that the map was missing (the 2026-09-28
+        /// census). A prop is its own class - a budget share, a texel cap, its coarsest LOD level - and is never a shell nor
+        /// a sibling for one. Rules about sizes, shaders and components, never about a map. False leaves the size rule as it
+        /// was: the census counts them and nothing is stored differently. Folded into the recipe by PART-11's bump commit,
+        /// which turns it on.
+        /// </summary>
+        internal static readonly bool PropsAsClass = false;
+
+        /// <summary>The smallest long side a prop may have, metres - the census's smallest band.</summary>
+        private const float PropMinLongSide = 1.5f;
+
+        /// <summary>
         /// HQ S3.13: the SHIPPED-SIZE bound on the map's cap - the maintainer's decision (2026-09-27): a shipped mesh
         /// file stays under 90 MiB so package.ps1 -RefreshMaps can commit it (GitHub refuses a file over 100 MB). The
         /// bound in triangles is this over the deflated bytes one triangle costs, MEASURED from the stored file when
@@ -1711,6 +1729,9 @@ namespace QuestTree.QuestGraph
 
             internal int PropsTiny;
 
+            /// <summary>PART-11 (3.2): the prop candidates FilterChunk made (the class on).</summary>
+            internal int PropCandidates;
+
             /// <summary>Buildings refused because no transform put their vertices inside their own
             /// renderer's bounds - see <see cref="Place"/>.</summary>
             internal int Implausible;
@@ -2430,6 +2451,11 @@ namespace QuestTree.QuestGraph
             /// <summary>PART-10 (decals): a decal volume - every material on a decal shader (MapMeshIndex.DecalShaders). Never
             /// stored: the game projects it onto the surfaces beneath and draws no surface of its own.</summary>
             internal bool Decal;
+
+            /// <summary>PART-11 (3.2): a PROP - a renderer under the building size rule admitted by the prop rule
+            /// (<see cref="PropsAsClass"/>). Budgeted from the props' share, read at its group's coarsest level, its tiles
+            /// capped; never a shell nor a sibling for one.</summary>
+            internal bool Prop;
         }
 
         /// <summary>
@@ -2462,6 +2488,11 @@ namespace QuestTree.QuestGraph
 
             /// <summary>HQ S3.12: a tree's group, started at its coarsest level (FoliageAtCoarsest).</summary>
             internal bool FoliageCoarse;
+
+            /// <summary>PART-11 (3.2): a PROPS' group - every renderer of every level under the size rule and admitted by the
+            /// prop rule (AllProps). Its members drive its ladder as a building's do (DrivesLevel); a prop under a
+            /// building's group does not.</summary>
+            internal bool AllProps;
 
             /// <summary>Renderers of the current level stored or on a worker. The group may move only while it is 0.</summary>
             internal int Committed;
@@ -2768,10 +2799,29 @@ namespace QuestTree.QuestGraph
             internal int WithCollider;
             internal readonly HashSet<Material> Materials = new HashSet<Material>();
             internal readonly List<string> Samples = new List<string>();
+
+            /// <summary>PART-11 (3.2): what the prop rule excludes in this band - text labels, foliage, decal volumes.</summary>
+            internal int Text;
+
+            internal int Foliage;
+            internal int Decal;
+            internal readonly List<string> TextSamples = new List<string>();
         }
 
+        /// <summary>What <see cref="CensusProp"/> and <see cref="PropVerdict"/> answer: not counted (outside the extent, or
+        /// a renderer that threw), too small, a prop, or excluded as text, foliage or a decal. A DISABLED renderer is not
+        /// counted by the census but does get the rule's verdict: whether it is read is Invisible's decision, as for a
+        /// building (one a culling system switched off is read as game-culled).</summary>
+        private const int CensusOutside = -1;
+
+        private const int CensusTiny = 0;
+        private const int CensusEligible = 1;
+        private const int CensusText = 2;
+        private const int CensusFoliage = 3;
+        private const int CensusDecal = 4;
+
         /// <summary>The census's bands: a long side of 1.5 to 3 m, 3 to 6 m, and 6 m or more but under the building height.</summary>
-        private const float PropCensusMinMetres = 1.5f;
+        private const float PropCensusMinMetres = PropMinLongSide;
 
         private const float PropCensusMidMetres = 3f;
         private const int PropSamplesPerBand = 3;
@@ -3699,17 +3749,25 @@ namespace QuestTree.QuestGraph
                     job.Request.MaxX - job.Request.MinX, job.Request.MaxZ - job.Request.MinZ);
 
                 if (verdict == SizeOversized) job.Oversized++;
-                if (verdict == SizeSmall) CensusProp(job, renderer, bounds, minX, maxX, minZ, maxZ);
-                if (verdict != SizeOk) continue;
 
-                if (HiddenVolume(job, renderer, size)) continue;
+                // PART-11 (3.2): under the size rule, a renderer is counted by the census and - with the class on and the
+                // census's verdict a prop - goes on through the gates a building passes, as a prop
+                var prop = false;
+                if (verdict == SizeSmall)
+                {
+                    if (CensusProp(job, renderer, bounds, minX, maxX, minZ, maxZ) != CensusEligible || !PropsAsClass) continue;
+                    prop = true;
+                }
+                else if (verdict != SizeOk) continue;
+
+                if (HiddenVolume(job, renderer, size, prop)) continue;
 
                 var centre = bounds.center;
                 if (!IsFinite(centre.x) || !IsFinite(centre.y) || !IsFinite(centre.z)) continue;
                 if (centre.x < minX || centre.x > maxX || centre.z < minZ || centre.z > maxZ) continue;
 
                 // AFTER the size and extent tests, so the hidden counts are of renderers that would otherwise
-                // have been buildings - not of every pooled weapon part in the scene.
+                // have been buildings (or props, PART-11) - not of every pooled weapon part in the scene.
                 if (Invisible(job, renderer)) continue;
 
                 // PART-10 (F2): the game draws it see-through; the model could only draw it opaque
@@ -3735,8 +3793,10 @@ namespace QuestTree.QuestGraph
                     Volume = Math.Abs(size.x * size.y * size.z),
                     Foliage = IsFoliage(renderer),
                     Decal = IsDecal(renderer),
+                    Prop = prop,
                 });
                 CountUse(job, mesh);
+                if (prop) job.PropCandidates++;
             }
 
             if (job.Scanned >= job.RendererCount) job.Renderers = null;
@@ -3888,9 +3948,11 @@ namespace QuestTree.QuestGraph
         /// <param name="job">The build, for the count.</param>
         /// <param name="renderer">The renderer.</param>
         /// <param name="size">Its world bounds' size.</param>
-        private static bool HiddenVolume(Job job, Renderer renderer, Vector3 size)
+        /// <param name="prop">PART-11: a prop candidate, tested whatever its size.</param>
+        private static bool HiddenVolume(Job job, Renderer renderer, Vector3 size, bool prop = false)
         {
-            if (Math.Max(size.x, Math.Max(size.y, size.z)) <= HiddenVolumeMetres) return false;
+            // PART-11 (3.2): a prop is under the size the rule was written for, so it is tested at any size
+            if (!prop && Math.Max(size.x, Math.Max(size.y, size.z)) <= HiddenVolumeMetres) return false;
 
             var materials = renderer.sharedMaterials;
             if (materials == null || materials.Length == 0) return false;
@@ -4217,6 +4279,9 @@ namespace QuestTree.QuestGraph
             state.Levels.AddRange(ladder);
             foreach (var level in ladder) job.LevelRenderers += level.Set.Count;
 
+            // PART-11 (3.2): a props' group, whatever its ladder's length
+            state.AllProps = PropsAsClass && ladder.Count > 0 && AllProps(job, ladder);
+
             // HQ S3.12: a tree's ladder starts at its coarsest real level
             if (FoliageAtCoarsest && ladder.Count > 1 && AllFoliage(ladder))
             {
@@ -4235,6 +4300,41 @@ namespace QuestTree.QuestGraph
             job.Groups[group] = state;
 
             return state;
+        }
+
+        /// <summary>PART-11 (3.2): whether a member counts for its group's LEVEL - holds the group at it (Committed), makes a
+        /// coarser level readable, completes an upgrade. A prop under a building's group does not: the ladder is the
+        /// building's, and its crates and pipes are read at whatever level it is on. Every member of a props' group
+        /// (GroupState.AllProps) counts.</summary>
+        /// <param name="c">The member.</param>
+        /// <param name="state">Its group's state, or null.</param>
+        private static bool DrivesLevel(Candidate c, GroupState state) =>
+            !(c.Prop && PropsAsClass && state != null && !state.AllProps);
+
+        /// <summary>PART-11 (3.2): whether every renderer of every level of a ladder is a prop - under the building size rule
+        /// and admitted by the prop rule (PropVerdict) - a props' group (GroupState.AllProps).</summary>
+        /// <param name="job">The build, for the extent's spans.</param>
+        /// <param name="ladder">The group's usable levels.</param>
+        private static bool AllProps(Job job, List<LevelSet> ladder)
+        {
+            var spanX = job.Request.MaxX - job.Request.MinX;
+            var spanZ = job.Request.MaxZ - job.Request.MinZ;
+            var any = false;
+
+            foreach (var level in ladder)
+                foreach (var renderer in level.List)
+                {
+                    if (renderer == null) continue;
+
+                    var bounds = renderer.bounds;
+                    var size = bounds.size;
+                    if (SizeVerdict(size.x, size.y, size.z, spanX, spanZ) != SizeSmall) return false;
+                    if (PropVerdict(renderer, bounds) != CensusEligible) return false;
+
+                    any = true;
+                }
+
+            return any;
         }
 
         /// <summary>HQ S3.12: whether every renderer of every level of a ladder is a tree or a bush (IsFoliage).</summary>
@@ -4567,8 +4667,9 @@ namespace QuestTree.QuestGraph
                     var level = ShellLevel(job, c);
                     var centre = c.Bounds.center;
                     var size = c.Bounds.size;
-                    var skip = c.Foliage || c.Decal || level < 0 || c.SourceTriangles <= 0;
-                    var noSibling = !IsSource(job, c) || !Decodable(c) || Left(job, c);
+                    // PART-11 (3.2): a prop is never a shell, nor a sibling a shell is judged against
+                    var skip = c.Foliage || c.Decal || c.Prop || level < 0 || c.SourceTriangles <= 0;
+                    var noSibling = !IsSource(job, c) || !Decodable(c) || Left(job, c) || c.Prop;
                     boxes.Add(new MapMeshIndex.ShellBox(centre.x, centre.y, centre.z, size.x, size.y, size.z, c.SourceTriangles, level,
                         skip, noSibling));
                 }
@@ -5457,7 +5558,8 @@ namespace QuestTree.QuestGraph
                 if (IsSource(job, c))
                 {
                     job.Claimed.Add(c.Renderer);
-                    if (c.Group != null && job.Groups.TryGetValue(c.Group, out var state) && state != null) state.Committed++;
+                    if (c.Group != null && job.Groups.TryGetValue(c.Group, out var state) && state != null && DrivesLevel(c, state))
+                        state.Committed++;
                 }
 
                 // a skipped building whose stored tile was captured late, failed or from a coarse mip: its materials are
@@ -5762,8 +5864,19 @@ namespace QuestTree.QuestGraph
                 : state.Levels[state.Current].Set.Contains(candidate.Renderer);
 
             var made = new Dictionary<int, List<Candidate>>();
-            var kept = new Dictionary<int, List<Renderer>>();
+            var kept = new Dictionary<int, List<Candidate>>();
             var group = candidate.Group;
+
+            // PART-11 (3.2): a level of a BUILDING's group is readable by its building-size members, never by the props
+            // under it (review F01: a renderer the gate would refuse must not move the group - a level of crates alone is
+            // no level for the building); a props' group counts every member
+            int Readable(List<Candidate> level)
+            {
+                var n = 0;
+                foreach (var c in level)
+                    if (DrivesLevel(c, state)) n++;
+                return n;
+            }
 
             // WP2: a level's renderers already stored unchanged at that level count as readable (the level is chosen)
             // but are not read again; they are claimed and committed once it is.
@@ -5776,7 +5889,7 @@ namespace QuestTree.QuestGraph
                 {
                     made[k] = MakeLevel(job, state.Levels[k], group, k, out var stored);
                     kept[k] = stored;
-                    return made[k].Count + stored.Count;
+                    return Readable(made[k]) + Readable(stored);
                 });
 
             if (next < 0) return false;
@@ -5791,10 +5904,10 @@ namespace QuestTree.QuestGraph
                 CountUse(job, c.Mesh);   // PART-11 (1): counted as queued, not as made - MakeLevel makes levels it never queues
             }
 
-            foreach (var renderer in kept[next])
+            foreach (var c in kept[next])
             {
-                job.Claimed.Add(renderer);
-                state.Committed++;
+                job.Claimed.Add(c.Renderer);
+                if (DrivesLevel(c, state)) state.Committed++;   // PART-11 (3.2): a stored prop holds a building's group no more than a read one
                 job.Skipped++;
             }
 
@@ -5808,11 +5921,12 @@ namespace QuestTree.QuestGraph
         /// <param name="level">The level.</param>
         /// <param name="group">Its group.</param>
         /// <param name="index">Its index in the ladder.</param>
-        /// <param name="stored">WP2: the level's renderers stored unchanged at this level, which are not queued.</param>
-        private static List<Candidate> MakeLevel(Job job, LevelSet level, LODGroup group, int index, out List<Renderer> stored)
+        /// <param name="stored">WP2: the level's members stored unchanged at this level (as the candidates the check made), which
+        /// are not queued.</param>
+        private static List<Candidate> MakeLevel(Job job, LevelSet level, LODGroup group, int index, out List<Candidate> stored)
         {
             var made = new List<Candidate>();
-            stored = new List<Renderer>();
+            stored = new List<Candidate>();
 
             foreach (var renderer in level.List)
             {
@@ -5836,7 +5950,7 @@ namespace QuestTree.QuestGraph
 
                     if (keep)
                     {
-                        stored.Add(renderer);
+                        stored.Add(c);
                         continue;
                     }
                 }
@@ -5875,11 +5989,19 @@ namespace QuestTree.QuestGraph
             var bounds = renderer.bounds;
             var size = bounds.size;
 
-            if (SizeVerdict(size.x, size.y, size.z, job.Request.MaxX - job.Request.MinX,
-                    job.Request.MaxZ - job.Request.MinZ) != SizeOk)
-                return null;
+            // PART-11 (3.2): a level's renderer under the size rule is a prop when the prop rule admits it (as FilterChunk)
+            var verdict = SizeVerdict(size.x, size.y, size.z, job.Request.MaxX - job.Request.MinX,
+                job.Request.MaxZ - job.Request.MinZ);
+            var prop = false;
 
-            if (HiddenVolume(job, renderer, size)) return null;
+            if (verdict == SizeSmall)
+            {
+                if (!PropsAsClass || PropVerdict(renderer, bounds) != CensusEligible) return null;
+                prop = true;
+            }
+            else if (verdict != SizeOk) return null;
+
+            if (HiddenVolume(job, renderer, size, prop)) return null;
 
             var centre = bounds.center;
             if (!IsFinite(centre.x) || !IsFinite(centre.y) || !IsFinite(centre.z)) return null;
@@ -5907,6 +6029,7 @@ namespace QuestTree.QuestGraph
                 Height = Math.Abs((double)size.y),
                 Foliage = IsFoliage(renderer),
                 Decal = IsDecal(renderer),
+                Prop = prop,
             };
 
             if (candidate.Foliage && FoliageAtCoarsest) candidate.Surface = Math.Min(candidate.Surface, FoliageBudgetSurface);   // HQ S3.12
@@ -6114,8 +6237,12 @@ namespace QuestTree.QuestGraph
             if (candidate.Group != null && job.Groups.TryGetValue(candidate.Group, out var state) && state != null &&
                 state.Current < state.Levels.Count)
             {
-                state.Committed++;
-                candidate.AsSource = true;
+                // PART-11 (3.2): a prop under a building's group is read at the group's level but does not hold the group there
+                if (DrivesLevel(candidate, state))
+                {
+                    state.Committed++;
+                    candidate.AsSource = true;
+                }
                 // The level the group is ON when the read happens (PART-04 review): a renderer shared by levels k
                 // and k+1, queued at k, is still read after the group moved to k+1 (IsSource passed it as a member
                 // of the current level), and its grade must say k+1, not one level better than it is.
@@ -8157,6 +8284,9 @@ namespace QuestTree.QuestGraph
 
                 // PART-10: a shell or a tree left out is not part of the level's building
                 if (Left(job, c)) continue;
+
+                // PART-11 (3.2): nor is a prop under a building's group - the level is its building-size members'
+                if (!DrivesLevel(c, state)) continue;
 
                 if (!job.Emitted.Contains(c.Renderer)) return false;
                 any = true;
@@ -10948,7 +11078,9 @@ namespace QuestTree.QuestGraph
         /// <summary>
         /// Props census (2026-09-28): a renderer the size rule left out - enabled, inside the extent - counted in its band
         /// with its source triangles (GetIndexCount, no array), its first material and whether it carries a collider (the
-        /// ones that also shape the relief). Everything derived from the scene; nothing is stored differently.
+        /// ones that also shape the relief). PART-11 (3.2): the band also counts what the prop rule excludes (text,
+        /// foliage, decals), and the answer is the rule's verdict on the renderer (<see cref="CensusEligible"/> for a
+        /// prop). Everything derived from the scene.
         /// </summary>
         /// <param name="renderer">The renderer the size rule left out.</param>
         /// <param name="bounds">Its world bounds.</param>
@@ -10956,28 +11088,25 @@ namespace QuestTree.QuestGraph
         /// <param name="maxX">See minX.</param>
         /// <param name="minZ">See minX.</param>
         /// <param name="maxZ">See minX.</param>
-        private static void CensusProp(Job job, Renderer renderer, Bounds bounds, double minX, double maxX, double minZ, double maxZ)
+        private static int CensusProp(Job job, Renderer renderer, Bounds bounds, double minX, double maxX, double minZ, double maxZ)
         {
             try
             {
-                if (!renderer.enabled) return;
-
                 var centre = bounds.center;
-                if (!IsFinite(centre.x) || !IsFinite(centre.z)) return;
-                if (centre.x < minX || centre.x > maxX || centre.z < minZ || centre.z > maxZ) return;
+                if (!IsFinite(centre.x) || !IsFinite(centre.z)) return CensusOutside;
+                if (centre.x < minX || centre.x > maxX || centre.z < minZ || centre.z > maxZ) return CensusOutside;
 
-                var size = bounds.size;
-                var longSide = Math.Max(size.x, size.z);
+                // the census counts what is switched on (its 2026-09-28 numbers); the rule's verdict is for every renderer
+                var enabled = renderer.enabled;
 
-                int band;
-                if (longSide >= MinBuildingLongSide) band = 2;          // long enough, too low
-                else if (longSide >= PropCensusMidMetres) band = 1;
-                else if (longSide >= PropCensusMinMetres) band = 0;
-                else
+                var band = PropBandOf(bounds.size);
+                if (band < 0)
                 {
-                    job.PropsTiny++;
-                    return;
+                    if (enabled) job.PropsTiny++;
+                    return CensusTiny;
                 }
+
+                if (!enabled) return PropVerdict(renderer, bounds);
 
                 var b = job.PropBands[band];
                 b.Count++;
@@ -10994,10 +11123,84 @@ namespace QuestTree.QuestGraph
                 if (material != null) b.Materials.Add(material);
 
                 if (b.Samples.Count < PropSamplesPerBand) b.Samples.Add(SafePath(renderer));
+
+                // PART-11 (3.2): the exclusions, counted where the census sees them
+                var verdict = PropVerdict(renderer, bounds);
+
+                switch (verdict)
+                {
+                    case CensusText:
+                        b.Text++;
+                        if (b.TextSamples.Count < PropSamplesPerBand) b.TextSamples.Add(SafePath(renderer));
+                        break;
+                    case CensusFoliage:
+                        b.Foliage++;
+                        break;
+                    case CensusDecal:
+                        b.Decal++;
+                        break;
+                }
+
+                return verdict;
             }
             catch (Exception)
             {
                 // a census entry, not a feature
+                return CensusOutside;
+            }
+        }
+
+        /// <summary>The census's band for a size: 0 (1.5-3 m), 1 (3-6 m), 2 (6 m or longer, under the building height), or
+        /// -1 under the prop floor.</summary>
+        /// <param name="size">The world bounds' size.</param>
+        private static int PropBandOf(Vector3 size)
+        {
+            var longSide = Math.Max(size.x, size.z);
+
+            if (longSide >= MinBuildingLongSide) return 2;          // long enough, too low
+            if (longSide >= PropCensusMidMetres) return 1;
+            if (longSide >= PropCensusMinMetres) return 0;
+
+            return -1;
+        }
+
+        /// <summary>
+        /// PART-11 (3.2): the prop rule's verdict on a renderer under the size rule - <see cref="CensusTiny"/> under the
+        /// floor, <see cref="CensusText"/> for a TextMesh, a TextMesh Pro label or a text, UI or sprite shader,
+        /// <see cref="CensusFoliage"/> and <see cref="CensusDecal"/> for the classes that are their own, else
+        /// <see cref="CensusEligible"/>. The extent and whether a switched-off renderer is read (Invisible) are the
+        /// caller's tests. Components and shader names only, never a name.
+        /// </summary>
+        /// <param name="renderer">The renderer.</param>
+        /// <param name="bounds">Its world bounds.</param>
+        private static int PropVerdict(Renderer renderer, Bounds bounds)
+        {
+            if (PropBandOf(bounds.size) < 0) return CensusTiny;
+
+            var shaders = ShaderNames(renderer);
+
+            if (MapMeshIndex.TextShaders(shaders) || IsTextComponent(renderer)) return CensusText;
+            if (MapMeshIndex.FoliageShaders(shaders)) return CensusFoliage;
+            if (MapMeshIndex.DecalShaders(shaders)) return CensusDecal;
+
+            return CensusEligible;
+        }
+
+        /// <summary>Whether a renderer draws a text component - Unity's TextMesh, or a TextMesh Pro text on the object or
+        /// above it (a TMP sub-mesh for a fallback font or a sprite is a child with a renderer of its own) - whatever its
+        /// shader is called.</summary>
+        /// <param name="renderer">The renderer.</param>
+        private static bool IsTextComponent(Renderer renderer)
+        {
+            try
+            {
+                if (renderer.GetComponent<TextMesh>() != null) return true;
+                return renderer.GetComponentInParent<TMPro.TMP_Text>() != null;
+            }
+            catch (Exception)
+            {
+                // a renderer destroyed between the scan and this test: not text
+                return false;
             }
         }
 
@@ -11011,7 +11214,13 @@ namespace QuestTree.QuestGraph
             string Band(string label, PropBand b) =>
                 $"{label}: {N(b.Count)} renderer(s), {N(b.Triangles)} source triangles, {N(b.Materials.Count)} material(s), " +
                 $"{N(b.WithCollider)} with a collider" +
+                (b.Text + b.Foliage + b.Decal > 0 ? $" ({N(b.Text)} text, {N(b.Foliage)} foliage, {N(b.Decal)} decal excluded)" : "") +
                 (b.Samples.Count > 0 ? $" [{string.Join(" | ", b.Samples.ToArray())}]" : "");
+
+            var textSamples = new List<string>();
+            foreach (var b in job.PropBands)
+                foreach (var sample in b.TextSamples)
+                    if (textSamples.Count < PropSamplesPerBand) textSamples.Add(sample);
 
             Plugin.LogSource?.LogInfo(
                 $"QuestTree: props on {job.Request.Map} - renderers on the buildings' layers inside the extent that the size rule " +
@@ -11019,7 +11228,11 @@ namespace QuestTree.QuestGraph
                 Band($"{PropCensusMinMetres.ToString("0.0", f1)}-{PropCensusMidMetres.ToString("0", f1)} m", job.PropBands[0]) + "; " +
                 Band($"{PropCensusMidMetres.ToString("0", f1)}-{MinBuildingLongSide.ToString("0", f1)} m", job.PropBands[1]) + "; " +
                 Band($"{MinBuildingLongSide.ToString("0", f1)} m and longer but under {MinBuildingHeight.ToString("0.0", f1)} m tall", job.PropBands[2]) +
-                $"; under {PropCensusMinMetres.ToString("0.0", f1)} m: {N(job.PropsTiny)}. A census only - nothing is stored differently.");
+                $"; under {PropCensusMinMetres.ToString("0.0", f1)} m: {N(job.PropsTiny)}" +
+                (textSamples.Count > 0 ? $"; text samples [{string.Join(" | ", textSamples.ToArray())}]" : "") +
+                (PropsAsClass
+                    ? $"; {N(job.PropCandidates)} of the rest passed the building gates as prop candidates (the scan's; fallback levels not counted)."
+                    : ". A census only - nothing is stored differently (the prop class is off)."));
         }
 
         private static void ReportHidden(Job job)
