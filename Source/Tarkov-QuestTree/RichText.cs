@@ -35,7 +35,56 @@ namespace QuestTree
             if (string.IsNullOrEmpty(text) || text.IndexOf('<') < 0) return text;
             if (AlreadyWrapped(text)) return text;
 
+            // A name another mod dressed in the game's own markup - a rarity colour, bold - keeps it when every tag is
+            // one of the harmless few and they are balanced (Dressed); anything else is shown as literal characters.
+            if (Dressed(text)) return text;
+
             return Open + StripCloses(text) + Close;
+        }
+
+        /// <summary>
+        /// The tags a name may keep: bold, italic, and a colour by hex code or by a plain name - what mods that colour item
+        /// names by rarity (through the game's locale) write, and nothing that changes size, position, sprites or fonts, so
+        /// a name can never swallow the rest of its line. A closing tag needs its opening one before it, and every open
+        /// tag is closed by the end.
+        /// </summary>
+        private static readonly System.Text.RegularExpressions.Regex Allowed = new System.Text.RegularExpressions.Regex(
+            @"^<(?:(?<open>b|i)|(?<open>color)=(?:#[0-9a-f]{6}(?:[0-9a-f]{2})?|[a-z]{3,12})|/(?<close>b|i|color))>$",
+            System.Text.RegularExpressions.RegexOptions.IgnoreCase | System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+        /// <summary>Whether every tag in the text is an <see cref="Allowed"/> one and they balance - such a name is
+        /// passed to TMP as it is. A "&lt;" that never closes, an unknown tag, a close without its open, or an open left
+        /// open all mean no: the text is escaped whole, as it always was.</summary>
+        private static bool Dressed(string text)
+        {
+            int b = 0, i = 0, colour = 0;
+            var at = text.IndexOf('<');
+
+            while (at >= 0)
+            {
+                var end = text.IndexOf('>', at + 1);
+                if (end < 0) return false;
+
+                var inner = text.IndexOf('<', at + 1);
+                if (inner >= 0 && inner < end) return false;
+
+                var match = Allowed.Match(text.Substring(at, end - at + 1));
+                if (!match.Success) return false;
+
+                var open = match.Groups["open"].Value.ToLowerInvariant();
+                var close = match.Groups["close"].Value.ToLowerInvariant();
+
+                if (open == "b") b++;
+                else if (open == "i") i++;
+                else if (open == "color") colour++;
+                else if (close == "b" && --b < 0) return false;
+                else if (close == "i" && --i < 0) return false;
+                else if (close == "color" && --colour < 0) return false;
+
+                at = text.IndexOf('<', end + 1);
+            }
+
+            return b == 0 && i == 0 && colour == 0;
         }
 
         /// <summary>Whether this string is one Safe produced: opens with the tag, ends with it, and

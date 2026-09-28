@@ -239,6 +239,7 @@ The checker compares pictures by pixels:
 
 ## Also
 
+- **Item names another mod colours keep their colour.** Mods that dress item names in the game's own rich text - a rarity colour and bold, as the tag-colour mods do through the locale (with ColorConverterAPI for the hex codes) - used to show their tags as literal text in the build panel and the quest body, because every name is escaped before it reaches the text. A name whose tags are only bold, italic and a colour, balanced, now keeps them; any other markup is still shown as characters, so a name can never swallow the rest of its line.
 - The zone file is schema v2: each map's record carries its extent (four edges, the source that
   produced it, when) and its floor bands with names and height ranges, copied onto the marker
   payload. Both halves refuse an extent that does not contain the zones already harvested, so a
