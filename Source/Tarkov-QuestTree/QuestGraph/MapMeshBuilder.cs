@@ -228,6 +228,30 @@ namespace QuestTree.QuestGraph
 
         internal static readonly int AsIsMaxFactor = 8;
 
+        /// <summary>
+        /// HQ S2.8: a LOD group stored at a coarser level whose finer level was tried before (GroupTried: tried at a target
+        /// not grown 5 % since) is tried AGAIN when the plan's headroom - the cap's planned share less what the stored
+        /// buildings hold and the new ones want - is at least <see cref="RetryHeadroomFactor"/> x the finer level's source
+        /// triangles: with S2.6 and S2.7 a read that fits the headroom lands, so the retry converges. The retries of one
+        /// stop are bounded by <see cref="RetrySeconds"/> of worker time at the decimation rate measured in this raid
+        /// (<see cref="DecimationRateFor"/>); groups past the bound wait for the next stop. Before: 53 groups on Customs
+        /// stayed at LOD1 for 62 stops with 1.9 M triangles of headroom. False gates as before. Not in the recipe.
+        /// </summary>
+        internal static readonly bool RetryWhenHeadroomGrew = true;
+
+        internal static readonly double RetryHeadroomFactor = 1.5;
+        internal static readonly double RetrySeconds = 10d;
+
+        /// <summary>HQ S2.8: source triangles decimated per worker-millisecond, measured by the last build that decimated for
+        /// over a second (<see cref="ReportQuality"/>), else this default (Customs' first build: 2.8 M in 11.7 s on 2 lanes).</summary>
+        private const double DefaultDecimationRate = 120d;
+
+        private static double _decimationRate = DefaultDecimationRate;
+
+        /// <summary>HQ S2.8: the source triangles one stop's retries may add up to - RetrySeconds of every worker lane at
+        /// the measured rate.</summary>
+        private static long RetryBudgetTriangles() => (long)(RetrySeconds * 1000d * _decimationRate * MaxWorkers);
+
         /// <summary>PART-10: members named in the shells' line, and tree/bush paths sampled in the foliage line.</summary>
         private const int ShellDropsLogged = 40;
 
@@ -1923,6 +1947,14 @@ namespace QuestTree.QuestGraph
 
             /// <summary>HQ S2.7: sources stored as they are before their group's next level, past the old 4 x bound.</summary>
             internal int AsIsBeforeLevel;
+
+            /// <summary>HQ S2.8: gated groups tried again this stop (and their finer level's sources), those left for the next
+            /// stop by the time bound, and those whose sources the headroom does not hold.</summary>
+            internal int GroupsRetried;
+
+            internal long RetrySources;
+            internal int GroupsRetryDeferred;
+            internal int GroupsRetryHeadroomShort;
 
             /// <summary>Stored as the source, past the limit, from unreserved headroom (H3).</summary>
             internal int StoredUndecimated;
@@ -4844,13 +4876,54 @@ namespace QuestTree.QuestGraph
             // WP2 (fixes 2): a LOD group whose finer level was tried before (its stored entries' triedLevel) at a target not
             // grown since is not tried again - its finer renderers are skipped and its stored level stays planned
             var gated = new HashSet<LODGroup>();
+
+            // HQ S2.8: a tried group is tried again when the plan's headroom holds its finer level's sources with room to
+            // spare, within this stop's retry time bound
+            var retried = new HashSet<LODGroup>();
+            var sourcesOf = new Dictionary<LODGroup, long>();
             foreach (var c in flex)
             {
-                if (c.Kind != KindNew || c.Group == null || gated.Contains(c.Group)) continue;
+                if (c.Kind != KindNew || c.Group == null) continue;
+                sourcesOf.TryGetValue(c.Group, out var sum);
+                sourcesOf[c.Group] = sum + Math.Max(0L, c.SourceTriangles);
+            }
+
+            var planHeadroom = (long)(cap * BudgetShare) - plan.FixedCost - plan.Want;
+            var retryLeft = RetryBudgetTriangles();
+
+            foreach (var c in flex)
+            {
+                if (c.Kind != KindNew || c.Group == null || gated.Contains(c.Group) || retried.Contains(c.Group)) continue;
                 if (!job.Groups.TryGetValue(c.Group, out var state) || state?.Stored == null) continue;
 
                 var lod = CurrentLod(job, c);
-                if (lod < state.StoredLod && GroupTried(state, lod, plan)) gated.Add(c.Group);
+                if (lod >= state.StoredLod || !GroupTried(state, lod, plan)) continue;
+
+                if (RetryWhenHeadroomGrew)
+                {
+                    sourcesOf.TryGetValue(c.Group, out var sources);
+
+                    if (planHeadroom >= RetryHeadroomFactor * sources)
+                    {
+                        if (sources <= retryLeft)
+                        {
+                            retried.Add(c.Group);
+                            retryLeft -= sources;
+                            planHeadroom -= sources;
+                            job.GroupsRetried++;
+                            job.RetrySources += sources;
+                            continue;
+                        }
+
+                        job.GroupsRetryDeferred++;
+                    }
+                    else
+                    {
+                        job.GroupsRetryHeadroomShort++;
+                    }
+                }
+
+                gated.Add(c.Group);
             }
 
             if (gated.Count > 0)
@@ -9760,6 +9833,10 @@ namespace QuestTree.QuestGraph
         private static void ReportQuality(Job job)
         {
             var f1 = CultureInfo.InvariantCulture;
+
+            // HQ S2.8: the decimation rate this raid runs at, for the next stop's retry bound
+            if (job.WorkerMs > 1000d && job.SourceDecimated > 0)
+                _decimationRate = Math.Max(1d, job.SourceDecimated / job.WorkerMs);
             var s0 = job.DecimatedSourceArea > 0d ? job.DecimatedSourceSliverArea / job.DecimatedSourceArea * 100d : 0d;
             var s1 = job.StoredDecimatedArea > 0d ? job.StoredDecimatedSliverArea / job.StoredDecimatedArea * 100d : 0d;
 
@@ -10585,6 +10662,32 @@ namespace QuestTree.QuestGraph
         /// the y range.</summary>
         /// <param name="job">The build.</param>
         /// <param name="result">The result.</param>
+        /// <summary>HQ S2.8: the buildings stored at a LOD level above 0 after this stop - kept stored rows and this
+        /// build's new rows - as a clause of the accumulation line: PART-00 section 6 asks for 0 after the last stop.</summary>
+        /// <param name="job">The build.</param>
+        private static string StoredCoarseClause(Job job)
+        {
+            var rows = 0;
+            var triangles = 0L;
+            var groups = new HashSet<ulong>();
+
+            void Count(MapMeshIndex.Entry m)
+            {
+                if (m == null || MapMeshIndex.LevelOfGrade(m.Grade) <= 0) return;
+                rows++;
+                triangles += Math.Max(0, m.StoredTriangles);
+                if (m.GroupPathHash != 0UL) groups.Add(m.GroupPathHash);
+            }
+
+            if (job.Stored != null)
+                foreach (var e in job.Stored.All)
+                    if (e != null && !e.Drop) Count(e.Meta);
+
+            foreach (var m in job.NewEntries) Count(m);
+
+            return $"; stored at LOD>0 after this stop: {N(groups.Count)} group(s), {N(rows)} row(s), {N(triangles)} triangles";
+        }
+
         private static void ReportAccumulation(Job job, Result result)
         {
             var f1 = CultureInfo.InvariantCulture;
@@ -10612,7 +10715,13 @@ namespace QuestTree.QuestGraph
                 (job.TextureRereads > 0 ? $"; {N(job.TextureRereads)} re-read for texture" +
                                           (job.TextureRefused > 0 ? $" ({N(job.TextureRefused)} got no atlas range - refused, not re-read until their target grows)" : "")
                     : "") +
-                (job.GroupsNotRetried > 0 ? $"; {N(job.GroupsNotRetried)} LOD group(s) not tried at a finer level again (tried at this target before)" : "") +
+                (job.GroupsNotRetried + job.GroupsRetried > 0
+                    ? $"; LOD groups tried before at a finer level: {N(job.GroupsRetried)} tried again ({N(job.RetrySources)} source triangles, " +
+                      $"{N(job.GroupsRetryDeferred)} left for the next stop by the {RetrySeconds.ToString("0", f1)} s retry bound, " +
+                      $"{N(job.GroupsRetryHeadroomShort)} whose sources the headroom does not hold at {RetryHeadroomFactor.ToString("0.0", f1)} x, " +
+                      $"{N(job.GroupsNotRetried)} gated)"
+                    : "") +
+                StoredCoarseClause(job) +
                 (job.RetargetsFailed > 0 ? $"; {N(job.RetargetsFailed)} re-target(s) did not land" : "") +
                 (job.PrunedShells + job.PrunedLevels > 0
                     ? $"; pruned {N(job.PrunedShells + job.PrunedLevels)} coincident shell(s) / coarse level(s)"
