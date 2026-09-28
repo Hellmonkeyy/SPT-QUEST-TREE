@@ -2616,10 +2616,12 @@ namespace QuestTree.QuestGraph
         /// </summary>
         private static IEnumerator EncodeSteps(string key, FloorUpload floor, byte[] bytes, string readError, EncodeJob job)
         {
-            // HQ S3.11: an alpha mask is its page's alpha as an 8-bit grey PNG - one frame, on the main thread
+            // HQ S3.11: an alpha mask is its page's alpha as an 8-bit grey PNG - the decode on the main thread, the pass
+            // over the pixels and the PNG on a worker (code review 1.19.0: it was all one main-thread frame)
             if (floor.AlphaOf != null)
             {
-                job.Ok = EncodeAlphaMask(key, floor, bytes, readError);
+                var mask = EncodeAlphaMaskSteps(key, floor, bytes, readError, job);
+                while (mask.MoveNext()) yield return mask.Current;
                 yield break;
             }
 
@@ -2673,83 +2675,131 @@ namespace QuestTree.QuestGraph
         /// <summary>HQ S3.11: a page's ALPHA MASK for the host - the page PNG decoded, its alpha written into every channel
         /// of an RGB24 texture of the same size and encoded as a PNG (a binary mask deflates to a few hundred KB). A page
         /// with no transparent pixel at all makes no mask: false, and the post goes up empty, which the host drops.</summary>
-        private static bool EncodeAlphaMask(string key, FloorUpload floor, byte[] bytes, string readError)
+        private static IEnumerator EncodeAlphaMaskSteps(string key, FloorUpload floor, byte[] bytes, string readError, EncodeJob job)
         {
+            job.Ok = false;
+            Color32[] pixels;
+            int width, height;
+
+            // the decode - a Unity object, the main thread's - then nothing but arrays
             Texture2D source = null;
-            Texture2D grey = null;
 
             try
             {
                 if (bytes == null)
                 {
                     Plugin.LogSource?.LogDebug($"QuestTree: {key} \"{floor.Name}\" could not be read ({readError ?? "IOException"}) - not offered.");
-                    return false;
+                    yield break;
                 }
 
                 if (!QuestTree.UI.DynamicMapsLibrary.PictureSize(bytes, out var declaredWidth, out var declaredHeight) ||
                     declaredWidth > MaxAtlasPixels || declaredHeight > MaxAtlasPixels)
                 {
                     Plugin.LogSource?.LogDebug($"QuestTree: {key} \"{floor.Name}\" is not a page of at most {MaxAtlasPixels} px - not offered.");
-                    return false;
+                    yield break;
                 }
 
                 source = new Texture2D(2, 2, TextureFormat.RGBA32, mipChain: false);
                 if (!source.LoadImage(bytes))
                 {
                     Plugin.LogSource?.LogDebug($"QuestTree: {key} \"{floor.Name}\" would not decode - not offered.");
-                    return false;
+                    yield break;
                 }
 
-                if (!SizeMatches(key, floor, source.width, source.height)) return false;
+                if (!SizeMatches(key, floor, source.width, source.height)) yield break;
 
-                var pixels = source.GetPixels32();
-                var transparent = 0;
-                for (var i = 0; i < pixels.Length; i++)
-                {
-                    var a = pixels[i].a;
-                    if (a < 255) transparent++;
-                    pixels[i] = new Color32(a, a, a, 255);
-                }
-
-                if (transparent == 0)
-                {
-                    Plugin.LogSource?.LogDebug($"QuestTree: {key} \"{floor.Name}\" has no transparent pixel - no mask is offered.");
-                    return false;
-                }
-
-                grey = new Texture2D(source.width, source.height, TextureFormat.RGB24, mipChain: false);
-                grey.SetPixels32(pixels);
-                grey.Apply(updateMipmaps: false);
-
-                var png = grey.EncodeToPNG();
-
-                if (png == null || png.Length == 0 || png.Length > MaxAtlasPageBytes)
-                {
-                    Plugin.LogSource?.LogInfo(
-                        $"QuestTree: {key} \"{floor.Name}\" is {Mb(png?.Length ?? 0)} MB as a PNG, over the {Mb(MaxAtlasPageBytes)} MB " +
-                        "a host takes per page - not offered; the page draws opaque on the host's clients.");
-                    return false;
-                }
-
-                floor.Base64 = Convert.ToBase64String(png);
-                floor.Bytes = png.Length;
-
-                Plugin.LogSource?.LogDebug(
-                    $"QuestTree: {key} \"{floor.Name}\" {source.width}x{source.height} -> PNG mask, {Mb(png.Length)} MB " +
-                    $"({transparent:#,##0} transparent pixel(s)).");
-                return true;
-            }
-            catch (Exception ex)
-            {
-                Plugin.LogSource?.LogWarning(
-                    $"QuestTree: {key} \"{floor.Name}\" could not be prepared for upload ({ex.GetType().Name}: {ex.Message}) - not offered.");
-                return false;
+                width = source.width;
+                height = source.height;
+                pixels = source.GetPixels32();
             }
             finally
             {
-                if (grey != null) UnityEngine.Object.Destroy(grey);
                 if (source != null) UnityEngine.Object.Destroy(source);
             }
+
+            // the pass over the pixels and the PNG, on a worker (here when the pool refuses)
+            var work = StartWork(() => AlphaMaskPng(pixels, width, height));
+            while (work != null && !work.IsCompleted) yield return null;
+
+            var made = work != null && !work.IsFaulted && !work.IsCanceled ? work.Result : AlphaMaskPng(pixels, width, height);
+
+            if (made.Transparent == 0)
+            {
+                Plugin.LogSource?.LogDebug($"QuestTree: {key} \"{floor.Name}\" has no transparent pixel - no mask is offered.");
+                yield break;
+            }
+
+            if (made.Png == null || made.Png.Length == 0 || made.Png.Length > MaxAtlasPageBytes)
+            {
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: {key} \"{floor.Name}\" is {Mb(made.Png?.Length ?? 0)} MB as a PNG, over the {Mb(MaxAtlasPageBytes)} MB " +
+                    "a host takes per page - not offered; the page draws opaque on the host's clients.");
+                yield break;
+            }
+
+            floor.Base64 = made.Base64;
+            floor.Bytes = made.Png.Length;
+            job.Ok = true;
+
+            Plugin.LogSource?.LogDebug(
+                $"QuestTree: {key} \"{floor.Name}\" {width}x{height} -> PNG mask, {Mb(made.Png.Length)} MB " +
+                $"({made.Transparent:#,##0} transparent pixel(s)), encoded off the main thread.");
+        }
+
+        /// <summary>The mask's pixels and PNG from a page's pixels - arrays only, so it runs on a worker: every pixel's
+        /// alpha as an 8-bit grey, ImageConversion.EncodeArrayToPNG (documented thread-safe) on R8, then RGBA when the
+        /// platform's encoder refuses R8, and the base64. Never throws: a failure is an empty result.</summary>
+        private sealed class MaskMade
+        {
+            public byte[] Png;
+            public string Base64;
+            public int Transparent;
+        }
+
+        private static MaskMade AlphaMaskPng(Color32[] pixels, int width, int height)
+        {
+            var made = new MaskMade();
+
+            try
+            {
+                var grey = new byte[pixels.Length];
+                for (var i = 0; i < pixels.Length; i++)
+                {
+                    var a = pixels[i].a;
+                    if (a < 255) made.Transparent++;
+                    grey[i] = a;
+                }
+
+                if (made.Transparent == 0) return made;
+
+                var png = ImageConversion.EncodeArrayToPNG(grey, UnityEngine.Experimental.Rendering.GraphicsFormat.R8_UNorm,
+                    (uint)width, (uint)height);
+
+                if (png == null || png.Length == 0)
+                {
+                    var rgba = new byte[pixels.Length * 4];
+                    for (var i = 0; i < pixels.Length; i++)
+                    {
+                        var a = pixels[i].a;
+                        rgba[i * 4] = a;
+                        rgba[i * 4 + 1] = a;
+                        rgba[i * 4 + 2] = a;
+                        rgba[i * 4 + 3] = 255;
+                    }
+
+                    png = ImageConversion.EncodeArrayToPNG(rgba, UnityEngine.Experimental.Rendering.GraphicsFormat.R8G8B8A8_UNorm,
+                        (uint)width, (uint)height);
+                }
+
+                made.Png = png;
+                if (png != null && png.Length > 0 && png.Length <= MaxAtlasPageBytes) made.Base64 = Convert.ToBase64String(png);
+            }
+            catch (Exception)
+            {
+                made.Png = null;
+            }
+
+            return made;
         }
 
         /// <summary>A worker, or null when the pool would not take it.</summary>
@@ -5531,18 +5581,7 @@ namespace QuestTree.QuestGraph
         /// thread exists.
         /// </summary>
         /// <param name="key">The map's internal id, or null.</param>
-        private static string AliasOf(string key)
-        {
-            if (string.IsNullOrEmpty(key)) return null;
-
-            foreach (var (a, b) in UI.MapView.SceneAliases)
-            {
-                if (string.Equals(a, key, StringComparison.OrdinalIgnoreCase)) return b;
-                if (string.Equals(b, key, StringComparison.OrdinalIgnoreCase)) return a;
-            }
-
-            return null;
-        }
+        private static string AliasOf(string key) => UI.MapCatalog.AliasOf(key);   // code review (1.19.0): one copy
 
         /// <summary>An ISO UTC timestamp, or null. Invariant and round-tripped: these are written
         /// with a Z and have to mean the same instant on every machine that reads them.</summary>

@@ -6152,8 +6152,10 @@ namespace QuestTree.UI
             if (_light != null) _light.enabled = false;
 
             // A viewport switched off (a visit to the tree tab) holds no pictures anyone is looking at, so
-            // the cache room for its sides goes back while it is off and is taken again when it returns.
-            ReturnSideRoom();
+            // the cache room for its sides goes back while it is off and is taken again when it returns. The
+            // pictures themselves STAY resident (code review 1.19.0): evicting them re-read and re-decoded four
+            // mipmapped 2048 px sides on every tab switch; the cache trims them only when it needs the room.
+            ReturnSideRoom(evict: false);
         }
 
         private void OnEnable()

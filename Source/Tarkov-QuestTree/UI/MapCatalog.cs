@@ -418,8 +418,10 @@ namespace QuestTree.UI
         /// this map has no twin. The pairs are MapView's, which mirrors the server's
         /// ZoneStore.Aliases - see <see cref="MapView.SceneAliases"/>.</summary>
         /// <param name="locationKey">The map's internal id.</param>
-        private static string AliasOf(string locationKey)
+        internal static string AliasOf(string locationKey)
         {
+            if (string.IsNullOrEmpty(locationKey)) return null;
+
             foreach (var (a, b) in MapView.SceneAliases)
             {
                 if (string.Equals(a, locationKey, StringComparison.OrdinalIgnoreCase)) return b;

@@ -1298,6 +1298,9 @@ namespace QuestTreeServer
             MapCaptureMetaDto ready;
             var flattened = "";
 
+            // code review (1.19.0): a completion in flight is waited out first - see WaitWhileCompleting
+            WaitWhileCompleting(StagingFolder(key, capturedAt));
+
             lock (_lock)
             {
                 if (!_loaded) Load();
@@ -1315,14 +1318,14 @@ namespace QuestTreeServer
                 // THIS mesh, so the only way it can be completing is with this mesh already staged - in
                 // which case the set is being stored in 3D and there is nothing to write. The other branch
                 // is kept for honesty rather than expected.
+                // still completing after the wait (code review 1.19.0): never "served" before the set is - the
+                // client is told to offer the mesh again
                 if (_completing.Contains(staging))
-                    return MeshIsStaged(staging, actual)
-                        ? new MapMeshUploadResponse { Accepted = true, Served = true }
-                        : new MapMeshUploadResponse
-                        {
-                            Accepted = false,
-                            Reason = "this capture is being completed right now - offer the mesh again"
-                        };
+                    return new MapMeshUploadResponse
+                    {
+                        Accepted = false,
+                        Reason = "this capture is being completed right now - offer the mesh again"
+                    };
 
                 var floors = FilesByLevel(staging);
                 var existing = SizeOf(MeshPath(staging));
@@ -1517,6 +1520,9 @@ namespace QuestTreeServer
             MapCaptureMetaDto? flatReady = null;
             var flatReason = "";
 
+            // code review (1.19.0): a completion in flight is waited out first - see WaitWhileCompleting
+            WaitWhileCompleting(StagingFolder(key, capturedAt));
+
             lock (_lock)
             {
                 if (!_loaded) Load();
@@ -1532,14 +1538,14 @@ namespace QuestTreeServer
                 // A completion - or another part's JOIN - of this capture is in flight: see the same guard
                 // in AcceptMesh. The join claims the folder too, so nothing writes a part into it or sweeps
                 // it while up to the mesh ceiling of parts is being read back outside the lock.
+                // still completing after the wait (code review 1.19.0): never "served" before the set is - the
+                // client is told to offer the mesh again
                 if (_completing.Contains(staging))
-                    return MeshIsStaged(staging, claimed)
-                        ? new MapMeshUploadResponse { Accepted = true, Served = true }
-                        : new MapMeshUploadResponse
-                        {
-                            Accepted = false,
-                            Reason = "this capture is being completed right now - offer the mesh again"
-                        };
+                    return new MapMeshUploadResponse
+                    {
+                        Accepted = false,
+                        Reason = "this capture is being completed right now - offer the mesh again"
+                    };
 
                 // The whole the parts claim to be must be the mesh the staged capture described - the same
                 // size its meta declared - or the budgets below would be judged on a number a sender chose.
