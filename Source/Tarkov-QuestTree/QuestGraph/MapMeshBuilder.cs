@@ -202,6 +202,20 @@ namespace QuestTree.QuestGraph
         /// re-enable never throws the accumulated mesh away. Static readonly so the choice is not a constant the compiler folds.</summary>
         internal static readonly bool ShellRule = true;
 
+        /// <summary>
+        /// HQ S2.6: a strict decimation that stopped at the error limit over its hard limit is paid from the whole of the
+        /// ledger's headroom (what nobody was promised - the cap less everything stored, reserved and pending), not from
+        /// the over-budget pool of 5 % of the cap (cap x (1 - BudgetShare) x 0.5), which on Customs was spent after 52
+        /// buildings while 0.8 M triangles of headroom went unused and 201 groups fell to the game's coarser LOD. False
+        /// pays from the pool as before. NOT in the recipe, as ShellRule: it only stores better-graded rows that the grade
+        /// rule replaces wholesale, so a rollback or a re-enable never throws the accumulated mesh away.
+        /// </summary>
+        internal static readonly bool OverBudgetPoolIsHeadroom = true;
+
+        /// <summary>HQ S2.6: a worker offers its over-limit result whatever its size (Apply still bounds it by the headroom);
+        /// false offers only a result within OverBudgetMaxFactor x the limit, as before. Not in the recipe, as above.</summary>
+        internal static readonly bool OfferOverLimitWithinHeadroom = true;
+
         /// <summary>PART-10: members named in the shells' line, and tree/bush paths sampled in the foliage line.</summary>
         private const int ShellDropsLogged = 40;
 
@@ -1889,6 +1903,11 @@ namespace QuestTree.QuestGraph
             internal long OverBudgetExtra;
             internal long OverBudgetPool;
             internal readonly int[] FellBackTo = new int[4];
+
+            /// <summary>HQ S2.6: over-limit results the workers offered, and how many Apply refused for want of headroom.</summary>
+            internal int OfferedOverLimit;
+
+            internal int OfferedRefusedHeadroom;
 
             /// <summary>Stored as the source, past the limit, from unreserved headroom (H3).</summary>
             internal int StoredUndecimated;
@@ -5731,8 +5750,10 @@ namespace QuestTree.QuestGraph
                 if (over != null)
                 {
                     var extra = over.Triangles - (long)limit;
+                    job.OfferedOverLimit++;
 
-                    if (extra <= job.Ledger.Headroom && extra <= job.OverBudgetPool)
+                    // HQ S2.6: from the headroom alone, or from the pool as well under the rollback
+                    if (extra <= job.Ledger.Headroom && (OverBudgetPoolIsHeadroom || extra <= job.OverBudgetPool))
                     {
                         if (Store(over, GradeOverBudget) == Stored)
                         {
@@ -5754,6 +5775,7 @@ namespace QuestTree.QuestGraph
 
                     // WP2 (fixes 3): offered and refused for want of headroom or the pool - not a clean attempt
                     candidate.CleanAttempt = false;
+                    job.OfferedRefusedHeadroom++;
                 }
 
                 // 3. the source as it is, BEFORE any coarser level - bounded by the factor and the headroom
@@ -6142,7 +6164,7 @@ namespace QuestTree.QuestGraph
                         outcome.Decimated = true;
                         return outcome;
                     }
-                    else if (n <= (long)source.Limit * OverBudgetMaxFactor) outcome.OverBudget = mesh;
+                    else if (OfferOverLimitWithinHeadroom || n <= (long)source.Limit * OverBudgetMaxFactor) outcome.OverBudget = mesh;
                 }
             }
 
@@ -9726,7 +9748,10 @@ namespace QuestTree.QuestGraph
             Plugin.LogSource?.LogInfo(
                 $"QuestTree: building quality for {job.Request.Map} - decimations {N(job.DecimationRuns)}: to target " +
                 $"{N(job.DecimationsToTarget)}, stopped at the error limit {N(job.StoppedAtError)} (stored over budget " +
-                $"{N(job.StoredOverBudget)}, +{N(job.OverBudgetExtra)} triangles, pool {N(job.OverBudgetPool)} left), relaxed " +
+                $"{N(job.StoredOverBudget)}, +{N(job.OverBudgetExtra)} triangles, " +
+                (OverBudgetPoolIsHeadroom
+                    ? $"headroom {N(job.Ledger?.Headroom ?? 0)} left; offered over limit {N(job.OfferedOverLimit)}, {N(job.OfferedRefusedHeadroom)} refused for headroom"
+                    : $"pool {N(job.OverBudgetPool)} left") + "), relaxed " +
                 $"passes {N(job.RelaxedPasses)}, seams crossed {N(job.SeamsRelaxed)}; refused: placement clamped " +
                 $"{N(job.RefusedPlacement)}, fan {N(job.RefusedFans)}, distance {N(job.RefusedDistance)}, flip " +
                 $"{N(job.RefusedFlips)}, edge growth {N(job.RefusedEdgeGrowth)}, new sliver {N(job.RefusedSliver)}; pinned " +
