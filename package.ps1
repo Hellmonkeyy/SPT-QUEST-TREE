@@ -280,10 +280,12 @@ if ($RefreshMaps) {
         # Three globs, not two: `*-mesh.bin` is the 3D mesh the same capture wrote beside its pictures
         # (MapMeshFile), and a set refreshed without it would ship a meta naming a mesh the zip does not
         # carry - which the mesh gate below then fails, loudly, rather than shipping.
+        # Four globs since HQ S3.11: `*-alpha.png` is an alpha page's mask (the page's alpha beside the JPEG the host
+        # serves), named by the meta's alphaFile and checked by the pack gate as the page is.
         $picked = @(Get-ChildItem $src.FullName -File |
-            Where-Object { $_.Name -like "*.jpg" -or $_.Name -like "*.map.json" -or $_.Name -like "*-mesh.bin" })
+            Where-Object { $_.Name -like "*.jpg" -or $_.Name -like "*.map.json" -or $_.Name -like "*-mesh.bin" -or $_.Name -like "*-alpha.png" })
         if ($picked.Count -eq 0) {
-            Write-Host "  skipped $($src.Name)\ - no .jpg, .map.json or -mesh.bin in it" -ForegroundColor DarkGray
+            Write-Host "  skipped $($src.Name)\ - no .jpg, .map.json, -mesh.bin or -alpha.png in it" -ForegroundColor DarkGray
             continue
         }
         $dst = Join-Path $mapsDir $src.Name
@@ -551,7 +553,9 @@ $stagedBody = ([string](Get-Content -Raw $stagedNotes)) -replace "(?m)^Archive s
 # JSON reader refuses. None of them can match what the release already carries: the zone files and
 # kappa-quests.json end in `.json`, which `\.jsonc$` does not match, and no allowlisted path contains
 # "dynamicmaps" (the match is case-insensitive, so "DynamicMaps.dll" is caught too).
-$forbidden = "objective-gps|tarkovdev|\.bak$|\.svg$|dynamicmaps|\.jsonc$|\.png$"
+# `\.png$` bars a capture's own PNG pictures (the host serves JPEGs) - but not an alpha page's mask, which is a PNG by
+# design (HQ S3.11) and is admitted by GATE 1's exact name.
+$forbidden = "objective-gps|tarkovdev|\.bak$|\.svg$|dynamicmaps|\.jsonc$|(?<!-alpha)\.png$"
 $expected = @($allow | ForEach-Object { $_.Dest })
 $found = @(Get-ChildItem $staging -Recurse -File | ForEach-Object { $_.FullName.Substring($staging.Length + 1) })
 

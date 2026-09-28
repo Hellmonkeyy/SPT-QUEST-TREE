@@ -746,6 +746,7 @@ namespace QuestTreeServer
                 var staged = FilesByLevel(staging);
                 var stagedSides = SidesByDir(staging);
                 var stagedPages = PagesByNumber(staging);
+                var stagedMasks = MasksByNumber(staging);   // HQ S3.11 (code review): masks count as pages do
 
                 // What this post REPLACES, which is the only thing either budget may discount: a floor
                 // or side posted twice overwrites its own staged copy, so counting the old one as well
@@ -754,7 +755,9 @@ namespace QuestTreeServer
                 var mine = isSide
                     ? (sideDir != null && stagedSides.TryGetValue(sideDir, out var mySide) ? SizeOf(mySide) : 0)
                     : isAtlas
-                        ? (pageNo != null && stagedPages.TryGetValue(pageNo.Value, out var myPage) ? SizeOf(myPage) : 0)
+                        ? maskNo != null
+                            ? (stagedMasks.TryGetValue(maskNo.Value, out var myMask) ? SizeOf(myMask) : 0)
+                            : (pageNo != null && stagedPages.TryGetValue(pageNo.Value, out var myPage) ? SizeOf(myPage) : 0)
                         : (staged.TryGetValue(request.Level, out var already) ? SizeOf(already) : 0);
 
                 // The sides the meta names that are not staged yet, other than this post's own: each is
@@ -777,9 +780,13 @@ namespace QuestTreeServer
                     ? SizeOf(MeshPath(staging))
                     : Math.Max(meta.Mesh?.Bytes ?? 0L, 0L);
 
+                // The staged masks count at their size; a mask not yet staged is not reserved (the meta on the way in
+                // does not say which pages carry alpha), so a set's masks are the one thing that can arrive past this
+                // budget by their own size - each at most a page's cap, dropped alone when the store is full.
                 var setBytes = staged.Sum(entry => SizeOf(entry.Value)) +
                                stagedSides.Sum(entry => SizeOf(entry.Value)) + pendingSides +
-                               stagedPages.Sum(entry => SizeOf(entry.Value)) + pendingPages + meshBytes - mine;
+                               stagedPages.Sum(entry => SizeOf(entry.Value)) + pendingPages +
+                               stagedMasks.Sum(entry => SizeOf(entry.Value)) + meshBytes - mine;
 
                 // A SIDE that does not fit is DROPPED rather than refusing the post, for the reason every
                 // other side problem is: a refusal would leave the side named in the staged meta, and the
@@ -3389,6 +3396,48 @@ namespace QuestTreeServer
 
             if (meta.Atlas.Count == 0) meta.Atlas = null;
         }
+
+        /// <summary>HQ S3.11: the staged alpha masks of one capture, by page number.</summary>
+        private static Dictionary<int, string> MasksByNumber(string staging)
+        {
+            var found = new Dictionary<int, string>();
+
+            if (!System.IO.Directory.Exists(staging)) return found;
+
+            for (var page = 0; page < MaxAtlasPages; page++)
+            {
+                var path = System.IO.Path.Combine(staging, StagedMaskName(page));
+
+                if (System.IO.File.Exists(path)) found[page] = path;
+            }
+
+            return found;
+        }
+
+        /// <summary>
+        /// Code review (1.19.0): a mesh post that finds its capture being COMPLETED waits for that completion, outside the
+        /// lock and bounded, rather than answering "served" for a set whose completion may still fail. After the wait the
+        /// caller's own re-check under the lock says what is true: the set is served (an "already served" answer), or it
+        /// is still staged (the mesh is stored and the set completed by this post as usual).
+        /// </summary>
+        /// <param name="staging">The capture's staging folder.</param>
+        private void WaitWhileCompleting(string staging)
+        {
+            var until = DateTime.UtcNow + CompletionWait;
+
+            while (DateTime.UtcNow < until)
+            {
+                lock (_lock)
+                {
+                    if (!_completing.Contains(staging)) return;
+                }
+
+                System.Threading.Thread.Sleep(CompletionPoll);
+            }
+        }
+
+        private static readonly TimeSpan CompletionWait = TimeSpan.FromSeconds(45);
+        private static readonly TimeSpan CompletionPoll = TimeSpan.FromMilliseconds(100);
 
         /// <summary>The staged atlas pages of one capture, by page number.</summary>
         private static Dictionary<int, string> PagesByNumber(string staging)

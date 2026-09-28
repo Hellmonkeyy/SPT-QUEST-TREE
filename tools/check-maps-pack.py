@@ -141,6 +141,7 @@ MESH_MAX_FILE_BYTES = 512 * 1024 * 1024
 GITHUB_FILE_LIMIT = 100_000_000
 # The relief cell rule, identical to MapMeshBuilder.ReliefCellFor and check-capture.py's relief_cell_for.
 RELIEF_PREFERRED_CELL = 0.5    # HQ S3.13: was 1.0
+RELIEF_PRE_HQ_CELL = 1.0       # the preferred cell between WP7 and HQ S3.13 - a WARN, as the pre-WP7 2 m is
 RELIEF_CELL_STEP = 0.5
 RELIEF_PRE_WP7_CELL = 2.0
 
@@ -504,6 +505,10 @@ def check_mesh(meta, folder, key, extent, levels, errors):
         if abs(band["cell"] - RELIEF_PRE_WP7_CELL) <= 1e-6 and abs(derived - RELIEF_PREFERRED_CELL) <= 1e-6:
             WARNINGS.append(f"{where}: {rel} band {band['level']} was captured before WP7 at 2 m - the rule now "
                             f"gives {derived:g} m for this extent")
+        elif abs(band["cell"] - RELIEF_PRE_HQ_CELL) <= 1e-6 and abs(derived - RELIEF_PREFERRED_CELL) <= 1e-6:
+            # HQ S3.13 halved the preferred cell; a set captured at 1 m draws on every reader, so it ships with a note
+            WARNINGS.append(f"{where}: {rel} band {band['level']} was captured before the high-quality build at 1 m - "
+                            f"the rule now gives {derived:g} m for this extent; re-capture it for the finer relief")
         else:
             errors.append(f"{where}: {rel} band {band['level']} has a {band['cell']:g} m cell but the rule gives "
                           f"{derived:g} m for its {span_x:g} x {span_z:g} m extent")
@@ -907,7 +912,7 @@ def check_set(folder, schema, errors):
     named |= page_named
 
     orphans = sorted(p.name for p in folder.iterdir()
-                     if p.is_file() and p.name.lower().endswith(".jpg")
+                     if p.is_file() and p.name.lower().endswith((".jpg", "-alpha.png"))
                      and p.name.lower() not in named)
     if orphans:
         errors.append(f"{key}: {', '.join(orphans)} - image(s) no floor, side or atlas page in the meta names. They "
