@@ -216,6 +216,18 @@ namespace QuestTree.QuestGraph
         /// false offers only a result within OverBudgetMaxFactor x the limit, as before. Not in the recipe, as above.</summary>
         internal static readonly bool OfferOverLimitWithinHeadroom = true;
 
+        /// <summary>
+        /// HQ S2.7: a source the worker could not bring inside its limit is stored as it is, before its group falls to the
+        /// game's next LOD level, when it is within <see cref="AsIsMaxFactor"/> x the limit and the headroom holds it
+        /// (before: within OverBudgetMaxFactor, 4 x). With S2.6 a decimated result is stored whenever it fits, so this
+        /// path serves the sources never decimated (over MaxDecimatedSource) and the results the guards refused
+        /// (slivers reverted, area lost). The factor keeps one huge as-is source from taking the headroom of everything
+        /// behind it. False keeps the 4 x bound. Not in the recipe, as ShellRule.
+        /// </summary>
+        internal static readonly bool AsIsBeforeNextLevel = true;
+
+        internal static readonly int AsIsMaxFactor = 8;
+
         /// <summary>PART-10: members named in the shells' line, and tree/bush paths sampled in the foliage line.</summary>
         private const int ShellDropsLogged = 40;
 
@@ -1908,6 +1920,9 @@ namespace QuestTree.QuestGraph
             internal int OfferedOverLimit;
 
             internal int OfferedRefusedHeadroom;
+
+            /// <summary>HQ S2.7: sources stored as they are before their group's next level, past the old 4 x bound.</summary>
+            internal int AsIsBeforeLevel;
 
             /// <summary>Stored as the source, past the limit, from unreserved headroom (H3).</summary>
             internal int StoredUndecimated;
@@ -5779,14 +5794,17 @@ namespace QuestTree.QuestGraph
                 }
 
                 // 3. the source as it is, BEFORE any coarser level - bounded by the factor and the headroom
-                if (fits && source.Triangles <= (long)limit * OverBudgetMaxFactor)
+                // (HQ S2.7: AsIsMaxFactor, 8 x, past the old 4 x)
+                var asIsFactor = AsIsBeforeNextLevel ? AsIsMaxFactor : OverBudgetMaxFactor;
+                if (fits && source.Triangles <= (long)limit * asIsFactor)
                 {
+                    if (source.Triangles > (long)limit * OverBudgetMaxFactor) job.AsIsBeforeLevel++;
                     AsIs(source);
                     return;
                 }
 
                 // WP2 (fixes 3): as it is was within the factor and refused for want of headroom - not a clean attempt
-                if (!fits && source.Triangles <= (long)limit * OverBudgetMaxFactor) candidate.CleanAttempt = false;
+                if (!fits && source.Triangles <= (long)limit * asIsFactor) candidate.CleanAttempt = false;
 
                 // 4. the group's NEXT level
                 if (EnqueueNextLevel(job, candidate)) return;
@@ -9756,7 +9774,8 @@ namespace QuestTree.QuestGraph
                 $"{N(job.RefusedPlacement)}, fan {N(job.RefusedFans)}, distance {N(job.RefusedDistance)}, flip " +
                 $"{N(job.RefusedFlips)}, edge growth {N(job.RefusedEdgeGrowth)}, new sliver {N(job.RefusedSliver)}; pinned " +
                 $"corners {N(job.PinnedCorners)}; slivers reverted {N(job.SliversReverted)}, area lost {N(job.AreaLost)}; " +
-                $"fell back: as-is {N(job.StoredUndecimated)}, LOD1 {N(job.FellBackTo[1])}, LOD2 {N(job.FellBackTo[2])}, " +
+                $"fell back: as-is {N(job.StoredUndecimated)} ({N(job.AsIsBeforeLevel)} past 4 x their limit, before their next level), " +
+                $"LOD1 {N(job.FellBackTo[1])}, LOD2 {N(job.FellBackTo[2])}, " +
                 $"LOD3+ {N(job.FellBackTo[3])}, clustered {N(job.ClusteredStored)}; sliver area {s0.ToString("0.0", f1)} % in " +
                 $"the sources, {s1.ToString("0.0", f1)} % stored.");
         }
