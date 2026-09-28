@@ -3125,33 +3125,6 @@ namespace QuestTree.QuestGraph
         }
 
         /// <summary>
-        /// Which of a ray's hits is the cell's height: its index in <paramref name="ys"/>, or -1 for
-        /// none.
-        ///
-        /// The topmost band takes the FIRST hit when it is this band's (at or above
-        /// <paramref name="floorY"/>): the ray comes down from over the roofs and the first thing it
-        /// meets is the roof. An interior band takes the LOWEST hit that is still this band's: its ray
-        /// starts just under the floor above, meets the tops of shelves and counters on the way down,
-        /// and the floor is the last of them - which is Interchange's Goshan drawn as a floor instead of
-        /// as a field of bumps. Order in <paramref name="ys"/> is not relied on for the interior case,
-        /// only the values.
-        ///
-        /// <paramref name="saturated"/> says an interior ray used every slot and its lowest qualifying
-        /// hit is still more than <see cref="SaturatedAboveMetres"/> over the band's minY: the floor may
-        /// be further down than <see cref="InteriorMaxHits"/> hits could reach, and the relief line
-        /// counts such cells per band.
-        ///
-        /// Floats in, an int out and no Unity type, so the harness calls it on the shipped assembly
-        /// with a synthetic column - a shelf top at floor + 1.8 m over the floor at 0.
-        /// </summary>
-        /// <param name="ys">The hits' world y, in the order the query returned them.</param>
-        /// <param name="used">How many of <paramref name="ys"/> are hits.</param>
-        /// <param name="maxHits">How many the query was allowed.</param>
-        /// <param name="floorY">The lowest y that is still this band's - RayFloorFor.</param>
-        /// <param name="minY">The band's minY, for the saturation test.</param>
-        /// <param name="interior">Whether the band is an interior one.</param>
-        /// <param name="saturated">See above.</param>
-        /// <summary>
         /// TerrainAnchoredGround's choice for a top-band cell. The highest hit at or above the floor is what the old rule
         /// took; when it is on a ground layer it stands. Otherwise the highest GROUND hit is the ground, and the highest
         /// non-ground hit within <see cref="ThinSurfaceMetres"/> above it (a road on the terrain, a floor slab) wins over
@@ -3198,6 +3171,33 @@ namespace QuestTree.QuestGraph
             return chosen;
         }
 
+        /// <summary>
+        /// Which of a ray's hits is the cell's height: its index in <paramref name="ys"/>, or -1 for
+        /// none.
+        ///
+        /// The topmost band takes the FIRST hit when it is this band's (at or above
+        /// <paramref name="floorY"/>): the ray comes down from over the roofs and the first thing it
+        /// meets is the roof. An interior band takes the LOWEST hit that is still this band's: its ray
+        /// starts just under the floor above, meets the tops of shelves and counters on the way down,
+        /// and the floor is the last of them - which is Interchange's Goshan drawn as a floor instead of
+        /// as a field of bumps. Order in <paramref name="ys"/> is not relied on for the interior case,
+        /// only the values.
+        ///
+        /// <paramref name="saturated"/> says an interior ray used every slot and its lowest qualifying
+        /// hit is still more than <see cref="SaturatedAboveMetres"/> over the band's minY: the floor may
+        /// be further down than <see cref="InteriorMaxHits"/> hits could reach, and the relief line
+        /// counts such cells per band.
+        ///
+        /// Floats in, an int out and no Unity type, so the harness calls it on the shipped assembly
+        /// with a synthetic column - a shelf top at floor + 1.8 m over the floor at 0.
+        /// </summary>
+        /// <param name="ys">The hits' world y, in the order the query returned them.</param>
+        /// <param name="used">How many of <paramref name="ys"/> are hits.</param>
+        /// <param name="maxHits">How many the query was allowed.</param>
+        /// <param name="floorY">The lowest y that is still this band's - RayFloorFor.</param>
+        /// <param name="minY">The band's minY, for the saturation test.</param>
+        /// <param name="interior">Whether the band is an interior one.</param>
+        /// <param name="saturated">See above.</param>
         internal static int PickHit(float[] ys, int used, int maxHits, float floorY, float minY, bool interior,
             out bool saturated)
         {
