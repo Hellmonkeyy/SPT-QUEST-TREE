@@ -145,6 +145,31 @@ namespace QuestTree.UI
 
         private static readonly bool ScreenSpaceShadowsOff = false;
 
+        /// <summary>
+        /// HQ S1.4: hemisphere ambient for the render - sky from above, ground bounce from below, an equator between
+        /// - set inside the same bracket as the fog and put back after it (the menu scene runs Flat ambient at 0.6,
+        /// and a Trilight left behind would tint the player's hideout). False leaves the scene's ambient as before.
+        /// </summary>
+        private static readonly bool AmbientTrilight = true;
+
+        private static readonly Color AmbientSky = new Color(0.62f, 0.68f, 0.78f);
+        private static readonly Color AmbientEquator = new Color(0.45f, 0.45f, 0.45f);
+        private static readonly Color AmbientGround = new Color(0.22f, 0.20f, 0.18f);
+
+        /// <summary>
+        /// HQ S1.4: a sky behind the map - one vertex-coloured dome the size of the far clip, centred on the camera
+        /// each render, drawn through Hidden/Internal-Colored (the one vertex-colour shader this view resolves)
+        /// with depth writes off, so every mesh draws over it. False keeps the solid backdrop colour.
+        /// </summary>
+        private static readonly bool SkyDome = true;
+
+        private static readonly Color SkyZenith = new Color(0.40f, 0.55f, 0.78f);
+        private static readonly Color SkyHorizon = new Color(0.78f, 0.83f, 0.90f);
+        private static readonly Color SkyBelow = new Color(0.30f, 0.31f, 0.33f);
+        private const float SkyRadiusOfFarClip = 0.9f;
+        private const int SkyRings = 8;
+        private const int SkySegments = 24;
+
         /// <summary>Vertices per mesh chunk. Unity takes more than this in one mesh with
         /// <see cref="IndexFormat.UInt32"/>, but a chunked mesh is a mesh that can be freed and drawn in
         /// pieces, and the relief of a 4-million-cell band would otherwise be one 96 MB buffer.</summary>
@@ -5063,6 +5088,8 @@ namespace QuestTree.UI
 
                 Place();
 
+                if (SkyDome) DrawSky();
+
                 for (var i = 0; i < _floors.Count; i++) Draw(_floors[i]);
 
                 RenderNow();
@@ -5077,9 +5104,10 @@ namespace QuestTree.UI
                     Plugin.LogSource?.LogInfo(string.Format(
                         CultureInfo.InvariantCulture,
                         "QuestTree: 3D map for {0} - first frame drawn in {1:0.0} ms, render {2:0.0} ms, {3} draw call(s), cut {4}, " +
-                        "msaa {5}x, shadows {6} ({7} cascade(s), {8:0} m).",
+                        "msaa {5}x, shadows {6} ({7} cascade(s), {8:0} m), ambient {9}, sky {10}.",
                         _mapKey, clock.Elapsed.TotalMilliseconds, _renderMs, _drawCalls, CutText(), _rtSamples,
-                        ShadowMode, ShadowMode == LightShadows.None ? 0 : ShadowCascadeCount, _shadowDistanceRendered));
+                        ShadowMode, ShadowMode == LightShadows.None ? 0 : ShadowCascadeCount, _shadowDistanceRendered,
+                        AmbientTrilight ? "trilight" : "scene", SkyDome && !_skyBroken ? "dome" : "backdrop"));
                 }
             }
             catch (Exception ex)
@@ -5099,6 +5127,95 @@ namespace QuestTree.UI
         {
             Graphics.DrawMesh(mesh, Matrix4x4.identity, material, _drawLayer, _camera);
             _drawCalls++;
+        }
+
+        /// <summary>HQ S1.4: the sky dome, made once and drawn centred on the camera - no shadows cast or received, so
+        /// the shadow pass never sees a 3.6 km sphere.</summary>
+        private Mesh _skyMesh;
+
+        private Material _skyMaterial;
+        private bool _skyBroken;
+
+        private void DrawSky()
+        {
+            if (_skyBroken || _camera == null) return;
+
+            try
+            {
+                if (_skyMesh == null || _skyMaterial == null)
+                {
+                    var shader = Shader.Find(Shaders[Shaders.Length - 1]);
+                    if (shader == null)
+                    {
+                        _skyBroken = true;
+                        return;
+                    }
+
+                    _skyMaterial = new Material(shader) { name = "QuestTreeMap3D-sky", renderQueue = 1000 };
+                    _skyMaterial.SetInt("_ZWrite", 0);
+                    _skyMaterial.SetInt("_Cull", 0);
+                    _skyMesh = SkyMesh(FarClip * SkyRadiusOfFarClip);
+                }
+
+                var at = Matrix4x4.Translate(_camera.transform.position);
+                Graphics.DrawMesh(_skyMesh, at, _skyMaterial, _drawLayer, _camera, 0, null, ShadowCastingMode.Off, false);
+                _drawCalls++;
+            }
+            catch (Exception ex)
+            {
+                // Once: the map draws over the backdrop colour instead.
+                _skyBroken = true;
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: the 3D map's sky could not be drawn ({ex.GetType().Name}: {ex.Message}) - backdrop colour instead.");
+            }
+        }
+
+        /// <summary>A sphere of <see cref="SkyRings"/> rings and <see cref="SkySegments"/> segments, coloured by height:
+        /// <see cref="SkyZenith"/> at the top, <see cref="SkyHorizon"/> at the horizon, <see cref="SkyBelow"/> under it.
+        /// Drawn from inside with culling off, so the winding does not matter.</summary>
+        private static Mesh SkyMesh(float radius)
+        {
+            var rings = SkyRings * 2;
+            var vertices = new List<Vector3>();
+            var colours = new List<Color32>();
+            var indices = new List<int>();
+
+            for (var r = 0; r <= rings; r++)
+            {
+                var v = (float)r / rings;
+                var polar = Mathf.PI * v;
+                var y = Mathf.Cos(polar);
+                var ring = Mathf.Sin(polar);
+
+                Color colour;
+                if (y >= 0f) colour = Color.Lerp(SkyHorizon, SkyZenith, Mathf.Pow(y, 0.6f));
+                else colour = Color.Lerp(SkyHorizon, SkyBelow, Mathf.Pow(-y, 0.4f));
+
+                for (var g = 0; g <= SkySegments; g++)
+                {
+                    var azimuth = 2f * Mathf.PI * g / SkySegments;
+                    vertices.Add(new Vector3(ring * Mathf.Cos(azimuth), y, ring * Mathf.Sin(azimuth)) * radius);
+                    colours.Add(colour);
+                }
+            }
+
+            var stride = SkySegments + 1;
+            for (var r = 0; r < rings; r++)
+                for (var g = 0; g < SkySegments; g++)
+                {
+                    var a = r * stride + g;
+                    var b = a + stride;
+                    indices.Add(a); indices.Add(b); indices.Add(a + 1);
+                    indices.Add(a + 1); indices.Add(b); indices.Add(b + 1);
+                }
+
+            var mesh = new Mesh { name = "QuestTreeMap3D-sky" };
+            mesh.SetVertices(vertices);
+            mesh.SetColors(colours);
+            mesh.SetTriangles(indices, 0);
+            mesh.bounds = new Bounds(Vector3.zero, Vector3.one * (radius * 2f));
+            mesh.UploadMeshData(true);
+            return mesh;
         }
 
         /// <summary>Queues one floor's meshes for our camera, with the floor's picture on them - the
@@ -5426,10 +5543,28 @@ namespace QuestTree.UI
             var collectWas = BuiltinShaderMode.UseBuiltin;
             var collectSet = false;
 
+            // HQ S1.4: the scene's ambient, put back in the finally.
+            var ambientModeWas = RenderSettings.ambientMode;
+            var ambientSkyWas = RenderSettings.ambientSkyColor;
+            var ambientEquatorWas = RenderSettings.ambientEquatorColor;
+            var ambientGroundWas = RenderSettings.ambientGroundColor;
+            var ambientIntensityWas = RenderSettings.ambientIntensity;
+            var ambientSet = false;
+
             try
             {
                 RenderSettings.fog = false;
                 _light.enabled = true;
+
+                if (AmbientTrilight)
+                {
+                    RenderSettings.ambientMode = AmbientMode.Trilight;
+                    RenderSettings.ambientSkyColor = AmbientSky;
+                    RenderSettings.ambientEquatorColor = AmbientEquator;
+                    RenderSettings.ambientGroundColor = AmbientGround;
+                    RenderSettings.ambientIntensity = 1f;
+                    ambientSet = true;
+                }
 
                 oblique = ApplyCut();
 
@@ -5474,6 +5609,16 @@ namespace QuestTree.UI
                 // is guarded separately for the same reason - one throwing must not skip the other.
                 try { RenderSettings.fog = fog; } catch (Exception) { /* nothing further to try */ }
                 try { if (_light != null) _light.enabled = false; } catch (Exception) { /* as above */ }
+
+                // HQ S1.4: the scene's ambient is the menu's, each field put back on its own.
+                if (ambientSet)
+                {
+                    try { RenderSettings.ambientMode = ambientModeWas; } catch (Exception) { /* as above */ }
+                    try { RenderSettings.ambientSkyColor = ambientSkyWas; } catch (Exception) { /* as above */ }
+                    try { RenderSettings.ambientEquatorColor = ambientEquatorWas; } catch (Exception) { /* as above */ }
+                    try { RenderSettings.ambientGroundColor = ambientGroundWas; } catch (Exception) { /* as above */ }
+                    try { RenderSettings.ambientIntensity = ambientIntensityWas; } catch (Exception) { /* as above */ }
+                }
 
                 // HQ S1.3: the shadow settings are the player's, each put back on its own.
                 if (shadowsSet)
@@ -5920,6 +6065,9 @@ namespace QuestTree.UI
                 if (_light != null) _light.enabled = false;
                 if (_image != null) _image.texture = null;
                 if (_rt != null) _rt.Release();
+
+                if (_skyMesh != null) { Destroy(_skyMesh); _skyMesh = null; }
+                if (_skyMaterial != null) { Destroy(_skyMaterial); _skyMaterial = null; }
             }
             catch (Exception ex)
             {
