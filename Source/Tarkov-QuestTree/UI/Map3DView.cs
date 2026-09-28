@@ -1655,11 +1655,18 @@ namespace QuestTree.UI
                             // by Draw from this view's TileStore once the tile is cut.
                             if (!into.AtlasByTile.TryGetValue(tile, out var group))
                             {
+                                var material = Matte(new Material(_buildingShader) { name = $"QuestTreeMap3D-tile{tile}-{level}" });
+
+                                // HQ S3.11: a tile on an alpha page clips on it - the ground's own cutout recipe, when the
+                                // building shader is the one that recipe was resolved for
+                                var store = _heldTiles ?? _tiles;
+                                if (store != null && store.AlphaTile(tile) && _groundCutout && ReferenceEquals(_groundShader, _buildingShader))
+                                    MakeCutout(material);
+
                                 group = new SideTexture
                                 {
                                     Tile = tile,
-                                    Material = Matte(new Material(_buildingShader)
-                                        { name = $"QuestTreeMap3D-tile{tile}-{level}" })
+                                    Material = material
                                 };
 
                                 into.AtlasByTile[tile] = group;
@@ -2522,6 +2529,15 @@ namespace QuestTree.UI
 
             if (!_groundCutout) return material;
 
+            return MakeCutout(material);
+        }
+
+        /// <summary>The Standard cutout recipe on a material (see <see cref="MakeGroundMaterial"/>): the render type tag,
+        /// the mode, the clip at 0.5, opaque blending with depth written, _ALPHATEST_ON, the AlphaTest queue. HQ S3.11: shared
+        /// with the alpha-page tile materials.</summary>
+        /// <param name="material">The material, returned.</param>
+        private static Material MakeCutout(Material material)
+        {
             material.SetOverrideTag("RenderType", "TransparentCutout");
 
             if (material.HasProperty("_Mode")) material.SetFloat("_Mode", 1f);
@@ -3019,6 +3035,16 @@ namespace QuestTree.UI
             /// <summary>Whether a tile failed for good (its own cut threw, or its page failed).</summary>
             public bool TileFailed(int tile) => tile >= 0 && tile < Tiles.Count && Tiles[tile].Failed;
 
+            /// <summary>HQ S3.11: the page a tile sits on, or -1.</summary>
+            public int PageOf(int tile) => tile >= 0 && tile < Tiles.Count ? Tiles[tile].Page : -1;
+
+            /// <summary>HQ S3.11: whether a page carries alpha (MapMeshFile.AlphaPages): its tiles are cut RGBA -> DXT5 and drawn
+            /// through an alpha-clipped material.</summary>
+            public bool AlphaPage(int page) => File != null && page >= 0 && page < MaxAtlasPages && (File.AlphaPages >> page & 1) != 0;
+
+            /// <summary>HQ S3.11: whether a tile is on an alpha page.</summary>
+            public bool AlphaTile(int tile) => AlphaPage(PageOf(tile));
+
             /// <summary>Whether a page could not be had at all (missing, unreadable, will not decode, too big).</summary>
             public bool PageFailed(int page) => page >= 0 && page < MaxAtlasPages && _pageFailed[page];
 
@@ -3173,7 +3199,10 @@ namespace QuestTree.UI
                     for (var row = 0; row < tile.H; row++)
                         Array.Copy(_pixels, (tile.Y + row) * _pageWidth + tile.X, buffer, row * tile.W, tile.W);
 
-                    texture = new Texture2D(tile.W, tile.H, TextureFormat.RGB24, mipChain: true)
+                    // HQ S3.11: a tile on an alpha page keeps its alpha - RGBA32, compressed to DXT5
+                    var alpha = AlphaPage(tile.Page);
+
+                    texture = new Texture2D(tile.W, tile.H, alpha ? TextureFormat.RGBA32 : TextureFormat.RGB24, mipChain: true)
                     {
                         name = $"QuestTreeMap3D-tile{index}",
                         wrapMode = TextureWrapMode.Repeat,
@@ -3184,18 +3213,20 @@ namespace QuestTree.UI
                     texture.SetPixels32(buffer);
                     texture.Apply(updateMipmaps: true, makeNoLongerReadable: false);
 
-                    // DXT1 needs 4 x 4 blocks; the builder aligns every tile, and one that is not stays RGB24.
+                    // DXT needs 4 x 4 blocks; the builder aligns every tile, and one that is not stays uncompressed.
                     if (tile.W % MapMeshFile.TileAlign == 0 && tile.H % MapMeshFile.TileAlign == 0)
                         texture.Compress(highQuality: size <= TileCompressHighQualityMaxPixels);
 
                     // Uploaded and the CPU copy freed.
                     texture.Apply(updateMipmaps: false, makeNoLongerReadable: true);
 
-                    var compressed = texture.format == TextureFormat.DXT1;
+                    var compressed = texture.format == TextureFormat.DXT1 || texture.format == TextureFormat.DXT5;
                     if (!compressed) _allCompressed = false;
 
-                    // DXT1: half a byte a pixel; anything else counted at 4 (D3D11 has no 24-bit format). Mips + 1/3.
-                    var bytes = compressed ? (long)size / 2 : (long)size * 4;
+                    // DXT1: half a byte a pixel; DXT5 one; anything else counted at 4 (D3D11 has no 24-bit format). Mips + 1/3.
+                    var bytes = texture.format == TextureFormat.DXT1 ? (long)size / 2
+                        : texture.format == TextureFormat.DXT5 ? size
+                        : (long)size * 4;
                     if (texture.mipmapCount > 1) bytes += bytes / 3;
 
                     tile.Texture = texture;

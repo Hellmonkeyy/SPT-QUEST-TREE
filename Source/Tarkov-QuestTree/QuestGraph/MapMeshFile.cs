@@ -231,6 +231,15 @@ namespace QuestTree.QuestGraph
         /// the meta's atlas entry n, <c>&lt;key&gt;-atlas-&lt;n&gt;.png</c>. 0 means no texture anywhere.</summary>
         internal int AtlasPages;
 
+        /// <summary>HQ S3.11: the pages that carry ALPHA - a bit per page (bit n = page n), each below <see cref="AtlasPages"/>.
+        /// A tile on such a page keeps its cutout material's alpha (255 or 0, thresholded at capture), and the viewer cuts
+        /// it as DXT5 with an alpha-clipped material; a page without the bit is opaque as before. In the header from
+        /// <see cref="Version"/> 4 (one byte after the page count); 0 for a v3 file.</summary>
+        internal int AlphaPages;
+
+        /// <summary>The page counts that carry the alpha mask byte after them.</summary>
+        internal const int AlphaMaskVersion = 4;
+
         /// <summary>The ground relief, one band per captured floor. Ordered as written; levels are
         /// distinct.</summary>
         internal List<ReliefBand> Bands = new List<ReliefBand>();
@@ -939,6 +948,7 @@ namespace QuestTree.QuestGraph
                 w.Write(file.YMin);
                 w.Write(file.YMax);
                 w.Write(file.AtlasPages);
+                if (Version >= AlphaMaskVersion) w.Write((byte)(file.AlphaPages & 0xFF));
 
                 w.Write(file.Bands.Count);
 
@@ -1434,6 +1444,16 @@ namespace QuestTree.QuestGraph
             if (file.AtlasPages < 0 || file.AtlasPages > MaxAtlasPages)
                 throw new InvalidDataException(
                     $"the mesh file claims {file.AtlasPages} atlas pages; the cap is {MaxAtlasPages}");
+
+            // HQ S3.11: the alpha-page mask, from v4
+            if (Version >= AlphaMaskVersion)
+            {
+                file.AlphaPages = r.ReadByte();
+
+                if ((file.AlphaPages >> file.AtlasPages) != 0)
+                    throw new InvalidDataException(
+                        $"the mesh file's alpha-page mask 0x{file.AlphaPages:X2} names a page past its {file.AtlasPages} page(s)");
+            }
 
             if (!IsFinite(file.MinX) || !IsFinite(file.MinZ) || !IsFinite(file.MaxX) || !IsFinite(file.MaxZ))
                 throw new InvalidDataException("the mesh file's extent is not finite");

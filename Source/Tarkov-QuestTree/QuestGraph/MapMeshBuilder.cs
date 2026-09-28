@@ -522,6 +522,17 @@ namespace QuestTree.QuestGraph
         /// still taken from a coarser mip keeps the existing upgrade path (Tile.Deficient). False leaves the request alone.</summary>
         private static readonly bool RequestFullMips = true;
 
+        /// <summary>
+        /// HQ S3.11: a CUTOUT material (the AlphaTest queue - fences, grates, railings, leaf cards) whose captured tile is
+        /// not opaque enough to take as opaque (CutoutOpaqueShare) is textured anyway, with its alpha kept - thresholded
+        /// at its own cutoff to 255 or 0 at capture (ReadTexture), so one clip at 0.5 serves every material and the
+        /// alpha survives DXT5 and any mask - and its page marked an ALPHA page in the file (MapMeshFile.AlphaPages).
+        /// Before, such a material was left to the side pictures and tints, so a fence was a solid wall. False leaves
+        /// them as before. Folded into the recipe by the bump commit (S3.13), where the file format that carries the
+        /// mask (v4) arrives; until then a v3 file has no mask and the viewer draws these tiles opaque.
+        /// </summary>
+        internal static readonly bool CutoutAlphaTiles = false;
+
         /// <summary>Seconds the capture sets aside for the atlas out of its budget (taken off the building
         /// phase's), and the ONE cap over the whole atlas phase - measuring, packing, capturing, filling, handing
         /// pages to the encoders and mapping the buildings (stage W review, H1). Past it the atlas is abandoned.</summary>
@@ -7815,6 +7826,9 @@ namespace QuestTree.QuestGraph
             internal bool CutoutLeft;
             internal bool WhiteLeft;
 
+            /// <summary>HQ S3.11: textured with its alpha kept, on an alpha page (CutoutAlphaTiles).</summary>
+            internal bool CutoutAlpha;
+
             /// <summary>WP2 (2.10): the material's key (MaterialKey), its stored tile row when the stored atlas has one,
             /// the texture's resident mip when it was registered (MapMeshIndex.MipUnknown when not streamed), whether its
             /// textured tile was left flat past the capture share or failed to capture this build, and whether its
@@ -9031,6 +9045,7 @@ namespace QuestTree.QuestGraph
                 float tr = Mathf.Clamp01(info.Tint.r), tg = Mathf.Clamp01(info.Tint.g), tb = Mathf.Clamp01(info.Tint.b);
                 var cut = Mathf.Clamp(info.Cutoff, 0f, 1f) * 255f;
                 var solid = 0;
+                var keepAlpha = CutoutAlphaTiles && info.Cutout;
 
                 for (var y = 0; y < h; y++)
                     for (var x = 0; x < w; x++)
@@ -9041,9 +9056,12 @@ namespace QuestTree.QuestGraph
                         tile[o] = (byte)Math.Min(255f, c.r * tr);
                         tile[o + 1] = (byte)Math.Min(255f, c.g * tg);
                         tile[o + 2] = (byte)Math.Min(255f, c.b * tb);
-                        tile[o + 3] = 255;
 
-                        if (c.a >= cut) solid++;
+                        // HQ S3.11: a cutout material keeps its alpha, thresholded at its own cutoff
+                        var opaquePixel = c.a >= cut;
+                        tile[o + 3] = keepAlpha ? (byte)(opaquePixel ? 255 : 0) : (byte)255;
+
+                        if (opaquePixel) solid++;
                     }
 
                 opaque = solid / (float)Math.Max(1, w * h);
@@ -9166,6 +9184,11 @@ namespace QuestTree.QuestGraph
                         if (textured && info.OpaqueShare >= CutoutOpaqueShare)
                         {
                             info.CutoutTaken = true;
+                        }
+                        else if (textured && CutoutAlphaTiles)
+                        {
+                            // HQ S3.11: textured with its alpha, on an alpha page
+                            info.CutoutAlpha = true;
                         }
                         else
                         {
@@ -9457,6 +9480,7 @@ namespace QuestTree.QuestGraph
             }
 
             file.AtlasPages = job.AtlasPageCount;
+            file.AlphaPages = AlphaMaskOf(job, file.AtlasPages);
             job.AtlasApplied = true;
 
             // WP2: a stored building drew a material on its flat tile because the textured capture was late or failed;
@@ -9838,6 +9862,7 @@ namespace QuestTree.QuestGraph
         internal static void TruncateAtlas(MapMeshFile file, int pages)
         {
             file.AtlasPages = Math.Max(0, pages);
+            file.AlphaPages &= (1 << file.AtlasPages) - 1;
 
             foreach (var building in file.Buildings)
                 building.Ranges?.RemoveAll(r => r.Page >= file.AtlasPages);
@@ -10277,13 +10302,14 @@ namespace QuestTree.QuestGraph
         {
             var f1 = CultureInfo.InvariantCulture;
             var used = 0;
-            int cutoutTaken = 0, cutoutLeft = 0, whiteLeft = 0, byMainTex = 0, byMainTex0 = 0, byOther = 0;
+            int cutoutTaken = 0, cutoutLeft = 0, whiteLeft = 0, byMainTex = 0, byMainTex0 = 0, byOther = 0, cutoutAlpha = 0;
 
             foreach (var m in job.Materials)
             {
                 if (m.Textured || m.Flat) used++;
                 if (m.CutoutTaken) cutoutTaken++;
                 if (m.CutoutLeft) cutoutLeft++;
+                if (m.CutoutAlpha) cutoutAlpha++;
                 if (m.WhiteLeft) whiteLeft++;
 
                 if (m.Texture == null || !(m.Textured || m.Flat)) continue;
@@ -10304,7 +10330,8 @@ namespace QuestTree.QuestGraph
                 $"{N(job.TilesUnplaced)} tile(s) over the {MapMeshFile.MaxAtlasPages}-page cap, " +
                 $"{N(job.TilesLate)} left flat past {N(AtlasSecondsCap * AtlasCaptureShare)} s of the {N(AtlasSecondsCap)} s atlas cap, " +
                 $"materials: {N(job.TransparentMaterials)} transparent (queue > 2500), {N(cutoutTaken)} cutout taken as opaque, " +
-                $"{N(cutoutLeft)} cutout left; {N(whiteLeft)} white flat left to the fallback; {N(job.NormalMapsRefused)} normal " +
+                $"{N(cutoutLeft)} cutout left, {N(cutoutAlpha)} cutout as alpha tiles on {N(AlphaPageCount(job.File.AlphaPages))} alpha page(s); " +
+                $"{N(whiteLeft)} white flat left to the fallback; {N(job.NormalMapsRefused)} normal " +
                 $"maps refused; main texture by property: _MainTex {N(byMainTex)}, _MainTex0 {N(byMainTex0)}, other {N(byOther)}; " +
                 $"{N(job.UvElsewhere)} GPU mesh(es) with UVs in another stream, {N(job.StaticBatchUvSkipped)} static-batch " +
                 "member(s) with their UVs not read; " +
@@ -10316,6 +10343,28 @@ namespace QuestTree.QuestGraph
                 (job.AtlasAbandoned ? " - ABANDONED, no page kept." : "."));
 
             ReportMaterialDiags(job);
+        }
+
+        /// <summary>HQ S3.11: the alpha-page mask of a build - the stored file's (its pages keep their alpha) and every page a
+        /// material textured with its alpha this build sits on, all below the page count.</summary>
+        /// <param name="job">The build.</param>
+        /// <param name="pages">The file's page count.</param>
+        private static int AlphaPageCount(int mask)
+        {
+            var n = 0;
+            for (var bit = 0; bit < MapMeshFile.MaxAtlasPages; bit++)
+                if ((mask >> bit & 1) != 0) n++;
+            return n;
+        }
+
+        private static int AlphaMaskOf(Job job, int pages)
+        {
+            var mask = job.Stored != null ? job.Request.Base.AlphaPages : 0;
+
+            foreach (var m in job.Materials)
+                if (m.CutoutAlpha && m.Page >= 0 && m.Page < MapMeshFile.MaxAtlasPages) mask |= 1 << m.Page;
+
+            return pages <= 0 ? 0 : mask & ((1 << pages) - 1);
         }
 
         /// <summary>HQ S3.10: the textures line's histogram of the tile sides placed this build, the fit scale, and the
@@ -10771,7 +10820,11 @@ namespace QuestTree.QuestGraph
 
             // everything computed: the file is the merged one from here
             file.Buildings = buildings;
-            if (stored != null) file.AtlasPages = pages;
+            if (stored != null)
+            {
+                file.AtlasPages = pages;
+                file.AlphaPages = (file.AlphaPages | basis.AlphaPages) & ((1 << pages) - 1);
+            }
 
             result.Accumulated = stored != null;
             result.BasePages = stored != null ? basis.AtlasPages : 0;
