@@ -1453,6 +1453,7 @@ namespace QuestTree.QuestGraph
 
                 Step(job, "the buildings' log line", () => ReportBuildings(job));
                 Step(job, "the hidden renderers' line", () => ReportHidden(job));
+                Step(job, "the props census line", () => ReportProps(job));
             }
 
             // --- stage W: the atlas -----------------------------------------------------------------------
@@ -1659,6 +1660,12 @@ namespace QuestTree.QuestGraph
             /// the rain volumes, on Customs. Counted, because a map where this is in the thousands is a
             /// map whose filter wants looking at.</summary>
             internal int Oversized;
+
+            /// <summary>Props census (2026-09-28): the renderers on the buildings' layers inside the extent that the size
+            /// rule leaves out, by size band - so a prop class can be sized from numbers, not a guess. A count only.</summary>
+            internal readonly PropBand[] PropBands = { new PropBand(), new PropBand(), new PropBand() };
+
+            internal int PropsTiny;
 
             /// <summary>Buildings refused because no transform put their vertices inside their own
             /// renderer's bounds - see <see cref="Place"/>.</summary>
@@ -2657,6 +2664,22 @@ namespace QuestTree.QuestGraph
             internal byte Pruned;
         }
 
+        /// <summary>Props census (2026-09-28): one size band of the renderers the size rule leaves out.</summary>
+        internal sealed class PropBand
+        {
+            internal int Count;
+            internal long Triangles;
+            internal int WithCollider;
+            internal readonly HashSet<Material> Materials = new HashSet<Material>();
+            internal readonly List<string> Samples = new List<string>();
+        }
+
+        /// <summary>The census's bands: a long side of 1.5 to 3 m, 3 to 6 m, and 6 m or more but under the building height.</summary>
+        private const float PropCensusMinMetres = 1.5f;
+
+        private const float PropCensusMidMetres = 3f;
+        private const int PropSamplesPerBand = 3;
+
         /// <summary>PART-10 (R1): a stored row pruned as a shell (F4's rule over the rows at load, or its present renderer marked
         /// by MarkShells), as a coarser LOD level of a group stored at a finer one, as a tree while trees are left out, or as a
         /// decal volume (always).</summary>
@@ -3478,6 +3501,7 @@ namespace QuestTree.QuestGraph
                     job.Request.MaxX - job.Request.MinX, job.Request.MaxZ - job.Request.MinZ);
 
                 if (verdict == SizeOversized) job.Oversized++;
+                if (verdict == SizeSmall) CensusProp(job, renderer, bounds, minX, maxX, minZ, maxZ);
                 if (verdict != SizeOk) continue;
 
                 if (HiddenVolume(job, renderer, size)) continue;
@@ -10487,6 +10511,77 @@ namespace QuestTree.QuestGraph
         /// a couple of paths from each of the largest roots, and what it did NOT drop (WP8 D6): switched-off renderers
         /// a culling system owns, read as game-culled, and the baked-LOD proxies excluded in their favour.</summary>
         /// <param name="job">The build.</param>
+        /// <summary>
+        /// Props census (2026-09-28): a renderer the size rule left out - enabled, inside the extent - counted in its band
+        /// with its source triangles (GetIndexCount, no array), its first material and whether it carries a collider (the
+        /// ones that also shape the relief). Everything derived from the scene; nothing is stored differently.
+        /// </summary>
+        private static void CensusProp(Job job, Renderer renderer, Bounds bounds, double minX, double maxX, double minZ, double maxZ)
+        {
+            try
+            {
+                if (!renderer.enabled) return;
+
+                var centre = bounds.center;
+                if (!IsFinite(centre.x) || !IsFinite(centre.z)) return;
+                if (centre.x < minX || centre.x > maxX || centre.z < minZ || centre.z > maxZ) return;
+
+                var size = bounds.size;
+                var longSide = Math.Max(size.x, size.z);
+
+                int band;
+                if (longSide >= MinBuildingLongSide) band = 2;          // long enough, too low
+                else if (longSide >= PropCensusMidMetres) band = 1;
+                else if (longSide >= PropCensusMinMetres) band = 0;
+                else
+                {
+                    job.PropsTiny++;
+                    return;
+                }
+
+                var b = job.PropBands[band];
+                b.Count++;
+
+                var filter = renderer.GetComponent<MeshFilter>();
+                var mesh = filter != null ? filter.sharedMesh : null;
+                if (mesh != null)
+                    for (var sub = 0; sub < mesh.subMeshCount; sub++)
+                        b.Triangles += mesh.GetIndexCount(sub) / 3;
+
+                if (renderer.GetComponent<Collider>() != null) b.WithCollider++;
+
+                var material = renderer.sharedMaterial;
+                if (material != null) b.Materials.Add(material);
+
+                if (b.Samples.Count < PropSamplesPerBand) b.Samples.Add(SafePath(renderer));
+            }
+            catch (Exception)
+            {
+                // a census entry, not a feature
+            }
+        }
+
+        /// <summary>The props census line, after the hidden renderers' line.</summary>
+        private static void ReportProps(Job job)
+        {
+            var f1 = CultureInfo.InvariantCulture;
+            var total = job.PropBands[0].Count + job.PropBands[1].Count + job.PropBands[2].Count;
+            if (total == 0 && job.PropsTiny == 0) return;
+
+            string Band(string label, PropBand b) =>
+                $"{label}: {N(b.Count)} renderer(s), {N(b.Triangles)} source triangles, {N(b.Materials.Count)} material(s), " +
+                $"{N(b.WithCollider)} with a collider" +
+                (b.Samples.Count > 0 ? $" [{string.Join(" | ", b.Samples.ToArray())}]" : "");
+
+            Plugin.LogSource?.LogInfo(
+                $"QuestTree: props on {job.Request.Map} - renderers on the buildings' layers inside the extent that the size rule " +
+                $"leaves out (a long side under {MinBuildingLongSide.ToString("0", f1)} m, or under {MinBuildingHeight.ToString("0.0", f1)} m tall); " +
+                Band($"{PropCensusMinMetres.ToString("0.0", f1)}-{PropCensusMidMetres.ToString("0", f1)} m", job.PropBands[0]) + "; " +
+                Band($"{PropCensusMidMetres.ToString("0", f1)}-{MinBuildingLongSide.ToString("0", f1)} m", job.PropBands[1]) + "; " +
+                Band($"{MinBuildingLongSide.ToString("0", f1)} m and longer but under {MinBuildingHeight.ToString("0.0", f1)} m tall", job.PropBands[2]) +
+                $"; under {PropCensusMinMetres.ToString("0.0", f1)} m: {N(job.PropsTiny)}. A census only - nothing is stored differently.");
+        }
+
         private static void ReportHidden(Job job)
         {
             var included = job.GameCulledBySwitcher + job.GameCulledByOcclusion;
