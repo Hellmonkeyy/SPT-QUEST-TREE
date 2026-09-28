@@ -522,6 +522,10 @@ namespace QuestTree.QuestGraph
 
         private const double AtlasPagePixelShare = 0.85d;
 
+        /// <summary>HQ S3 review (low): the fit never brings a tile that wanted the cap under this side - past that the
+        /// packer leaves tiles unplaced (counted, as before) rather than the whole atlas going to 4 px.</summary>
+        private const int MinFittedTileSide = 64;
+
         /// <summary>HQ S3.10: a streamed texture is asked for its full mip chain when its material is registered, so the
         /// capture frames later blits from the finest level rather than the one resident where the player stood; a tile
         /// still taken from a coarser mip keeps the existing upgrade path (Tile.Deficient). False leaves the request alone.</summary>
@@ -4883,7 +4887,7 @@ namespace QuestTree.QuestGraph
                     var cap = job.StoredFlats ? MapMeshFile.MaxAtlasPages - 1 : MapMeshFile.MaxAtlasPages;
                     var room = pages < cap || job.PackState.Page < cap - 1 ||
                                (job.PackState.Page == cap - 1 &&
-                                job.PackState.ShelfY + job.PackState.ShelfH + AtlasTileMax + 2 * AtlasPadding <= MapMeshFile.AtlasPageSize);
+                                job.PackState.ShelfY + job.PackState.ShelfH + TileSide(info.Texture.height) + 2 * AtlasPadding <= MapMeshFile.AtlasPageSize);
                     if (room) return true;
                     continue;
                 }
@@ -9060,11 +9064,20 @@ namespace QuestTree.QuestGraph
                 wanted[m] = TexelsPerMetre * metresPerRepeat;
             }
 
-            double Padded(int m, double scale)
+            // S3 review (low): an unmeasured material wants its cap, and is scaled with the rest; no fitted side under
+            // MinFittedTileSide
+            int SideAt(int m, double scale)
             {
                 var info = job.Materials[m];
                 var cap = info.Foliage ? Math.Min(FoliageTileMax, AtlasTileMax) : AtlasTileMax;
-                var side = wanted[m] > 0d ? (int)Math.Min(cap, wanted[m] * scale) : cap;
+                var basis = wanted[m] > 0d ? Math.Min(cap, wanted[m]) : cap;
+                return (int)Math.Min(cap, Math.Max(Math.Min(MinFittedTileSide, basis), basis * scale));
+            }
+
+            double Padded(int m, double scale)
+            {
+                var info = job.Materials[m];
+                var side = SideAt(m, scale);
                 var w = TileSide(info.Texture.width, side) + 2 * AtlasPadding;
                 var h = TileSide(info.Texture.height, side) + 2 * AtlasPadding;
                 return (double)w * h;
@@ -9085,7 +9098,12 @@ namespace QuestTree.QuestGraph
             }
 
             var scale = 1d;
-            if (budget > 0d && Sum(1d) > budget)
+            if (budget <= 0d)
+            {
+                // the stored pages leave no room at all: the smallest fit, and the packer says what did not place
+                scale = 0d;
+            }
+            else if (Sum(1d) > budget)
             {
                 double lo = 0d, hi = 1d;
                 for (var step = 0; step < 50; step++)
@@ -9102,11 +9120,9 @@ namespace QuestTree.QuestGraph
 
             for (var m = 0; m < job.Materials.Count; m++)
             {
-                var cap = job.Materials[m].Foliage ? Math.Min(FoliageTileMax, AtlasTileMax) : AtlasTileMax;
-                if (wanted[m] > 0d)
-                    job.Materials[m].Wanted = Math.Max(MapMeshFile.TileAlign, (int)Math.Min(cap, wanted[m] * scale));
-                else if (job.Materials[m].Foliage)
-                    job.Materials[m].Wanted = cap;
+                var info = job.Materials[m];
+                if (info.Texture == null || info.Texture.dimension != TextureDimension.Tex2D) continue;
+                info.Wanted = Math.Max(MapMeshFile.TileAlign, SideAt(m, scale));
             }
         }
 
