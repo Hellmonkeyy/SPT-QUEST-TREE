@@ -563,6 +563,24 @@ namespace QuestTree.QuestGraph
         /// </summary>
         internal static readonly bool GroundUnderBuildings = true;
 
+        /// <summary>
+        /// Test 2026-09-28 (the crane): the top band's ground is ANCHORED TO THE TERRAIN. A ray from above hits whatever
+        /// collider is highest - a crane's box collider, a car's roof, a tree's trunk capsule, a bridge deck - and the
+        /// first-hit rule made each a slab in the relief draped with stretched ground pixels. With this on, the top band
+        /// asks for <see cref="TopBandHits"/> hits a ray; where the highest hit is not on a terrain layer
+        /// (<see cref="GroundLayerNames"/>), the highest TERRAIN hit is the ground, and only a thin surface lying within
+        /// <see cref="ThinSurfaceMetres"/> above it - a road, a pavement, a floor slab - wins over it. A cell with no
+        /// terrain hit at all (an indoor map, a mesh floor) keeps the first hit as before. A rule about layers, never a
+        /// map; re-cast every stop, so not in the recipe. False keeps the first hit.
+        /// </summary>
+        internal static readonly bool TerrainAnchoredGround = true;
+
+        internal const int TopBandHits = 8;
+        private const float ThinSurfaceMetres = 1.5f;
+
+        /// <summary>The layers that ARE the ground: the terrain, its grass, and water.</summary>
+        private static readonly string[] GroundLayerNames = { "Terrain", "Grass", "Water" };
+
         /// <summary>How far under a cell's cast hit a building triangle may lie and still count as covering the cell (a
         /// floor slab at the hit itself, a threshold a step down); anything deeper is under the ground.</summary>
         private const float BelowHitSlackMetres = 1.5f;
@@ -1615,6 +1633,9 @@ namespace QuestTree.QuestGraph
             internal MapMeshFile File;
             internal int RayMask;
 
+            /// <summary>The ground layers' mask (TerrainAnchoredGround), 0 when this game version has none of them.</summary>
+            internal int GroundMask;
+
             internal readonly List<BandWork> Bands = new List<BandWork>();
             internal readonly List<Candidate> Candidates = new List<Candidate>();
 
@@ -1704,6 +1725,8 @@ namespace QuestTree.QuestGraph
 
             /// <summary>One ray's hit heights, reused for every ray - see PickHit.</summary>
             internal float[] HitYs;
+
+            internal bool[] HitGround;
 
             /// <summary>Each LOD group's two candidate levels and which is in use - see
             /// <see cref="GroupState"/>. Decided once per group; a group with forty renderers under it is
@@ -2221,6 +2244,9 @@ namespace QuestTree.QuestGraph
             /// minY - on an interior band, terrain reached through a raised floor. Reported, not
             /// corrected.</summary>
             internal int BelowFloor;
+
+            /// <summary>Cells whose ground was anchored to a terrain hit under something higher (TerrainAnchoredGround).</summary>
+            internal int Anchored;
 
             /// <summary>The measured height of each cell in METRES, NaN where no ray hit. Dropped by
             /// <see cref="FinishBand"/> as soon as the cells are quantised.</summary>
@@ -2795,6 +2821,7 @@ namespace QuestTree.QuestGraph
             };
 
             job.RayMask = ReliefMask();
+            job.GroundMask = TerrainAnchoredGround ? GroundMaskOf() : 0;
 
             var spanX = request.MaxX - request.MinX;
             var spanZ = request.MaxZ - request.MinZ;
@@ -2871,6 +2898,44 @@ namespace QuestTree.QuestGraph
                 throw new InvalidOperationException("no band of this map can carry a relief grid");
         }
 
+        /// <summary>The relief line's account of the cells anchored to the terrain under something higher.</summary>
+        private static string AnchoredNotes(Job job)
+        {
+            var anchored = 0;
+            foreach (var band in job.Bands) anchored += band.Anchored;
+
+            return anchored > 0
+                ? $"; {N(anchored)} cell(s) anchored to the terrain under something higher (a roof, a crane, a car, a trunk)"
+                : job.GroundMask == 0 && TerrainAnchoredGround ? "; no ground layer to anchor to" : "";
+        }
+
+        /// <summary>The ground layers as a mask (<see cref="GroundLayerNames"/>), 0 for the names this game version
+        /// does not have - the anchoring rule is then off, and the relief line says so once.</summary>
+        private static int GroundMaskOf()
+        {
+            var mask = 0;
+            var missing = new List<string>();
+
+            foreach (var name in GroundLayerNames)
+            {
+                var layer = LayerMask.NameToLayer(name);
+                if (layer < 0) missing.Add(name);
+                else mask |= 1 << layer;
+            }
+
+            if (mask == 0 && !_loggedGroundMask)
+            {
+                _loggedGroundMask = true;
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: none of the ground layers ({string.Join(", ", GroundLayerNames)}) exists in this game version - " +
+                    "the relief keeps every ray's first hit.");
+            }
+
+            return mask;
+        }
+
+        private static bool _loggedGroundMask;
+
         /// <summary>The layers a relief ray may hit: <see cref="ReliefLayerNames"/> as this game
         /// version numbers them, through <see cref="LayerMask.GetMask"/>, with the names it does not
         /// have left out and said so once. A name GetMask does not know contributes nothing, which
@@ -2938,11 +3003,14 @@ namespace QuestTree.QuestGraph
             // One hit a ray on the topmost band, several on an interior one - see Band.Interior. The
             // results array is count * maxHits: command i's hits are i*maxHits .. i*maxHits+maxHits-1,
             // and the first with no collider ends its list.
-            var maxHits = source.Interior ? InteriorMaxHits : 1;
+            var anchoring = !source.Interior && TerrainAnchoredGround && job.GroundMask != 0;
+            var maxHits = source.Interior ? InteriorMaxHits : anchoring ? TopBandHits : 1;
 
             if (job.HitYs == null || job.HitYs.Length < maxHits) job.HitYs = new float[maxHits];
+            if (job.HitGround == null || job.HitGround.Length < maxHits) job.HitGround = new bool[maxHits];
 
             var ys = job.HitYs;
+            var ground = job.HitGround;
 
             var commands = new NativeArray<RaycastCommand>(count, Allocator.TempJob);
             var results = default(NativeArray<RaycastHit>);
@@ -2997,10 +3065,23 @@ namespace QuestTree.QuestGraph
                         if (candidate.collider == null) break;
 
                         ys[k] = candidate.point.y;
+                        ground[k] = anchoring && candidate.collider.gameObject != null &&
+                                    (job.GroundMask & (1 << candidate.collider.gameObject.layer)) != 0;
                         used = k + 1;
                     }
 
-                    var chosen = PickHit(ys, used, maxHits, floor, source.MinY, source.Interior, out var saturated);
+                    var saturated = false;
+                    int chosen;
+
+                    if (anchoring)
+                    {
+                        chosen = PickTopHit(ys, ground, used, floor, out var anchored);
+                        if (anchored) band.Anchored++;
+                    }
+                    else
+                    {
+                        chosen = PickHit(ys, used, maxHits, floor, source.MinY, source.Interior, out saturated);
+                    }
 
                     if (saturated) band.Saturated++;
 
@@ -3070,6 +3151,53 @@ namespace QuestTree.QuestGraph
         /// <param name="minY">The band's minY, for the saturation test.</param>
         /// <param name="interior">Whether the band is an interior one.</param>
         /// <param name="saturated">See above.</param>
+        /// <summary>
+        /// TerrainAnchoredGround's choice for a top-band cell. The highest hit at or above the floor is what the old rule
+        /// took; when it is on a ground layer it stands. Otherwise the highest GROUND hit is the ground, and the highest
+        /// non-ground hit within <see cref="ThinSurfaceMetres"/> above it (a road on the terrain, a floor slab) wins over
+        /// it; with no ground hit at all the highest hit stands as before. <paramref name="anchored"/> says the choice
+        /// differs from the old rule's. Floats and bools in, an int out, no Unity type - checkable on a synthetic column.
+        /// </summary>
+        /// <param name="ys">The hits' world y, in the order the query returned them.</param>
+        /// <param name="ground">Whether each hit is on a ground layer.</param>
+        /// <param name="used">How many of the arrays are hits.</param>
+        /// <param name="floorY">The lowest y that is still this band's - RayFloorFor.</param>
+        /// <param name="anchored">Whether the choice is not the highest hit.</param>
+        internal static int PickTopHit(float[] ys, bool[] ground, int used, float floorY, out bool anchored)
+        {
+            anchored = false;
+            if (ys == null || ground == null || used <= 0) return -1;
+
+            var highest = -1;
+            var terrain = -1;
+
+            for (var k = 0; k < used && k < ys.Length && k < ground.Length; k++)
+            {
+                var y = ys[k];
+                if (!IsFinite(y) || y < floorY) continue;
+
+                if (highest < 0 || y > ys[highest]) highest = k;
+                if (ground[k] && (terrain < 0 || y > ys[terrain])) terrain = k;
+            }
+
+            if (highest < 0) return -1;
+            if (ground[highest] || terrain < 0) return highest;
+
+            // the ground, unless a thin surface sits on it
+            var chosen = terrain;
+            var ceiling = ys[terrain] + ThinSurfaceMetres;
+
+            for (var k = 0; k < used && k < ys.Length && k < ground.Length; k++)
+            {
+                var y = ys[k];
+                if (ground[k] || !IsFinite(y) || y < floorY) continue;
+                if (y > ys[terrain] && y <= ceiling && y > ys[chosen]) chosen = k;
+            }
+
+            anchored = chosen != highest;
+            return chosen;
+        }
+
         internal static int PickHit(float[] ys, int used, int maxHits, float floorY, float minY, bool interior,
             out bool saturated)
         {
@@ -3155,7 +3283,7 @@ namespace QuestTree.QuestGraph
                 $"{job.CellMetres.ToString("0.0#", CultureInfo.InvariantCulture)} m (derived from the {N(job.Request.MaxX - job.Request.MinX)} x " +
                 $"{N(job.Request.MaxZ - job.Request.MinZ)} m extent and the {N(MapMeshFile.MaxCellsPerBand)}-cell band cap), " +
                 $"{N(job.Rays)} rays in {N(job.ReliefClock.Elapsed.TotalMilliseconds)} ms, " +
-                $"{Pct(job.Hits, job.Rays)} hit; bands: {BandShares(job)}{BelowNotes(job)}.");
+                $"{Pct(job.Hits, job.Rays)} hit; bands: {BandShares(job)}{BelowNotes(job)}{AnchoredNotes(job)}.");
 
             // Said only when it happened, and per band: the evidence for whether InteriorMaxHits is
             // enough, which only an interior band full of shelving can produce.
@@ -10516,6 +10644,13 @@ namespace QuestTree.QuestGraph
         /// with its source triangles (GetIndexCount, no array), its first material and whether it carries a collider (the
         /// ones that also shape the relief). Everything derived from the scene; nothing is stored differently.
         /// </summary>
+        /// <param name="job">The build.</param>
+        /// <param name="renderer">The renderer the size rule left out.</param>
+        /// <param name="bounds">Its world bounds.</param>
+        /// <param name="minX">The extent, with the centre margin.</param>
+        /// <param name="maxX">See minX.</param>
+        /// <param name="minZ">See minX.</param>
+        /// <param name="maxZ">See minX.</param>
         private static void CensusProp(Job job, Renderer renderer, Bounds bounds, double minX, double maxX, double minZ, double maxZ)
         {
             try
