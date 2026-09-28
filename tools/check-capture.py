@@ -1053,9 +1053,11 @@ QUALITY_SLIVER_SOURCE_SLACK = 3.0  # points of sliver AREA over the sources' sha
 QUALITY_WARN_APEXES = 200
 QUALITY_WARN_P10 = 0.5            # triangles per m2
 QUALITY_WARN_SIDE = 25.0          # % of the area
-# HQ S2.9: the sidecar's rows at a LOD level above 0 (PART-00 section 6 asks for none after the last stop), and the
-# under-served rows - stored under this share of min(source, the live target: INDEX_TARGET_PER_M2 x box surface,
-# clamped INDEX_TARGET_MIN..INDEX_TARGET_MAX, the recipe's AreaBudget at scale 1)
+# HQ S2.9: the sidecar's rows at a LOD level above 0 (PART-00 section 6 asks for none after the last stop; a group
+# whose LOD0 is over the builder's 1 M source guard legitimately stays coarse, so the WARN can name such a map), and
+# the under-served rows - stored under this share of min(source, target), target = INDEX_TARGET_PER_M2 x box surface
+# clamped INDEX_TARGET_MIN..INDEX_TARGET_MAX: the SURFACE term of the recipe's AreaBudget at scale 1 (the storey floor
+# and the legacy floor are left out, so it undercounts)
 INDEX_TARGET_PER_M2 = 20.0
 INDEX_TARGET_MIN = 24
 INDEX_TARGET_MAX = 250_000

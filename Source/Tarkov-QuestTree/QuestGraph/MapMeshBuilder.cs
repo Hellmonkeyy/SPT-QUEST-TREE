@@ -252,6 +252,12 @@ namespace QuestTree.QuestGraph
         /// the measured rate.</summary>
         private static long RetryBudgetTriangles() => (long)(RetrySeconds * 1000d * _decimationRate * MaxWorkers);
 
+        /// <summary>HQ S2 review: the groups (by path hash) tried again in this session - they go to the back of the order
+        /// at every later stop, so a group left for the next stop by the time bound gets its turn. Cleared when large.</summary>
+        private static readonly HashSet<ulong> RetriedGroups = new HashSet<ulong>();
+
+        private const int RetriedGroupsCap = 100_000;
+
         /// <summary>PART-10: members named in the shells' line, and tree/bush paths sampled in the foliage line.</summary>
         private const int ShellDropsLogged = 40;
 
@@ -1956,6 +1962,9 @@ namespace QuestTree.QuestGraph
             internal int GroupsRetryDeferred;
             internal int GroupsRetryHeadroomShort;
 
+            /// <summary>HQ S2 review: sources of a retried group stored as they are before their next level.</summary>
+            internal int AsIsForRetry;
+
             /// <summary>Stored as the source, past the limit, from unreserved headroom (H3).</summary>
             internal int StoredUndecimated;
 
@@ -2200,6 +2209,11 @@ namespace QuestTree.QuestGraph
             internal bool CleanAttempt;
 
             internal bool TextureWait;
+
+            /// <summary>HQ S2 review: its group is being tried again at this finer level because the headroom holds its
+            /// sources (ApplyUnionBudget) - so Apply stores its source as it is within the headroom BEFORE falling to the
+            /// next level, and a retry that the decimator cannot improve still lands rather than repeating every stop.</summary>
+            internal bool RetryHeadroom;
 
             /// <summary>WP2 (fixes 4): its attempt was recorded on its stored row already (RecordTried runs from more than one
             /// place; an unclean attempt must be counted once).</summary>
@@ -4891,23 +4905,38 @@ namespace QuestTree.QuestGraph
             var planHeadroom = (long)(cap * BudgetShare) - plan.FixedCost - plan.Want;
             var retryLeft = RetryBudgetTriangles();
 
+            // the tried groups, in flex order - then (S2 review) the ones not yet tried again this session first
+            var tried = new List<LODGroup>();
             foreach (var c in flex)
             {
-                if (c.Kind != KindNew || c.Group == null || gated.Contains(c.Group) || retried.Contains(c.Group)) continue;
+                if (c.Kind != KindNew || c.Group == null || tried.Contains(c.Group)) continue;
                 if (!job.Groups.TryGetValue(c.Group, out var state) || state?.Stored == null) continue;
 
                 var lod = CurrentLod(job, c);
                 if (lod >= state.StoredLod || !GroupTried(state, lod, plan)) continue;
 
+                tried.Add(c.Group);
+            }
+
+            if (RetriedGroups.Count > RetriedGroupsCap) RetriedGroups.Clear();
+            var ordered = new List<LODGroup>(tried.Count);
+            foreach (var g in tried) if (!RetriedGroups.Contains(PathHash(job, g.transform))) ordered.Add(g);
+            foreach (var g in tried) if (RetriedGroups.Contains(PathHash(job, g.transform))) ordered.Add(g);
+
+            foreach (var g in ordered)
+            {
                 if (RetryWhenHeadroomGrew)
                 {
-                    sourcesOf.TryGetValue(c.Group, out var sources);
+                    sourcesOf.TryGetValue(g, out var sources);
 
                     if (planHeadroom >= RetryHeadroomFactor * sources)
                     {
-                        if (sources <= retryLeft)
+                        // the first retry of a stop is never held back by the time bound, so a group larger than the
+                        // whole bound is still tried once
+                        if (sources <= retryLeft || retried.Count == 0)
                         {
-                            retried.Add(c.Group);
+                            retried.Add(g);
+                            RetriedGroups.Add(PathHash(job, g.transform));
                             retryLeft -= sources;
                             planHeadroom -= sources;
                             job.GroupsRetried++;
@@ -4923,8 +4952,12 @@ namespace QuestTree.QuestGraph
                     }
                 }
 
-                gated.Add(c.Group);
+                gated.Add(g);
             }
+
+            // a retried group's candidates take the as-is path within the headroom before their next level (Apply)
+            foreach (var c in flex)
+                if (c.Kind == KindNew && c.Group != null && retried.Contains(c.Group)) c.RetryHeadroom = true;
 
             if (gated.Count > 0)
             {
@@ -5878,6 +5911,15 @@ namespace QuestTree.QuestGraph
 
                 // WP2 (fixes 3): as it is was within the factor and refused for want of headroom - not a clean attempt
                 if (!fits && source.Triangles <= (long)limit * asIsFactor) candidate.CleanAttempt = false;
+
+                // HQ S2 review: a group tried again because the headroom holds its sources stores them as they are, whatever
+                // the factor, before its next level - so a retry the decimator cannot improve lands and is not repeated
+                if (candidate.RetryHeadroom && fits)
+                {
+                    job.AsIsForRetry++;
+                    AsIs(source);
+                    return;
+                }
 
                 // 4. the group's NEXT level
                 if (EnqueueNextLevel(job, candidate)) return;
@@ -10657,11 +10699,6 @@ namespace QuestTree.QuestGraph
             return true;
         }
 
-        /// <summary>WP2 (2.11): the accumulation line - what the build did to the stored mesh (the from-scratch path
-        /// "accumulates onto" this capture with nothing kept), the triangles against the derived cap, the scales, and
-        /// the y range.</summary>
-        /// <param name="job">The build.</param>
-        /// <param name="result">The result.</param>
         /// <summary>HQ S2.8: the buildings stored at a LOD level above 0 after this stop - kept stored rows and this
         /// build's new rows - as a clause of the accumulation line: PART-00 section 6 asks for 0 after the last stop.</summary>
         /// <param name="job">The build.</param>
@@ -10688,6 +10725,11 @@ namespace QuestTree.QuestGraph
             return $"; stored at LOD>0 after this stop: {N(groups.Count)} group(s), {N(rows)} row(s), {N(triangles)} triangles";
         }
 
+        /// <summary>WP2 (2.11): the accumulation line - what the build did to the stored mesh (the from-scratch path
+        /// "accumulates onto" this capture with nothing kept), the triangles against the derived cap, the scales, and
+        /// the y range.</summary>
+        /// <param name="job">The build.</param>
+        /// <param name="result">The result.</param>
         private static void ReportAccumulation(Job job, Result result)
         {
             var f1 = CultureInfo.InvariantCulture;
@@ -10719,7 +10761,7 @@ namespace QuestTree.QuestGraph
                     ? $"; LOD groups tried before at a finer level: {N(job.GroupsRetried)} tried again ({N(job.RetrySources)} source triangles, " +
                       $"{N(job.GroupsRetryDeferred)} left for the next stop by the {RetrySeconds.ToString("0", f1)} s retry bound, " +
                       $"{N(job.GroupsRetryHeadroomShort)} whose sources the headroom does not hold at {RetryHeadroomFactor.ToString("0.0", f1)} x, " +
-                      $"{N(job.GroupsNotRetried)} gated)"
+                      $"{N(job.GroupsNotRetried)} gated in all; {N(job.AsIsForRetry)} of the retried stored as they are)"
                     : "") +
                 StoredCoarseClause(job) +
                 (job.RetargetsFailed > 0 ? $"; {N(job.RetargetsFailed)} re-target(s) did not land" : "") +
