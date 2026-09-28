@@ -97,6 +97,19 @@ namespace QuestTree.UI
         /// <summary>The light's intensity and direction, as the experiment ran them.</summary>
         private const float LightIntensity = 1.2f;
 
+        /// <summary>
+        /// HQ S1.1: the private camera renders only when something it shows has changed - the view moved
+        /// (<see cref="ViewVersion"/>), the render texture was remade, the cut height changed, the pipeline pumped
+        /// (an upload, a cut, a wall job), the shared tile store cut or failed a tile, a material is still waiting
+        /// for its picture, the first frame, or a finished build. A clean frame keeps the last image in the render
+        /// texture, which the RawImage goes on showing. False renders every LateUpdate as before.
+        /// </summary>
+        private static readonly bool RenderOnChange = true;
+
+        /// <summary>HQ S1.1: with <see cref="RenderOnChange"/>, a forced render every this many clean frames
+        /// (0 = never) - a safety valve should a render texture ever lose its contents between changes.</summary>
+        private static readonly int RenderHeartbeatFrames = 0;
+
         /// <summary>Vertices per mesh chunk. Unity takes more than this in one mesh with
         /// <see cref="IndexFormat.UInt32"/>, but a chunked mesh is a mesh that can be freed and drawn in
         /// pieces, and the relief of a 4-million-cell band would otherwise be one 96 MB buffer.</summary>
@@ -1220,14 +1233,14 @@ namespace QuestTree.UI
         /// panel has been resized. The rect is in canvas units and the canvas may be scaled, so a
         /// texture sized from the rect alone is soft on a scaled-up UI and wasteful on a scaled-down
         /// one.</summary>
-        private void EnsureRenderTexture()
+        private bool EnsureRenderTexture()
         {
             var scale = CanvasScale();
 
             var width = Mathf.Clamp(Mathf.RoundToInt(_viewport.rect.width * scale), 64, 4096);
             var height = Mathf.Clamp(Mathf.RoundToInt(_viewport.rect.height * scale), 64, 4096);
 
-            if (_rt != null && width == _rtWidth && height == _rtHeight) return;
+            if (_rt != null && width == _rtWidth && height == _rtHeight) return false;
 
             var previous = _rt;
 
@@ -1240,13 +1253,14 @@ namespace QuestTree.UI
             if (_camera != null) _camera.targetTexture = _rt;
             if (_image != null) _image.texture = _rt;
 
-            if (previous == null) return;
+            if (previous == null) return true;
 
             // The old one goes only after the new one is in place on both the camera and the image: a
             // released texture still assigned to either is a frame rendered into nothing, or a UI quad
             // sampling freed memory.
             previous.Release();
             Destroy(previous);
+            return true;
         }
 
         // --- building the meshes -------------------------------------------------------------------
@@ -1688,6 +1702,7 @@ namespace QuestTree.UI
             _ready = true;
             _measureFirstFrame = true;
             _timeRender = true;
+            _forceRender = true;
             _buildClock.Stop();
 
             // The jobs this build used are no longer needed by it. See the collection in LateUpdate.
@@ -1985,6 +2000,21 @@ namespace QuestTree.UI
 
         /// <summary>Draw calls submitted this frame - see <see cref="Submit"/>.</summary>
         private int _drawCalls;
+
+        /// <summary>HQ S1.1: what the last rendered frame showed, and what has to differ for the next one to render -
+        /// the view version, the cut height and the tile store's version; a build just finished forces one; a
+        /// material still waiting for its picture (<see cref="_unsettled"/>) keeps rendering until it has it.</summary>
+        private int _renderedViewVersion = int.MinValue;
+
+        private float _renderedCutY = float.NaN;
+        private int _renderedTileVersion = -1;
+        private bool _forceRender;
+        private bool _unsettled;
+
+        /// <summary>HQ S1.1: frames that reached the draw decision, and how many of them rendered - the release line.</summary>
+        private long _framesSeen;
+
+        private long _framesRendered;
 
         private string _shaderName = "";
         private string _cutoutNote = "";
@@ -2899,6 +2929,13 @@ namespace QuestTree.UI
             public Texture2D TextureOf(int tile) =>
                 tile >= 0 && tile < Tiles.Count ? Tiles[tile].Texture : null;
 
+            /// <summary>HQ S1.1: bumped whenever a tile is cut or fails, or a page fails - a view renders again when it
+            /// differs from what its last frame saw.</summary>
+            public int Version { get; private set; }
+
+            /// <summary>Whether a tile failed for good (its own cut threw, or its page failed).</summary>
+            public bool TileFailed(int tile) => tile >= 0 && tile < Tiles.Count && Tiles[tile].Failed;
+
             /// <summary>Whether a page could not be had at all (missing, unreadable, will not decode, too big).</summary>
             public bool PageFailed(int page) => page >= 0 && page < MaxAtlasPages && _pageFailed[page];
 
@@ -3083,12 +3120,14 @@ namespace QuestTree.UI
                     _bytes += bytes;
                     ResidentBytesAll += bytes;
                     _cut++;
+                    unchecked { Version++; }
                     texture = null;
                 }
                 catch (Exception ex)
                 {
                     tile.Failed = true;
                     _failed++;
+                    unchecked { Version++; }
 
                     Plugin.LogSource?.LogDebug(
                         $"QuestTree: atlas tile {index} of '{_mapKey}' could not be cut ({ex.GetType().Name}: {ex.Message}).");
@@ -3105,6 +3144,7 @@ namespace QuestTree.UI
                 if (page < 0 || page >= MaxAtlasPages || _pageFailed[page]) return;
 
                 _pageFailed[page] = true;
+                unchecked { Version++; }
 
                 var tiles = _tilesOfPage[page];
                 if (tiles != null)
@@ -4934,16 +4974,45 @@ namespace QuestTree.UI
 
                 // Uploads, cuts and wall builds, paced - while the first build is on, and after it for walls
                 // that arrive late.
-                if (!_ready || _work.Count > 0 || _wallJobs.Count > 0) Pump();
+                var pumped = false;
+                if (!_ready || _work.Count > 0 || _wallJobs.Count > 0)
+                {
+                    Pump();
+                    pumped = true;
+                }
 
                 if (_broke || !_ready) return;
                 if (_camera == null || _floors.Count == 0) return;
 
                 var first = _measureFirstFrame;
+                var resized = EnsureRenderTexture();
+
+                // HQ S1.1: nothing this frame shows has changed - the last image stays in the texture. The overlays
+                // are placed regardless: they are cheap, and MapView may have added a pin.
+                var tileVersion = _heldTiles?.Version ?? 0;
+                _framesSeen++;
+
+                var dirty = !RenderOnChange || _forceRender || first || pumped || resized || _unsettled ||
+                            _renderedViewVersion != ViewVersion || !SameCut(_cutY, _renderedCutY) ||
+                            tileVersion != _renderedTileVersion ||
+                            (RenderHeartbeatFrames > 0 && _framesSeen % RenderHeartbeatFrames == 0);
+
+                if (!dirty)
+                {
+                    PlaceOverlays();
+                    return;
+                }
+
+                _forceRender = false;
+                _unsettled = false;
+                _renderedViewVersion = ViewVersion;
+                _renderedCutY = _cutY;
+                _renderedTileVersion = tileVersion;
+                _framesRendered++;
+
                 var clock = first ? Stopwatch.StartNew() : null;
                 _drawCalls = 0;
 
-                EnsureRenderTexture();
                 Place();
 
                 for (var i = 0; i < _floors.Count; i++) Draw(_floors[i]);
@@ -5008,10 +5077,18 @@ namespace QuestTree.UI
             // under the floor being looked at - which reads as the map having gone wrong, where a floor
             // that appears a moment later reads as a floor that appeared a moment later. Asked for above,
             // so the frame that has it draws it.
-            if (!_flatColours && ground.mainTexture == null) return;
+            if (!_flatColours && ground.mainTexture == null)
+            {
+                _unsettled = true;
+                return;
+            }
 
             var meshes = floor.Meshes;
             if (meshes == null) return;
+
+            // HQ S1.1: walls still to come, or any material below still waiting for its picture, keep the view
+            // rendering every frame until it is whole; a failed tile or side is settled (it never arrives).
+            if (meshes.WallsPending) _unsettled = true;
 
             // WP8 (V.3): the faces by source, when the debug switch is on (never in a shipped build).
             var debug = DebugFaceSources && !_flatColours;
@@ -5100,6 +5177,8 @@ namespace QuestTree.UI
                     // its faces going back to the U/V rule - as a failed side picture's do.
                     if (tiles != null && tiles.PageFailedFor(atlas.Tile)) _sideFailed = true;
 
+                    if (material.mainTexture == null && tiles != null && !tiles.TileFailed(atlas.Tile)) _unsettled = true;
+
                     var draw = material.mainTexture != null ? material : SideFallbackFor(meshes, floor.Level, walls);
 
                     // debug: a FLAT tile (the atlas's 4 x 4 colour for a material without a texture) in magenta
@@ -5138,6 +5217,8 @@ namespace QuestTree.UI
                 // rebuilt without that side at the top of the next frame (not mid-draw - see LateUpdate), so
                 // its faces go back to the top picture or a tint as if the side had never been captured.
                 if (picture != null && picture.ArtworkFailed) _sideFailed = true;
+
+                if (material.mainTexture == null && !(picture != null && picture.ArtworkFailed)) _unsettled = true;
 
                 // No picture on it (decoding, evicted, or failed): drawn in the floor's wall colour rather
                 // than skipped. A skipped face is a hole straight through the building.
@@ -5693,6 +5774,19 @@ namespace QuestTree.UI
         private void Release()
         {
             _broke = true;
+
+            if (RenderOnChange && _framesSeen > 0)
+            {
+                var seen = _framesSeen;
+                var rendered = _framesRendered;
+                _framesSeen = 0;
+                _framesRendered = 0;
+
+                Plugin.LogSource?.LogInfo(string.Format(
+                    CultureInfo.InvariantCulture,
+                    "QuestTree: 3D map for {0} - rendered {1:#,##0} of {2:#,##0} frame(s) ({3:0} % skipped as unchanged).",
+                    _mapKey, rendered, seen, seen > 0 ? 100d * (seen - rendered) / seen : 0d));
+            }
 
             if (_cutSkippedFrames > 0 && !_cutSkipLogged)
             {
