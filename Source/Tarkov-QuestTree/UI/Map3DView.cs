@@ -101,15 +101,28 @@ namespace QuestTree.UI
         /// Test 2026-09-28 (the light "not placed right"): the light was FIXED in the world, 50 degrees down at yaw -30,
         /// while the camera orbits - looking north it sat ten degrees behind the view, so every face the viewer saw was
         /// lit flat and the map read as unlit; turned to look south it would sit in front, and every visible wall would
-        /// be in its own shadow. With this on the light turns with the view: <see cref="LightYawOffset"/> degrees off the
-        /// view's yaw and <see cref="LightPitch"/> degrees down - over the viewer's shoulder - so the faces the viewer sees
-        /// are lit with form on both sides whatever the yaw, and shadows fall away from the viewer. Set every render
-        /// (render-on-change draws again when the view moves). False keeps the fixed direction.
+        /// be in its own shadow. Two ways to light a map you orbit, chosen by ModSettings.MapLighting and set every render
+        /// (render-on-change draws again when the view moves or the setting changes):
+        /// - SUN (the default, the maintainer's choice): the key light stays fixed in the world at <see cref="SunPitch"/>
+        ///   degrees down and <see cref="SunYaw"/>, so shadows lie one way across the whole map as it is orbited - it reads
+        ///   as a place - and a FILL light from the viewer (<see cref="FillShare"/> of the sun's intensity, pitched
+        ///   <see cref="FillPitch"/> down along the view, casting no shadow) keeps the walls the viewer looks at from going
+        ///   black when the view faces into the sun;
+        /// - OVER THE SHOULDER: one light that turns with the view, <see cref="LightYawOffset"/> degrees off the view's yaw
+        ///   and <see cref="LightPitch"/> degrees down, so the faces the viewer sees are lit with form on both sides
+        ///   whatever the yaw, and shadows fall away from the viewer.
         /// </summary>
-        private static readonly bool LightFollowsView = true;
+        private const float SunPitch = 60f;
 
+        private const float SunYaw = -30f;
+        private const float FillShare = 0.35f;
+        private const float FillPitch = 25f;
         private const float LightPitch = 50f;
         private const float LightYawOffset = 40f;
+
+        /// <summary>The lighting the setting asks for, the sun when the settings are not ready.</summary>
+        private static ModSettings.MapLightMode Lighting =>
+            ModSettings.Ready && ModSettings.MapLighting != null ? ModSettings.MapLighting.Value : ModSettings.MapLightMode.Sun;
 
         /// <summary>
         /// HQ S1.1: the private camera renders only when something it shows has changed - the view moved
@@ -638,6 +651,11 @@ namespace QuestTree.UI
         private GameObject _cameraGo;
         private GameObject _lightGo;
 
+        /// <summary>The fill light of the sun mode - from the viewer, no shadow.</summary>
+        private Light _fill;
+
+        private GameObject _fillGo;
+
         private int _drawLayer = -1;
         private int _privateMask;
 
@@ -888,7 +906,16 @@ namespace QuestTree.UI
             _light.shadowStrength = ShadowStrength;
             _light.cullingMask = _privateMask;
             _light.enabled = false;
-            _lightGo.transform.rotation = Quaternion.Euler(50f, -30f, 0f);
+            _lightGo.transform.rotation = Quaternion.Euler(SunPitch, SunYaw, 0f);
+
+            _fillGo = new GameObject("QuestTreeMap3DFill", typeof(Light));
+            _fillGo.layer = _drawLayer;
+            _fill = _fillGo.GetComponent<Light>();
+            _fill.type = LightType.Directional;
+            _fill.intensity = LightIntensity * FillShare;
+            _fill.shadows = LightShadows.None;
+            _fill.cullingMask = _privateMask;
+            _fill.enabled = false;
 
             // The file read and the deflate are a worker's job; every Mesh it turns into is Unity's
             // thread only, and that happens in LateUpdate when this lands. A capture's relief is a
@@ -5240,9 +5267,9 @@ namespace QuestTree.UI
                         _mapKey, clock.Elapsed.TotalMilliseconds, _renderMs, _drawCalls, CutText(), _rtSamples,
                         ShadowMode, ShadowMode == LightShadows.None ? 0 : ShadowCascadeCount, _shadowDistanceRendered,
                         AmbientTrilight ? "trilight" : "scene", SkyDome && !_skyBroken ? "dome" : "backdrop",
-                        LightFollowsView
-                            ? string.Format(CultureInfo.InvariantCulture, "over the shoulder ({0:0} deg off the view, {1:0} down)", LightYawOffset, LightPitch)
-                            : "fixed"));
+                        Lighting == ModSettings.MapLightMode.Sun
+                            ? string.Format(CultureInfo.InvariantCulture, "sun ({0:0} up, yaw {1:0}) with a fill from the viewer at {2:P0}", SunPitch, SunYaw, FillShare)
+                            : string.Format(CultureInfo.InvariantCulture, "over the shoulder ({0:0} deg off the view, {1:0} down)", LightYawOffset, LightPitch)));
                 }
             }
             catch (Exception ex)
@@ -5722,7 +5749,18 @@ namespace QuestTree.UI
             {
                 RenderSettings.fog = false;
                 _light.enabled = true;
-                if (LightFollowsView) _lightGo.transform.rotation = Quaternion.Euler(LightPitch, _yaw + LightYawOffset, 0f);
+
+                // the sun fixed in the world with the fill from the viewer, or the one light over the shoulder
+                var sun = Lighting == ModSettings.MapLightMode.Sun;
+                _lightGo.transform.rotation = sun
+                    ? Quaternion.Euler(SunPitch, SunYaw, 0f)
+                    : Quaternion.Euler(LightPitch, _yaw + LightYawOffset, 0f);
+
+                if (_fill != null)
+                {
+                    _fill.enabled = sun;
+                    if (sun) _fillGo.transform.rotation = Quaternion.Euler(FillPitch, _yaw, 0f);
+                }
 
                 if (AmbientTrilight)
                 {
@@ -5777,6 +5815,7 @@ namespace QuestTree.UI
                 // is guarded separately for the same reason - one throwing must not skip the other.
                 try { RenderSettings.fog = fog; } catch (Exception) { /* nothing further to try */ }
                 try { if (_light != null) _light.enabled = false; } catch (Exception) { /* as above */ }
+                try { if (_fill != null) _fill.enabled = false; } catch (Exception) { /* as above */ }
 
                 // HQ S1.4: the scene's ambient is the menu's, each field put back on its own.
                 if (ambientSet)
@@ -6168,7 +6207,9 @@ namespace QuestTree.UI
         /// burning a camera render a frame on a picture nobody is looking at.</summary>
         private void OnDisable()
         {
+            ModSettings.Changed -= OnSettingsChanged;
             if (_light != null) _light.enabled = false;
+            if (_fill != null) _fill.enabled = false;
 
             // A viewport switched off (a visit to the tree tab) holds no pictures anyone is looking at, so
             // the cache room for its sides goes back while it is off and is taken again when it returns. The
@@ -6182,6 +6223,16 @@ namespace QuestTree.UI
             // Unity calls this on AddComponent too, before anything is known - nothing is taken then, since
             // the sides are counted, and the shader resolved, only later. After a return it retakes the room.
             if (_built && !_broke) TakeSideRoom();
+
+            ModSettings.Changed -= OnSettingsChanged;
+            ModSettings.Changed += OnSettingsChanged;
+        }
+
+        /// <summary>A setting changed (the lighting, among others): the next frame is drawn again - render-on-change would
+        /// otherwise keep the frame lit the old way.</summary>
+        private void OnSettingsChanged(bool layout)
+        {
+            if (_built && !_broke) unchecked { ViewVersion++; }
         }
 
         private void OnDestroy()
@@ -6237,6 +6288,7 @@ namespace QuestTree.UI
                 }
 
                 if (_light != null) _light.enabled = false;
+                if (_fill != null) _fill.enabled = false;
                 if (_image != null) _image.texture = null;
                 if (_rt != null) _rt.Release();
 
@@ -6261,9 +6313,12 @@ namespace QuestTree.UI
                 _debugMaterials[i] = null;
             }
 
+            ModSettings.Changed -= OnSettingsChanged;
+
             Discard(_rt);
             Discard(_cameraGo);
             Discard(_lightGo);
+            Discard(_fillGo);
             Discard(_image != null ? _image.gameObject : null);
 
             _rt = null;
@@ -6271,6 +6326,8 @@ namespace QuestTree.UI
             _cameraGo = null;
             _light = null;
             _lightGo = null;
+            _fill = null;
+            _fillGo = null;
             _image = null;
         }
 
