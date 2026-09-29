@@ -121,33 +121,516 @@ namespace QuestTree.UI
                 ? QualitySettings.activeColorSpace == ColorSpace.Linear ? 0.96f : 0.78f
                 : 1f;
 
-        /// <summary>The factor on the sun and the ambient that puts a white up-facing surface in the sun at WhiteInSun (its
-        /// brightest channel just under it: the sun is warm), for the light's own pitch (the over-the-shoulder light uses
-        /// the same budget at its pitch).</summary>
-        private float Exposure(float pitchDegrees) =>
-            WhiteInSun / (DiffuseShare * (SunIntensity * Mathf.Sin(pitchDegrees * Mathf.Deg2Rad) + SunIntensity * AmbientOfSun));
+        /// <summary>
+        /// LIGHT LIKE THE GAME, stage 3: the light a view renders with - the CAPTURED one when the capture recorded the
+        /// raid's light and it is usable (a sun above <see cref="MinCapturedSunElevation"/> with intensity over
+        /// <see cref="MinCapturedSunIntensity"/> by day; an ambient with all 27 harmonics), else the stage 1 PRESET. The
+        /// captured sun keeps its azimuth, so the real-time shadows lie along the ones baked into the picture, and its
+        /// elevation is clamped to <see cref="MaxCapturedSunElevation"/> so a noon capture still throws a shadow of some
+        /// length (the picture's are shorter - accepted). The captured ambient is EFT's own spherical harmonics, which
+        /// EVALUATE TO DISPLAY (gamma) VALUES; Unity's Standard shader treats the probe as linear and converts what it
+        /// evaluates to gamma, so the probe is re-projected (<see cref="ProbeRefit"/>). The captured ambient is used ONLY
+        /// with the captured sun: it belongs to that sun's raid, and a night or overcast ambient under the preset's warm
+        /// day sun would be a light the game never showed. The exposure budget then holds as in stage 1 - a white
+        /// up-facing surface in the sun just under WhiteInSun - over the plan's own sun and ambient top.
+        /// <see cref="UseCapturedLight"/> false keeps the preset for every map.
+        /// </summary>
+        private static readonly bool UseCapturedLight = true;
 
-        /// <summary>The light the flat ground gets under the budget, PER CHANNEL (the sun is warm, the sky a little blue) -
-        /// the ground picture, developed and already lit by the game at capture, is drawn at its own value and its own
-        /// hue by dividing its colour by this (stage 1; stage 3 aligns the sun with the capture's so the real-time shadows
-        /// fall where the picture's do). Alpha 1: the cutout ground's clip edge must not move.</summary>
-        private Color FlatGroundLight(float pitchDegrees)
+        private const float MinCapturedSunElevation = 15f;
+        private const float MaxCapturedSunElevation = 55f;
+        private const float MinCapturedSunIntensity = 0.05f;
+
+        /// <summary>The probe is scaled in linear space; a factor k on the gamma result is k^gamma on the linear probe.</summary>
+        private const float ProbeGamma = 2.2f;
+
+        /// <summary>
+        /// Review of stage 3: how EFT's gamma-valued harmonics become a linear probe. True: a LEAST-SQUARES REFIT - the
+        /// probe whose evaluation is closest, over <see cref="RefitDirections"/> directions spread on the sphere, to the
+        /// gamma-to-linear of EFT's own evaluation there, so that the shader's linear-to-gamma of it lands near EFT's value
+        /// in EVERY direction. False (the first stage 3 cut): every coefficient of a channel scaled by
+        /// GammaToLinear(top) / top - exact straight up only; the gamma curve is not a scale, so the dimmer sideways and
+        /// downward values came out about 30 % and 90 % too bright against the game.
+        /// </summary>
+        private const bool ProbeRefit = true;
+
+        /// <summary>The refit's sample count: well over the nine unknowns, spread evenly (a Fibonacci sphere).</summary>
+        private const int RefitDirections = 64;
+
+        /// <summary>The convention check's tolerance, per cent: EFT's own top formula against Unity's evaluation. A
+        /// difference over this means the 27 floats are not packed as Unity's SphericalHarmonicsL2, and the probe would be
+        /// a wrong light - refused, the preset ambient used.</summary>
+        private const float ConventionTolerancePercent = 2f;
+
+        /// <summary>The shape check's warning level, per cent: the probe's gamma result at the horizon and straight down
+        /// against EFT's. It warns in the first-frame line and does not refuse (second order cannot follow a gamma curve
+        /// exactly).</summary>
+        private const float ShapeWarnPercent = 10f;
+
+        /// <summary>The ambient's floor as a fraction of the sun (both at the top, display terms): a captured ambient
+        /// under it is raised to it, so a face turned from the sun is not near black. 0 turns the floor off (the first
+        /// stage 3 cut: the ambient as captured, however dim).</summary>
+        private const float AmbientFloorOfSun = 0.3f;
+
+        /// <summary>What the view lights with - resolved once per view from the entry's captured light or the preset.</summary>
+        private sealed class LightPlan
         {
-            var sin = Mathf.Sin(pitchDegrees * Mathf.Deg2Rad);
-            var k = DiffuseShare * Exposure(pitchDegrees) * SunIntensity;
-            return new Color(
-                k * (sin * SunColour.r + AmbientOfSun * AmbientSky.r),
-                k * (sin * SunColour.g + AmbientOfSun * AmbientSky.g),
-                k * (sin * SunColour.b + AmbientOfSun * AmbientSky.b),
-                1f);
+            internal bool Captured;
+            internal string Why = "";
+            internal string TimeOfDay = "";
+
+            /// <summary>Towards the sun, unit; the light's forward is its negation.</summary>
+            internal Vector3 SunDirection;
+
+            internal Color SunColour;
+            internal float SunIntensity;
+            internal float ShadowStrength;
+            internal float ElevationDegrees;
+            internal float CapturedElevationDegrees;
+
+            /// <summary>The captured ambient as a probe in LINEAR terms (re-projected), or null for the Trilight preset.</summary>
+            internal SphericalHarmonicsL2? Probe;
+
+            /// <summary>The ambient straight up, in display (gamma) terms - the exposure budget's ambient term: the probe's
+            /// top as the shader will draw it when there is a probe, else the preset's.</summary>
+            internal Color AmbientTop;
+
+            /// <summary>The Trilight preset's ambient top under this plan's sun - the budget's ambient whenever the probe
+            /// is not drawn (no probe, or the over-the-shoulder light).</summary>
+            internal Color PresetAmbientTop;
+
+            /// <summary>Why the captured ambient is not used although the captured sun is ("" when it is used).</summary>
+            internal string AmbientWhy = "";
+
+            /// <summary>Convention check: EFT's top formula against Unity's evaluation straight up, per cent (-1 = not run).</summary>
+            internal float ConventionError = -1f;
+
+            /// <summary>True when the probe came from the least-squares refit, false when from the top scaling.</summary>
+            internal bool Refit;
+
+            /// <summary>Shape check: the probe's gamma result at the horizon and straight down against EFT's, per cent.</summary>
+            internal float ShapeError;
+
+            /// <summary>The captured ambient's top over the sun's (brightest channels), before any floor.</summary>
+            internal float AmbientOfSunCaptured;
+
+            /// <summary>True when the ambient was raised to <see cref="AmbientFloorOfSun"/>.</summary>
+            internal bool AmbientRaised;
+
+            internal Color Zenith;
+            internal Color Horizon;
+            internal Color Fog;
+        }
+
+        /// <summary>The plan is resolved once and kept for the view's life because the entry it is resolved from is fixed
+        /// for the view's life too: Attach is the only writer of _entry, and a map change builds a new view (the sky mesh
+        /// coloured from the plan is equally per view). A future path that swaps _entry on a live view must clear this
+        /// and destroy _skyMesh.</summary>
+        private LightPlan _plan;
+
+        private LightPlan Plan => _plan ??= ResolveLight();
+
+        /// <summary>The preset sun's direction (towards it), from the stage 1 pitch and yaw.</summary>
+        private static Vector3 PresetSunDirection => -(Quaternion.Euler(SunPitch, SunYaw, 0f) * Vector3.forward);
+
+        private LightPlan ResolveLight()
+        {
+            var plan = new LightPlan
+            {
+                SunDirection = PresetSunDirection,
+                SunColour = SunColour,
+                SunIntensity = SunIntensity,
+                ShadowStrength = ShadowStrength,
+                ElevationDegrees = SunPitch,
+                AmbientTop = AmbientSky * (SunIntensity * AmbientOfSun),
+                PresetAmbientTop = AmbientSky * (SunIntensity * AmbientOfSun),
+                Zenith = SkyZenith,
+                Horizon = SkyHorizon,
+                Fog = SkyHorizon,
+                Why = "no lighting block in the capture",
+            };
+
+            var captured = _entry?.Lighting;
+            if (!UseCapturedLight) { plan.Why = "the captured light is switched off"; return plan; }
+            if (captured == null) return plan;
+
+            plan.TimeOfDay = captured.TimeOfDay ?? "";
+
+            try
+            {
+                // the sun
+                var sunOk = captured.HasSun && captured.SunColor.HasValue;
+                var elevation = sunOk ? Mathf.Asin(Mathf.Clamp(captured.SunDirection.y, -1f, 1f)) * Mathf.Rad2Deg : 0f;
+
+                if (sunOk && !captured.IsDay) { sunOk = false; plan.Why = "captured at night"; }
+                else if (sunOk && elevation < MinCapturedSunElevation) { sunOk = false; plan.Why = $"the captured sun is {elevation:0} deg up, under {MinCapturedSunElevation:0}"; }
+                else if (sunOk && captured.SunIntensity < MinCapturedSunIntensity) { sunOk = false; plan.Why = "the captured sun is out (overcast or night)"; }
+                else if (!sunOk) plan.Why = "the capture has no sun";
+
+                if (sunOk)
+                {
+                    var azimuth = Mathf.Atan2(captured.SunDirection.x, captured.SunDirection.z);
+                    var clamped = Mathf.Min(elevation, MaxCapturedSunElevation) * Mathf.Deg2Rad;
+                    plan.SunDirection = new Vector3(Mathf.Cos(clamped) * Mathf.Sin(azimuth), Mathf.Sin(clamped), Mathf.Cos(clamped) * Mathf.Cos(azimuth)).normalized;
+                    plan.CapturedElevationDegrees = elevation;
+                    plan.ElevationDegrees = Mathf.Min(elevation, MaxCapturedSunElevation);
+                    plan.SunColour = new Color(Mathf.Max(0.05f, captured.SunColor.Value.r), Mathf.Max(0.05f, captured.SunColor.Value.g), Mathf.Max(0.05f, captured.SunColor.Value.b), 1f);
+                    plan.SunIntensity = Mathf.Max(MinCapturedSunIntensity, captured.SunIntensity);
+                    plan.ShadowStrength = captured.SunShadowStrength > 0.05f ? Mathf.Clamp01(captured.SunShadowStrength) : ShadowStrength;
+                    plan.Captured = true;
+                    plan.Why = "";
+                }
+
+                // the ambient: the preset's under the plan's sun, unless the captured sun is used and EFT's harmonics pass
+                plan.PresetAmbientTop = AmbientSky * (plan.SunIntensity * AmbientOfSun);
+                plan.AmbientTop = plan.PresetAmbientTop;
+                if (plan.Captured) ResolveAmbient(plan, captured.AmbientSh);
+
+                // the sky and the fog
+                if (captured.SkyColor.HasValue) plan.Zenith = captured.SkyColor.Value;
+                if (captured.FogColor.HasValue) { plan.Horizon = captured.FogColor.Value; plan.Fog = captured.FogColor.Value; }
+                else if (captured.EquatorColor.HasValue) { plan.Horizon = captured.EquatorColor.Value; plan.Fog = captured.EquatorColor.Value; }
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning($"QuestTree: the captured light of {_mapKey} could not be used ({ex.GetType().Name}: {ex.Message}) - the preset lights it.");
+                return new LightPlan
+                {
+                    SunDirection = PresetSunDirection, SunColour = SunColour, SunIntensity = SunIntensity, ShadowStrength = ShadowStrength,
+                    ElevationDegrees = SunPitch, AmbientTop = AmbientSky * (SunIntensity * AmbientOfSun),
+                    PresetAmbientTop = AmbientSky * (SunIntensity * AmbientOfSun),
+                    Zenith = SkyZenith, Horizon = SkyHorizon, Fog = SkyHorizon, Why = "the captured light could not be used",
+                };
+            }
+
+            return plan;
+        }
+
+        /// <summary>
+        /// Stage 3 review: EFT's ambient harmonics into a probe for the gamma-space Standard shader, with two checks that
+        /// CAN fail. CONVENTION first: the game's own AmbientLight.GetColorTop reads its top as
+        /// sh[c,1] + sh[c,0] - sh[c,6] - sh[c,8], which is exactly Unity's evaluation straight up when the 27 floats are
+        /// packed as Unity's SphericalHarmonicsL2 - so the two are compared per channel, and a difference over
+        /// <see cref="ConventionTolerancePercent"/> of the larger refuses the probe (the preset ambient is used). Then the
+        /// re-projection (<see cref="ProbeRefit"/>), then SHAPE: the probe's gamma result at four horizon azimuths and
+        /// straight down against EFT's own values there (the directions the top-only scaling got wrong). Then the floor
+        /// (<see cref="AmbientFloorOfSun"/>). Leaves plan.Probe null, with plan.AmbientWhy saying why, when refused.
+        /// </summary>
+        private static void ResolveAmbient(LightPlan plan, float[] sh)
+        {
+            if (sh == null || sh.Length != 27) { plan.AmbientWhy = "the capture has no ambient harmonics"; return; }
+
+            var eft = new SphericalHarmonicsL2();
+            for (var c = 0; c < 3; c++)
+                for (var i = 0; i < 9; i++)
+                    eft[c, i] = sh[c * 9 + i];
+
+            var top = EvaluateOne(eft, Vector3.up);
+            if (!(top.r > 0.001f && top.g > 0.001f && top.b > 0.001f && top.maxColorComponent < 16f))
+            {
+                plan.AmbientWhy = string.Format(CultureInfo.InvariantCulture, "EFT ambient refused: its top {0:0.000}/{1:0.000}/{2:0.000} is out of range", top.r, top.g, top.b);
+                return;
+            }
+
+            // (a) the convention check: the game's top formula against Unity's evaluation, per channel
+            var convention = 0f;
+            for (var c = 0; c < 3; c++)
+            {
+                var theirs = eft[c, 1] + eft[c, 0] - eft[c, 6] - eft[c, 8];
+                var unitys = top[c];
+                var larger = Mathf.Max(0.0001f, Mathf.Max(Mathf.Abs(theirs), Mathf.Abs(unitys)));
+                convention = Mathf.Max(convention, 100f * Mathf.Abs(theirs - unitys) / larger);
+            }
+
+            plan.ConventionError = convention;
+            if (convention > ConventionTolerancePercent)
+            {
+                plan.AmbientWhy = string.Format(CultureInfo.InvariantCulture, "EFT ambient refused: convention check failed ({0:0.0} %)", convention);
+                return;
+            }
+
+            // the re-projection: the refit, or (the rollback, or a singular system) the per-channel top scaling
+            var probe = eft;
+            var refitFailure = "";
+            plan.Refit = ProbeRefit && RefitForGamma(eft, out probe, out refitFailure);
+            if (!plan.Refit)
+            {
+                probe = ScaleByTop(eft, top);
+                plan.AmbientWhy = refitFailure;   // "" under the rollback: top scaling chosen, not fallen back to
+            }
+
+            // (b) the shape check, before the floor (the floor is a deliberate departure from EFT, not an error of the fit)
+            plan.ShapeError = ShapeError(eft, probe);
+
+            // the top the shader will draw, for the exposure budget and the ground's division
+            var drawn = EvaluateOne(probe, Vector3.up);
+            plan.AmbientTop = new Color(
+                Mathf.LinearToGammaSpace(Mathf.Max(0f, drawn.r)),
+                Mathf.LinearToGammaSpace(Mathf.Max(0f, drawn.g)),
+                Mathf.LinearToGammaSpace(Mathf.Max(0f, drawn.b)), 1f);
+
+            // the floor: a dim captured ambient raised to a share of the sun; k on the gamma result is k^gamma on the probe
+            var sunTop = Mathf.Max(0.0001f, plan.SunIntensity * plan.SunColour.maxColorComponent);
+            plan.AmbientOfSunCaptured = plan.AmbientTop.maxColorComponent / sunTop;
+            var floor = AmbientFloorOfSun * sunTop;
+            if (AmbientFloorOfSun > 0f && plan.AmbientTop.maxColorComponent < floor)
+            {
+                var ratio = floor / Mathf.Max(0.0001f, plan.AmbientTop.maxColorComponent);
+                var linear = Mathf.Pow(ratio, ProbeGamma);
+                for (var c = 0; c < 3; c++)
+                    for (var i = 0; i < 9; i++)
+                        probe[c, i] *= linear;
+
+                plan.AmbientTop = new Color(plan.AmbientTop.r * ratio, plan.AmbientTop.g * ratio, plan.AmbientTop.b * ratio, 1f);
+                plan.AmbientRaised = true;
+            }
+
+            plan.Probe = probe;
+        }
+
+        private static Color EvaluateOne(SphericalHarmonicsL2 sh, Vector3 direction)
+        {
+            var result = new Color[1];
+            sh.Evaluate(new[] { direction }, result);
+            return result[0];
+        }
+
+        /// <summary>The rollback re-projection: each channel's coefficients scaled by GammaToLinear(top) / top - exact
+        /// straight up, too bright everywhere dimmer (see <see cref="ProbeRefit"/>).</summary>
+        private static SphericalHarmonicsL2 ScaleByTop(SphericalHarmonicsL2 eft, Color top)
+        {
+            var probe = eft;
+            for (var c = 0; c < 3; c++)
+            {
+                var factor = Mathf.GammaToLinearSpace(top[c]) / top[c];
+                for (var i = 0; i < 9; i++)
+                    probe[c, i] = eft[c, i] * factor;
+            }
+
+            return probe;
+        }
+
+        /// <summary>
+        /// The least-squares re-projection: per channel, the nine coefficients minimising the sum over
+        /// <see cref="RefitDirections"/> Fibonacci-sphere directions d of (probe(d) - GammaToLinear(max(0, EFT(d))))^2,
+        /// from the normal equations (A^T A) c = A^T y. The basis columns A[., k] are MEASURED - a unit probe (coefficient
+        /// k 1, the rest 0) evaluated over the directions - so the fit leans on no constant of Unity's basis, only on
+        /// Evaluate being what the shader draws. That reliance is TESTED first: the fit is only right if Evaluate is the
+        /// plain linear sum of the basis (a clamp at 0, like the shader's own max, would cut the negative half off every
+        /// odd lobe and the fit would be silently wrong - and neither the convention check, all positive straight up, nor
+        /// the shape check, which goes through the same Evaluate, would see it). False, with
+        /// <paramref name="failure"/> saying why, when that test fails or the system is singular (it should not be for 64
+        /// spread directions); the caller then falls back to the top scaling.
+        /// </summary>
+        private static bool RefitForGamma(SphericalHarmonicsL2 eft, out SphericalHarmonicsL2 probe, out string failure)
+        {
+            probe = eft;
+            failure = "";
+            var f = CultureInfo.InvariantCulture;
+
+            // linearity, part one: the y-linear lobe alone must be odd - negative straight down, the exact opposite of up
+            var yLobe = new SphericalHarmonicsL2();
+            yLobe[0, 1] = 1f;
+            var lobeUp = EvaluateOne(yLobe, Vector3.up).r;
+            var lobeDown = EvaluateOne(yLobe, Vector3.down).r;
+            if (!(lobeDown < 0f) || Mathf.Abs(lobeUp + lobeDown) >= 1e-4f)
+            {
+                failure = string.Format(f, "Evaluate is not the linear basis (the y lobe gives {0:0.0000} up, {1:0.0000} down) - top-scaled instead", lobeUp, lobeDown);
+                return false;
+            }
+
+            var n = RefitDirections;
+            var directions = new Vector3[n];
+            var golden = Mathf.PI * (3f - Mathf.Sqrt(5f));
+            for (var j = 0; j < n; j++)
+            {
+                var y = 1f - 2f * (j + 0.5f) / n;
+                var r = Mathf.Sqrt(Mathf.Max(0f, 1f - y * y));
+                var phi = golden * j;
+                directions[j] = new Vector3(Mathf.Cos(phi) * r, y, Mathf.Sin(phi) * r);
+            }
+
+            // the measured basis (the red channel of each unit probe; the channels are independent)
+            var basis = new double[n, 9];
+            var values = new Color[n];
+            for (var k = 0; k < 9; k++)
+            {
+                var unit = new SphericalHarmonicsL2();
+                unit[0, k] = 1f;
+                unit.Evaluate(directions, values);
+                for (var j = 0; j < n; j++) basis[j, k] = values[j].r;
+            }
+
+            // the targets: EFT's display value in each direction (taken to linear per channel below)
+            var target = new Color[n];
+            eft.Evaluate(directions, target);
+
+            // linearity, part two: EFT's own red evaluation must be the measured basis times its red coefficients
+            for (var j = 0; j < n; j++)
+            {
+                double sum = 0;
+                for (var k = 0; k < 9; k++) sum += basis[j, k] * eft[0, k];
+                if (Math.Abs(target[j].r - sum) > 1e-4 * (1.0 + Math.Abs(sum)))
+                {
+                    failure = string.Format(f, "Evaluate is not the linear basis ({0:0.0000} against the basis sum {1:0.0000}) - top-scaled instead", target[j].r, sum);
+                    return false;
+                }
+            }
+
+            var normal = new double[9, 9];
+            for (var k = 0; k < 9; k++)
+                for (var l = 0; l < 9; l++)
+                {
+                    double sum = 0;
+                    for (var j = 0; j < n; j++) sum += basis[j, k] * basis[j, l];
+                    normal[k, l] = sum;
+                }
+
+            // per channel: the targets clamped at 0 (the shader clamps) and taken to linear, then the solve
+            var solved = eft;
+            var rhs = new double[9];
+            var coefficients = new double[9];
+            for (var c = 0; c < 3; c++)
+            {
+                for (var k = 0; k < 9; k++)
+                {
+                    double sum = 0;
+                    for (var j = 0; j < n; j++) sum += basis[j, k] * Mathf.GammaToLinearSpace(Mathf.Max(0f, target[j][c]));
+                    rhs[k] = sum;
+                }
+
+                if (!SolveLinear((double[,])normal.Clone(), rhs, coefficients))
+                {
+                    failure = "the refit's system is singular - top-scaled instead";
+                    return false;
+                }
+
+                for (var k = 0; k < 9; k++)
+                {
+                    if (double.IsNaN(coefficients[k]) || double.IsInfinity(coefficients[k]))
+                    {
+                        failure = "the refit solved to a non-finite coefficient - top-scaled instead";
+                        return false;
+                    }
+
+                    solved[c, k] = (float)coefficients[k];
+                }
+            }
+
+            probe = solved;
+            return true;
+        }
+
+        /// <summary>Gaussian elimination with partial pivoting on a square system, in place (a and b are overwritten);
+        /// false when a pivot is effectively zero.</summary>
+        private static bool SolveLinear(double[,] a, double[] b, double[] x)
+        {
+            var n = b.Length;
+            for (var col = 0; col < n; col++)
+            {
+                var pivot = col;
+                for (var row = col + 1; row < n; row++)
+                    if (Math.Abs(a[row, col]) > Math.Abs(a[pivot, col])) pivot = row;
+
+                if (Math.Abs(a[pivot, col]) < 1e-12) return false;
+
+                if (pivot != col)
+                {
+                    for (var k = 0; k < n; k++) { var t = a[col, k]; a[col, k] = a[pivot, k]; a[pivot, k] = t; }
+                    var tb = b[col]; b[col] = b[pivot]; b[pivot] = tb;
+                }
+
+                for (var row = col + 1; row < n; row++)
+                {
+                    var f = a[row, col] / a[col, col];
+                    for (var k = col; k < n; k++) a[row, k] -= f * a[col, k];
+                    b[row] -= f * b[col];
+                }
+            }
+
+            for (var row = n - 1; row >= 0; row--)
+            {
+                var sum = b[row];
+                for (var k = row + 1; k < n; k++) sum -= a[row, k] * x[k];
+                x[row] = sum / a[row, row];
+            }
+
+            return true;
+        }
+
+        /// <summary>The shape check: the probe's value, converted to gamma as the shader does (negatives clamped to 0),
+        /// against EFT's own at four horizon azimuths and straight down - per channel, as a share of the brightest
+        /// channel of EFT's TOP (floored at 0.01), the same yardstick for every direction: an error measured against the
+        /// ambient's own brightness is one you can see, while measured against a dark direction's own value (the ground
+        /// bounce straight down) a tiny absolute miss would read as a large per cent and cry wolf. The worst, per cent.</summary>
+        private static float ShapeError(SphericalHarmonicsL2 eft, SphericalHarmonicsL2 probe)
+        {
+            var directions = new[] { Vector3.forward, Vector3.right, Vector3.back, Vector3.left, Vector3.down };
+            var theirs = new Color[directions.Length];
+            var ours = new Color[directions.Length];
+            eft.Evaluate(directions, theirs);
+            probe.Evaluate(directions, ours);
+
+            var scale = Mathf.Max(0.01f, EvaluateOne(eft, Vector3.up).maxColorComponent);
+            var worst = 0f;
+            for (var j = 0; j < directions.Length; j++)
+            {
+                for (var c = 0; c < 3; c++)
+                {
+                    var want = Mathf.Max(0f, theirs[j][c]);
+                    var got = Mathf.LinearToGammaSpace(Mathf.Max(0f, ours[j][c]));
+                    worst = Mathf.Max(worst, 100f * Mathf.Abs(got - want) / scale);
+                }
+            }
+
+            return worst;
+        }
+
+        /// <summary>The light a white up-facing surface gets per channel under a plan, BEFORE the exposure: the sun's share
+        /// (its intensity x its colour x the light direction's rise) plus the ambient top the view draws.</summary>
+        private static Color UpLight(LightPlan plan, float upShare, bool sun)
+        {
+            var s = plan.SunIntensity * Mathf.Max(0f, upShare);
+            var ambient = AmbientTopFor(plan, sun);
+            return new Color(s * plan.SunColour.r + ambient.r, s * plan.SunColour.g + ambient.g, s * plan.SunColour.b + ambient.b, 1f);
+        }
+
+        /// <summary>
+        /// Whether the view draws the captured probe: only in the Sun mode. EFT's probe is brighter on the real sun's
+        /// side, which is fixed in the world; the over-the-shoulder light turns with the view, so under it that bright
+        /// side would sit anywhere against the light - a face lit by both, its opposite by neither. The Trilight preset
+        /// has no side and goes with any light direction.
+        /// </summary>
+        private static bool DrawsProbe(LightPlan plan, bool sun) => sun && plan.Probe.HasValue;
+
+        /// <summary>The ambient top the view draws, display terms: the probe's, or the Trilight preset's.</summary>
+        private static Color AmbientTopFor(LightPlan plan, bool sun) => DrawsProbe(plan, sun) ? plan.AmbientTop : plan.PresetAmbientTop;
+
+        /// <summary>The factor on the sun and the ambient that puts a white up-facing surface in the sun just under
+        /// WhiteInSun (its brightest channel), for a light rising <paramref name="upShare"/> (sin of its elevation).</summary>
+        private float Exposure(LightPlan plan, float upShare, bool sun) =>
+            WhiteInSun / Mathf.Max(0.01f, DiffuseShare * UpLight(plan, upShare, sun).maxColorComponent);
+
+        /// <summary>The light the flat ground gets under the budget, PER CHANNEL - the ground picture, developed and already
+        /// lit by the game at capture, is drawn at its own value and its own hue by dividing its colour by this. Alpha 1:
+        /// the cutout ground's clip edge must not move.</summary>
+        private Color FlatGroundLight(LightPlan plan, float upShare, bool sun)
+        {
+            var k = DiffuseShare * Exposure(plan, upShare, sun);
+            var light = UpLight(plan, upShare, sun);
+            return new Color(k * light.r, k * light.g, k * light.b, 1f);
         }
 
         /// <summary>The ground material's colour: one over the flat ground's light per channel, alpha 1.</summary>
-        private Color GroundColour(float pitchDegrees)
+        private Color GroundColour(LightPlan plan, float upShare, bool sun)
         {
-            var light = FlatGroundLight(pitchDegrees);
+            var light = FlatGroundLight(plan, upShare, sun);
             return new Color(1f / Mathf.Max(0.05f, light.r), 1f / Mathf.Max(0.05f, light.g), 1f / Mathf.Max(0.05f, light.b), 1f);
         }
+
+        /// <summary>The plan's sun rise for the mode in use: the sun's own, or the over-the-shoulder light's pitch.</summary>
+        private float UpShareFor(LightPlan plan, bool sun) =>
+            sun ? Mathf.Max(0f, plan.SunDirection.y) : Mathf.Sin(LightPitch * Mathf.Deg2Rad);
 
         /// <summary>
         /// Test 2026-09-28 (the light "not placed right"): the light was FIXED in the world, 50 degrees down at yaw -30,
@@ -241,6 +724,37 @@ namespace QuestTree.UI
         /// <summary>Whether the last render drew shadows at all (a cut floor turns them off - ShadowsUnderCut), for the
         /// first-frame line.</summary>
         private bool _shadowsDrawn;
+
+        /// <summary>Stage 3: where the view's light came from, for the first-frame line - with the ambient's two checks (the
+        /// convention, which refuses, and the shape, which warns) and its share of the sun.</summary>
+        private string LightSource()
+        {
+            var plan = Plan;
+            var f = CultureInfo.InvariantCulture;
+
+            // the captured ambient is only ever used with the captured sun, so a preset sun means the preset for both
+            if (!plan.Captured) return $"preset ({plan.Why})";
+
+            var text = string.Format(f, "captured {0} (sun {1:0} deg up{2}, shadow strength {3:0.00})",
+                string.IsNullOrEmpty(plan.TimeOfDay) ? "raid light" : "at " + plan.TimeOfDay,
+                plan.ElevationDegrees,
+                plan.CapturedElevationDegrees > plan.ElevationDegrees + 0.5f ? string.Format(f, " clamped from {0:0}", plan.CapturedElevationDegrees) : "",
+                plan.ShadowStrength);
+
+            if (!plan.Probe.HasValue)
+                return text + ", preset ambient (" + (string.IsNullOrEmpty(plan.AmbientWhy) ? "no reason recorded" : plan.AmbientWhy) + ")";
+
+            text += string.Format(f, ", EFT ambient (top {0:0.00}/{1:0.00}/{2:0.00}, convention {3:0.0} %, {4}, shape error {5:0.0} %{6}), ambient {7:0.00} of the sun{8}",
+                plan.AmbientTop.r, plan.AmbientTop.g, plan.AmbientTop.b, plan.ConventionError,
+                plan.Refit ? "refit" : string.IsNullOrEmpty(plan.AmbientWhy) ? "top-scaled" : plan.AmbientWhy,
+                plan.ShapeError, plan.ShapeError > ShapeWarnPercent ? string.Format(f, " - WARNING over {0:0} %", ShapeWarnPercent) : "",
+                plan.AmbientOfSunCaptured,
+                plan.AmbientRaised ? string.Format(f, ", ambient raised to {0:0.00} of the sun", AmbientFloorOfSun) : "");
+
+            if (Lighting != ModSettings.MapLightMode.Sun) text += " - not drawn over the shoulder, the preset ambient is";
+
+            return text;
+        }
 
         /// <summary>Stage 0: which cascade the camera's focus falls in, from the split and the range of the last render - a
         /// dark region whose edge is a StableFit sphere is read against this.</summary>
@@ -2698,7 +3212,7 @@ namespace QuestTree.UI
             // stage 1: the picture is already lit (the game's sun and the capture's own light, developed to its
             // percentiles) - its colour is divided by the light the flat ground gets, so it shows at its own value and the
             // sun only adds its slope shading and the buildings' shadows on top (_Color takes values over 1)
-            if (material.HasProperty("_Color")) material.SetColor("_Color", GroundColour(SunPitch));
+            if (material.HasProperty("_Color")) material.SetColor("_Color", GroundColour(Plan, UpShareFor(Plan, Lighting == ModSettings.MapLightMode.Sun), Lighting == ModSettings.MapLightMode.Sun));
 
             if (!_groundCutout) return material;
 
@@ -5390,19 +5904,25 @@ namespace QuestTree.UI
                         "QuestTree: 3D map for {0} - first frame drawn in {1:0.0} ms, render {2:0.0} ms, {3} draw call(s), cut {4}, " +
                         "msaa {5}x, shadows {6} ({7} cascade(s), {8:0} m), ambient {9}, sky {10}, light {11}, pixel lights {12}, " +
                         "colour space {13}, exposure x{14:0.00} (white in the sun under {15:0.00}, the ground's picture at x{16}, ambient {17:0.00} of the sun), fog {18}; " +
-                        "shadow switches: {19}, ground receives {20}, screen-space {21}; the focus at {22:0} m is {23}.",
+                        "shadow switches: {19}, ground receives {20}, screen-space {21}; the focus at {22:0} m is {23}; source {24}.",
                         _mapKey, clock.Elapsed.TotalMilliseconds, _renderMs, _drawCalls, CutText(), _rtSamples,
                         _shadowsDrawn ? ShadowMode.ToString() : ShadowMode == LightShadows.None ? "None" : "off for the cut floor",
                         _shadowsDrawn ? ShadowCascadeCount : 0, _shadowsDrawn ? _shadowDistanceRendered : 0f,
-                        AmbientTrilight ? "trilight" : "scene", SkyDome && !_skyBroken ? "dome" : "backdrop",
+                        DrawsProbe(Plan, Lighting == ModSettings.MapLightMode.Sun) ? "EFT probe" : AmbientTrilight ? "trilight" : "scene",
+                        SkyDome && !_skyBroken ? "dome" : "backdrop",
                         Lighting == ModSettings.MapLightMode.Sun
-                            ? string.Format(CultureInfo.InvariantCulture, "sun ({0:0} up, towards yaw {1:0}, warm)", SunPitch, SunYaw)
+                            ? string.Format(CultureInfo.InvariantCulture, "sun ({0:0} up, azimuth {1:0}, colour {2:0.00}/{3:0.00}/{4:0.00})",
+                                Plan.ElevationDegrees, Mathf.Atan2(Plan.SunDirection.x, Plan.SunDirection.z) * Mathf.Rad2Deg,
+                                Plan.SunColour.r, Plan.SunColour.g, Plan.SunColour.b)
                             : string.Format(CultureInfo.InvariantCulture, "over the shoulder ({0:0} deg off the view, {1:0} down)", LightYawOffset, LightPitch),
                         QualitySettings.pixelLightCount, QualitySettings.activeColorSpace, _exposureRendered, WhiteInSun,
-                        string.Format(CultureInfo.InvariantCulture, "{0:0.00}/{1:0.00}/{2:0.00}", _groundColour.r, _groundColour.g, _groundColour.b), AmbientOfSun,
+                        string.Format(CultureInfo.InvariantCulture, "{0:0.00}/{1:0.00}/{2:0.00}", _groundColour.r, _groundColour.g, _groundColour.b),
+                        // the ambient the view draws over the sun, as LightSource() reports it - not the preset's constant
+                        AmbientTopFor(Plan, Lighting == ModSettings.MapLightMode.Sun).maxColorComponent /
+                            Mathf.Max(0.0001f, Plan.SunIntensity * Plan.SunColour.maxColorComponent),
                         !AerialFog ? "off" : _fogDrawn ? "aerial" : "off for the cut floor",
                         ShadowMode, GroundReceivesShadows ? "yes" : "no", ScreenSpaceShadowsOff ? "off" : "on",
-                        _distance, FocusCascade()));
+                        _distance, FocusCascade(), LightSource()));
                 }
             }
             catch (Exception ex)
@@ -5459,7 +5979,8 @@ namespace QuestTree.UI
                     _skyMaterial = new Material(shader) { name = "QuestTreeMap3D-sky", renderQueue = 1000 };
                     _skyMaterial.SetInt("_ZWrite", 0);
                     _skyMaterial.SetInt("_Cull", 0);
-                    _skyMesh = SkyMesh(FarClip * SkyRadiusOfFarClip);
+                    var plan = Plan;
+                    _skyMesh = SkyMesh(FarClip * SkyRadiusOfFarClip, plan.Zenith, plan.Horizon, AerialFog ? plan.Horizon : SkyBelow);
                 }
 
                 var at = Matrix4x4.Translate(_camera.transform.position);
@@ -5478,7 +5999,7 @@ namespace QuestTree.UI
         /// <summary>A sphere of <see cref="SkyRings"/> rings and <see cref="SkySegments"/> segments, coloured by height:
         /// <see cref="SkyZenith"/> at the top, <see cref="SkyHorizon"/> at the horizon, <see cref="SkyBelow"/> under it.
         /// Drawn from inside with culling off, so the winding does not matter.</summary>
-        private static Mesh SkyMesh(float radius)
+        private static Mesh SkyMesh(float radius, Color zenith, Color horizon, Color below)
         {
             var rings = SkyRings * 2;
             var vertices = new List<Vector3>();
@@ -5493,8 +6014,8 @@ namespace QuestTree.UI
                 var ring = Mathf.Sin(polar);
 
                 Color colour;
-                if (y >= 0f) colour = Color.Lerp(SkyHorizon, SkyZenith, Mathf.Pow(y, 0.6f));
-                else colour = Color.Lerp(SkyHorizon, SkyBelow, Mathf.Pow(-y, 0.4f));
+                if (y >= 0f) colour = Color.Lerp(horizon, zenith, Mathf.Pow(y, 0.6f));
+                else colour = Color.Lerp(horizon, below, Mathf.Pow(-y, 0.4f));
 
                 for (var g = 0; g <= SkySegments; g++)
                 {
@@ -5903,23 +6424,40 @@ namespace QuestTree.UI
                 RenderSettings.fog = false;   // the menu's own, off unless AerialFog sets ours below
                 _light.enabled = true;
 
-                // the sun fixed in the world, or the one light over the shoulder - under the exposure budget either way
+                // the sun fixed in the world (the captured one, or the preset), or the one light over the shoulder - under
+                // the exposure budget either way
+                var plan = Plan;
                 var sun = Lighting == ModSettings.MapLightMode.Sun;
-                var pitch = sun ? SunPitch : LightPitch;
+                var upShare = UpShareFor(plan, sun);
                 _lightGo.transform.rotation = sun
-                    ? Quaternion.Euler(SunPitch, SunYaw, 0f)
+                    ? Quaternion.LookRotation(-plan.SunDirection)
                     : Quaternion.Euler(LightPitch, _yaw + LightYawOffset, 0f);
 
-                var exposure = Exposure(pitch);
-                _light.intensity = SunIntensity * exposure;
-                _light.color = SunColour;
+                var exposure = Exposure(plan, upShare, sun);
+                _light.intensity = plan.SunIntensity * exposure;
+                _light.color = plan.SunColour;
+                _light.shadowStrength = plan.ShadowStrength;
                 _exposureRendered = exposure;
-                _groundColour = GroundColour(SunPitch);
+                _groundColour = GroundColour(plan, upShare, sun);
 
-                if (AmbientTrilight)
+                if (DrawsProbe(plan, sun))
                 {
-                    var ambient = SunIntensity * AmbientOfSun * exposure;
+                    // stage 3: EFT's ambient, re-projected, scaled in linear terms to the budget's factor on the display value
+                    var scaled = plan.Probe.Value;
+                    var linearFactor = Mathf.Pow(exposure, ProbeGamma);
+                    for (var c = 0; c < 3; c++)
+                        for (var i = 0; i < 9; i++)
+                            scaled[c, i] *= linearFactor;
+
                     ambientSet = true;   // before the first write: a setter that throws half way is still put back
+                    RenderSettings.ambientMode = AmbientMode.Custom;
+                    RenderSettings.ambientIntensity = 1f;
+                    RenderSettings.ambientProbe = scaled;
+                }
+                else if (AmbientTrilight)
+                {
+                    var ambient = plan.SunIntensity * AmbientOfSun * exposure;
+                    ambientSet = true;
                     RenderSettings.ambientMode = AmbientMode.Trilight;
                     RenderSettings.ambientSkyColor = AmbientSky * ambient;
                     RenderSettings.ambientEquatorColor = AmbientEquator * ambient;
@@ -5941,7 +6479,7 @@ namespace QuestTree.UI
                     fogSet = true;
                     RenderSettings.fog = true;
                     RenderSettings.fogMode = FogMode.Linear;
-                    RenderSettings.fogColor = SkyHorizon;
+                    RenderSettings.fogColor = Plan.Fog;
                     RenderSettings.fogStartDistance = start;
                     RenderSettings.fogEndDistance = start + FogSpanOfFarClip * FarClip;
                 }
