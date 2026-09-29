@@ -53,12 +53,19 @@ namespace QuestTree.UI
         /// THE knob to turn after a play-test.</summary>
         internal const float PostExposure = 0.6f;
 
-        /// <summary>Scalable AO's strength. 0.6 darkens the foot of a wall and the inside of a doorway without drawing a
-        /// dark halo round every roof edge seen from above.</summary>
-        private const float AoIntensity = 0.6f;
+        /// <summary>Scalable AO's strength. The project renders in GAMMA colour space, so the forward composite multiplies
+        /// the occlusion into display-encoded colour: a factor that would take a linear value to 0.7 takes the encoded one
+        /// there instead, which is about 0.45 in light - occlusion reads about twice as strong as the same intensity in a
+        /// linear project, where PPv2's defaults were tuned. The 2026-09-28 test also saw the shadows go very dark with AO
+        /// on, and occlusion multiplies over the shadow rather than beside it. Scalable AO is not linear in its intensity
+        /// (it raises intensity x occlusion to the power 0.6), so 0.35 gives about 0.72 of what 0.6 gave, not half; if
+        /// the next test still reads dark, about 0.2 is the step that halves it. Rollback: 0.6f.</summary>
+        private const float AoIntensity = 0.35f;
 
         /// <summary>Scalable AO's sampling radius, in metres. 2 m reaches a room's corners and a street's kerbs; the
-        /// default quarter metre is sized for a first-person view and vanishes at map distances.</summary>
+        /// default quarter metre is sized for a first-person view and vanishes at map distances. Left at 2 m by the
+        /// 2026-09-28 change: the complaint was how dark occlusion goes, which is the intensity, while the radius sets how
+        /// far it spreads; changing one knob keeps the next play-test readable.</summary>
         private const float AoRadius = 2f;
 
         /// <summary>Whether ambient occlusion runs on a frame drawn with the floor cut's oblique near plane. Off, because an

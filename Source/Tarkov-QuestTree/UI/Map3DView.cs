@@ -779,6 +779,48 @@ namespace QuestTree.UI
         private Color _groundColour = Color.white;
         private bool _fogDrawn;
         private static readonly ShadowResolution ShadowMapResolution = ShadowResolution.VeryHigh;
+
+        /// <summary>
+        /// The 2026-09-28 in-game test: with the screen-space shadow collect on, everything inside the shadow range was
+        /// dark, walls facing the sun included; with the collect off the ground was lit but the buildings' sun-facing walls
+        /// were still black. The ground casts nothing (it is drawn with ShadowCastingMode.Off), so it cannot shadow itself;
+        /// the buildings do cast, and a caster that reads as shadowed on its own lit face is shadow acne - the shadow map
+        /// holding the surface's own depth, compared against itself. The light's bias was never set, so Unity's defaults
+        /// applied (bias 0.05, normal bias 0.4), which are sized for a first-person shadow range of tens of metres. Here the
+        /// cascades reach up to 1,500 m on a VeryHigh map (4096, a 2048 tile a cascade with four): the far cascade is about
+        /// 0.7 m a texel, and a wall lit at a grazing angle moves by about that much in depth across a single texel, far
+        /// past a 0.05 offset. Earlier builds had the same acne but read it as dull under a 0.45 strength and a large
+        /// ambient; the exposure budget and the 0.85 strength made it black.
+        ///
+        /// Units: in the built-in pipeline a directional light's bias and normal bias are both scaled by the cascade's
+        /// texel size (the shadow caster pass reads them from unity_LightShadowBias, which Unity fills per cascade), so
+        /// one value serves every cascade and the offset in metres grows with the cascade - small near the camera, where
+        /// a building's base is looked at closely, and larger far away, where the texels are large. The bias pushes the
+        /// caster's depth away from the light; the normal bias moves the caster inwards along its normal, scaled by the
+        /// sine of the angle between the normal and the light (UnityClipSpaceShadowCasterPos in UnityCG.cginc), so it
+        /// acts on walls lit at grazing angles - the acne case - and hardly at all on a roof facing the sun.
+        ///
+        /// Numbers: soft shadows filter over the collect pass's PCF tent, about 2.5 texels' radius on desktop, with a
+        /// receiver-plane bias of its own, so a grazing wall must clear its own depth over a footprint of texels, not one.
+        /// A normal bias of 1.5 texels covers most of it (about 0.1 m in the nearest cascade, about 1 m in the farthest,
+        /// where a building is a few pixels on screen) - an approximation, to be judged in game. The constant bias
+        /// then only has to cover depth quantisation and the flat-lit faces the normal bias does not move: 0.5 texels,
+        /// about 0.03 m near and 0.35 m far, below what reads as a shadow lifting off a building's base at either zoom.
+        /// Values past about 1 for the bias or 2 for the normal bias begin to detach shadows from bases and to thin
+        /// narrow casters (posts, railings) out of the far cascades - raise these only if acne remains after a
+        /// play-test, lower them if shadows float.
+        ///
+        /// The light's shadowNearPlane is left at Unity's default: in the built-in pipeline it applies to point and spot
+        /// lights only; a directional light's shadow frustum is fitted to the casters' bounds per cascade, so the value
+        /// is never read for it.
+        ///
+        /// Rollback: 0.05f and 0.4f are Unity's defaults, the values every build before this one drew with.
+        /// </summary>
+        private static readonly float ShadowBias = 0.5f;
+
+        /// <summary>The normal bias, in cascade texels - see <see cref="ShadowBias"/> for the finding and the reasoning.
+        /// Rollback: 0.4f, Unity's default.</summary>
+        private static readonly float ShadowNormalBias = 1.5f;
         private static readonly float ShadowDistanceOfView = 2.5f;
         private static readonly float ShadowDistanceMin = 100f;
 
@@ -1546,6 +1588,8 @@ namespace QuestTree.UI
             _light.color = SunColour;
             _light.shadows = ShadowMode;
             _light.shadowStrength = ShadowStrength;
+            _light.shadowBias = ShadowBias;               // not Unity's 0.05: the defaults drew acne at this range (ShadowBias)
+            _light.shadowNormalBias = ShadowNormalBias;   // not Unity's 0.4, as above
             _light.cullingMask = _privateMask;
             _light.enabled = false;
             _lightGo.transform.rotation = Quaternion.Euler(SunPitch, SunYaw, 0f);
@@ -5909,7 +5953,7 @@ namespace QuestTree.UI
                     Plugin.LogSource?.LogInfo(string.Format(
                         CultureInfo.InvariantCulture,
                         "QuestTree: 3D map for {0} - first frame drawn in {1:0.0} ms, render {2:0.0} ms, {3} draw call(s), cut {4}, " +
-                        "msaa {5}x, shadows {6} ({7} cascade(s), {8:0} m), ambient {9}, sky {10}, light {11}, pixel lights {12}, " +
+                        "msaa {5}x, shadows {6} ({7} cascade(s), {8:0} m, bias {26:0.00} / normal {27:0.00}), ambient {9}, sky {10}, light {11}, pixel lights {12}, " +
                         "colour space {13}, exposure x{14:0.00} (white in the sun under {15:0.00}, the ground's picture at x{16}, ambient {17:0.00} of the sun), fog {18}; " +
                         "shadow switches: {19}, ground receives {20}, screen-space {21}; the focus at {22:0} m is {23}; source {24}; post-processing {25}.",
                         _mapKey, clock.Elapsed.TotalMilliseconds, _renderMs, _drawCalls, CutText(), _rtSamples,
@@ -5929,7 +5973,8 @@ namespace QuestTree.UI
                             Mathf.Max(0.0001f, Plan.SunIntensity * Plan.SunColour.maxColorComponent),
                         !AerialFog ? "off" : _fogDrawn ? "aerial" : "off for the cut floor",
                         ShadowMode, GroundReceivesShadows ? "yes" : "no", ScreenSpaceShadowsOff ? "off" : "on",
-                        _distance, FocusCascade(), LightSource(), Map3DPostProcess.Describe()));
+                        _distance, FocusCascade(), LightSource(), Map3DPostProcess.Describe(),
+                        _light != null ? _light.shadowBias : -1f, _light != null ? _light.shadowNormalBias : -1f));   // read back from the light, not the constants, so the line proves they took
                 }
             }
             catch (Exception ex)
