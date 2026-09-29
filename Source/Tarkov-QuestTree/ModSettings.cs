@@ -231,9 +231,18 @@ namespace QuestTree
         /// map, not a property of one.</summary>
         public static ConfigEntry<MapViewMode> MapMode { get; private set; }
 
-        /// <summary>Test 2026-09-28: how the 3D map is lit - a fixed sun with a fill light from the viewer (the default), or
-        /// one light over the viewer's shoulder that turns with the view. See Map3DView's lighting constants.</summary>
+        /// <summary>Test 2026-09-28: how the 3D map is lit - a fixed sun (the default), or one light over the viewer's shoulder
+        /// that turns with the view. See Map3DView's lighting constants.</summary>
         public static ConfigEntry<MapLightMode> MapLighting { get; private set; }
+
+        /// <summary>Lighting stage 0 (2026-09-28): the three switches that isolate a shadow fault in one build - the
+        /// shadows themselves (off / hard / soft), whether the relief ground receives them, and whether Unity's
+        /// screen-space shadow collect pass is used (off: the Standard shader samples the cascade map per fragment). Under
+        /// Advanced, F12 only; a change rebuilds the viewport.</summary>
+        public static ConfigEntry<MapShadowMode> MapShadows { get; private set; }
+
+        public static ConfigEntry<bool> MapGroundReceivesShadows { get; private set; }
+        public static ConfigEntry<bool> MapScreenSpaceShadows { get; private set; }
 
         /// <summary>Whether a finished capture is offered to the host this profile plays on - see
         /// QuestGraph/MapTransfer.cs. On by default because the HOST decides: a host that does not
@@ -318,6 +327,14 @@ namespace QuestTree
 
             /// <summary>The flat picture, as every release before 1.19.0 drew it.</summary>
             Flat
+        }
+
+        /// <summary>The 3D map's shadows. See <see cref="MapShadows"/>.</summary>
+        public enum MapShadowMode
+        {
+            Off,
+            Hard,
+            Soft
         }
 
         /// <summary>How the 3D map is lit. See <see cref="MapLighting"/>.</summary>
@@ -902,8 +919,8 @@ namespace QuestTree
             MapLighting = config.Bind(
                 "Map", "3D map lighting", MapLightMode.Sun,
                 "How the 3D map is lit. 'Sun': one sun fixed in the world, 45 degrees up from the south-west of the " +
-                "captured map, so shadows lie the same way across the whole map as you orbit, plus a weak fill light " +
-                "from where you look, so the walls facing you are never black when you face into the sun. " +
+                "captured map, so shadows lie the same way across the whole map as you orbit, with an ambient light " +
+                "of a little under half the sun so the walls facing away from it are never black. " +
                 "'OverTheShoulder': one light that turns with the view, 40 degrees off it, so whatever you look at is " +
                 "lit and the shadows swing round as you orbit. Takes effect when the map redraws.");
 
@@ -987,6 +1004,23 @@ namespace QuestTree
                 "its sidecar and <key>-verify-atlas-<n>.png pages) for tools/compare-mesh.py to compare with the accumulated " +
                 "mesh. This costs one extra full mesh phase at that stop.");
 
+            MapShadows = config.Bind(
+                "Advanced", "3D map: shadows", MapShadowMode.Soft,
+                "The sun's shadows in the 3D map: Soft (the default), Hard, or Off. Off is the first thing to try when " +
+                "a region of the map draws dark: if it stays dark, it is not a shadow. Takes effect when the map redraws.");
+
+            MapGroundReceivesShadows = config.Bind(
+                "Advanced", "3D map: the ground receives shadows", true,
+                "Whether the buildings' shadows fall on the relief ground. The captured picture on the ground already " +
+                "carries the game's own shadows, so off costs little; off is the second thing to try when a region " +
+                "of the ground draws dark. Takes effect when the map redraws.");
+
+            MapScreenSpaceShadows = config.Bind(
+                "Advanced", "3D map: screen-space shadows", true,
+                "Whether the 3D map's shadows go through Unity's screen-space collect pass (on, the usual way) or the " +
+                "shader samples the cascade shadow map per fragment (off; needs that shader variant in the game). " +
+                "The third thing to try for a dark region. Takes effect when the map redraws.");
+
             MeshFoliage = config.Bind(
                 "Advanced", "3D map: include trees and bushes", true,
                 "On, the 3D map's mesh keeps trees and bushes (renderers drawn with the game's SpeedTree shaders), each read at " +
@@ -1065,6 +1099,9 @@ namespace QuestTree
             MapLabels.SettingChanged += Raise;
             MapMode.SettingChanged += Raise;
             MapLighting.SettingChanged += Raise;
+            MapShadows.SettingChanged += Raise;
+            MapGroundReceivesShadows.SettingChanged += Raise;
+            MapScreenSpaceShadows.SettingChanged += Raise;
             ColorActive.SettingChanged += Raise;
             ColorAvailable.SettingChanged += Raise;
             ColorCompleted.SettingChanged += Raise;

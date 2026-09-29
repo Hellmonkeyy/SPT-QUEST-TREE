@@ -203,9 +203,27 @@ namespace QuestTree.UI
         /// (RenderNow), so the player's preset - which may have shadows off entirely - is untouched outside the bracket.
         /// The shadow distance is derived from the view each render: <see cref="ShadowDistanceOfView"/> times the
         /// camera's distance, at least <see cref="ShadowDistanceMin"/> metres and never past the far clip - a close
-        /// dollhouse gets a sharp map and the whole-map view a coarse one.
+        /// dollhouse gets a sharp map and the whole-map view a coarse one. Stage 0: the mode is the setting's
+        /// (ModSettings.MapShadows), Soft when the settings are not ready; a change rebuilds the viewport.
         /// </summary>
-        private static readonly LightShadows ShadowMode = LightShadows.Soft;
+        private static LightShadows ShadowMode
+        {
+            get
+            {
+                if (!ModSettings.Ready || ModSettings.MapShadows == null) return LightShadows.Soft;
+
+                switch (ModSettings.MapShadows.Value)
+                {
+                    case ModSettings.MapShadowMode.Off: return LightShadows.None;
+                    case ModSettings.MapShadowMode.Hard: return LightShadows.Hard;
+                    default: return LightShadows.Soft;
+                }
+            }
+        }
+
+        /// <summary>Stage 0: whether the relief ground receives shadows (ModSettings.MapGroundReceivesShadows).</summary>
+        private static bool GroundReceivesShadows =>
+            !ModSettings.Ready || ModSettings.MapGroundReceivesShadows == null || ModSettings.MapGroundReceivesShadows.Value;
 
         private static readonly float ShadowStrength = 0.85f;   // stage 1: under the exposure budget a shadow keeps the ambient's third, as the game's do
         /// <summary>Second 2026-09-28 test: two cascades over a range that grew with the zoom (2.5 km when zoomed out) spread
@@ -223,6 +241,22 @@ namespace QuestTree.UI
         /// <summary>Whether the last render drew shadows at all (a cut floor turns them off - ShadowsUnderCut), for the
         /// first-frame line.</summary>
         private bool _shadowsDrawn;
+
+        /// <summary>Stage 0: which cascade the camera's focus falls in, from the split and the range of the last render - a
+        /// dark region whose edge is a StableFit sphere is read against this.</summary>
+        private string FocusCascade()
+        {
+            var range = _shadowDistanceRendered;
+            if (!_shadowsDrawn || range <= 0f) return "outside any cascade (no shadows drawn)";
+
+            var edges = new[] { ShadowCascadeSplit.x * range, ShadowCascadeSplit.y * range, ShadowCascadeSplit.z * range, range };
+            for (var k = 0; k < edges.Length; k++)
+                if (_distance <= edges[k])
+                    return string.Format(CultureInfo.InvariantCulture, "in cascade {0} of {1} by split (edges {2:0}/{3:0}/{4:0}/{5:0} m; StableFit spheres reach further)",
+                        k + 1, ShadowCascadeCount, edges[0], edges[1], edges[2], edges[3]);
+
+            return string.Format(CultureInfo.InvariantCulture, "past the shadow range of {0:0} m", range);
+        }
 
         /// <summary>Stage 1: the exposure factor, the ground's colour factor and whether the fog was drawn, of the last render,
         /// for the first-frame line.</summary>
@@ -246,7 +280,9 @@ namespace QuestTree.UI
         /// </summary>
         private static readonly bool ShadowsUnderCut = false;
 
-        private static readonly bool ScreenSpaceShadowsOff = false;
+        /// <summary>Stage 0: the setting's (ModSettings.MapScreenSpaceShadows, on by default = this false).</summary>
+        private static bool ScreenSpaceShadowsOff =>
+            ModSettings.Ready && ModSettings.MapScreenSpaceShadows != null && !ModSettings.MapScreenSpaceShadows.Value;
 
         /// <summary>
         /// HQ S1.4: hemisphere ambient for the render - sky from above, ground bounce from below, an equator between
@@ -5353,7 +5389,8 @@ namespace QuestTree.UI
                         CultureInfo.InvariantCulture,
                         "QuestTree: 3D map for {0} - first frame drawn in {1:0.0} ms, render {2:0.0} ms, {3} draw call(s), cut {4}, " +
                         "msaa {5}x, shadows {6} ({7} cascade(s), {8:0} m), ambient {9}, sky {10}, light {11}, pixel lights {12}, " +
-                        "colour space {13}, exposure x{14:0.00} (white in the sun under {15:0.00}, the ground's picture at x{16}, ambient {17:0.00} of the sun), fog {18}.",
+                        "colour space {13}, exposure x{14:0.00} (white in the sun under {15:0.00}, the ground's picture at x{16}, ambient {17:0.00} of the sun), fog {18}; " +
+                        "shadow switches: {19}, ground receives {20}, screen-space {21}; the focus at {22:0} m is {23}.",
                         _mapKey, clock.Elapsed.TotalMilliseconds, _renderMs, _drawCalls, CutText(), _rtSamples,
                         _shadowsDrawn ? ShadowMode.ToString() : ShadowMode == LightShadows.None ? "None" : "off for the cut floor",
                         _shadowsDrawn ? ShadowCascadeCount : 0, _shadowsDrawn ? _shadowDistanceRendered : 0f,
@@ -5363,7 +5400,9 @@ namespace QuestTree.UI
                             : string.Format(CultureInfo.InvariantCulture, "over the shoulder ({0:0} deg off the view, {1:0} down)", LightYawOffset, LightPitch),
                         QualitySettings.pixelLightCount, QualitySettings.activeColorSpace, _exposureRendered, WhiteInSun,
                         string.Format(CultureInfo.InvariantCulture, "{0:0.00}/{1:0.00}/{2:0.00}", _groundColour.r, _groundColour.g, _groundColour.b), AmbientOfSun,
-                        !AerialFog ? "off" : _fogDrawn ? "aerial" : "off for the cut floor"));
+                        !AerialFog ? "off" : _fogDrawn ? "aerial" : "off for the cut floor",
+                        ShadowMode, GroundReceivesShadows ? "yes" : "no", ScreenSpaceShadowsOff ? "off" : "on",
+                        _distance, FocusCascade()));
                 }
             }
             catch (Exception ex)
@@ -5385,10 +5424,13 @@ namespace QuestTree.UI
         /// 2026-09-28): a bumpy height mesh at a shadow-map pixel of 0.3-0.6 m self-shadows into speckle, and its picture
         /// already carries the game's own shadows from above - the near ground was being shadowed twice while the ground
         /// past the shadow range was not, the near-dull, far-bright split of the day's test.</param>
-        private void Submit(Mesh mesh, Material material, bool castShadows = true)
+        /// <param name="receiveShadows">Whether it receives shadows (stage 0: the ground's is a setting).</param>
+        private void Submit(Mesh mesh, Material material, bool castShadows = true, bool receiveShadows = true)
         {
-            if (castShadows) Graphics.DrawMesh(mesh, Matrix4x4.identity, material, _drawLayer, _camera);
-            else Graphics.DrawMesh(mesh, Matrix4x4.identity, material, _drawLayer, _camera, 0, null, ShadowCastingMode.Off, true);
+            if (castShadows && receiveShadows) Graphics.DrawMesh(mesh, Matrix4x4.identity, material, _drawLayer, _camera);
+            else
+                Graphics.DrawMesh(mesh, Matrix4x4.identity, material, _drawLayer, _camera, 0, null,
+                    castShadows ? ShadowCastingMode.On : ShadowCastingMode.Off, receiveShadows);
             _drawCalls++;
         }
 
@@ -5532,7 +5574,7 @@ namespace QuestTree.UI
             for (var i = 0; i < meshes.Ground.Count; i++)
             {
                 var mesh = meshes.Ground[i];
-                if (mesh != null) Submit(mesh, ground, castShadows: false);
+                if (mesh != null) Submit(mesh, ground, castShadows: false, receiveShadows: GroundReceivesShadows);
             }
 
             // Every mesh is drawn whole: the dollhouse cut is the camera's oblique near plane (ApplyCut), which
