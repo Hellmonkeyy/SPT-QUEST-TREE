@@ -588,14 +588,28 @@ namespace QuestTree.QuestGraph
         /// first-hit rule made each a slab in the relief draped with stretched ground pixels. With this on, the top band
         /// asks for <see cref="TopBandHits"/> hits a ray; where the highest hit is not on a terrain layer
         /// (<see cref="GroundLayerNames"/>), the highest TERRAIN hit is the ground, and only a thin surface lying within
-        /// <see cref="ThinSurfaceMetres"/> above it - a road, a pavement, a floor slab - wins over it. A cell with no
-        /// terrain hit at all (an indoor map, a mesh floor) keeps the first hit as before. A rule about layers, never a
-        /// map; re-cast every stop, so not in the recipe. False keeps the first hit.
+        /// <see cref="ThinSurfaceMetres"/> above it - a road, a pavement, a kerb - wins over it. Anything standing higher
+        /// on the terrain (a car, a concrete ring, a trailer, a raised slab) is a thing on the ground, not the ground, and
+        /// the terrain under it stands. A cell with no terrain hit at all (an indoor map, a mesh floor) keeps the first
+        /// hit as before. A rule about layers, never a map; re-cast every stop, so not in the recipe. False keeps the
+        /// first hit.
         /// </summary>
         internal static readonly bool TerrainAnchoredGround = true;
 
         internal const int TopBandHits = 8;
-        private const float ThinSurfaceMetres = 1.5f;
+
+        /// <summary>
+        /// How far above the terrain hit a non-terrain hit may lie and still be the ground (was 1.5). Test 2026-09-28/29
+        /// (the Customs capture with the prop class): at 1.5 m a car's roof, a concrete ring, a trailer bed and every low
+        /// prop with a collider lay within the band, so the ground rose to their tops - the car was buried in its own hump
+        /// of ground and the ring stood in a white spike of stretched picture; before the prop class drew the props this
+        /// only read as bumps. A road or a pavement laid on the terrain lies within a few tens of centimetres of it and a
+        /// kerb under 0.2 m, so 0.4 m keeps every one of them and nothing that stands on the ground. A bridge deck or a
+        /// raised floor slab more than 0.4 m over the terrain now falls back to the terrain beneath it, which the
+        /// building's own mesh then stands on (LowerReliefUnderBuildings handles the building case). Re-cast every stop
+        /// and not in the recipe, so it applies at the next capture stop without a rebuild.
+        /// </summary>
+        private const float ThinSurfaceMetres = 0.4f;
 
         /// <summary>The layers that ARE the ground: the terrain, its grass, and water.</summary>
         private static readonly string[] GroundLayerNames = { "Terrain", "Grass", "Water" };
@@ -3308,7 +3322,7 @@ namespace QuestTree.QuestGraph
         /// <summary>
         /// TerrainAnchoredGround's choice for a top-band cell. The highest hit at or above the floor is what the old rule
         /// took; when it is on a ground layer it stands. Otherwise the highest GROUND hit is the ground, and the highest
-        /// non-ground hit within <see cref="ThinSurfaceMetres"/> above it (a road on the terrain, a floor slab) wins over
+        /// non-ground hit within <see cref="ThinSurfaceMetres"/> above it (a road on the terrain, a pavement, a kerb) wins over
         /// it; with no ground hit at all the highest hit stands as before. <paramref name="anchored"/> says the choice
         /// differs from the old rule's. Floats and bools in, an int out, no Unity type - checkable on a synthetic column.
         /// </summary>
