@@ -1790,7 +1790,7 @@ namespace QuestTree.UI
             // changes and nothing is logged (the quiet console).
             if (Map3DPostProcess.Wanted)
                 Plugin.LogSource?.LogInfo($"QuestTree: 3D map post-processing for {_mapKey}: {Map3DPostProcess.Probe()}");
-            Map3DPostProcess.Attach(_camera, _drawLayer, out _, _entry?.Lighting?.PrismTonemap);
+            _postProcessAttached = Map3DPostProcess.Attach(_camera, _drawLayer, out _, _entry?.Lighting?.PrismTonemap);
 
             // Spot-sun stage A: whether spot shadows and emission work in this game, measured once per session on the
             // probe's own camera before this view's first render (and before its light is made, which stage C sets from
@@ -2373,6 +2373,12 @@ namespace QuestTree.UI
 
             _groundShader = ResolveGroundShader(shader, shaderName, out _groundCutout, out _cutoutNote);
 
+            // Spot-sun stage B: emission or the division path, decided once per build - after the probe (run in the view's
+            // setup, before any build) and before the first material below is made; the check is owed again for this build
+            DecideEmission();
+            _emissionChecked = false;
+            _sideChecked = false;
+
             // One Floor per drawn band, each with a cache entry - reused when complete, registered empty
             // when not, and then filled by the worker's data.
             var toPrepare = new List<(int Level, Built Into)>();
@@ -2573,11 +2579,17 @@ namespace QuestTree.UI
                         {
                             if (into.Sides[s] == null)
                             {
-                                into.Sides[s] = new SideTexture
-                                {
-                                    Material = Matte(new Material(_buildingShader)
-                                        { name = $"QuestTreeMap3D-side{SideOrder[s]}-{level}" })
-                                };
+                                var sideMaterial = Matte(new Material(_buildingShader)
+                                    { name = $"QuestTreeMap3D-side{SideOrder[s]}-{level}" });
+
+                                // Spot-sun stage B: a side picture is a finished image, as the ground's is (captured in
+                                // raid under the game's light, graded) - drawn as emission, never lit again. The flag
+                                // follows the ground's (the sides use the buildings' shader, which is Standard whenever
+                                // the ground's is) unless the opaque variant failed its check this session
+                                // (_sideEmission). Its _EmissionMap follows the picture wherever Draw assigns it.
+                                if (_emissiveSides) Emissive(sideMaterial);
+
+                                into.Sides[s] = new SideTexture { Material = sideMaterial };
                             }
 
                             into.Sides[s].Meshes.Add(MakeMesh(mesh));
@@ -3479,14 +3491,559 @@ namespace QuestTree.UI
         {
             var material = Matte(new Material(_groundShader) { name = $"QuestTreeMap3D-ground-{level}" });
 
-            // stage 1: the picture is already lit (the game's sun and the capture's own light, developed to its
-            // percentiles) - its colour is divided by the light the flat ground gets, so it shows at its own value and the
+            // Spot-sun stage B: the picture drawn as EMISSION - the finished image at its own value, never lit, never
+            // shadowed, never divided by a light estimate. The flag holds only on the Standard shader, which always clips
+            // (ResolveGroundShader), so the cutout goes on first and the emission recipe after it, as the probe proved it.
+            if (_emissiveGround)
+            {
+                Emissive(_groundCutout ? MakeCutout(material) : material);
+
+                // SELF-TEST "ground" (QUESTTREE_PROBE_SABOTAGE): the keyword off with the flag left on - the emission is
+                // never sampled, the ground reads black, and CheckPictureEmission must say MISMATCH
+                if (SelfTest == "ground") material.DisableKeyword("_EMISSION");
+
+                return material;
+            }
+
+            // stage 1 (the fallback: a failed probe, the Legacy cutout shader, or the switch off): the picture is
+            // already lit (the game's sun and the capture's own light, developed to its percentiles) - its colour is divided by the light the flat ground gets, so it shows at its own value and the
             // sun only adds its slope shading and the buildings' shadows on top (_Color takes values over 1)
             if (material.HasProperty("_Color")) material.SetColor("_Color", GroundColour(Plan, UpShareFor(Plan, Lighting == ModSettings.MapLightMode.Sun), Lighting == ModSettings.MapLightMode.Sun));
 
             if (!_groundCutout) return material;
 
             return MakeCutout(material);
+        }
+
+        /// <summary>
+        /// Spot-sun stage B rollback: false puts the ground back on stage 1's division path (_Color = one over the flat
+        /// ground's light) and the side pictures back to lit, whatever the probe found. A readonly field, not a const, so
+        /// the branch it switches off is not unreachable code to the compiler.
+        /// </summary>
+        private static readonly bool EmissiveGround = true;
+
+        /// <summary>The self-test switch the light probe reads (Map3DLightProbe.SelfTestVariable), read once here the same
+        /// way. "ground" builds the ground material with the flag on but WITHOUT the _EMISSION keyword, so the emission
+        /// check must log MISMATCH (black against the picture) - the proof that check can fail. The probe itself ignores
+        /// "ground" (it acts on "shadow" and "emission" only), so it still passes and the flag still comes on.</summary>
+        private const string SelfTestVariable = "QUESTTREE_PROBE_SABOTAGE";
+
+        private static readonly string SelfTest = ReadSelfTest();
+
+        /// <summary>The self-test switch, read once. A process that may not read its environment runs the normal path.</summary>
+        private static string ReadSelfTest()
+        {
+            try
+            {
+                var value = Environment.GetEnvironmentVariable(SelfTestVariable);
+                return value == null ? "" : value.Trim().ToLowerInvariant();
+            }
+            catch (Exception)
+            {
+                return "";
+            }
+        }
+
+        /// <summary>
+        /// Whether this build draws the ground's picture as emission: <see cref="EmissiveGround"/> is on, the ground's
+        /// shader is Standard (the Legacy cutout fallback has no emission, and neither does Unlit/Texture or
+        /// Hidden/Internal-Colored), and the session's light probe ran and its emission check read the texel back
+        /// (Map3DLightProbe.Result.Emission). Decided once per build by <see cref="DecideEmission"/>, before any material is
+        /// made, so every material of the build agrees with the first-frame line.
+        /// </summary>
+        private bool _emissiveGround;
+
+        /// <summary>Whether this build draws the side pictures as emission: as <see cref="_emissiveGround"/> (the sides use
+        /// the buildings' shader, which is Standard whenever the ground's is), unless the OPAQUE emission variant failed its
+        /// check this session (<see cref="_sideEmission"/>) - the probe proved only the cutout one.</summary>
+        private bool _emissiveSides;
+
+        /// <summary>Why <see cref="_emissiveGround"/> is false, for the first-frame line; empty when it is true.</summary>
+        private string _emissiveWhy = "";
+
+        /// <summary>The factor on the pictures' emission, _EmissionColor = white x this. 1 until stage D anchors it to the
+        /// tonemap (the picture then shows at its own value in an LDR frame).</summary>
+        private float _emissionScale = 1f;
+
+        /// <summary>Whether the post-processing stack was attached to this view's camera - then every render is graded by it,
+        /// and a rendered pixel cannot be held against the picture's raw texel.</summary>
+        private bool _postProcessAttached;
+
+        /// <summary>What the opaque side check found this session: sides stay lit for the rest of the session after a
+        /// MISMATCH, and are checked once more per build until one passes.</summary>
+        private enum SideEmission
+        {
+            Unproven,
+            Proven,
+            Failed
+        }
+
+        private static SideEmission _sideEmission = SideEmission.Unproven;
+
+        /// <summary>Sets <see cref="_emissiveGround"/>, <see cref="_emissiveSides"/> and, when the ground's is false,
+        /// <see cref="_emissiveWhy"/>. Reads the probe's cached result - it never runs the probe. The shader is looked at
+        /// before the probe: a Legacy or Unlit ground has no emission whatever the probe found.</summary>
+        private void DecideEmission()
+        {
+            _emissiveGround = false;
+            _emissiveWhy = "";
+
+            var probe = Map3DLightProbe.Last;
+
+            if (!EmissiveGround) _emissiveWhy = "switched off";
+            else if (_groundShader == null || _groundShader.name != "Standard") _emissiveWhy = "legacy shader";
+            else if (probe == null) _emissiveWhy = "probe not run";
+            else if (!probe.Emission)
+            {
+                // An emission check that never ran (the probe could not start, or threw first) leaves the read at its default,
+                // alpha included - the target is cleared opaque, so a real read has alpha. Then the probe's reason says more.
+                var read = probe.EmissionRead;
+                var unread = read.r == 0 && read.g == 0 && read.b == 0 && read.a == 0;
+
+                _emissiveWhy = "probe: " + (unread && !string.IsNullOrEmpty(probe.Why)
+                    ? probe.Why
+                    : string.Format(CultureInfo.InvariantCulture, "emission read {0}/{1}/{2}", read.r, read.g, read.b));
+            }
+            else _emissiveGround = true;
+
+            _emissiveSides = _emissiveGround && _sideEmission != SideEmission.Failed;
+        }
+
+        /// <summary>
+        /// Spot-sun stage B: the emission recipe Map3DLightProbe's emission check proved (Build, the rig's Emissive), on a
+        /// material already Matte and, for the ground, already cut out. A BLACK albedo with alpha 1 - Standard's alpha is
+        /// _Color.a x _MainTex.a, so the cutout still clips on the picture's own alpha while the light, the ambient and the
+        /// shadows add nothing to it; the picture as the emission map at <see cref="_emissionScale"/>; the _EMISSION keyword
+        /// that compiles the emission in; no GI flags (there is no lightmapper to feed). _EmissionMap is set from the current
+        /// _MainTex here and again wherever Draw puts a picture on the material (<see cref="SetPicture"/>).
+        /// </summary>
+        /// <param name="material">The material, returned.</param>
+        private Material Emissive(Material material)
+        {
+            if (material.HasProperty("_Color")) material.SetColor("_Color", new Color(0f, 0f, 0f, 1f));
+            if (material.HasProperty("_EmissionMap")) material.SetTexture("_EmissionMap", material.mainTexture);
+            if (material.HasProperty("_EmissionColor")) material.SetColor("_EmissionColor", Color.white * _emissionScale);
+
+            material.EnableKeyword("_EMISSION");
+            material.globalIlluminationFlags = MaterialGlobalIlluminationFlags.None;
+
+            return material;
+        }
+
+        /// <summary>A side material made again as the lit path makes it (Matte, the buildings' shader, white), carrying the
+        /// old one's picture; the old one is destroyed. For a side whose emission variant failed its check.</summary>
+        /// <param name="old">The emissive side material.</param>
+        private Material LitSideMaterial(Material old)
+        {
+            var material = Matte(new Material(_buildingShader) { name = old.name });
+            material.mainTexture = old.mainTexture;
+            Destroy(old);
+
+            return material;
+        }
+
+        /// <summary>Puts a picture on a picture material: _MainTex always (the cutout's alpha, and the lit path's colour),
+        /// and _EmissionMap too when that material is drawn as emission - an emission map left on an evicted texture would
+        /// draw black under a _MainTex that had been put back.</summary>
+        /// <param name="material">The ground's or a side's material.</param>
+        /// <param name="picture">The picture.</param>
+        /// <param name="emissive">Whether the material is on the emission path (<see cref="_emissiveGround"/> or
+        /// <see cref="_emissiveSides"/>).</param>
+        private static void SetPicture(Material material, Texture picture, bool emissive)
+        {
+            material.mainTexture = picture;
+            if (emissive && material.HasProperty("_EmissionMap")) material.SetTexture("_EmissionMap", picture);
+        }
+
+        /// <summary>The first-frame line's ground clause: "emission x1.00", or the division path with its reason and colour.</summary>
+        private string GroundText() =>
+            _emissiveGround
+                ? string.Format(CultureInfo.InvariantCulture, "emission x{0:0.00}{1}", _emissionScale,
+                    SelfTest == "ground" ? " (SELF-TEST: _EMISSION left off)" : "")
+                : string.Format(CultureInfo.InvariantCulture, "lit fallback ({0}) {1:0.00}/{2:0.00}/{3:0.00}",
+                    _emissiveWhy, _groundColour.r, _groundColour.g, _groundColour.b);
+
+        /// <summary>The first-frame line's sides clause: "emission" once the opaque check has passed this session, "emission
+        /// pending check" before this build's check has run (the first frame is logged before it), "emission unproven" after
+        /// a check that skipped, "lit" off the emission path (with the reason when the check failed), "none" when the side
+        /// pictures take no part.</summary>
+        private string SidesText() =>
+            !SidesActive ? "none"
+            : _emissiveSides
+                ? (_sideEmission == SideEmission.Proven ? "emission" : !_sideChecked ? "emission pending check" : "emission unproven")
+            : _sideEmission == SideEmission.Failed ? "lit (the emission check failed)"
+            : "lit";
+
+        /// <summary>Whether this build's ground check (<see cref="CheckPictureEmission"/>) has been made - or given up on -
+        /// already. Reset per build in BeginBuild.</summary>
+        private bool _emissionChecked;
+
+        /// <summary>As <see cref="_emissionChecked"/>, for the side check.</summary>
+        private bool _sideChecked;
+
+        /// <summary>The emission check's tolerance per channel, in 8-bit steps.</summary>
+        private const int EmissionCheckTolerance = 6;
+
+        /// <summary>How far the Unlit reference may sit from the picture's full-size texel, per channel, when neither fog nor
+        /// post-processing is drawn: further means the reference is not showing the picture, and a comparison with it
+        /// proves nothing. Wider than the check's own tolerance, because the drawn mip averages neighbouring texels.</summary>
+        private const int ReferenceTexelTolerance = 12;
+
+        /// <summary>The picture's alpha (at full size, at the centre) under which the centre is taken as clipped or on the
+        /// clip's edge and the check skipped: the drawn mip can average in the transparent surround, so not 0.5.</summary>
+        private const float EmissionCheckAlphaMin = 0.75f;
+
+        /// <summary>How far, in pixels, the side check looks from a side mesh's projected bounds centre for a pixel the side
+        /// actually covers - a chunk of many buildings has its bounds centre in the air between them.</summary>
+        private const int SideSearchRadius = 48;
+
+        /// <summary>
+        /// Spot-sun stage B's proof, after a render with the pictures as emission. Every render goes through RenderNow, the
+        /// whole bracket, into a temporary target of the view's size and samples, resolved to one sample before it is read
+        /// (<see cref="RenderFrame"/>), with nothing queued but what is being tested - so no building stands in front, and
+        /// the view's own texture, the real frame, is never touched.
+        ///
+        /// GROUND (the cutout emission variant), once per build: the pixel at the viewport's centre - where the camera
+        /// looks at the focus on the selected floor's ground (Place) - with the ground material, and with Unlit/Texture
+        /// carrying the same picture. Fog, post-processing, mip and filtering are the same for both, so the only difference
+        /// left is what Standard adds to or takes from the picture: an emission not compiled in reads black, a light, an
+        /// ambient or a specular veil on the black albedo reads brighter - a MISMATCH beyond
+        /// <see cref="EmissionCheckTolerance"/>. So that two identical WRONG reads cannot pass (review S2): the reference
+        /// must differ from the backdrop (an empty render), and with no fog or post-processing it must match the picture's
+        /// own texel within <see cref="ReferenceTexelTolerance"/>; either failing is a skip, said so, never an ok.
+        ///
+        /// SIDES (the OPAQUE emission variant, which the probe never proved - review S1), once per build until it passes:
+        /// one side mesh of the selected floor whose bounds centre is on screen, drawn with its material and with the
+        /// Unlit reference; the pixel nearest that centre which the reference covers (differs from the backdrop) is
+        /// compared. A pass marks the sides proven for the session; a MISMATCH puts them on the lit path for the session
+        /// (Draw rebuilds each side material without the emission) and forces a render.
+        ///
+        /// Waited for while the picture a part needs is not on its material yet; otherwise skipped with the reason. Never
+        /// throws out of the render.
+        /// </summary>
+        private void CheckPictureEmission()
+        {
+            if (_camera == null || _rt == null || !_emissiveGround) return;
+
+            var floor = _levels.Count > 0 ? FloorAt(_levels[_levels.Count - 1]) : null;
+            if (floor == null || floor.Meshes == null) return;
+
+            Material unlitReference = null;
+
+            try
+            {
+                var unlit = Shader.Find("Unlit/Texture");
+                var usable = unlit != null && unlit.isSupported;
+
+                if (!_emissionChecked)
+                {
+                    var ground = floor.GroundMaterial;
+                    var picture = ground != null ? ground.mainTexture : null;
+
+                    // the selected floor's picture arrives on a later frame, and that frame's render checks it
+                    if (picture != null)
+                    {
+                        _emissionChecked = true;
+
+                        string verdict;
+                        try
+                        {
+                            verdict = usable
+                                ? GroundVerdict(floor, ground, picture, unlit, ref unlitReference)
+                                : "no Unlit/Texture to compare with, skipped";
+                        }
+                        catch (Exception ex)
+                        {
+                            verdict = "could not be made (" + ex.GetType().Name + ": " + ex.Message + ")";
+                        }
+
+                        Plugin.LogSource?.LogInfo("QuestTree: 3D map emission check - " + verdict);
+                    }
+                }
+
+                if (!_sideChecked)
+                {
+                    string verdict;
+                    try
+                    {
+                        verdict = !SidesActive || !_emissiveSides || _sideEmission != SideEmission.Unproven
+                            ? ""   // nothing on the emission path to prove, or proven (or failed) already this session
+                            : !usable
+                                ? "no Unlit/Texture to compare with, skipped"
+                                : SideVerdict(floor, unlit, ref unlitReference);
+                    }
+                    catch (Exception ex)
+                    {
+                        verdict = "could not be made (" + ex.GetType().Name + ": " + ex.Message + ")";
+                    }
+
+                    // null: no side picture here yet - a later render tries again
+                    if (verdict != null)
+                    {
+                        _sideChecked = true;
+                        if (verdict.Length > 0) Plugin.LogSource?.LogInfo("QuestTree: 3D map side emission check - " + verdict);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                // once: a check that throws is not retried every frame
+                _emissionChecked = true;
+                _sideChecked = true;
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: 3D map emission check - could not be made ({ex.GetType().Name}: {ex.Message}).");
+            }
+            finally
+            {
+                if (unlitReference != null) Destroy(unlitReference);
+            }
+        }
+
+        /// <summary>The ground part of <see cref="CheckPictureEmission"/>: its log verdict. Three renders, each read back as
+        /// the one centre pixel.</summary>
+        private string GroundVerdict(Floor floor, Material ground, Texture picture, Shader unlit, ref Material unlitReference)
+        {
+            if (_file == null || _groundBand == null || !_groundBand.TryHeightAt(_focus.x, _focus.y, out _))
+                return "centre not on the ground, skipped";
+
+            // the ground's planar UV of the focus (as Prep.PlanarUv): where it falls across the extent is where it falls
+            // across the picture
+            var spanX = (float)(_file.MaxX - _file.MinX);
+            var spanZ = (float)(_file.MaxZ - _file.MinZ);
+            var uv = new Vector2(
+                spanX > 0f ? Mathf.Clamp01((_focus.x - (float)_file.MinX) / spanX) : 0.5f,
+                spanZ > 0f ? Mathf.Clamp01((_focus.y - (float)_file.MinZ) / spanZ) : 0.5f);
+
+            var texel = TexelAt(picture, uv);
+
+            if (texel.a < EmissionCheckAlphaMin * 255f)
+                return string.Format(CultureInfo.InvariantCulture, "centre on the picture's clipped surround (alpha {0}), skipped", texel.a);
+
+            var centre = new RectInt(_rt.width / 2, _rt.height / 2, 1, 1);
+
+            var read = RenderFrame(floor.Meshes.Ground, ground, true, centre)[0];
+
+            unlitReference = ReferenceFor(unlitReference, unlit, picture);
+            var expected = RenderFrame(floor.Meshes.Ground, unlitReference, true, centre)[0];
+
+            var empty = RenderFrame(null, null, true, centre)[0];
+
+            if (Near(expected, empty, EmissionCheckTolerance))
+                return string.Format(CultureInfo.InvariantCulture, "reference is the backdrop ({0}/{1}/{2}), skipped",
+                    expected.r, expected.g, expected.b);
+
+            // Only a render with neither fog nor grading can be held against the raw texel; _fogDrawn is the last render's
+            if (!_fogDrawn && !_postProcessAttached && !Near(expected, texel, ReferenceTexelTolerance))
+                return string.Format(CultureInfo.InvariantCulture,
+                    "reference {0}/{1}/{2} does not match the picture {3}/{4}/{5}, skipped",
+                    expected.r, expected.g, expected.b, texel.r, texel.g, texel.b);
+
+            return string.Format(CultureInfo.InvariantCulture, "centre reads {0}/{1}/{2} vs picture {3}/{4}/{5}: {6}",
+                read.r, read.g, read.b, expected.r, expected.g, expected.b,
+                Near(read, expected, EmissionCheckTolerance) ? "ok" : "MISMATCH");
+        }
+
+        /// <summary>The most side meshes the side check tries before it gives up for this build: each try whose window has
+        /// no covered pixel costs two renders.</summary>
+        private const int SideMeshTries = 8;
+
+        /// <summary>
+        /// The side part of <see cref="CheckPictureEmission"/>: its log verdict, or null to try again on a later render (no
+        /// side of the selected floor has its picture yet). Sets <see cref="_sideEmission"/> on a comparison. Each on-screen
+        /// side mesh, up to <see cref="SideMeshTries"/>, is drawn with the Unlit reference and against an empty frame, both
+        /// read back only in the window of <see cref="SideSearchRadius"/> around its projected bounds centre; the first with
+        /// a covered pixel is then drawn with its emission material, and that pixel compared.
+        /// </summary>
+        private string SideVerdict(Floor floor, Shader unlit, ref Material unlitReference)
+        {
+            var width = _rt.width;
+            var height = _rt.height;
+            var anyPicture = false;
+            var tries = 0;
+
+            for (var slot = 0; slot < floor.Meshes.Sides.Length && tries < SideMeshTries; slot++)
+            {
+                var side = floor.Meshes.Sides[slot];
+                var material = side?.Material;
+                var picture = material != null ? material.mainTexture : null;
+                if (picture == null || !material.IsKeywordEnabled("_EMISSION")) continue;
+
+                anyPicture = true;
+
+                for (var i = 0; i < side.Meshes.Count && tries < SideMeshTries; i++)
+                {
+                    var mesh = side.Meshes[i];
+                    if (mesh == null) continue;
+
+                    var at = _camera.WorldToViewportPoint(mesh.bounds.center);
+                    if (at.z <= 0f || at.x < 0f || at.x > 1f || at.y < 0f || at.y > 1f) continue;
+
+                    tries++;
+
+                    // the window around the projected centre, clipped to the view
+                    var px = Mathf.RoundToInt(at.x * (width - 1));
+                    var py = Mathf.RoundToInt(at.y * (height - 1));
+                    var x0 = Mathf.Max(0, px - SideSearchRadius);
+                    var y0 = Mathf.Max(0, py - SideSearchRadius);
+                    var x1 = Mathf.Min(width - 1, px + SideSearchRadius);
+                    var y1 = Mathf.Min(height - 1, py + SideSearchRadius);
+                    var window = new RectInt(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
+
+                    var one = new List<Mesh>(1) { mesh };
+
+                    // one reference material for the whole check: its picture is whichever part used it last
+                    unlitReference = ReferenceFor(unlitReference, unlit, picture);
+                    var expected = RenderFrame(one, unlitReference, false, window);
+                    var backdrop = RenderFrame(null, null, false, window);
+
+                    var pixel = CoveredNear(expected, backdrop, window.width, window.height, px - x0, py - y0);
+                    if (pixel < 0) continue;   // this chunk's centre is in the air between its buildings - the next one
+
+                    var read = RenderFrame(one, material, false, window);
+
+                    var ok = Near(read[pixel], expected[pixel], EmissionCheckTolerance);
+                    _sideEmission = ok ? SideEmission.Proven : SideEmission.Failed;
+
+                    if (!ok)
+                    {
+                        // lit for the rest of the session: Draw rebuilds each emissive side material lit, from the next render
+                        _emissiveSides = false;
+                        _forceRender = true;
+                    }
+
+                    return string.Format(CultureInfo.InvariantCulture, "side {0} reads {1}/{2}/{3} vs picture {4}/{5}/{6}: {7}",
+                        SideOrder[slot], read[pixel].r, read[pixel].g, read[pixel].b,
+                        expected[pixel].r, expected[pixel].g, expected[pixel].b,
+                        ok ? "ok" : "MISMATCH, the sides are drawn lit");
+                }
+            }
+
+            if (tries > 0)
+                return string.Format(CultureInfo.InvariantCulture,
+                    "nothing drawn within {0} px of the centres of {1} side mesh(es), skipped", SideSearchRadius, tries);
+
+            return anyPicture ? "no side mesh's centre on screen, skipped" : null;
+        }
+
+        /// <summary>The Unlit/Texture reference material with <paramref name="picture"/> on it, made on first use.</summary>
+        private static Material ReferenceFor(Material reference, Shader unlit, Texture picture)
+        {
+            if (reference == null) reference = new Material(unlit) { name = "QuestTreeMap3D-emission-check" };
+            reference.mainTexture = picture;
+
+            return reference;
+        }
+
+        /// <summary>Whether two colours agree within <paramref name="tolerance"/> on each of r, g and b.</summary>
+        private static bool Near(Color32 a, Color32 b, int tolerance) =>
+            Math.Abs(a.r - b.r) <= tolerance && Math.Abs(a.g - b.g) <= tolerance && Math.Abs(a.b - b.b) <= tolerance;
+
+        /// <summary>The index, in a window's pixels (<paramref name="width"/> x <paramref name="height"/>), of the pixel
+        /// nearest (x, y) - window coordinates - where <paramref name="drawn"/> differs from <paramref name="backdrop"/>:
+        /// a pixel the mesh covers; -1 when none does.</summary>
+        private static int CoveredNear(Color32[] drawn, Color32[] backdrop, int width, int height, int x, int y)
+        {
+            var best = -1;
+            var bestDistance = int.MaxValue;
+
+            for (var py = 0; py < height; py++)
+            {
+                for (var px = 0; px < width; px++)
+                {
+                    var distance = (px - x) * (px - x) + (py - y) * (py - y);
+                    if (distance >= bestDistance) continue;
+
+                    var index = py * width + px;
+                    if (Near(drawn[index], backdrop[index], EmissionCheckTolerance)) continue;
+
+                    best = index;
+                    bestDistance = distance;
+                }
+            }
+
+            return best;
+        }
+
+        /// <summary>
+        /// <paramref name="meshes"/> alone (none: an empty frame, the backdrop), with <paramref name="material"/>, rendered
+        /// through <see cref="RenderNow"/> into a temporary target of the view's own size and samples (so the projection, the
+        /// mip and the coverage are the view's), then BLITTED into a one-sample target and read back from that - review S2:
+        /// nothing else in the repo reads a multisampled target directly, and a direct read may come back black. Only
+        /// <paramref name="window"/> is read back (a pixel, or the side check's square), row by row from its lower left, as
+        /// a whole frame would be ~15 MB at 1440p. The ground is submitted as Draw submits it (no casting), anything else
+        /// casting and receiving. The camera's target is put back and both temporaries released whatever throws.
+        /// </summary>
+        private Color32[] RenderFrame(List<Mesh> meshes, Material material, bool ground, RectInt window)
+        {
+            var target = _camera.targetTexture;
+            var previous = RenderTexture.active;
+            RenderTexture temporary = null;
+            RenderTexture resolved = null;
+            Texture2D readable = null;
+
+            try
+            {
+                temporary = RenderTexture.GetTemporary(_rt.descriptor);
+                _camera.targetTexture = temporary;
+
+                if (meshes != null && material != null)
+                {
+                    for (var i = 0; i < meshes.Count; i++)
+                    {
+                        var mesh = meshes[i];
+                        if (mesh == null) continue;
+
+                        if (ground) Submit(mesh, material, castShadows: false, receiveShadows: GroundReceivesShadows);
+                        else Submit(mesh, material);
+                    }
+                }
+
+                RenderNow();
+
+                resolved = RenderTexture.GetTemporary(temporary.width, temporary.height, 0, RenderTextureFormat.ARGB32);
+                Graphics.Blit(temporary, resolved);
+
+                RenderTexture.active = resolved;
+                readable = new Texture2D(window.width, window.height, TextureFormat.RGBA32, false);
+                readable.ReadPixels(new Rect(window.x, window.y, window.width, window.height), 0, 0, false);
+
+                return readable.GetPixels32();
+            }
+            finally
+            {
+                try { RenderTexture.active = previous; } catch (Exception) { /* nothing further to try */ }
+                try { if (_camera != null) _camera.targetTexture = target; } catch (Exception) { /* as above */ }
+                if (temporary != null) RenderTexture.ReleaseTemporary(temporary);
+                if (resolved != null) RenderTexture.ReleaseTemporary(resolved);
+                if (readable != null) Destroy(readable);
+            }
+        }
+
+        /// <summary>The picture's full-size texel at <paramref name="uv"/>: a blit whose every pixel samples that one point
+        /// (scale 0, offset uv) into a 1x1 target, read back - the picture itself is not CPU-readable (as ReadPalette).</summary>
+        private static Color32 TexelAt(Texture source, Vector2 uv)
+        {
+            var previous = RenderTexture.active;
+            RenderTexture target = null;
+            Texture2D readable = null;
+
+            try
+            {
+                target = RenderTexture.GetTemporary(1, 1, 0, RenderTextureFormat.ARGB32);
+                Graphics.Blit(source, target, Vector2.zero, uv);
+
+                RenderTexture.active = target;
+                readable = new Texture2D(1, 1, TextureFormat.RGBA32, false);
+                readable.ReadPixels(new Rect(0f, 0f, 1f, 1f), 0, 0, false);
+
+                return readable.GetPixels32()[0];
+            }
+            finally
+            {
+                RenderTexture.active = previous;
+                if (target != null) RenderTexture.ReleaseTemporary(target);
+                if (readable != null) Destroy(readable);
+            }
         }
 
         /// <summary>The Standard cutout recipe on a material (see <see cref="MakeGroundMaterial"/>): the render type tag,
@@ -6173,7 +6730,7 @@ namespace QuestTree.UI
                         CultureInfo.InvariantCulture,
                         "QuestTree: 3D map for {0} - first frame drawn in {1:0.0} ms, render {2:0.0} ms, {3} draw call(s), cut {4}, " +
                         "msaa {5}x, shadows {6} ({7} cascade(s), {8:0} m, bias {26:0.00} / normal {27:0.00}), ambient {9}, sky {10}, light {11}, pixel lights {12}, " +
-                        "colour space {13}, exposure x{14:0.00} (white in the sun under {15:0.00}, the ground's picture at x{16}, ambient {17:0.00} of the sun), fog {18}; " +
+                        "colour space {13}, exposure x{14:0.00} (white in the sun under {15:0.00}, ambient {17:0.00} of the sun), fog {18}; ground {16}, sides {34}; " +
                         "shadow switches: {19}, ground receives {20}, screen-space {21}, collect {28} ({29}, built-in {30}), {32}, distant-shadow keywords {31};the focus at {22:0} m is {23}; source {24}; post-processing {25}; probe {33}.",
                         _mapKey, clock.Elapsed.TotalMilliseconds, _renderMs, _drawCalls, CutText(), _rtSamples,
                         _shadowsDrawn ? ShadowMode.ToString() : ShadowMode == LightShadows.None ? "None" : "off for the cut floor",
@@ -6186,7 +6743,7 @@ namespace QuestTree.UI
                                 Plan.SunColour.r, Plan.SunColour.g, Plan.SunColour.b)
                             : string.Format(CultureInfo.InvariantCulture, "over the shoulder ({0:0} deg off the view, {1:0} down)", LightYawOffset, LightPitch),
                         QualitySettings.pixelLightCount, QualitySettings.activeColorSpace, _exposureRendered, WhiteInSun,
-                        string.Format(CultureInfo.InvariantCulture, "{0:0.00}/{1:0.00}/{2:0.00}", _groundColour.r, _groundColour.g, _groundColour.b),
+                        GroundText(),   // stage B: "emission x{e}", or "lit fallback (why) r/g/b" - the division colour only where it is used
                         // the ambient the view draws over the sun, as LightSource() reports it - not the preset's constant
                         AmbientTopFor(Plan, Lighting == ModSettings.MapLightMode.Sun).maxColorComponent /
                             Mathf.Max(0.0001f, Plan.SunIntensity * Plan.SunColour.maxColorComponent),
@@ -6196,8 +6753,12 @@ namespace QuestTree.UI
                         _light != null ? _light.shadowBias : -1f, _light != null ? _light.shadowNormalBias : -1f,   // read back from the light, not the constants, so the line proves they took
                         // the collect and the keywords as found before the bracket changed them
                         _collectModeFound, _collectShaderFound ?? "-", _builtinCollect ?? "-", DistantShadowText(),
-                        DistantGlobalsText(), Map3DLightProbe.Describe()));
+                        DistantGlobalsText(), Map3DLightProbe.Describe(), SidesText()));
                 }
+
+                // Spot-sun stage B's proof, after the real frame is in the view's texture (the check renders into a
+                // temporary one): the ground once per build, the sides once per build until they pass, each when its picture is here
+                if (_emissiveGround && (!_emissionChecked || !_sideChecked)) CheckPictureEmission();
             }
             catch (Exception ex)
             {
@@ -6335,7 +6896,7 @@ namespace QuestTree.UI
                 floor.Layer != null && floor.Layer.TryGetSprite(out var sprite) &&
                 sprite != null && sprite.texture != null)
             {
-                ground.mainTexture = sprite.texture;
+                SetPicture(ground, sprite.texture, _emissiveGround);   // and its emission map, on the emission path
                 walls.mainTexture = sprite.texture;
             }
 
@@ -6481,12 +7042,16 @@ namespace QuestTree.UI
                 var material = side?.Material;
                 if (material == null) continue;
 
+                // Stage B review S1: the opaque emission variant failed its check this session - a side material still
+                // carrying it (made before the check, or cached by another view) is rebuilt lit, as the lit path makes it
+                if (!_emissiveSides && material.IsKeywordEnabled("_EMISSION")) material = side.Material = LitSideMaterial(material);
+
                 var picture = _sides[slot]?.Picture;
 
                 if (material.mainTexture == null && picture != null && picture.TryGetSprite(out var sideSprite) &&
                     sideSprite != null && sideSprite.texture != null)
                 {
-                    material.mainTexture = sideSprite.texture;
+                    SetPicture(material, sideSprite.texture, _emissiveSides);   // as the ground's
                 }
 
                 // A side whose picture has FAILED to decode will never have one: noted, and the view is
