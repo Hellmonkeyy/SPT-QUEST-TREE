@@ -172,6 +172,11 @@ namespace QuestTree.UI
         /// stage 3 cut: the ambient as captured, however dim).</summary>
         private const float AmbientFloorOfSun = 0.3f;
 
+        /// <summary>The sky dome and the fog take the captured sky and fog colours' HUE at the preset's brightness (see
+        /// <see cref="Rescaled"/>), because TOD_Sky's colours are scene-referred and came out black and dark teal when drawn
+        /// as they are. False: the preset colours regardless of the capture (the look before stage 3).</summary>
+        private static readonly bool CapturedSkyHue = true;
+
         /// <summary>What the view lights with - resolved once per view from the entry's captured light or the preset.</summary>
         private sealed class LightPlan
         {
@@ -220,6 +225,9 @@ namespace QuestTree.UI
             internal Color Zenith;
             internal Color Horizon;
             internal Color Fog;
+
+            /// <summary>True when the sky dome or the fog took a captured hue (<see cref="CapturedSkyHue"/>).</summary>
+            internal bool SkyHueCaptured;
         }
 
         /// <summary>The plan is resolved once and kept for the view's life because the entry it is resolved from is fixed
@@ -286,10 +294,25 @@ namespace QuestTree.UI
                 plan.AmbientTop = plan.PresetAmbientTop;
                 if (plan.Captured) ResolveAmbient(plan, captured.AmbientSh);
 
-                // the sky and the fog
-                if (captured.SkyColor.HasValue) plan.Zenith = captured.SkyColor.Value;
-                if (captured.FogColor.HasValue) { plan.Horizon = captured.FogColor.Value; plan.Fog = captured.FogColor.Value; }
-                else if (captured.EquatorColor.HasValue) { plan.Horizon = captured.EquatorColor.Value; plan.Fog = captured.EquatorColor.Value; }
+                // the sky and the fog: the captured hue at the preset's brightness, since the captured values are
+                // scene-referred (Customs at noon records a sky of 0.05) and the game's exposure that brightens them is not
+                // captured; a colour too dark to carry a hue keeps the preset
+                if (CapturedSkyHue)
+                {
+                    if (captured.SkyColor.HasValue && captured.SkyColor.Value.maxColorComponent >= 0.001f)
+                    {
+                        plan.Zenith = Rescaled(captured.SkyColor.Value, SkyZenith);
+                        plan.SkyHueCaptured = true;
+                    }
+
+                    var horizon = captured.FogColor ?? captured.EquatorColor;
+                    if (horizon.HasValue && horizon.Value.maxColorComponent >= 0.001f)
+                    {
+                        plan.Horizon = Rescaled(horizon.Value, SkyHorizon);
+                        plan.Fog = plan.Horizon;
+                        plan.SkyHueCaptured = true;
+                    }
+                }
             }
             catch (Exception ex)
             {
@@ -304,6 +327,20 @@ namespace QuestTree.UI
             }
 
             return plan;
+        }
+
+        /// <summary>
+        /// A captured sky or fog colour at the preset's brightness: its hue kept, its brightest channel set to the preset's.
+        /// TOD_Sky's colours are scene-referred - the game brightens them through its Prism auto-exposure before they reach
+        /// the screen, and that exposure is not captured - so drawn as they are through the unlit dome and as the fog they
+        /// read as night (the dome went black, tall distant objects dark teal). The hue is what carries the weather (an
+        /// overcast grey, a dusk orange), and the preset carries a brightness known to read well; the caller keeps the
+        /// preset for a colour too dark (max under 0.001) to carry a hue.
+        /// </summary>
+        private static Color Rescaled(Color captured, Color preset)
+        {
+            var scale = preset.maxColorComponent / captured.maxColorComponent;
+            return new Color(captured.r * scale, captured.g * scale, captured.b * scale, 1f);
         }
 
         /// <summary>
@@ -733,7 +770,8 @@ namespace QuestTree.UI
             var f = CultureInfo.InvariantCulture;
 
             // the captured ambient is only ever used with the captured sun, so a preset sun means the preset for both
-            if (!plan.Captured) return $"preset ({plan.Why})";
+            var sky = plan.SkyHueCaptured ? "sky hue captured" : "sky preset";
+            if (!plan.Captured) return $"preset ({plan.Why}), {sky}";
 
             var text = string.Format(f, "captured {0} (sun {1:0} deg up{2}, shadow strength {3:0.00})",
                 string.IsNullOrEmpty(plan.TimeOfDay) ? "raid light" : "at " + plan.TimeOfDay,
@@ -742,7 +780,7 @@ namespace QuestTree.UI
                 plan.ShadowStrength);
 
             if (!plan.Probe.HasValue)
-                return text + ", preset ambient (" + (string.IsNullOrEmpty(plan.AmbientWhy) ? "no reason recorded" : plan.AmbientWhy) + ")";
+                return text + ", preset ambient (" + (string.IsNullOrEmpty(plan.AmbientWhy) ? "no reason recorded" : plan.AmbientWhy) + "), " + sky;
 
             text += string.Format(f, ", EFT ambient (top {0:0.00}/{1:0.00}/{2:0.00}, convention {3:0.0} %, {4}, shape error {5:0.0} %{6}), ambient {7:0.00} of the sun{8}",
                 plan.AmbientTop.r, plan.AmbientTop.g, plan.AmbientTop.b, plan.ConventionError,
@@ -753,7 +791,7 @@ namespace QuestTree.UI
 
             if (Lighting != ModSettings.MapLightMode.Sun) text += " - not drawn over the shoulder, the preset ambient is";
 
-            return text;
+            return text + ", " + sky;
         }
 
         /// <summary>Stage 0: which cascade the camera's focus falls in, from the split and the range of the last render - a
