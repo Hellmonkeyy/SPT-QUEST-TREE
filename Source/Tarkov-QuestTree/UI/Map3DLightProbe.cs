@@ -129,7 +129,11 @@ namespace QuestTree.UI
 
         /// <summary>The spot's distances, largest first: the viewer wants the farthest that still shadows (a far spot's
         /// rays are near parallel, like the sun's).</summary>
-        private static readonly float[] SweepDistances = { 20000f, 5000f, 2000f };
+        private static readonly float[] SweepDistances = { SweepDistanceMax, 5000f, 2000f };
+
+        /// <summary>The farthest distance the sweep tries, metres - also the viewer's spot distance when there is no probe
+        /// result (Map3DView), so the two never disagree.</summary>
+        internal const float SweepDistanceMax = 20000f;
 
         /// <summary>shadowBias values, largest first: at a passing distance the largest pair that passes is kept - the
         /// most margin against acne that does not yet lift the shadow off the box.</summary>

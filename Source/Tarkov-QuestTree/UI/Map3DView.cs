@@ -35,11 +35,15 @@ namespace QuestTree.UI
     ///     inactive (see <see cref="ChoosePrivateLayer"/>) - a camera-mask test is the wrong test,
     ///     because EFT switches distant renderers off and a layer that looks free is then a statement
     ///     about where the player is standing;
-    ///   - the directional light is disabled and is switched on ONLY inside the render bracket, and off
-    ///     again in a finally. A per-light culling mask is honoured in forward rendering (the path this
-    ///     camera uses, for the oblique cut - see PrivateCameraPath) and is not a guarantee under the
-    ///     deferred path the game uses, so the mask is not the safeguard: the light being off outside
-    ///     those two statements is;
+    ///   - the one light - a far SPOT standing in for the sun (spot-sun stage C, 2026-09-29: a directional
+    ///     light's shadows go through the game's replacement screen-space collect, which drew full shadow
+    ///     on every receiver; a spot's are sampled per fragment in the ForwardAdd pass and never pass
+    ///     through it) - is disabled and is switched on ONLY inside the render bracket, and off again in a
+    ///     finally. Each render places it along the sun's direction at a distance fitted to what the view
+    ///     shows (FitView), so its near-parallel rays light and shadow like the sun's. A per-light culling
+    ///     mask is honoured in forward rendering (the path this camera uses, for the oblique cut - see
+    ///     PrivateCameraPath) and is not a guarantee under the deferred path the game uses, so the mask is
+    ///     not the safeguard: the light being off outside those two statements is;
     ///   - scene fog is switched off for the render and restored in the same finally, because our
     ///     geometry is hundreds of metres across and the menu's fog would swallow it;
     ///   - <see cref="OnDisable"/> stops rendering entirely, and <see cref="OnDestroy"/> destroys every
@@ -718,12 +722,11 @@ namespace QuestTree.UI
         private static readonly long MsaaPixelCap = 4_000_000;
 
         /// <summary>
-        /// HQ S1.3: the directional light casts shadows (None = the flat look, as before). The shadow settings are
-        /// QualitySettings, global and the player's: every one is saved before the render and put back after it
-        /// (RenderNow), so the player's preset - which may have shadows off entirely - is untouched outside the bracket.
-        /// The shadow distance is derived from the view each render: <see cref="ShadowDistanceOfView"/> times the
-        /// camera's distance, at least <see cref="ShadowDistanceMin"/> metres and never past the far clip - a close
-        /// dollhouse gets a sharp map and the whole-map view a coarse one. Stage 0: the mode is the setting's
+        /// HQ S1.3: the sun's light casts shadows (None = the flat look, as before). The shadow settings are
+        /// QualitySettings, global and the player's: the two the render sets (shadows, shadowDistance) are saved before
+        /// it and put back after it (RenderNow), so the player's preset - which may have shadows off entirely - is
+        /// untouched outside the bracket. Spot-sun stage C: the shadow distance reaches the farthest point of the fitted
+        /// view from the camera (FitView), so every receiver on screen is inside it. Stage 0: the mode is the setting's
         /// (ModSettings.MapShadows), Soft when the settings are not ready; a change rebuilds the viewport.
         /// </summary>
         private static LightShadows ShadowMode
@@ -741,22 +744,7 @@ namespace QuestTree.UI
             }
         }
 
-        /// <summary>Stage 0: whether the relief ground receives shadows (ModSettings.MapGroundReceivesShadows).</summary>
-        private static bool GroundReceivesShadows =>
-            !ModSettings.Ready || ModSettings.MapGroundReceivesShadows == null || ModSettings.MapGroundReceivesShadows.Value;
-
         private static readonly float ShadowStrength = 0.85f;   // stage 1: under the exposure budget a shadow keeps the ambient's third, as the game's do
-        /// <summary>Second 2026-09-28 test: two cascades over a range that grew with the zoom (2.5 km when zoomed out) spread
-        /// the shadow map so thin that no building cast a visible shadow at an ordinary zoom. Four cascades, and the range
-        /// capped at <see cref="ShadowDistanceMax"/>: the near cascades keep building-scale shadows sharp at any zoom, and
-        /// past the cap (a whole-map view) shadows fade, which is what a map that far away looks like anyway.</summary>
-        private static readonly int ShadowCascadeCount = 4;
-
-        private const float ShadowDistanceMax = 1500f;
-
-        /// <summary>The four cascades' split, Unity's default - set with the count, since the game's quality level holds
-        /// its own.</summary>
-        private static readonly Vector3 ShadowCascadeSplit = new Vector3(0.067f, 0.2f, 0.467f);
 
         /// <summary>Whether the last render drew shadows at all (a cut floor turns them off - ShadowsUnderCut), for the
         /// first-frame line.</summary>
@@ -794,263 +782,125 @@ namespace QuestTree.UI
             return text + ", " + sky;
         }
 
-        /// <summary>Stage 0: which cascade the camera's focus falls in, from the split and the range of the last render - a
-        /// dark region whose edge is a StableFit sphere is read against this.</summary>
-        private string FocusCascade()
-        {
-            var range = _shadowDistanceRendered;
-            if (!_shadowsDrawn || range <= 0f) return "outside any cascade (no shadows drawn)";
-
-            var edges = new[] { ShadowCascadeSplit.x * range, ShadowCascadeSplit.y * range, ShadowCascadeSplit.z * range, range };
-            for (var k = 0; k < edges.Length; k++)
-                if (_distance <= edges[k])
-                    return string.Format(CultureInfo.InvariantCulture, "in cascade {0} of {1} by split (edges {2:0}/{3:0}/{4:0}/{5:0} m; StableFit spheres reach further)",
-                        k + 1, ShadowCascadeCount, edges[0], edges[1], edges[2], edges[3]);
-
-            return string.Format(CultureInfo.InvariantCulture, "past the shadow range of {0:0} m", range);
-        }
-
         /// <summary>Stage 1: the exposure factor, the ground's colour factor and whether the fog was drawn, of the last render,
         /// for the first-frame line.</summary>
         private float _exposureRendered;
 
         private Color _groundColour = Color.white;
         private bool _fogDrawn;
-        private static readonly ShadowResolution ShadowMapResolution = ShadowResolution.VeryHigh;
 
         /// <summary>
-        /// The 2026-09-28 in-game test: with the screen-space shadow collect on, everything inside the shadow range was
-        /// dark, walls facing the sun included; with the collect off the ground was lit but the buildings' sun-facing walls
-        /// were still black. The ground casts nothing (it is drawn with ShadowCastingMode.Off), so it cannot shadow itself;
-        /// the buildings do cast, and a caster that reads as shadowed on its own lit face is shadow acne - the shadow map
-        /// holding the surface's own depth, compared against itself. The light's bias was never set, so Unity's defaults
-        /// applied (bias 0.05, normal bias 0.4), which are sized for a first-person shadow range of tens of metres. Here the
-        /// cascades reach up to 1,500 m on a VeryHigh map (4096, a 2048 tile a cascade with four): the far cascade is about
-        /// 0.7 m a texel, and a wall lit at a grazing angle moves by about that much in depth across a single texel, far
-        /// past a 0.05 offset. Earlier builds had the same acne but read it as dull under a 0.45 strength and a large
-        /// ambient; the exposure budget and the 0.85 strength made it black.
+        /// The light's bias and normal bias when the light probe did not measure them (Map3DLightProbe.Result) - then the
+        /// spot draws no shadows (<see cref="_spotShadowsWhy"/>), so these only fill the light and are never drawn with.
         ///
-        /// Units: in the built-in pipeline a directional light's bias and normal bias are both scaled by the cascade's
-        /// texel size (the shadow caster pass reads them from unity_LightShadowBias, which Unity fills per cascade), so
-        /// one value serves every cascade and the offset in metres grows with the cascade - small near the camera, where
-        /// a building's base is looked at closely, and larger far away, where the texels are large. The bias pushes the
-        /// caster's depth away from the light; the normal bias moves the caster inwards along its normal, scaled by the
-        /// sine of the angle between the normal and the light (UnityClipSpaceShadowCasterPos in UnityCG.cginc), so it
-        /// acts on walls lit at grazing angles - the acne case - and hardly at all on a roof facing the sun.
+        /// Where the values come from instead. The 2026-09-28 in-game test drew acne (sun-facing walls black) with the
+        /// directional light's defaults, because a directional bias is scaled by the cascade's texel size and the
+        /// cascades reached 1,500 m. A spot's bias is not a cascade's: the built-in pipeline scales a spot light's
+        /// shadowBias and shadowNormalBias with its own shadow map's texel, and how that behaves for a spot kilometres
+        /// from the map was unknown. So nothing here is derived: the probe renders the production setup (the far spot,
+        /// ForcePixel, the white cookie, the near plane just short of the lit area, range ten times the distance) and
+        /// sweeps bias {0.05, 0.01, 0.002} and normal bias {0.4, 0.1}, keeping the largest pair that both shadows a 20 m
+        /// box and leaves a quad tilted 60 degrees to the light free of acne. The viewer takes that pair as it is.
         ///
-        /// Numbers: soft shadows filter over the collect pass's PCF tent, about 2.5 texels' radius on desktop, with a
-        /// receiver-plane bias of its own, so a grazing wall must clear its own depth over a footprint of texels, not one.
-        /// A normal bias of 1.5 texels covers most of it (about 0.1 m in the nearest cascade, about 1 m in the farthest,
-        /// where a building is a few pixels on screen) - an approximation, to be judged in game. The constant bias
-        /// then only has to cover depth quantisation and the flat-lit faces the normal bias does not move: 0.5 texels,
-        /// about 0.03 m near and 0.35 m far, below what reads as a shadow lifting off a building's base at either zoom.
-        /// Values past about 1 for the bias or 2 for the normal bias begin to detach shadows from bases and to thin
-        /// narrow casters (posts, railings) out of the far cascades - raise these only if acne remains after a
-        /// play-test, lower them if shadows float.
+        /// Caveat: the probe measured at its own distance (Result.MaxDistanceOk) over a 100 m radius; the viewer's distance
+        /// is fitted to the view and never past that one, but its radius and near plane are the view's. If acne or
+        /// floating shadows show in a play-test, the probe's sweep is what to widen, not these.
         ///
-        /// The light's shadowNearPlane is left at Unity's default: in the built-in pipeline it applies to point and spot
-        /// lights only; a directional light's shadow frustum is fitted to the casters' bounds per cascade, so the value
-        /// is never read for it.
-        ///
-        /// Rollback: 0.05f and 0.4f are Unity's defaults, the values every build before this one drew with.
+        /// Rollback: none needed - with no probe result there are no shadows. 0.05f and 0.4f are Unity's defaults.
         /// </summary>
-        private static readonly float ShadowBias = 0.5f;
+        private static readonly float ShadowBias = 0.05f;
 
-        /// <summary>The normal bias, in cascade texels - see <see cref="ShadowBias"/> for the finding and the reasoning.
-        /// Rollback: 0.4f, Unity's default.</summary>
-        private static readonly float ShadowNormalBias = 1.5f;
-        private static readonly float ShadowDistanceOfView = 2.5f;
-        private static readonly float ShadowDistanceMin = 100f;
+        /// <summary>The normal bias when the probe did not measure one - see <see cref="ShadowBias"/>. Unity's default.</summary>
+        private static readonly float ShadowNormalBias = 0.4f;
+
+        /// <summary>Spot-sun stage C: the spot's distance from the fitted view's centre, as a multiple of the view's radius
+        /// (FitView), clamped to <see cref="SpotDistanceMin"/> and the probe's largest passing distance. Fifteen radii puts
+        /// the rays at the view's edge within 4 degrees of parallel - near enough to the sun's that the buildings' shadows
+        /// lie along the picture's baked ones - while the shadow map's depth span (near plane D minus the radius) stays
+        /// two radii deep.</summary>
+        private const float SpotDistanceOfRadius = 15f;
+
+        /// <summary>The spot's range as a multiple of its distance: the map sits at a tenth of the range, where Unity's spot
+        /// attenuation is flat - the ratio the probe measured the attenuation at.</summary>
+        private const float SpotRangeOfDistance = 10f;
+
+        /// <summary>The cone's full angle over the one that exactly covers the fitted radius: a margin so the view's edge is
+        /// not on the cone's edge.</summary>
+        private const float SpotConeMargin = 1.05f;
+
+        /// <summary>The smallest share of the spot's distance its shadow near plane may be: the spot is moved out until the
+        /// near plane is at least this share of the distance (when the probe's maximum allows). The probe proved shadows at
+        /// near / range of about 0.1 (near D - 150 over range 10 D); a near of 0.1 D over range 10 D is near / range 0.01,
+        /// which keeps the receivers' depth precision within 10x of what was proved - a near of 0.1 m would not.</summary>
+        private const float SpotNearShareOfDistance = 0.1f;
+
+        /// <summary>The closest the spot comes, metres: a view zoomed to 30 m still gets near-parallel rays.</summary>
+        private const float SpotDistanceMin = 500f;
+
+        /// <summary>The farthest the spot goes when there is no probe result (then it casts no shadows): the probe's own
+        /// farthest distance.</summary>
+        private const float SpotDistanceNoProbe = Map3DLightProbe.SweepDistanceMax;
+
+        /// <summary>The spot's attenuation divisor when there is no probe result: Unity's built-in spot falloff at a tenth
+        /// of the range (<see cref="SpotRangeOfDistance"/>) is about 0.8, so the light is raised by 1 / 0.8.</summary>
+        private const float AttenuationNoProbe = 1.25f;
+
+        /// <summary>The smallest fitted radius, metres, so a degenerate fit still gives a cone.</summary>
+        private const float FitRadiusMin = 1f;
+
+        /// <summary>The shadow distance over the farthest fitted point from the camera: a margin so the last receivers on
+        /// screen are not in the shadow fade.</summary>
+        private const float ShadowDistanceMargin = 1.05f;
+
+        /// <summary>The white 4x4 clamp cookie the probe proved: the default spot cookie is a round vignette, which would
+        /// darken the fitted view's corners. Made once per view, destroyed with <see cref="_lightGo"/>.</summary>
+        private Texture2D _lightCookie;
+
+        /// <summary>The probe's result as this view took it at build: null when the probe did not run or this view's
+        /// shader is not Standard (the only one the probe vouches for).</summary>
+        private Map3DLightProbe.Result _probe;
+
+        /// <summary>Why the spot draws no shadows whatever the setting says - "none (probe failed: why)", "none (probe not
+        /// run)" or "none (legacy shader)" - null when the probe passed. Kept for the first-frame line.</summary>
+        private string _spotShadowsWhy;
+
+        /// <summary>The last render's spot: its distance from the fitted centre and the fitted radius, metres - for the
+        /// first-frame line.</summary>
+        private float _spotDistance;
+
+        /// <summary>The last render's fitted radius, metres (FitView) - for the first-frame line.</summary>
+        private float _spotRadius;
+
+        /// <summary>The last render's shadow near plane over its range (the shadow map's far plane), as set - for the
+        /// first-frame line, so the depth precision the shadow map had can be judged.</summary>
+        private float _spotNearFarRatio;
+
+        /// <summary>The last render's QualitySettings.shadowDistance, 0 when it drew no shadows - for the first-frame line.</summary>
+        private float _spotShadowDistance;
+
+        /// <summary>The union of every drawn floor's ground and building mesh bounds (world space: the meshes are drawn
+        /// with the identity matrix). Set by <see cref="Finish"/>, cleared by <see cref="BeginBuild"/>.</summary>
+        private Bounds _mapBounds;
+
+        /// <summary>Whether <see cref="_mapBounds"/> holds at least one mesh's bounds; false until the build finishes or
+        /// when it has no meshes, and then FitView falls back to the camera's focus.</summary>
+        private bool _mapBoundsSet;
+
+        /// <summary>The viewport points <see cref="FitView"/> casts rays through: the four corners and the centre.</summary>
+        private static readonly Vector3[] FitViewportPoints =
+        {
+            new Vector3(0f, 0f, 0f), new Vector3(1f, 0f, 0f), new Vector3(0f, 1f, 0f), new Vector3(1f, 1f, 0f),
+            new Vector3(0.5f, 0.5f, 0f),
+        };
 
         /// <summary>
-        /// HQ S1.3: the two fallbacks for the untested case - Forward's screen-space shadow collect pass under the
-        /// oblique near plane of the floor cut (ApplyCut). If shadows sit right on the top floor but slide with the
-        /// camera once a lower floor is cut: first try <see cref="ScreenSpaceShadowsOff"/> (see its own comment for
-        /// what Disabled really does on PC - it is not a per-fragment cascade lookup); if that
-        /// draws no shadows at all, set <see cref="ShadowsUnderCut"/> false - shadows stay on for uncut frames and go
-        /// off for the cut ones. S1 review: OFF by default for a second reason - the cut is only the camera's near
-        /// plane, so the geometry it removes from view (upper storeys, roofs) would still cast onto the exposed floor;
-        /// a cut frame is drawn without shadows, an uncut one (the top floor, a one-band map) with them.
+        /// HQ S1.3: whether a cut frame (the oblique near plane of the floor cut, ApplyCut) draws shadows. Off: the cut is
+        /// only the camera's near plane, so the geometry it removes from view (upper storeys, roofs) would still cast onto
+        /// the exposed floor; a cut frame is drawn without shadows, an uncut one (the top floor, a one-band map) with them.
+        /// Spot-sun stage C keeps it off for the same reason: the spot's shadow map is rendered from the light, which
+        /// never sees the cut.
         /// </summary>
         private static readonly bool ShadowsUnderCut = false;
-
-        /// <summary>
-        /// Stage 0: the setting's (ModSettings.MapScreenSpaceShadows, on by default = this false). When true, the
-        /// render sets the screen-space shadow collect to Disabled, and this wins over <see cref="ForceBuiltinCollect"/>.
-        ///
-        /// What Disabled does on PC (corrected after the 2026-09-28 test): it does NOT make Standard sample the cascade
-        /// map per fragment. On desktop D3D11 the built-in pipeline's directional-light SHADOWS_SCREEN variant is
-        /// screen-space only - a receiver reads the collected screen-space mask (_ShadowMapTexture) at its screen
-        /// position. With the collect disabled that mask is never written for our camera, so receivers read whatever
-        /// the texture holds (in the test: the buildings, the receivers, stayed dark), while the relief ground, which
-        /// receives no shadows, came out lit. It is a diagnostic switch, not a working shadow path.
-        /// </summary>
-        private static bool ScreenSpaceShadowsOff =>
-            ModSettings.Ready && ModSettings.MapScreenSpaceShadows != null && !ModSettings.MapScreenSpaceShadows.Value;
-
-        /// <summary>
-        /// Test 2026-09-28: with the collect in its normal state EVERY surface inside the shadow distance rendered as
-        /// shadowed, the relief ground too (which receives none), the dark edge following the shadow distance. The
-        /// reading: EFT installs a custom screen-space shadow collect (its DistantShadow system - the GlobalShadow*
-        /// textures and matrices, the ENABLE_DISTANT_SHADOW / DISTANT_SHADOWS_BLEND keywords) that reads globals the
-        /// game's main camera sets through its own command buffers and our private camera never sets, so it collects
-        /// about zero everywhere. When true, our render sets the collect to Unity's built-in shader, which needs only
-        /// the cascade atlas and the camera's depth texture - both of which Unity makes for our camera itself - and puts
-        /// the previous mode back in the finally. <see cref="ScreenSpaceShadowsOff"/> wins when both are on.
-        ///
-        /// Uncertain: if the built-in collect shader was stripped from the game's build, UseBuiltin would draw no
-        /// directional shadows at all. So the view looks it up once (Shader.Find of Unity's own name for it,
-        /// "Hidden/Internal-ScreenSpaceShadows") and, when it is absent or unsupported, degrades: the mode is left as the
-        /// game set it and the one-off line says the fix is unavailable. Unsupported is treated as absent because an
-        /// unsupported collect draws nothing either. The first-frame line prints the lookup, the mode found and the custom
-        /// shader's name, so the test can tell the cases apart.
-        ///
-        /// Rollback: false - the collect is left as the game set it (the build before this one), and only the
-        /// Disabled switch touches it.
-        /// </summary>
-        private static readonly bool ForceBuiltinCollect = true;
-
-        /// <summary>Unity's name for its built-in screen-space shadow collect shader.</summary>
-        private const string BuiltinCollectShaderName = "Hidden/Internal-ScreenSpaceShadows";
-
-        /// <summary>
-        /// When true, our render globally disables every one of <see cref="DistantShadowKeywords"/> that was on, and
-        /// re-enables exactly those in the finally. DistantShadow turns them on in a command buffer at the main camera's
-        /// BeforeGBuffer and off again at its AfterEverything, so between the game's cameras they should already be off;
-        /// the first-frame line records which were on. If one is on while we render, any shader compiled with it - the
-        /// custom collect first, and PRECOMPUTE_MASK most of all, which points a shader at the game's own precomputed
-        /// screen mask (PreComputedGlobalShadow, the main camera's) - takes the distant-shadow path, whose inputs are
-        /// the main camera's.
-        ///
-        /// Rollback: false - the keywords are left as found (the build before this one).
-        /// </summary>
-        private static readonly bool DistantShadowKeywordsOff = true;
-
-        /// <summary>
-        /// The set DistantShadow.DisableKeywords turns off after the main camera (DistantShadow.cs, the strings at
-        /// lines 282-306): the game's own idea of "off between cameras", so disabling the same set cannot put the
-        /// renderer in a state the game never uses. USE_GAUSS_DISTRIBUTION and DISTANT_SHADOW_FIX_GLOW are not in that
-        /// method (the first is a filter choice the game leaves set, the second is scoped to the mask blur) and are
-        /// left alone.
-        /// </summary>
-        private static readonly string[] DistantShadowKeywords =
-        {
-            "DISTANT_SHADOWS_BLEND", "ADAPTIVE_DEPTH_BIAS", "ENABLE_DISTANT_SHADOW", "ENABLE_DISTANT_SHADOW_PCF",
-            "DISTANT_SHADOW_MULTIPROJECTION", "ENABLE_PCF_SHIFT", "DISABLE_WIND_EFT", "PRECOMPUTE_MASK",
-            "ENABLE_PARALLAX", "RENDER_FOR_SCOPE", "ENABLE_BLUR_MASK", "REDUCE_SAMPLES",
-        };
-
-        /// <summary>The screen-space collect's mode as the last render found it, before the bracket changed it - for the
-        /// first-frame line.</summary>
-        private BuiltinShaderMode _collectModeFound = BuiltinShaderMode.UseBuiltin;
-
-        /// <summary>The name of the custom collect shader assigned when the view first rendered, "-" for none. Read once
-        /// per view, not per render: the name getter allocates a string, and EFT runs the raid with the GC off.</summary>
-        private string _collectShaderFound;
-
-        /// <summary>Whether the built-in collect shader is in the build, looked up once per view: "absent", "present" or
-        /// "unsupported" (null until the lookup).</summary>
-        private string _builtinCollect;
-
-        /// <summary>Which of <see cref="DistantShadowKeywords"/> were globally on when the last render began - for the
-        /// first-frame line (reused, so a render allocates nothing).</summary>
-        private readonly bool[] _distantShadowFound = new bool[DistantShadowKeywords.Length];
-
-        /// <summary>Which of them this render turned off, for the finally to turn back on (reused as above).</summary>
-        private readonly bool[] _distantShadowOffSet = new bool[DistantShadowKeywords.Length];
-
-        /// <summary>The one line naming the game's collect has been written for this view.</summary>
-        private bool _collectLogged;
-
-        /// <summary>
-        /// Test 2026-09-29: the game's collect is a custom shader ("Hidden/Internal-ScreenSpaceShadowsEFT") and Unity's
-        /// built-in one is absent from the build, so <see cref="ForceBuiltinCollect"/> cannot act. With the game's collect
-        /// in place every surface inside the shadow range still rendered as shadowed with all twelve
-        /// <see cref="DistantShadowKeywords"/> off ("0/12 on"). The reading: the EFT collect samples DistantShadow's
-        /// texture globals whatever the keywords say, and on our camera those hold the main camera's stale textures (or
-        /// none, which Unity binds as black) - and a black or stale mask reads as shadowed.
-        ///
-        /// When true, and only when the game's collect is what our render will use (the mode is UseCustom, or a custom
-        /// shader is assigned while the built-in one is absent), not disabled by the screen-space setting and not
-        /// replaced by Unity's built-in one, the render saves each of <see cref="DistantShadowTextureGlobals"/> with
-        /// Shader.GetGlobalTexture and sets it to Texture2D.whiteTexture - 1 is "lit" in these masks (DistantShadow itself
-        /// clears its hi-res mask to white before drawing, DistantShadow.cs lines 951/965/977) - and the finally puts each
-        /// saved value back, a null one as null. Only while shadows are drawn: without them no collect runs.
-        ///
-        /// Caveat on three of them: GlobalShadow, GlobalShadowSampled and GlobalShadowSampled2 are DistantShadow's
-        /// shadow DEPTH maps (_depthRTs, RenderTextureFormat.Depth, line 1168), not lit masks. White there is depth 1.0,
-        /// which on D3D11's reversed Z is the near plane, so a depth comparison against it could read as occluded. They
-        /// are in the set because the test asked for every mask-like texture DistantShadow sets; if this build changes
-        /// nothing or darkens further, those three are the first to take back out.
-        ///
-        /// Not touched: _LowResDepth - a downscaled copy of the camera's depth (DownscaleDepthMaterial's target), not a
-        /// shadow term. There is no neutral depth: white would place every pixel at one plane and move the collect's
-        /// depth-aware upsample rather than neutralise it, and with ShadowMaskLowRes white the upsample of white is
-        /// white whatever the depth weights. Nor the matrices (GlobalShadowWorldToScreen/WorldToView/Projection and their
-        /// "2" versions) and vectors (GlobalShadowSettings, GlobalShadowProj, GlobalShadowTexelSize,
-        /// GlobalShadowL0/L1/L0Old, DepthTexture_TexelSize, DebugParams): they are the next candidates if neutral masks
-        /// change nothing.
-        ///
-        /// Rollback: false - the globals are left as found (the build before this one).
-        /// </summary>
-        private static readonly bool NeutraliseDistantShadowGlobals = true;
-
-        /// <summary>
-        /// The texture globals DistantShadow sets that hold a shadow term, where white means lit (DistantShadow.cs: the
-        /// IDs at lines 78, 88, 114, 116, 120 and 310; the writes at 818-819/829, 865-866/894, 939, 945, 990).
-        /// </summary>
-        private static readonly string[] DistantShadowTextureGlobals =
-        {
-            // the three MASKS only (white = lit): GlobalShadow, GlobalShadowSampled and GlobalShadowSampled2 are the
-            // distant-shadow DEPTH maps, where white is the near plane on reversed Z and could read as occluded
-            "PreComputedGlobalShadow", "ShadowMaskLowRes", "_BlurMask",
-        };
-
-        /// <summary>Their property IDs, hashed once rather than per render.</summary>
-        private static readonly int[] DistantShadowTextureIds = Array.ConvertAll(DistantShadowTextureGlobals, Shader.PropertyToID);
-
-        /// <summary>Each global as the last render found it, for the finally to put back (reused, so a render allocates
-        /// nothing; cleared after the restore so the view holds no reference to the game's textures).</summary>
-        private readonly Texture[] _distantGlobalWas = new Texture[DistantShadowTextureGlobals.Length];
-
-        /// <summary>Which of them this render replaced, for the finally (reused as above).</summary>
-        private readonly bool[] _distantGlobalSet = new bool[DistantShadowTextureGlobals.Length];
-
-        /// <summary>Which of them held a texture when found - for the first-frame line (reused as above).</summary>
-        private readonly bool[] _distantGlobalFound = new bool[DistantShadowTextureGlobals.Length];
-
-        /// <summary>Why the last render did not neutralise them, null when it did - for the first-frame line.</summary>
-        private string _distantGlobalsSkipped = "not rendered yet";
-
-        /// <summary>The globals clause of the first-frame line: which held a texture and were replaced, or why none was.</summary>
-        private string DistantGlobalsText()
-        {
-            if (_distantGlobalsSkipped != null) return "distant-shadow globals not neutralised (" + _distantGlobalsSkipped + ")";
-            var found = new List<string>();
-            var failed = 0;
-            for (var i = 0; i < DistantShadowTextureGlobals.Length; i++)
-                if (_distantGlobalFound[i]) found.Add(DistantShadowTextureGlobals[i]);
-            for (var i = 0; i < DistantShadowTextureGlobals.Length; i++)
-                if (!_distantGlobalReplaced[i]) failed++;
-            return string.Format(CultureInfo.InvariantCulture, "distant-shadow globals neutralised: {0} of {1} were set ({2}){3}",
-                found.Count, DistantShadowTextureGlobals.Length, found.Count == 0 ? "none" : string.Join(", ", found),
-                failed == 0 ? "" : string.Format(CultureInfo.InvariantCulture, ", {0} write(s) failed", failed));
-        }
-
-        /// <summary>Which of them the last render actually wrote white - kept past the finally (which clears
-        /// <see cref="_distantGlobalSet"/>) for the first-frame line.</summary>
-        private readonly bool[] _distantGlobalReplaced = new bool[DistantShadowTextureGlobals.Length];
-
-        /// <summary>The keywords found on, as "n/12 on: A, B" - built for the first-frame line only.</summary>
-        private string DistantShadowText()
-        {
-            var on = new List<string>();
-            for (var i = 0; i < DistantShadowKeywords.Length; i++)
-                if (_distantShadowFound[i]) on.Add(DistantShadowKeywords[i]);
-            return on.Count == 0
-                ? string.Format(CultureInfo.InvariantCulture, "0/{0} on", DistantShadowKeywords.Length)
-                : string.Format(CultureInfo.InvariantCulture, "{0}/{1} on: {2}", on.Count, DistantShadowKeywords.Length, string.Join(", ", on));
-        }
 
         /// <summary>
         /// HQ S1.4: hemisphere ambient for the render - sky from above, ground bounce from below, an equator between
@@ -1796,19 +1646,45 @@ namespace QuestTree.UI
             // probe's own camera before this view's first render (and before its light is made, which stage C sets from
             // the result). Only the Standard shader has either variant; the shader is the one BeginBuild will resolve.
             var probeShader = ResolveShader(out _);
-            if (probeShader != null && probeShader.name.StartsWith("Standard", StringComparison.Ordinal))
-                Map3DLightProbe.Run(_drawLayer, probeShader);
+            var standard = probeShader != null && probeShader.name.StartsWith("Standard", StringComparison.Ordinal);
+            if (standard) Map3DLightProbe.Run(_drawLayer, probeShader);
 
+            // Stage C: the probe's verdict is taken only for the Standard shader it measured - the result is cached per
+            // session, and a later view on the legacy fallback must not inherit a pass that shader cannot honour.
+            _probe = standard ? Map3DLightProbe.Last : null;
+            _spotShadowsWhy = !standard ? "none (legacy shader)"
+                : _probe == null ? "none (probe not run)"
+                : !_probe.SpotShadows ? "none (probe failed: " + (_probe.Why ?? "no reason recorded") + ")"
+                : null;
+
+            // The white clamp cookie the probe proved (the default one vignettes the cone). The built-in spot cookie is
+            // read from the alpha channel, so the alpha is white too.
+            _lightCookie = new Texture2D(4, 4, TextureFormat.RGBA32, false)
+            {
+                name = "QuestTreeMap3DLight-cookie",
+                wrapMode = TextureWrapMode.Clamp,
+                filterMode = FilterMode.Bilinear,
+            };
+            var white = new Color32[16];
+            for (var i = 0; i < white.Length; i++) white[i] = new Color32(255, 255, 255, 255);
+            _lightCookie.SetPixels32(white);
+            _lightCookie.Apply(false);
+
+            // The one light: a SPOT, set up as the probe measured it (see ShadowBias); RenderNow places and aims it each
+            // render. ForcePixel, so it is never demoted to a vertex light whatever the player's pixel light count.
             _lightGo = new GameObject("QuestTreeMap3DLight", typeof(Light));
             _lightGo.layer = _drawLayer;
             _light = _lightGo.GetComponent<Light>();
-            _light.type = LightType.Directional;
+            _light.type = LightType.Spot;
+            _light.renderMode = LightRenderMode.ForcePixel;
+            _light.cookie = _lightCookie;
             _light.intensity = SunIntensity;
             _light.color = SunColour;
-            _light.shadows = ShadowMode;
+            _light.shadows = _spotShadowsWhy == null ? ShadowMode : LightShadows.None;
             _light.shadowStrength = ShadowStrength;
-            _light.shadowBias = ShadowBias;               // not Unity's 0.05: the defaults drew acne at this range (ShadowBias)
-            _light.shadowNormalBias = ShadowNormalBias;   // not Unity's 0.4, as above
+            _light.shadowCustomResolution = _probe != null ? _probe.ResolutionEffective : Map3DLightProbe.SpotShadowMapMax;
+            _light.shadowBias = _spotShadowsWhy == null ? _probe.Bias : ShadowBias;
+            _light.shadowNormalBias = _spotShadowsWhy == null ? _probe.NormalBias : ShadowNormalBias;
             _light.cullingMask = _privateMask;
             _light.enabled = false;
             _lightGo.transform.rotation = Quaternion.Euler(SunPitch, SunYaw, 0f);
@@ -2295,6 +2171,10 @@ namespace QuestTree.UI
             _built = true;
             ResetPipeline();
 
+            // stage C: the spot is fitted to this build's meshes, never a previous build's
+            _mapBounds = default(Bounds);
+            _mapBoundsSet = false;
+
             _buildClock.Reset();
             _buildClock.Start();
 
@@ -2761,6 +2641,7 @@ namespace QuestTree.UI
             var wallsOutside = 0L;
 
             GroundAboveCut(out var groundAbove, out var groundMeasured);
+            ComputeMapBounds();
 
             foreach (var floor in _floors)
             {
@@ -3993,7 +3874,7 @@ namespace QuestTree.UI
                         var mesh = meshes[i];
                         if (mesh == null) continue;
 
-                        if (ground) Submit(mesh, material, castShadows: false, receiveShadows: GroundReceivesShadows);
+                        if (ground) Submit(mesh, material, castShadows: false);
                         else Submit(mesh, material);
                     }
                 }
@@ -6726,34 +6607,39 @@ namespace QuestTree.UI
                     // this size costs to look at, frame after frame - the number that says whether it holds 60.
                     _measureFirstFrame = false;
 
+                    // Stage C: the spot's cone, range, near plane, map size and biases are read BACK from the light, not
+                    // taken from the values computed, so the line proves the setters took them (the near plane's
+                    // inspector range is 0.1-10; the probe read it back at production distances too).
                     Plugin.LogSource?.LogInfo(string.Format(
                         CultureInfo.InvariantCulture,
-                        "QuestTree: 3D map for {0} - first frame drawn in {1:0.0} ms, render {2:0.0} ms, {3} draw call(s), cut {4}, " +
-                        "msaa {5}x, shadows {6} ({7} cascade(s), {8:0} m, bias {26:0.00} / normal {27:0.00}), ambient {9}, sky {10}, light {11}, pixel lights {12}, " +
-                        "colour space {13}, exposure x{14:0.00} (white in the sun under {15:0.00}, ambient {17:0.00} of the sun), fog {18}; ground {16}, sides {34}; " +
-                        "shadow switches: {19}, ground receives {20}, screen-space {21}, collect {28} ({29}, built-in {30}), {32}, distant-shadow keywords {31};the focus at {22:0} m is {23}; source {24}; post-processing {25}; probe {33}.",
+                        "QuestTree: 3D map for {0} - first frame drawn in {1:0.0} ms, render {2:0.0} ms, {3} draw call(s), cut {4}, msaa {5}x, " +
+                        "light {6} spot at {7:0} m, cone {8:0.0} deg over r {9:0} m, range {10:0} m, near {11:0} m (read back, near/far {31:0.0000}), map {12} px, " +
+                        "bias {13:0.000}/{14:0.00}, atten x{15:0.00}; shadows {16} to {17:0} m; ground {18}, sides {19}; ambient {20}, sky {21}, " +
+                        "pixel lights {22}, colour space {23}, exposure x{24:0.00} (white in the sun under {25:0.00}, ambient {26:0.00} of the sun), " +
+                        "fog {27}; source {28}; post-processing {29}; probe {30}.",
                         _mapKey, clock.Elapsed.TotalMilliseconds, _renderMs, _drawCalls, CutText(), _rtSamples,
-                        _shadowsDrawn ? ShadowMode.ToString() : ShadowMode == LightShadows.None ? "None" : "off for the cut floor",
-                        _shadowsDrawn ? ShadowCascadeCount : 0, _shadowsDrawn ? _shadowDistanceRendered : 0f,
-                        DrawsProbe(Plan, Lighting == ModSettings.MapLightMode.Sun) ? "EFT probe" : AmbientTrilight ? "trilight" : "scene",
-                        SkyDome && !_skyBroken ? "dome" : "backdrop",
                         Lighting == ModSettings.MapLightMode.Sun
                             ? string.Format(CultureInfo.InvariantCulture, "sun ({0:0} up, azimuth {1:0}, colour {2:0.00}/{3:0.00}/{4:0.00})",
                                 Plan.ElevationDegrees, Mathf.Atan2(Plan.SunDirection.x, Plan.SunDirection.z) * Mathf.Rad2Deg,
                                 Plan.SunColour.r, Plan.SunColour.g, Plan.SunColour.b)
                             : string.Format(CultureInfo.InvariantCulture, "over the shoulder ({0:0} deg off the view, {1:0} down)", LightYawOffset, LightPitch),
-                        QualitySettings.pixelLightCount, QualitySettings.activeColorSpace, _exposureRendered, WhiteInSun,
+                        _spotDistance,
+                        _light != null ? _light.spotAngle : -1f, _spotRadius,
+                        _light != null ? _light.range : -1f, _light != null ? _light.shadowNearPlane : -1f,
+                        _light != null ? _light.shadowCustomResolution : -1,
+                        _light != null ? _light.shadowBias : -1f, _light != null ? _light.shadowNormalBias : -1f,
+                        _probe != null ? _probe.Attenuation : AttenuationNoProbe,
+                        ShadowsText(), _spotShadowDistance,
                         GroundText(),   // stage B: "emission x{e}", or "lit fallback (why) r/g/b" - the division colour only where it is used
+                        SidesText(),
+                        DrawsProbe(Plan, Lighting == ModSettings.MapLightMode.Sun) ? "EFT probe" : AmbientTrilight ? "trilight" : "scene",
+                        SkyDome && !_skyBroken ? "dome" : "backdrop",
+                        QualitySettings.pixelLightCount, QualitySettings.activeColorSpace, _exposureRendered, WhiteInSun,
                         // the ambient the view draws over the sun, as LightSource() reports it - not the preset's constant
                         AmbientTopFor(Plan, Lighting == ModSettings.MapLightMode.Sun).maxColorComponent /
                             Mathf.Max(0.0001f, Plan.SunIntensity * Plan.SunColour.maxColorComponent),
                         !AerialFog ? "off" : _fogDrawn ? "aerial" : "off for the cut floor",
-                        ShadowMode, GroundReceivesShadows ? "yes" : "no", ScreenSpaceShadowsOff ? "off" : "on",
-                        _distance, FocusCascade(), LightSource(), Map3DPostProcess.Describe(),
-                        _light != null ? _light.shadowBias : -1f, _light != null ? _light.shadowNormalBias : -1f,   // read back from the light, not the constants, so the line proves they took
-                        // the collect and the keywords as found before the bracket changed them
-                        _collectModeFound, _collectShaderFound ?? "-", _builtinCollect ?? "-", DistantShadowText(),
-                        DistantGlobalsText(), Map3DLightProbe.Describe(), SidesText()));
+                        LightSource(), Map3DPostProcess.Describe(), Map3DLightProbe.Describe(), _spotNearFarRatio));
                 }
 
                 // Spot-sun stage B's proof, after the real frame is in the view's texture (the check renders into a
@@ -6771,22 +6657,149 @@ namespace QuestTree.UI
             }
         }
 
+        /// <summary>
+        /// Stage C: how far the map reaches from <paramref name="centre"/> towards the light - the largest projection of
+        /// the eight corners of <see cref="_mapBounds"/> on <paramref name="dir"/>, at least <paramref name="radius"/> - so
+        /// the shadow near plane is short of every caster, not just the fitted view's. The radius when there are no bounds.
+        /// </summary>
+        private float TowardsLight(Vector3 centre, Vector3 dir, float radius)
+        {
+            if (!_mapBoundsSet) return radius;
+
+            var min = _mapBounds.min;
+            var max = _mapBounds.max;
+            var reach = radius;
+            for (var k = 0; k < 8; k++)
+            {
+                var corner = new Vector3((k & 1) == 0 ? min.x : max.x, (k & 2) == 0 ? min.y : max.y, (k & 4) == 0 ? min.z : max.z);
+                reach = Mathf.Max(reach, Vector3.Dot(corner - centre, dir));
+            }
+
+            return reach;
+        }
+
+        /// <summary>Stage C: the first-frame line's shadows clause for the last render - the mode drawn, or why none was:
+        /// the setting, the cut floor (ShadowsUnderCut), or the spot's own reason (<see cref="_spotShadowsWhy"/>).</summary>
+        private string ShadowsText()
+        {
+            if (_shadowsDrawn) return ShadowMode.ToString();
+            if (ShadowMode == LightShadows.None) return "off (setting)";
+            if (_spotShadowsWhy != null) return _spotShadowsWhy;
+            return "off for the cut floor";
+        }
+
         /// <summary>One DrawMesh for our camera, counted. Every mesh this view draws goes through here, so the
         /// first-frame line's draw-call count is the real one.</summary>
         /// <param name="mesh">The mesh.</param>
         /// <param name="material">Its material.</param>
         /// <param name="castShadows">Whether it casts shadows (it always receives them). The ground does not (review
         /// 2026-09-28): a bumpy height mesh at a shadow-map pixel of 0.3-0.6 m self-shadows into speckle, and its picture
-        /// already carries the game's own shadows from above - the near ground was being shadowed twice while the ground
-        /// past the shadow range was not, the near-dull, far-bright split of the day's test.</param>
-        /// <param name="receiveShadows">Whether it receives shadows (stage 0: the ground's is a setting).</param>
-        private void Submit(Mesh mesh, Material material, bool castShadows = true, bool receiveShadows = true)
+        /// already carries the game's own shadows from above. Stage C: receiving costs the emission ground nothing (its
+        /// albedo is black, so the spot's pass adds nothing to shadow); only the lit fallback's ground is shadowed.</param>
+        private void Submit(Mesh mesh, Material material, bool castShadows = true)
         {
-            if (castShadows && receiveShadows) Graphics.DrawMesh(mesh, Matrix4x4.identity, material, _drawLayer, _camera);
+            if (castShadows) Graphics.DrawMesh(mesh, Matrix4x4.identity, material, _drawLayer, _camera);
             else
-                Graphics.DrawMesh(mesh, Matrix4x4.identity, material, _drawLayer, _camera, 0, null,
-                    castShadows ? ShadowCastingMode.On : ShadowCastingMode.Off, receiveShadows);
+                Graphics.DrawMesh(mesh, Matrix4x4.identity, material, _drawLayer, _camera, 0, null, ShadowCastingMode.Off, true);
             _drawCalls++;
+        }
+
+        /// <summary>
+        /// Spot-sun stage C: the union of every drawn floor's ground and building mesh bounds, for <see cref="FitView"/>.
+        /// Once per build, when it finishes (Finish); Mesh.bounds is kept by Unity, so this is a walk over the lists, not
+        /// the vertices. The walls are not in it: they are built later (StartWalls) and stand under the roofs, which are.
+        /// </summary>
+        private void ComputeMapBounds()
+        {
+            _mapBoundsSet = false;
+            _mapBounds = default(Bounds);
+
+            foreach (var floor in _floors)
+            {
+                var meshes = floor?.Meshes;
+                if (meshes == null) continue;
+
+                AddBounds(meshes.Ground);
+                AddBounds(meshes.Buildings);
+            }
+        }
+
+        /// <summary>Encapsulates each non-empty mesh's bounds into <see cref="_mapBounds"/>, the first one setting it.</summary>
+        private void AddBounds(List<Mesh> meshes)
+        {
+            for (var i = 0; i < meshes.Count; i++)
+            {
+                var mesh = meshes[i];
+                if (mesh == null || mesh.vertexCount == 0) continue;
+
+                if (_mapBoundsSet) _mapBounds.Encapsulate(mesh.bounds);
+                else
+                {
+                    _mapBounds = mesh.bounds;
+                    _mapBoundsSet = true;
+                }
+            }
+        }
+
+        /// <summary>
+        /// Spot-sun stage C: the part of the map the camera shows, as a sphere the spot's cone is fitted to. A ray through
+        /// each viewport corner and the centre meets the planes of the map's lowest and highest points; a ray that misses
+        /// a plane (parallel, or pointing away) or meets it past the far clip is taken at the far clip instead; each point
+        /// is clamped into the map's bounds, so a view that reaches past the map is fitted to the map, not to the empty
+        /// distance. The centre is the points' bounding box's, the radius its half diagonal (at least
+        /// <see cref="FitRadiusMin"/>). Called before ApplyCut, so the rays are the unmodified perspective's: the cut's
+        /// oblique matrix changes only depth, and the clamp spans the whole map's height, so a cut floor is inside the
+        /// fit. False, with the camera's focus sphere, when there are no bounds yet.
+        /// </summary>
+        private bool FitView(out Vector3 centre, out float radius)
+        {
+            var camera = _camera.transform;
+            centre = camera.position + camera.forward * Mathf.Max(FitRadiusMin, _distance);
+            radius = Mathf.Max(FitRadiusMin, _distance);
+            if (!_mapBoundsSet) return false;
+
+            var low = _mapBounds.min.y;
+            var high = _mapBounds.max.y;
+            var fit = new Bounds();
+            var any = false;
+
+            for (var k = 0; k < FitViewportPoints.Length; k++)
+            {
+                var ray = _camera.ViewportPointToRay(FitViewportPoints[k]);
+                AddFitPoint(ray, low, ref fit, ref any);
+                AddFitPoint(ray, high, ref fit, ref any);
+            }
+
+            centre = fit.center;
+            radius = Mathf.Max(FitRadiusMin, fit.extents.magnitude);
+            return true;
+        }
+
+        /// <summary>One of <see cref="FitView"/>'s points: where <paramref name="ray"/> meets the plane y =
+        /// <paramref name="y"/>, or its point at the far clip; clamped into the map's bounds and added to the fit.</summary>
+        private void AddFitPoint(Ray ray, float y, ref Bounds fit, ref bool any)
+        {
+            // the far clip is a DEPTH (along the camera's forward), not a distance along the ray: a corner ray reaches
+            // it at FarClip / cos(the ray's angle off the forward)
+            var depthPerMetre = Mathf.Max(1e-4f, Vector3.Dot(ray.direction, _camera.transform.forward));
+            var point = ray.GetPoint(FarClip / depthPerMetre);
+            if (Mathf.Abs(ray.direction.y) > 1e-6f)
+            {
+                var t = (y - ray.origin.y) / ray.direction.y;
+                if (t >= 0f && t * depthPerMetre <= FarClip) point = ray.GetPoint(t);
+            }
+
+            var min = _mapBounds.min;
+            var max = _mapBounds.max;
+            point = new Vector3(Mathf.Clamp(point.x, min.x, max.x), Mathf.Clamp(point.y, min.y, max.y),
+                Mathf.Clamp(point.z, min.z, max.z));
+
+            if (any) fit.Encapsulate(point);
+            else
+            {
+                fit = new Bounds(point, Vector3.zero);
+                any = true;
+            }
         }
 
         /// <summary>HQ S1.4: the sky dome, made once and drawn centred on the camera - no shadows cast or received, so
@@ -6930,7 +6943,7 @@ namespace QuestTree.UI
             for (var i = 0; i < meshes.Ground.Count; i++)
             {
                 var mesh = meshes.Ground[i];
-                if (mesh != null) Submit(mesh, ground, castShadows: false, receiveShadows: GroundReceivesShadows);
+                if (mesh != null) Submit(mesh, ground, castShadows: false);
             }
 
             // Every mesh is drawn whole: the dollhouse cut is the camera's oblique near plane (ApplyCut), which
@@ -7221,98 +7234,18 @@ namespace QuestTree.UI
         /// <summary>
         /// The one render: our light on, the scene's fog off, the camera rendered by hand, and both put
         /// back by the statement that changed them. The finally is the whole safety of this design - a
-        /// directional light left enabled here is a directional light in the player's hideout, and fog
-        /// left off is the menu's own background flattened.
+        /// light left enabled here is a light in the player's hideout, and fog left off is the menu's own
+        /// background flattened.
         /// </summary>
         private void RenderNow()
         {
             var fog = RenderSettings.fog;
             var oblique = false;
 
-            // HQ S1.3: the player's shadow settings, put back in the finally whatever happens in between.
+            // HQ S1.3: the player's shadow settings the render sets, put back in the finally whatever happens in between.
             var shadowsWere = QualitySettings.shadows;
-            var resolutionWas = QualitySettings.shadowResolution;
             var distanceWas = QualitySettings.shadowDistance;
-            var cascadesWere = QualitySettings.shadowCascades;
-            var splitWas = QualitySettings.shadowCascade4Split;
-            var projectionWas = QualitySettings.shadowProjection;
             var shadowsSet = false;
-            var collectSet = false;
-
-            // Read before anything in the bracket changes it: the mode as the game left it, for the finally and for the
-            // first-frame line. Each read is guarded on its own - a diagnostic must not stop the render. If the mode
-            // cannot be read, collectWas is only a default, and restoring it could replace a UseCustom the game had:
-            // collectReadOk gates BOTH writes below, so an unread mode is never written or "restored".
-            var collectWas = BuiltinShaderMode.UseBuiltin;
-            var collectReadOk = false;
-            try
-            {
-                collectWas = GraphicsSettings.GetShaderMode(BuiltinShaderType.ScreenSpaceShadows);
-                collectReadOk = true;
-            }
-            catch (Exception) { /* left unread; nothing below touches the mode */ }
-            _collectModeFound = collectWas;
-
-            // Once per view: the custom shader's name (its getter allocates, and EFT runs the raid with the GC off) and
-            // whether Unity's own collect survived the game's shader stripping - Shader.Find returns null for a shader
-            // that is not in the build.
-            if (_collectShaderFound == null)
-            {
-                try { _collectShaderFound = GraphicsSettings.GetCustomShader(BuiltinShaderType.ScreenSpaceShadows)?.name ?? "-"; }
-                catch (Exception) { _collectShaderFound = "-"; }
-                if (_collectShaderFound.Length == 0) _collectShaderFound = "-";
-            }
-
-            if (_builtinCollect == null)
-            {
-                try
-                {
-                    var builtin = Shader.Find(BuiltinCollectShaderName);
-                    _builtinCollect = builtin == null ? "absent" : builtin.isSupported ? "present" : "unsupported";
-                }
-                catch (Exception) { _builtinCollect = "absent"; }
-            }
-
-            // The distant-shadow keywords as found; the finally re-enables exactly the ones this render turned off.
-            for (var k = 0; k < DistantShadowKeywords.Length; k++)
-            {
-                _distantShadowOffSet[k] = false;
-                try { _distantShadowFound[k] = Shader.IsKeywordEnabled(DistantShadowKeywords[k]); }
-                catch (Exception) { _distantShadowFound[k] = false; }   // read as off, so it is never touched
-            }
-
-            // Only an absent or unsupported built-in shader stops the forced collect; the setting's Disabled wins over it.
-            var forceBuiltin = ForceBuiltinCollect && collectReadOk && _builtinCollect == "present";
-
-            // The game's collect is what our render will draw with: in use as found (the mode is UseCustom, or a custom
-            // shader is assigned while Unity's own is absent) and neither disabled by the setting nor replaced by the
-            // built-in one. Only then are its distant-shadow globals worth neutralising (NeutraliseDistantShadowGlobals).
-            var gameCollect = !ScreenSpaceShadowsOff && !forceBuiltin &&
-                (collectWas == BuiltinShaderMode.UseCustom || (_collectShaderFound != "-" && _builtinCollect != "present"));
-            var neutralise = NeutraliseDistantShadowGlobals && gameCollect;
-
-            if (!_collectLogged &&
-                (collectWas == BuiltinShaderMode.UseCustom || _collectShaderFound != "-" || _builtinCollect != "present"))
-            {
-                // Once per view: the fact the test needs, without the debug line. The mode is named as well as the shader,
-                // because a custom shader can be assigned while the mode is UseBuiltin (then it is not in use).
-                _collectLogged = true;
-                string outcome;
-                if (ScreenSpaceShadowsOff) outcome = "renders with the collect disabled (the screen-space setting is off)";
-                else if (neutralise)
-                    outcome = "renders with the game's collect and neutral distant-shadow masks" +
-                        (_builtinCollect != "present" ? " (Unity's built-in collect is " + _builtinCollect + " in this build)" : "");
-                else if (!ForceBuiltinCollect) outcome = "keeps it";
-                else if (_builtinCollect != "present")
-                    outcome = "keeps it - Unity's built-in collect is " + _builtinCollect + " in this build, so the fix is unavailable";
-                else if (!collectReadOk) outcome = "keeps it - the mode could not be read, so it is not changed";
-                else if (collectWas == BuiltinShaderMode.UseBuiltin) outcome = "renders with Unity's built-in one, already in use";
-                else outcome = "renders with Unity's built-in one";
-
-                Plugin.LogSource?.LogInfo(
-                    $"QuestTree: the game's screen-space shadow collect mode is {(collectReadOk ? collectWas.ToString() : "unreadable")}, " +
-                    $"custom shader {_collectShaderFound}, built-in {_builtinCollect}; the 3D map {outcome}.");
-            }
 
             // HQ S1.4: the scene's ambient, put back in the finally.
             var ambientModeWas = RenderSettings.ambientMode;
@@ -7342,12 +7275,43 @@ namespace QuestTree.UI
                 var plan = Plan;
                 var sun = Lighting == ModSettings.MapLightMode.Sun;
                 var upShare = UpShareFor(plan, sun);
-                _lightGo.transform.rotation = sun
-                    ? Quaternion.LookRotation(-plan.SunDirection)
-                    : Quaternion.Euler(LightPitch, _yaw + LightYawOffset, 0f);
 
+                // Stage C: the spot stands where the sun is, seen from the part of the map the view shows. dir points
+                // TOWARDS the light, as the directional light before it pointed along -SunDirection; over the shoulder it
+                // is the reverse of that rotation's forward, so the mode is the same rotation as before. Fitted before
+                // ApplyCut, whose oblique matrix is not the view's perspective (FitView).
+                FitView(out var centre, out var radius);
+                var dir = sun
+                    ? plan.SunDirection
+                    : -(Quaternion.Euler(LightPitch, _yaw + LightYawOffset, 0f) * Vector3.forward);
+                var farthest = _probe != null ? Mathf.Max(SpotDistanceMin, _probe.MaxDistanceOk) : SpotDistanceNoProbe;
+                // far enough that the near plane (below) is at least SpotNearShareOfDistance of the distance whenever the
+                // probe's maximum allows it - the map's reach towards the light, not the fit's radius, sets that
+                var reach = TowardsLight(centre, dir, radius);
+                var distance = Mathf.Clamp(
+                    Mathf.Max(SpotDistanceOfRadius * radius, (reach + 10f) / (1f - SpotNearShareOfDistance)),
+                    SpotDistanceMin, farthest);
+
+                _lightGo.transform.SetPositionAndRotation(centre + dir * distance, Quaternion.LookRotation(-dir));
+                // the cone tangent to the fitted sphere: asin, not atan - they part when the distance is clamped to the
+                // probe's maximum and the radius is a large share of it
+                _light.spotAngle = Mathf.Clamp(2f * Mathf.Asin(Mathf.Min(1f, radius / distance)) * Mathf.Rad2Deg * SpotConeMargin, 1f, 179f);
+                _light.range = SpotRangeOfDistance * distance;
+
+                // The near plane is fitted to the whole map's reach towards the light, not the fit's: a spot's shadow
+                // caster is not pancaked (unity_LightShadowBias.y is 0 for spots), so a caster nearer the light than the
+                // plane casts nothing - a tall building up-sun of a zoomed-in fit would leak light exactly where the view
+                // looks. 10 m short of the nearest any map mesh can be to the light, never below 0.1.
+                _light.shadowNearPlane = Mathf.Max(0.1f, distance - reach - 10f);
+                _spotNearFarRatio = _light.shadowNearPlane / Mathf.Max(0.0001f, _light.range);
+                _spotDistance = distance;
+                _spotRadius = radius;
+
+                // the spot's attenuation (what distance and cookie leave of it at the map, as the probe measured) divided
+                // back out, so the sun's intensity under the exposure budget is what reaches a surface facing it
                 var exposure = Exposure(plan, upShare, sun);
-                _light.intensity = plan.SunIntensity * exposure;
+                var attenuation = _probe != null ? Mathf.Max(0.0001f, _probe.Attenuation) : AttenuationNoProbe;
+                _light.intensity = plan.SunIntensity * exposure / attenuation;
                 _light.color = plan.SunColour;
                 _light.shadowStrength = plan.ShadowStrength;
                 _exposureRendered = exposure;
@@ -7399,83 +7363,20 @@ namespace QuestTree.UI
 
                 _fogDrawn = fogSet;
 
-                if (ShadowMode != LightShadows.None)
+                // Stage C: shadows only where the setting asks, the frame is uncut (ShadowsUnderCut) and the probe proved spot
+                // shadows (_spotShadowsWhy). The shadow distance reaches the farthest fitted point from the camera, so no
+                // receiver on screen is in the fade.
+                _shadowsDrawn = ShadowMode != LightShadows.None && (!oblique || ShadowsUnderCut) && _spotShadowsWhy == null;
+                _light.shadows = _shadowsDrawn ? ShadowMode : LightShadows.None;
+                _spotShadowDistance = 0f;
+
+                if (_shadowsDrawn)
                 {
-                    var under = !oblique || ShadowsUnderCut;
-                    _light.shadows = under ? ShadowMode : LightShadows.None;
-                    _shadowsDrawn = false;
-
-                    if (under)
-                    {
-                        QualitySettings.shadows = ShadowQuality.All;
-                        QualitySettings.shadowResolution = ShadowMapResolution;
-                        QualitySettings.shadowDistance = ShadowDistanceFor(_distance);
-                        QualitySettings.shadowCascades = ShadowCascadeCount;
-                        QualitySettings.shadowCascade4Split = ShadowCascadeSplit;   // a known split, not the game's quality level's
-                        QualitySettings.shadowProjection = ShadowProjection.StableFit;
-                        shadowsSet = true;
-                        _shadowDistanceRendered = QualitySettings.shadowDistance;
-                        _shadowsDrawn = true;
-
-                        // Disabled (the setting) wins; otherwise Unity's own collect replaces the game's custom one,
-                        // whose inputs are the main camera's. collectWas was read above, before either change, and
-                        // neither write happens when it could not be read (see collectReadOk).
-                        if (ScreenSpaceShadowsOff && collectReadOk)
-                        {
-                            collectSet = true;   // before the write: a setter that throws half way is still put back
-                            GraphicsSettings.SetShaderMode(BuiltinShaderType.ScreenSpaceShadows, BuiltinShaderMode.Disabled);
-                        }
-                        else if (!ScreenSpaceShadowsOff && forceBuiltin && collectWas != BuiltinShaderMode.UseBuiltin)
-                        {
-                            collectSet = true;
-                            GraphicsSettings.SetShaderMode(BuiltinShaderType.ScreenSpaceShadows, BuiltinShaderMode.UseBuiltin);
-                        }
-
-                        // The game's collect stays: its distant-shadow masks white (lit) for our render only, each saved
-                        // first and put back in the finally (see NeutraliseDistantShadowGlobals).
-                        if (neutralise)
-                        {
-                            _distantGlobalsSkipped = null;
-                            for (var g = 0; g < DistantShadowTextureIds.Length; g++)
-                            {
-                                _distantGlobalFound[g] = false;
-                                _distantGlobalReplaced[g] = false;
-                                try
-                                {
-                                    var was = Shader.GetGlobalTexture(DistantShadowTextureIds[g]);
-                                    _distantGlobalWas[g] = was;
-                                    _distantGlobalFound[g] = was != null;
-                                    _distantGlobalSet[g] = true;   // before the write, as collectSet
-                                    Shader.SetGlobalTexture(DistantShadowTextureIds[g], Texture2D.whiteTexture);
-                                    _distantGlobalReplaced[g] = true;
-                                }
-                                catch (Exception)
-                                {
-                                    // A read that throws leaves this one untouched (not marked set, nothing to restore); a
-                                    // write that throws is still put back, and the line counts it as failed.
-                                }
-                            }
-                        }
-                        else
-                            _distantGlobalsSkipped = !NeutraliseDistantShadowGlobals ? "the switch is off"
-                                : ScreenSpaceShadowsOff ? "the collect is disabled by the screen-space setting"
-                                : forceBuiltin ? "Unity's built-in collect is in use"
-                                : "the game's collect is not in use";
-                    }
-                    else _distantGlobalsSkipped = "no shadows on this frame";
-                }
-                else _distantGlobalsSkipped = "no shadows on this frame";
-
-                // The game's distant-shadow keywords off for our render only, each only if it was on (see
-                // DistantShadowKeywordsOff); the finally turns back on exactly these.
-                if (DistantShadowKeywordsOff)
-                {
-                    for (var k = 0; k < DistantShadowKeywords.Length; k++)
-                    {
-                        if (!_distantShadowFound[k]) continue;
-                        _distantShadowOffSet[k] = true;   // before the write, as collectSet
-                        Shader.DisableKeyword(DistantShadowKeywords[k]);
-                    }
+                    shadowsSet = true;   // before the first write: a setter that throws half way is still put back
+                    QualitySettings.shadows = ShadowQuality.All;
+                    QualitySettings.shadowDistance =
+                        (Vector3.Distance(_camera.transform.position, centre) + radius) * ShadowDistanceMargin;
+                    _spotShadowDistance = QualitySettings.shadowDistance;
                 }
 
                 // stage 4: the post-processing volume is live for this render only (a game camera whose volume layer
@@ -7533,34 +7434,7 @@ namespace QuestTree.UI
                 if (shadowsSet)
                 {
                     try { QualitySettings.shadows = shadowsWere; } catch (Exception) { /* as above */ }
-                    try { QualitySettings.shadowResolution = resolutionWas; } catch (Exception) { /* as above */ }
                     try { QualitySettings.shadowDistance = distanceWas; } catch (Exception) { /* as above */ }
-                    try { QualitySettings.shadowCascades = cascadesWere; } catch (Exception) { /* as above */ }
-                    try { QualitySettings.shadowCascade4Split = splitWas; } catch (Exception) { /* as above */ }
-                    try { QualitySettings.shadowProjection = projectionWas; } catch (Exception) { /* as above */ }
-                }
-
-                if (collectSet)
-                {
-                    try { GraphicsSettings.SetShaderMode(BuiltinShaderType.ScreenSpaceShadows, collectWas); } catch (Exception) { /* as above */ }
-                }
-
-                // each distant-shadow global on its own, so one throwing does not leave the others white; a null saved
-                // value goes back as null, as the game had it, and the saved reference is dropped either way
-                for (var g = 0; g < DistantShadowTextureIds.Length; g++)
-                {
-                    if (!_distantGlobalSet[g]) continue;
-                    try { Shader.SetGlobalTexture(DistantShadowTextureIds[g], _distantGlobalWas[g]); } catch (Exception) { /* as above */ }
-                    _distantGlobalWas[g] = null;
-                    _distantGlobalSet[g] = false;
-                }
-
-                // each keyword on its own, so one throwing does not leave the others off
-                for (var k = 0; k < DistantShadowKeywords.Length; k++)
-                {
-                    if (!_distantShadowOffSet[k]) continue;
-                    try { Shader.EnableKeyword(DistantShadowKeywords[k]); } catch (Exception) { /* as above */ }
-                    _distantShadowOffSet[k] = false;
                 }
 
                 // The oblique projection lives ONLY inside this bracket: every other reader of the camera
@@ -7569,15 +7443,6 @@ namespace QuestTree.UI
                 try { if (oblique && _camera != null) _camera.ResetProjectionMatrix(); } catch (Exception) { /* as above */ }
             }
         }
-
-        /// <summary>HQ S1.3: the shadow distance of the last render, in metres - the view-derived value. See RenderNow.</summary>
-        private float _shadowDistanceRendered;
-
-        /// <summary>HQ S1.3: the shadow distance for a camera at <paramref name="distance"/> metres from its focus -
-        /// <see cref="ShadowDistanceOfView"/> times that, at least <see cref="ShadowDistanceMin"/>, never past
-        /// <see cref="ShadowDistanceMax"/> or the far clip. Derived from the view, never from a map.</summary>
-        private static float ShadowDistanceFor(float distance) =>
-            Mathf.Clamp(ShadowDistanceOfView * Mathf.Max(0f, distance), ShadowDistanceMin, Mathf.Min(ShadowDistanceMax, FarClip));
 
         /// <summary>Time the next render, for the first-frame line. Set by <see cref="Finish"/> and whenever the
         /// cut height changes, so the first frame after a floor switch is timed too.</summary>
@@ -8022,6 +7887,7 @@ namespace QuestTree.UI
             Discard(_rt);
             Discard(_cameraGo);
             Discard(_lightGo);
+            Discard(_lightCookie);   // after its light: the cookie is ours, the light only held it
             Discard(_image != null ? _image.gameObject : null);
 
             _rt = null;
@@ -8029,6 +7895,7 @@ namespace QuestTree.UI
             _cameraGo = null;
             _light = null;
             _lightGo = null;
+            _lightCookie = null;
             _image = null;
         }
 

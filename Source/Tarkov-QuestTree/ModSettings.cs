@@ -235,14 +235,12 @@ namespace QuestTree
         /// that turns with the view. See Map3DView's lighting constants.</summary>
         public static ConfigEntry<MapLightMode> MapLighting { get; private set; }
 
-        /// <summary>Lighting stage 0 (2026-09-28): the three switches that isolate a shadow fault in one build - the
-        /// shadows themselves (off / hard / soft), whether the relief ground receives them, and whether Unity's
-        /// screen-space shadow collect pass is used (off: the Standard shader samples the cascade map per fragment). Under
-        /// Advanced, F12 only; a change rebuilds the viewport.</summary>
+        /// <summary>Lighting stage 0 (2026-09-28): the sun's shadows in the 3D map (off / hard / soft). Spot-sun stage C
+        /// (2026-09-29) took out the two switches that stood beside it - whether the ground receives shadows and whether the
+        /// screen-space collect pass is used: the sun is a spot light now, whose shadows never pass through the collect, and
+        /// the ground is drawn as emission, which a shadow cannot darken. Under Advanced, F12 only; a change rebuilds the
+        /// viewport.</summary>
         public static ConfigEntry<MapShadowMode> MapShadows { get; private set; }
-
-        public static ConfigEntry<bool> MapGroundReceivesShadows { get; private set; }
-        public static ConfigEntry<bool> MapScreenSpaceShadows { get; private set; }
 
         /// <summary>Lighting stage 4 (2026-09-28): whether the 3D map's private camera runs the game's PostProcessing v2 stack
         /// (a tonemap following the capture's - ACES, or Neutral for the game's default RomB - and scalable ambient
@@ -1019,18 +1017,6 @@ namespace QuestTree
                 "The sun's shadows in the 3D map: Soft (the default), Hard, or Off. Off is the first thing to try when " +
                 "a region of the map draws dark: if it stays dark, it is not a shadow. Takes effect when the map redraws.");
 
-            MapGroundReceivesShadows = config.Bind(
-                "Advanced", "3D map: the ground receives shadows", true,
-                "Whether the buildings' shadows fall on the relief ground. The captured picture on the ground already " +
-                "carries the game's own shadows, so off costs little; off is the second thing to try when a region " +
-                "of the ground draws dark. Takes effect when the map redraws.");
-
-            MapScreenSpaceShadows = config.Bind(
-                "Advanced", "3D map: screen-space shadows", true,
-                "Whether the 3D map's shadows go through Unity's screen-space collect pass (on, the usual way) or the " +
-                "shader samples the cascade shadow map per fragment (off; needs that shader variant in the game). " +
-                "The third thing to try for a dark region. Takes effect when the map redraws.");
-
             MapPostProcessing = config.Bind(
                 "Advanced", "3D map: tonemap and ambient occlusion (experimental)", false,
                 "Off, the default: the 3D map is lit by its own exposure budget with no post-processing. On, the map's private " +
@@ -1119,8 +1105,6 @@ namespace QuestTree
             MapLighting.SettingChanged += Raise;
             MapPostProcessing.SettingChanged += Raise;
             MapShadows.SettingChanged += Raise;
-            MapGroundReceivesShadows.SettingChanged += Raise;
-            MapScreenSpaceShadows.SettingChanged += Raise;
             ColorActive.SettingChanged += Raise;
             ColorAvailable.SettingChanged += Raise;
             ColorCompleted.SettingChanged += Raise;
