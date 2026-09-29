@@ -94,8 +94,22 @@ namespace QuestTree.UI
         /// <summary>How much of the distance one wheel notch takes off.</summary>
         internal const float DollyPerNotch = 0.12f;
 
-        /// <summary>The light's intensity and direction, as the experiment ran them.</summary>
+        /// <summary>The light's intensity, as the experiment ran it.</summary>
         private const float LightIntensity = 1.2f;
+
+        /// <summary>
+        /// Test 2026-09-28 (the light "not placed right"): the light was FIXED in the world, 50 degrees down at yaw -30,
+        /// while the camera orbits - looking north it sat ten degrees behind the view, so every face the viewer saw was
+        /// lit flat and the map read as unlit; turned to look south it would sit in front, and every visible wall would
+        /// be in its own shadow. With this on the light turns with the view: <see cref="LightYawOffset"/> degrees off the
+        /// view's yaw and <see cref="LightPitch"/> degrees down - over the viewer's shoulder - so the faces the viewer sees
+        /// are lit with form on both sides whatever the yaw, and shadows fall away from the viewer. Set every render
+        /// (render-on-change draws again when the view moves). False keeps the fixed direction.
+        /// </summary>
+        private static readonly bool LightFollowsView = true;
+
+        private const float LightPitch = 50f;
+        private const float LightYawOffset = 40f;
 
         /// <summary>
         /// HQ S1.1: the private camera renders only when something it shows has changed - the view moved
@@ -5222,10 +5236,13 @@ namespace QuestTree.UI
                     Plugin.LogSource?.LogInfo(string.Format(
                         CultureInfo.InvariantCulture,
                         "QuestTree: 3D map for {0} - first frame drawn in {1:0.0} ms, render {2:0.0} ms, {3} draw call(s), cut {4}, " +
-                        "msaa {5}x, shadows {6} ({7} cascade(s), {8:0} m), ambient {9}, sky {10}.",
+                        "msaa {5}x, shadows {6} ({7} cascade(s), {8:0} m), ambient {9}, sky {10}, light {11}.",
                         _mapKey, clock.Elapsed.TotalMilliseconds, _renderMs, _drawCalls, CutText(), _rtSamples,
                         ShadowMode, ShadowMode == LightShadows.None ? 0 : ShadowCascadeCount, _shadowDistanceRendered,
-                        AmbientTrilight ? "trilight" : "scene", SkyDome && !_skyBroken ? "dome" : "backdrop"));
+                        AmbientTrilight ? "trilight" : "scene", SkyDome && !_skyBroken ? "dome" : "backdrop",
+                        LightFollowsView
+                            ? string.Format(CultureInfo.InvariantCulture, "over the shoulder ({0:0} deg off the view, {1:0} down)", LightYawOffset, LightPitch)
+                            : "fixed"));
                 }
             }
             catch (Exception ex)
@@ -5705,6 +5722,7 @@ namespace QuestTree.UI
             {
                 RenderSettings.fog = false;
                 _light.enabled = true;
+                if (LightFollowsView) _lightGo.transform.rotation = Quaternion.Euler(LightPitch, _yaw + LightYawOffset, 0f);
 
                 if (AmbientTrilight)
                 {
