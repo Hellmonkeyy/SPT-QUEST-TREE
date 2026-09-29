@@ -611,6 +611,23 @@ namespace QuestTree.QuestGraph
         /// </summary>
         private const float ThinSurfaceMetres = 0.4f;
 
+        /// <summary>
+        /// Test 2026-09-29: the upper edges, in metres over the terrain hit, of the relief line's check on
+        /// <see cref="ThinSurfaceMetres"/> - a check that CAN fail. Bins 0 and 1 count the thin surfaces the rule took (up
+        /// to half the ceiling, and up to the ceiling); bins 2..5 count the cells whose LOWEST non-ground hit it REFUSED for standing over the
+        /// ceiling (up to 0.2 m over it, to 1 m, to 1.5 m, and higher). A road or a pavement sits in bin 0; a mass in bin 1
+        /// says low things are being taken as ground, and a mass in bin 2 says real surfaces lie just over the ceiling and
+        /// it is too tight. Derived from the ceiling, so a change to it moves the bins with it.
+        /// </summary>
+        private static readonly float[] ThinTallyEdges =
+        {
+            ThinSurfaceMetres * 0.5f, ThinSurfaceMetres, ThinSurfaceMetres + 0.2f,
+            Math.Max(1f, ThinSurfaceMetres + 0.2f), Math.Max(1.5f, ThinSurfaceMetres + 0.2f)
+        };
+
+        /// <summary>The bins of the thin-surface check: one more than its edges.</summary>
+        private const int ThinTallyBins = 6;
+
         /// <summary>The layers that ARE the ground: the terrain, its grass, and water.</summary>
         private static readonly string[] GroundLayerNames = { "Terrain", "Grass", "Water" };
 
@@ -744,6 +761,44 @@ namespace QuestTree.QuestGraph
         /// fallback: a 4 x 4 white tile from a material with no texture and no colour is not information (the white
         /// slabs of m14).</summary>
         private const int WhiteFlatLevel = 242;
+
+        /// <summary>
+        /// Test 2026-09-29 (the Scav Base hall's pipes, the power plant's chimneys): a material on a REFLECTIVE shader with
+        /// no main texture - EFT's "p0/Reflective/Bumped Specular" with _MainTex unset, 27 buildings and 62,296 triangles
+        /// on one map before the props - looks in the game like its _Cube reflection (chrome, galvanised metal). The atlas
+        /// gave it a flat tile of its _Color, white by default, which <see cref="WhiteFlatLevel"/> then left to the viewer's
+        /// fallback: white or dark featureless cylinders. With this on, such a material's tint is its reflection cubemap's
+        /// mean colour, times _Color, times <see cref="CubemapTintShare"/>, no channel over <see cref="CubemapTintMax"/>
+        /// (TintFromCubemap). A cubemap that cannot be read keeps the old tint. In the recipe: it changes a material's key
+        /// and its flat tile. False keeps the old tint everywhere.
+        /// </summary>
+        internal static readonly bool CubemapTint = true;
+
+        /// <summary>
+        /// The share of the cubemap's mean colour a reflective material's flat tile takes. An ESTIMATE, not a measurement:
+        /// a metal's colour on screen is the environment it reflects, which in the game is mostly sky and ground, and the
+        /// mean of a cubemap whose upper half is bright sky, taken as a DIFFUSE colour and lit again by the viewer's light,
+        /// reads too light beside the textured walls around it. 0.6 puts a typical overcast cubemap (a mean of about
+        /// 0.55-0.65) near a 0.35-0.4 grey - galvanised metal in shade. Rollback knob: 1 takes the mean as it is.
+        /// </summary>
+        internal static readonly float CubemapTintShare = 0.6f;
+
+        /// <summary>The ceiling on each channel of a cubemap tint: under <see cref="WhiteFlatLevel"/> (242, 0.95), so a
+        /// bright cubemap's tint is never mistaken for a material with no colour and dropped, and no metal reads as paper
+        /// white. Rollback knob: 1 lets the share alone decide.</summary>
+        internal static readonly float CubemapTintMax = 0.9f;
+
+        /// <summary>A cubemap face is copied at its smallest mip of at least this many pixels a side (mip 0 when it has one
+        /// level): a mean needs no more, and a small mip is the GPU's own average of the finer ones.</summary>
+        private const int CubemapMinFacePixels = 8;
+
+        /// <summary>The largest side a face is read back at - a cubemap with one level of 1,024 is scaled down to this
+        /// first, so the read stays a few kilobytes whatever the cubemap.</summary>
+        private const int CubemapReadMax = 64;
+
+        /// <summary>The texture properties a reflection cubemap is looked for under, in order; only a CUBE texture there
+        /// counts (a planar _ReflectionTex is a 2D render of the scene, not the environment).</summary>
+        private static readonly string[] CubemapProperties = { "_Cube", "_ReflectionTex", "_Cubemap" };
         private const int AtlasFlatPixels = 4;
         private const int AtlasAveragePixels = 8;
         private const float AtlasTileSlack = 0.05f;
@@ -798,12 +853,17 @@ namespace QuestTree.QuestGraph
         /// earlier WP2 build wrote is discarded once. Fixes 5 did NOT bump it: its rules read a stored r5 mesh as they find
         /// it (a range kept within tolerance, a texture re-read settled after the atlas), and a bump would throw away every
         /// accumulated mesh for nothing. "r6" and "r7" since the HQ plan's bumps (the decal rule; S3.13's constants, mesh v4,
-        /// sidecar v5), "r8" since PART-11's bump (the prop class and its constants, sidecar v6). Declared AFTER every static field of this class it reads (static initialisers run in
+        /// sidecar v5), "r8" since PART-11's bump (the prop class and its constants, sidecar v6), "r9" since test 2026-09-29's
+        /// cubemap tint (a reflective material with no main texture tinted from its reflection cubemap - CubemapTint and its
+        /// constants - which changes the flat tiles, and the keys, of materials an r8 atlas stored in white). Declared AFTER every static field of this class it reads (static initialisers run in
         /// textual order - NotBuildingLayerNames above it would otherwise still be null).
         /// </summary>
         internal static readonly string MeshRecipe = string.Join(";", new[]
         {
-            "r8", RecipePart(MapMeshFile.Version), RecipePart(MapMeshIndex.Version),
+            "r9", RecipePart(MapMeshFile.Version), RecipePart(MapMeshIndex.Version),
+            // test 2026-09-29: the cubemap tint
+            RecipePart(CubemapTint), RecipePart(CubemapTintShare), RecipePart(CubemapTintMax),
+            RecipePart(CubemapMinFacePixels), RecipePart(CubemapReadMax),
             // PART-11 (3.6): the prop class
             RecipePart(PropsAsClass), RecipePart(PropMinLongSide), RecipePart(PropTrianglesPerSquareMetre), RecipePart(PropMaxTriangles),
             RecipePart(PropShareOfCap), RecipePart(PropTileMax), RecipePart(PropTexelsPerMetre), RecipePart(PropOverLimitFactor),
@@ -1998,6 +2058,19 @@ namespace QuestTree.QuestGraph
             /// <summary>WP8 (D4): normal maps refused as main textures (by name, format or the captured tile's mean).</summary>
             internal int NormalMapsRefused;
 
+            /// <summary>Test 2026-09-29 (CubemapTint): materials tinted from their reflection cubemap, those whose cubemap
+            /// would not read (they keep their old tint), the first few named for the materials line, and each cubemap's
+            /// mean once read, null when it failed - many materials share one reflection probe's cubemap, and each read
+            /// stalls the GPU, so a cubemap is read once a build.</summary>
+            internal int CubemapTints;
+
+            internal int CubemapTintsFailed;
+
+            /// <summary>Review 2026-09-29: materials whose cube texture is a realtime probe's RenderTexture, left untinted.</summary>
+            internal int CubemapTintsRealtime;
+            internal readonly List<string> CubemapTintSamples = new List<string>();
+            internal readonly Dictionary<Texture, Color?> CubemapMeans = new Dictionary<Texture, Color?>();
+
             /// <summary>WP8 (D4 commit 1): every material the atlas leaves out - by render queue (2450 and up) or for
             /// having no main texture (flat) - with what its shader exposes and how much geometry it draws, for the
             /// materials line (ReportAtlas).</summary>
@@ -2369,6 +2442,10 @@ namespace QuestTree.QuestGraph
 
             /// <summary>Cells whose ground was anchored to a terrain hit under something higher (TerrainAnchoredGround).</summary>
             internal int Anchored;
+
+            /// <summary>Test 2026-09-29: the thin-surface check's counts (<see cref="ThinTallyEdges"/>) - integers filled by
+            /// PickTopHit, so the check costs no allocation per cell.</summary>
+            internal readonly int[] ThinTally = new int[ThinTallyBins];
 
             /// <summary>The measured height of each cell in METRES, NaN where no ray hit. Dropped by
             /// <see cref="FinishBand"/> as soon as the cells are quantised.</summary>
@@ -3093,15 +3170,36 @@ namespace QuestTree.QuestGraph
                 throw new InvalidOperationException("no band of this map can carry a relief grid");
         }
 
-        /// <summary>The relief line's account of the cells anchored to the terrain under something higher.</summary>
+        /// <summary>The relief line's account of the cells anchored to the terrain under something higher, and (test
+        /// 2026-09-29) the thin-surface check: what the ceiling took and what it refused, by rise over the ground hit.</summary>
         private static string AnchoredNotes(Job job)
         {
             var anchored = 0;
-            foreach (var band in job.Bands) anchored += band.Anchored;
+            var tally = new int[ThinTallyBins];
+            var tallied = 0;
 
-            return anchored > 0
-                ? $"; {N(anchored)} cell(s) anchored to the terrain under something higher (a roof, a crane, a car, a trunk)"
-                : job.GroundMask == 0 && TerrainAnchoredGround ? "; no ground layer to anchor to" : "";
+            foreach (var band in job.Bands)
+            {
+                anchored += band.Anchored;
+
+                for (var b = 0; b < ThinTallyBins; b++)
+                {
+                    tally[b] += band.ThinTally[b];
+                    tallied += band.ThinTally[b];
+                }
+            }
+
+            if (anchored == 0 && tallied == 0)
+                return job.GroundMask == 0 && TerrainAnchoredGround ? "; no ground layer to anchor to" : "";
+
+            var f = CultureInfo.InvariantCulture;
+            string M(int edge) => edge < 0 ? "0" : ThinTallyEdges[edge].ToString("0.##", f);
+
+            return $"; anchored {N(anchored)} cell(s) to the terrain under something higher (a roof, a crane, a car, a trunk); " +
+                   $"cells with a thin surface taken {M(-1)}-{M(0)} m: {N(tally[0])}, {M(0)}-{M(1)} m: {N(tally[1])}; cells " +
+                   "whose lowest hit was refused over the " +
+                   $"ceiling {M(1)}-{M(2)} m: {N(tally[2])} (a mass here means the ceiling is too tight), {M(2)}-{M(3)} m: " +
+                   $"{N(tally[3])}, {M(3)}-{M(4)} m: {N(tally[4])}, over: {N(tally[5])}";
         }
 
         /// <summary>The ground layers as a mask (<see cref="GroundLayerNames"/>), 0 for the names this game version
@@ -3270,7 +3368,7 @@ namespace QuestTree.QuestGraph
 
                     if (anchoring)
                     {
-                        chosen = PickTopHit(ys, ground, used, floor, out var anchored);
+                        chosen = PickTopHit(ys, ground, used, floor, out var anchored, band.ThinTally);
                         if (anchored) band.Anchored++;
                     }
                     else
@@ -3331,7 +3429,11 @@ namespace QuestTree.QuestGraph
         /// <param name="used">How many of the arrays are hits.</param>
         /// <param name="floorY">The lowest y that is still this band's - RayFloorFor.</param>
         /// <param name="anchored">Whether the choice is not the highest hit.</param>
-        internal static int PickTopHit(float[] ys, bool[] ground, int used, float floorY, out bool anchored)
+        /// <param name="tally">Test 2026-09-29: the thin-surface check's counts (<see cref="ThinTallyEdges"/>), or null.
+        /// Where the rule decides (the highest hit is not ground and a ground hit lies under it), the thin surface taken
+        /// is counted by its rise over the ground hit into bin 0 or 1, and the LOWEST non-ground hit refused for standing
+        /// over the ceiling into bins 2..5 - one count a cell on each side.</param>
+        internal static int PickTopHit(float[] ys, bool[] ground, int used, float floorY, out bool anchored, int[] tally = null)
         {
             anchored = false;
             if (ys == null || ground == null || used <= 0) return -1;
@@ -3354,16 +3456,37 @@ namespace QuestTree.QuestGraph
             // the ground, unless a thin surface sits on it
             var chosen = terrain;
             var ceiling = ys[terrain] + ThinSurfaceMetres;
+            var refused = -1;
 
             for (var k = 0; k < used && k < ys.Length && k < ground.Length; k++)
             {
                 var y = ys[k];
                 if (ground[k] || !IsFinite(y) || y < floorY) continue;
                 if (y > ys[terrain] && y <= ceiling && y > ys[chosen]) chosen = k;
+
+                // the LOWEST hit over the ceiling is the one the ceiling decided about - a car's roof, not the crane over
+                // it - so a cell counts once on the refused side, as it does on the taken side
+                if (y > ceiling && (refused < 0 || y < ys[refused])) refused = k;
+            }
+
+            if (tally != null)
+            {
+                // binned at 1 or under / 2 or over whatever the float rounding of the rise
+                if (chosen != terrain) tally[Math.Min(1, ThinTallyBin(ys[chosen] - ys[terrain]))]++;
+                if (refused >= 0) tally[Math.Max(2, ThinTallyBin(ys[refused] - ys[terrain]))]++;
             }
 
             anchored = chosen != highest;
             return chosen;
+        }
+
+        /// <summary>The thin-surface check's bin for a rise over the ground hit (<see cref="ThinTallyEdges"/>).</summary>
+        /// <param name="rise">Metres over the ground hit.</param>
+        private static int ThinTallyBin(float rise)
+        {
+            var bin = 0;
+            while (bin < ThinTallyEdges.Length && rise > ThinTallyEdges[bin]) bin++;
+            return Math.Min(bin, ThinTallyBins - 1);
         }
 
         /// <summary>
@@ -7045,7 +7168,14 @@ namespace QuestTree.QuestGraph
                         candidate.Mesh.GetTopology(submesh) == MeshTopology.Triangles)
                         diag.Triangles += candidate.Mesh.GetIndexCount(submesh) / 3;
 
-                    if ((counted ??= new HashSet<MaterialDiag>()).Add(diag)) diag.Buildings++;
+                    if ((counted ??= new HashSet<MaterialDiag>()).Add(diag))
+                    {
+                        diag.Buildings++;
+
+                        // test 2026-09-29: a flat material's entry names a few of the props that draw it
+                        if (diag.Kind == DiagFlat && candidate.Prop && (diag.Samples == null || diag.Samples.Count < MaterialDiagSamples))
+                            (diag.Samples ??= new List<string>(MaterialDiagSamples)).Add(SafePath(candidate.Renderer));
+                    }
                 }
 
                 var info = id >= 0 ? job.Materials[id] : null;
@@ -8876,16 +9006,36 @@ namespace QuestTree.QuestGraph
 
             internal int Buildings;
             internal long Triangles;
+
+            /// <summary>Test 2026-09-29: its flat tile was WHITE and left to the viewer's fallback (AtlasMaterial.WhiteLeft)
+            /// in at least one building - those were never named before.</summary>
+            internal bool White;
+
+            /// <summary>Test 2026-09-29: listed only when its flat tile was found white (<see cref="DiagWhite"/>, a material
+            /// WITH a texture that ended on its flat tile) - after Slots, so its buildings and triangles are counted in
+            /// MapBuilding from the MAPPED (decimated) triangles, not the source ones.</summary>
+            internal bool CountedWhenMapped;
+
+            /// <summary>Test 2026-09-29: up to <see cref="MaterialDiagSamples"/> props that draw a flat material (SafePath),
+            /// null until the first - a path finds the object in the scene, a shader name does not.</summary>
+            internal List<string> Samples;
         }
 
         /// <summary>Entries the materials line lists, most triangles first.</summary>
         private const int MaterialDiagEntries = 20;
 
+        /// <summary>Prop paths a flat entry names (test 2026-09-29).</summary>
+        private const int MaterialDiagSamples = 3;
+
         private const int DiagTransparent = 0;
         private const int DiagFlat = 1;
         private const int DiagCutout = 2;
 
-        private static readonly string[] DiagKinds = { "transparent", "flat", "cutout" };
+        /// <summary>Test 2026-09-29: a material WITH a main texture whose flat tile was drawn instead and was white - a
+        /// capture that failed or ran late, or a use too wide for its tile.</summary>
+        private const int DiagWhite = 3;
+
+        private static readonly string[] DiagKinds = { "transparent", "flat", "cutout", "white flat (textured)" };
 
         /// <summary>WP8 (D4 commit 1): records a material the atlas leaves out. Never throws.</summary>
         /// <param name="job">The build.</param>
@@ -8927,6 +9077,38 @@ namespace QuestTree.QuestGraph
             }
 
             job.MaterialDiags[material] = diag;
+        }
+
+        /// <summary>
+        /// Test 2026-09-29: names a white flat on the materials line - MapBuilding left it to the viewer's fallback, and
+        /// nothing said which material it was. One with no main texture is listed already (flat, MaterialId) with its
+        /// source triangles counted in Slots, and is only marked. One WITH a texture that ended on its flat tile was never
+        /// listed: it is listed now as <see cref="DiagWhite"/>, and as Slots has run, its buildings and triangles are counted
+        /// here - once per building, as MapBuilding reaches each material once a building - from the mapped triangles.
+        /// Main thread (the atlas phase). Never throws past Diagnose's own guard.
+        /// </summary>
+        /// <param name="job">The build.</param>
+        /// <param name="info">The material.</param>
+        /// <param name="mats">The building's material per mapped triangle.</param>
+        /// <param name="m">The material's id.</param>
+        private static void DiagnoseWhite(Job job, AtlasMaterial info, int[] mats, int m)
+        {
+            var material = info.Material;
+            if (material == null) return;
+
+            if (!job.MaterialDiags.TryGetValue(material, out var diag))
+            {
+                Diagnose(job, material, DiagWhite);
+                if (!job.MaterialDiags.TryGetValue(material, out diag)) return;
+                diag.CountedWhenMapped = true;
+            }
+
+            diag.White = true;
+            if (!diag.CountedWhenMapped) return;
+
+            diag.Buildings++;
+            for (var t = 0; t < mats.Length; t++)
+                if (mats[t] == m) diag.Triangles++;
         }
 
         /// <summary>One building's use of one material: its UV bounds and the integer shift and flat verdict
@@ -9109,6 +9291,9 @@ namespace QuestTree.QuestGraph
                         break;
                     }
 
+                    // test 2026-09-29: a reflective material with no main texture looks like its reflection, not its _Color
+                    if (CubemapTint && info.Texture == null) TintFromCubemap(job, material, info);
+
                     // WP2 (2.10): what the stored atlas knows the material by, and its tile there if it has one
                     info.Key = MaterialKey(material, info);
                     info.Mip = MipOf(info.Texture);
@@ -9142,6 +9327,172 @@ namespace QuestTree.QuestGraph
 
             job.MaterialIds[material] = id;
             return id;
+        }
+
+        /// <summary>
+        /// Test 2026-09-29 (<see cref="CubemapTint"/>): a reflective material's tint from its reflection cubemap - the
+        /// cubemap's mean colour times _Color (when the shader has one) times <see cref="CubemapTintShare"/>, each channel
+        /// clamped to <see cref="CubemapTintMax"/>. The material's tint is untouched when it has no cube texture under
+        /// <see cref="CubemapProperties"/> or the cubemap would not read (counted). Main thread (MaterialId).
+        /// </summary>
+        /// <param name="job">The build.</param>
+        /// <param name="material">The material.</param>
+        /// <param name="info">Its registry entry, the tint already read.</param>
+        private static void TintFromCubemap(Job job, Material material, AtlasMaterial info)
+        {
+            try
+            {
+                Texture cube = null;
+
+                foreach (var name in CubemapProperties)
+                {
+                    if (!material.HasProperty(name)) continue;
+
+                    var texture = material.GetTexture(name);
+                    if (texture == null || texture.dimension != TextureDimension.Cube) continue;
+
+                    cube = texture;
+                    break;
+                }
+
+                if (cube == null) return;
+
+                // Review 2026-09-29: only a BAKED cubemap. A realtime reflection probe's RenderTexture changes with the time
+                // of day, so a tint from it would change the material key every build: the stored tile would never match,
+                // and each build would orphan another flat tile. Counted and named; the old tint stands.
+                if (!(cube is Cubemap))
+                {
+                    job.CubemapTintsRealtime++;
+                    if (job.CubemapTintSamples.Count < MaterialDiagSamples)
+                        job.CubemapTintSamples.Add($"{(material.shader != null ? material.shader.name : "?")} '{material.name}' " +
+                                                   $"(cube '{cube.name}': realtime probe - not tinted)");
+                    return;
+                }
+
+                if (!job.CubemapMeans.TryGetValue(cube, out var mean))
+                {
+                    mean = CubemapMean(job, cube);
+                    job.CubemapMeans[cube] = mean;
+                }
+
+                if (mean == null)
+                {
+                    job.CubemapTintsFailed++;
+                    return;
+                }
+
+                var colour = material.HasProperty("_Color") ? material.GetColor("_Color") : Color.white;
+                if (!IsFinite(colour.r) || !IsFinite(colour.g) || !IsFinite(colour.b)) colour = Color.white;
+
+                var m = mean.Value;
+                info.Tint = new Color(
+                    Mathf.Clamp(m.r * colour.r * CubemapTintShare, 0f, CubemapTintMax),
+                    Mathf.Clamp(m.g * colour.g * CubemapTintShare, 0f, CubemapTintMax),
+                    Mathf.Clamp(m.b * colour.b * CubemapTintShare, 0f, CubemapTintMax),
+                    1f);
+
+                job.CubemapTints++;
+
+                if (job.CubemapTintSamples.Count < MaterialDiagSamples)
+                    job.CubemapTintSamples.Add($"{(material.shader != null ? material.shader.name : "?")} '{material.name}' " +
+                                               $"(cube '{cube.name}', mean {m.r.ToString("0.00", CultureInfo.InvariantCulture)} " +
+                                               $"{m.g.ToString("0.00", CultureInfo.InvariantCulture)} " +
+                                               $"{m.b.ToString("0.00", CultureInfo.InvariantCulture)})");
+            }
+            catch (Exception ex)
+            {
+                // the old tint stands; MaterialId's own guard would otherwise drop the whole material
+                job.CubemapTintsFailed++;
+                job.Note("a reflective material's cubemap", ex);
+            }
+        }
+
+        /// <summary>
+        /// Test 2026-09-29: a cubemap's mean colour over its six faces, 0..1 as the atlas reads a texture (gamma, clamped),
+        /// or null when it cannot be read. HOW, and why not the obvious way: a game cubemap is not CPU-readable and is
+        /// usually block-compressed, so neither GetPixels on it nor Graphics.CopyTexture into a readable RGBA32 Texture2D
+        /// works - CopyTexture never converts formats, and from a non-readable source it copies on the GPU only, leaving
+        /// the destination's CPU pixels (what GetPixels32 reads) untouched. So each face, at its smallest mip of at least
+        /// <see cref="CubemapMinFacePixels"/>, is copied GPU-side into a 2D texture of the cubemap's OWN format and size
+        /// (CopyTexture between identical formats, cube element to 2D element), that texture is Blit into an ARGB32
+        /// RenderTexture - the GPU decodes whatever format it is - and read back with ReadPixels into the atlas's scratch
+        /// texture: the path ReadTexture already takes for every atlas tile. Limits: an HDR cubemap is clamped at 1 by the
+        /// ARGB32 target, and one stored RGBM-encoded reads darker than it shows. Main thread; the active RenderTexture is
+        /// restored and the temporaries released however it goes.
+        /// </summary>
+        /// <param name="job">The build, for the scratch texture and the notes.</param>
+        /// <param name="cube">The cubemap (a Cubemap or a cube RenderTexture).</param>
+        private static Color? CubemapMean(Job job, Texture cube)
+        {
+            if ((SystemInfo.copyTextureSupport & CopyTextureSupport.DifferentTypes) == 0) return null;
+
+            var side = cube.width;
+            if (side <= 0 || cube.height != side) return null;
+
+            var levels = Math.Max(1, cube.mipmapCount);
+            var mip = 0;
+            while (mip + 1 < levels && (side >> (mip + 1)) >= CubemapMinFacePixels) mip++;
+
+            var faceSide = Math.Max(1, side >> mip);
+            var format = cube.graphicsFormat;
+
+            // a block-compressed texture's side must be whole blocks, and the 2D copy must be a format the GPU samples
+            if (format == GraphicsFormat.None || !SystemInfo.IsFormatSupported(format, FormatUsage.Sample)) return null;
+            if (GraphicsFormatUtility.IsCompressedFormat(format) && faceSide % 4 != 0) return null;
+
+            // A one-mip cubemap's face is scaled down by a bilinear Blit, so its mean samples about 4 texels in 256 at 1,024
+            // px - accepted: a reflection cubemap is smooth, and the tint is a flat colour anyway.
+            var readSide = Math.Min(faceSide, CubemapReadMax);
+            var previous = RenderTexture.active;
+            Texture2D face = null;
+            RenderTexture rt = null;
+
+            try
+            {
+                face = new Texture2D(faceSide, faceSide, format, TextureCreationFlags.None);
+                rt = RenderTexture.GetTemporary(readSide, readSide, 0, RenderTextureFormat.ARGB32, RenderTextureReadWrite.sRGB);
+
+                if (job.AtlasScratch == null)
+                    job.AtlasScratch = new Texture2D(AtlasTileMax, AtlasTileMax, TextureFormat.RGBA32, false, false);
+
+                long sr = 0, sg = 0, sb = 0;
+
+                for (var f = 0; f < 6; f++)
+                {
+                    Graphics.CopyTexture(cube, f, mip, face, 0, 0);
+                    Graphics.Blit(face, rt);
+
+                    RenderTexture.active = rt;
+                    job.AtlasScratch.ReadPixels(new Rect(0, 0, readSide, readSide), 0, 0, false);
+
+                    var read = job.AtlasScratch.GetRawTextureData<Color32>();
+                    var stride = job.AtlasScratch.width;
+
+                    for (var y = 0; y < readSide; y++)
+                        for (var x = 0; x < readSide; x++)
+                        {
+                            var c = read[y * stride + x];
+                            sr += c.r;
+                            sg += c.g;
+                            sb += c.b;
+                        }
+                }
+
+                var n = 6d * readSide * readSide * 255d;
+                return new Color((float)(sr / n), (float)(sg / n), (float)(sb / n), 1f);
+            }
+            catch (Exception ex)
+            {
+                job.Note("a reflective material's cubemap", ex);
+                return null;
+            }
+            finally
+            {
+                RenderTexture.active = previous;
+                if (rt != null) RenderTexture.ReleaseTemporary(rt);
+                // at once, not at the frame's end: a one-mip 1,024 px RGBAHalf face is several MB, and a frame can read several
+                if (face != null) UnityEngine.Object.DestroyImmediate(face);
+            }
         }
 
         /// <summary>
@@ -10272,6 +10623,7 @@ namespace QuestTree.QuestGraph
                     {
                         info.WhiteLeft = true;
                         flat = false;
+                        DiagnoseWhite(job, info, mats, m);
                     }
 
                     if (use != null && (textured || flat))
@@ -11683,22 +12035,39 @@ namespace QuestTree.QuestGraph
                 triangles[d.Kind] += d.Triangles;
             }
 
+            var whites = 0;
+            foreach (var d in all)
+                if (d.White) whites++;
+
             var entries = new List<string>();
             for (var i = 0; i < all.Count && i < MaterialDiagEntries; i++)
             {
                 var d = all[i];
-                entries.Add($"{DiagKinds[d.Kind]}: {d.Shader} | {d.Queue} | " +
+                entries.Add($"{DiagKinds[d.Kind]}{(d.White && d.Kind != DiagWhite ? ", white" : "")}: {d.Shader} | {d.Queue} | " +
                             $"{(d.AlphaTest ? "alphatest" : "-")} | " +
                             $"{(float.IsNaN(d.Cutoff) ? "-" : d.Cutoff.ToString("0.00", f1))} | {d.Properties} | " +
-                            $"{N(d.Buildings)} | {N(d.Triangles)}");
+                            $"{N(d.Buildings)} | {N(d.Triangles)}{(d.CountedWhenMapped ? " mapped" : "")}" +
+                            (d.Samples != null && d.Samples.Count > 0 ? $" | props: {string.Join(", ", d.Samples.ToArray())}" : ""));
             }
+
+            // test 2026-09-29: the reflective materials tinted from their cubemap (CubemapTint)
+            var cubemaps = !CubemapTint
+                ? "; cubemap tint rolled back"
+                : $"; {N(job.CubemapTints)} reflective material(s) with no main texture tinted from their cubemap (x" +
+                  $"{CubemapTintShare.ToString("0.##", f1)}, channels <= {CubemapTintMax.ToString("0.##", f1)}), " +
+                  $"{N(job.CubemapTintsFailed)} whose cubemap would not read kept their tint, {N(job.CubemapTintsRealtime)} on a " +
+                  "realtime probe left untinted" +
+                  (job.CubemapTintSamples.Count > 0 ? $" ({string.Join(" | ", job.CubemapTintSamples.ToArray())})" : "");
 
             Plugin.LogSource?.LogInfo(
                 $"QuestTree: materials left out of the atlas on {job.Request.Map} - {N(count[DiagTransparent])} transparent by " +
                 $"render queue > 2500 ({N(triangles[DiagTransparent])} source triangles), {N(count[DiagFlat])} flat without a " +
                 $"main texture ({N(triangles[DiagFlat])}), {N(count[DiagCutout])} cutout (queue 2450..2500 or _ALPHATEST_ON; " +
-                $"taken or left by measured coverage, {N(triangles[DiagCutout])}); the {entries.Count} drawing the most (kind: shader | renderQueue | _ALPHATEST_ON | _Cutoff | " +
-                $"texture properties, * = set | buildings | triangles): {string.Join(" ;; ", entries.ToArray())}");
+                $"taken or left by measured coverage, {N(triangles[DiagCutout])}); {N(whites)} white flat(s) left to the " +
+                $"fallback, {N(count[DiagWhite])} of them textured ({N(triangles[DiagWhite])} mapped triangles){cubemaps}; " +
+                $"the {entries.Count} drawing the most (kind: shader | renderQueue | _ALPHATEST_ON | _Cutoff | " +
+                $"texture properties, * = set | buildings | triangles | props, a flat one's first {MaterialDiagSamples}): " +
+                $"{string.Join(" ;; ", entries.ToArray())}");
         }
 
         /// <summary>Binds the file, fills the result's counts and says what the build cost in
