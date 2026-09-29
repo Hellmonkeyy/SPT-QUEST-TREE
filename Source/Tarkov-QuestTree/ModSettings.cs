@@ -244,6 +244,16 @@ namespace QuestTree
         public static ConfigEntry<bool> MapGroundReceivesShadows { get; private set; }
         public static ConfigEntry<bool> MapScreenSpaceShadows { get; private set; }
 
+        /// <summary>Lighting stage 4 (2026-09-28): whether the 3D map's private camera runs the game's PostProcessing v2 stack
+        /// (a tonemap following the capture's - ACES, or Neutral for the game's default RomB - and scalable ambient
+        /// occlusion, see UI/Map3DPostProcess.cs). Off by default until it has been
+        /// play-tested; off is exactly the viewer as it was before the stage. F12 only; a change rebuilds the viewport.</summary>
+        public static ConfigEntry<bool> MapPostProcessing { get; private set; }
+
+        /// <summary>Read by the 3D map when it builds its camera; false before Init has run, which is the setting's own default,
+        /// so a plugin that failed to initialise never attaches the stack.</summary>
+        public static bool PostProcessingWanted => Ready && MapPostProcessing != null && MapPostProcessing.Value;
+
         /// <summary>Whether a finished capture is offered to the host this profile plays on - see
         /// QuestGraph/MapTransfer.cs. On by default because the HOST decides: a host that does not
         /// want other people's pictures refuses them itself, and its refusal costs one line a
@@ -1021,6 +1031,14 @@ namespace QuestTree
                 "shader samples the cascade shadow map per fragment (off; needs that shader variant in the game). " +
                 "The third thing to try for a dark region. Takes effect when the map redraws.");
 
+            MapPostProcessing = config.Bind(
+                "Advanced", "3D map: tonemap and ambient occlusion (experimental)", false,
+                "Off, the default: the 3D map is lit by its own exposure budget with no post-processing. On, the map's private " +
+                "camera runs the game's PostProcessing stack with a tonemap following the capture's (ACES, or Neutral for the " +
+                "game's default RomB) and ambient occlusion, if the game has the " +
+                "stack's resources loaded (the log's first-frame line says). Experimental: play-test it; it costs a few " +
+                "milliseconds per redraw.");
+
             MeshFoliage = config.Bind(
                 "Advanced", "3D map: include trees and bushes", true,
                 "On, the 3D map's mesh keeps trees and bushes (renderers drawn with the game's SpeedTree shaders), each read at " +
@@ -1099,6 +1117,7 @@ namespace QuestTree
             MapLabels.SettingChanged += Raise;
             MapMode.SettingChanged += Raise;
             MapLighting.SettingChanged += Raise;
+            MapPostProcessing.SettingChanged += Raise;
             MapShadows.SettingChanged += Raise;
             MapGroundReceivesShadows.SettingChanged += Raise;
             MapScreenSpaceShadows.SettingChanged += Raise;

@@ -1531,6 +1531,13 @@ namespace QuestTree.UI
             // would draw under the menu rather than over it.
             _camera.depth = -50f;
 
+            // Lighting stage 4: the game's PostProcessing stack on this camera - a tonemap and ambient occlusion - only
+            // when the setting asks and the game has the stack's resources loaded (Map3DPostProcess); off, nothing
+            // changes and nothing is logged (the quiet console).
+            if (Map3DPostProcess.Wanted)
+                Plugin.LogSource?.LogInfo($"QuestTree: 3D map post-processing for {_mapKey}: {Map3DPostProcess.Probe()}");
+            Map3DPostProcess.Attach(_camera, _drawLayer, out _, _entry?.Lighting?.PrismTonemap);
+
             _lightGo = new GameObject("QuestTreeMap3DLight", typeof(Light));
             _lightGo.layer = _drawLayer;
             _light = _lightGo.GetComponent<Light>();
@@ -5904,7 +5911,7 @@ namespace QuestTree.UI
                         "QuestTree: 3D map for {0} - first frame drawn in {1:0.0} ms, render {2:0.0} ms, {3} draw call(s), cut {4}, " +
                         "msaa {5}x, shadows {6} ({7} cascade(s), {8:0} m), ambient {9}, sky {10}, light {11}, pixel lights {12}, " +
                         "colour space {13}, exposure x{14:0.00} (white in the sun under {15:0.00}, the ground's picture at x{16}, ambient {17:0.00} of the sun), fog {18}; " +
-                        "shadow switches: {19}, ground receives {20}, screen-space {21}; the focus at {22:0} m is {23}; source {24}.",
+                        "shadow switches: {19}, ground receives {20}, screen-space {21}; the focus at {22:0} m is {23}; source {24}; post-processing {25}.",
                         _mapKey, clock.Elapsed.TotalMilliseconds, _renderMs, _drawCalls, CutText(), _rtSamples,
                         _shadowsDrawn ? ShadowMode.ToString() : ShadowMode == LightShadows.None ? "None" : "off for the cut floor",
                         _shadowsDrawn ? ShadowCascadeCount : 0, _shadowsDrawn ? _shadowDistanceRendered : 0f,
@@ -5922,7 +5929,7 @@ namespace QuestTree.UI
                             Mathf.Max(0.0001f, Plan.SunIntensity * Plan.SunColour.maxColorComponent),
                         !AerialFog ? "off" : _fogDrawn ? "aerial" : "off for the cut floor",
                         ShadowMode, GroundReceivesShadows ? "yes" : "no", ScreenSpaceShadowsOff ? "off" : "on",
-                        _distance, FocusCascade(), LightSource()));
+                        _distance, FocusCascade(), LightSource(), Map3DPostProcess.Describe()));
                 }
             }
             catch (Exception ex)
@@ -6513,6 +6520,11 @@ namespace QuestTree.UI
                     }
                 }
 
+                // stage 4: the post-processing volume is live for this render only (a game camera whose volume layer
+                // included ours would otherwise be graded), and the stack is told when the frame is cut so it keeps the
+                // oblique projection it would otherwise reset
+                Map3DPostProcess.SetActive(true, oblique);
+
                 var clock = _timeRender ? Stopwatch.StartNew() : null;
                 _camera.Render();
 
@@ -6529,6 +6541,7 @@ namespace QuestTree.UI
                 // off is the menu's own scene changed under the player for the rest of the session. Each
                 // is guarded separately for the same reason - one throwing must not skip the other.
                 try { RenderSettings.fog = fog; } catch (Exception) { /* nothing further to try */ }
+                try { Map3DPostProcess.SetActive(false); } catch (Exception) { /* as above */ }
                 try { if (_light != null) _light.enabled = false; } catch (Exception) { /* as above */ }
 
                 if (fogSet)
@@ -7027,6 +7040,8 @@ namespace QuestTree.UI
                 Discard(_debugMaterials[i]);
                 _debugMaterials[i] = null;
             }
+
+            Map3DPostProcess.Detach(_camera);   // stage 4: before the camera goes, so the stack's buffers and HDR flag are undone
 
             Discard(_rt);
             Discard(_cameraGo);
