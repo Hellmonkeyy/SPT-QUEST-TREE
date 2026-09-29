@@ -962,6 +962,85 @@ namespace QuestTree.UI
         /// <summary>The one line naming the game's collect has been written for this view.</summary>
         private bool _collectLogged;
 
+        /// <summary>
+        /// Test 2026-09-29: the game's collect is a custom shader ("Hidden/Internal-ScreenSpaceShadowsEFT") and Unity's
+        /// built-in one is absent from the build, so <see cref="ForceBuiltinCollect"/> cannot act. With the game's collect
+        /// in place every surface inside the shadow range still rendered as shadowed with all twelve
+        /// <see cref="DistantShadowKeywords"/> off ("0/12 on"). The reading: the EFT collect samples DistantShadow's
+        /// texture globals whatever the keywords say, and on our camera those hold the main camera's stale textures (or
+        /// none, which Unity binds as black) - and a black or stale mask reads as shadowed.
+        ///
+        /// When true, and only when the game's collect is what our render will use (the mode is UseCustom, or a custom
+        /// shader is assigned while the built-in one is absent), not disabled by the screen-space setting and not
+        /// replaced by Unity's built-in one, the render saves each of <see cref="DistantShadowTextureGlobals"/> with
+        /// Shader.GetGlobalTexture and sets it to Texture2D.whiteTexture - 1 is "lit" in these masks (DistantShadow itself
+        /// clears its hi-res mask to white before drawing, DistantShadow.cs lines 951/965/977) - and the finally puts each
+        /// saved value back, a null one as null. Only while shadows are drawn: without them no collect runs.
+        ///
+        /// Caveat on three of them: GlobalShadow, GlobalShadowSampled and GlobalShadowSampled2 are DistantShadow's
+        /// shadow DEPTH maps (_depthRTs, RenderTextureFormat.Depth, line 1168), not lit masks. White there is depth 1.0,
+        /// which on D3D11's reversed Z is the near plane, so a depth comparison against it could read as occluded. They
+        /// are in the set because the test asked for every mask-like texture DistantShadow sets; if this build changes
+        /// nothing or darkens further, those three are the first to take back out.
+        ///
+        /// Not touched: _LowResDepth - a downscaled copy of the camera's depth (DownscaleDepthMaterial's target), not a
+        /// shadow term. There is no neutral depth: white would place every pixel at one plane and move the collect's
+        /// depth-aware upsample rather than neutralise it, and with ShadowMaskLowRes white the upsample of white is
+        /// white whatever the depth weights. Nor the matrices (GlobalShadowWorldToScreen/WorldToView/Projection and their
+        /// "2" versions) and vectors (GlobalShadowSettings, GlobalShadowProj, GlobalShadowTexelSize,
+        /// GlobalShadowL0/L1/L0Old, DepthTexture_TexelSize, DebugParams): they are the next candidates if neutral masks
+        /// change nothing.
+        ///
+        /// Rollback: false - the globals are left as found (the build before this one).
+        /// </summary>
+        private static readonly bool NeutraliseDistantShadowGlobals = true;
+
+        /// <summary>
+        /// The texture globals DistantShadow sets that hold a shadow term, where white means lit (DistantShadow.cs: the
+        /// IDs at lines 78, 88, 114, 116, 120 and 310; the writes at 818-819/829, 865-866/894, 939, 945, 990).
+        /// </summary>
+        private static readonly string[] DistantShadowTextureGlobals =
+        {
+            // the three MASKS only (white = lit): GlobalShadow, GlobalShadowSampled and GlobalShadowSampled2 are the
+            // distant-shadow DEPTH maps, where white is the near plane on reversed Z and could read as occluded
+            "PreComputedGlobalShadow", "ShadowMaskLowRes", "_BlurMask",
+        };
+
+        /// <summary>Their property IDs, hashed once rather than per render.</summary>
+        private static readonly int[] DistantShadowTextureIds = Array.ConvertAll(DistantShadowTextureGlobals, Shader.PropertyToID);
+
+        /// <summary>Each global as the last render found it, for the finally to put back (reused, so a render allocates
+        /// nothing; cleared after the restore so the view holds no reference to the game's textures).</summary>
+        private readonly Texture[] _distantGlobalWas = new Texture[DistantShadowTextureGlobals.Length];
+
+        /// <summary>Which of them this render replaced, for the finally (reused as above).</summary>
+        private readonly bool[] _distantGlobalSet = new bool[DistantShadowTextureGlobals.Length];
+
+        /// <summary>Which of them held a texture when found - for the first-frame line (reused as above).</summary>
+        private readonly bool[] _distantGlobalFound = new bool[DistantShadowTextureGlobals.Length];
+
+        /// <summary>Why the last render did not neutralise them, null when it did - for the first-frame line.</summary>
+        private string _distantGlobalsSkipped = "not rendered yet";
+
+        /// <summary>The globals clause of the first-frame line: which held a texture and were replaced, or why none was.</summary>
+        private string DistantGlobalsText()
+        {
+            if (_distantGlobalsSkipped != null) return "distant-shadow globals not neutralised (" + _distantGlobalsSkipped + ")";
+            var found = new List<string>();
+            var failed = 0;
+            for (var i = 0; i < DistantShadowTextureGlobals.Length; i++)
+                if (_distantGlobalFound[i]) found.Add(DistantShadowTextureGlobals[i]);
+            for (var i = 0; i < DistantShadowTextureGlobals.Length; i++)
+                if (!_distantGlobalReplaced[i]) failed++;
+            return string.Format(CultureInfo.InvariantCulture, "distant-shadow globals neutralised: {0} of {1} were set ({2}){3}",
+                found.Count, DistantShadowTextureGlobals.Length, found.Count == 0 ? "none" : string.Join(", ", found),
+                failed == 0 ? "" : string.Format(CultureInfo.InvariantCulture, ", {0} write(s) failed", failed));
+        }
+
+        /// <summary>Which of them the last render actually wrote white - kept past the finally (which clears
+        /// <see cref="_distantGlobalSet"/>) for the first-frame line.</summary>
+        private readonly bool[] _distantGlobalReplaced = new bool[DistantShadowTextureGlobals.Length];
+
         /// <summary>The keywords found on, as "n/12 on: A, B" - built for the first-frame line only.</summary>
         private string DistantShadowText()
         {
@@ -6088,7 +6167,7 @@ namespace QuestTree.UI
                         "QuestTree: 3D map for {0} - first frame drawn in {1:0.0} ms, render {2:0.0} ms, {3} draw call(s), cut {4}, " +
                         "msaa {5}x, shadows {6} ({7} cascade(s), {8:0} m, bias {26:0.00} / normal {27:0.00}), ambient {9}, sky {10}, light {11}, pixel lights {12}, " +
                         "colour space {13}, exposure x{14:0.00} (white in the sun under {15:0.00}, the ground's picture at x{16}, ambient {17:0.00} of the sun), fog {18}; " +
-                        "shadow switches: {19}, ground receives {20}, screen-space {21}, collect {28} ({29}, built-in {30}), distant-shadow keywords {31}; the focus at {22:0} m is {23}; source {24}; post-processing {25}.",
+                        "shadow switches: {19}, ground receives {20}, screen-space {21}, collect {28} ({29}, built-in {30}), {32}, distant-shadow keywords {31};the focus at {22:0} m is {23}; source {24}; post-processing {25}.",
                         _mapKey, clock.Elapsed.TotalMilliseconds, _renderMs, _drawCalls, CutText(), _rtSamples,
                         _shadowsDrawn ? ShadowMode.ToString() : ShadowMode == LightShadows.None ? "None" : "off for the cut floor",
                         _shadowsDrawn ? ShadowCascadeCount : 0, _shadowsDrawn ? _shadowDistanceRendered : 0f,
@@ -6109,7 +6188,8 @@ namespace QuestTree.UI
                         _distance, FocusCascade(), LightSource(), Map3DPostProcess.Describe(),
                         _light != null ? _light.shadowBias : -1f, _light != null ? _light.shadowNormalBias : -1f,   // read back from the light, not the constants, so the line proves they took
                         // the collect and the keywords as found before the bracket changed them
-                        _collectModeFound, _collectShaderFound ?? "-", _builtinCollect ?? "-", DistantShadowText()));
+                        _collectModeFound, _collectShaderFound ?? "-", _builtinCollect ?? "-", DistantShadowText(),
+                        DistantGlobalsText()));
                 }
             }
             catch (Exception ex)
@@ -6632,6 +6712,13 @@ namespace QuestTree.UI
             // Only an absent or unsupported built-in shader stops the forced collect; the setting's Disabled wins over it.
             var forceBuiltin = ForceBuiltinCollect && collectReadOk && _builtinCollect == "present";
 
+            // The game's collect is what our render will draw with: in use as found (the mode is UseCustom, or a custom
+            // shader is assigned while Unity's own is absent) and neither disabled by the setting nor replaced by the
+            // built-in one. Only then are its distant-shadow globals worth neutralising (NeutraliseDistantShadowGlobals).
+            var gameCollect = !ScreenSpaceShadowsOff && !forceBuiltin &&
+                (collectWas == BuiltinShaderMode.UseCustom || (_collectShaderFound != "-" && _builtinCollect != "present"));
+            var neutralise = NeutraliseDistantShadowGlobals && gameCollect;
+
             if (!_collectLogged &&
                 (collectWas == BuiltinShaderMode.UseCustom || _collectShaderFound != "-" || _builtinCollect != "present"))
             {
@@ -6640,6 +6727,9 @@ namespace QuestTree.UI
                 _collectLogged = true;
                 string outcome;
                 if (ScreenSpaceShadowsOff) outcome = "renders with the collect disabled (the screen-space setting is off)";
+                else if (neutralise)
+                    outcome = "renders with the game's collect and neutral distant-shadow masks" +
+                        (_builtinCollect != "present" ? " (Unity's built-in collect is " + _builtinCollect + " in this build)" : "");
                 else if (!ForceBuiltinCollect) outcome = "keeps it";
                 else if (_builtinCollect != "present")
                     outcome = "keeps it - Unity's built-in collect is " + _builtinCollect + " in this build, so the fix is unavailable";
@@ -6768,8 +6858,41 @@ namespace QuestTree.UI
                             collectSet = true;
                             GraphicsSettings.SetShaderMode(BuiltinShaderType.ScreenSpaceShadows, BuiltinShaderMode.UseBuiltin);
                         }
+
+                        // The game's collect stays: its distant-shadow masks white (lit) for our render only, each saved
+                        // first and put back in the finally (see NeutraliseDistantShadowGlobals).
+                        if (neutralise)
+                        {
+                            _distantGlobalsSkipped = null;
+                            for (var g = 0; g < DistantShadowTextureIds.Length; g++)
+                            {
+                                _distantGlobalFound[g] = false;
+                                _distantGlobalReplaced[g] = false;
+                                try
+                                {
+                                    var was = Shader.GetGlobalTexture(DistantShadowTextureIds[g]);
+                                    _distantGlobalWas[g] = was;
+                                    _distantGlobalFound[g] = was != null;
+                                    _distantGlobalSet[g] = true;   // before the write, as collectSet
+                                    Shader.SetGlobalTexture(DistantShadowTextureIds[g], Texture2D.whiteTexture);
+                                    _distantGlobalReplaced[g] = true;
+                                }
+                                catch (Exception)
+                                {
+                                    // A read that throws leaves this one untouched (not marked set, nothing to restore); a
+                                    // write that throws is still put back, and the line counts it as failed.
+                                }
+                            }
+                        }
+                        else
+                            _distantGlobalsSkipped = !NeutraliseDistantShadowGlobals ? "the switch is off"
+                                : ScreenSpaceShadowsOff ? "the collect is disabled by the screen-space setting"
+                                : forceBuiltin ? "Unity's built-in collect is in use"
+                                : "the game's collect is not in use";
                     }
+                    else _distantGlobalsSkipped = "no shadows on this frame";
                 }
+                else _distantGlobalsSkipped = "no shadows on this frame";
 
                 // The game's distant-shadow keywords off for our render only, each only if it was on (see
                 // DistantShadowKeywordsOff); the finally turns back on exactly these.
@@ -6848,6 +6971,16 @@ namespace QuestTree.UI
                 if (collectSet)
                 {
                     try { GraphicsSettings.SetShaderMode(BuiltinShaderType.ScreenSpaceShadows, collectWas); } catch (Exception) { /* as above */ }
+                }
+
+                // each distant-shadow global on its own, so one throwing does not leave the others white; a null saved
+                // value goes back as null, as the game had it, and the saved reference is dropped either way
+                for (var g = 0; g < DistantShadowTextureIds.Length; g++)
+                {
+                    if (!_distantGlobalSet[g]) continue;
+                    try { Shader.SetGlobalTexture(DistantShadowTextureIds[g], _distantGlobalWas[g]); } catch (Exception) { /* as above */ }
+                    _distantGlobalWas[g] = null;
+                    _distantGlobalSet[g] = false;
                 }
 
                 // each keyword on its own, so one throwing does not leave the others off
