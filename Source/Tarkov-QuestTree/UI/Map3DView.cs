@@ -827,8 +827,8 @@ namespace QuestTree.UI
         /// <summary>
         /// HQ S1.3: the two fallbacks for the untested case - Forward's screen-space shadow collect pass under the
         /// oblique near plane of the floor cut (ApplyCut). If shadows sit right on the top floor but slide with the
-        /// camera once a lower floor is cut: first try <see cref="ScreenSpaceShadowsOff"/> (Standard then samples the
-        /// cascade map per fragment from the world position; needs that shader variant in the game's build); if that
+        /// camera once a lower floor is cut: first try <see cref="ScreenSpaceShadowsOff"/> (see its own comment for
+        /// what Disabled really does on PC - it is not a per-fragment cascade lookup); if that
         /// draws no shadows at all, set <see cref="ShadowsUnderCut"/> false - shadows stay on for uncut frames and go
         /// off for the cut ones. S1 review: OFF by default for a second reason - the cut is only the camera's near
         /// plane, so the geometry it removes from view (upper storeys, roofs) would still cast onto the exposed floor;
@@ -836,9 +836,104 @@ namespace QuestTree.UI
         /// </summary>
         private static readonly bool ShadowsUnderCut = false;
 
-        /// <summary>Stage 0: the setting's (ModSettings.MapScreenSpaceShadows, on by default = this false).</summary>
+        /// <summary>
+        /// Stage 0: the setting's (ModSettings.MapScreenSpaceShadows, on by default = this false). When true, the
+        /// render sets the screen-space shadow collect to Disabled, and this wins over <see cref="ForceBuiltinCollect"/>.
+        ///
+        /// What Disabled does on PC (corrected after the 2026-09-28 test): it does NOT make Standard sample the cascade
+        /// map per fragment. On desktop D3D11 the built-in pipeline's directional-light SHADOWS_SCREEN variant is
+        /// screen-space only - a receiver reads the collected screen-space mask (_ShadowMapTexture) at its screen
+        /// position. With the collect disabled that mask is never written for our camera, so receivers read whatever
+        /// the texture holds (in the test: the buildings, the receivers, stayed dark), while the relief ground, which
+        /// receives no shadows, came out lit. It is a diagnostic switch, not a working shadow path.
+        /// </summary>
         private static bool ScreenSpaceShadowsOff =>
             ModSettings.Ready && ModSettings.MapScreenSpaceShadows != null && !ModSettings.MapScreenSpaceShadows.Value;
+
+        /// <summary>
+        /// Test 2026-09-28: with the collect in its normal state EVERY surface inside the shadow distance rendered as
+        /// shadowed, the relief ground too (which receives none), the dark edge following the shadow distance. The
+        /// reading: EFT installs a custom screen-space shadow collect (its DistantShadow system - the GlobalShadow*
+        /// textures and matrices, the ENABLE_DISTANT_SHADOW / DISTANT_SHADOWS_BLEND keywords) that reads globals the
+        /// game's main camera sets through its own command buffers and our private camera never sets, so it collects
+        /// about zero everywhere. When true, our render sets the collect to Unity's built-in shader, which needs only
+        /// the cascade atlas and the camera's depth texture - both of which Unity makes for our camera itself - and puts
+        /// the previous mode back in the finally. <see cref="ScreenSpaceShadowsOff"/> wins when both are on.
+        ///
+        /// Uncertain: if the built-in collect shader was stripped from the game's build, UseBuiltin would draw no
+        /// directional shadows at all. So the view looks it up once (Shader.Find of Unity's own name for it,
+        /// "Hidden/Internal-ScreenSpaceShadows") and, when it is absent or unsupported, degrades: the mode is left as the
+        /// game set it and the one-off line says the fix is unavailable. Unsupported is treated as absent because an
+        /// unsupported collect draws nothing either. The first-frame line prints the lookup, the mode found and the custom
+        /// shader's name, so the test can tell the cases apart.
+        ///
+        /// Rollback: false - the collect is left as the game set it (the build before this one), and only the
+        /// Disabled switch touches it.
+        /// </summary>
+        private static readonly bool ForceBuiltinCollect = true;
+
+        /// <summary>Unity's name for its built-in screen-space shadow collect shader.</summary>
+        private const string BuiltinCollectShaderName = "Hidden/Internal-ScreenSpaceShadows";
+
+        /// <summary>
+        /// When true, our render globally disables every one of <see cref="DistantShadowKeywords"/> that was on, and
+        /// re-enables exactly those in the finally. DistantShadow turns them on in a command buffer at the main camera's
+        /// BeforeGBuffer and off again at its AfterEverything, so between the game's cameras they should already be off;
+        /// the first-frame line records which were on. If one is on while we render, any shader compiled with it - the
+        /// custom collect first, and PRECOMPUTE_MASK most of all, which points a shader at the game's own precomputed
+        /// screen mask (PreComputedGlobalShadow, the main camera's) - takes the distant-shadow path, whose inputs are
+        /// the main camera's.
+        ///
+        /// Rollback: false - the keywords are left as found (the build before this one).
+        /// </summary>
+        private static readonly bool DistantShadowKeywordsOff = true;
+
+        /// <summary>
+        /// The set DistantShadow.DisableKeywords turns off after the main camera (DistantShadow.cs, the strings at
+        /// lines 282-306): the game's own idea of "off between cameras", so disabling the same set cannot put the
+        /// renderer in a state the game never uses. USE_GAUSS_DISTRIBUTION and DISTANT_SHADOW_FIX_GLOW are not in that
+        /// method (the first is a filter choice the game leaves set, the second is scoped to the mask blur) and are
+        /// left alone.
+        /// </summary>
+        private static readonly string[] DistantShadowKeywords =
+        {
+            "DISTANT_SHADOWS_BLEND", "ADAPTIVE_DEPTH_BIAS", "ENABLE_DISTANT_SHADOW", "ENABLE_DISTANT_SHADOW_PCF",
+            "DISTANT_SHADOW_MULTIPROJECTION", "ENABLE_PCF_SHIFT", "DISABLE_WIND_EFT", "PRECOMPUTE_MASK",
+            "ENABLE_PARALLAX", "RENDER_FOR_SCOPE", "ENABLE_BLUR_MASK", "REDUCE_SAMPLES",
+        };
+
+        /// <summary>The screen-space collect's mode as the last render found it, before the bracket changed it - for the
+        /// first-frame line.</summary>
+        private BuiltinShaderMode _collectModeFound = BuiltinShaderMode.UseBuiltin;
+
+        /// <summary>The name of the custom collect shader assigned when the view first rendered, "-" for none. Read once
+        /// per view, not per render: the name getter allocates a string, and EFT runs the raid with the GC off.</summary>
+        private string _collectShaderFound;
+
+        /// <summary>Whether the built-in collect shader is in the build, looked up once per view: "absent", "present" or
+        /// "unsupported" (null until the lookup).</summary>
+        private string _builtinCollect;
+
+        /// <summary>Which of <see cref="DistantShadowKeywords"/> were globally on when the last render began - for the
+        /// first-frame line (reused, so a render allocates nothing).</summary>
+        private readonly bool[] _distantShadowFound = new bool[DistantShadowKeywords.Length];
+
+        /// <summary>Which of them this render turned off, for the finally to turn back on (reused as above).</summary>
+        private readonly bool[] _distantShadowOffSet = new bool[DistantShadowKeywords.Length];
+
+        /// <summary>The one line naming the game's collect has been written for this view.</summary>
+        private bool _collectLogged;
+
+        /// <summary>The keywords found on, as "n/12 on: A, B" - built for the first-frame line only.</summary>
+        private string DistantShadowText()
+        {
+            var on = new List<string>();
+            for (var i = 0; i < DistantShadowKeywords.Length; i++)
+                if (_distantShadowFound[i]) on.Add(DistantShadowKeywords[i]);
+            return on.Count == 0
+                ? string.Format(CultureInfo.InvariantCulture, "0/{0} on", DistantShadowKeywords.Length)
+                : string.Format(CultureInfo.InvariantCulture, "{0}/{1} on: {2}", on.Count, DistantShadowKeywords.Length, string.Join(", ", on));
+        }
 
         /// <summary>
         /// HQ S1.4: hemisphere ambient for the render - sky from above, ground bounce from below, an equator between
@@ -5955,7 +6050,7 @@ namespace QuestTree.UI
                         "QuestTree: 3D map for {0} - first frame drawn in {1:0.0} ms, render {2:0.0} ms, {3} draw call(s), cut {4}, " +
                         "msaa {5}x, shadows {6} ({7} cascade(s), {8:0} m, bias {26:0.00} / normal {27:0.00}), ambient {9}, sky {10}, light {11}, pixel lights {12}, " +
                         "colour space {13}, exposure x{14:0.00} (white in the sun under {15:0.00}, the ground's picture at x{16}, ambient {17:0.00} of the sun), fog {18}; " +
-                        "shadow switches: {19}, ground receives {20}, screen-space {21}; the focus at {22:0} m is {23}; source {24}; post-processing {25}.",
+                        "shadow switches: {19}, ground receives {20}, screen-space {21}, collect {28} ({29}, built-in {30}), distant-shadow keywords {31}; the focus at {22:0} m is {23}; source {24}; post-processing {25}.",
                         _mapKey, clock.Elapsed.TotalMilliseconds, _renderMs, _drawCalls, CutText(), _rtSamples,
                         _shadowsDrawn ? ShadowMode.ToString() : ShadowMode == LightShadows.None ? "None" : "off for the cut floor",
                         _shadowsDrawn ? ShadowCascadeCount : 0, _shadowsDrawn ? _shadowDistanceRendered : 0f,
@@ -5974,7 +6069,9 @@ namespace QuestTree.UI
                         !AerialFog ? "off" : _fogDrawn ? "aerial" : "off for the cut floor",
                         ShadowMode, GroundReceivesShadows ? "yes" : "no", ScreenSpaceShadowsOff ? "off" : "on",
                         _distance, FocusCascade(), LightSource(), Map3DPostProcess.Describe(),
-                        _light != null ? _light.shadowBias : -1f, _light != null ? _light.shadowNormalBias : -1f));   // read back from the light, not the constants, so the line proves they took
+                        _light != null ? _light.shadowBias : -1f, _light != null ? _light.shadowNormalBias : -1f,   // read back from the light, not the constants, so the line proves they took
+                        // the collect and the keywords as found before the bracket changed them
+                        _collectModeFound, _collectShaderFound ?? "-", _builtinCollect ?? "-", DistantShadowText()));
                 }
             }
             catch (Exception ex)
@@ -6450,8 +6547,72 @@ namespace QuestTree.UI
             var splitWas = QualitySettings.shadowCascade4Split;
             var projectionWas = QualitySettings.shadowProjection;
             var shadowsSet = false;
-            var collectWas = BuiltinShaderMode.UseBuiltin;
             var collectSet = false;
+
+            // Read before anything in the bracket changes it: the mode as the game left it, for the finally and for the
+            // first-frame line. Each read is guarded on its own - a diagnostic must not stop the render. If the mode
+            // cannot be read, collectWas is only a default, and restoring it could replace a UseCustom the game had:
+            // collectReadOk gates BOTH writes below, so an unread mode is never written or "restored".
+            var collectWas = BuiltinShaderMode.UseBuiltin;
+            var collectReadOk = false;
+            try
+            {
+                collectWas = GraphicsSettings.GetShaderMode(BuiltinShaderType.ScreenSpaceShadows);
+                collectReadOk = true;
+            }
+            catch (Exception) { /* left unread; nothing below touches the mode */ }
+            _collectModeFound = collectWas;
+
+            // Once per view: the custom shader's name (its getter allocates, and EFT runs the raid with the GC off) and
+            // whether Unity's own collect survived the game's shader stripping - Shader.Find returns null for a shader
+            // that is not in the build.
+            if (_collectShaderFound == null)
+            {
+                try { _collectShaderFound = GraphicsSettings.GetCustomShader(BuiltinShaderType.ScreenSpaceShadows)?.name ?? "-"; }
+                catch (Exception) { _collectShaderFound = "-"; }
+                if (_collectShaderFound.Length == 0) _collectShaderFound = "-";
+            }
+
+            if (_builtinCollect == null)
+            {
+                try
+                {
+                    var builtin = Shader.Find(BuiltinCollectShaderName);
+                    _builtinCollect = builtin == null ? "absent" : builtin.isSupported ? "present" : "unsupported";
+                }
+                catch (Exception) { _builtinCollect = "absent"; }
+            }
+
+            // The distant-shadow keywords as found; the finally re-enables exactly the ones this render turned off.
+            for (var k = 0; k < DistantShadowKeywords.Length; k++)
+            {
+                _distantShadowOffSet[k] = false;
+                try { _distantShadowFound[k] = Shader.IsKeywordEnabled(DistantShadowKeywords[k]); }
+                catch (Exception) { _distantShadowFound[k] = false; }   // read as off, so it is never touched
+            }
+
+            // Only an absent or unsupported built-in shader stops the forced collect; the setting's Disabled wins over it.
+            var forceBuiltin = ForceBuiltinCollect && collectReadOk && _builtinCollect == "present";
+
+            if (!_collectLogged &&
+                (collectWas == BuiltinShaderMode.UseCustom || _collectShaderFound != "-" || _builtinCollect != "present"))
+            {
+                // Once per view: the fact the test needs, without the debug line. The mode is named as well as the shader,
+                // because a custom shader can be assigned while the mode is UseBuiltin (then it is not in use).
+                _collectLogged = true;
+                string outcome;
+                if (ScreenSpaceShadowsOff) outcome = "renders with the collect disabled (the screen-space setting is off)";
+                else if (!ForceBuiltinCollect) outcome = "keeps it";
+                else if (_builtinCollect != "present")
+                    outcome = "keeps it - Unity's built-in collect is " + _builtinCollect + " in this build, so the fix is unavailable";
+                else if (!collectReadOk) outcome = "keeps it - the mode could not be read, so it is not changed";
+                else if (collectWas == BuiltinShaderMode.UseBuiltin) outcome = "renders with Unity's built-in one, already in use";
+                else outcome = "renders with Unity's built-in one";
+
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: the game's screen-space shadow collect mode is {(collectReadOk ? collectWas.ToString() : "unreadable")}, " +
+                    $"custom shader {_collectShaderFound}, built-in {_builtinCollect}; the 3D map {outcome}.");
+            }
 
             // HQ S1.4: the scene's ambient, put back in the finally.
             var ambientModeWas = RenderSettings.ambientMode;
@@ -6556,12 +6717,31 @@ namespace QuestTree.UI
                         _shadowDistanceRendered = QualitySettings.shadowDistance;
                         _shadowsDrawn = true;
 
-                        if (ScreenSpaceShadowsOff)
+                        // Disabled (the setting) wins; otherwise Unity's own collect replaces the game's custom one,
+                        // whose inputs are the main camera's. collectWas was read above, before either change, and
+                        // neither write happens when it could not be read (see collectReadOk).
+                        if (ScreenSpaceShadowsOff && collectReadOk)
                         {
-                            collectWas = GraphicsSettings.GetShaderMode(BuiltinShaderType.ScreenSpaceShadows);
+                            collectSet = true;   // before the write: a setter that throws half way is still put back
                             GraphicsSettings.SetShaderMode(BuiltinShaderType.ScreenSpaceShadows, BuiltinShaderMode.Disabled);
-                            collectSet = true;
                         }
+                        else if (!ScreenSpaceShadowsOff && forceBuiltin && collectWas != BuiltinShaderMode.UseBuiltin)
+                        {
+                            collectSet = true;
+                            GraphicsSettings.SetShaderMode(BuiltinShaderType.ScreenSpaceShadows, BuiltinShaderMode.UseBuiltin);
+                        }
+                    }
+                }
+
+                // The game's distant-shadow keywords off for our render only, each only if it was on (see
+                // DistantShadowKeywordsOff); the finally turns back on exactly these.
+                if (DistantShadowKeywordsOff)
+                {
+                    for (var k = 0; k < DistantShadowKeywords.Length; k++)
+                    {
+                        if (!_distantShadowFound[k]) continue;
+                        _distantShadowOffSet[k] = true;   // before the write, as collectSet
+                        Shader.DisableKeyword(DistantShadowKeywords[k]);
                     }
                 }
 
@@ -6630,6 +6810,14 @@ namespace QuestTree.UI
                 if (collectSet)
                 {
                     try { GraphicsSettings.SetShaderMode(BuiltinShaderType.ScreenSpaceShadows, collectWas); } catch (Exception) { /* as above */ }
+                }
+
+                // each keyword on its own, so one throwing does not leave the others off
+                for (var k = 0; k < DistantShadowKeywords.Length; k++)
+                {
+                    if (!_distantShadowOffSet[k]) continue;
+                    try { Shader.EnableKeyword(DistantShadowKeywords[k]); } catch (Exception) { /* as above */ }
+                    _distantShadowOffSet[k] = false;
                 }
 
                 // The oblique projection lives ONLY inside this bracket: every other reader of the camera
