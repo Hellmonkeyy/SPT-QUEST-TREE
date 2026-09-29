@@ -466,6 +466,38 @@ namespace QuestTree.UI
             public MapLayer Picture;
         }
 
+        /// <summary>Lighting stage 2: the raid's light a capture recorded (its meta's "lighting" block), as the 3D view
+        /// uses it - or absent. Only what checked out is here: a sun with a finite, non-zero direction, an ambient with
+        /// all 27 harmonics; a colour that was missing is null. Filled by MapCatalog.ReadLighting.</summary>
+        internal sealed class CaptureLighting
+        {
+            /// <summary>Towards the light - the sun by day, the moon by night, never below TOD's minimum height - so IsDay,
+            /// not the elevation, says night. World axes, unit length; Vector3.zero when the capture had no light.</summary>
+            public Vector3 SunDirection;
+
+            /// <summary>Towards TOD's true sun (below the horizon at night), world axes, unit length; Vector3.zero when the
+            /// capture did not record it.</summary>
+            public Vector3 SunTrueDirection;
+
+            public Color? SunColor;
+            public float SunIntensity;
+            public float SunShadowStrength;
+            public bool IsDay;
+            public float Fogginess;
+
+            /// <summary>EFT's ambient, 27 spherical-harmonics floats ([channel * 9 + coefficient]), or null.</summary>
+            public float[] AmbientSh;
+
+            public Color? SkyColor;
+            public Color? EquatorColor;
+            public Color? FogColor;
+            public string PrismTonemap = "";
+            public string ColorSpace = "";
+            public string TimeOfDay = "";
+
+            public bool HasSun => SunDirection != Vector3.zero;
+        }
+
         internal sealed class SidePicture
         {
             /// <summary>"N", "S", "E" or "W": the side the camera stood on.</summary>
@@ -528,6 +560,10 @@ namespace QuestTree.UI
             /// for a capture without them, whose buildings keep the projected textures (top, sides, tints).
             /// Filled by MapCatalog.ReadAtlas; a page whose file is missing is left out, never the capture.</summary>
             public readonly List<AtlasPage> AtlasPages = new();
+
+            /// <summary>Lighting stage 2: the raid's light the capture recorded, or null (an older capture, a DynamicMaps
+            /// map, a synthesised extent) - the 3D view then lights with its preset.</summary>
+            public CaptureLighting Lighting;
 
             /// <summary>The map's declared coordinate rotation, applied to the artwork
             /// (MapView.PlaceArtwork) and to percentage-placed objective pins (MapView.PositionFor).

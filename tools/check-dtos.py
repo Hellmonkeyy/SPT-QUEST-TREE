@@ -59,7 +59,7 @@ SAME_NAME = """
     ZoneHarvestRequest HarvestedTrigger HarvestedQuestItem ZoneHarvestResponse
     MapExtentDto MapFloorDto
     MapRectDto MapCaptureFloorDto MapLabelDto MapCaptureMetaDto MapCaptureMeshDto MapCaptureSideDto
-    MapCaptureAtlasDto
+    MapCaptureAtlasDto MapCaptureLightingDto
     MapUploadRequest MapUploadResponse MapIndexEntryDto MapIndexDto MapImageRequest MapImageDto
     MapMeshUploadRequest MapMeshUploadResponse MapMeshRequest MapMeshDto
 """.split()

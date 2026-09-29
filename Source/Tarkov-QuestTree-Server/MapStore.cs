@@ -2791,6 +2791,9 @@ namespace QuestTreeServer
             meta.ModVersion = Clip((meta.ModVersion ?? "").Trim(), MaxFreeTextLength);
             meta.TimeOfDay = Clip((meta.TimeOfDay ?? "").Trim(), MaxNameLength);
 
+            // Lighting stage 2: carried when it checks out, nulled when it does not - never a refusal
+            if (meta.Lighting != null && !LightingIsUsable(meta.Lighting)) meta.Lighting = null;
+
             // Carried, not ranked on, and bounded because they are stored and served back: the version
             // of a set is CapturedAt alone (the check further up), and these two only decide what the
             // credit line under the map says. A firstCapturedAt that is not a timestamp is blanked
@@ -4829,6 +4832,51 @@ namespace QuestTreeServer
                 DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal, out var at)
                 ? at
                 : DateTime.MinValue;
+        }
+
+        /// <summary>Lighting stage 2: whether a capture's lighting block is one the store will carry - every array its
+        /// fixed length with finite numbers, every number finite, the strings clipped in place, the effect list bounded.
+        /// A block that fails is dropped (the caller nulls it): a set is a set without its light.</summary>
+        /// <param name="l">The block.</param>
+        private static bool LightingIsUsable(MapCaptureLightingDto l)
+        {
+            static bool Finite(float v) => float.IsFinite(v) && Math.Abs(v) < 1e6f;
+
+            static bool ArrayOk(float[]? a, int length, bool required)
+            {
+                if (a == null) return !required;
+                if (a.Length != length) return false;
+                foreach (var v in a) if (!Finite(v)) return false;
+                return true;
+            }
+
+            if (!ArrayOk(l.SunDirection, 3, false) || !ArrayOk(l.SunTrueDirection, 3, false) || !ArrayOk(l.SunColor, 3, false) ||
+                !ArrayOk(l.AmbientSh, 27, false) || !ArrayOk(l.SkyColor, 3, false) || !ArrayOk(l.EquatorColor, 3, false) || !ArrayOk(l.FogColor, 3, false) ||
+                !ArrayOk(l.LevelSunColor, 3, false) || !ArrayOk(l.RenderFogColor, 3, false))
+                return false;
+
+            if (!Finite(l.SunIntensity) || !Finite(l.SunShadowStrength) || !Finite(l.Fogginess) || !Finite(l.FogDensity) ||
+                !Finite(l.FogStart) || !Finite(l.FogEnd) || !Finite(l.AmbientIntensity) || !Finite(l.PrismMiddleGrey) ||
+                !Finite(l.PrismGamma))
+                return false;
+
+            // something to light with: a sun or an ambient
+            if (l.SunDirection == null && l.AmbientSh == null) return false;
+
+            l.Source = Clip((l.Source ?? "").Trim(), MaxNameLength);
+            l.FogMode = Clip((l.FogMode ?? "").Trim(), MaxNameLength);
+            l.AmbientMode = Clip((l.AmbientMode ?? "").Trim(), MaxNameLength);
+            l.PrismTonemap = Clip((l.PrismTonemap ?? "").Trim(), MaxNameLength);
+            l.PrismLut = Clip((l.PrismLut ?? "").Trim(), MaxFreeTextLength);
+            l.ColorSpace = Clip((l.ColorSpace ?? "").Trim(), MaxNameLength);
+
+            if (l.PostProcess != null)
+            {
+                if (l.PostProcess.Count > 32) l.PostProcess.RemoveRange(32, l.PostProcess.Count - 32);
+                for (var i = 0; i < l.PostProcess.Count; i++) l.PostProcess[i] = Clip((l.PostProcess[i] ?? "").Trim(), MaxFreeTextLength);
+            }
+
+            return true;
         }
 
         /// <summary>A string from a client cut to a length, with its line breaks turned into spaces.

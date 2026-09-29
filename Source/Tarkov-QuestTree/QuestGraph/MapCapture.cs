@@ -11113,6 +11113,21 @@ namespace QuestTree.QuestGraph
 
                 var now = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", CultureInfo.InvariantCulture);
 
+                // Lighting stage 2: read in its own try, out here, because a game update that removes a type
+                // ReadLighting names (TOD_Sky, PrismEffects, LevelSettings, ...) makes Mono throw when it compiles
+                // that method, before any try inside it runs - and without this one the catch around this whole
+                // method would take it, and the capture would keep its pictures but lose its meta. The light is
+                // optional; the meta is not.
+                CaptureLighting lighting = null;
+                try
+                {
+                    lighting = ReadLighting();
+                }
+                catch (Exception ex)
+                {
+                    Plugin.LogSource?.LogDebug($"QuestTree: the raid's light could not be read ({ex.GetType().Name}: {ex.Message}) - the capture carries none.");
+                }
+
                 var meta = new CaptureMeta
                 {
                     SchemaVersion = SchemaVersion,
@@ -11133,6 +11148,7 @@ namespace QuestTree.QuestGraph
                     ModVersion = ModInfo.Stamp,
                     Render = RenderTag,
                     TimeOfDay = TimeOfDay(),
+                    Lighting = lighting,
                     Floors = floors,
                     Labels = plan.Labels,
                     Mesh = mesh,
@@ -11354,6 +11370,183 @@ namespace QuestTree.QuestGraph
                 Plugin.LogSource?.LogDebug($"QuestTree: the raid's clock could not be read ({ex.Message}).");
                 return "";
             }
+        }
+
+        /// <summary>
+        /// Lighting stage 2: the raid's light, read on the main thread where the meta is written, each part in its own
+        /// try so one missing type (a modded scene, a game update) costs that part and nothing else. Null when neither the
+        /// game's sky nor its ambient was there (the menu, a test) - the meta then carries no block at all. The caller
+        /// (WriteMeta) still wraps the call in a try of its own: a member this method names directly that a game update
+        /// removed makes Mono throw when it JIT-compiles the method, which happens before any of the trys below run, so
+        /// only the CALLER's try can catch that. Every number is written finite (see <see cref="Finite"/>): the
+        /// server reads the meta with System.Text.Json, which refuses the "NaN" string Newtonsoft writes for a
+        /// non-finite float and would fail the whole upload over one bad coefficient.
+        /// </summary>
+        private static CaptureLighting ReadLighting()
+        {
+            var l = new CaptureLighting();
+            var any = false;
+
+            float[] Rgb(Color c) => FiniteOrNull(new[] { c.r, c.g, c.b });
+
+            try
+            {
+                if (MonoBehaviourSingleton<TOD_Sky>.Instantiated)
+                {
+                    var sky = TOD_Sky.Instance;
+                    var light = sky != null && sky.Components != null ? sky.Components.LightSource : null;
+
+                    if (light != null)
+                    {
+                        // TOD's light source: the sun by day, the MOON by night, never below TOD's minimum height
+                        var towards = -light.transform.forward;
+                        l.SunDirection = FiniteOrNull(new[] { towards.x, towards.y, towards.z });
+                        l.SunColor = Rgb(light.color);
+                        l.SunIntensity = Finite(light.intensity);
+                        l.SunShadowStrength = Finite(light.shadowStrength);
+                        any = true;
+                    }
+
+                    if (sky != null)
+                    {
+                        l.Source = "TOD_Sky";
+                        l.IsDay = sky.IsDay;
+                        l.Fogginess = Finite(sky.Atmosphere != null ? sky.Atmosphere.Fogginess : 0f);
+                        l.SkyColor = Rgb(sky.SampleSkyColor());
+                        l.EquatorColor = Rgb(sky.SampleEquatorColor());
+
+                        // Without the direct-light term: with it, TOD samples along the capture camera's yaw, and the
+                        // recorded horizon would be warm and bright or not by which way the player happened to face.
+                        l.FogColor = Rgb(sky.SampleFogColor(false));
+                        any = true;
+
+                        // The true sun, wherever it is (under the horizon at night), in its own try: the light's
+                        // direction above is the one to light by, and this one only says where the sun really was.
+                        try
+                        {
+                            var sun = sky.SunDirection;
+                            l.SunTrueDirection = FiniteOrNull(new[] { sun.x, sun.y, sun.z });
+                        }
+                        catch (Exception ex)
+                        {
+                            Plugin.LogSource?.LogDebug($"QuestTree: the sky's true sun could not be read ({ex.GetType().Name}: {ex.Message}).");
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug($"QuestTree: the raid's sun could not be read ({ex.GetType().Name}: {ex.Message}).");
+            }
+
+            try
+            {
+                var weather = EFT.Weather.WeatherController.Instance;
+                var tod = weather != null ? weather.TimeOfDayController : null;
+
+                if (tod != null)
+                {
+                    var sh = tod.SH;
+                    var coefficients = new float[27];
+                    for (var c = 0; c < 3; c++)
+                        for (var i = 0; i < 9; i++)
+                            coefficients[c * 9 + i] = sh[c, i];
+
+                    l.AmbientSh = FiniteOrNull(coefficients);
+                    any = any || l.AmbientSh != null;
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug($"QuestTree: the raid's ambient could not be read ({ex.GetType().Name}: {ex.Message}).");
+            }
+
+            try
+            {
+                l.Fog = RenderSettings.fog;
+                l.FogMode = RenderSettings.fogMode.ToString();
+                l.FogDensity = Finite(RenderSettings.fogDensity);
+                l.FogStart = Finite(RenderSettings.fogStartDistance);
+                l.FogEnd = Finite(RenderSettings.fogEndDistance);
+                l.RenderFogColor = Rgb(RenderSettings.fogColor);
+                l.AmbientMode = RenderSettings.ambientMode.ToString();
+                l.AmbientIntensity = Finite(RenderSettings.ambientIntensity);
+                l.ColorSpace = QualitySettings.activeColorSpace.ToString();
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug($"QuestTree: the render settings could not be read ({ex.GetType().Name}: {ex.Message}).");
+            }
+
+            try
+            {
+                var settings = UnityEngine.Object.FindObjectOfType<LevelSettings>();
+                if (settings != null) l.LevelSunColor = Rgb(settings.SunColor);
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug($"QuestTree: the level settings could not be read ({ex.GetType().Name}: {ex.Message}).");
+            }
+
+            try
+            {
+                var camera = EFT.CameraControl.CameraManager.Instance?.Camera;
+                var prism = camera != null ? camera.GetComponent<PrismEffects>() : null;
+
+                if (prism != null)
+                {
+                    l.PrismTonemap = prism.useTonemap ? prism.tonemapType.ToString() : "";
+                    l.PrismExposure = prism.useExposure;
+                    l.PrismMiddleGrey = Finite(prism.exposureMiddleGrey);
+                    l.PrismGamma = Finite(prism.useGammaCorrection ? prism.gammaValue : 0f);
+                    l.PrismLut = prism.useLut && prism.twoDLookupTex != null ? prism.twoDLookupTex.name ?? "" : "";
+                }
+
+                // the PostProcessing v2 volume, by reflection: the mod does not reference its assembly (stage 4 may)
+                var volume = camera != null ? camera.GetComponent("PostProcessVolume") : null;
+                if (volume != null)
+                {
+                    // Reading "profile" CLONES the shared profile the first time (Unity's material rule), so it is read
+                    // only when the volume already holds its own instance; otherwise the shared one is what renders.
+                    var type = volume.GetType();
+                    var instantiated = type.GetMethod("HasInstantiatedProfile", Type.EmptyTypes)?.Invoke(volume, null) as bool? ?? false;
+                    var profile = instantiated ? type.GetProperty("profile")?.GetValue(volume) : type.GetField("sharedProfile")?.GetValue(volume);
+                    var list = profile?.GetType().GetField("settings")?.GetValue(profile) as System.Collections.IEnumerable;
+
+                    if (list != null)
+                        foreach (var effect in list)
+                        {
+                            if (effect == null || l.PostProcess.Count >= 32) continue;
+
+                            // ParameterOverride<T>.value is a public FIELD in the game's PostProcessing, so a property
+                            // lookup alone read every effect as off; the property stays as the fallback.
+                            var enabled = effect.GetType().GetField("enabled")?.GetValue(effect);
+                            var enabledType = enabled?.GetType();
+                            var on = (enabledType?.GetField("value")?.GetValue(enabled) ?? enabledType?.GetProperty("value")?.GetValue(enabled)) as bool? ?? false;
+                            var active = effect.GetType().GetField("active")?.GetValue(effect) as bool? ?? true;
+                            l.PostProcess.Add($"{effect.GetType().Name}:{(on && active ? "on" : "off")}");
+                        }
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug($"QuestTree: the camera's post-processing could not be read ({ex.GetType().Name}: {ex.Message}).");
+            }
+
+            return any ? l : null;
+        }
+
+        /// <summary>Lighting stage 2: a float the host can read - NaN and infinity become 0, because Newtonsoft writes
+        /// them as the string "NaN", which the server's System.Text.Json refuses for a float, failing the whole upload.</summary>
+        private static float Finite(float v) => float.IsNaN(v) || float.IsInfinity(v) ? 0f : v;
+
+        /// <summary>Lighting stage 2: the array, or null when any element is NaN or infinite - a colour, a direction or
+        /// harmonics with a hole in them are not ones to light by, and null is what every reader already handles.</summary>
+        private static float[] FiniteOrNull(float[] values)
+        {
+            foreach (var v in values)
+                if (float.IsNaN(v) || float.IsInfinity(v)) return null;
+            return values;
         }
 
         // --- labels ----------------------------------------------------------------------------
@@ -12289,6 +12482,13 @@ namespace QuestTree.QuestGraph
             /// captured at 03:00 is a dark map and worth taking again.</summary>
             [JsonProperty("timeOfDay")] public string TimeOfDay { get; set; }
 
+            /// <summary>Lighting stage 2 (2026-09-28): the raid's LIGHT as the game had it when this capture was written -
+            /// its sun, its ambient harmonics, its sky and fog colours, its tonemap - so the 3D map can be lit like the
+            /// game (Map3DView, stage 3). Absent in a capture taken before the field existed or when nothing could be
+            /// read (the menu, a test scene); every reader falls back to its preset light. NOT part of RenderTag: a
+            /// merge is of pictures, and the newest capture's light wins. See <see cref="ReadLighting"/>.</summary>
+            [JsonProperty("lighting", NullValueHandling = NullValueHandling.Ignore)] public CaptureLighting Lighting { get; set; }
+
             [JsonProperty("floors")] public List<CaptureFloor> Floors { get; set; } = new List<CaptureFloor>();
             [JsonProperty("labels")] public List<CaptureLabel> Labels { get; set; } = new List<CaptureLabel>();
 
@@ -12417,6 +12617,72 @@ namespace QuestTree.QuestGraph
             /// <summary>SHA-256 of the file's bytes, lower-case hex. What tells a mesh that belongs to
             /// this meta from one left behind by an older capture or truncated in transit.</summary>
             [JsonProperty("sha256")] public string Sha256 { get; set; }
+        }
+
+        /// <summary>
+        /// Lighting stage 2: the raid's light, as the game had it - flat fields, every array a fixed length, so the host
+        /// can bound it (MapStore) and the wire mirrors stay simple. Colours are r, g, b in the game's own (gamma) values;
+        /// the sun direction points TOWARDS the sun in world axes; the ambient is Unity's SphericalHarmonicsL2 as 27
+        /// floats (3 channels x 9 coefficients, [c, i] order) - EFT's own ambient, computed by its time-of-day controller,
+        /// which the game applies through its own shader globals rather than RenderSettings. The block is finite by
+        /// construction: ReadLighting writes 0 for a non-finite number and null for an array with one in it.
+        /// </summary>
+        internal sealed class CaptureLighting
+        {
+            /// <summary>What was read: "TOD_Sky" when the game's sky was there, else "" (RenderSettings only).</summary>
+            [JsonProperty("source")] public string Source { get; set; } = "";
+
+            /// <summary>Towards the game's light, world axes: the sun by day, the MOON by night, and never below TOD's
+            /// minimum height - so IsDay, not the elevation, says night. Null when unreadable.</summary>
+            [JsonProperty("sunDirection")] public float[] SunDirection { get; set; }
+
+            /// <summary>Towards TOD_Sky's true sun (sky.SunDirection), below the horizon at night; null when unreadable.</summary>
+            [JsonProperty("sunTrueDirection", NullValueHandling = NullValueHandling.Ignore)] public float[] SunTrueDirection { get; set; }
+
+            [JsonProperty("sunColor")] public float[] SunColor { get; set; }
+            [JsonProperty("sunIntensity")] public float SunIntensity { get; set; }
+            [JsonProperty("sunShadowStrength")] public float SunShadowStrength { get; set; }
+            [JsonProperty("isDay")] public bool IsDay { get; set; }
+            [JsonProperty("fogginess")] public float Fogginess { get; set; }
+
+            /// <summary>EFT's ambient as spherical harmonics, 27 floats, or null.</summary>
+            [JsonProperty("ambientSh")] public float[] AmbientSh { get; set; }
+
+            [JsonProperty("skyColor")] public float[] SkyColor { get; set; }
+            [JsonProperty("equatorColor")] public float[] EquatorColor { get; set; }
+            /// <summary>TOD's fog colour sampled with directLight false: the horizon colour without the sun's direct term,
+            /// so it does not depend on where the player looked.</summary>
+            [JsonProperty("fogColor")] public float[] FogColor { get; set; }
+
+            /// <summary>The level's declared sun colour (LevelSettings.SunColor), or null.</summary>
+            [JsonProperty("levelSunColor")] public float[] LevelSunColor { get; set; }
+
+            /// <summary>The fog as applied (RenderSettings) at the time of the capture.</summary>
+            [JsonProperty("fog")] public bool Fog { get; set; }
+
+            [JsonProperty("fogMode")] public string FogMode { get; set; } = "";
+            [JsonProperty("fogDensity")] public float FogDensity { get; set; }
+            [JsonProperty("fogStart")] public float FogStart { get; set; }
+            [JsonProperty("fogEnd")] public float FogEnd { get; set; }
+            [JsonProperty("renderFogColor")] public float[] RenderFogColor { get; set; }
+            [JsonProperty("ambientMode")] public string AmbientMode { get; set; } = "";
+            [JsonProperty("ambientIntensity")] public float AmbientIntensity { get; set; }
+
+            /// <summary>The FPS camera's Prism tonemap: its type name when in use ("RomB", "ACES", ...), else "".</summary>
+            [JsonProperty("prismTonemap")] public string PrismTonemap { get; set; } = "";
+
+            [JsonProperty("prismExposure")] public bool PrismExposure { get; set; }
+            [JsonProperty("prismMiddleGrey")] public float PrismMiddleGrey { get; set; }
+
+            /// <summary>Prism's gamma when its correction is on, else 0.</summary>
+            [JsonProperty("prismGamma")] public float PrismGamma { get; set; }
+
+            [JsonProperty("prismLut")] public string PrismLut { get; set; } = "";
+
+            /// <summary>The FPS camera's PostProcessing volume: each effect as "TypeName:on" or ":off".</summary>
+            [JsonProperty("postProcess")] public List<string> PostProcess { get; set; } = new List<string>();
+
+            [JsonProperty("colorSpace")] public string ColorSpace { get; set; } = "";
         }
 
         private sealed class CaptureExtent

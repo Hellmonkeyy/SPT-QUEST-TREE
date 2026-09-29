@@ -570,6 +570,9 @@ namespace QuestTree.UI
 
             /// <summary>The atlas pages that checked out. See <see cref="ReadAtlas"/>.</summary>
             public readonly List<DynamicMapsLibrary.AtlasPage> AtlasPages = new();
+
+            /// <summary>Lighting stage 2: the raid's light, or null. See <see cref="ReadLighting"/>.</summary>
+            public DynamicMapsLibrary.CaptureLighting Lighting;
             public readonly List<(int Level, string Name, string File, float MinY, float MaxY)> Floors = new();
             public readonly List<(string Text, float X, float Z, DynamicMapsLibrary.MapLabelKind Kind)> Labels = new();
         }
@@ -673,6 +676,7 @@ namespace QuestTree.UI
                 ReadMesh(root, folder, name, parsed);
                 ReadSides(root, folder, name, parsed);
                 ReadAtlas(root, folder, name, parsed);
+                ReadLighting(root, name, parsed);
 
                 parsed.Attribution = Attribution(
                     (string)Field(root, "modVersion"), firstCapturedAt,
@@ -1164,6 +1168,90 @@ namespace QuestTree.UI
             }
         }
 
+        /// <summary>Lighting stage 2: the meta's "lighting" block into the capture, or nothing - a block that does not check
+        /// out (a direction that is not a unit vector, an ambient short of 27 numbers, a number that is not one) costs the
+        /// light and nothing else: the map draws with the preset. Everything guarded; never a throw out of here.</summary>
+        /// <param name="root">The meta.</param>
+        /// <param name="metaName">The meta's file name, for the log line.</param>
+        /// <param name="parsed">The capture being filled in.</param>
+        private static void ReadLighting(JObject root, string metaName, ParsedCapture parsed)
+        {
+            try
+            {
+                var block = Field(root, "lighting") as JObject;
+                if (block == null) return;
+
+                float[] Floats(string field, int length)
+                {
+                    if (!(Field(block, field) is JArray array) || array.Count != length) return null;
+                    var values = new float[length];
+                    for (var i = 0; i < length; i++)
+                    {
+                        var v = (float?)array[i] ?? float.NaN;
+                        if (float.IsNaN(v) || float.IsInfinity(v)) return null;
+                        values[i] = v;
+                    }
+                    return values;
+                }
+
+                Color? Colour(string field)
+                {
+                    var c = Floats(field, 3);
+                    return c == null ? (Color?)null : new Color(Mathf.Max(0f, c[0]), Mathf.Max(0f, c[1]), Mathf.Max(0f, c[2]), 1f);
+                }
+
+                float Number(string field) => (float?)Field(block, field) is float v && !float.IsNaN(v) && !float.IsInfinity(v) ? v : 0f;
+
+                var lighting = new DynamicMapsLibrary.CaptureLighting
+                {
+                    SunColor = Colour("sunColor"),
+                    SunIntensity = Mathf.Max(0f, Number("sunIntensity")),
+                    SunShadowStrength = Mathf.Clamp01(Number("sunShadowStrength")),
+                    IsDay = (bool?)Field(block, "isDay") ?? false,
+                    Fogginess = Mathf.Clamp01(Number("fogginess")),
+                    AmbientSh = Floats("ambientSh", 27),
+                    SkyColor = Colour("skyColor"),
+                    EquatorColor = Colour("equatorColor"),
+                    FogColor = Colour("fogColor"),
+                    PrismTonemap = ((string)Field(block, "prismTonemap") ?? "").Trim(),
+                    ColorSpace = ((string)Field(block, "colorSpace") ?? "").Trim(),
+                    TimeOfDay = ((string)Field(root, "timeOfDay") ?? "").Trim(),
+                };
+
+                var direction = Floats("sunDirection", 3);
+                if (direction != null)
+                {
+                    var v = new Vector3(direction[0], direction[1], direction[2]);
+                    if (v.sqrMagnitude > 1e-6f) lighting.SunDirection = v.normalized;
+                }
+
+                var trueSun = Floats("sunTrueDirection", 3);
+                if (trueSun != null)
+                {
+                    var v = new Vector3(trueSun[0], trueSun[1], trueSun[2]);
+                    if (v.sqrMagnitude > 1e-6f) lighting.SunTrueDirection = v.normalized;
+                }
+
+                if (!lighting.HasSun && lighting.AmbientSh == null)
+                {
+                    // Said once per read, so a block that went empty (a capture where the light could not be read)
+                    // is not mistaken later for a parse that never happened.
+                    Plugin.LogSource?.LogDebug(
+                        $"QuestTree: capture '{metaName}' carries a lighting block with neither a sun nor an ambient - " +
+                        "the preset lights this map.");
+                    return;
+                }
+
+                parsed.Lighting = lighting;
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning(
+                    $"QuestTree: capture '{metaName}' carries a lighting block that could not be read ({ex.GetType().Name}) - " +
+                    "this map is lit with the preset.");
+            }
+        }
+
         /// <summary>
         /// The capture's optional 3D relief file: <c>"mesh": {"file","bytes","version","cells",
         /// "triangles","sha256"}</c>, written beside the pictures by MapMeshBuilder.
@@ -1308,6 +1396,9 @@ namespace QuestTree.UI
 
             // The building texture pages, as read: paths until a 3D view asks for their textures.
             entry.AtlasPages.AddRange(parsed.AtlasPages);
+
+            // Lighting stage 2: the raid's light, as read; null keeps the preset.
+            entry.Lighting = parsed.Lighting;
 
             var boundsMin = new Vector2(parsed.MinX, parsed.MinZ);
             var boundsMax = new Vector2(parsed.MaxX, parsed.MaxZ);

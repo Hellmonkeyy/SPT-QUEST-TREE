@@ -152,6 +152,42 @@ namespace QuestTree.QuestGraph
         [JsonProperty("yMax")] public float YMax { get; set; }
     }
 
+    /// <summary>The wire mirror of MapCapture.CaptureLighting - the same names, the same shapes (fixed-length arrays of
+    /// floats, r g b for a colour, 27 harmonics; "sunDirection" x y z towards the game's light - the sun by day, the moon
+    /// by night, never below TOD's minimum height, so isDay, not the elevation, says night - and the optional
+    /// "sunTrueDirection" towards TOD's true sun). See the server's copy for the bounds.</summary>
+    internal sealed class MapCaptureLightingDto
+    {
+        [JsonProperty("source")] public string Source { get; set; }
+        [JsonProperty("sunDirection")] public float[] SunDirection { get; set; }
+        [JsonProperty("sunTrueDirection", NullValueHandling = NullValueHandling.Ignore)] public float[] SunTrueDirection { get; set; }
+        [JsonProperty("sunColor")] public float[] SunColor { get; set; }
+        [JsonProperty("sunIntensity")] public float SunIntensity { get; set; }
+        [JsonProperty("sunShadowStrength")] public float SunShadowStrength { get; set; }
+        [JsonProperty("isDay")] public bool IsDay { get; set; }
+        [JsonProperty("fogginess")] public float Fogginess { get; set; }
+        [JsonProperty("ambientSh")] public float[] AmbientSh { get; set; }
+        [JsonProperty("skyColor")] public float[] SkyColor { get; set; }
+        [JsonProperty("equatorColor")] public float[] EquatorColor { get; set; }
+        [JsonProperty("fogColor")] public float[] FogColor { get; set; }
+        [JsonProperty("levelSunColor")] public float[] LevelSunColor { get; set; }
+        [JsonProperty("fog")] public bool Fog { get; set; }
+        [JsonProperty("fogMode")] public string FogMode { get; set; }
+        [JsonProperty("fogDensity")] public float FogDensity { get; set; }
+        [JsonProperty("fogStart")] public float FogStart { get; set; }
+        [JsonProperty("fogEnd")] public float FogEnd { get; set; }
+        [JsonProperty("renderFogColor")] public float[] RenderFogColor { get; set; }
+        [JsonProperty("ambientMode")] public string AmbientMode { get; set; }
+        [JsonProperty("ambientIntensity")] public float AmbientIntensity { get; set; }
+        [JsonProperty("prismTonemap")] public string PrismTonemap { get; set; }
+        [JsonProperty("prismExposure")] public bool PrismExposure { get; set; }
+        [JsonProperty("prismMiddleGrey")] public float PrismMiddleGrey { get; set; }
+        [JsonProperty("prismGamma")] public float PrismGamma { get; set; }
+        [JsonProperty("prismLut")] public string PrismLut { get; set; }
+        [JsonProperty("postProcess")] public List<string> PostProcess { get; set; }
+        [JsonProperty("colorSpace")] public string ColorSpace { get; set; }
+    }
+
     /// <summary>One atlas page of a capture: a 4096 px sheet of the game's own building textures, which the 3D
     /// view drapes on the buildings by the mesh file's UVs. Optional: absent on older sets, and a page a host
     /// cannot use is dropped by it while the rest of the set is served (those buildings fall back).
@@ -260,6 +296,10 @@ namespace QuestTree.QuestGraph
         /// existed). An upload names only the sides whose picture is on this disk; a side that then
         /// fails to encode is posted EMPTY, which tells the host to drop it rather than wait.</summary>
         [JsonProperty("sides")] public List<MapCaptureSideDto> Sides { get; set; }
+
+        /// <summary>Lighting stage 2: the raid's light as the capture read it (MapCapture.CaptureLighting), or null. Carried
+        /// so a set synced from a host is lit like the game too; the host bounds it (MapStore) and nulls what does not check out.</summary>
+        [JsonProperty("lighting", NullValueHandling = NullValueHandling.Ignore)] public MapCaptureLightingDto Lighting { get; set; }
 
         /// <summary>The atlas pages, or null for none. An upload names only the pages whose picture is on this
         /// disk; a page that then fails to encode is posted EMPTY, which tells the host to drop it.</summary>

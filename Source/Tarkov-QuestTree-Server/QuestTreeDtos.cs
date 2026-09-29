@@ -1157,6 +1157,43 @@ namespace QuestTreeServer
         [JsonPropertyName("yMax")] public float YMax { get; set; }
     }
 
+    /// <summary>The raid's light as the capturing client read it (the client's MapCapture.CaptureLighting): colours as
+    /// r g b, the ambient as 27 spherical-harmonics floats, and "sunDirection" as x y z towards the game's LIGHT - the sun
+    /// by day, the MOON by night, never below TOD's minimum height, so isDay, not the elevation, says night;
+    /// "sunTrueDirection" (optional) is TOD's true sun. Read by nothing here; bounded by MapStore.LightingIsUsable and
+    /// carried.</summary>
+    public sealed class MapCaptureLightingDto
+    {
+        [JsonPropertyName("source")] public string Source { get; set; } = "";
+        [JsonPropertyName("sunDirection")] public float[]? SunDirection { get; set; }
+        [JsonPropertyName("sunTrueDirection")] public float[]? SunTrueDirection { get; set; }
+        [JsonPropertyName("sunColor")] public float[]? SunColor { get; set; }
+        [JsonPropertyName("sunIntensity")] public float SunIntensity { get; set; }
+        [JsonPropertyName("sunShadowStrength")] public float SunShadowStrength { get; set; }
+        [JsonPropertyName("isDay")] public bool IsDay { get; set; }
+        [JsonPropertyName("fogginess")] public float Fogginess { get; set; }
+        [JsonPropertyName("ambientSh")] public float[]? AmbientSh { get; set; }
+        [JsonPropertyName("skyColor")] public float[]? SkyColor { get; set; }
+        [JsonPropertyName("equatorColor")] public float[]? EquatorColor { get; set; }
+        [JsonPropertyName("fogColor")] public float[]? FogColor { get; set; }
+        [JsonPropertyName("levelSunColor")] public float[]? LevelSunColor { get; set; }
+        [JsonPropertyName("fog")] public bool Fog { get; set; }
+        [JsonPropertyName("fogMode")] public string FogMode { get; set; } = "";
+        [JsonPropertyName("fogDensity")] public float FogDensity { get; set; }
+        [JsonPropertyName("fogStart")] public float FogStart { get; set; }
+        [JsonPropertyName("fogEnd")] public float FogEnd { get; set; }
+        [JsonPropertyName("renderFogColor")] public float[]? RenderFogColor { get; set; }
+        [JsonPropertyName("ambientMode")] public string AmbientMode { get; set; } = "";
+        [JsonPropertyName("ambientIntensity")] public float AmbientIntensity { get; set; }
+        [JsonPropertyName("prismTonemap")] public string PrismTonemap { get; set; } = "";
+        [JsonPropertyName("prismExposure")] public bool PrismExposure { get; set; }
+        [JsonPropertyName("prismMiddleGrey")] public float PrismMiddleGrey { get; set; }
+        [JsonPropertyName("prismGamma")] public float PrismGamma { get; set; }
+        [JsonPropertyName("prismLut")] public string PrismLut { get; set; } = "";
+        [JsonPropertyName("postProcess")] public List<string>? PostProcess { get; set; }
+        [JsonPropertyName("colorSpace")] public string ColorSpace { get; set; } = "";
+    }
+
     /// <summary>One ATLAS page of a map: a 4096 px sheet of the game's own building textures, packed as
     /// tiles, which the 3D view drapes on the buildings by the mesh file's own UVs (stage W). Up to eight per
     /// set, numbered by <see cref="Page"/>.
@@ -1273,6 +1310,11 @@ namespace QuestTreeServer
         /// <see cref="MapCaptureSideDto"/>. When set, the set is not served until every side named here
         /// has arrived or been dropped, so a meta never names a side picture the host does not hold.</summary>
         [JsonPropertyName("sides")] public List<MapCaptureSideDto>? Sides { get; set; }
+
+        /// <summary>Lighting stage 2: the raid's light as the capturing client read it, or null. Carried and served back
+        /// so a downloaded set is lit like the game; bounded by MapStore (fixed array lengths, finite numbers, clipped
+        /// strings) and NULLED, never refused, when it does not check out - a picture is a picture without it.</summary>
+        [JsonPropertyName("lighting")] public MapCaptureLightingDto? Lighting { get; set; }
 
         /// <summary>The atlas pages this set carries, or null/empty for none - see
         /// <see cref="MapCaptureAtlasDto"/>. When set, the set is not served until every page named here has
