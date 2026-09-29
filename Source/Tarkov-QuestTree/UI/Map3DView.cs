@@ -94,8 +94,60 @@ namespace QuestTree.UI
         /// <summary>How much of the distance one wheel notch takes off.</summary>
         internal const float DollyPerNotch = 0.12f;
 
-        /// <summary>The light's intensity, as the experiment ran it.</summary>
-        private const float LightIntensity = 1.2f;
+        /// <summary>
+        /// LIGHT LIKE THE GAME, stage 1 (review 2026-09-28, the viewer alone; the captured sun follows in stage 3). The
+        /// game renders in GAMMA colour space (the capture's exposure gamma is 1.0 there), where the Standard shader adds
+        /// light in display values: the old sun 1.2 x sin 45 + a Trilight sky of 0.93 + a fill came to about twice white
+        /// on a roof, so any roof over half grey clipped (washed out), a shadow took away a quarter of that (invisible),
+        /// and ambient equalled the sun (flat). Now an EXPOSURE BUDGET: the sun at <see cref="SunIntensity"/> (warm, the
+        /// game's default sun colour), the ambient at <see cref="AmbientOfSun"/> of it (the game's ambient is a fraction
+        /// of its sun), the whole scaled by <see cref="Exposure"/> so a white surface facing up in the sun lands at
+        /// <see cref="WhiteInSun"/> - nothing clips, shadows take most of a surface's light
+        /// (<see cref="ShadowStrength"/>). The Standard shader in gamma space also keeps 22 % of every surface for its
+        /// dielectric specular (4 % in linear), so the diffuse it draws is 0.78 of the light: the exposure divides by
+        /// that share, read from the colour space at run time (<see cref="DiffuseShare"/>). The fill light is gone: an
+        /// SH light that turned with the view brightened whatever the viewer faced and read as "attached to the camera".
+        /// </summary>
+        private const float SunIntensity = 1f;
+
+        private static readonly Color SunColour = new Color(1f, 0.82f, 0.57f);   // LevelSettings' default SunColor 255/209/145
+        private const float AmbientOfSun = 0.45f;   // stage 1 review: at 0.35 a wall facing away from the sun (equator ambient only) went near black
+        private const float WhiteInSun = 0.92f;
+
+        /// <summary>The building shader's diffuse share of the light: the Standard shader keeps a dielectric specular
+        /// reserve - 0.22 in gamma space, 0.04 in linear - and a Lambert shader (the Legacy family) keeps none.</summary>
+        private float DiffuseShare =>
+            _buildingShader != null && _buildingShader.name.StartsWith("Standard", StringComparison.Ordinal)
+                ? QualitySettings.activeColorSpace == ColorSpace.Linear ? 0.96f : 0.78f
+                : 1f;
+
+        /// <summary>The factor on the sun and the ambient that puts a white up-facing surface in the sun at WhiteInSun (its
+        /// brightest channel just under it: the sun is warm), for the light's own pitch (the over-the-shoulder light uses
+        /// the same budget at its pitch).</summary>
+        private float Exposure(float pitchDegrees) =>
+            WhiteInSun / (DiffuseShare * (SunIntensity * Mathf.Sin(pitchDegrees * Mathf.Deg2Rad) + SunIntensity * AmbientOfSun));
+
+        /// <summary>The light the flat ground gets under the budget, PER CHANNEL (the sun is warm, the sky a little blue) -
+        /// the ground picture, developed and already lit by the game at capture, is drawn at its own value and its own
+        /// hue by dividing its colour by this (stage 1; stage 3 aligns the sun with the capture's so the real-time shadows
+        /// fall where the picture's do). Alpha 1: the cutout ground's clip edge must not move.</summary>
+        private Color FlatGroundLight(float pitchDegrees)
+        {
+            var sin = Mathf.Sin(pitchDegrees * Mathf.Deg2Rad);
+            var k = DiffuseShare * Exposure(pitchDegrees) * SunIntensity;
+            return new Color(
+                k * (sin * SunColour.r + AmbientOfSun * AmbientSky.r),
+                k * (sin * SunColour.g + AmbientOfSun * AmbientSky.g),
+                k * (sin * SunColour.b + AmbientOfSun * AmbientSky.b),
+                1f);
+        }
+
+        /// <summary>The ground material's colour: one over the flat ground's light per channel, alpha 1.</summary>
+        private Color GroundColour(float pitchDegrees)
+        {
+            var light = FlatGroundLight(pitchDegrees);
+            return new Color(1f / Mathf.Max(0.05f, light.r), 1f / Mathf.Max(0.05f, light.g), 1f / Mathf.Max(0.05f, light.b), 1f);
+        }
 
         /// <summary>
         /// Test 2026-09-28 (the light "not placed right"): the light was FIXED in the world, 50 degrees down at yaw -30,
@@ -107,11 +159,10 @@ namespace QuestTree.UI
         ///   <see cref="SunYaw"/> and <see cref="SunPitch"/> degrees down - it comes from the south-west of the capture's
         ///   frame (+Z north), behind-left of the default view, so at that view a wall facing the camera takes half the sun
         ///   (a 60-degree incidence), its west face the same and its east face none (form), and shadows lie one way across the whole map as
-        ///   it is orbited (it reads as a place); a FILL light from the viewer (<see cref="FillShare"/> of the sun's
-        ///   intensity, pitched <see cref="FillPitch"/> down along the view, casting no shadow, evaluated per vertex so it
-        ///   costs no second pass) keeps the walls the viewer looks at from going black when the view faces into the sun.
+        ///   it is orbited (it reads as a place); the ambient (a third of the sun) lights the faces the sun does not.
         ///   The second 2026-09-28 test: a sun at 60 up and yaw -30 read as "attached to the camera" - it WAS nearly behind
-        ///   the default view - and cast shadows too short to see; 45 down makes them 1.7 times longer.
+        ///   the default view, and a fill light turned with the view - and cast shadows too short to see; 45 down makes
+        ///   them 1.7 times longer. The fill is gone (see the exposure budget above).
         /// - OVER THE SHOULDER: one light that turns with the view, <see cref="LightYawOffset"/> degrees off the view's yaw
         ///   and <see cref="LightPitch"/> degrees down, so the faces the viewer sees are lit with form on both sides
         ///   whatever the yaw, and shadows fall away from the viewer.
@@ -119,8 +170,6 @@ namespace QuestTree.UI
         private const float SunPitch = 45f;
 
         private const float SunYaw = 45f;
-        private const float FillShare = 0.35f;
-        private const float FillPitch = 25f;
         private const float LightPitch = 50f;
         private const float LightYawOffset = 40f;
 
@@ -158,7 +207,7 @@ namespace QuestTree.UI
         /// </summary>
         private static readonly LightShadows ShadowMode = LightShadows.Soft;
 
-        private static readonly float ShadowStrength = 0.55f;   // test 2026-09-28: 0.65 read as a dark map under the old ambient; 0.45 too faint under the trilight
+        private static readonly float ShadowStrength = 0.85f;   // stage 1: under the exposure budget a shadow keeps the ambient's third, as the game's do
         /// <summary>Second 2026-09-28 test: two cascades over a range that grew with the zoom (2.5 km when zoomed out) spread
         /// the shadow map so thin that no building cast a visible shadow at an ordinary zoom. Four cascades, and the range
         /// capped at <see cref="ShadowDistanceMax"/>: the near cascades keep building-scale shadows sharp at any zoom, and
@@ -174,6 +223,13 @@ namespace QuestTree.UI
         /// <summary>Whether the last render drew shadows at all (a cut floor turns them off - ShadowsUnderCut), for the
         /// first-frame line.</summary>
         private bool _shadowsDrawn;
+
+        /// <summary>Stage 1: the exposure factor, the ground's colour factor and whether the fog was drawn, of the last render,
+        /// for the first-frame line.</summary>
+        private float _exposureRendered;
+
+        private Color _groundColour = Color.white;
+        private bool _fogDrawn;
         private static readonly ShadowResolution ShadowMapResolution = ShadowResolution.VeryHigh;
         private static readonly float ShadowDistanceOfView = 2.5f;
         private static readonly float ShadowDistanceMin = 100f;
@@ -200,9 +256,20 @@ namespace QuestTree.UI
         private static readonly bool AmbientTrilight = true;
 
         // test 2026-09-28: brighter than the menu's Flat 0.6 the view had before - the first values read as dusk
-        private static readonly Color AmbientSky = new Color(0.90f, 0.93f, 1.00f);
-        private static readonly Color AmbientEquator = new Color(0.72f, 0.72f, 0.72f);
-        private static readonly Color AmbientGround = new Color(0.45f, 0.43f, 0.40f);
+        /// <summary>Stage 1: the ambient's SHAPE - sky a little blue, ground a little warm - at unit brightness; its level is
+        /// AmbientOfSun x the sun, scaled with it by the exposure at render time.</summary>
+        private static readonly Color AmbientSky = new Color(0.92f, 0.96f, 1.00f);
+
+        private static readonly Color AmbientEquator = new Color(0.95f, 0.95f, 0.95f);
+        private static readonly Color AmbientGround = new Color(0.60f, 0.56f, 0.50f);
+
+        /// <summary>Stage 1: aerial perspective - linear fog in the sky's horizon colour from a little past the camera's
+        /// focus to well beyond it, set inside the bracket and put back. The game's world has fog; a map with none reads
+        /// as a model. False forces fog off, as before.</summary>
+        private static readonly bool AerialFog = true;
+
+        private const float FogStartOfDistance = 1.2f;
+        private const float FogSpanOfFarClip = 0.6f;
 
         /// <summary>
         /// HQ S1.4: a sky behind the map - one vertex-coloured dome the size of the far clip, centred on the camera
@@ -213,7 +280,9 @@ namespace QuestTree.UI
 
         private static readonly Color SkyZenith = new Color(0.40f, 0.55f, 0.78f);
         private static readonly Color SkyHorizon = new Color(0.78f, 0.83f, 0.90f);
-        private static readonly Color SkyBelow = new Color(0.30f, 0.31f, 0.33f);
+        /// <summary>Under the horizon: the fog's own colour while the aerial fog is on (fogged ground at the map's edge must
+        /// meet a dome of the same colour, not a dark band), else the old dark grey.</summary>
+        private static Color SkyBelow => AerialFog ? SkyHorizon : new Color(0.30f, 0.31f, 0.33f);
         private const float SkyRadiusOfFarClip = 0.9f;
         private const int SkyRings = 8;
         private const int SkySegments = 24;
@@ -669,10 +738,6 @@ namespace QuestTree.UI
         private GameObject _cameraGo;
         private GameObject _lightGo;
 
-        /// <summary>The fill light of the sun mode - from the viewer, no shadow.</summary>
-        private Light _fill;
-
-        private GameObject _fillGo;
 
         private int _drawLayer = -1;
         private int _privateMask;
@@ -907,6 +972,7 @@ namespace QuestTree.UI
             _camera.cullingMask = _privateMask;
             _camera.useOcclusionCulling = false;
             _camera.allowMSAA = RenderMsaa > 1;
+            _camera.allowHDR = false;   // stage 1: an LDR target; HDR would only buy an intermediate buffer the tonemap-less path never uses
 
             // Forward, for the oblique cut: see PrivateCameraPath.
             _camera.renderingPath = PrivateCameraPath;
@@ -919,24 +985,13 @@ namespace QuestTree.UI
             _lightGo.layer = _drawLayer;
             _light = _lightGo.GetComponent<Light>();
             _light.type = LightType.Directional;
-            _light.intensity = LightIntensity;
+            _light.intensity = SunIntensity;
+            _light.color = SunColour;
             _light.shadows = ShadowMode;
             _light.shadowStrength = ShadowStrength;
             _light.cullingMask = _privateMask;
             _light.enabled = false;
             _lightGo.transform.rotation = Quaternion.Euler(SunPitch, SunYaw, 0f);
-
-            _fillGo = new GameObject("QuestTreeMap3DFill", typeof(Light));
-            _fillGo.layer = _drawLayer;
-            _fill = _fillGo.GetComponent<Light>();
-            _fill.type = LightType.Directional;
-            _fill.intensity = LightIntensity * FillShare;
-            _fill.shadows = LightShadows.None;
-            // per vertex: a smooth fill needs no per-pixel pass, and the game's pixel light count then cannot drop it or
-            // double every draw (review 2026-09-28)
-            _fill.renderMode = LightRenderMode.ForceVertex;
-            _fill.cullingMask = _privateMask;
-            _fill.enabled = false;
 
             // The file read and the deflate are a worker's job; every Mesh it turns into is Unity's
             // thread only, and that happens in LateUpdate when this lands. A capture's relief is a
@@ -2603,6 +2658,11 @@ namespace QuestTree.UI
         private Material MakeGroundMaterial(int level)
         {
             var material = Matte(new Material(_groundShader) { name = $"QuestTreeMap3D-ground-{level}" });
+
+            // stage 1: the picture is already lit (the game's sun and the capture's own light, developed to its
+            // percentiles) - its colour is divided by the light the flat ground gets, so it shows at its own value and the
+            // sun only adds its slope shading and the buildings' shadows on top (_Color takes values over 1)
+            if (material.HasProperty("_Color")) material.SetColor("_Color", GroundColour(SunPitch));
 
             if (!_groundCutout) return material;
 
@@ -5292,15 +5352,18 @@ namespace QuestTree.UI
                     Plugin.LogSource?.LogInfo(string.Format(
                         CultureInfo.InvariantCulture,
                         "QuestTree: 3D map for {0} - first frame drawn in {1:0.0} ms, render {2:0.0} ms, {3} draw call(s), cut {4}, " +
-                        "msaa {5}x, shadows {6} ({7} cascade(s), {8:0} m), ambient {9}, sky {10}, light {11}, pixel lights {12}.",
+                        "msaa {5}x, shadows {6} ({7} cascade(s), {8:0} m), ambient {9}, sky {10}, light {11}, pixel lights {12}, " +
+                        "colour space {13}, exposure x{14:0.00} (white in the sun under {15:0.00}, the ground's picture at x{16}, ambient {17:0.00} of the sun), fog {18}.",
                         _mapKey, clock.Elapsed.TotalMilliseconds, _renderMs, _drawCalls, CutText(), _rtSamples,
                         _shadowsDrawn ? ShadowMode.ToString() : ShadowMode == LightShadows.None ? "None" : "off for the cut floor",
                         _shadowsDrawn ? ShadowCascadeCount : 0, _shadowsDrawn ? _shadowDistanceRendered : 0f,
                         AmbientTrilight ? "trilight" : "scene", SkyDome && !_skyBroken ? "dome" : "backdrop",
                         Lighting == ModSettings.MapLightMode.Sun
-                            ? string.Format(CultureInfo.InvariantCulture, "sun ({0:0} up, towards yaw {1:0}) with a per-vertex fill from the viewer at {2:P0}", SunPitch, SunYaw, FillShare)
+                            ? string.Format(CultureInfo.InvariantCulture, "sun ({0:0} up, towards yaw {1:0}, warm)", SunPitch, SunYaw)
                             : string.Format(CultureInfo.InvariantCulture, "over the shoulder ({0:0} deg off the view, {1:0} down)", LightYawOffset, LightPitch),
-                        QualitySettings.pixelLightCount));
+                        QualitySettings.pixelLightCount, QualitySettings.activeColorSpace, _exposureRendered, WhiteInSun,
+                        string.Format(CultureInfo.InvariantCulture, "{0:0.00}/{1:0.00}/{2:0.00}", _groundColour.r, _groundColour.g, _groundColour.b), AmbientOfSun,
+                        !AerialFog ? "off" : _fogDrawn ? "aerial" : "off for the cut floor"));
                 }
             }
             catch (Exception ex)
@@ -5784,34 +5847,64 @@ namespace QuestTree.UI
             var ambientProbeWas = RenderSettings.ambientProbe;
             var ambientSet = false;
 
+            // stage 1: the reflection intensity and the fog's shape are the menu's too, put back the same way
+            var reflectionWas = RenderSettings.reflectionIntensity;
+            var reflectionSet = false;
+            var fogModeWas = RenderSettings.fogMode;
+            var fogColorWas = RenderSettings.fogColor;
+            var fogStartWas = RenderSettings.fogStartDistance;
+            var fogEndWas = RenderSettings.fogEndDistance;
+            var fogSet = false;
+
             try
             {
-                RenderSettings.fog = false;
+                RenderSettings.fog = false;   // the menu's own, off unless AerialFog sets ours below
                 _light.enabled = true;
 
-                // the sun fixed in the world with the fill from the viewer, or the one light over the shoulder
+                // the sun fixed in the world, or the one light over the shoulder - under the exposure budget either way
                 var sun = Lighting == ModSettings.MapLightMode.Sun;
+                var pitch = sun ? SunPitch : LightPitch;
                 _lightGo.transform.rotation = sun
                     ? Quaternion.Euler(SunPitch, SunYaw, 0f)
                     : Quaternion.Euler(LightPitch, _yaw + LightYawOffset, 0f);
 
-                if (_fill != null)
-                {
-                    _fill.enabled = sun;
-                    if (sun) _fillGo.transform.rotation = Quaternion.Euler(FillPitch, _yaw, 0f);
-                }
+                var exposure = Exposure(pitch);
+                _light.intensity = SunIntensity * exposure;
+                _light.color = SunColour;
+                _exposureRendered = exposure;
+                _groundColour = GroundColour(SunPitch);
 
                 if (AmbientTrilight)
                 {
+                    var ambient = SunIntensity * AmbientOfSun * exposure;
+                    ambientSet = true;   // before the first write: a setter that throws half way is still put back
                     RenderSettings.ambientMode = AmbientMode.Trilight;
-                    RenderSettings.ambientSkyColor = AmbientSky;
-                    RenderSettings.ambientEquatorColor = AmbientEquator;
-                    RenderSettings.ambientGroundColor = AmbientGround;
+                    RenderSettings.ambientSkyColor = AmbientSky * ambient;
+                    RenderSettings.ambientEquatorColor = AmbientEquator * ambient;
+                    RenderSettings.ambientGroundColor = AmbientGround * ambient;
                     RenderSettings.ambientIntensity = 1f;
-                    ambientSet = true;
                 }
 
+                // the gamma-space Standard shader's environment reflection would veil every surface with the menu's probe
+                reflectionSet = true;
+                RenderSettings.reflectionIntensity = 0f;
+
                 oblique = ApplyCut();
+
+                // the aerial fog, on uncut frames only: the fog coordinate is clip-space depth, which the cut's oblique
+                // projection replaces (stage 1 review) - a cut frame is drawn clear, as it is drawn without shadows
+                if (AerialFog && !oblique)
+                {
+                    var start = FogStartOfDistance * Mathf.Max(0f, _distance);
+                    fogSet = true;
+                    RenderSettings.fog = true;
+                    RenderSettings.fogMode = FogMode.Linear;
+                    RenderSettings.fogColor = SkyHorizon;
+                    RenderSettings.fogStartDistance = start;
+                    RenderSettings.fogEndDistance = start + FogSpanOfFarClip * FarClip;
+                }
+
+                _fogDrawn = fogSet;
 
                 if (ShadowMode != LightShadows.None)
                 {
@@ -5857,7 +5950,19 @@ namespace QuestTree.UI
                 // is guarded separately for the same reason - one throwing must not skip the other.
                 try { RenderSettings.fog = fog; } catch (Exception) { /* nothing further to try */ }
                 try { if (_light != null) _light.enabled = false; } catch (Exception) { /* as above */ }
-                try { if (_fill != null) _fill.enabled = false; } catch (Exception) { /* as above */ }
+
+                if (fogSet)
+                {
+                    try { RenderSettings.fogMode = fogModeWas; } catch (Exception) { /* as above */ }
+                    try { RenderSettings.fogColor = fogColorWas; } catch (Exception) { /* as above */ }
+                    try { RenderSettings.fogStartDistance = fogStartWas; } catch (Exception) { /* as above */ }
+                    try { RenderSettings.fogEndDistance = fogEndWas; } catch (Exception) { /* as above */ }
+                }
+
+                if (reflectionSet)
+                {
+                    try { RenderSettings.reflectionIntensity = reflectionWas; } catch (Exception) { /* as above */ }
+                }
 
                 // HQ S1.4: the scene's ambient is the menu's, each field put back on its own.
                 if (ambientSet)
@@ -6251,7 +6356,6 @@ namespace QuestTree.UI
         private void OnDisable()
         {
             if (_light != null) _light.enabled = false;
-            if (_fill != null) _fill.enabled = false;
 
             // A viewport switched off (a visit to the tree tab) holds no pictures anyone is looking at, so
             // the cache room for its sides goes back while it is off and is taken again when it returns. The
@@ -6320,7 +6424,6 @@ namespace QuestTree.UI
                 }
 
                 if (_light != null) _light.enabled = false;
-                if (_fill != null) _fill.enabled = false;
                 if (_image != null) _image.texture = null;
                 if (_rt != null) _rt.Release();
 
@@ -6348,7 +6451,6 @@ namespace QuestTree.UI
             Discard(_rt);
             Discard(_cameraGo);
             Discard(_lightGo);
-            Discard(_fillGo);
             Discard(_image != null ? _image.gameObject : null);
 
             _rt = null;
@@ -6356,8 +6458,6 @@ namespace QuestTree.UI
             _cameraGo = null;
             _light = null;
             _lightGo = null;
-            _fill = null;
-            _fillGo = null;
             _image = null;
         }
 
