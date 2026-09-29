@@ -118,6 +118,19 @@ namespace QuestTree.UI
         private const float AmbientOfSun = 0.45f;   // stage 1 review: at 0.35 a wall facing away from the sun (equator ambient only) went near black
         private const float WhiteInSun = 0.92f;
 
+        /// <summary>
+        /// Spot-sun stage D: the anchor on the tonemap path - a white up-facing surface in the sun is exposed to 1.8, ABOVE
+        /// 1, and the tonemap's shoulder (ACES or Neutral, after the post-exposure) rolls it off to about 0.9 the way the
+        /// game's own frame rolls off a sunlit roof, while the mid-tones keep their contrast. Only on a view whose
+        /// calibration proved the path HDR (<see cref="_tonemapOn"/>): on an LDR target 1.8 would clip every lit face flat.
+        /// Rollback: 0.92f, the plain path's <see cref="WhiteInSun"/>.
+        /// </summary>
+        private const float WhiteInSunTonemap = 1.8f;
+
+        /// <summary>The white-in-the-sun anchor this view renders with: <see cref="WhiteInSunTonemap"/> on the tonemap path,
+        /// <see cref="WhiteInSun"/> on the plain one.</summary>
+        private float WhiteAnchor => _tonemapOn ? WhiteInSunTonemap : WhiteInSun;
+
         /// <summary>The building shader's diffuse share of the light: the Standard shader keeps a dielectric specular
         /// reserve - 0.22 in gamma space, 0.04 in linear - and a Lambert shader (the Legacy family) keeps none.</summary>
         private float DiffuseShare =>
@@ -176,6 +189,15 @@ namespace QuestTree.UI
         /// stage 3 cut: the ambient as captured, however dim).</summary>
         private const float AmbientFloorOfSun = 0.3f;
 
+        /// <summary>Spot-sun stage D: the ambient floor on the tonemap path. Off: the floor was there because on the plain
+        /// path a face turned from the sun went near black at the 0.92 anchor; under the 1.8 anchor and the tonemap's toe
+        /// the captured ambient (about 0.18 of the sun) already reads, and raising it flattens the game's own contrast.
+        /// Rollback: <see cref="AmbientFloorOfSun"/>.</summary>
+        private const float AmbientFloorOfSunTonemap = 0f;
+
+        /// <summary>The ambient floor this view resolves its plan with (<see cref="ResolveAmbient"/>).</summary>
+        private float AmbientFloor => _tonemapOn ? AmbientFloorOfSunTonemap : AmbientFloorOfSun;
+
         /// <summary>The sky dome and the fog take the captured sky and fog colours' HUE at the preset's brightness (see
         /// <see cref="Rescaled"/>), because TOD_Sky's colours are scene-referred and came out black and dark teal when drawn
         /// as they are. False: the preset colours regardless of the capture (the look before stage 3).</summary>
@@ -223,8 +245,12 @@ namespace QuestTree.UI
             /// <summary>The captured ambient's top over the sun's (brightest channels), before any floor.</summary>
             internal float AmbientOfSunCaptured;
 
-            /// <summary>True when the ambient was raised to <see cref="AmbientFloorOfSun"/>.</summary>
+            /// <summary>True when the ambient was raised to <see cref="AmbientFloorUsed"/>.</summary>
             internal bool AmbientRaised;
+
+            /// <summary>Stage D: the floor the plan was resolved with (<see cref="AmbientFloor"/>: 0 on the tonemap path), so the
+            /// log reports the floor applied, not the plain path's constant.</summary>
+            internal float AmbientFloorUsed;
 
             internal Color Zenith;
             internal Color Horizon;
@@ -296,7 +322,7 @@ namespace QuestTree.UI
                 // the ambient: the preset's under the plan's sun, unless the captured sun is used and EFT's harmonics pass
                 plan.PresetAmbientTop = AmbientSky * (plan.SunIntensity * AmbientOfSun);
                 plan.AmbientTop = plan.PresetAmbientTop;
-                if (plan.Captured) ResolveAmbient(plan, captured.AmbientSh);
+                if (plan.Captured) ResolveAmbient(plan, captured.AmbientSh, AmbientFloor);
 
                 // the sky and the fog: the captured hue at the preset's brightness, since the captured values are
                 // scene-referred (Customs at noon records a sky of 0.05) and the game's exposure that brightens them is not
@@ -357,7 +383,7 @@ namespace QuestTree.UI
         /// straight down against EFT's own values there (the directions the top-only scaling got wrong). Then the floor
         /// (<see cref="AmbientFloorOfSun"/>). Leaves plan.Probe null, with plan.AmbientWhy saying why, when refused.
         /// </summary>
-        private static void ResolveAmbient(LightPlan plan, float[] sh)
+        private static void ResolveAmbient(LightPlan plan, float[] sh, float floorOfSun)
         {
             if (sh == null || sh.Length != 27) { plan.AmbientWhy = "the capture has no ambient harmonics"; return; }
 
@@ -413,8 +439,9 @@ namespace QuestTree.UI
             // the floor: a dim captured ambient raised to a share of the sun; k on the gamma result is k^gamma on the probe
             var sunTop = Mathf.Max(0.0001f, plan.SunIntensity * plan.SunColour.maxColorComponent);
             plan.AmbientOfSunCaptured = plan.AmbientTop.maxColorComponent / sunTop;
-            var floor = AmbientFloorOfSun * sunTop;
-            if (AmbientFloorOfSun > 0f && plan.AmbientTop.maxColorComponent < floor)
+            plan.AmbientFloorUsed = floorOfSun;
+            var floor = floorOfSun * sunTop;
+            if (floorOfSun > 0f && plan.AmbientTop.maxColorComponent < floor)
             {
                 var ratio = floor / Mathf.Max(0.0001f, plan.AmbientTop.maxColorComponent);
                 var linear = Mathf.Pow(ratio, ProbeGamma);
@@ -647,10 +674,11 @@ namespace QuestTree.UI
         /// <summary>The ambient top the view draws, display terms: the probe's, or the Trilight preset's.</summary>
         private static Color AmbientTopFor(LightPlan plan, bool sun) => DrawsProbe(plan, sun) ? plan.AmbientTop : plan.PresetAmbientTop;
 
-        /// <summary>The factor on the sun and the ambient that puts a white up-facing surface in the sun just under
-        /// WhiteInSun (its brightest channel), for a light rising <paramref name="upShare"/> (sin of its elevation).</summary>
+        /// <summary>The factor on the sun and the ambient that puts a white up-facing surface in the sun at the view's
+        /// anchor (<see cref="WhiteAnchor"/>, its brightest channel), for a light rising <paramref name="upShare"/> (sin of
+        /// its elevation).</summary>
         private float Exposure(LightPlan plan, float upShare, bool sun) =>
-            WhiteInSun / Mathf.Max(0.01f, DiffuseShare * UpLight(plan, upShare, sun).maxColorComponent);
+            WhiteAnchor / Mathf.Max(0.01f, DiffuseShare * UpLight(plan, upShare, sun).maxColorComponent);
 
         /// <summary>The light the flat ground gets under the budget, PER CHANNEL - the ground picture, developed and already
         /// lit by the game at capture, is drawn at its own value and its own hue by dividing its colour by this. Alpha 1:
@@ -662,11 +690,14 @@ namespace QuestTree.UI
             return new Color(k * light.r, k * light.g, k * light.b, 1f);
         }
 
-        /// <summary>The ground material's colour: one over the flat ground's light per channel, alpha 1.</summary>
+        /// <summary>The ground material's colour: one over the flat ground's light per channel, alpha 1. Stage D: times
+        /// <see cref="_emissionScale"/> (1 on the plain path), so a lit-fallback ground on the tonemap path comes out of the
+        /// tonemap at the value the emission sides beside it do.</summary>
         private Color GroundColour(LightPlan plan, float upShare, bool sun)
         {
             var light = FlatGroundLight(plan, upShare, sun);
-            return new Color(1f / Mathf.Max(0.05f, light.r), 1f / Mathf.Max(0.05f, light.g), 1f / Mathf.Max(0.05f, light.b), 1f);
+            var k = _emissionScale;
+            return new Color(k / Mathf.Max(0.05f, light.r), k / Mathf.Max(0.05f, light.g), k / Mathf.Max(0.05f, light.b), 1f);
         }
 
         /// <summary>The plan's sun rise for the mode in use: the sun's own, or the over-the-shoulder light's pitch.</summary>
@@ -775,7 +806,7 @@ namespace QuestTree.UI
                 plan.Refit ? "refit" : string.IsNullOrEmpty(plan.AmbientWhy) ? "top-scaled" : plan.AmbientWhy,
                 plan.ShapeError, plan.ShapeError > ShapeWarnPercent ? string.Format(f, " - WARNING over {0:0} %", ShapeWarnPercent) : "",
                 plan.AmbientOfSunCaptured,
-                plan.AmbientRaised ? string.Format(f, ", ambient raised to {0:0.00} of the sun", AmbientFloorOfSun) : "");
+                plan.AmbientRaised ? string.Format(f, ", ambient raised to {0:0.00} of the sun", plan.AmbientFloorUsed) : "");
 
             if (Lighting != ModSettings.MapLightMode.Sun) text += " - not drawn over the shoulder, the preset ambient is";
 
@@ -1626,7 +1657,7 @@ namespace QuestTree.UI
             _camera.cullingMask = _privateMask;
             _camera.useOcclusionCulling = false;
             _camera.allowMSAA = RenderMsaa > 1;
-            _camera.allowHDR = false;   // stage 1: an LDR target; HDR would only buy an intermediate buffer the tonemap-less path never uses
+            _camera.allowHDR = false;   // until Attach below says whether the tonemap path runs (stage D)
 
             // Forward, for the oblique cut: see PrivateCameraPath.
             _camera.renderingPath = PrivateCameraPath;
@@ -1641,6 +1672,20 @@ namespace QuestTree.UI
             if (Map3DPostProcess.Wanted)
                 Plugin.LogSource?.LogInfo($"QuestTree: 3D map post-processing for {_mapKey}: {Map3DPostProcess.Probe()}");
             _postProcessAttached = Map3DPostProcess.Attach(_camera, _drawLayer, out _, _entry?.Lighting?.PrismTonemap);
+
+            // Spot-sun stage D: the tonemap path is what really attached, not what the setting asked for - a game without
+            // the stack's resources, or an attach that threw, keeps the plain path whatever the setting says. On it the
+            // camera renders HDR into a half-float target, because an ARGB32 one clips every value above 1 before the
+            // tonemap sees it and the 1.8 anchor would come out flat white. The self-test "tonemap" forces the LDR target
+            // so the calibration below must log CLIPPED - the proof its check can fail.
+            _tonemapOn = _postProcessAttached && Map3DPostProcess.Attached;
+            _hdrTarget = _tonemapOn && SelfTest != "tonemap";
+            _camera.allowHDR = _hdrTarget;
+            EnsureRenderTexture();   // remade as ARGBHalf on the HDR path (the first was made before this was known)
+
+            // the plan's ambient floor follows _tonemapOn; nothing has read the lazy plan yet, cleared all the same so the
+            // order can never matter
+            _plan = null;
 
             // Spot-sun stage A: whether spot shadows and emission work in this game, measured once per session on the
             // probe's own camera before this view's first render (and before its light is made, which stage C sets from
@@ -1716,6 +1761,10 @@ namespace QuestTree.UI
             }
 
             Place();
+
+            // Spot-sun stage D: the tonemap's curve read back before anything real is drawn - it sets the pictures'
+            // emission scale (their materials are made later, in BeginBuild) and proves the path HDR, or falls back.
+            if (_tonemapOn) CalibrateTonemap(standard ? probeShader : null);
 
             // One render with nothing queued, so the viewport shows the backdrop colour from the first
             // frame. Without it the RawImage displays an uninitialised render texture - black, or worse -
@@ -2121,7 +2170,9 @@ namespace QuestTree.UI
             var width = Mathf.Clamp(Mathf.RoundToInt(_viewport.rect.width * scale), 64, 4096);
             var height = Mathf.Clamp(Mathf.RoundToInt(_viewport.rect.height * scale), 64, 4096);
 
-            if (_rt != null && width == _rtWidth && height == _rtHeight) return false;
+            // stage D: the format follows _hdrTarget too, so the texture made before Attach is remade once it is decided
+            var format = RenderFormat();
+            if (_rt != null && width == _rtWidth && height == _rtHeight && _rt.format == format) return false;
 
             var previous = _rt;
 
@@ -2129,7 +2180,7 @@ namespace QuestTree.UI
             // RawImage reads it.
             var samples = RenderMsaa > 1 && (long)width * height <= MsaaPixelCap ? RenderMsaa : 1;
 
-            _rt = new RenderTexture(width, height, 24, RenderTextureFormat.ARGB32)
+            _rt = new RenderTexture(width, height, 24, format)
             {
                 name = "QuestTreeMap3D",
                 antiAliasing = samples
@@ -2152,6 +2203,21 @@ namespace QuestTree.UI
             Destroy(previous);
             return true;
         }
+
+        /// <summary>Spot-sun stage D: the view's target format - ARGBHalf on the HDR path (<see cref="_hdrTarget"/>), so the
+        /// tonemap sees the values above 1 the 1.8 anchor puts there, ARGB32 otherwise. A device without half-float render
+        /// targets gets ARGB32, and the calibration then reads CLIPPED and falls back.</summary>
+        private RenderTextureFormat RenderFormat()
+        {
+            if (!_hdrTarget) return RenderTextureFormat.ARGB32;
+
+            // asked once per view: EnsureRenderTexture runs every frame
+            if (!_halfSupported.HasValue) _halfSupported = SystemInfo.SupportsRenderTextureFormat(RenderTextureFormat.ARGBHalf);
+            return _halfSupported.Value ? RenderTextureFormat.ARGBHalf : RenderTextureFormat.ARGB32;
+        }
+
+        /// <summary>Whether the device renders into ARGBHalf, asked on the first HDR <see cref="RenderFormat"/> of the view.</summary>
+        private bool? _halfSupported;
 
         // --- building the meshes -------------------------------------------------------------------
 
@@ -3406,7 +3472,9 @@ namespace QuestTree.UI
         /// <summary>The self-test switch the light probe reads (Map3DLightProbe.SelfTestVariable), read once here the same
         /// way. "ground" builds the ground material with the flag on but WITHOUT the _EMISSION keyword, so the emission
         /// check must log MISMATCH (black against the picture) - the proof that check can fail. The probe itself ignores
-        /// "ground" (it acts on "shadow" and "emission" only), so it still passes and the flag still comes on.</summary>
+        /// "ground" (it acts on "shadow" and "emission" only), so it still passes and the flag still comes on. Stage D:
+        /// "tonemap" keeps the camera LDR (allowHDR off, an ARGB32 target) on the tonemap path, so the tonemap calibration
+        /// must log CLIPPED and fall back to the plain anchor (<see cref="CalibrateTonemap"/>).</summary>
         private const string SelfTestVariable = "QUESTTREE_PROBE_SABOTAGE";
 
         private static readonly string SelfTest = ReadSelfTest();
@@ -3442,13 +3510,343 @@ namespace QuestTree.UI
         /// <summary>Why <see cref="_emissiveGround"/> is false, for the first-frame line; empty when it is true.</summary>
         private string _emissiveWhy = "";
 
-        /// <summary>The factor on the pictures' emission, _EmissionColor = white x this. 1 until stage D anchors it to the
-        /// tonemap (the picture then shows at its own value in an LDR frame).</summary>
+        /// <summary>The factor on the pictures' emission, _EmissionColor = white x this. 1 on the plain path (the picture
+        /// then shows at its own value in an LDR frame); on the tonemap path the scale <see cref="CalibrateTonemap"/> read
+        /// back, so the picture's mid grey comes out of the tonemap as mid grey.</summary>
         private float _emissionScale = 1f;
 
         /// <summary>Whether the post-processing stack was attached to this view's camera - then every render is graded by it,
         /// and a rendered pixel cannot be held against the picture's raw texel.</summary>
         private bool _postProcessAttached;
+
+        /// <summary>
+        /// Spot-sun stage D: whether this view renders on the TONEMAP path - the 1.8 anchor (<see cref="WhiteAnchor"/>),
+        /// no ambient floor (<see cref="AmbientFloor"/>) and the calibrated emission scale. Set in Build from what
+        /// Map3DPostProcess really attached, and taken back to false by <see cref="CalibrateTonemap"/> when the path proves
+        /// not to be HDR (or the calibration cannot be made): an unproven HDR path gets the plain anchor, which cannot clip.
+        /// </summary>
+        private bool _tonemapOn;
+
+        /// <summary>Whether the camera renders HDR into an ARGBHalf target: the tonemap path, unless the self-test "tonemap"
+        /// forces the LDR one. Decided once in Build and kept for the view (a calibration fallback leaves the target as it is).</summary>
+        private bool _hdrTarget;
+
+        /// <summary>True only inside <see cref="CalibrateTonemap"/>'s renders: RenderNow then leaves the light off, the fog
+        /// off and the floor cut out, so the quads read the tonemap of their emission and nothing else.</summary>
+        private bool _calibrating;
+
+        /// <summary>The emission values the calibration draws, one quad each, left to right. 0.18 and 0.32 are the shadows'
+        /// and the mid-tones' toe, 0.5 the picture's mid grey at scale 1, 1.0 and 1.8 the step the clip check reads (1.8
+        /// is <see cref="WhiteInSunTonemap"/>), 2.5 the head room over it.</summary>
+        private static readonly float[] CalibrationValues = { 0.18f, 0.32f, 0.5f, 1f, 1.8f, 2.5f };
+
+        /// <summary>T(v): what each of <see cref="CalibrationValues"/> read back as, 0..1 (the mean of r, g and b).</summary>
+        private readonly float[] _tonemapCurve = new float[CalibrationValues.Length];
+
+        /// <summary>Whether <see cref="_tonemapCurve"/> holds a real read (the calibration got as far as its renders).</summary>
+        private bool _tonemapRead;
+
+        /// <summary>Why the tonemap path fell back after Attach ("CLIPPED", "calibration failed ..."), for the first-frame
+        /// line; null while it stands.</summary>
+        private string _tonemapFallback;
+
+        /// <summary>How far in front of the camera the calibration quads stand: well past the 0.5 m near plane, near enough
+        /// that nothing of the map (not drawn in those renders anyway) could be in front.</summary>
+        private const float CalibrationDistance = 2f;
+
+        /// <summary>The clip check: T(1.8) - T(1.0) under this (5 steps of 8 bits) means every value above 1 came out as 1
+        /// - an LDR target or intermediate somewhere - and the 1.8 anchor would draw every lit face flat white.</summary>
+        private const float CalibrationClipStep = 5f / 255f;
+
+        /// <summary>The picture's mid grey, and what it should read after the tonemap: the emission scale is the one that
+        /// takes a 0.5 texel to a 0.5 read.</summary>
+        private const float PictureMidGrey = 0.5f;
+
+        /// <summary>The emission scale's lower clamp: a curve whose toe already reads 0.5 at under 0.25 is not a tonemap
+        /// the pictures should be halved for.</summary>
+        private const float EmissionScaleMin = 0.5f;
+
+        /// <summary>The emission scale's upper clamp: a curve that never reaches 0.5 by 2.5 (a failed or foreign grade)
+        /// must not multiply the pictures without bound.</summary>
+        private const float EmissionScaleMax = 4f;
+
+        /// <summary>The targets the calibration line reports against (it does not act on them): the anchor's white should
+        /// read bright but under white, and a 0.32 mid-shadow should not be crushed.</summary>
+        private const float AnchorReadMin = 0.82f;
+        private const float AnchorReadMax = 0.96f;
+        private const float ShadowReadMin = 0.2f;
+
+        /// <summary>The Standard shader's _EmissionColor, looked up once: the calibration, the checks and the per-draw
+        /// scale match set it.</summary>
+        private static readonly int EmissionColorId = Shader.PropertyToID("_EmissionColor");
+
+        /// <summary>
+        /// Spot-sun stage D: reads the tonemap's curve back, once per build before the first real render, on the tonemap
+        /// path only. Six quads 2 m in front of the camera, one per <see cref="CalibrationValues"/> across the view, each the
+        /// stage B emission recipe (<see cref="Emissive"/>: black albedo, a 1x1 white emission map, _EmissionColor = v) on
+        /// the Standard shader, drawn for this camera alone with no light probes and no shadows. They go through the whole
+        /// bracket (<see cref="RenderWindow"/> into a temporary target, the post-processing active) with the light, the fog
+        /// and the cut off (<see cref="_calibrating"/>); each quad's centre pixel is its T(v). From the curve: the emission
+        /// scale e with T(e x 0.5) = 0.5, interpolated linearly between the samples. Two checks that can fail: an empty
+        /// render compared with the brightest quad (the quads were drawn at all), and T(1.8) - T(1.0) at least
+        /// <see cref="CalibrationClipStep"/> (the path is HDR) - the self-test "tonemap" forces an LDR target so the second
+        /// must say CLIPPED. Either failing puts the view on the plain anchor and the ambient floor with e = 1. One log
+        /// line; never throws.
+        /// </summary>
+        /// <param name="shader">The Standard shader the probe measured, or null on the legacy fallback (no emission).</param>
+        private void CalibrateTonemap(Shader shader)
+        {
+            var f = CultureInfo.InvariantCulture;
+            var count = CalibrationValues.Length;
+            var meshes = new Mesh[count];
+            var materials = new Material[count];
+            Texture2D white = null;
+
+            _emissionScale = 1f;
+            _tonemapRead = false;
+            _tonemapFallback = null;
+
+            try
+            {
+                if (shader == null)
+                {
+                    TonemapFallback("calibration skipped (legacy shader, no emission to calibrate with)");
+                    Plugin.LogSource?.LogInfo("QuestTree: 3D map tonemap calibration - skipped (legacy shader), the plain anchor is used.");
+                    return;
+                }
+
+                if (_camera == null || _rt == null)
+                {
+                    TonemapFallback("calibration skipped (no camera)");
+                    Plugin.LogSource?.LogInfo("QuestTree: 3D map tonemap calibration - skipped (no camera), the plain anchor is used.");
+                    return;
+                }
+
+                white = new Texture2D(1, 1, TextureFormat.RGBA32, false)
+                {
+                    name = "QuestTreeMap3D-calibration-white",
+                    wrapMode = TextureWrapMode.Clamp,
+                    filterMode = FilterMode.Point,
+                };
+                white.SetPixel(0, 0, Color.white);
+                white.Apply(false);
+
+                // the quads across the view at the calibration distance: a column each, 70 % of its width, 60 % of the height
+                var eye = _camera.transform;
+                var halfHeight = CalibrationDistance * Mathf.Tan(_camera.fieldOfView * 0.5f * Mathf.Deg2Rad);
+                var halfWidth = halfHeight * _camera.aspect;
+                var column = 2f * halfWidth / count;
+                var right = eye.right * (column * 0.35f);
+                var up = eye.up * (halfHeight * 0.3f);
+                var toward = -eye.forward;
+
+                var width = _rt.width;
+                var height = _rt.height;
+                var px = new int[count];
+                var py = new int[count];
+                var y0 = height - 1;
+                var y1 = 0;
+
+                for (var i = 0; i < count; i++)
+                {
+                    var centre = eye.position + eye.forward * CalibrationDistance + eye.right * (-halfWidth + column * (i + 0.5f));
+                    meshes[i] = CalibrationQuad(centre, right, up, toward);
+
+                    var material = Matte(new Material(shader) { name = "QuestTreeMap3D-calibration-" + i.ToString(f) });
+                    material.mainTexture = white;
+                    Emissive(material);
+                    var v = CalibrationValues[i];
+                    material.SetColor(EmissionColorId, new Color(v, v, v, 1f));
+                    materials[i] = material;
+
+                    var at = _camera.WorldToViewportPoint(centre);
+                    px[i] = Mathf.Clamp(Mathf.RoundToInt(at.x * (width - 1)), 0, width - 1);
+                    py[i] = Mathf.Clamp(Mathf.RoundToInt(at.y * (height - 1)), 0, height - 1);
+                    y0 = Mathf.Min(y0, py[i]);
+                    y1 = Mathf.Max(y1, py[i]);
+                }
+
+                var window = new RectInt(0, y0, width, y1 - y0 + 1);
+
+                _calibrating = true;
+                var drawn = RenderWindow(window, () =>
+                {
+                    for (var i = 0; i < count; i++)
+                        Graphics.DrawMesh(meshes[i], Matrix4x4.identity, materials[i], _drawLayer, _camera, 0, null,
+                            ShadowCastingMode.Off, false, null, LightProbeUsage.Off);
+                });
+                var empty = RenderWindow(window, null);
+                _calibrating = false;
+
+                for (var i = 0; i < count; i++)
+                {
+                    var c = drawn[(py[i] - y0) * width + px[i]];
+                    _tonemapCurve[i] = (c.r + c.g + c.b) / (3f * 255f);
+                }
+
+                _tonemapRead = true;
+
+                var brightest = (py[count - 1] - y0) * width + px[count - 1];
+                var clipped = TonemapAt(1.8f) - TonemapAt(1f) < CalibrationClipStep;
+                var notDrawn = Near(drawn[brightest], empty[brightest], 5);
+
+                if (notDrawn) TonemapFallback("calibration failed (the quads were not drawn)");
+                else if (clipped) TonemapFallback("CLIPPED");
+                else _emissionScale = Mathf.Clamp(InverseTonemap(PictureMidGrey) / PictureMidGrey, EmissionScaleMin, EmissionScaleMax);
+
+                var anchorRead = TonemapAt(WhiteInSunTonemap);
+                var inRange = anchorRead >= AnchorReadMin && anchorRead <= AnchorReadMax && TonemapAt(0.32f) >= ShadowReadMin;
+
+                Plugin.LogSource?.LogInfo(string.Format(
+                    f,
+                    "QuestTree: 3D map tonemap calibration - T(0.18/0.32/0.5/1.0/1.8/2.5) = {0:0.00}/{1:0.00}/{2:0.00}/{3:0.00}/{4:0.00}/{5:0.00}, " +
+                    "emission scale x{6:0.00}, white in the sun {7:0.00} reads {8:0.00} {9}, {10}{11}",
+                    _tonemapCurve[0], _tonemapCurve[1], _tonemapCurve[2], _tonemapCurve[3], _tonemapCurve[4], _tonemapCurve[5],
+                    _emissionScale, WhiteInSunTonemap, anchorRead, inRange ? "ok" : "out of range",
+                    notDrawn ? "NOT DRAWN" : clipped ? "CLIPPED" : "hdr",
+                    notDrawn || clipped
+                        ? string.Format(f, " - tonemap {0}: the plain anchor {1:0.00} and the ambient floor are used{2}",
+                            notDrawn ? "not calibrated" : "clipped", WhiteInSun,
+                            SelfTest == "tonemap" ? " (SELF-TEST: LDR target forced)" : "")
+                        : "."));
+            }
+            catch (Exception ex)
+            {
+                TonemapFallback("calibration failed (" + ex.GetType().Name + ")");
+                Plugin.LogSource?.LogInfo(string.Format(f,
+                    "QuestTree: 3D map tonemap calibration - could not be made ({0}: {1}), the plain anchor {2:0.00} is used.",
+                    ex.GetType().Name, ex.Message, WhiteInSun));
+            }
+            finally
+            {
+                _calibrating = false;
+                for (var i = 0; i < count; i++)
+                {
+                    if (meshes[i] != null) Destroy(meshes[i]);
+                    if (materials[i] != null) Destroy(materials[i]);
+                }
+
+                if (white != null) Destroy(white);
+            }
+        }
+
+        /// <summary>Back to the plain path for this view: the plain anchor (<see cref="WhiteAnchor"/> follows
+        /// <see cref="_tonemapOn"/>), the ambient floor (the lazy plan is cleared so it is resolved again with it) and the
+        /// pictures at their own value - the materials already made are brought to it here, since a fallback can come
+        /// mid-view (the stack detached) after BeginBuild made them at the calibrated scale: each floor's ground (its
+        /// emission, or the lit fallback's _Color, which carries the scale too) and its side pictures.</summary>
+        private void TonemapFallback(string why)
+        {
+            _tonemapOn = false;
+            _tonemapFallback = why;
+            _emissionScale = 1f;
+            _plan = null;
+
+            for (var i = 0; i < _floors.Count; i++)
+            {
+                var floor = _floors[i];
+                var ground = floor?.GroundMaterial;
+
+                if (ground != null)
+                {
+                    if (_emissiveGround && ground.IsKeywordEnabled("_EMISSION")) MatchEmissionScale(ground);
+                    else if (!_emissiveGround && ground.HasProperty("_Color"))
+                    {
+                        var sun = Lighting == ModSettings.MapLightMode.Sun;
+                        ground.SetColor("_Color", GroundColour(Plan, UpShareFor(Plan, sun), sun));
+                    }
+                }
+
+                var sides = floor?.Meshes?.Sides;
+                if (sides == null) continue;
+
+                for (var slot = 0; slot < sides.Length; slot++)
+                {
+                    var material = sides[slot]?.Material;
+                    if (material != null && material.IsKeywordEnabled("_EMISSION")) MatchEmissionScale(material);
+                }
+            }
+
+            _forceRender = true;
+        }
+
+        /// <summary>One calibration quad in world space (drawn at the identity), wound clockwise as seen from
+        /// <paramref name="toward"/>'s side - the camera's - so it is not culled.</summary>
+        private static Mesh CalibrationQuad(Vector3 centre, Vector3 right, Vector3 up, Vector3 toward)
+        {
+            var mesh = new Mesh { name = "QuestTreeMap3D-calibration" };
+            mesh.vertices = new[] { centre - right - up, centre - right + up, centre + right + up, centre + right - up };
+            mesh.normals = new[] { toward, toward, toward, toward };
+            mesh.uv = new[] { new Vector2(0f, 0f), new Vector2(0f, 1f), new Vector2(1f, 1f), new Vector2(1f, 0f) };
+            mesh.triangles = new[] { 0, 1, 2, 0, 2, 3 };
+            mesh.RecalculateBounds();
+
+            return mesh;
+        }
+
+        /// <summary>T(v) from the calibration's samples, linear between them and held at the ends.</summary>
+        private float TonemapAt(float v)
+        {
+            var n = CalibrationValues.Length;
+            if (v <= CalibrationValues[0]) return _tonemapCurve[0];
+
+            for (var i = 1; i < n; i++)
+            {
+                if (v > CalibrationValues[i]) continue;
+
+                var a = CalibrationValues[i - 1];
+                var b = CalibrationValues[i];
+                return Mathf.Lerp(_tonemapCurve[i - 1], _tonemapCurve[i], (v - a) / (b - a));
+            }
+
+            return _tonemapCurve[n - 1];
+        }
+
+        /// <summary>The v with T(v) = <paramref name="read"/>: the first sample interval that brackets it, linear inside it;
+        /// the end values when the curve never reaches it (the caller clamps the scale).</summary>
+        private float InverseTonemap(float read)
+        {
+            var n = CalibrationValues.Length;
+            if (read <= _tonemapCurve[0]) return CalibrationValues[0];
+
+            for (var i = 1; i < n; i++)
+            {
+                var lo = _tonemapCurve[i - 1];
+                var hi = _tonemapCurve[i];
+                if (read > hi || hi <= lo) continue;
+
+                return Mathf.Lerp(CalibrationValues[i - 1], CalibrationValues[i], (read - lo) / (hi - lo));
+            }
+
+            return CalibrationValues[n - 1];
+        }
+
+        /// <summary>The first-frame line's tonemap clause: what the path is and what it read, or why it is off.</summary>
+        private string TonemapText()
+        {
+            var f = CultureInfo.InvariantCulture;
+
+            if (_tonemapOn)
+                return string.Format(f, "{0}, post-exposure {1:0.00}, anchor {2:0.00} reads {3:0.00}, ambient floor {4}, emission x{5:0.00}",
+                    Map3DPostProcess.TonemapperName, Map3DPostProcess.PostExposure, WhiteInSunTonemap,
+                    _tonemapRead ? TonemapAt(WhiteInSunTonemap) : -1f,
+                    AmbientFloorOfSunTonemap > 0f ? AmbientFloorOfSunTonemap.ToString("0.00", f) : "off",
+                    _emissionScale);
+
+            if (!ModSettings.PostProcessingWanted) return "off (setting)";
+            if (!_postProcessAttached) return string.Format(f, "off (not attached), plain anchor {0:0.00}", WhiteInSun);
+
+            return string.Format(f, "{0}, plain anchor {1:0.00}", _tonemapFallback ?? "off", WhiteInSun);
+        }
+
+        /// <summary>Stage D: the side materials outlive a view (the floor cache), so one made under another view's
+        /// calibration is brought to this view's scale before it is drawn. A compare first, so a draw sets nothing when it
+        /// is already right.</summary>
+        private void MatchEmissionScale(Material material)
+        {
+            var want = new Color(_emissionScale, _emissionScale, _emissionScale, 1f);
+            if (material.GetColor(EmissionColorId) != want) material.SetColor(EmissionColorId, want);
+        }
 
         /// <summary>What the opaque side check found this session: sides stay lit for the rest of the session after a
         /// MISMATCH, and are checked once more per build until one passes.</summary>
@@ -3503,7 +3901,9 @@ namespace QuestTree.UI
         {
             if (material.HasProperty("_Color")) material.SetColor("_Color", new Color(0f, 0f, 0f, 1f));
             if (material.HasProperty("_EmissionMap")) material.SetTexture("_EmissionMap", material.mainTexture);
-            if (material.HasProperty("_EmissionColor")) material.SetColor("_EmissionColor", Color.white * _emissionScale);
+            // alpha 1, as MatchEmissionScale compares it (white x scale would scale the alpha too)
+            if (material.HasProperty("_EmissionColor"))
+                material.SetColor("_EmissionColor", new Color(_emissionScale, _emissionScale, _emissionScale, 1f));
 
             material.EnableKeyword("_EMISSION");
             material.globalIlluminationFlags = MaterialGlobalIlluminationFlags.None;
@@ -3702,7 +4102,7 @@ namespace QuestTree.UI
 
             var centre = new RectInt(_rt.width / 2, _rt.height / 2, 1, 1);
 
-            var read = RenderFrame(floor.Meshes.Ground, ground, true, centre)[0];
+            var read = RenderAtUnitEmission(floor.Meshes.Ground, ground, true, centre)[0];
 
             unlitReference = ReferenceFor(unlitReference, unlit, picture);
             var expected = RenderFrame(floor.Meshes.Ground, unlitReference, true, centre)[0];
@@ -3780,7 +4180,7 @@ namespace QuestTree.UI
                     var pixel = CoveredNear(expected, backdrop, window.width, window.height, px - x0, py - y0);
                     if (pixel < 0) continue;   // this chunk's centre is in the air between its buildings - the next one
 
-                    var read = RenderFrame(one, material, false, window);
+                    var read = RenderAtUnitEmission(one, material, false, window);
 
                     var ok = Near(read[pixel], expected[pixel], EmissionCheckTolerance);
                     _sideEmission = ok ? SideEmission.Proven : SideEmission.Failed;
@@ -3804,6 +4204,26 @@ namespace QuestTree.UI
                     "nothing drawn within {0} px of the centres of {1} side mesh(es), skipped", SideSearchRadius, tries);
 
             return anyPicture ? "no side mesh's centre on screen, skipped" : null;
+        }
+
+        /// <summary>Stage D: <see cref="RenderFrame"/> with the material's _EmissionColor at white for that one render and put
+        /// back after. The Unlit reference draws the picture at 1; on the tonemap path the pictures' emission is scaled
+        /// (<see cref="_emissionScale"/>), and the check proves the emission is compiled in and nothing lights it, not the
+        /// scale - both go through the same tonemap, so at 1 they must still agree.</summary>
+        private Color32[] RenderAtUnitEmission(List<Mesh> meshes, Material material, bool ground, RectInt window)
+        {
+            var has = material.HasProperty(EmissionColorId);
+            var was = has ? material.GetColor(EmissionColorId) : Color.white;
+
+            try
+            {
+                if (has) material.SetColor(EmissionColorId, Color.white);
+                return RenderFrame(meshes, material, ground, window);
+            }
+            finally
+            {
+                if (has) material.SetColor(EmissionColorId, was);
+            }
         }
 
         /// <summary>The Unlit/Texture reference material with <paramref name="picture"/> on it, made on first use.</summary>
@@ -3854,7 +4274,31 @@ namespace QuestTree.UI
         /// a whole frame would be ~15 MB at 1440p. The ground is submitted as Draw submits it (no casting), anything else
         /// casting and receiving. The camera's target is put back and both temporaries released whatever throws.
         /// </summary>
-        private Color32[] RenderFrame(List<Mesh> meshes, Material material, bool ground, RectInt window)
+        private Color32[] RenderFrame(List<Mesh> meshes, Material material, bool ground, RectInt window) =>
+            RenderWindow(window, meshes != null && material != null ? () => SubmitAll(meshes, material, ground) : (Action)null);
+
+        /// <summary>The meshes <see cref="RenderFrame"/> draws: the ground as Draw submits it (no casting), anything else
+        /// casting and receiving.</summary>
+        private void SubmitAll(List<Mesh> meshes, Material material, bool ground)
+        {
+            for (var i = 0; i < meshes.Count; i++)
+            {
+                var mesh = meshes[i];
+                if (mesh == null) continue;
+
+                if (ground) Submit(mesh, material, castShadows: false);
+                else Submit(mesh, material);
+            }
+        }
+
+        /// <summary>
+        /// The body of <see cref="RenderFrame"/>, with what is drawn left to <paramref name="submit"/> (null: an empty
+        /// frame): the DrawMesh calls it makes, then RenderNow into a temporary of the view's own descriptor (on the tonemap
+        /// path an MSAA ARGBHalf, so the render is the view's HDR one), blitted into a one-sample ARGB32 - the blit resolves
+        /// the samples and brings the half floats to 8 bits (the tonemap's output is already 0..1) - and read back there.
+        /// Stage D's calibration draws its own quads through it.
+        /// </summary>
+        private Color32[] RenderWindow(RectInt window, Action submit)
         {
             var target = _camera.targetTexture;
             var previous = RenderTexture.active;
@@ -3867,17 +4311,7 @@ namespace QuestTree.UI
                 temporary = RenderTexture.GetTemporary(_rt.descriptor);
                 _camera.targetTexture = temporary;
 
-                if (meshes != null && material != null)
-                {
-                    for (var i = 0; i < meshes.Count; i++)
-                    {
-                        var mesh = meshes[i];
-                        if (mesh == null) continue;
-
-                        if (ground) Submit(mesh, material, castShadows: false);
-                        else Submit(mesh, material);
-                    }
-                }
+                submit?.Invoke();
 
                 RenderNow();
 
@@ -6614,8 +7048,8 @@ namespace QuestTree.UI
                         CultureInfo.InvariantCulture,
                         "QuestTree: 3D map for {0} - first frame drawn in {1:0.0} ms, render {2:0.0} ms, {3} draw call(s), cut {4}, msaa {5}x, " +
                         "light {6} spot at {7:0} m, cone {8:0.0} deg over r {9:0} m, range {10:0} m, near {11:0} m (read back, near/far {31:0.0000}), map {12} px, " +
-                        "bias {13:0.000}/{14:0.00}, atten x{15:0.00}; shadows {16} to {17:0} m; ground {18}, sides {19}; ambient {20}, sky {21}, " +
-                        "pixel lights {22}, colour space {23}, exposure x{24:0.00} (white in the sun under {25:0.00}, ambient {26:0.00} of the sun), " +
+                        "bias {13:0.000}/{14:0.00}, atten x{15:0.00}; shadows {16} to {17:0} m; ground {18}, sides {19}; tonemap {32}; ambient {20}, sky {21}, " +
+                        "pixel lights {22}, colour space {23}, exposure x{24:0.00} (white in the sun at {25:0.00}, ambient {26:0.00} of the sun), " +
                         "fog {27}; source {28}; post-processing {29}; probe {30}.",
                         _mapKey, clock.Elapsed.TotalMilliseconds, _renderMs, _drawCalls, CutText(), _rtSamples,
                         Lighting == ModSettings.MapLightMode.Sun
@@ -6634,12 +7068,13 @@ namespace QuestTree.UI
                         SidesText(),
                         DrawsProbe(Plan, Lighting == ModSettings.MapLightMode.Sun) ? "EFT probe" : AmbientTrilight ? "trilight" : "scene",
                         SkyDome && !_skyBroken ? "dome" : "backdrop",
-                        QualitySettings.pixelLightCount, QualitySettings.activeColorSpace, _exposureRendered, WhiteInSun,
+                        QualitySettings.pixelLightCount, QualitySettings.activeColorSpace, _exposureRendered, WhiteAnchor,
                         // the ambient the view draws over the sun, as LightSource() reports it - not the preset's constant
                         AmbientTopFor(Plan, Lighting == ModSettings.MapLightMode.Sun).maxColorComponent /
                             Mathf.Max(0.0001f, Plan.SunIntensity * Plan.SunColour.maxColorComponent),
                         !AerialFog ? "off" : _fogDrawn ? "aerial" : "off for the cut floor",
-                        LightSource(), Map3DPostProcess.Describe(), Map3DLightProbe.Describe(), _spotNearFarRatio));
+                        LightSource(), Map3DPostProcess.Describe(), Map3DLightProbe.Describe(), _spotNearFarRatio,
+                        TonemapText()));   // stage D: {32}
                 }
 
                 // Spot-sun stage B's proof, after the real frame is in the view's texture (the check renders into a
@@ -7058,6 +7493,7 @@ namespace QuestTree.UI
                 // Stage B review S1: the opaque emission variant failed its check this session - a side material still
                 // carrying it (made before the check, or cached by another view) is rebuilt lit, as the lit path makes it
                 if (!_emissiveSides && material.IsKeywordEnabled("_EMISSION")) material = side.Material = LitSideMaterial(material);
+                else if (_emissiveSides && material.IsKeywordEnabled("_EMISSION")) MatchEmissionScale(material);
 
                 var picture = _sides[slot]?.Picture;
 
@@ -7268,7 +7704,18 @@ namespace QuestTree.UI
             try
             {
                 RenderSettings.fog = false;   // the menu's own, off unless AerialFog sets ours below
-                _light.enabled = true;
+                _light.enabled = !_calibrating;   // stage D: the calibration's quads are emission alone, nothing lit
+
+                // Stage D review: the stack can drop off mid-view (SetActive's volume check, or a throw, calls Detach); with
+                // no tonemap the 1.8 anchor and the calibrated scale would draw blown-out white, so the view goes back to the
+                // plain path before this render reads its plan. TonemapFallback runs once: it clears _tonemapOn.
+                if (_tonemapOn && !_calibrating && !Map3DPostProcess.Attached)
+                {
+                    TonemapFallback("stack detached");
+                    Plugin.LogSource?.LogInfo(string.Format(CultureInfo.InvariantCulture,
+                        "QuestTree: 3D map tonemap - the post-processing stack was taken off ({0}); the plain anchor {1:0.00}, the ambient floor and emission x1.00 are used from here.",
+                        Map3DPostProcess.Describe(), WhiteInSun));
+                }
 
                 // the sun fixed in the world (the captured one, or the preset), or the one light over the shoulder - under
                 // the exposure budget either way
@@ -7346,11 +7793,11 @@ namespace QuestTree.UI
                 reflectionSet = true;
                 RenderSettings.reflectionIntensity = 0f;
 
-                oblique = ApplyCut();
+                oblique = !_calibrating && ApplyCut();   // stage D: the cut plane could clip the calibration's quads
 
                 // the aerial fog, on uncut frames only: the fog coordinate is clip-space depth, which the cut's oblique
                 // projection replaces (stage 1 review) - a cut frame is drawn clear, as it is drawn without shadows
-                if (AerialFog && !oblique)
+                if (AerialFog && !oblique && !_calibrating)
                 {
                     var start = FogStartOfDistance * Mathf.Max(0f, _distance);
                     fogSet = true;

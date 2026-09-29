@@ -28,9 +28,10 @@ namespace QuestTree.UI
     ///   - a profile built in code with ColorGrading (HDR grading mode with a tonemap following the capture's: ACES, or
     ///     Neutral for the game's default RomB) and scalable ambient obscurance, the one AO mode PPv2 can run in the
     ///     forward path without compute shaders; every other effect type is in the profile switched off;
-    ///   - allowHDR left as the viewer set it (off): the exposure budget keeps the picture under about 0.92 white, the
-    ///     post-exposure is float maths inside the grading shader either way, and an HDR intermediate resolved onto an
-    ///     ARGB32 MSAA target is a path nobody has verified in this game.
+    ///   - allowHDR left as the viewer set it: since spot-sun stage D (2026-09-29) the viewer turns it on, with an
+    ///     ARGBHalf target, exactly when <see cref="Attach"/> succeeded, and anchors its exposure to the tonemap (a sunlit
+    ///     white at 1.8, above 1, which an ARGB32 target would clip before the tonemap saw it). The viewer's own
+    ///     calibration renders proves the path is HDR and falls back to the plain anchor when it is not.
     ///
     /// Every entry point here catches its own failure, logs one line and returns to the off state: a failure must never
     /// leave the volume active or the layer on the camera.
@@ -46,11 +47,11 @@ namespace QuestTree.UI
         /// False keeps <see cref="DefaultTonemapper"/> for every map - the rollback if a mapped curve reads worse than ACES.</summary>
         private static readonly bool FollowCapturedTonemap = true;
 
-        /// <summary>The exposure under the tonemap, in EV. The viewer's own exposure budget already puts white at about
-        /// 0.92, so the picture arrives at the tonemap already fitted to LDR; a tonemap's shoulder then darkens every
-        /// mid-tone. 0.6 EV (about x1.5) lifts the mid-tones back to where the budget put them and lets the shoulder
-        /// compress only the highlights - it is applied in the grading shader's float maths, so it needs no HDR buffer.
-        /// THE knob to turn after a play-test.</summary>
+        /// <summary>The exposure under the tonemap, in EV. A tonemap's shoulder darkens every mid-tone; 0.6 EV (about x1.5)
+        /// lifts the mid-tones back and lets the shoulder compress only the highlights. Since spot-sun stage D the viewer
+        /// anchors its own exposure (a sunlit white at 1.8) and its emission scale to the curve with this in it, read back
+        /// by its calibration, so a change here moves the anchor's reading, which the log reports. THE knob to turn after
+        /// a play-test.</summary>
         internal const float PostExposure = 0.6f;
 
         /// <summary>Scalable AO's strength. The project renders in GAMMA colour space, so the forward composite multiplies
@@ -115,7 +116,13 @@ namespace QuestTree.UI
         /// <summary>The last failure's one-line reason, so <see cref="Describe"/> can say why it is off.</summary>
         private static string _failure;
 
-        private static bool Attached => _layer != null && _volumeGo != null;
+        /// <summary>Whether the layer and the volume are really on the camera now. Internal since spot-sun stage D: the
+        /// viewer decides HDR and its exposure anchor on this, not on the setting, which asks without knowing whether the
+        /// game had the stack's resources.</summary>
+        internal static bool Attached => _layer != null && _volumeGo != null;
+
+        /// <summary>The tonemapper the attached profile runs (ACES or Neutral), for the viewer's first-frame line.</summary>
+        internal static string TonemapperName => _tonemapper.ToString();
 
         /// <summary>Whether the setting asks for post-processing at all. The viewer logs the probe line only when this is
         /// true, so a player who never turned the setting on sees no new line.</summary>
@@ -511,8 +518,8 @@ namespace QuestTree.UI
             {
                 var line = string.Format(
                     CultureInfo.InvariantCulture,
-                    "{0} tonemap, exposure {1:+0.0;-0.0} EV, SAO {2:0.0##} (off on cut frames), LDR intermediate",
-                    _tonemapper, PostExposure, AoIntensity);
+                    "{0} tonemap, exposure {1:+0.0;-0.0} EV, SAO {2:0.0##} (off on cut frames), {3} intermediate",
+                    _tonemapper, PostExposure, AoIntensity, _camera != null && _camera.allowHDR ? "HDR" : "LDR");
 
                 // A check that can fail: the keeper counts every cut frame on which PPv2 ran AFTER it and so undid the cut.
                 if (_cutUndone > 0)

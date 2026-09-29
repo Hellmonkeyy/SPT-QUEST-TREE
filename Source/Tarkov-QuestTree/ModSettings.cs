@@ -244,8 +244,10 @@ namespace QuestTree
 
         /// <summary>Lighting stage 4 (2026-09-28): whether the 3D map's private camera runs the game's PostProcessing v2 stack
         /// (a tonemap following the capture's - ACES, or Neutral for the game's default RomB - and scalable ambient
-        /// occlusion, see UI/Map3DPostProcess.cs). Off by default until it has been
-        /// play-tested; off is exactly the viewer as it was before the stage. F12 only; a change rebuilds the viewport.</summary>
+        /// occlusion, see UI/Map3DPostProcess.cs). On by default since spot-sun stage D (2026-09-29): the viewer renders HDR
+        /// under it and anchors its exposure to the tonemap's curve; off is the plain exposure-budget path. The key was
+        /// renamed with the default, so a config that saved the old key's false starts on the new default rather than
+        /// keeping a choice made against the experimental version. F12 only; a change rebuilds the viewport.</summary>
         public static ConfigEntry<bool> MapPostProcessing { get; private set; }
 
         /// <summary>Read by the 3D map when it builds its camera; false before Init has run, which is the setting's own default,
@@ -1018,12 +1020,12 @@ namespace QuestTree
                 "a region of the map draws dark: if it stays dark, it is not a shadow. Takes effect when the map redraws.");
 
             MapPostProcessing = config.Bind(
-                "Advanced", "3D map: tonemap and ambient occlusion (experimental)", false,
-                "Off, the default: the 3D map is lit by its own exposure budget with no post-processing. On, the map's private " +
-                "camera runs the game's PostProcessing stack with a tonemap following the capture's (ACES, or Neutral for the " +
-                "game's default RomB) and ambient occlusion, if the game has the " +
-                "stack's resources loaded (the log's first-frame line says). Experimental: play-test it; it costs a few " +
-                "milliseconds per redraw.");
+                "Advanced", "3D map: tonemap and ambient occlusion (like the game)", true,
+                "On, the default: the 3D map renders in HDR and the map's private camera runs the game's PostProcessing " +
+                "stack with a tonemap following the capture's (ACES, or Neutral for the game's default RomB) and ambient " +
+                "occlusion, so sunlit roofs roll off the way the game's own picture does instead of clipping, if the game " +
+                "has the stack's resources loaded (the log's first-frame line says). Off: the map is lit by its own " +
+                "exposure budget with no post-processing, which costs a few milliseconds less per redraw.");
 
             MeshFoliage = config.Bind(
                 "Advanced", "3D map: include trees and bushes", true,
