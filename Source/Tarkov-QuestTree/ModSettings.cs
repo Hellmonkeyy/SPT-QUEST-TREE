@@ -323,8 +323,8 @@ namespace QuestTree
         /// <summary>How the 3D map is lit. See <see cref="MapLighting"/>.</summary>
         public enum MapLightMode
         {
-            /// <summary>A sun fixed in the world (60 degrees up, from the south-west) for the shadows, and a weak fill light
-            /// from the viewer so the walls you look at are never black when you face into the sun.</summary>
+            /// <summary>A sun fixed in the world (45 degrees up, from the south-west of the capture's frame) for the shadows,
+            /// and a weak fill light from the viewer so the walls you look at are never black when you face into the sun.</summary>
             Sun,
 
             /// <summary>One light over the viewer's shoulder that turns with the view: every face you look at is lit, and the
@@ -898,13 +898,14 @@ namespace QuestTree
                 "the ground by the captured coordinates it was measured over, so there is nothing left " +
                 "for a rotation or a mirror to correct.");
 
+            // F12-only, as the Advanced 3D entries are: a lighting preference, not something the Settings tab need carry.
             MapLighting = config.Bind(
                 "Map", "3D map lighting", MapLightMode.Sun,
-                "How the 3D map is lit. 'Sun': one sun fixed in the world, 60 degrees up from the south-west, so " +
-                "shadows lie the same way across the whole map as you orbit, plus a weak fill light from where you " +
-                "look, so the walls facing you are never black when you face into the sun. 'Over the shoulder': one " +
-                "light that turns with the view, 40 degrees off it, so whatever you look at is lit and the shadows " +
-                "swing round as you orbit. Takes effect on the next frame.");
+                "How the 3D map is lit. 'Sun': one sun fixed in the world, 45 degrees up from the south-west of the " +
+                "captured map, so shadows lie the same way across the whole map as you orbit, plus a weak fill light " +
+                "from where you look, so the walls facing you are never black when you face into the sun. " +
+                "'OverTheShoulder': one light that turns with the view, 40 degrees off it, so whatever you look at is " +
+                "lit and the shadows swing round as you orbit. Takes effect when the map redraws.");
 
             UploadCaptures = config.Bind(
                 "Map", "Share captured maps", true,

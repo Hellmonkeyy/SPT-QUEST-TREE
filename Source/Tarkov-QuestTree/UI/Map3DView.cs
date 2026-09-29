@@ -99,22 +99,26 @@ namespace QuestTree.UI
 
         /// <summary>
         /// Test 2026-09-28 (the light "not placed right"): the light was FIXED in the world, 50 degrees down at yaw -30,
-        /// while the camera orbits - looking north it sat ten degrees behind the view, so every face the viewer saw was
-        /// lit flat and the map read as unlit; turned to look south it would sit in front, and every visible wall would
-        /// be in its own shadow. Two ways to light a map you orbit, chosen by ModSettings.MapLighting and set every render
-        /// (render-on-change draws again when the view moves or the setting changes):
-        /// - SUN (the default, the maintainer's choice): the key light stays fixed in the world at <see cref="SunPitch"/>
-        ///   degrees down and <see cref="SunYaw"/>, so shadows lie one way across the whole map as it is orbited - it reads
-        ///   as a place - and a FILL light from the viewer (<see cref="FillShare"/> of the sun's intensity, pitched
-        ///   <see cref="FillPitch"/> down along the view, casting no shadow) keeps the walls the viewer looks at from going
-        ///   black when the view faces into the sun;
+        /// while the camera orbits - at the default view (yaw 0, looking along the capture's +Z) it sat about twenty degrees
+        /// behind the camera, so every face the viewer saw was lit flat and the map read as unlit; turned to look the other
+        /// way it would sit in front, and every visible wall would be in its own shadow. Two ways to light a map you orbit,
+        /// chosen by ModSettings.MapLighting and set every render (a change of the setting rebuilds the viewport):
+        /// - SUN (the default, the maintainer's choice): the key light stays fixed in the world, travelling towards yaw
+        ///   <see cref="SunYaw"/> and <see cref="SunPitch"/> degrees down - it comes from the south-west of the capture's
+        ///   frame (+Z north), behind-left of the default view, so at that view a wall facing the camera takes half the sun
+        ///   (a 60-degree incidence), its west face the same and its east face none (form), and shadows lie one way across the whole map as
+        ///   it is orbited (it reads as a place); a FILL light from the viewer (<see cref="FillShare"/> of the sun's
+        ///   intensity, pitched <see cref="FillPitch"/> down along the view, casting no shadow, evaluated per vertex so it
+        ///   costs no second pass) keeps the walls the viewer looks at from going black when the view faces into the sun.
+        ///   The second 2026-09-28 test: a sun at 60 up and yaw -30 read as "attached to the camera" - it WAS nearly behind
+        ///   the default view - and cast shadows too short to see; 45 down makes them 1.7 times longer.
         /// - OVER THE SHOULDER: one light that turns with the view, <see cref="LightYawOffset"/> degrees off the view's yaw
         ///   and <see cref="LightPitch"/> degrees down, so the faces the viewer sees are lit with form on both sides
         ///   whatever the yaw, and shadows fall away from the viewer.
         /// </summary>
-        private const float SunPitch = 60f;
+        private const float SunPitch = 45f;
 
-        private const float SunYaw = -30f;
+        private const float SunYaw = 45f;
         private const float FillShare = 0.35f;
         private const float FillPitch = 25f;
         private const float LightPitch = 50f;
@@ -154,8 +158,22 @@ namespace QuestTree.UI
         /// </summary>
         private static readonly LightShadows ShadowMode = LightShadows.Soft;
 
-        private static readonly float ShadowStrength = 0.45f;   // test 2026-09-28: 0.65 read as a dark map
-        private static readonly int ShadowCascadeCount = 2;
+        private static readonly float ShadowStrength = 0.55f;   // test 2026-09-28: 0.65 read as a dark map under the old ambient; 0.45 too faint under the trilight
+        /// <summary>Second 2026-09-28 test: two cascades over a range that grew with the zoom (2.5 km when zoomed out) spread
+        /// the shadow map so thin that no building cast a visible shadow at an ordinary zoom. Four cascades, and the range
+        /// capped at <see cref="ShadowDistanceMax"/>: the near cascades keep building-scale shadows sharp at any zoom, and
+        /// past the cap (a whole-map view) shadows fade, which is what a map that far away looks like anyway.</summary>
+        private static readonly int ShadowCascadeCount = 4;
+
+        private const float ShadowDistanceMax = 1500f;
+
+        /// <summary>The four cascades' split, Unity's default - set with the count, since the game's quality level holds
+        /// its own.</summary>
+        private static readonly Vector3 ShadowCascadeSplit = new Vector3(0.067f, 0.2f, 0.467f);
+
+        /// <summary>Whether the last render drew shadows at all (a cut floor turns them off - ShadowsUnderCut), for the
+        /// first-frame line.</summary>
+        private bool _shadowsDrawn;
         private static readonly ShadowResolution ShadowMapResolution = ShadowResolution.VeryHigh;
         private static readonly float ShadowDistanceOfView = 2.5f;
         private static readonly float ShadowDistanceMin = 100f;
@@ -914,6 +932,9 @@ namespace QuestTree.UI
             _fill.type = LightType.Directional;
             _fill.intensity = LightIntensity * FillShare;
             _fill.shadows = LightShadows.None;
+            // per vertex: a smooth fill needs no per-pixel pass, and the game's pixel light count then cannot drop it or
+            // double every draw (review 2026-09-28)
+            _fill.renderMode = LightRenderMode.ForceVertex;
             _fill.cullingMask = _privateMask;
             _fill.enabled = false;
 
@@ -2623,6 +2644,14 @@ namespace QuestTree.UI
         {
             if (material.HasProperty("_Glossiness")) material.SetFloat("_Glossiness", 0f);
             if (material.HasProperty("_Metallic")) material.SetFloat("_Metallic", 0f);
+
+            // Test 2026-09-28 (review): at roughness 1 the Standard shader still draws a broad specular highlight and its
+            // glossy reflection, which over a large ground plane at a grazing angle reads as a far-away sun. Both off (the
+            // keywords are shader features; a build without the variant falls back to the default one, silently).
+            material.EnableKeyword("_SPECULARHIGHLIGHTS_OFF");
+            material.EnableKeyword("_GLOSSYREFLECTIONS_OFF");
+            if (material.HasProperty("_SpecularHighlights")) material.SetFloat("_SpecularHighlights", 0f);
+            if (material.HasProperty("_GlossyReflections")) material.SetFloat("_GlossyReflections", 0f);
 
             return material;
         }
@@ -5263,13 +5292,15 @@ namespace QuestTree.UI
                     Plugin.LogSource?.LogInfo(string.Format(
                         CultureInfo.InvariantCulture,
                         "QuestTree: 3D map for {0} - first frame drawn in {1:0.0} ms, render {2:0.0} ms, {3} draw call(s), cut {4}, " +
-                        "msaa {5}x, shadows {6} ({7} cascade(s), {8:0} m), ambient {9}, sky {10}, light {11}.",
+                        "msaa {5}x, shadows {6} ({7} cascade(s), {8:0} m), ambient {9}, sky {10}, light {11}, pixel lights {12}.",
                         _mapKey, clock.Elapsed.TotalMilliseconds, _renderMs, _drawCalls, CutText(), _rtSamples,
-                        ShadowMode, ShadowMode == LightShadows.None ? 0 : ShadowCascadeCount, _shadowDistanceRendered,
+                        _shadowsDrawn ? ShadowMode.ToString() : ShadowMode == LightShadows.None ? "None" : "off for the cut floor",
+                        _shadowsDrawn ? ShadowCascadeCount : 0, _shadowsDrawn ? _shadowDistanceRendered : 0f,
                         AmbientTrilight ? "trilight" : "scene", SkyDome && !_skyBroken ? "dome" : "backdrop",
                         Lighting == ModSettings.MapLightMode.Sun
-                            ? string.Format(CultureInfo.InvariantCulture, "sun ({0:0} up, yaw {1:0}) with a fill from the viewer at {2:P0}", SunPitch, SunYaw, FillShare)
-                            : string.Format(CultureInfo.InvariantCulture, "over the shoulder ({0:0} deg off the view, {1:0} down)", LightYawOffset, LightPitch)));
+                            ? string.Format(CultureInfo.InvariantCulture, "sun ({0:0} up, towards yaw {1:0}) with a per-vertex fill from the viewer at {2:P0}", SunPitch, SunYaw, FillShare)
+                            : string.Format(CultureInfo.InvariantCulture, "over the shoulder ({0:0} deg off the view, {1:0} down)", LightYawOffset, LightPitch),
+                        QualitySettings.pixelLightCount));
                 }
             }
             catch (Exception ex)
@@ -5285,9 +5316,16 @@ namespace QuestTree.UI
 
         /// <summary>One DrawMesh for our camera, counted. Every mesh this view draws goes through here, so the
         /// first-frame line's draw-call count is the real one.</summary>
-        private void Submit(Mesh mesh, Material material)
+        /// <param name="mesh">The mesh.</param>
+        /// <param name="material">Its material.</param>
+        /// <param name="castShadows">Whether it casts shadows (it always receives them). The ground does not (review
+        /// 2026-09-28): a bumpy height mesh at a shadow-map pixel of 0.3-0.6 m self-shadows into speckle, and its picture
+        /// already carries the game's own shadows from above - the near ground was being shadowed twice while the ground
+        /// past the shadow range was not, the near-dull, far-bright split of the day's test.</param>
+        private void Submit(Mesh mesh, Material material, bool castShadows = true)
         {
-            Graphics.DrawMesh(mesh, Matrix4x4.identity, material, _drawLayer, _camera);
+            if (castShadows) Graphics.DrawMesh(mesh, Matrix4x4.identity, material, _drawLayer, _camera);
+            else Graphics.DrawMesh(mesh, Matrix4x4.identity, material, _drawLayer, _camera, 0, null, ShadowCastingMode.Off, true);
             _drawCalls++;
         }
 
@@ -5431,7 +5469,7 @@ namespace QuestTree.UI
             for (var i = 0; i < meshes.Ground.Count; i++)
             {
                 var mesh = meshes.Ground[i];
-                if (mesh != null) Submit(mesh, ground);
+                if (mesh != null) Submit(mesh, ground, castShadows: false);
             }
 
             // Every mesh is drawn whole: the dollhouse cut is the camera's oblique near plane (ApplyCut), which
@@ -5731,6 +5769,7 @@ namespace QuestTree.UI
             var resolutionWas = QualitySettings.shadowResolution;
             var distanceWas = QualitySettings.shadowDistance;
             var cascadesWere = QualitySettings.shadowCascades;
+            var splitWas = QualitySettings.shadowCascade4Split;
             var projectionWas = QualitySettings.shadowProjection;
             var shadowsSet = false;
             var collectWas = BuiltinShaderMode.UseBuiltin;
@@ -5778,6 +5817,7 @@ namespace QuestTree.UI
                 {
                     var under = !oblique || ShadowsUnderCut;
                     _light.shadows = under ? ShadowMode : LightShadows.None;
+                    _shadowsDrawn = false;
 
                     if (under)
                     {
@@ -5785,9 +5825,11 @@ namespace QuestTree.UI
                         QualitySettings.shadowResolution = ShadowMapResolution;
                         QualitySettings.shadowDistance = ShadowDistanceFor(_distance);
                         QualitySettings.shadowCascades = ShadowCascadeCount;
+                        QualitySettings.shadowCascade4Split = ShadowCascadeSplit;   // a known split, not the game's quality level's
                         QualitySettings.shadowProjection = ShadowProjection.StableFit;
                         shadowsSet = true;
                         _shadowDistanceRendered = QualitySettings.shadowDistance;
+                        _shadowsDrawn = true;
 
                         if (ScreenSpaceShadowsOff)
                         {
@@ -5838,6 +5880,7 @@ namespace QuestTree.UI
                     try { QualitySettings.shadowResolution = resolutionWas; } catch (Exception) { /* as above */ }
                     try { QualitySettings.shadowDistance = distanceWas; } catch (Exception) { /* as above */ }
                     try { QualitySettings.shadowCascades = cascadesWere; } catch (Exception) { /* as above */ }
+                    try { QualitySettings.shadowCascade4Split = splitWas; } catch (Exception) { /* as above */ }
                     try { QualitySettings.shadowProjection = projectionWas; } catch (Exception) { /* as above */ }
                 }
 
@@ -5857,10 +5900,10 @@ namespace QuestTree.UI
         private float _shadowDistanceRendered;
 
         /// <summary>HQ S1.3: the shadow distance for a camera at <paramref name="distance"/> metres from its focus -
-        /// <see cref="ShadowDistanceOfView"/> times that, at least <see cref="ShadowDistanceMin"/>, never past the far
-        /// clip. Derived from the view, never from a map.</summary>
+        /// <see cref="ShadowDistanceOfView"/> times that, at least <see cref="ShadowDistanceMin"/>, never past
+        /// <see cref="ShadowDistanceMax"/> or the far clip. Derived from the view, never from a map.</summary>
         private static float ShadowDistanceFor(float distance) =>
-            Mathf.Clamp(ShadowDistanceOfView * Mathf.Max(0f, distance), ShadowDistanceMin, FarClip);
+            Mathf.Clamp(ShadowDistanceOfView * Mathf.Max(0f, distance), ShadowDistanceMin, Mathf.Min(ShadowDistanceMax, FarClip));
 
         /// <summary>Time the next render, for the first-frame line. Set by <see cref="Finish"/> and whenever the
         /// cut height changes, so the first frame after a floor switch is timed too.</summary>
@@ -6207,7 +6250,6 @@ namespace QuestTree.UI
         /// burning a camera render a frame on a picture nobody is looking at.</summary>
         private void OnDisable()
         {
-            ModSettings.Changed -= OnSettingsChanged;
             if (_light != null) _light.enabled = false;
             if (_fill != null) _fill.enabled = false;
 
@@ -6223,16 +6265,6 @@ namespace QuestTree.UI
             // Unity calls this on AddComponent too, before anything is known - nothing is taken then, since
             // the sides are counted, and the shader resolved, only later. After a return it retakes the room.
             if (_built && !_broke) TakeSideRoom();
-
-            ModSettings.Changed -= OnSettingsChanged;
-            ModSettings.Changed += OnSettingsChanged;
-        }
-
-        /// <summary>A setting changed (the lighting, among others): the next frame is drawn again - render-on-change would
-        /// otherwise keep the frame lit the old way.</summary>
-        private void OnSettingsChanged(bool layout)
-        {
-            if (_built && !_broke) unchecked { ViewVersion++; }
         }
 
         private void OnDestroy()
@@ -6312,8 +6344,6 @@ namespace QuestTree.UI
                 Discard(_debugMaterials[i]);
                 _debugMaterials[i] = null;
             }
-
-            ModSettings.Changed -= OnSettingsChanged;
 
             Discard(_rt);
             Discard(_cameraGo);
