@@ -1792,6 +1792,13 @@ namespace QuestTree.UI
                 Plugin.LogSource?.LogInfo($"QuestTree: 3D map post-processing for {_mapKey}: {Map3DPostProcess.Probe()}");
             Map3DPostProcess.Attach(_camera, _drawLayer, out _, _entry?.Lighting?.PrismTonemap);
 
+            // Spot-sun stage A: whether spot shadows and emission work in this game, measured once per session on the
+            // probe's own camera before this view's first render (and before its light is made, which stage C sets from
+            // the result). Only the Standard shader has either variant; the shader is the one BeginBuild will resolve.
+            var probeShader = ResolveShader(out _);
+            if (probeShader != null && probeShader.name.StartsWith("Standard", StringComparison.Ordinal))
+                Map3DLightProbe.Run(_drawLayer, probeShader);
+
             _lightGo = new GameObject("QuestTreeMap3DLight", typeof(Light));
             _lightGo.layer = _drawLayer;
             _light = _lightGo.GetComponent<Light>();
@@ -3486,7 +3493,7 @@ namespace QuestTree.UI
         /// the mode, the clip at 0.5, opaque blending with depth written, _ALPHATEST_ON, the AlphaTest queue. HQ S3.11: shared
         /// with the alpha-page tile materials.</summary>
         /// <param name="material">The material, returned.</param>
-        private static Material MakeCutout(Material material)
+        internal static Material MakeCutout(Material material)
         {
             material.SetOverrideTag("RenderType", "TransparentCutout");
 
@@ -3513,7 +3520,7 @@ namespace QuestTree.UI
         /// <summary>Matte, not plastic. Standard's defaults are a smooth dielectric, which turns a
         /// hillside into a mirror of the one light in the scene.</summary>
         /// <param name="material">The material to dull.</param>
-        private static Material Matte(Material material)
+        internal static Material Matte(Material material)
         {
             if (material.HasProperty("_Glossiness")) material.SetFloat("_Glossiness", 0f);
             if (material.HasProperty("_Metallic")) material.SetFloat("_Metallic", 0f);
@@ -6167,7 +6174,7 @@ namespace QuestTree.UI
                         "QuestTree: 3D map for {0} - first frame drawn in {1:0.0} ms, render {2:0.0} ms, {3} draw call(s), cut {4}, " +
                         "msaa {5}x, shadows {6} ({7} cascade(s), {8:0} m, bias {26:0.00} / normal {27:0.00}), ambient {9}, sky {10}, light {11}, pixel lights {12}, " +
                         "colour space {13}, exposure x{14:0.00} (white in the sun under {15:0.00}, the ground's picture at x{16}, ambient {17:0.00} of the sun), fog {18}; " +
-                        "shadow switches: {19}, ground receives {20}, screen-space {21}, collect {28} ({29}, built-in {30}), {32}, distant-shadow keywords {31};the focus at {22:0} m is {23}; source {24}; post-processing {25}.",
+                        "shadow switches: {19}, ground receives {20}, screen-space {21}, collect {28} ({29}, built-in {30}), {32}, distant-shadow keywords {31};the focus at {22:0} m is {23}; source {24}; post-processing {25}; probe {33}.",
                         _mapKey, clock.Elapsed.TotalMilliseconds, _renderMs, _drawCalls, CutText(), _rtSamples,
                         _shadowsDrawn ? ShadowMode.ToString() : ShadowMode == LightShadows.None ? "None" : "off for the cut floor",
                         _shadowsDrawn ? ShadowCascadeCount : 0, _shadowsDrawn ? _shadowDistanceRendered : 0f,
@@ -6189,7 +6196,7 @@ namespace QuestTree.UI
                         _light != null ? _light.shadowBias : -1f, _light != null ? _light.shadowNormalBias : -1f,   // read back from the light, not the constants, so the line proves they took
                         // the collect and the keywords as found before the bracket changed them
                         _collectModeFound, _collectShaderFound ?? "-", _builtinCollect ?? "-", DistantShadowText(),
-                        DistantGlobalsText()));
+                        DistantGlobalsText(), Map3DLightProbe.Describe()));
                 }
             }
             catch (Exception ex)
