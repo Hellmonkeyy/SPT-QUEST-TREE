@@ -40,6 +40,17 @@ namespace QuestTree
 
             try
             {
+                // Main thread, once, before anything decodes or captures a picture: the largest picture side
+                // this GPU takes (up to 16384). A failure keeps the 8192 default, which every path handles.
+                UI.DynamicMapsLibrary.SizePictureLimit();
+            }
+            catch (Exception ex)
+            {
+                Logger.LogError($"QuestTree: failed to read the GPU's texture limit: {ex.Message}");
+            }
+
+            try
+            {
                 // Before the headless check on purpose: a headless client loads every map anyone
                 // plays, which makes it the best zone harvester in the group. Its own guard: a
                 // config failure above has nothing to do with whether raids can be harvested.

@@ -556,6 +556,10 @@ namespace QuestTree.UI
             public float MinX, MinZ, MaxX, MaxZ;
             public int Rotation;
 
+            /// <summary>The meta's <c>pxPerMetre</c>, or 0 when it is not a finite positive number. Copied into each
+            /// floor layer (<see cref="DynamicMapsLibrary.MapLayer.PxPerMetre"/>) for the 3D view.</summary>
+            public float PxPerMetre;
+
             /// <summary>The 3D relief file's full path, or null when this capture has no usable one.
             /// See <see cref="ReadMesh"/>.</summary>
             public string MeshPath;
@@ -654,6 +658,10 @@ namespace QuestTree.UI
                 parsed.Rotation = rotation == 90 || rotation == 180 || rotation == 270 ? rotation : 0;
 
                 var pxPerMetre = Number(root, "pxPerMetre");
+
+                // Recorded for the viewer as read, 0 standing for "unknown": the placement never depends on it
+                // (the floors carry their own rectangle), only the 3D view's choice of what to texture roofs from.
+                parsed.PxPerMetre = IsFinite(pxPerMetre) && pxPerMetre > 0f ? pxPerMetre : 0f;
 
                 // capturedAt is the LATEST capture in the set and is what decides which of two
                 // folders is newer; firstCapturedAt is when the set was started and is what the
@@ -1419,6 +1427,13 @@ namespace QuestTree.UI
 
                     // The one flag that decides how it is loaded and what draws it.
                     IsRaster = true,
+
+                    // Decoded with a mip chain, trilinear and 4x aniso, and block-compressed - see
+                    // DynamicMapsLibrary.MapLayer.Mipmapped.
+                    Mipmapped = true,
+
+                    // The picture's density, for the 3D view (0 when the meta did not say).
+                    PxPerMetre = parsed.PxPerMetre,
 
                     BoundsMin = boundsMin,
                     BoundsMax = boundsMax

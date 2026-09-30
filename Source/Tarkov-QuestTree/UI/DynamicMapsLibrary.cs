@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
@@ -81,12 +82,21 @@ namespace QuestTree.UI
 
             /// <summary>
             /// Whether the decoded picture gets a mip chain, trilinear filtering and 4x anisotropy. Set by
-            /// <see cref="MapCatalog"/> for the 3D view's atlas pages and side pictures, which are minified
-            /// hard (a 4096 page over a building a few hundred pixels tall, seen at a grazing angle) and
-            /// shimmer without mips. The floors stay as they were: a flat floor is drawn near 1:1, and a
-            /// chain would add a third to the largest textures this cache holds for nothing.
+            /// <see cref="MapCatalog"/> for every captured floor and side picture. The sides are minified hard
+            /// (seen at a grazing angle) and shimmer without mips; the floors are now too - the 3D view lays the
+            /// ground at whole-map zoom and at a slant, and the 2D map shows a whole 8944 px floor in a panel a
+            /// tenth of that. The third a chain adds is paid for many times over by block compression (see
+            /// <see cref="CompressPictures"/>): DXT5 with mips is a third of the RGBA32 picture without them.
             /// </summary>
             public bool Mipmapped;
+
+            /// <summary>
+            /// The capture's pixels per metre, from the meta's <c>pxPerMetre</c>; 0 when the meta has no finite
+            /// value (a hand-edited or pre-scale file). A host set's meta already carries its downscaled scale
+            /// (MapTransfer rewrites it on upload), so this is the density of the picture actually on disk.
+            /// Read by the 3D view to decide whether the picture is dense enough to texture roofs from.
+            /// </summary>
+            public float PxPerMetre;
 
             /// <summary>
             /// The floor's name as the map ARTWORK calls it - the part of the image filename after
@@ -1321,13 +1331,15 @@ namespace QuestTree.UI
         /// argument. The accounting reads the format BACK off the texture afterwards, so an opaque
         /// JPEG is still counted at three bytes a pixel - see <see cref="TextureBytes"/>.
         ///
-        /// Mipmaps off, because the picture is stretched onto its floor's world rectangle and the
-        /// view's zoom is a container scale - there is no minification chain worth 33 % more memory
-        /// on a 39 MiB texture. Bilinear filtering, so zooming in blurs rather than blocks.
+        /// Mipmaps on for floors and sides alike (<see cref="MapLayer.Mipmapped"/>), trilinear and 4x
+        /// anisotropy: both are minified - the 2D map at whole-map zoom, the 3D view at a slant - and
+        /// the chain's third is repaid by the compression below.
         ///
-        /// markNonReadable, which drops the CPU-side copy the decode leaves behind. That copy is the
-        /// same size as the texture - 3262x3136 at RGBA32 is 39 MiB, which is the biggest a floor of a
-        /// big map gets, and the cache holds six - and nothing here ever reads a pixel back.
+        /// Block compression (<see cref="CompressPictures"/>): decoded READABLE, compressed in place
+        /// (an alpha picture to DXT5, which keeps the reach mask in its alpha; an RGB24 JPEG to DXT1),
+        /// and only then made non-readable by Apply, which drops the CPU-side copy. Nothing reads a
+        /// floor or side picture back on the CPU - the 3D view samples it only by Blit + ReadPixels
+        /// from a RenderTexture, which works on a compressed texture - so the copy is pure cost.
         ///
         /// SpriteMeshType.FullRect rather than the default tight mesh, which matters twice over now.
         /// A tight mesh is traced from the texture's ALPHA, which a non-readable texture cannot be
@@ -1355,9 +1367,10 @@ namespace QuestTree.UI
 
             // The frame size from the header BEFORE decoding: a small, very compressible file (a hostile host's
             // copy, a hand-placed one) could otherwise become a 256 MiB - 1 GiB texture in one frame (review F49).
-            // A capture is at most 8192 on a side (MapCapture.Resolution clamps the setting), a host copy 2048
-            // and an atlas page 4096; anything past MaxPictureSide, or with no header we can read, is refused
-            // like a picture that will not decode.
+            // A capture is at most MaxPictureSide on a side (MapCapture.Resolution clamps the setting), a host
+            // copy 2048 and an atlas page 4096; anything past MaxPictureSide - 8192 until SizePictureLimit has
+            // asked the GPU, then up to 16384 - or with no header we can read, is refused like a picture that
+            // will not decode.
             if (!PictureSize(bytes, out var declaredWidth, out var declaredHeight) ||
                 declaredWidth > MaxPictureSide || declaredHeight > MaxPictureSide)
             {
@@ -1377,7 +1390,8 @@ namespace QuestTree.UI
                 // this is the one that cannot discard alpha if it ever does not.
                 texture = new Texture2D(2, 2, TextureFormat.RGBA32, mipChain: layer.Mipmapped);
 
-                if (!texture.LoadImage(bytes, markNonReadable: true))
+                // Readable for now: Compress works on the CPU copy. The Apply below drops it.
+                if (!texture.LoadImage(bytes, markNonReadable: false))
                 {
                     // The texture is a native allocation, so a failed decode has to destroy it -
                     // the same trap QuestPin above fell into once.
@@ -1388,9 +1402,38 @@ namespace QuestTree.UI
                     return null;
                 }
 
-                // A mipmapped page or side: LoadImage builds the chain itself (the texture was made with one),
-                // and trilinear + 4x anisotropy is what keeps a grazing wall from shimmering. The atlas tiles
-                // carry 16 px of padding so the smaller mips do not bleed one tile into the next.
+                // Block compression, once per load, on the main thread: Compress(false) is Unity's fast CPU
+                // encoder and still costs seconds on a ~38 Mpx floor (8944x4312) - accepted, since it runs once
+                // per decode and the floor cache then holds a third of the memory. An alpha picture (our
+                // captures decode ARGB32/RGBA32) becomes DXT5, which keeps the reach mask; an opaque one (a
+                // host's JPEG, RGB24) becomes DXT1. The chain LoadImage built is compressed with it. DXT works
+                // in 4x4 blocks, so a side that is not a multiple of 4 stays uncompressed rather than have the
+                // driver pad or refuse it.
+                var width = texture.width;
+                var height = texture.height;
+
+                if (CompressPictures)
+                {
+                    if (width % 4 == 0 && height % 4 == 0)
+                    {
+                        texture.Compress(false);
+                    }
+                    else
+                    {
+                        Plugin.LogSource?.LogDebug(
+                            $"QuestTree: map picture '{name}' kept {texture.format}: " +
+                            $"{width.ToString(CultureInfo.InvariantCulture)}x{height.ToString(CultureInfo.InvariantCulture)} " +
+                            "not a multiple of 4.");
+                    }
+                }
+
+                // Every path ends here: no mip rebuild (LoadImage made the chain, Compress kept it) and
+                // makeNoLongerReadable, which frees the CPU copy - as large as the texture was before it
+                // was compressed, and nothing reads it (see the remarks).
+                texture.Apply(false, true);
+
+                // Floors and sides alike: trilinear + 4x anisotropy is what keeps a grazing wall, or a whole
+                // floor shown small, from shimmering.
                 if (layer.Mipmapped)
                 {
                     texture.filterMode = FilterMode.Trilinear;
@@ -1425,9 +1468,14 @@ namespace QuestTree.UI
                 // back for our own capture with its alpha intact (this very line proved it on
                 // 2026-09-23, while MapCapture's merge was still refusing that format), RGB24 is an
                 // opaque one (a host's JPEG, or a PNG saved without an alpha channel), and anything
-                // else is a Unity version doing something unexpected.
+                // else is a Unity version doing something unexpected. Read after Compress, so it says DXT5
+                // for a capture, DXT1 for a host's JPEG, and the uncompressed format when compression was
+                // skipped or switched off; the mip count says whether the chain survived.
                 Plugin.LogSource?.LogDebug(
                     $"QuestTree: map picture '{name}' {texture.width}x{texture.height} {texture.format} " +
+                    (texture.mipmapCount > 1
+                        ? $"with {texture.mipmapCount.ToString(CultureInfo.InvariantCulture)} mips "
+                        : "no mips ") +
                     $"decoded in {clock.ElapsedMilliseconds} ms " +
                     $"({layer.RasterBytes / (1024f * 1024f):F1} MB); " +
                     $"{(ResidentRasterBytes + layer.RasterBytes) / (1024f * 1024f):F1} MB of pictures " +
@@ -1446,9 +1494,35 @@ namespace QuestTree.UI
             }
         }
 
-        /// <summary>The longest side a map picture may have before it is decoded - see BuildRasterSprite,
-        /// MapTransfer.Encode and MapCapture.LoadPicture.</summary>
-        internal const int MaxPictureSide = 8192;
+        /// <summary>
+        /// Rollback for the viewer's block compression. True: a floor or side picture whose sides are multiples
+        /// of 4 is compressed to DXT5 (alpha) or DXT1 (opaque) after decoding, a third of the memory of RGBA32
+        /// even with its mip chain. False: today's uncompressed RGBA32/RGB24 path, still mipmapped and still
+        /// made non-readable.
+        /// </summary>
+        internal static readonly bool CompressPictures = true;
+
+        /// <summary>
+        /// The longest side a map picture may have before it is decoded - see BuildRasterSprite,
+        /// MapTransfer.Encode / ArrayBegin and MapCapture.LoadPicture. 8192 until <see cref="SizePictureLimit"/>
+        /// has asked the GPU (Plugin.Awake), then as large as the device takes, up to 16384: an 8 px/m capture of a
+        /// big map is 8944 px long, and a limit below the device's own would refuse a picture it can hold.
+        /// </summary>
+        internal static int MaxPictureSide { get; private set; } = 8192;
+
+        /// <summary>
+        /// Sets <see cref="MaxPictureSide"/> to <c>Math.Min(16384, SystemInfo.maxTextureSize)</c>. MAIN THREAD ONLY
+        /// (SystemInfo), so Plugin.Awake calls it once. A device that answers something implausible (0 on a
+        /// graphics-less client, or below 2048, the host copy's own size) keeps the 8192 default rather than
+        /// refusing every picture.
+        /// </summary>
+        internal static void SizePictureLimit()
+        {
+            var device = SystemInfo.maxTextureSize;
+            if (device < 2048) return;
+
+            MaxPictureSide = Math.Min(16384, device);
+        }
 
         /// <summary>A PNG's (IHDR) or JPEG's (frame header) width and height, read without decoding; false for
         /// anything else.</summary>
@@ -1477,13 +1551,30 @@ namespace QuestTree.UI
         /// one it was constructed with or the file's extension: our captures are RGBA PNGs and decode
         /// to RGBA32 at four bytes a pixel (39 MiB for a 3262x3136 floor, the largest the capture's
         /// memory budget allows), a host's JPEG and any PNG without an alpha channel decode to RGB24 -
-        /// counted at four as well, since D3D11 stores it as RGBA. A mipmapped page or side adds a third.
+        /// counted at four as well, since D3D11 stores it as RGBA. Compressed (<see cref="CompressPictures"/>),
+        /// a capture is DXT5 at one byte a pixel and a host's JPEG DXT1 at half a byte. A mipmapped picture adds
+        /// a third.
         ///
         /// An unrecognised format is counted at four, so the number in the log is never optimistic.
         /// </summary>
         private static long TextureBytes(Texture2D texture)
         {
-            var bytesPerPixel = texture.format switch
+            var pixels = (long)texture.width * texture.height;
+
+            // Block formats in bits, since DXT1 is half a byte a pixel (8 bytes per 4x4 block, DXT5 16).
+            long bytes;
+            if (texture.format == TextureFormat.DXT1) bytes = pixels / 2;
+            else if (texture.format == TextureFormat.DXT5) bytes = pixels;
+            else bytes = pixels * UncompressedBytesPerPixel(texture.format);
+
+            // A full mip chain adds a third (1/4 + 1/16 + ... -> 1/3).
+            return texture.mipmapCount > 1 ? bytes + bytes / 3 : bytes;
+        }
+
+        /// <summary>Bytes a pixel for the uncompressed formats <see cref="TextureBytes"/> may meet.</summary>
+        private static int UncompressedBytesPerPixel(TextureFormat format)
+        {
+            return format switch
             {
                 // What LoadImage actually produces for our files: ARGB32 for a PNG with alpha (our
                 // captures), RGB24 for one without (a host's JPEG); RGBA32 in case a build ever differs.
@@ -1501,11 +1592,6 @@ namespace QuestTree.UI
                 TextureFormat.Alpha8 => 1,
                 _ => 4
             };
-
-            var bytes = (long)texture.width * texture.height * bytesPerPixel;
-
-            // A full mip chain adds a third (1/4 + 1/16 + ... -> 1/3).
-            return texture.mipmapCount > 1 ? bytes + bytes / 3 : bytes;
         }
 
         private static bool OverBudget(List<VectorUtils.Geometry> geometry)
