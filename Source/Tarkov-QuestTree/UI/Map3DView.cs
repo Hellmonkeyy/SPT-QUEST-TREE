@@ -1904,6 +1904,7 @@ namespace QuestTree.UI
             try
             {
                 RenderNow();
+                Present();
             }
             catch (Exception ex)
             {
@@ -2351,6 +2352,64 @@ namespace QuestTree.UI
         /// <summary>Whether the device renders into ARGBHalf, asked on the first HDR <see cref="RenderFormat"/> of the view.</summary>
         private bool? _halfSupported;
 
+        /// <summary>Play-test 2026-09-29: what the RawImage shows on the HDR path - <see cref="_rt"/> copied into an ARGB32
+        /// texture after each real render (<see cref="Present"/>); null on the plain path, where the image shows the target.</summary>
+        private RenderTexture _display;
+
+        /// <summary>
+        /// Play-test 2026-09-29 (tonemap on: the view blown out and oversaturated, while the calibration read a sane curve):
+        /// the ALPHA of the HDR target. Every opaque Standard pass writes alpha 1 (UNITY_OPAQUE_ALPHA) and the spot's
+        /// ForwardAdd pass is blended "[_SrcBlend] One" on alpha as on colour, so each lit pixel's alpha adds up to 2 or
+        /// more. An ARGB32 target (tonemap off) clamps that back to 1 as it is written; the ARGBHalf target keeps it, PPv2
+        /// carries alpha through untouched, and the UI's premultiplied RawImage draw (rgb x alpha, Blend One
+        /// OneMinusSrcAlpha) doubles every lit pixel and clips it per channel - white ground, oversaturated trees. Every
+        /// readback (the calibration, the emission check) compares rgb only, and the calibration's quads are unlit (alpha
+        /// 1), so none of them could see it. On the HDR path the frame is now copied into an ARGB32 texture - the same
+        /// blit the readbacks use, which clamps alpha to 1 exactly as the plain path's target does - and the image shows
+        /// that copy. Off the HDR path (the plain path, or a fallback) the image shows <see cref="_rt"/> as before and the
+        /// copy is let go.
+        /// </summary>
+        private void Present()
+        {
+            if (_image == null || _rt == null) return;
+
+            if (!_hdrTarget)
+            {
+                if (_image.texture != _rt) _image.texture = _rt;
+
+                if (_display != null)
+                {
+                    var unused = _display;
+                    _display = null;
+                    unused.Release();
+                    Destroy(unused);
+                }
+
+                return;
+            }
+
+            RenderTexture old = null;
+            if (_display == null || _display.width != _rt.width || _display.height != _rt.height)
+            {
+                old = _display;
+                _display = new RenderTexture(_rt.width, _rt.height, 0, RenderTextureFormat.ARGB32)
+                {
+                    name = "QuestTreeMap3D-display"
+                };
+                _display.Create();
+            }
+
+            Graphics.Blit(_rt, _display);
+            if (_image.texture != _display) _image.texture = _display;
+
+            // the old copy goes only once the image is off it (as EnsureRenderTexture's target)
+            if (old != null)
+            {
+                old.Release();
+                Destroy(old);
+            }
+        }
+
         // --- building the meshes -------------------------------------------------------------------
 
         /// <summary>
@@ -2460,6 +2519,8 @@ namespace QuestTree.UI
             DecideEmission();
             _emissionChecked = false;
             _sideChecked = false;
+            _frameChecked = false;
+            _frameCheckTries = 0;
 
             // One Floor per drawn band, each with a cache entry - reused when complete, registered empty
             // when not, and then filled by the worker's data.
@@ -3631,7 +3692,8 @@ namespace QuestTree.UI
         /// check must log MISMATCH (black against the picture) - the proof that check can fail. The probe itself ignores
         /// "ground" (it acts on "shadow" and "emission" only), so it still passes and the flag still comes on. Stage D:
         /// "tonemap" keeps the camera LDR (allowHDR off, an ARGB32 target) on the tonemap path, so the tonemap calibration
-        /// must log CLIPPED and fall back to the plain anchor (<see cref="CalibrateTonemap"/>).</summary>
+        /// must log CLIPPED and fall back to the plain anchor (<see cref="CalibrateTonemap"/>). "framecheck" halves the
+        /// tonemap frame check's prediction, so it must log TOO BRIGHT and fall back (<see cref="CheckTonemapFrame"/>).</summary>
         private const string SelfTestVariable = "QUESTTREE_PROBE_SABOTAGE";
 
         private static readonly string SelfTest = ReadSelfTest();
@@ -4068,6 +4130,267 @@ namespace QuestTree.UI
         {
             var want = new Color(_emissionScale, _emissionScale, _emissionScale, 1f);
             if (material.GetColor(EmissionColorId) != want) material.SetColor(EmissionColorId, want);
+        }
+
+        /// <summary>Whether this build's tonemap frame check (<see cref="CheckTonemapFrame"/>) is made or given up. Reset per
+        /// build in BeginBuild.</summary>
+        private bool _frameChecked;
+
+        /// <summary>The rendered frames the frame check has tried and found unusable (centre covered, off the ground).</summary>
+        private int _frameCheckTries;
+
+        /// <summary>The most rendered frames the frame check tries before it gives up for the build (two renders each).</summary>
+        private const int FrameCheckTries = 8;
+
+        /// <summary>How far the frame's centre may sit from the curve's prediction, as a share of it (summed r+g+b).</summary>
+        private const float FrameCheckTolerance = 0.15f;
+
+        /// <summary>The smallest predicted r+g+b, in 8-bit steps, the frame check judges: darker, 15 % is under the noise.</summary>
+        private const int FrameCheckDarkest = 60;
+
+        /// <summary>The most the frame check's nine picture samples may sit from their mean (summed r+g+b, as a share).</summary>
+        private const float FrameCheckUniform = 0.06f;
+
+        /// <summary>The alpha the image may get before the frame check falls back: above it the premultiplied UI draw
+        /// scales the frame.</summary>
+        private const float FrameCheckAlphaMax = 1.05f;
+
+        /// <summary>The last <see cref="UniformTexel"/> spread, for the frame check's line.</summary>
+        private float _frameCheckSpread;
+
+        /// <summary>
+        /// The frame check's reference: the picture sampled on a 3x3 grid at -1, 0 and +1 screen pixels' footprint around
+        /// <paramref name="uv"/> (the camera's distance and field of view over the render height, in metres, over the
+        /// picture's extent), each through <see cref="TexelAt"/>; the mean is returned and <paramref name="spread"/> is
+        /// the largest share any sample's r+g+b sits from the mean's.
+        /// </summary>
+        private Color32 UniformTexel(Texture picture, Vector2 uv, out float spread)
+        {
+            var metresPerPixel = 2f * Mathf.Max(1f, _distance) * Mathf.Tan(FieldOfView * 0.5f * Mathf.Deg2Rad) / Mathf.Max(1, _rt.height);
+            var spanX = Mathf.Max(1f, (float)(_file.MaxX - _file.MinX));
+            var spanZ = Mathf.Max(1f, (float)(_file.MaxZ - _file.MinZ));
+
+            var samples = new Color32[9];
+            float r = 0f, g = 0f, b = 0f, a = 0f;
+            var n = 0;
+            for (var dy = -1; dy <= 1; dy++)
+            {
+                for (var dx = -1; dx <= 1; dx++)
+                {
+                    var at = new Vector2(
+                        Mathf.Clamp01(uv.x + dx * metresPerPixel / spanX),
+                        Mathf.Clamp01(uv.y + dy * metresPerPixel / spanZ));
+                    var s = TexelAt(picture, at);
+                    samples[n++] = s;
+                    r += s.r; g += s.g; b += s.b; a += s.a;
+                }
+            }
+
+            var mean = new Color32(
+                (byte)Mathf.RoundToInt(r / 9f), (byte)Mathf.RoundToInt(g / 9f),
+                (byte)Mathf.RoundToInt(b / 9f), (byte)Mathf.RoundToInt(a / 9f));
+
+            var meanSum = Mathf.Max(1f, (r + g + b) / 9f);
+            spread = 0f;
+            for (var i = 0; i < samples.Length; i++)
+                spread = Mathf.Max(spread, Mathf.Abs(samples[i].r + samples[i].g + samples[i].b - meanSum) / meanSum);
+
+            _frameCheckSpread = spread;
+            return mean;
+        }
+
+        /// <summary>Set only around the frame check's cover render: Draw leaves the ground out.</summary>
+        private bool _withoutGround;
+
+        /// <summary>
+        /// Play-test 2026-09-29: the proof on the REAL frame that the tonemap path draws the ground where the calibration
+        /// says. After a real render on the tonemap path, the view's own target <see cref="_rt"/> is read at the viewport
+        /// centre through the same blit into ARGB32 RenderWindow and the display copy use, and held against the ground
+        /// picture there (the mean of <see cref="UniformTexel"/>'s nine samples, judged only where they agree within
+        /// <see cref="FrameCheckUniform"/>) taken through the calibrated curve: T(emission scale x texel), per channel. The
+        /// emission ground has a black albedo, so nothing but the tonemap moves it. Over by more than
+        /// <see cref="FrameCheckTolerance"/> (r+g+b) is TOO BRIGHT and the view falls back to the plain path
+        /// (<see cref="TonemapFallback"/>); TOO DARK is logged only (ambient occlusion darkens ground by a wall). The raw
+        /// alpha is read too, through an ARGBHalf blit, and the alpha the image gets: above
+        /// <see cref="FrameCheckAlphaMax"/> there (Present not applied) is ALPHA, a fallback too. The centre must be bare ground: a render of everything BUT the ground is
+        /// compared with an empty one there first; a covered or off-ground centre is tried again on a later rendered
+        /// frame, up to <see cref="FrameCheckTries"/>. Self-test "framecheck" halves the prediction, so the check must
+        /// say TOO BRIGHT and fall back. Never throws.
+        /// </summary>
+        private void CheckTonemapFrame()
+        {
+            var f = CultureInfo.InvariantCulture;
+
+            try
+            {
+                if (!_tonemapRead || !_emissiveGround || _camera == null || _rt == null)
+                {
+                    _frameChecked = true;
+                    Plugin.LogSource?.LogInfo("QuestTree: 3D map tonemap frame check - " +
+                        (!_emissiveGround ? "the ground is not on emission" : "no calibrated curve") + ", skipped.");
+                    return;
+                }
+
+                var floor = _levels.Count > 0 ? FloorAt(_levels[_levels.Count - 1]) : null;
+                var ground = floor?.GroundMaterial;
+                var picture = ground != null ? ground.mainTexture : null;
+
+                // the selected floor's picture arrives on a later frame, and that frame's render checks it
+                if (floor == null || floor.Meshes == null || picture == null) return;
+
+                string retry = null;
+                Color32 texel = default;
+                var centre = new RectInt(_rt.width / 2, _rt.height / 2, 1, 1);
+
+                if (!FocusUv(out var uv)) retry = "centre not on the ground";
+                else
+                {
+                    // review: the frame samples the picture mips down (and anisotropic), so one full-size texel is no
+                    // reference on varied ground - a 3x3 grid at +-1 screen pixel's footprint, judged only where it is
+                    // uniform, and its mean is the reference
+                    texel = UniformTexel(picture, uv, out var spread);
+                    if (texel.a < EmissionCheckAlphaMin * 255f) retry = "centre on the picture's clipped surround";
+                    else if (spread > FrameCheckUniform) retry = "ground at the centre not uniform";
+                }
+
+                if (retry == null)
+                {
+                    // anything but the ground at the centre: a roof, a wall or a tree over it
+                    var others = RenderWindow(centre, () =>
+                    {
+                        _withoutGround = true;
+                        try
+                        {
+                            for (var i = 0; i < _floors.Count; i++) Draw(_floors[i]);
+                        }
+                        finally
+                        {
+                            _withoutGround = false;
+                        }
+                    })[0];
+                    var empty = RenderWindow(centre, null)[0];
+
+                    if (!Near(others, empty, EmissionCheckTolerance)) retry = "centre covered by a building or tree";
+                }
+
+                if (retry != null)
+                {
+                    if (++_frameCheckTries < FrameCheckTries) return;
+
+                    _frameChecked = true;
+                    Plugin.LogSource?.LogInfo(string.Format(f,
+                        "QuestTree: 3D map tonemap frame check - {0} on {1} rendered frame(s), skipped.", retry, _frameCheckTries));
+                    return;
+                }
+
+                _frameChecked = true;
+
+                // the view's own target, as the image gets it: 8-bit through the blit, and the raw alpha through a half one
+                var read = (Color32)ReadThrough(_rt, centre, RenderTextureFormat.ARGB32, TextureFormat.RGBA32);
+                var alpha = _halfSupported == true
+                    ? ReadThrough(_rt, centre, RenderTextureFormat.ARGBHalf, TextureFormat.RGBAHalf).a
+                    : float.NaN;
+
+                var sabotage = SelfTest == "framecheck" ? 0.5f : 1f;
+                var er = Mathf.RoundToInt(255f * sabotage * TonemapAt(_emissionScale * texel.r / 255f));
+                var eg = Mathf.RoundToInt(255f * sabotage * TonemapAt(_emissionScale * texel.g / 255f));
+                var eb = Mathf.RoundToInt(255f * sabotage * TonemapAt(_emissionScale * texel.b / 255f));
+                var expected = er + eg + eb;
+
+                string verdict;
+                var ratio = 0f;
+                if (expected < FrameCheckDarkest) verdict = "picture too dark to judge, skipped";
+                else
+                {
+                    ratio = (read.r + read.g + read.b) / (float)expected;
+                    verdict = ratio > 1f + FrameCheckTolerance ? "TOO BRIGHT"
+                        : ratio < 1f - FrameCheckTolerance ? "TOO DARK"
+                        : "ok";
+                }
+
+                // review: rgb cannot see the alpha bug, so the alpha the IMAGE gets is guarded too - the display copy's
+                // (clamped by Present), or the raw target's if the image is somehow on it; above 1 the premultiplied UI
+                // draw would still scale the frame
+                var shownAlpha = _display != null && _image != null && _image.texture == _display
+                    ? ReadThrough(_display, centre, RenderTextureFormat.ARGB32, TextureFormat.RGBA32).a
+                    : alpha;
+                var alphaBad = shownAlpha > FrameCheckAlphaMax;
+                if (alphaBad) verdict = "ALPHA";
+
+                var line = string.Format(f,
+                    "QuestTree: 3D map tonemap frame check - centre reads {0}/{1}/{2} vs picture {3}/{4}/{5}: {6} " +
+                    "(x{7:0.00} of the curve's {8}/{9}/{10} at emission x{11:0.00}, picture the mean of 9 samples within {15:0.0} %; " +
+                    "alpha {12:0.00} in the view's target, {16:0.00} in the image{13}{14})",
+                    read.r, read.g, read.b, texel.r, texel.g, texel.b, verdict, ratio, er, eg, eb, _emissionScale, alpha,
+                    alpha > 1.01f && !alphaBad ? ", clamped by Present" : "",
+                    SelfTest == "framecheck" ? "; SELF-TEST: prediction halved" : "",
+                    100f * _frameCheckSpread, shownAlpha);
+
+                // review: TOO DARK is logged only - ambient occlusion rightly darkens ground beside a wall
+                if (verdict == "TOO BRIGHT" || alphaBad)
+                {
+                    TonemapFallback("frame check " + verdict);
+                    _forceRender = true;
+
+                    // review: the image is on the remade ARGB32 target now, uncleared until the next render - the last
+                    // frame copied in so there is no flash
+                    if (_display != null && _rt != null && _image != null && _image.texture == _rt) Graphics.Blit(_display, _rt);
+
+                    line += string.Format(f, " - the plain anchor {0:0.00} and the ambient floor are used, post-processing taken off.", WhiteInSun);
+                }
+                else line += verdict == "TOO DARK" ? " - logged only (ambient occlusion may darken it)." : ".";
+
+                Plugin.LogSource?.LogInfo(line);
+            }
+            catch (Exception ex)
+            {
+                _frameChecked = true;
+                Plugin.LogSource?.LogInfo(string.Format(f,
+                    "QuestTree: 3D map tonemap frame check - could not be made ({0}: {1}).", ex.GetType().Name, ex.Message));
+            }
+        }
+
+        /// <summary>The ground picture's UV at the view's focus (as Prep.PlanarUv: where it falls across the extent is where
+        /// it falls across the picture); false when the focus is not over the ground band.</summary>
+        private bool FocusUv(out Vector2 uv)
+        {
+            uv = default;
+            if (_file == null || _groundBand == null || !_groundBand.TryHeightAt(_focus.x, _focus.y, out _)) return false;
+
+            var spanX = (float)(_file.MaxX - _file.MinX);
+            var spanZ = (float)(_file.MaxZ - _file.MinZ);
+            uv = new Vector2(
+                spanX > 0f ? Mathf.Clamp01((_focus.x - (float)_file.MinX) / spanX) : 0.5f,
+                spanZ > 0f ? Mathf.Clamp01((_focus.y - (float)_file.MinZ) / spanZ) : 0.5f);
+            return true;
+        }
+
+        /// <summary>One pixel of <paramref name="source"/> blitted whole into a one-sample temporary of
+        /// <paramref name="through"/> (the blit resolves MSAA, and an ARGB32 one clamps to 0..1 as RenderWindow's does)
+        /// and read back as <paramref name="readAs"/>.</summary>
+        private static Color ReadThrough(RenderTexture source, RectInt pixel, RenderTextureFormat through, TextureFormat readAs)
+        {
+            var previous = RenderTexture.active;
+            RenderTexture target = null;
+            Texture2D readable = null;
+
+            try
+            {
+                target = RenderTexture.GetTemporary(source.width, source.height, 0, through);
+                Graphics.Blit(source, target);
+
+                RenderTexture.active = target;
+                readable = new Texture2D(1, 1, readAs, false);
+                readable.ReadPixels(new Rect(pixel.x, pixel.y, 1f, 1f), 0, 0, false);
+
+                return readable.GetPixel(0, 0);
+            }
+            finally
+            {
+                RenderTexture.active = previous;
+                if (target != null) RenderTexture.ReleaseTemporary(target);
+                if (readable != null) Destroy(readable);
+            }
         }
 
         /// <summary>What the opaque side check found this session: sides stay lit for the rest of the session after a
@@ -7858,6 +8181,7 @@ namespace QuestTree.UI
                 for (var i = 0; i < _floors.Count; i++) Draw(_floors[i]);
 
                 RenderNow();
+                Present();
                 PlaceOverlays();
 
                 if (first)
@@ -7905,6 +8229,9 @@ namespace QuestTree.UI
                 // Spot-sun stage B's proof, after the real frame is in the view's texture (the check renders into a
                 // temporary one): the ground once per build, the sides once per build until they pass, each when its picture is here
                 if (_emissiveGround && (!_emissionChecked || !_sideChecked)) CheckPictureEmission();
+
+                // Play-test 2026-09-29: the tonemap path proven on the REAL frame, not only on the calibration's quads
+                if (_tonemapOn && !_frameChecked) CheckTonemapFrame();
             }
             catch (Exception ex)
             {
@@ -8204,7 +8531,8 @@ namespace QuestTree.UI
             // prepared on a worker and uploaded paced (StartWalls), so not a per-frame cost either.
             if (meshes.WallsPending && !meshes.WallsRunning) StartWalls(meshes, floor.Level, ground.mainTexture, late: true);
 
-            for (var i = 0; i < meshes.Ground.Count; i++)
+            // the tonemap frame check's cover render draws everything BUT the ground (CheckTonemapFrame)
+            for (var i = 0; i < meshes.Ground.Count && !_withoutGround; i++)
             {
                 var mesh = meshes.Ground[i];
                 if (mesh != null) Submit(mesh, ground, castShadows: false);
@@ -9182,12 +9510,14 @@ namespace QuestTree.UI
             Map3DPostProcess.Detach(_camera);   // stage 4: before the camera goes, so the stack's buffers and HDR flag are undone
 
             Discard(_rt);
+            Discard(_display);
             Discard(_cameraGo);
             Discard(_lightGo);
             Discard(_lightCookie);   // after its light: the cookie is ours, the light only held it
             Discard(_image != null ? _image.gameObject : null);
 
             _rt = null;
+            _display = null;
             _camera = null;
             _cameraGo = null;
             _light = null;
