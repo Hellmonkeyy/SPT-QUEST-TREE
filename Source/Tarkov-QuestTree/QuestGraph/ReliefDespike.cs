@@ -15,7 +15,8 @@ namespace QuestTree.QuestGraph
     ///
     /// On bigmap's stored band this moves 7.5 k of 2.4 M cells, every one at a man-made object (the stacks, the boiler
     /// house, the Snipe Tower block, the hall, the pylons) - measured by the read-only investigation, and again by the
-    /// harness on this code.
+    /// harness on this code. A cell whose column met the terrain is never moved; with <see cref="DespikeRequiresCover"/>
+    /// (off) a cell no stored mesh reaches the ground over is kept too.
     ///
     /// Pure array code: no Unity type, no allocation per cell or per line (two grid-sized scratch arrays and one index
     /// line a call), so it runs on a worker thread and in a console harness as it is. A cell is only ever moved DOWN, a
@@ -33,6 +34,44 @@ namespace QuestTree.QuestGraph
         /// wall, a car, a container stays (they are the ground's business elsewhere - TerrainAnchoredGround and the
         /// under-buildings pass), a stack, a tower or a roof panel over a low floor goes.</summary>
         internal const float DespikeRiseMetres = 6f;
+
+        /// <summary>
+        /// Rollback switch (play-test 2026-09-29, the Snipe Tower block on Customs): true protects every cell no stored mesh
+        /// reaches the ground over (<see cref="CoverFootprint"/>), so a structure with colliders and no stored mesh keeps its
+        /// draped column. That left the Snipe Tower block as two picture-draped cylinders with grassy tops (382 cells on
+        /// bigmap); a flattened spot reads better than a column of stretched ground picture, so false flattens every spike
+        /// and only a cell whose column met the terrain is protected (<see cref="ProtectMask"/>). Static readonly, not
+        /// const, so the branch on it compiles either way without an unreachable-code warning.
+        /// </summary>
+        internal static readonly bool DespikeRequiresCover = false;
+
+        /// <summary>
+        /// The despike's protected cells: every cell whose ground bits hold <paramref name="terrainBit"/> (its column met the
+        /// terrain, which is the ground by definition), and, when <paramref name="requireCover"/>, every cell the
+        /// <paramref name="cover"/> mask gives no <see cref="CoverFootprint"/>. Null when nothing is protected (no ground
+        /// bits and no cover asked - the viewer on a stored file), which the despike reads as "move any spike".
+        /// </summary>
+        /// <param name="cells">The band's cell count.</param>
+        /// <param name="cover">The cover mask, or null (then every cell counts as uncovered).</param>
+        /// <param name="groundBits">Per-cell ground bits (MapMeshBuilder's BandWork.Ground), or null when unknown.</param>
+        /// <param name="terrainBit">The bit of <paramref name="groundBits"/> that says the column met the terrain.</param>
+        /// <param name="requireCover">Protect the cells whose <paramref name="cover"/> lacks <paramref name="coverBit"/>
+        /// (<see cref="DespikeRequiresCover"/> in the builder; always in the viewer, which has no ground bits).</param>
+        /// <param name="coverBit">The cover bit a cell needs to be movable: <see cref="CoverFootprint"/> (a mesh reaches
+        /// the ground) or <see cref="CoverAnyHeight"/> (a mesh lies over it at all).</param>
+        internal static bool[] ProtectMask(int cells, byte[] cover, byte[] groundBits, byte terrainBit, bool requireCover,
+            byte coverBit = CoverFootprint)
+        {
+            if (cells < 1 || (!requireCover && groundBits == null)) return null;
+
+            var protect = new bool[cells];
+
+            for (var n = 0; n < cells; n++)
+                protect[n] = (groundBits != null && n < groundBits.Length && (groundBits[n] & terrainBit) != 0) ||
+                             (requireCover && (cover == null || n >= cover.Length || (cover[n] & coverBit) == 0));
+
+            return protect;
+        }
 
         /// <summary>
         /// The top-hat over a band in METRES: every cell more than <see cref="DespikeRiseMetres"/> over the band's opening
@@ -263,6 +302,78 @@ namespace QuestTree.QuestGraph
         /// pillar cells against 7,301); a basement or a tunnel under the ground is drawn over nothing and does not count.</summary>
         internal const byte CoverFootprint = 4;
 
+        /// <summary>A cover-mask bit: a building's or a prop's triangle lies over the cell's centre AT ANY HEIGHT (review
+        /// 2026-09-29): the viewer's guard, which has no terrain bits - a cell no stored mesh lies over at all (a narrow
+        /// terrain spur) is never despiked on load. Widened by <see cref="CoverReachMetres"/> (<see cref="DilateBit"/>)
+        /// before it is read. No other pass reads it.</summary>
+        internal const byte CoverAnyHeight = 8;
+
+        /// <summary>How far, horizontally, the viewer's <see cref="CoverAnyHeight"/> guard reaches past a stored triangle
+        /// (review 2026-09-29): the Snipe Tower's collider top is 3-5.5 m wider than its stored shafts, so a spike within
+        /// this of any stored mesh is movable on load; rock farther from every stored mesh stays protected.</summary>
+        internal const float CoverReachMetres = 6f;
+
+        /// <summary>
+        /// <paramref name="bit"/> of <paramref name="mask"/> dilated in place by a square of <c>2r + 1</c> cells: a cell
+        /// takes the bit when any cell within <paramref name="r"/> cells on both axes has it. Separable (rows, then
+        /// columns), each line a running count over the window, so O(w x h) whatever r is; other bits are untouched.
+        /// </summary>
+        /// <param name="mask">Row-major <paramref name="w"/> x <paramref name="h"/> bits, written in place.</param>
+        /// <param name="w">Columns.</param>
+        /// <param name="h">Rows.</param>
+        /// <param name="bit">The bit to dilate.</param>
+        /// <param name="r">The half-width in cells; 0 or less leaves the mask as it is.</param>
+        /// <returns>The cells that hold the bit afterwards.</returns>
+        internal static int DilateBit(byte[] mask, int w, int h, byte bit, int r)
+        {
+            if (mask == null || w < 1 || h < 1 || mask.Length < w * h) return 0;
+
+            var n = w * h;
+            var set = 0;
+
+            if (r > 0)
+            {
+                var rows = new bool[n];
+
+                for (var row = 0; row < h; row++)
+                {
+                    var start = row * w;
+                    var count = 0;
+
+                    // the window [col - r, col + r]: primed with [0, r - 1], each step adds col + r and drops col - r - 1
+                    for (var c = 0; c < Math.Min(r, w); c++) if ((mask[start + c] & bit) != 0) count++;
+
+                    for (var col = 0; col < w; col++)
+                    {
+                        var add = col + r;
+                        if (add < w && (mask[start + add] & bit) != 0) count++;
+                        var drop = col - r - 1;
+                        if (drop >= 0 && (mask[start + drop] & bit) != 0) count--;
+                        rows[start + col] = count > 0;
+                    }
+                }
+
+                for (var col = 0; col < w; col++)
+                {
+                    var count = 0;
+                    for (var rr = 0; rr < Math.Min(r, h); rr++) if (rows[rr * w + col]) count++;
+
+                    for (var row = 0; row < h; row++)
+                    {
+                        var add = row + r;
+                        if (add < h && rows[add * w + col]) count++;
+                        var drop = row - r - 1;
+                        if (drop >= 0 && rows[drop * w + col]) count--;
+                        if (count > 0) mask[row * w + col] |= bit;
+                    }
+                }
+            }
+
+            for (var i = 0; i < n; i++) if ((mask[i] & bit) != 0) set++;
+
+            return set;
+        }
+
         /// <summary>The bits the under-buildings flood counts as covered: a triangle at or above the hit.</summary>
         internal const byte CoverAtHit = CoverBuilding | CoverProp;
 
@@ -344,6 +455,8 @@ namespace QuestTree.QuestGraph
                         var hit = heights[n];
                         if (hit == MapMeshFile.NoHit) continue;   // no ground
                         if (skip != null && (skip[n] & skipBit) != 0) continue;
+
+                        cover[n] |= CoverAnyHeight;
 
                         // review 2026-09-29 (F3): the footprint only from a mesh that reaches the GROUND - a basement or a tunnel
                         // under a collider-only structure is no drawn thing over it. The ground is the opening, not the hit: a

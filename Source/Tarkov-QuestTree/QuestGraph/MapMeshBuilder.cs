@@ -13181,9 +13181,12 @@ namespace QuestTree.QuestGraph
         /// Review 2026-09-29 (Q4), for the viewer's worker: a STORED file's top band despiked as the builder does it, so host
         /// sets and shipped seeds heal without a recapture. The despike only - the flood needs the terrain bits and the
         /// sidecar's kinds, which a stored file does not hold. A stored file keeps no terrain bits either, so nothing is
-        /// protected as terrain; every cell no stored mesh reaches the ground over is protected (<see cref="CoverMask"/>
-        /// with no kinds, so trees and props count as buildings). Idempotent: a band the builder already despiked moves 0.
-        /// Pure arrays; writes the band's codes in place.
+        /// protected as terrain. Instead (review 2026-09-29) every cell no stored mesh lies over AT ANY HEIGHT is protected
+        /// (<see cref="ReliefDespike.CoverAnyHeight"/> from <see cref="CoverMask"/> with no kinds, so trees and props count
+        /// as buildings), widened by <see cref="ReliefDespike.CoverReachMetres"/>: a narrow terrain spur far from every
+        /// stored mesh is never flattened on load, a collider column over or beside stored props is. With
+        /// <see cref="ReliefDespike.DespikeRequiresCover"/> the stricter rule applies: a mesh must reach the ground there.
+        /// Idempotent: a band the builder already despiked moves 0. Pure arrays; writes the band's codes in place.
         /// </summary>
         /// <param name="file">The stored file.</param>
         /// <returns>The cells moved.</returns>
@@ -13193,11 +13196,21 @@ namespace QuestTree.QuestGraph
             if (top == null || top.Width < 2 || top.Height < 2) return 0;
 
             var opened = ReliefDespike.OpenedCodes(top.Heights, top.Width, top.Height, top.CellMetres);
-            var cover = CoverMask(file, top, null, null, opened, out _, out _);
-            if (opened == null || cover == null) return 0;
+            if (opened == null) return 0;
 
-            var protect = new bool[cover.Length];
-            for (var n = 0; n < cover.Length; n++) protect[n] = (cover[n] & ReliefDespike.CoverFootprint) == 0;
+            // the ground argument only feeds the footprint bit, which the any-height guard does not read
+            var footprint = ReliefDespike.DespikeRequiresCover;
+            var cover = CoverMask(file, top, null, null, footprint ? opened : null, out _, out _);
+            if (cover == null) return 0;
+
+            // review 2026-09-29: the guard reaches CoverReachMetres past every stored triangle (the Snipe Tower's collider
+            // top overhangs its stored shafts by 3-5.5 m)
+            if (!footprint && top.CellMetres >= 0.01f)
+                ReliefDespike.DilateBit(cover, top.Width, top.Height, ReliefDespike.CoverAnyHeight,
+                    (int)Math.Round(ReliefDespike.CoverReachMetres / top.CellMetres, MidpointRounding.AwayFromZero));
+
+            var protect = ReliefDespike.ProtectMask(top.Width * top.Height, cover, null, 0, true,
+                footprint ? ReliefDespike.CoverFootprint : ReliefDespike.CoverAnyHeight);
 
             return ReliefDespike.DespikeCodes(top.Heights, opened, top.Width, top.Height, file.YMin, file.YMax, ReliefDespike.DespikeRiseMetres,
                 protect);
@@ -13248,13 +13261,9 @@ namespace QuestTree.QuestGraph
             if (DespikeRelief)
             {
                 // protected: every cell whose column met the terrain (review F4 - the relief there is the terrain, or a road
-                // within ThinSurfaceMetres of it), and every cell no stored mesh reaches the ground over (a real structure
-                // with colliders and no stored mesh: a picture-draped column is the better failure than one that vanishes)
-                protect = new bool[cells];
-
-                for (var n = 0; n < cells; n++)
-                    protect[n] = (terrain != null && (terrain.Ground[n] & GroundUnder) != 0) ||
-                                 (cover[n] & ReliefDespike.CoverFootprint) == 0;
+                // within ThinSurfaceMetres of it); with ReliefDespike.DespikeRequiresCover (off since the Snipe Tower
+                // play-test) also every cell no stored mesh reaches the ground over
+                protect = ReliefDespike.ProtectMask(cells, cover, terrain?.Ground, GroundUnder, ReliefDespike.DespikeRequiresCover);
 
                 Step(job, "the relief's spikes", () => DespikeTopBand(job, file, top, opened, protect, "before the flood"));
             }
