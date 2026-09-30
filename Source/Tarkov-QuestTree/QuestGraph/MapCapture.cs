@@ -8607,9 +8607,37 @@ namespace QuestTree.QuestGraph
         // is the contract's -r), no merge, no walkable mask, and the exposure, which is the top band's
         // and is never re-measured.
 
-        /// <summary>The most pixels per metre a side view is taken at - the contract's number. Brought
-        /// down by the same memory budget as a floor when a side's span needs it.</summary>
-        private const float SidePixelsPerMetre = 2f;
+        /// <summary>The most pixels per metre a side view is taken at - the contract's number (rollback:
+        /// 2f). Half the floors' <see cref="MaxPixelsPerMetre"/>, as it was at 2 against 4: a wall seen at
+        /// 45 degrees from outside the map is coarser and more occluded than the ground from above, so
+        /// doubling it buys less. Brought down, per side, by the resolution cap (see
+        /// <see cref="SideWantedPpm"/>) and then by the same memory budget as a floor when a side's span
+        /// needs it. An earlier capture's side at another scale is not merged into (MapSideView.Mismatch
+        /// compares the ppm) and is taken again whole; a side carried from it keeps its own pxPerMetre,
+        /// which the viewer honours.</summary>
+        private const float SidePixelsPerMetre = 4f;
+
+        /// <summary>The scale a side asks <see cref="Budget"/> for: <see cref="SidePixelsPerMetre"/>, held
+        /// so its long side, once <see cref="SidePictureSide"/> has rounded it up, stays within
+        /// <see cref="Resolution"/> - and so within DynamicMapsLibrary.MaxPictureSide, past which the viewer
+        /// refuses a picture. At 2 px/m no side came near the cap; at 4 px/m a map over 2 km on a side, or
+        /// a resolution setting of 2048 or 4096, would pass it. The floor's rule (Prepare): the cap less one
+        /// block when sides are rounded, because ceil(span x ppm) can land a pixel over what cap / span
+        /// promises and rounding that up to a multiple of four would then pass the cap; Resolution() is a
+        /// multiple of four, so cap - 4 rounds up to at most cap. Budget only ever lowers it further.
+        /// Deterministic for a given frame and setting, which the merge needs (SidePrevious).</summary>
+        /// <param name="frame">The side's frame - see MapSideView.Frame: [1] is its r span, [3] its u span.</param>
+        private static float SideWantedPpm(double[] frame)
+        {
+            var cap = Resolution();
+            var capPx = AlignPictureSides ? cap - PictureBlock : cap;
+            var longSpan = Math.Max(frame[1], frame[3]);
+
+            // A degenerate frame is left to SidePictureSide's one pixel and the self-check, as before.
+            if (!IsFinite(longSpan) || longSpan <= 0d) return SidePixelsPerMetre;
+
+            return (float)Math.Min(SidePixelsPerMetre, capPx / longSpan);
+        }
 
         /// <summary>How far in front of the box's nearest corner the side camera stands, in metres;
         /// one metre less of it is the near plane. What that clips is only what lies CLOSER to the camera
@@ -8934,7 +8962,7 @@ namespace QuestTree.QuestGraph
 
                     MapSideView.Frame(f, r, u, e.MinX, e.MinZ, e.MaxX, e.MaxZ, yMin, yMax, out var frame);
 
-                    var ppm = Budget(SidePixelsPerMetre, frame[1], frame[3], out _);
+                    var ppm = Budget(SideWantedPpm(frame), frame[1], frame[3], out _);
                     pixels += (long)SidePictureSide(frame[1], ppm) * SidePictureSide(frame[3], ppm);
                 }
 
@@ -9135,7 +9163,7 @@ namespace QuestTree.QuestGraph
                 var e = plan.Extent;
                 MapSideView.Frame(f, r, u, e.MinX, e.MinZ, e.MaxX, e.MaxZ, yMin, yMax, out var frame);
 
-                var ppm = Budget(SidePixelsPerMetre, frame[1], frame[3], out var budgetNote);
+                var ppm = Budget(SideWantedPpm(frame), frame[1], frame[3], out var budgetNote);
 
                 var side = new Plan
                 {
@@ -10305,9 +10333,10 @@ namespace QuestTree.QuestGraph
             }
 
             // The building phase's cap, from this capture's own clock (second review, H1): the capture's
-            // 140 s budget less what the floors MEASURED and what the side views are expected to take
-            // (the same estimate their own line prints, over the bands' y range - the sides' box is not
-            // known until the mesh is), never under the builder's minimum.
+            // budget (MapMeshBuilder.CaptureSecondsBudget, 210 s) less what the floors MEASURED and what the side
+            // views are expected to take (the same estimate their own line prints, over the bands' y range - the
+            // sides' box is not known until the mesh is), never under the builder's minimum and never over its
+            // MaxBuildingSeconds, which keeps the mesh phase inside the watchdog.
             var sides = 0d;
 
             if (plan.WantsSides && request.Bands.Count > 0)
@@ -10323,8 +10352,8 @@ namespace QuestTree.QuestGraph
 
             // Not floored here: the builder takes the relief's measured seconds off it first and floors what is
             // left at MinBuildingSeconds.
-            request.BuildingSeconds = MapMeshBuilder.CaptureSecondsBudget - floors - sides -
-                                      MapMeshBuilder.AtlasSecondsReserve;
+            request.BuildingSeconds = Math.Min(MapMeshBuilder.MaxBuildingSeconds,
+                MapMeshBuilder.CaptureSecondsBudget - floors - sides - MapMeshBuilder.AtlasSecondsReserve);
 
             // Stage W: each atlas page is streamed by its encoder (a worker) to its staged name plus ".part",
             // renamed to the staged name once the capture has waited for it after the hold (SettleAtlasPages), and

@@ -2313,7 +2313,7 @@ def check_atlas(meta, folder, key, errors, warnings):
 
 
 SIDE_DIRS = ("N", "S", "E", "W")
-SIDE_MAX_PPM = 2.0          # the contract's pxPerMetre ceiling (MapCapture.SidePixelsPerMetre)
+SIDE_MAX_PPM = 4.0          # the contract's pxPerMetre ceiling (MapCapture.SidePixelsPerMetre; rollback 2.0)
 SIDE_VECTOR_TOLERANCE = 1e-3
 SIDE_ORIGIN_TOLERANCE = 1e-3
 

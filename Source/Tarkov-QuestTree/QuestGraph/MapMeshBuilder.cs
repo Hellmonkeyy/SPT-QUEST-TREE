@@ -508,8 +508,25 @@ namespace QuestTree.QuestGraph
         /// review, H1) - a planning budget, not the campaign's wait (MapCapture.WorstCaseSeconds). The building
         /// phase's soft cap is what the floors' and relief's measured seconds and the sides' estimate leave of
         /// it, never under
-        /// <see cref="MinBuildingSeconds"/>.</summary>
-        internal const double CaptureSecondsBudget = 140d;
+        /// <see cref="MinBuildingSeconds"/> and never over <see cref="MaxBuildingSeconds"/>.
+        ///
+        /// 210 (rollback: 140) since the 8 px/m ground and the 4 px/m sides: at 140 the building phase was left
+        /// about 74 s on a Customs stop (140 - ~11 s floors - ~15 s side estimate - 40 s atlas), but the new
+        /// pictures take about four times the tiles (~32 s floors; the side estimate is the floors' seconds per
+        /// pixel times ~30 M side pixels, about 31 s), which would have left ~37 s. 210 leaves ~107 s, held at
+        /// MaxBuildingSeconds (100) - estimated, to be checked against a real stop's header line. It moves no
+        /// ceiling: the mesh phase is bounded by MapCapture's watchdog, not by this, and MapCapture.WorstCaseSeconds
+        /// (the campaign's wait) does not include it.</summary>
+        internal const double CaptureSecondsBudget = 210d;
+
+        /// <summary>The most the building phase is given (relief and buildings together, before the builder takes
+        /// the relief's measured seconds off): 100 s, the most it could get when <see cref="CaptureSecondsBudget"/>
+        /// was 140 (140 - 40 s atlas). Held there because MapCapture's 200 s mesh watchdog was sized around it -
+        /// 100 soft + 10 hard + <see cref="DrainSeconds"/> + <see cref="AtlasSecondsReserve"/> is 158 s - and on a
+        /// small map whose floors and sides take next to nothing the raised budget would otherwise hand out up to
+        /// 170 s, and the watchdog would then cut the atlas. Maps whose pictures take time are
+        /// at or under it (Customs estimated at the 100 s ceiling).</summary>
+        internal const double MaxBuildingSeconds = 100d;
 
         /// <summary>The least the building phase is given, however long the floors took.</summary>
         internal const double MinBuildingSeconds = 20d;
