@@ -407,7 +407,11 @@ namespace QuestTree.UI
                 ? "no key is bound for capturing the whole map at once - bind one in the F12 menu " +
                   "(Map > Capture the whole map key)"
                 : $"press <b>{ModSettings.KeyText(shortcut, " + ")}</b> to capture the WHOLE map in one go - it " +
-                  "teleports you from stop to stop, captures at each, and puts you back where you pressed it";
+                  "teleports you from stop to stop, captures at each, and " +
+                  (QuestGraph.MapCampaign.EndAtExtract && ModSettings.CampaignEndAtExtract.Value
+                      ? "leaves you in the nearest extract you can use, whose extraction timer starts at once - the raid " +
+                        "ends within seconds unless you step out (or puts you back where you pressed it, if none can be used)"
+                      : "puts you back where you pressed it");
 
             var auto = ModSettings.AutoCapture.Value
                 ? $"Automatic capture is ON: one every {ModSettings.AutoCaptureSeconds.Value} s once you have " +

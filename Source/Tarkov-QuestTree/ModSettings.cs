@@ -187,6 +187,13 @@ namespace QuestTree
         /// meaningful distinction rather than a decoration.</summary>
         public static ConfigEntry<KeyboardShortcut> CampaignKey { get; private set; }
 
+        /// <summary>Whether a capture campaign that visits every stop ends with the player standing in the nearest
+        /// extract they can use, rather than back where the key was pressed. On by default: a map-building raid is over
+        /// once the map is captured, and the walk back from the start is the part nobody wanted. A campaign that stops
+        /// early still puts the player back. Landing IN an open extract starts its extraction timer, so the raid ends
+        /// within seconds unless the player steps out. See MapCampaign.Finish.</summary>
+        public static ConfigEntry<bool> CampaignEndAtExtract { get; private set; }
+
         /// <summary>Whether a raid captures the map by itself every few seconds as the player moves
         /// about it - the map-building raid's setting. Off by default: it hitches every few seconds,
         /// which is a price only somebody building a map picture is getting anything for.</summary>
@@ -875,7 +882,18 @@ namespace QuestTree
                 "capture. Customs is 9 x 5 cells of 115 x 100 m, about 33 stops once the cells with nowhere to " +
                 "stand are dropped. The first stop builds the 3D map whole (up to a couple of minutes); every later " +
                 "stop only adds what it newly sees. The log's closing line gives the campaign's real duration. Needs " +
-                "'Harvest quest zones in raid' on, like the single capture key.");
+                "'Harvest quest zones in raid' on, like the single capture key. With 'Map capture campaign: end at an " +
+                "extract' on, a campaign that finishes leaves you at an extract instead - whose timer starts at once, " +
+                "so the raid ends within seconds unless you step out.");
+
+            CampaignEndAtExtract = config.Bind(
+                "Map", "Map capture campaign: end at an extract", true,
+                "When a whole-map capture campaign has visited every stop, teleport you into the nearest extract you can " +
+                "use right now - one open to your side and spawn, not a vehicle, co-op or flare exit, and with any " +
+                "requirement (payment, switch, empty slot) already met - instead of back to where you pressed the key. " +
+                "A campaign that stops early (you died, stops failed) still puts you back. When no extract qualifies, " +
+                "the log says why for each and you are put back. Landing in the extract starts its extraction timer, so " +
+                "the raid ends within seconds unless you step out of it.");
 
             AutoCapture = config.Bind(
                 "Map", "Capture the map automatically while I play", false,
@@ -1065,7 +1083,7 @@ namespace QuestTree
                 ShowTakeWithYou, CountUnacceptedQuests, ShowTraderColours,
                 TraderColours, ShowCredits,
                 PinLabels, ColorActive, ColorAvailable, ColorCompleted, ColorLocked, ColorGated, ColorFailed, ColorAccent, Tooltips,
-                HoverSounds, RememberLastView, OpenTracker, CaptureMapKey, CampaignKey,
+                HoverSounds, RememberLastView, OpenTracker, CaptureMapKey, CampaignKey, CampaignEndAtExtract,
                 AutoCapture, AutoCaptureSeconds, CaptureResolution,
                 UploadCaptures, MapPictureSource, MapLabels, MapMode
             });
@@ -1112,6 +1130,7 @@ namespace QuestTree
             // F12 menu has to repaint the page or the row keeps naming the old key.
             CaptureMapKey.SettingChanged += Raise;
             CampaignKey.SettingChanged += Raise;
+            CampaignEndAtExtract.SettingChanged += Raise;   // the Settings tab's campaign note says where a campaign ends
             AutoCapture.SettingChanged += Raise;
             AutoCaptureSeconds.SettingChanged += Raise;
             CaptureResolution.SettingChanged += Raise;

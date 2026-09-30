@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
 using EFT;
+using EFT.Interactive;
 using UnityEngine;
 using UnityEngine.AI;
 
@@ -14,7 +15,9 @@ namespace QuestTree.QuestGraph
     /// capture in <see cref="MapCapture"/> rather than second renderers of their own:
     ///
     ///   - the CAMPAIGN key: one press teleports the player across a grid of standable spots covering
-    ///     the map, captures at each, and puts the player back where they pressed it;
+    ///     the map, captures at each, and then leaves the player standing in the nearest extract they
+    ///     can use (see <see cref="Finish"/>) - or, with that setting off, a stopped campaign, or no
+    ///     usable extract, puts them back where they pressed it;
     ///   - AUTO capture: while the player plays, a capture every few seconds once they have moved,
     ///     so a raid spent walking the map builds the picture by itself.
     ///
@@ -116,6 +119,22 @@ namespace QuestTree.QuestGraph
         /// nothing.</summary>
         private const int MaxStartFailures = 2;
 
+        /// <summary>Rollback for ending a finished campaign at an extract: false = a campaign that visited every stop puts
+        /// the player back where the key was pressed, as before, whatever <see cref="ModSettings.CampaignEndAtExtract"/>
+        /// says. The setting is the player's switch; this is the code's.</summary>
+        internal const bool EndAtExtract = true;
+
+        /// <summary>How far outside an extract's trigger box the landing spot may be, in metres, when none of the NavMesh
+        /// points sampled inside the box is IN it - a trigger narrower than the NavMesh's own margin from the walls, or one
+        /// hung over a doorway. Two metres is a step or two, so the player still ends the campaign at the extract rather
+        /// than somewhere near it; further than that and the point is refused, with the reason in the closing line.</summary>
+        private const float ExtractNearMetres = 2f;
+
+        /// <summary>Heights above a NavMesh point, in metres, at which the player's body is tested against an extract's
+        /// trigger box: feet, middle, head. The trigger fires on the player's capsule, not on the point under it, so a box
+        /// whose floor sits above the ground (or whose top is at waist height) still counts when any of these is inside.</summary>
+        private static readonly float[] ExtractBodyHeights = { 0.1f, 0.9f, 1.6f };
+
         /// <summary>Seconds a single stop waits for its capture: the capture's own worst case with every cap in
         /// force (MapCapture.WorstCaseSeconds, review F45), so this only fires for a capture that has stopped
         /// finishing. Past it the campaign stops, having said so, and puts the player back once the capture
@@ -165,7 +184,9 @@ namespace QuestTree.QuestGraph
         /// <param name="map">The campaign's map.</param>
         /// <param name="captured">Stops captured before the campaign stopped waiting.</param>
         /// <param name="stops">Stops the campaign planned.</param>
-        private IEnumerator RestoreWhenDone(Vector3 start, string map, int captured, int stops)
+        /// <param name="lastStop">The last planned stop, for <see cref="Finish"/>'s distance.</param>
+        /// <param name="completed">Whether the campaign visited every stop - see <see cref="Finish"/>.</param>
+        private IEnumerator RestoreWhenDone(Vector3 start, string map, int captured, int stops, Vector3 lastStop, bool completed)
         {
             try
             {
@@ -173,7 +194,7 @@ namespace QuestTree.QuestGraph
             }
             finally
             {
-                Restore(start);
+                Finish(start, lastStop, completed);
                 ReleaseCampaignHold(map, captured, stops, "campaign stopped");
                 _running = false;
             }
@@ -715,6 +736,13 @@ namespace QuestTree.QuestGraph
             _campaignUploadNote = "";
             _campaignHold = MapTransfer.HoldUploads(this, map, "capture campaign", preempts: true);
 
+            // Set only on the line after the loop, so it is true for a campaign that went through every stop and false
+            // for every other end: a break (death, raid over, two failures in a row, a capture past its worst case) sets
+            // `stopped`, and an exception reaches the finally without passing that line - whereas `stopped` alone is
+            // still null after an exception, which is why the finally cannot ask it.
+            var completed = false;
+            var lastStop = stops[stops.Count - 1];
+
             try
             {
                 for (var i = 0; i < stops.Count; i++)
@@ -835,9 +863,15 @@ namespace QuestTree.QuestGraph
                     Plugin.LogSource?.LogInfo(
                         $"QuestTree: campaign stop {i + 1} of {stops.Count} at {At(stop)} - captured.");
                 }
+
+                completed = stopped == null;
             }
             finally
             {
+                // Where the player is left, for automatic capture's "last capture" below: the start, unless Finish
+                // moved them to an extract.
+                var endedAt = start;
+
                 // A capture still running when the campaign gave up is NOT run out from under (review F45): the
                 // player stays at the stop until it clears, with no time backstop, before being moved back. Done
                 // in a coroutine of its own because a finally cannot wait.
@@ -856,22 +890,22 @@ namespace QuestTree.QuestGraph
                             "you are put back as soon as it finishes.");
 
                     _campaignUploadNote = _campaignHold != null ? ", upload after the last capture ends" : "";
-                    StartCoroutine(RestoreWhenDone(start, map, captured, stops.Count));   // clears _running itself
+                    StartCoroutine(RestoreWhenDone(start, map, captured, stops.Count, lastStop, completed));   // clears _running itself
                 }
                 else
                 {
-                    Restore(start);
+                    endedAt = Finish(start, lastStop, completed);
                     ReleaseCampaignHold(map, captured, stops.Count, stopped == null ? "campaign done" : "campaign stopped");
                     _running = false;
                 }
 
                 // A campaign has just photographed the map from everywhere, including the cell it
-                // started in, so automatic capture treats the start position as its own last capture:
-                // it waits for the player to move on rather than immediately taking one more picture
-                // of where they are standing again.
+                // started in and the stop nearest the extract it may have ended at, so automatic capture
+                // treats where the player is left as its own last capture: it waits for the player to move
+                // on rather than immediately taking one more picture of where they are standing.
                 _autoHasCaptured = true;
-                _autoLastCaptureX = start.x;
-                _autoLastCaptureZ = start.z;
+                _autoLastCaptureX = endedAt.x;
+                _autoLastCaptureZ = endedAt.z;
                 _autoDueAt = Time.time;
 
                 var seconds = (clock.ElapsedMilliseconds / 1000d).ToString("0", CultureInfo.InvariantCulture);
@@ -971,6 +1005,336 @@ namespace QuestTree.QuestGraph
                     $"QuestTree: the capture campaign could not put you back at {At(start)} ({ex.Message}) - " +
                     "extract or use a teleport mod if you are somewhere you should not be.");
             }
+        }
+
+        // --- the end at an extract --------------------------------------------------------------
+
+        /// <summary>
+        /// Where a campaign leaves the player, and the position it left them at. A campaign that visited EVERY stop
+        /// (<paramref name="completed"/>) ends with the player standing in the nearest extract they can use right now,
+        /// so a map-building raid ends with a walk of a few metres rather than a trip back across the map from where the
+        /// key was pressed. Every other end - a death, the raid gone, two failed stops in a row, a capture past its worst
+        /// case, an exception, the setting or <see cref="EndAtExtract"/> off, or no usable extract - is the old
+        /// <see cref="Restore"/>, because a campaign that did not finish is one the player may want to run again from
+        /// where they stood.
+        ///
+        /// Nothing is restored first because nothing needs it: the campaign changes the player's POSITION and nothing
+        /// else - no god mode, no noclip, no gravity or collision switch (see the class comment) - so the move to the
+        /// extract replaces the move back to the start rather than following it, and one teleport is the whole of it.
+        ///
+        /// Never throws: the callers are finallys, and the lines after them (the upload hold, _running) must run.
+        /// </summary>
+        /// <param name="start">Where the player was standing when the key was pressed.</param>
+        /// <param name="lastStop">The last planned stop, which the closing line measures from.</param>
+        /// <param name="completed">Whether the campaign went through every stop.</param>
+        /// <returns>Where the player was left: the extract's landing point, or <paramref name="start"/>.</returns>
+        private Vector3 Finish(Vector3 start, Vector3 lastStop, bool completed)
+        {
+            try
+            {
+                // A dead player or a raid that is over is Restore's to report, not a reason to look for an extract.
+                if (completed && EndAtExtract && (ModSettings.CampaignEndAtExtract?.Value ?? true) &&
+                    _gameWorld != null && _gameWorld.MainPlayer != null && PlayerIsAlive())
+                {
+                    var player = _gameWorld.MainPlayer;
+
+                    if (!TryFindExtract(player, out var name, out var landing, out var outside, out var refused))
+                    {
+                        Plugin.LogSource?.LogInfo($"QuestTree: campaign done, no usable extract: {refused}");
+                    }
+                    else if (Teleport(landing + Vector3.up * CampaignTeleportRise))
+                    {
+                        // The same one metre up as every stop, for the same reason (see CampaignTeleportRise): the
+                        // landing is a NavMesh surface, and Player.Teleport re-bases the fall height to the arrival
+                        // point, so the drop is one metre - under the game's Health.Falling.SafeHeight, no damage.
+                        //
+                        // A landing BESIDE the trigger is said as such: the player is not in it, so no extraction has
+                        // started, and "ended at extract" would read as though one had.
+                        Plugin.LogSource?.LogInfo(outside > 0f
+                            ? $"QuestTree: campaign ended beside extract '{name}' " +
+                              $"({outside.ToString("0.0", CultureInfo.InvariantCulture)} m outside its trigger; step in to extract)"
+                            : $"QuestTree: campaign ended at extract '{name}' ({Whole(Vector3.Distance(lastStop, landing))} m " +
+                              "from the last stop)");
+                        return landing;
+                    }
+
+                    // A teleport that failed has said why; the player still is not left at the last stop.
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning($"QuestTree: the capture campaign could not look for an extract ({ex.Message}).");
+            }
+
+            Restore(start);
+            return start;
+        }
+
+        /// <summary>
+        /// The nearest extract the local player can use right now, and a NavMesh point inside (or right beside) its
+        /// trigger; false with every candidate's reason when there is none. The rule, in the game's own terms
+        /// (CommonAssets.Scripts.Game.ExfiltrationController and EFT.Interactive.ExfiltrationPoint in this client):
+        ///
+        ///   - the point is this player's: <c>ExfiltrationPoint.InfiltrationMatch(player)</c>, the game's own test when a
+        ///     player walks into the trigger - the spawn's entry point for a PMC exit, the profile id a Scav was dealt for
+        ///     a Scav exit, side and entry point for a shared one. It is what <c>EligiblePoints(profile)</c> filters by for
+        ///     a PMC, and the only answer for a Scav (whose exits are dealt by ScavExfiltrationClaim, not listed there).
+        ///     Candidates are the controller's ExfiltrationPoints and ScavExfiltrationPoints; the secret exits (a separate
+        ///     array, found by walking into them) and transits (TransitPoint, not an ExfiltrationPoint) are left out;
+        ///   - it is OPEN: status RegularMode. NotPresent is an exit this raid did not roll, Pending/Hidden one not open,
+        ///     UncompleteRequirements one waiting on a switch or a payment, Countdown a shared timer already running,
+        ///     AwaitsManualActivation a flare or a lever;
+        ///   - it is an Individual exit: a SharedTimer (the vehicles) or Manual one needs more than standing in it;
+        ///   - every requirement it has is met for this player now - <c>ExfiltrationRequirement.Met(player, point)</c>, the
+        ///     game's own check: a paid exit is met once paid, a co-op one only in Countdown, a switch-gated one once its
+        ///     status is RegularMode, a timed one once its start time has passed, an empty-slot one when the slot is;
+        ///   - the player is not on the controller's banned list.
+        ///
+        /// Of the usable ones, one with NO requirements wins over a nearer one whose requirement is met - a met
+        /// requirement can stop being met on arrival - and within each the nearest to the player wins.
+        /// </summary>
+        /// <param name="player">The local player - the only one a campaign moves.</param>
+        /// <param name="name">The chosen extract's name, as the game's settings spell it.</param>
+        /// <param name="landing">Where to put the player's feet.</param>
+        /// <param name="outside">Metres the standing player is outside the chosen trigger; 0 when inside it.</param>
+        /// <param name="refused">When false: each of this player's extracts with the reason it was refused.</param>
+        private bool TryFindExtract(Player player, out string name, out Vector3 landing, out float outside, out string refused)
+        {
+            name = null;
+            landing = Vector3.zero;
+            outside = 0f;
+            refused = "";
+
+            var controller = _gameWorld.ExfiltrationController;
+            if (controller == null)
+            {
+                refused = "this raid has no extraction controller";
+                return false;
+            }
+
+            if (controller.BannedPlayers != null && controller.BannedPlayers.Contains(player.Id))
+            {
+                refused = "the game has barred you from extracting in this raid";
+                return false;
+            }
+
+            // The shared exits are in both arrays; the set keeps each point once.
+            var points = new List<ExfiltrationPoint>();
+            var seen = new HashSet<ExfiltrationPoint>();
+            if (controller.ExfiltrationPoints != null)
+                foreach (var p in controller.ExfiltrationPoints)
+                    if (p != null && seen.Add(p)) points.Add(p);
+            if (controller.ScavExfiltrationPoints != null)
+                foreach (var p in controller.ScavExfiltrationPoints)
+                    if (p != null && seen.Add(p)) points.Add(p);
+
+            var from = player.Transform.position;
+            var reasons = new List<string>();
+            var others = 0;
+            var bestTier = int.MaxValue;
+            var bestDistance = float.MaxValue;
+
+            foreach (var point in points)
+            {
+                var label = point.Settings?.Name;
+                if (string.IsNullOrEmpty(label)) label = point.name;
+
+                try
+                {
+                    // Not this player's at all - a Scav exit for a PMC, a PMC exit of another spawn. Counted rather than
+                    // listed: they are most of a map's exits and none of them was ever a candidate.
+                    // The side test first, explicitly: the base InfiltrationMatch reads only the profile's entry point,
+                    // so a Scav whose profile carries one would otherwise match a PMC exit the game never dealt it. A
+                    // Scav's exits are the Scav (and shared) points; a PMC's are the rest, the shared ones deciding for
+                    // themselves in their own InfiltrationMatch.
+                    var scavPoint = point is ScavExfiltrationPoint;
+                    var scavPlayer = player.Profile?.Info?.Side == EPlayerSide.Savage;
+                    if ((scavPlayer && !scavPoint) || !point.InfiltrationMatch(player))
+                    {
+                        others++;
+                        continue;
+                    }
+
+                    var why = WhyNotUsable(point, player, out var hasRequirements);
+                    if (why == null)
+                    {
+                        if (TryLanding(point, out var at, out var off))
+                        {
+                            var tier = hasRequirements ? 1 : 0;
+                            var distance = Vector3.Distance(from, at);
+                            if (tier < bestTier || (tier == bestTier && distance < bestDistance))
+                            {
+                                bestTier = tier;
+                                bestDistance = distance;
+                                name = label;
+                                landing = at;
+                                outside = off;
+                            }
+
+                            continue;
+                        }
+
+                        why = $"no NavMesh within {Whole(ExtractNearMetres)} m of its trigger";
+                    }
+
+                    reasons.Add($"{label}: {why}");
+                }
+                catch (Exception ex)
+                {
+                    reasons.Add($"{label}: could not be read ({ex.Message})");
+                }
+            }
+
+            if (name != null) return true;
+
+            if (reasons.Count == 0) reasons.Add("none of this raid's extracts is yours");
+            refused = string.Join(", ", reasons) +
+                      (others > 0 ? string.Format(CultureInfo.InvariantCulture, " (and {0} for another side or spawn)", others) : "");
+            return false;
+        }
+
+        /// <summary>Why this player cannot use this extract now, or null when they can - the status, type and
+        /// requirement halves of <see cref="TryFindExtract"/>'s rule.</summary>
+        /// <param name="point">An extract already known to be this player's.</param>
+        /// <param name="player">The local player.</param>
+        /// <param name="hasRequirements">Whether the extract has any requirement at all, met or not.</param>
+        private static string WhyNotUsable(ExfiltrationPoint point, Player player, out bool hasRequirements)
+        {
+            hasRequirements = false;
+
+            switch (point.Status)
+            {
+                case EExfiltrationStatus.RegularMode:
+                    break;
+                case EExfiltrationStatus.NotPresent:
+                    return "not in this raid";
+                case EExfiltrationStatus.UncompleteRequirements:
+                    return "requirements not met";
+                case EExfiltrationStatus.Countdown:
+                    return "shared timer running";
+                case EExfiltrationStatus.AwaitsManualActivation:
+                    return "needs activating";
+                case EExfiltrationStatus.Pending:
+                case EExfiltrationStatus.Hidden:
+                    return "not open yet";
+                default:
+                    return "status " + point.Status;
+            }
+
+            var type = point.Settings?.ExfiltrationType ?? EExfiltrationType.Individual;
+            if (type == EExfiltrationType.SharedTimer) return "shared-timer (vehicle) extract";
+            if (type == EExfiltrationType.Manual) return "manually activated extract";
+
+            // Walked by hand rather than through the game's UnmetRequirements: a Reference requirement can leave a NULL
+            // entry in Requirements (CreateRequirement returns null for None and Reference), which that LINQ would call
+            // Met on and throw.
+            List<string> unmet = null;
+            foreach (var requirement in point.Requirements ?? Array.Empty<ExfiltrationRequirement>())
+            {
+                if (requirement == null) continue;
+
+                hasRequirements = true;
+                if (requirement.Met(player, point)) continue;
+
+                unmet ??= new List<string>();
+                unmet.Add(requirement.Requirement.ToString());
+            }
+
+            return unmet == null ? null : "needs " + string.Join("+", unmet);
+        }
+
+        /// <summary>A NavMesh point where a standing player is inside this extract's trigger box - sampled from the box's
+        /// centre, then from four points half way to its corners - or, failing that, the sampled point nearest the box when
+        /// it is within <see cref="ExtractNearMetres"/> of it (a trigger too small or too close to a wall for the NavMesh
+        /// to reach into). The box is the one ExfiltrationPoint.Awake reads and folds the transform's scale into, so its
+        /// size is in the transform's local units, which is what the inside test compares in.
+        ///
+        /// A point BESIDE the box must not be above its top: the 3 m sample radius reaches a roof or the floor over a
+        /// ground-floor trigger, and a point up there is metres from the extract by any path, however close it is to
+        /// the box in a straight line.</summary>
+        /// <param name="point">The extract.</param>
+        /// <param name="landing">Where the player's feet go.</param>
+        /// <param name="outside">Metres the standing player is outside the box; 0 when inside it.</param>
+        private static bool TryLanding(ExfiltrationPoint point, out Vector3 landing, out float outside)
+        {
+            landing = Vector3.zero;
+            outside = 0f;
+
+            var box = point.GetComponent<BoxCollider>();
+            var frame = box != null ? box.transform : point.transform;
+            var centre = box != null ? box.center : Vector3.zero;
+
+            // An extract with no box is one the game could not have read either (Awake would have thrown); a 2 m cube at
+            // its transform still finds the ground there and lands the player beside it.
+            var half = (box != null ? box.size : Vector3.one * 2f) * 0.5f;
+
+            // Far enough down from the box's middle to reach the ground under a tall box, and never less than a storey.
+            var radius = Mathf.Max(half.y + 1f, 3f);
+
+            // The box's highest point in world space - the highest of its eight corners, so a tilted box is measured
+            // by its real top rather than by its centre plus half its local height.
+            var top = float.MinValue;
+            for (var c = 0; c < 8; c++)
+            {
+                var corner = new Vector3(
+                    (c & 1) == 0 ? -half.x : half.x,
+                    (c & 2) == 0 ? -half.y : half.y,
+                    (c & 4) == 0 ? -half.z : half.z);
+                top = Mathf.Max(top, frame.TransformPoint(centre + corner).y);
+            }
+
+            var bestDistance = float.MaxValue;
+
+            for (var i = 0; i < 5; i++)
+            {
+                var offset = i switch
+                {
+                    1 => new Vector3(half.x * 0.5f, 0f, half.z * 0.5f),
+                    2 => new Vector3(-half.x * 0.5f, 0f, half.z * 0.5f),
+                    3 => new Vector3(half.x * 0.5f, 0f, -half.z * 0.5f),
+                    4 => new Vector3(-half.x * 0.5f, 0f, -half.z * 0.5f),
+                    _ => Vector3.zero
+                };
+
+                if (!NavMesh.SamplePosition(frame.TransformPoint(centre + offset), out var hit, radius, NavMesh.AllAreas))
+                    continue;
+
+                // The trigger fires on the player's capsule, not on the point under it: inside when feet, middle or head is.
+                var distance = float.MaxValue;
+                foreach (var height in ExtractBodyHeights)
+                    distance = Mathf.Min(distance, DistanceToBox(frame, centre, half, hit.position + Vector3.up * height));
+
+                if (distance <= 0f)
+                {
+                    landing = hit.position;
+                    return true;
+                }
+
+                // Beside it, and only from the box's own level or below - see the summary.
+                if (hit.position.y <= top && distance < bestDistance)
+                {
+                    bestDistance = distance;
+                    landing = hit.position;
+                }
+            }
+
+            if (bestDistance > ExtractNearMetres) return false;
+
+            outside = bestDistance;
+            return true;
+        }
+
+        /// <summary>World-space metres from <paramref name="world"/> to a box given in <paramref name="frame"/>'s local
+        /// space by its centre and half size; 0 when inside it.</summary>
+        private static float DistanceToBox(Transform frame, Vector3 centre, Vector3 half, Vector3 world)
+        {
+            var local = frame.InverseTransformPoint(world) - centre;
+            var clamped = new Vector3(
+                Mathf.Clamp(local.x, -half.x, half.x),
+                Mathf.Clamp(local.y, -half.y, half.y),
+                Mathf.Clamp(local.z, -half.z, half.z));
+
+            return clamped == local ? 0f : Vector3.Distance(world, frame.TransformPoint(clamped + centre));
         }
 
         // --- automatic capture -----------------------------------------------------------------
