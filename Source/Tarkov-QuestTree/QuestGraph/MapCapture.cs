@@ -558,6 +558,104 @@ namespace QuestTree.QuestGraph
         /// FinishFloor / FinishSide. Off in a release.</summary>
         private static readonly bool TileSkipAudit = false;
 
+        /// <summary>Campaign speed step 1 (1): a floor that rendered no tile - every one owned by a closer capture or outside
+        /// the mask - keeps its picture and distance sidecar on disk as they are: no Develop, no encode, no write. With no
+        /// tile rendered the development only copies the previous picture and sidecar pixel for pixel (DevelopBand's
+        /// not-taken branch), so the files a rewrite would stage hold the same pixels; skipping it saved ~12 s a Customs
+        /// stop (1.3 s develop, 10.5 s encode and 67.6 MB write). Off (rollback): the floor is developed, encoded and
+        /// rewritten as before.</summary>
+        private static readonly bool SkipUnchangedFloors = true;
+
+        /// <summary>Campaign speed step 1 (2): a side view whose tile plan leaves nothing to render keeps its picture and
+        /// sidecar on disk (CommitSides carries its entry): no tiles, no develop, no encode, no write - the side's share of
+        /// the 15.8 s a Customs stop spent on sides. Off (rollback): every side is developed, encoded and rewritten.</summary>
+        private static readonly bool SkipUnchangedSides = true;
+
+        /// <summary>Campaign speed step 1 (2): a side pixel inside a tile this capture RENDERED that came back with nothing
+        /// drawn, and that lies ABOVE the scene's collider skyline (<see cref="BuildSkyline"/>) by
+        /// <see cref="SkylineMarginPx"/>, records in the sidecar the step it was seen empty from - as a drawn pixel records
+        /// the step it was seen from - so it is settled for every later capture that is no closer. Without it the top row
+        /// of every side (sky: N/S tiles 0-4, E/W tiles 0-2 on Customs) stayed 255 "never seen" for ever,
+        /// CaptureMerge.Takes said any drawn pixel there would be taken, and TileWorth rendered those tiles at every stop.
+        /// Only above the skyline (review): a side pixel's step is the distance to its ray's ground point, not to what it
+        /// shows, so an empty pixel over a building streamed out at this stop, settled, would have refused that building to
+        /// a later stop farther away that had it loaded - lost for good. Colliders never stream out, so nothing solid can
+        /// be above their skyline. At or below it an empty pixel keeps 255 and is retried as before; a pixel settled there
+        /// by the first version of this rule is healed on load (HealSideDist). The colour stays transparent black, so
+        /// check-capture's "255 means RGB 0" invariant still holds. Sides only (no walkable mask, alpha 255 exactly where
+        /// drawn). Off (rollback): nothing is settled, and every transparent side pixel with a step is read as 255.</summary>
+        private static readonly bool SideSettleEmpty = true;
+
+        /// <summary>Campaign speed step 1 (2, review): texture rows above the collider skyline a pixel must be to be settled -
+        /// room for what the relief grid's half-metre cells and a mesh drawn a little proud of its collider can hide.</summary>
+        private const int SkylineMarginPx = 8;
+
+        /// <summary>Campaign speed step 1 (2, re-review): metres of height, projected into the side's picture (x ppm x |u.y|,
+        /// ~85 px at 4 px/m), above the collider skyline that can still hold something with NO collider - tree canopies,
+        /// wires - which is exactly what distance-culls at the map's edges. An empty pixel above skyline + this is settled
+        /// at once; one in the band between is settled only after it was rendered empty at <see cref="SettleEmptyStops"/>
+        /// stops of the SAME campaign (<see cref="SideEmptyCounts"/>), and never outside a campaign.</summary>
+        private const float SkylineFoliageMetres = 30f;
+
+        /// <summary>Campaign speed step 1 (2, re-review): stops of one campaign a pixel in the foliage band must be rendered
+        /// empty at before it is settled.</summary>
+        private const int SettleEmptyStops = 2;
+
+        /// <summary>Campaign speed step 1 (2, re-review): one side's per-pixel count of the running campaign's stops that
+        /// rendered it empty (saturating), with the side's geometry it counts for.</summary>
+        private sealed class EmptyCounts
+        {
+            public string Geometry;
+            public byte[] Counts;
+        }
+
+        /// <summary>Campaign speed step 1 (2, re-review): the running campaign's counts, per map and side, and the session they
+        /// belong to - about 32 MB on Customs; dropped by CampaignBegins and CampaignEnds, and never kept outside a
+        /// campaign.</summary>
+        private static readonly Dictionary<string, EmptyCounts> _sideEmptyCounts =
+            new Dictionary<string, EmptyCounts>(StringComparer.OrdinalIgnoreCase);
+
+        private static int _sideEmptyCountsSession;
+
+        /// <summary>Campaign speed step 1 (2, re-review): the running campaign's empty counts for one side, made (zeroed) when
+        /// the side is first met or its geometry changed; null outside a campaign.</summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="view">The side.</param>
+        private static byte[] SideEmptyCounts(Plan plan, SideView view)
+        {
+            var live = LiveCampaignSession;
+            if (live == 0 || view?.Plan == null || view.Frame == null) return null;
+
+            if (_sideEmptyCountsSession != live)
+            {
+                _sideEmptyCounts.Clear();
+                _sideEmptyCountsSession = live;
+            }
+
+            var side = view.Plan;
+            var inv = CultureInfo.InvariantCulture;
+            var geometry = $"{side.WidthPx.ToString(inv)}x{side.HeightPx.ToString(inv)}|{MapMeshIndex.Bits(side.Ppm).ToString(inv)}|" +
+                           $"{MapMeshIndex.Bits(view.Frame[0]).ToString(inv)}|{MapMeshIndex.Bits(view.Frame[2]).ToString(inv)}";
+            var id = plan.Key + "|" + view.Dir;
+            var length = side.WidthPx * side.HeightPx;
+
+            if (!_sideEmptyCounts.TryGetValue(id, out var held) || held.Geometry != geometry || held.Counts == null ||
+                held.Counts.Length != length)
+            {
+                held = new EmptyCounts { Geometry = geometry, Counts = new byte[length] };
+                _sideEmptyCounts[id] = held;
+            }
+
+            return held.Counts;
+        }
+
+        /// <summary>Campaign speed step 1 (2, re-review): the counts let go - a campaign starting or ending.</summary>
+        private static void ForgetEmptyCounts()
+        {
+            _sideEmptyCounts.Clear();
+            _sideEmptyCountsSession = 0;
+        }
+
         /// <summary>WP1: metres taken off a tile's closed-form minimum distance before it becomes a step, so the
         /// per-tile bound is a lower bound of DevelopBand's float arithmetic whatever the rounding.</summary>
         private const double TileSkipSlackMetres = 0.05d;
@@ -1029,6 +1127,40 @@ namespace QuestTree.QuestGraph
         /// scratch into &lt;key&gt;-mesh.verify.bin for tools/compare-mesh.py (TryStartCapture's verifyMesh).</summary>
         private bool _verifyMesh;
 
+        /// <summary>Campaign speed step 1 (4): a capture campaign is running (<see cref="CampaignBegins"/> ..
+        /// <see cref="CampaignEnds"/>), and which one - the relief cast at its first stop is reused by its later stops
+        /// (MapMeshBuilder.Request.ReliefSession). Static: MapCampaign is not this component, and a campaign outlives none of
+        /// the raid's captures. False (every capture casts its own relief, as before) until MapCampaign says otherwise.</summary>
+        private static bool _inCampaign;
+
+        private static int _campaignSession;
+
+        /// <summary>Campaign speed step 1 (4, review): the session a build may store or reuse the relief for - the running
+        /// campaign's, or 0. A build that outlives its campaign sees 0 (or a newer session) and stores nothing.</summary>
+        internal static int LiveCampaignSession => _inCampaign ? _campaignSession : 0;
+
+        /// <summary>Campaign speed step 1 (4): MapCampaign calls this when a campaign starts, before its first stop's capture.
+        /// A new session: the first stop casts the relief and every later stop of the same campaign, in the same raid,
+        /// reuses it (colliders never stream out - see MapMeshBuilder's header).</summary>
+        internal static void CampaignBegins()
+        {
+            unchecked { _campaignSession++; }
+            if (_campaignSession == 0) _campaignSession = 1;
+
+            _inCampaign = true;
+            MapMeshBuilder.ForgetRelief();
+            ForgetEmptyCounts();
+        }
+
+        /// <summary>Campaign speed step 1 (4): MapCampaign calls this whenever a campaign ends - done, cut short, cancelled,
+        /// or the raid gone. Later captures cast their own relief again, and the held grids are let go.</summary>
+        internal static void CampaignEnds()
+        {
+            _inCampaign = false;
+            MapMeshBuilder.ForgetRelief();
+            ForgetEmptyCounts();
+        }
+
         /// <summary>WP2 (7): the raid's LOD map and path hashes, kept across its captures (MapMeshBuilder.CacheFor, keyed
         /// on the GameWorld). This component hangs off the GameWorld, so it goes with the raid anyway.</summary>
         private MapMeshBuilder.SceneCache _sceneCache;
@@ -1461,7 +1593,14 @@ namespace QuestTree.QuestGraph
             }
         }
 
-        private void OnDestroy() => Cleanup();
+        private void OnDestroy()
+        {
+            Cleanup();
+
+            // Campaign speed step 1 (4): this component goes with the raid - a campaign's relief never outlives it, even
+            // when the raid ends mid-capture before MapCampaign's own OnDestroy
+            CampaignEnds();
+        }
 
         /// <summary>Whether there is a raid with a living player to photograph. A dead player's world
         /// is still loaded, but the screen has moved on and the frames are not the player's to
@@ -1594,7 +1733,11 @@ namespace QuestTree.QuestGraph
                     // before the key was pressed. MeasureFloor has already said so in one line.
                     if (plan.Refused) break;
 
-                    if (!floor.Failed)
+                    // Campaign speed step 1 (1): no tile rendered, so the develop would only copy the stored picture and
+                    // sidecar - they are kept on disk as they are, and the three steps below are skipped for this floor.
+                    var unchanged = !floor.Failed && KeepUnchangedFloor(plan, floor);
+
+                    if (!floor.Failed && !unchanged)
                     {
                         // Driven here rather than started as a coroutine of its own, so the floor
                         // loop cannot run ahead of a development that is still going.
@@ -1602,7 +1745,7 @@ namespace QuestTree.QuestGraph
                         while (develop.MoveNext()) yield return develop.Current;
                     }
 
-                    if (!floor.Failed)
+                    if (!floor.Failed && !unchanged)
                     {
                         yield return null;
 
@@ -1614,7 +1757,7 @@ namespace QuestTree.QuestGraph
                     // The sidecar AFTER the picture, and only when the picture was written - see
                     // WriteSidecar, where the order is the whole of what makes a crash between the
                     // two files survivable. (The managed path keeps that order in SettleEncodes.)
-                    if (!floor.Failed && floor.PictureEncode == null)
+                    if (!floor.Failed && !unchanged && floor.PictureEncode == null)
                     {
                         yield return null;
                         WriteSidecar(plan, floor);
@@ -1887,6 +2030,9 @@ namespace QuestTree.QuestGraph
                 if (!plan.Refused && plan.WantsSides && plan.Floors.Any(f => !f.Failed && f.Bytes > 0))
                 {
                     plan.SidesTaken = true;
+
+                    // Campaign speed step 1 (2, review): the collider skyline the sides settle empty pixels above
+                    plan.Tops = mesh?.Tops;
 
                     var sides = CaptureSides(plan, mesh?.File);
 
@@ -3587,6 +3733,64 @@ namespace QuestTree.QuestGraph
             }
         }
 
+        /// <summary>
+        /// Campaign speed step 1 (1): whether a floor keeps its stored picture and sidecar as they are - and if so, marks it
+        /// <see cref="FloorPlan.Unchanged"/>, gives it the stored picture's length as <see cref="FloorPlan.Bytes"/> (every
+        /// "was a picture written" gate - the mesh, the sides, WriteMeta - asks <c>!Failed &amp;&amp; Bytes &gt; 0</c>, and the
+        /// floor IS named by this meta) and says so in the floor's line.
+        ///
+        /// Only the exact case, where a rewrite would stage the same pixels: a tile plan was made and no tile rendered, the
+        /// stored picture AND its sidecar were loaded before the tiles (DevelopBand's not-taken branch then copies the
+        /// picture pixel for pixel and the sidecar byte for byte - the sidecar is the authority for "drawn" whenever there
+        /// is one), the exposure is the stored one (MeasureFloor's no-tile path), and the previous meta names this very
+        /// file, which is still on disk with its sidecar beside it. Anything else - no sidecar, audit mode, a renamed file -
+        /// takes the full develop and rewrite as before.
+        /// </summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="floor">The floor, measured.</param>
+        private static bool KeepUnchangedFloor(Plan plan, FloorPlan floor)
+        {
+            if (!SkipUnchangedFloors || TileSkipAudit || floor == null || floor.Failed) return false;
+
+            try
+            {
+                if (floor.Verdicts == null || floor.Tiles != 0 || !floor.PreviousLoaded || floor.PreviousColour == null ||
+                    floor.PreviousDist == null || !floor.ReusedExposure || floor.Exposure == null ||
+                    string.IsNullOrEmpty(floor.File) || string.IsNullOrEmpty(floor.DistFile))
+                    return false;
+
+                // The entry WriteMeta would otherwise carry: the meta names this file, so Described (what a rewrite writes)
+                // and the stored entry agree on it.
+                var stored = Carried(plan, floor);
+                if (stored == null || !string.Equals(stored.File, floor.File, StringComparison.OrdinalIgnoreCase)) return false;
+
+                var picture = new FileInfo(Path.Combine(plan.Dir, floor.File));
+                if (!picture.Exists || picture.Length <= 0 || !File.Exists(Path.Combine(plan.Dir, floor.DistFile))) return false;
+
+                floor.Unchanged = true;
+                floor.Merged = true;
+                floor.Bytes = picture.Length;
+
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: {plan.Key} \"{floor.Dto?.Name}\" unchanged, not rewritten - {TilesPhrase(plan, floor)}; its " +
+                    $"picture ({picture.Length.ToString(CultureInfo.InvariantCulture)} bytes) and distance sidecar stay on disk as " +
+                    $"they are, exposure {E(floor.Exposure.Low)}..{E(floor.Exposure.High)} (kept from the first capture), " +
+                    $"{Ms(floor.Clock?.Elapsed.TotalMilliseconds ?? 0d)} ms.");
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                floor.Unchanged = false;
+                floor.Bytes = 0;
+
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: whether {plan.Key} \"{floor.Dto?.Name}\" could keep its stored picture was not decided " +
+                    $"({ex.GetType().Name}: {ex.Message}) - it is developed and rewritten.");
+                return false;
+            }
+        }
+
         /// <summary>WP4 B2: one encode on a worker. A METHOD, so the worker's closure holds these parameters and nothing an
         /// iterator later nulls - the atlas bug MapMeshBuilder records. Never faults: PngEncoder.Encode returns its errors,
         /// and a Task.Run that throws comes back as a Result with the error.</summary>
@@ -5133,6 +5337,7 @@ namespace QuestTree.QuestGraph
                 {
                     yield return null;
                     LoadPreviousDist(plan, floor);
+                    HealSideDist(plan, floor);
                 }
             }
 
@@ -7125,6 +7330,7 @@ namespace QuestTree.QuestGraph
             {
                 yield return null;
                 LoadPreviousDist(plan, floor);
+                HealSideDist(plan, floor);
             }
 
             floor.PreviousLoaded = true;
@@ -7508,6 +7714,9 @@ namespace QuestTree.QuestGraph
                 // rather than once per pixel: the per-pixel work is then one add and one square root.
                 floor.DxSquared = BuildDxSquared(plan);
 
+                // Campaign speed step 1 (2): which pixels this capture rendered, so an undrawn one there is settled.
+                BuildRenderedTiles(plan, floor);
+
                 return true;
             }
             catch (Exception ex)
@@ -7568,6 +7777,11 @@ namespace QuestTree.QuestGraph
                         // else about the merge below is the floors' own code, unchanged. A side's plan
                         // carries its SideView; a floor's does not.
                         var distance = drawn ? NewStep(plan, dxSquared, dzSquared, col, textureRow) : DistanceEmpty;
+
+                        // Campaign speed step 1 (2): rendered by this capture and nothing drawn - the step it was seen
+                        // empty from, recorded below only where nothing drawn is on disk (SettleEmpty).
+                        var seenEmpty = !drawn && floor.RenderedTile != null && floor.SkyRow != null &&
+                                        RenderedAt(plan, floor, col, textureRow) && EmptySettles(floor, index, col, textureRow);
 
                         // Sampled for EVERY pixel, not only the ones this capture supplies: the mask is a
                         // property of the map, so the share it dims is a fact about the picture rather
@@ -7637,12 +7851,23 @@ namespace QuestTree.QuestGraph
 
                             floor.Filled++;
                         }
+                        else if (seenEmpty && SettleEmpty(oldDrawn, oldDistance, oldPixel,
+                                     NewStep(plan, dxSquared, dzSquared, col, textureRow), out var settled))
+                        {
+                            // Campaign speed step 1 (2): still nothing here, now seen from this step - transparent as it
+                            // was, but settled for every later capture that is no closer.
+                            block[target + col] = oldPixel;
+                            floor.Dist[index] = settled;
+                            floor.SettledEmpty++;
+                            floor.StillEmpty++;
+                        }
                         else
                         {
                             block[target + col] = oldPixel;
                             floor.Dist[index] = oldDrawn ? oldDistance : DistanceEmpty;
 
-                            if (oldDrawn) floor.Kept++;
+                            // A side pixel settled empty earlier (transparent, with a step) is still empty, not kept.
+                            if (oldDrawn && !(SideSettleEmpty && plan.Side != null && EmptyPixel(oldPixel))) floor.Kept++;
                             else floor.StillEmpty++;
                         }
                     }
@@ -7705,7 +7930,272 @@ namespace QuestTree.QuestGraph
                 floor.LumBand = null;
                 floor.NeighbourLum = null;
                 floor.NeighbourIndex = null;
+                floor.TileRowOf = null;
+                floor.TileColOf = null;
+                floor.RenderedTile = null;
             }
+        }
+
+        /// <summary>Campaign speed step 1 (2): for a side with <see cref="SideSettleEmpty"/>, each texture row's and column's
+        /// tile row and column (from TileRect in the contract's orientation - the orientation Develop indexes after
+        /// MirrorSide) and whether each tile was rendered this capture (<see cref="Renders"/>: every tile with no plan,
+        /// the Render verdicts and the water promotions with one). Left null for a floor, which keeps 255 for an undrawn
+        /// pixel.</summary>
+        /// <param name="plan">The plan (a side's own plan).</param>
+        /// <param name="floor">The side.</param>
+        private static void BuildRenderedTiles(Plan plan, FloorPlan floor)
+        {
+            floor.TileRowOf = null;
+            floor.TileColOf = null;
+            floor.RenderedTile = null;
+
+            if (!SideSettleEmpty || plan.Side == null || plan.TilesX <= 0 || plan.TileCount <= 0) return;
+
+            var rows = new int[plan.HeightPx];
+            var cols = new int[plan.WidthPx];
+            for (var i = 0; i < rows.Length; i++) rows[i] = -1;
+            for (var i = 0; i < cols.Length; i++) cols[i] = -1;
+
+            var rendered = new bool[plan.TileCount];
+            var any = false;
+
+            for (var tile = 0; tile < plan.TileCount; tile++)
+            {
+                TileRect(plan, tile, true, out var col0, out var n, out var row0, out var m);
+
+                for (var r = Math.Max(0, row0); r < Math.Min(plan.HeightPx, row0 + m); r++) rows[r] = tile / plan.TilesX;
+                for (var c = Math.Max(0, col0); c < Math.Min(plan.WidthPx, col0 + n); c++) cols[c] = tile % plan.TilesX;
+
+                rendered[tile] = Renders(floor, tile);
+                any |= rendered[tile];
+            }
+
+            if (!any) return;
+
+            floor.TileRowOf = rows;
+            floor.TileColOf = cols;
+            floor.RenderedTile = rendered;
+        }
+
+        /// <summary>
+        /// Campaign speed step 1 (2, review): the side's collider skyline - every relief cell's highest collider (x, top, z)
+        /// projected into the side's picture by MapSideView's own mapping (dot(r, p) = originR + px / ppm, dot(u, p) =
+        /// originU + (height - py) / ppm, the equations GroundPointOf inverts), the highest texture row kept per column, each
+        /// cell widened by its own half-width in columns and rows, plus <see cref="SkylineMarginPx"/>. Nothing solid can
+        /// draw above it: colliders never stream out. Left null (nothing settled, everything settled before healed) when
+        /// there are no tops or on any error.
+        /// </summary>
+        /// <param name="plan">The capture's plan, with its tops.</param>
+        /// <param name="view">The side.</param>
+        private static void BuildSkyline(Plan plan, SideView view)
+        {
+            var floor = view?.Floor;
+            if (floor == null) return;
+
+            floor.SkyRow = null;
+            floor.SkyFarRow = null;
+            floor.EmptyCounts = null;
+
+            var tops = plan.Tops;
+            var side = view.Plan;
+            if (!SideSettleEmpty || tops?.Y == null || side == null || view.Right == null || view.Up == null || view.Frame == null)
+                return;
+
+            try
+            {
+                var clock = Stopwatch.StartNew();
+                var width = side.WidthPx;
+                var height = side.HeightPx;
+                var ppm = (double)side.Ppm;
+                var r = view.Right;
+                var u = view.Up;
+                var originR = view.Frame[0];
+                var originU = view.Frame[2];
+
+                var sky = new int[width];
+                for (var c = 0; c < width; c++) sky[c] = int.MinValue;
+
+                var halfPx = tops.CellMetres * 0.5 * ppm;
+                var colPad = (int)Math.Ceiling(halfPx) + 1;
+                var rowPad = (int)Math.Ceiling(halfPx) + 1;
+                var cells = 0;
+
+                for (var row = 0; row < tops.Height; row++)
+                {
+                    var z = tops.MinZ + (row + 0.5) * tops.CellMetres;
+
+                    for (var col = 0; col < tops.Width; col++)
+                    {
+                        var y = tops.Y[row * tops.Width + col];
+                        if (float.IsNaN(y) || float.IsInfinity(y)) continue;
+
+                        var x = tops.MinX + (col + 0.5) * tops.CellMetres;
+                        var pc = (r[0] * x + r[1] * y + r[2] * z - originR) * ppm;
+                        var tr = (int)Math.Floor((u[0] * x + u[1] * y + u[2] * z - originU) * ppm) + rowPad;
+                        var centre = (int)Math.Floor(pc);
+
+                        var c0 = Math.Max(0, centre - colPad);
+                        var c1 = Math.Min(width - 1, centre + colPad);
+
+                        for (var c = c0; c <= c1; c++)
+                            if (tr > sky[c])
+                                sky[c] = tr;
+
+                        cells++;
+                    }
+                }
+
+                for (var c = 0; c < width; c++)
+                    sky[c] = sky[c] == int.MinValue ? -1 : sky[c] + SkylineMarginPx;
+
+                // The foliage band's top: 30 m of height is 30 x ppm x |u.y| texture rows (u is the picture's up)
+                var band = (int)Math.Ceiling(SkylineFoliageMetres * ppm * Math.Abs(u[1]));
+                var far = new int[width];
+                for (var c = 0; c < width; c++) far[c] = sky[c] < 0 ? -1 : sky[c] + band;
+
+                floor.SkyRow = sky;
+                floor.SkyFarRow = far;
+                floor.EmptyCounts = SideEmptyCounts(plan, view);
+
+                var clear = 0L;
+                foreach (var v in far) clear += Math.Max(0, height - 1 - Math.Max(-1, v));
+
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: {plan.Key} side view {view.Dir} - collider skyline from {cells.ToString(CultureInfo.InvariantCulture)} " +
+                    $"relief cell(s): {(100d * clear / Math.Max(1L, (long)width * height)).ToString("0", CultureInfo.InvariantCulture)} % of its pixels lie above it and its " +
+                    $"{band.ToString(CultureInfo.InvariantCulture)}-row foliage band (settled when rendered empty), " +
+                    (floor.EmptyCounts != null ? "the band settled after " + SettleEmptyStops.ToString(CultureInfo.InvariantCulture) +
+                                                 " empty stops of this campaign, "
+                        : "the band never settled outside a campaign, ") +
+                    $"{Ms(clock.Elapsed.TotalMilliseconds)} ms.");
+            }
+            catch (Exception ex)
+            {
+                floor.SkyRow = null;
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: {plan.Key} side view {view.Dir}'s collider skyline could not be made ({ex.GetType().Name}: " +
+                    $"{ex.Message}) - no empty pixel of it is settled this capture.");
+            }
+        }
+
+        /// <summary>Campaign speed step 1 (2, re-review): whether a side pixel this capture RENDERED and found empty is
+        /// settled: above the foliage band at once; inside it (above the collider skyline) only once the running campaign
+        /// has rendered it empty at <see cref="SettleEmptyStops"/> stops, this one counted here - so called once per pixel
+        /// per develop, and only for a rendered, undrawn pixel; at or below the skyline, or in the band outside a campaign,
+        /// never.</summary>
+        /// <param name="floor">The side, its skyline built.</param>
+        /// <param name="index">The pixel (texture order).</param>
+        /// <param name="col">The column (contract orientation).</param>
+        /// <param name="textureRow">The texture row, 0 at the bottom.</param>
+        private static bool EmptySettles(FloorPlan floor, int index, int col, int textureRow)
+        {
+            var sky = floor.SkyRow;
+            var far = floor.SkyFarRow;
+            if (sky == null || far == null || col < 0 || col >= sky.Length || textureRow <= sky[col]) return false;
+            if (textureRow > far[col]) return true;
+
+            var counts = floor.EmptyCounts;
+            if (counts == null || index < 0 || index >= counts.Length) return false;
+
+            if (counts[index] < byte.MaxValue) counts[index]++;
+            return counts[index] >= SettleEmptyStops;
+        }
+
+        /// <summary>Campaign speed step 1 (2, re-review): whether a pixel the sidecar on disk records as settled empty may stay
+        /// settled - the same rule without counting: above the foliage band, or in it with the running campaign's count
+        /// already at <see cref="SettleEmptyStops"/>.</summary>
+        /// <param name="floor">The side, its skyline built.</param>
+        /// <param name="index">The pixel (texture order).</param>
+        /// <param name="col">The column.</param>
+        /// <param name="textureRow">The texture row.</param>
+        private static bool SettledMayStay(FloorPlan floor, int index, int col, int textureRow)
+        {
+            var sky = floor.SkyRow;
+            var far = floor.SkyFarRow;
+            if (sky == null || far == null || col < 0 || col >= sky.Length || textureRow <= sky[col]) return false;
+            if (textureRow > far[col]) return true;
+
+            var counts = floor.EmptyCounts;
+            return counts != null && index >= 0 && index < counts.Length && counts[index] >= SettleEmptyStops;
+        }
+
+        /// <summary>Campaign speed step 1 (2, review): the repair on load. A side sidecar pixel that is transparent black AND
+        /// carries a step is a settled-empty pixel; one the settle rule would not settle now (<see cref="SettledMayStay"/>:
+        /// at or below the collider skyline, or in the foliage band without this campaign's count - or any, with the settle
+        /// off or no skyline) is read as 255 - never seen - so a pixel settled over a streamed-out building or canopy is
+        /// taken again by the next capture that draws it. Floors are untouched.</summary>
+        /// <param name="plan">The plan (a side's own plan).</param>
+        /// <param name="floor">The side, its previous picture and sidecar just loaded.</param>
+        private static void HealSideDist(Plan plan, FloorPlan floor)
+        {
+            if (plan?.Side == null || floor?.PreviousDist == null || floor.PreviousColour == null) return;
+
+            try
+            {
+                var dist = floor.PreviousDist;
+                var colour = floor.PreviousColour;
+                var width = plan.WidthPx;
+                var keepAbove = SideSettleEmpty && floor.SkyRow != null;
+                var healed = 0;
+
+                for (var i = 0; i < dist.Length && i < colour.Length; i++)
+                {
+                    if (dist[i] == DistanceEmpty || !EmptyPixel(colour[i])) continue;
+                    if (keepAbove && SettledMayStay(floor, i, i % width, i / width)) continue;
+
+                    dist[i] = DistanceEmpty;
+                    healed++;
+                }
+
+                if (healed > 0)
+                    Plugin.LogSource?.LogDebug(
+                        $"QuestTree: {plan.Key} \"{floor.Dto?.Name}\" - {healed.ToString(CultureInfo.InvariantCulture)} empty " +
+                        "pixel(s) settled at or below the collider skyline read as never seen, so they are taken again.");
+            }
+            catch (Exception ex)
+            {
+                // unhealed is the old rule's state: the capture goes on, it is only less willing to retake those pixels
+                Plugin.LogSource?.LogDebug($"QuestTree: {plan.Key}'s side sidecar could not be healed ({ex.Message}).");
+            }
+        }
+
+        /// <summary>Campaign speed step 1 (2): whether this capture rendered the tile holding a pixel.</summary>
+        /// <param name="plan">The plan.</param>
+        /// <param name="floor">The side, with its lookup built.</param>
+        /// <param name="col">The column (contract orientation).</param>
+        /// <param name="textureRow">The texture row, 0 at the bottom.</param>
+        private static bool RenderedAt(Plan plan, FloorPlan floor, int col, int textureRow)
+        {
+            var r = floor.TileRowOf[textureRow];
+            var c = floor.TileColOf[col];
+            if (r < 0 || c < 0) return false;
+
+            var tile = r * plan.TilesX + c;
+            return tile < floor.RenderedTile.Length && floor.RenderedTile[tile];
+        }
+
+        /// <summary>Campaign speed step 1 (2): a side pixel with nothing drawn in it - transparent black, which is what
+        /// Develop leaves where no capture drew (a drawn side pixel is alpha 255: a side has no walkable mask).</summary>
+        /// <param name="pixel">The pixel on disk.</param>
+        private static bool EmptyPixel(Color32 pixel) => pixel.a == 0 && pixel.r == 0 && pixel.g == 0 && pixel.b == 0;
+
+        /// <summary>Campaign speed step 1 (2): the sidecar step a side pixel this capture rendered and found empty records -
+        /// its own step where nothing on disk was ever seen there (255), or where an earlier capture saw it empty from
+        /// farther; false where the picture on disk has a real pixel (kept, with its step) or an empty one seen from as
+        /// close or closer. Best of by distance, as for a drawn pixel.</summary>
+        /// <param name="oldDrawn">Whether the sidecar on disk has a step here.</param>
+        /// <param name="oldDistance">That step.</param>
+        /// <param name="oldPixel">The pixel on disk.</param>
+        /// <param name="step">This capture's step for the pixel.</param>
+        /// <param name="settled">The step to record.</param>
+        private static bool SettleEmpty(bool oldDrawn, byte oldDistance, Color32 oldPixel, byte step, out byte settled)
+        {
+            settled = step;
+
+            if (step == DistanceEmpty) return false;
+            if (!oldDrawn) return EmptyPixel(oldPixel);
+
+            return EmptyPixel(oldPixel) && step < oldDistance;
         }
 
         /// <summary>One pixel from linear light to the byte that goes in the PNG.
@@ -8467,6 +8957,9 @@ namespace QuestTree.QuestGraph
             floor.TileMaxOld = null;
             floor.SkipZone = null;
             floor.Rgba = null;
+            floor.SkyRow = null;
+            floor.SkyFarRow = null;
+            floor.EmptyCounts = null;
 
             // WP4 B2: the tile verdicts (a few dozen entries) outlive the floor while its encode runs - the settle's
             // captured line (TilesPhrase) and audit line read them; DropEncode drops them.
@@ -8822,42 +9315,53 @@ namespace QuestTree.QuestGraph
 
                 plan.SideFloor = view.Floor;
 
+                // Campaign speed step 1 (2, review): the skyline BEFORE the previous sidecar is loaded (HealSideDist reads it)
+                BuildSkyline(plan, view);
+
                 // WP1: as for a floor - the side's previous picture and sidecar (<key>-side-<dir>.png and its
                 // .dist.png) and the tile plan before the tiles, when the side merges.
                 var loading = LoadAndPlan(view.Plan, view.Floor);
                 while (loading.MoveNext()) yield return loading.Current;
 
+                // Campaign speed step 1 (2): a side whose plan renders nothing keeps its picture and sidecar on disk, as a
+                // floor does (KeepUnchangedFloor) - no tiles, no develop, no encode; CommitSides carries its entry.
+                var unchanged = KeepUnchangedSide(plan, view);
+                if (unchanged) tally.Unchanged++;
+
                 // As for a floor: the scene's culling forced and its water flat for the side's rendered tiles,
                 // released after its last tile however the tiles went. The water rule runs in the camera's
                 // orientation, before MirrorSide.
-                var tiles = RenderTiles(view.Plan, view.Floor, () =>
+                if (!unchanged)
                 {
-                    // A side still rendering well past the budget is abandoned, as a floor is (review F45).
-                    if (clock.Elapsed.TotalSeconds <= SidePhaseSeconds * SidePhaseOverrun) return false;
+                    var tiles = RenderTiles(view.Plan, view.Floor, () =>
+                    {
+                        // A side still rendering well past the budget is abandoned, as a floor is (review F45).
+                        if (clock.Elapsed.TotalSeconds <= SidePhaseSeconds * SidePhaseOverrun) return false;
 
-                    cut++;
-                    return true;
-                });
+                        cut++;
+                        return true;
+                    });
 
-                while (tiles.MoveNext()) yield return tiles.Current;
+                    while (tiles.MoveNext()) yield return tiles.Current;
+                }
 
                 // WP4 B2, BARRIER 3: the previous side's encode, which ran during this side's hold and tiles.
                 var settle = SettleSides(plan, view, tally);
                 while (settle.MoveNext()) yield return settle.Current;
 
-                if (!view.Floor.Failed)
+                if (!view.Floor.Failed && !unchanged)
                 {
                     yield return null;
                     MirrorSide(plan, view);
                 }
 
-                if (!view.Floor.Failed && (view.Floor.Verdicts == null || view.Floor.Tiles > 0))
+                if (!view.Floor.Failed && !unchanged && (view.Floor.Verdicts == null || view.Floor.Tiles > 0))
                 {
                     var inpaint = Inpaint(view.Plan, view.Floor);
                     while (inpaint.MoveNext()) yield return inpaint.Current;
                 }
 
-                if (!view.Floor.Failed)
+                if (!view.Floor.Failed && !unchanged)
                 {
                     // No merge: the side Plan has no Previous, so Develop takes every pixel this render
                     // drew and leaves every other one transparent - alpha 255 where drawn, 0 where not,
@@ -8867,14 +9371,14 @@ namespace QuestTree.QuestGraph
                     while (develop.MoveNext()) yield return develop.Current;
                 }
 
-                if (!view.Floor.Failed && view.Floor.Rgba != null)
+                if (!view.Floor.Failed && !unchanged && view.Floor.Rgba != null)
                 {
                     yield return null;
 
                     // WP4 B2: the managed path - the encodes start on workers, SettleSides stages them.
                     StartSideEncode(plan, view);
                 }
-                else if (!view.Floor.Failed)
+                else if (!view.Floor.Failed && !unchanged)
                 {
                     yield return null;
 
@@ -8921,12 +9425,55 @@ namespace QuestTree.QuestGraph
             Plugin.LogSource?.LogInfo(
                 $"QuestTree: side views for {plan.Key} - {tally.Rendered} of {MapSideView.Directions.Length} rendered " +
                 $"{scale} ({string.Join(", ", sizes.ToArray())}), " +
+                (tally.Unchanged > 0 ? $"{tally.Unchanged} unchanged, not rewritten, " : "") +
                 $"{(clock.Elapsed.TotalSeconds).ToString("0.0", CultureInfo.InvariantCulture)} s this stop.");
 
             if (cut > 0)
                 Plugin.LogSource?.LogWarning(
                     $"QuestTree: {plan.Key} - {cut} side view(s) were cut at the {SidePhaseSeconds:0} s side budget; " +
                     "the pictures an earlier capture took of them are kept.");
+        }
+
+        /// <summary>
+        /// Campaign speed step 1 (2): whether a side keeps its stored picture and sidecar as they are - the side's version of
+        /// <see cref="KeepUnchangedFloor"/>. Only the exact case: the side merges (SidePrevious accepted the stored one, so
+        /// the same size, frame, basis and exposure), a tile plan was made and renders no tile, the stored picture and its
+        /// sidecar were loaded (a develop would copy both unchanged), and the previous meta's entry for this direction is
+        /// one CarriedSides will carry, its file and sidecar still on disk. Says so in the side's line.
+        /// </summary>
+        /// <param name="plan">The capture's plan.</param>
+        /// <param name="view">The side, its tile plan made.</param>
+        private static bool KeepUnchangedSide(Plan plan, SideView view)
+        {
+            if (!SkipUnchangedSides || TileSkipAudit || view?.Floor == null || view.Plan == null) return false;
+
+            var floor = view.Floor;
+            var side = view.Plan;
+
+            try
+            {
+                if (floor.Failed || side.Previous == null || floor.Verdicts == null || !floor.PreviousLoaded ||
+                    floor.PreviousColour == null || floor.PreviousDist == null || TilesToRender(side, floor).Any())
+                    return false;
+
+                var carried = CarriedSides(plan).FirstOrDefault(s => s.Dir == view.Dir);
+                if (carried == null || !string.Equals(carried.File, floor.File, StringComparison.OrdinalIgnoreCase) ||
+                    !File.Exists(Path.Combine(plan.Dir, SideDistFileName(plan.Key, view.Dir))))
+                    return false;
+
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: side view {view.Dir} of {plan.Key} unchanged, not rewritten - {TilesPhrase(side, floor)}; its " +
+                    "picture and distance sidecar stay on disk as they are.");
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: whether {plan.Key}'s side view {view.Dir} could keep its stored picture was not decided " +
+                    $"({ex.GetType().Name}: {ex.Message}) - it is rendered and rewritten.");
+                return false;
+            }
         }
 
         /// <summary>The side views' expected wall time, whole seconds rounded up: the floors' measured
@@ -9516,7 +10063,9 @@ namespace QuestTree.QuestGraph
                       $"{Share(floor.StillEmpty, drawnOf)} % still empty"
                     : ", fresh (nothing earlier to merge into)") +
                 (floor.CyanFilled > 0 ? $", {floor.CyanFilled} cyan water pixels filled" : "") +
-                (floor.Despeckled > 0 ? $", {floor.Despeckled} speckles medianed" : "") + (encoded ?? "") + ".");
+                (floor.Despeckled > 0 ? $", {floor.Despeckled} speckles medianed" : "") +
+                (floor.SettledEmpty > 0 ? $", {floor.SettledEmpty} empty pixel(s) settled at the step they were seen from" : "") +
+                (encoded ?? "") + ".");
 
             AuditLine(side, floor);
 
@@ -9527,6 +10076,10 @@ namespace QuestTree.QuestGraph
         private sealed class SideTally
         {
             public int Rendered;
+
+            /// <summary>Campaign speed step 1 (2): sides kept on disk as they are (KeepUnchangedSide).</summary>
+            public int Unchanged;
+
             public readonly List<string> Sizes = new List<string>();
             public readonly HashSet<float> Scales = new HashSet<float>();
         }
@@ -10572,6 +11125,10 @@ namespace QuestTree.QuestGraph
                 _sceneCache = MapMeshBuilder.CacheFor(_sceneCache, _gameWorld);
                 request.Scene = _sceneCache;
 
+                // Campaign speed step 1 (4): inside a campaign the relief is cast at its first stop and reused after; 0 (a
+                // key press, an automatic tick, or no campaign flag) casts it as before
+                request.ReliefSession = _inCampaign ? _campaignSession : 0;
+
                 if (request.Bands.Count == 0)
                 {
                     Plugin.LogSource?.LogDebug(
@@ -11018,12 +11575,21 @@ namespace QuestTree.QuestGraph
                 var floors = new List<CaptureFloor>();
                 var keep = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 var carried = 0;
+                var unchanged = 0;
 
                 foreach (var floor in plan.Floors)
                 {
                     CaptureFloor entry;
 
-                    if (!floor.Failed && floor.Bytes > 0)
+                    if (!floor.Failed && floor.Bytes > 0 && floor.Unchanged)
+                    {
+                        // Campaign speed step 1 (1): nothing was staged - the picture and sidecar on disk ARE this
+                        // floor's, and the entry is the one a rewrite would have written (the same file, size, band and
+                        // stored exposure).
+                        entry = Described(plan, floor);
+                        unchanged++;
+                    }
+                    else if (!floor.Failed && floor.Bytes > 0)
                     {
                         entry = Described(plan, floor);
 
@@ -11274,7 +11840,8 @@ namespace QuestTree.QuestGraph
                 DropStalePictures(plan, keep);
 
                 Plugin.LogSource?.LogInfo(
-                    $"QuestTree: capture of {plan.Key} written - {written.Count} floor(s), {plan.Bytes} bytes, " +
+                    $"QuestTree: capture of {plan.Key} written - {written.Count} floor(s)" +
+                    (unchanged > 0 ? $" ({unchanged} unchanged, not rewritten)" : "") + $", {plan.Bytes} bytes, " +
                     (carried > 0 ? $"{carried} floor(s) kept from an earlier capture, " : "") +
                     (sides != null
                         ? $"{sides.Count} side view(s)" +
@@ -12409,6 +12976,10 @@ namespace QuestTree.QuestGraph
             /// <summary>Bytes the staged side views take, for the capture's line.</summary>
             public long SideBytes;
 
+            /// <summary>Campaign speed step 1 (2, review): this capture's collider tops (MapMeshBuilder.Result.Tops), or null
+            /// when no mesh was built - then no side pixel is settled and every one settled before is read as 255.</summary>
+            public MapMeshBuilder.ColliderTops Tops;
+
             /// <summary>How many of the named side views came from an earlier capture - CommitSides.</summary>
             public int SidesCarried;
 
@@ -12594,6 +13165,38 @@ namespace QuestTree.QuestGraph
             public int AuditOwnedTaken;
 
             public int AuditOutsideVisible;
+
+            /// <summary>Campaign speed step 1 (1): the floor rendered no tile and its stored picture and sidecar are kept as
+            /// they are (SkipUnchangedFloors) - nothing is staged, WriteMeta names the stored files and commits nothing.
+            /// <see cref="Bytes"/> is then the stored picture's length, so every "was it written" gate still holds.</summary>
+            public bool Unchanged;
+
+            /// <summary>Campaign speed step 1 (2): per texture row and per column (contract orientation), the tile row and
+            /// column it belongs to, -1 for none; and per tile whether this capture rendered it. Built by DevelopBegin for
+            /// a side when SideSettleEmpty, dropped by DevelopFinish.</summary>
+            public int[] TileRowOf;
+
+            public int[] TileColOf;
+
+            public bool[] RenderedTile;
+
+            /// <summary>Campaign speed step 1 (2, review): per column (contract orientation), the texture row a side pixel must
+            /// be ABOVE to be settled empty - the collider skyline plus <see cref="SkylineMarginPx"/>; -1 where no collider
+            /// projects into the column. Null: no skyline, nothing settled. Built by BuildSkyline, dropped by
+            /// ReleaseTexture.</summary>
+            public int[] SkyRow;
+
+            /// <summary>Campaign speed step 1 (2, re-review): per column, the top of the foliage band - SkyRow plus
+            /// <see cref="SkylineFoliageMetres"/> projected; above it an empty pixel is settled at once. Null with SkyRow.</summary>
+            public int[] SkyFarRow;
+
+            /// <summary>Campaign speed step 1 (2, re-review): the running campaign's empty counts for this side (texture
+            /// order, contract orientation), or null outside a campaign.</summary>
+            public byte[] EmptyCounts;
+
+            /// <summary>Campaign speed step 1 (2): side pixels whose sidecar now records the step they were seen empty
+            /// from (newly, or from closer than before), for the side's line.</summary>
+            public int SettledEmpty;
         }
 
         // --- the meta file ---------------------------------------------------------------------

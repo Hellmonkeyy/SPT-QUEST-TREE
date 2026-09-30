@@ -261,6 +261,10 @@ namespace QuestTree.QuestGraph
         /// raid".</param>
         private void ReleaseCampaignHold(string map, int captured, int stops, string what)
         {
+            // Campaign speed step 1 (4): every end of a campaign passes here (done, early, stopped, the late capture's
+            // RestoreWhenDone, the raid's OnDestroy) - the held relief goes with it. First, before any early return.
+            MapCapture.CampaignEnds();
+
             var hold = _campaignHold;
             _campaignHold = null;
 
@@ -440,6 +444,10 @@ namespace QuestTree.QuestGraph
         /// </summary>
         private void OnDestroy()
         {
+            // Campaign speed step 1 (4): the raid is gone - whether or not a hold was taken (its rollback switch off), no
+            // campaign relief may survive into the next raid
+            MapCapture.CampaignEnds();
+
             try
             {
                 if (_campaignHold != null)
@@ -996,6 +1004,10 @@ namespace QuestTree.QuestGraph
 
             try
             {
+                // Campaign speed step 1 (4): a new campaign session - its first stop casts the relief, later stops reuse it.
+                // Inside the try (review), so the finally's ReleaseCampaignHold -> CampaignEnds follows it whatever happens.
+                MapCapture.CampaignBegins();
+
                 _cancelRequested = false;
                 _raidTimeUnreadableSaid = false;
                 _acceptingCancel = true;

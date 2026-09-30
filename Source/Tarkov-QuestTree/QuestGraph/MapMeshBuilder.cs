@@ -927,6 +927,26 @@ namespace QuestTree.QuestGraph
         /// when the derived cap binds over the union.</summary>
         internal const double RetargetSeconds = 10d;
 
+        /// <summary>Campaign speed step 1 (3): a re-target - a deliberate REDUCTION of an over-served stored building -
+        /// replaces the stored copy only when what it stores has fewer triangles. MapMeshIndex.ReplaceAccepted's re-target
+        /// rule asks only that the grade be no worse, so a present re-target whose decimation stopped at the error limit
+        /// and fell back to the source as it is (the stored copy IS that source as it is) replaced the building with
+        /// itself: "added 3, replaced 3, 3 re-targeted" at every Customs stop, the new row's RetargetTried back at 0, the
+        /// plan picking the same three again the next stop, and the mesh never Unchanged. Refused instead, the attempt is
+        /// recorded on the stored row (RecordTried -> RecordRetarget), so the plan does not pick it again until its target
+        /// moves. Off (rollback): the old rule.</summary>
+        private static readonly bool RetargetMustReduce = true;
+
+        /// <summary>Campaign speed step 1 (4): inside a campaign (Request.ReliefSession not 0) the relief rays are cast
+        /// at the first stop only and every later stop of the same campaign, in the same raid, with the same extent,
+        /// bands and masks, reuses that cast (heights, distance bytes and counts) - colliders do not stream out (see the
+        /// header), so a recast gave the same heights for 2.4 s a Customs stop. The distance bytes are the FIRST stop's, kept
+        /// as they are (review): the heights are identical at every stop because colliders do not stream, and the distances
+        /// only arbitrate later merges (FillFromBase keeps the closer of them and the stored ones) - recomputing them per
+        /// stop made the relief compare different at every stop (SameRelief), so the mesh was never Unchanged. Off
+        /// (rollback), or outside a campaign: every build casts its own.</summary>
+        private static readonly bool ReuseCampaignRelief = true;
+
         /// <summary>WP2 candidate kinds (Classify): not stored; stored and unchanged (not read again); stored but
         /// degraded or under its target now (re-read, replacing it); stored but its geometry signature changed (re-read,
         /// replacing it).</summary>
@@ -1128,6 +1148,11 @@ namespace QuestTree.QuestGraph
             /// <summary>WP2 (7): the raid's LOD map and path hashes, kept across this raid's builds (see
             /// <see cref="CacheFor"/>). Null keeps them for this build only, as before.</summary>
             internal SceneCache Scene = null;
+
+            /// <summary>Campaign speed step 1 (4): the capture campaign this build is a stop of (MapCapture.CampaignBegins),
+            /// or 0 outside one. Not 0: the first build of the session casts the relief and keeps it; the later ones reuse
+            /// it (<see cref="ReuseCampaignRelief"/>).</summary>
+            internal int ReliefSession;
         }
 
         /// <summary>What a build produced. <see cref="File"/> is null when nothing usable was
@@ -1136,6 +1161,10 @@ namespace QuestTree.QuestGraph
         {
             /// <summary>The mesh, ready to be written, or null.</summary>
             internal MapMeshFile File;
+
+            /// <summary>Campaign speed step 1 (2, review): the collider tops of this build's relief grid (every band's
+            /// highest hit per cell), for the side views' skyline; null when the relief was not cast or reused.</summary>
+            internal ColliderTops Tops;
 
             /// <summary>Cells across every band.</summary>
             internal long Cells;
@@ -1313,7 +1342,11 @@ namespace QuestTree.QuestGraph
             // on Customs for a band of -3.5..8.5) and a range changed after a value was quantised
             // silently moves it.
 
-            for (var i = 0; i < job.Bands.Count; i++)
+            // Campaign speed step 1 (4): a later stop of a campaign takes the first stop's cast; a throw casts as before
+            var reused = false;
+            Step(job, "the campaign's relief", () => reused = TakeCampaignRelief(job));
+
+            for (var i = 0; i < job.Bands.Count && !reused; i++)
             {
                 var band = job.Bands[i];
 
@@ -1324,6 +1357,12 @@ namespace QuestTree.QuestGraph
                     yield return null;
                 }
             }
+
+            // BEFORE anything writes into the grids (FillFromBase, the quantisation): the cast as it came back
+            if (!reused) Step(job, "keeping the campaign's relief", () => KeepCampaignRelief(job));
+
+            // the side views' collider skyline, cast or reused
+            Step(job, "the collider tops", () => MakeTops(job, result));
 
             Step(job, "the relief's log line", () => ReportRelief(job));
 
@@ -1824,6 +1863,12 @@ namespace QuestTree.QuestGraph
             internal int Rays;
             internal int Hits;
             internal readonly Stopwatch ReliefClock = new Stopwatch();
+
+            /// <summary>Campaign speed step 1 (4): the relief was taken from the campaign's first stop (no ray cast), and
+            /// what that cast took.</summary>
+            internal bool ReliefReused;
+
+            internal double ReliefReusedCastMs;
             internal readonly Stopwatch BuildingClock = new Stopwatch();
 
             internal int Kept;
@@ -2471,6 +2516,12 @@ namespace QuestTree.QuestGraph
             internal ushort[] Codes;
             internal byte[] Distance;
 
+            /// <summary>Campaign speed step 1 (2, review): per cell, the HIGHEST collider any of its ray's hits met, NaN where
+            /// none - whatever the relief picked (the ground under a roof, on the top band). Colliders never stream out, so
+            /// this is the scene's solid skyline whether or not a building is drawn now; the side views settle an empty
+            /// pixel only above it (MapCapture.BuildSkyline). Dropped once <see cref="Result.Tops"/> is made.</summary>
+            internal float[] TopY;
+
             /// <summary>WP2: the cells filled from the stored relief (this cast left them empty), and how many.</summary>
             internal bool[] FromBase;
 
@@ -2584,6 +2635,11 @@ namespace QuestTree.QuestGraph
             /// <summary>WP2 (fixes 4): its attempt was recorded on its stored row already (RecordTried runs from more than one
             /// place; an unclean attempt must be counted once).</summary>
             internal bool AttemptRecorded;
+
+            /// <summary>Campaign speed step 1 (3, review): a re-target refused because it stored no fewer triangles than its
+            /// stored copy (RetargetMustReduce) - recorded as tried even when the attempt was not clean, since reading it
+            /// again gives the same source and the same refusal.</summary>
+            internal bool RetargetGainedNothing;
 
             /// <summary>WP2: the stored building it was matched to, whatever its kind.</summary>
             internal StoredEntry Matched;
@@ -3164,7 +3220,8 @@ namespace QuestTree.QuestGraph
                     Height = height,
                     Metres = new float[width * height],
                     Codes = new ushort[width * height],
-                    Distance = new byte[width * height]
+                    Distance = new byte[width * height],
+                    TopY = new float[width * height]
                 };
 
                 // EMPTY, not zero. A new float[] is full of zeros, and zero is a perfectly good height
@@ -3178,6 +3235,7 @@ namespace QuestTree.QuestGraph
                 {
                     work.Metres[n] = float.NaN;
                     work.Distance[n] = MapMeshFile.DistanceEmpty;
+                    work.TopY[n] = float.NaN;
                 }
 
                 job.Bands.Add(work);
@@ -3395,6 +3453,17 @@ namespace QuestTree.QuestGraph
 
                     if (saturated) band.Saturated++;
 
+                    // Campaign speed step 1 (2, review): the highest collider met, whichever hit the relief keeps
+                    if (band.TopY != null && used > 0)
+                    {
+                        var top = ys[0];
+                        for (var k = 1; k < used; k++)
+                            if (ys[k] > top)
+                                top = ys[k];
+
+                        band.TopY[n] = top;
+                    }
+
                     if (chosen < 0)
                     {
                         band.Metres[n] = float.NaN;
@@ -3593,6 +3662,227 @@ namespace QuestTree.QuestGraph
         private static float CellCentreZ(Job job, int row) =>
             (float)(job.Request.MinZ + (row + 0.5d) * job.CellMetres);
 
+        /// <summary>Campaign speed step 1 (2, review): the highest collider per relief cell, over every band - Y[row * Width +
+        /// col], NaN for none; the cell centred at (MinX + (col + 0.5) CellMetres, MinZ + (row + 0.5) CellMetres).</summary>
+        internal sealed class ColliderTops
+        {
+            internal float[] Y;
+            internal int Width;
+            internal int Height;
+            internal double CellMetres;
+            internal double MinX;
+            internal double MinZ;
+        }
+
+        /// <summary>Campaign speed step 1 (2, review): Result.Tops from the bands' TopY - only when every band's every cell was
+        /// cast (or reused), so a gap is never read as sky - and the per-band arrays dropped.</summary>
+        /// <param name="job">The build, its relief cast.</param>
+        /// <param name="result">The result.</param>
+        private static void MakeTops(Job job, Result result)
+        {
+            if (job.Bands.Count == 0) return;
+
+            var first = job.Bands[0];
+            var ok = true;
+            foreach (var band in job.Bands)
+                if (band.TopY == null || band.Done != band.Cells || band.Width != first.Width || band.Height != first.Height)
+                    ok = false;
+
+            if (ok)
+            {
+                var y = (float[])first.TopY.Clone();
+
+                for (var b = 1; b < job.Bands.Count; b++)
+                {
+                    var other = job.Bands[b].TopY;
+                    for (var n = 0; n < y.Length; n++)
+                        if (!float.IsNaN(other[n]) && (float.IsNaN(y[n]) || other[n] > y[n]))
+                            y[n] = other[n];
+                }
+
+                result.Tops = new ColliderTops
+                {
+                    Y = y, Width = first.Width, Height = first.Height, CellMetres = job.CellMetres,
+                    MinX = job.Request.MinX, MinZ = job.Request.MinZ,
+                };
+            }
+
+            foreach (var band in job.Bands) band.TopY = null;
+        }
+
+        /// <summary>Campaign speed step 1 (4): one campaign's relief as its first stop cast it - every band's heights in
+        /// metres and distance bytes, the counts the relief line and the y range read, and what identifies the cast (the
+        /// session, the raid's GameWorld, and <see cref="ReliefKey"/>). About 5 bytes a cell: 12 MB on Customs.</summary>
+        private sealed class CampaignRelief
+        {
+            internal int Session;
+            internal object World;
+            internal string Key;
+            internal float[][] Metres;
+            internal byte[][] Distance;
+            internal float[][] TopY;
+            internal int[] Hits;
+            internal int[] Saturated;
+            internal int[] BelowFloor;
+            internal int[] Anchored;
+            internal int[][] Thin;
+            internal int Rays;
+            internal float Lowest;
+            internal float Highest;
+            internal double CastMs;
+        }
+
+        /// <summary>Campaign speed step 1 (4): the running campaign's relief, or null. Main thread only.</summary>
+        private static CampaignRelief _campaignRelief;
+
+        /// <summary>Campaign speed step 1 (4): drops the held relief - a campaign starting or ending (MapCapture).</summary>
+        internal static void ForgetRelief() => _campaignRelief = null;
+
+        /// <summary>Campaign speed step 1 (4): everything a cast's result depends on besides the colliders - the map, the
+        /// recipe, the extent, the cell, the ray and ground masks, and every band's level, heights, camera, depth, kind
+        /// and grid. Exact (the bits of every float), so any difference casts afresh.</summary>
+        /// <param name="job">The build, prepared.</param>
+        private static string ReliefKey(Job job)
+        {
+            var r = job.Request;
+            var key = new System.Text.StringBuilder();
+            var inv = CultureInfo.InvariantCulture;
+
+            key.Append(r.Map).Append('|').Append(MeshRecipe).Append('|')
+                .Append(MapMeshIndex.Bits(r.MinX).ToString(inv)).Append(',').Append(MapMeshIndex.Bits(r.MinZ).ToString(inv)).Append(',')
+                .Append(MapMeshIndex.Bits(r.MaxX).ToString(inv)).Append(',').Append(MapMeshIndex.Bits(r.MaxZ).ToString(inv)).Append('|')
+                .Append(MapMeshIndex.Bits(job.CellMetres).ToString(inv)).Append('|')
+                .Append(job.RayMask.ToString(inv)).Append(',').Append(job.GroundMask.ToString(inv)).Append(',')
+                .Append(TerrainAnchoredGround ? '1' : '0');
+
+            foreach (var band in job.Bands)
+            {
+                var b = band.Source;
+                key.Append('|').Append(b.Level.ToString(inv)).Append(',')
+                    .Append(MapMeshIndex.Bits(b.MinY).ToString(inv)).Append(',').Append(MapMeshIndex.Bits(b.MaxY).ToString(inv)).Append(',')
+                    .Append(MapMeshIndex.Bits(b.CameraY).ToString(inv)).Append(',').Append(MapMeshIndex.Bits(b.DepthBelow).ToString(inv))
+                    .Append(',').Append(b.Interior ? '1' : '0').Append(',')
+                    .Append(band.Width.ToString(inv)).Append('x').Append(band.Height.ToString(inv));
+            }
+
+            return key.ToString();
+        }
+
+        /// <summary>Campaign speed step 1 (4): the first stop's cast into this build's grids, when this build is a later stop
+        /// of the same campaign in the same raid and nothing the cast depends on has changed. Everything is checked before
+        /// anything is written, so false leaves the grids as Prepare made them and the rays are cast as before.</summary>
+        /// <param name="job">The build, prepared.</param>
+        private static bool TakeCampaignRelief(Job job)
+        {
+            var session = job.Request.ReliefSession;
+            var world = job.Request.Scene?.World;
+            var held = _campaignRelief;
+
+            if (!ReuseCampaignRelief || session == 0 || world == null || held == null) return false;
+            if (session != MapCapture.LiveCampaignSession) return false;
+            if (held.Session != session || !ReferenceEquals(held.World, world)) return false;
+            if (held.Metres == null || held.Metres.Length != job.Bands.Count) return false;
+            if (!string.Equals(held.Key, ReliefKey(job), StringComparison.Ordinal)) return false;
+
+            for (var i = 0; i < job.Bands.Count; i++)
+            {
+                var band = job.Bands[i];
+                if (held.Metres[i] == null || held.Metres[i].Length != band.Cells || band.Metres == null || band.Metres.Length != band.Cells ||
+                    held.Distance[i] == null || held.Distance[i].Length != band.Cells ||
+                    held.TopY[i] == null || held.TopY[i].Length != band.Cells || band.TopY == null || band.TopY.Length != band.Cells ||
+                    band.Distance == null || band.Distance.Length != band.Cells || held.Thin[i] == null ||
+                    held.Thin[i].Length != band.ThinTally.Length)
+                    return false;
+            }
+
+            for (var i = 0; i < job.Bands.Count; i++)
+            {
+                var band = job.Bands[i];
+
+                Array.Copy(held.Metres[i], band.Metres, band.Cells);
+                Array.Copy(held.TopY[i], band.TopY, band.Cells);
+                Array.Copy(held.Thin[i], band.ThinTally, band.ThinTally.Length);
+
+                // The first stop's distance bytes, as they are - NOT recomputed from this stop's player (review): the heights
+                // are the same at every stop (colliders do not stream) and the distances only arbitrate later merges, while a
+                // per-stop recompute made SameRelief fail at every stop and the mesh never Unchanged.
+                Array.Copy(held.Distance[i], band.Distance, band.Cells);
+
+                band.Hits = held.Hits[i];
+                band.Saturated = held.Saturated[i];
+                band.BelowFloor = held.BelowFloor[i];
+                band.Anchored = held.Anchored[i];
+                band.Done = band.Cells;
+            }
+
+            job.Rays = held.Rays;
+            job.Lowest = held.Lowest;
+            job.Highest = held.Highest;
+            job.ReliefReused = true;
+            job.ReliefReusedCastMs = held.CastMs;
+
+            return true;
+        }
+
+        /// <summary>Campaign speed step 1 (4): a campaign stop's COMPLETE cast, copied and held for the campaign's later
+        /// stops - only inside a campaign and only when every band's every cell was cast (a chunk that failed is cast
+        /// again next stop, as before).</summary>
+        /// <param name="job">The build, its rays cast.</param>
+        private static void KeepCampaignRelief(Job job)
+        {
+            var session = job.Request.ReliefSession;
+            var world = job.Request.Scene?.World;
+
+            if (!ReuseCampaignRelief || session == 0 || world == null || job.Bands.Count == 0) return;
+
+            // (review) a build still running when its campaign ended (or a new one began) must not store for a dead session
+            if (session != MapCapture.LiveCampaignSession) return;
+
+            var cells = 0L;
+            foreach (var band in job.Bands)
+            {
+                if (band.Done != band.Cells || band.Metres == null || band.Distance == null || band.TopY == null) return;
+                cells += band.Cells;
+            }
+
+            if (cells != job.Rays) return;
+
+            var n = job.Bands.Count;
+            var held = new CampaignRelief
+            {
+                Session = session,
+                World = world,
+                Key = ReliefKey(job),
+                Metres = new float[n][],
+                Distance = new byte[n][],
+                TopY = new float[n][],
+                Hits = new int[n],
+                Saturated = new int[n],
+                BelowFloor = new int[n],
+                Anchored = new int[n],
+                Thin = new int[n][],
+                Rays = job.Rays,
+                Lowest = job.Lowest,
+                Highest = job.Highest,
+                CastMs = job.ReliefClock.Elapsed.TotalMilliseconds,
+            };
+
+            for (var i = 0; i < n; i++)
+            {
+                var band = job.Bands[i];
+                held.Metres[i] = (float[])band.Metres.Clone();
+                held.Distance[i] = (byte[])band.Distance.Clone();
+                held.TopY[i] = (float[])band.TopY.Clone();
+                held.Thin[i] = (int[])band.ThinTally.Clone();
+                held.Hits[i] = band.Hits;
+                held.Saturated[i] = band.Saturated;
+                held.BelowFloor[i] = band.BelowFloor;
+                held.Anchored[i] = band.Anchored;
+            }
+
+            _campaignRelief = held;
+        }
+
         /// <summary>The relief's one log line: the grid, the rays, the time and the hit rate. The hit
         /// rate is the number to read - phase 3-0 measured 100 % on Customs from either end, and
         /// anything well under that on a later map is a mask or a band that wants looking at.</summary>
@@ -3617,7 +3907,10 @@ namespace QuestTree.QuestGraph
                 $"{(first == null ? 0 : first.Width)}x{(first == null ? 0 : first.Height)} cells at " +
                 $"{job.CellMetres.ToString("0.0#", CultureInfo.InvariantCulture)} m (derived from the {N(job.Request.MaxX - job.Request.MinX)} x " +
                 $"{N(job.Request.MaxZ - job.Request.MinZ)} m extent and the {N(MapMeshFile.MaxCellsPerBand)}-cell band cap), " +
-                $"{N(job.Rays)} rays in {N(job.ReliefClock.Elapsed.TotalMilliseconds)} ms, " +
+                (job.ReliefReused
+                    ? $"reused from this campaign's first stop (no ray cast here; its {N(job.Rays)} rays took " +
+                      $"{N(job.ReliefReusedCastMs)} ms), "
+                    : $"{N(job.Rays)} rays in {N(job.ReliefClock.Elapsed.TotalMilliseconds)} ms, ") +
                 $"{Pct(job.Hits, job.Rays)} hit; bands: {BandShares(job)}{BelowNotes(job)}{AnchoredNotes(job)}.");
 
             // Said only when it happened, and per band: the evidence for whether InteriorMaxHits is
@@ -5822,6 +6115,9 @@ namespace QuestTree.QuestGraph
                 }
             }
 
+            // Campaign speed step 1 (3): which stored buildings the plan re-targets, each named once a session at Debug
+            Step(job, "the re-targets' names", () => NoteRetargets(job, union, plan));
+
             // WP8 (D3): the over-budget pool, as on the from-scratch path
             job.OverBudgetPool = (long)(job.Cap * (1 - BudgetShare) * 0.5);
 
@@ -6013,6 +6309,75 @@ namespace QuestTree.QuestGraph
             return any;
         }
 
+        /// <summary>Campaign speed step 1 (3): the stored buildings already named by <see cref="NoteRetargets"/> or
+        /// <see cref="NoteRetargetRefused"/> this session - each is named once, however many stops pick it.</summary>
+        private static readonly HashSet<string> RetargetsNamed = new HashSet<string>(StringComparer.Ordinal);
+
+        /// <summary>Campaign speed step 1 (3): at Debug, the stored buildings this build's union plan re-targets that have not
+        /// been named before this session - the one line that says WHICH buildings churn when "re-targeted" keeps
+        /// appearing at every stop: its row, path (present) or path hash (absent), stored, source and target triangles,
+        /// and whether it is re-read or re-decimated in place.</summary>
+        /// <param name="job">The build.</param>
+        /// <param name="union">The union the plan was made over.</param>
+        /// <param name="plan">The plan.</param>
+        private static void NoteRetargets(Job job, List<UnionItem> union, AreaBudget.UnionPlan plan)
+        {
+            if (union == null || plan?.Retarget == null) return;
+
+            var inv = CultureInfo.InvariantCulture;
+            var named = new List<string>();
+
+            for (var k = 0; k < union.Count && k < plan.Retarget.Length; k++)
+            {
+                if (!plan.Retarget[k]) continue;
+
+                var e = union[k].Entry;
+                if (e?.Meta == null) continue;
+
+                var present = e.ReplacedBy != null && e.ReplacedBy.Retarget && e.ReplacedBy.Renderer != null;
+                var who = present
+                    ? $"'{HierarchyPath(e.ReplacedBy.Renderer.transform)}'"
+                    : $"path hash {e.Meta.PathHash.ToString("x16", inv)}";
+
+                var id = $"{job.Request.Map}|{e.Meta.PathHash.ToString("x16", inv)}|{e.Index.ToString(inv)}";
+                if (!RetargetsNamed.Add(id)) continue;
+
+                named.Add($"row {e.Index.ToString(inv)} {who} stored {N(e.Meta.StoredTriangles)} of {N(e.Meta.SourceTriangles)} " +
+                          $"source, target {N(plan.Targets[k])}, retarget tried at {N(e.Meta.RetargetTried)}, " +
+                          (present ? "re-read" : "re-decimated in place"));
+            }
+
+            if (named.Count > 0)
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: {job.Request.Map} re-targets {named.Count} over-served stored building(s) not named before this " +
+                    $"session: {string.Join(" | ", named.ToArray())}.");
+        }
+
+        /// <summary>Campaign speed step 1 (3): at Debug, once a session per building, a re-target refused for storing no
+        /// fewer triangles than the copy it would replace.</summary>
+        /// <param name="job">The build.</param>
+        /// <param name="c">The re-read.</param>
+        /// <param name="e">The stored copy.</param>
+        /// <param name="kept">What the re-read would store.</param>
+        private static void NoteRetargetRefused(Job job, Candidate c, StoredEntry e, long kept)
+        {
+            try
+            {
+                var inv = CultureInfo.InvariantCulture;
+                if (!RetargetsNamed.Add($"refused|{job.Request.Map}|{e.Meta.PathHash.ToString("x16", inv)}|{e.Index.ToString(inv)}")) return;
+
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: {job.Request.Map}'s re-target of row {e.Index.ToString(inv)} " +
+                    $"'{(c.Renderer != null ? HierarchyPath(c.Renderer.transform) : "?")}' is refused - it would store {N(kept)} " +
+                    $"triangle(s), no fewer than the {N(e.Meta.StoredTriangles)} stored; the stored copy is kept and the attempt " +
+                    $"recorded at target {N(c.Target)}.");
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug($"QuestTree: a refused re-target could not be named ({ex.Message}).");
+            }
+        }
+
         /// <summary>WP2 (fixes 2): a re-read that did not replace its stored copy records the attempt on it - the target
         /// and the level it was read at - so it is not read again until the target grows or a finer level is read.
         /// WP2 (fixes 3): only a CLEAN attempt (<see cref="Candidate.CleanAttempt"/>); an unclean one leaves the row untried,
@@ -6029,7 +6394,7 @@ namespace QuestTree.QuestGraph
 
             if (c.Retarget)
             {
-                if (c.CleanAttempt) RecordRetarget(job, e, target);
+                if (c.CleanAttempt || c.RetargetGainedNothing) RecordRetarget(job, e, target);
                 return;
             }
 
@@ -8064,9 +8429,21 @@ namespace QuestTree.QuestGraph
             // is stored changes nothing (so a scene read twice is Unchanged). A changed signature replaces whatever it is.
             var hasUv = world.UV != null && world.TriMat != null && world.UV.Length == vertices * 2 && world.TriMat.Length == kept;
 
+            // Campaign speed step 1 (3): a re-target that stores no fewer triangles than the copy it would replace reduces
+            // nothing - refused, and recorded as tried (RecordTried), rather than replacing the building with itself
+            var retargetGainsNothing = RetargetMustReduce && replaced != null && candidate.Retarget &&
+                                       candidate.Kind != KindChanged && kept >= replaced.Meta.StoredTriangles;
+
+            if (retargetGainsNothing)
+            {
+                candidate.RetargetGainedNothing = true;
+                NoteRetargetRefused(job, candidate, replaced, kept);
+            }
+
             if (replaced != null &&
-                !MapMeshIndex.ReplaceAccepted(candidate.Kind == KindChanged ? MapMeshIndex.ReasonChanged : candidate.Reason, grade,
-                    replaced.Meta.Grade, kept, replaced.Meta.StoredTriangles, hasUv))
+                (retargetGainsNothing ||
+                 !MapMeshIndex.ReplaceAccepted(candidate.Kind == KindChanged ? MapMeshIndex.ReasonChanged : candidate.Reason, grade,
+                     replaced.Meta.Grade, kept, replaced.Meta.StoredTriangles, hasUv)))
             {
                 job.UpgradesRefused++;
                 RecordTried(job, candidate);
