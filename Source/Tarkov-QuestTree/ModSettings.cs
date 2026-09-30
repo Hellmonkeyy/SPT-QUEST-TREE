@@ -325,6 +325,16 @@ namespace QuestTree
         /// rather than assumed.</summary>
         public static ConfigEntry<KeyboardShortcut> ProbeKey { get; private set; }
 
+        /// <summary>THROWAWAY. The key of QuestGraph/MenuSceneProbe.cs, which asks whether a raid map's built-in scenes can be
+        /// loaded additively in the MAIN MENU (no raid, no GameWorld) and what arrives with them. Unbound by default, F12 and
+        /// the cfg only (not in Entries). Delete with MenuSceneProbe.cs, together with <see cref="MenuSceneProbeLevels"/> and
+        /// the one line in TrackerHotkey.Update.</summary>
+        public static ConfigEntry<KeyboardShortcut> MenuSceneProbeKey { get; private set; }
+
+        /// <summary>THROWAWAY, with <see cref="MenuSceneProbeKey"/>: the build indices the probe loads, as a comma list. "17"
+        /// is Customs' custom_Terrain.</summary>
+        public static ConfigEntry<string> MenuSceneProbeLevels { get; private set; }
+
         /// <summary>Which of the two quest marks the boxes wear. Kappa is the canonical list;
         /// Collector is what this install actually gates Collector behind, which a quest mod can
         /// make a very different set.</summary>
@@ -1046,6 +1056,20 @@ namespace QuestTree
                 "layers and puts a small test view on screen (press again to close it). It writes " +
                 "BepInEx/plugins/QuestTree/captures/<map>.meshprobe.txt and captures/menu.meshprobe.txt and " +
                 "will be removed again; nothing in the mod depends on it.");
+
+            // THROWAWAY, to be deleted with QuestGraph/MenuSceneProbe.cs. Unbound, and out of Entries like ProbeKey.
+            MenuSceneProbeKey = config.Bind(
+                "Advanced", "Menu scene probe key (throwaway)", KeyboardShortcut.Empty,
+                "Debug only, and temporary. Pressed in the MAIN MENU (never in a raid or the hideout), it loads the map scenes " +
+                "listed below additively, logs what arrived (renderers, terrains, colliders, lights, memory, errors), then " +
+                "unloads them again. Its lines start \"QuestTree: [menu scene probe]\" in BepInEx/LogOutput.log. Nothing in the " +
+                "mod depends on it and it will be removed again. Restart the game after using this, before any raid.");
+
+            MenuSceneProbeLevels = config.Bind(
+                "Advanced", "Menu scene probe levels (throwaway)", "17",
+                "Debug only, and temporary. The build indices (a comma list) the menu scene probe loads, one at a time. " +
+                "17 is Customs' terrain scene. Only scenes under Assets/Content/Locations/ are accepted. Restart the game after using " +
+                "this, before any raid.");
 
             // WP2: the 3D mesh's accumulation - out of Entries, so the in-panel Settings tab shows no row for them; F12 and
             // the cfg file only.
