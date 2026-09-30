@@ -59,10 +59,13 @@ namespace QuestTree.QuestGraph
         /// only bounds a pathological chain.</summary>
         private const int MaxPresetDepth = 8;
 
-        /// <summary>Scenes whose name (or rcid) ends in one of these are not loaded: audio-only, culling-bake and design
-        /// scenes carry nothing a map capture draws, and they cost load time and memory. A suffix rule on scene names,
-        /// never a map name. Rollback: an empty array loads every scene of the preset.</summary>
-        internal static readonly string[] SkippedSceneSuffixes = { "_Sound", "_Culling", "_DesignMain" };
+        /// <summary>Scenes whose name (or rcid) ends in one of these are not loaded: audio-only and culling-bake scenes
+        /// carry nothing a map capture draws, and they cost load time and memory. A suffix rule on scene names, never a map
+        /// name. Rollback: an empty array loads every scene of the preset.
+        ///
+        /// _DesignMain is NOT skipped (play-test 2026-09-30): it holds the BorderZones and ExfiltrationPoints - 0 of 5 and
+        /// 0 of 29 on Customs without it - which the capture's labels and MapExtentProbe's fallback extent read.</summary>
+        internal static readonly string[] SkippedSceneSuffixes = { "_Sound", "_Culling" };
 
         /// <summary>Always loaded whatever <see cref="SkippedSceneSuffixes"/> says: the NavMesh lives only in the _AI scene,
         /// and the capture's extent and floors come from it.</summary>
@@ -533,6 +536,9 @@ namespace QuestTree.QuestGraph
         /// blocks run) and the map is unloaded, so a wedged capture never leaves the menu holding a map.</summary>
         internal const double WhileLoadedCapSeconds = 1800d;
 
+        /// <summary>How many times the unload goes round for scenes that appeared during it before it gives up and says so.</summary>
+        internal const int MaxUnloadPasses = 8;
+
         /// <summary>A scene that appeared during the run: what the unload takes down.</summary>
         internal sealed class Hosted
         {
@@ -681,6 +687,7 @@ namespace QuestTree.QuestGraph
             else if (Busy) refusal = "a run is still going";
             else if (!InMenu(out var why)) refusal = $"{why}. It runs in the main menu only";
             else if (RestartAdvised != null) refusal = $"an earlier run could not restore the menu ({RestartAdvised}). RESTART THE GAME first";
+            else if (whileLoaded != null && WorldSet(out var world)) refusal = WorkRefusal(world);
 
             if (refusal != null) return false;
 
@@ -704,6 +711,34 @@ namespace QuestTree.QuestGraph
                 return false;
             }
         }
+
+        /// <summary>Whether any GameWorld is the singleton - a raid's, or a HideoutGameWorld outliving a hideout visit. The
+        /// menu gate allows the latter for a bare host run, but work while loaded (a capture) must not start: the hosted
+        /// scenes' lamps and windows register into a live world as they load and wake, before the capture could refuse.
+        /// Checked before anything loads. A test that throws counts as set.</summary>
+        internal static bool WorldSet(out string world)
+        {
+            world = null;
+
+            try
+            {
+                var instance = Singleton<GameWorld>.Instance;
+                if (instance == null) return false;
+
+                world = instance.GetType().Name;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                world = $"unknown ({ex.GetType().Name})";
+                return true;
+            }
+        }
+
+        /// <summary>The refusal for work while loaded under a GameWorld.</summary>
+        internal static string WorkRefusal(string world) =>
+            $"a GameWorld is set ({world}) - a menu capture runs only before the hideout or a raid has been visited; restart " +
+            "the game and capture from the main menu";
 
         /// <summary>Hosts <paramref name="locationId"/>'s map in the main menu: resolves its scenes, loads them all additively
         /// one at a time, runs <paramref name="whileLoaded"/> (may be null; phase M2's capture; capped at
@@ -746,6 +781,7 @@ namespace QuestTree.QuestGraph
 
                 if (!InMenu(out var why)) ctx.Refusal = $"{why} - it runs in the main menu only";
                 else if (RestartAdvised != null) ctx.Refusal = $"an earlier run could not restore the menu ({RestartAdvised}) - RESTART THE GAME first";
+                else if (whileLoaded != null && WorldSet(out var world)) ctx.Refusal = WorkRefusal(world);
 
                 if (ctx.Refusal == null)
                 {
@@ -1051,37 +1087,67 @@ namespace QuestTree.QuestGraph
                 Log($"{unasked.Count} scene(s) appeared that were not requested (streamed in, or loaded by a hosted script) - " +
                     $"unloaded with the rest: {string.Join(", ", unasked)}.");
 
-            for (var i = ctx.Appeared.Count - 1; i >= 0; i--)
+            // Repeated until nothing is left (M1 review): a scene that appears WHILE the others unload - loaded by a script
+            // of a hosted scene on its way out - is caught by the next pass's diff and unloaded too. A scene whose unload
+            // failed is not retried (its trouble is already said), so the passes end; MaxUnloadPasses bounds a scene that
+            // keeps loading another.
+            var failed = new HashSet<int>();
+
+            for (var pass = 1; ; pass++)
             {
-                var hosted = ctx.Appeared[i];
-                var scene = hosted.Scene;
+                if (pass > 1) DiffScenes(ctx);
 
-                if (!IsLoaded(scene))
+                var pending = ctx.Appeared.Count(h => !failed.Contains(h.Scene.handle));
+                if (pending == 0) break;
+
+                if (pass > MaxUnloadPasses)
                 {
-                    Log($"unload '{hosted.Name}': not loaded (any more) - nothing to do.");
-                    ctx.Appeared.RemoveAt(i);
-                    continue;
+                    ctx.Trouble.Add($"scenes kept appearing through {MaxUnloadPasses} unload passes");
+                    break;
                 }
 
-                var clock = Stopwatch.StartNew();
-                AsyncOperation op = null;
+                if (pass > 1)
+                    Log($"unload pass {pass}: {pending} scene(s) appeared during the unload - " +
+                        string.Join(", ", ctx.Appeared.Where(h => !failed.Contains(h.Scene.handle)).Select(h => $"'{h.Name}'")) + ".");
 
-                if (!Try($"UnloadSceneAsync('{hosted.Name}')", () => op = SceneManager.UnloadSceneAsync(scene)) || op == null)
+                for (var i = ctx.Appeared.Count - 1; i >= 0; i--)
                 {
-                    ctx.Trouble.Add($"'{hosted.Name}' could not be unloaded (no operation)");
-                    continue;
+                    var hosted = ctx.Appeared[i];
+                    var scene = hosted.Scene;
+
+                    if (failed.Contains(scene.handle)) continue;
+
+                    if (!IsLoaded(scene))
+                    {
+                        Log($"unload '{hosted.Name}': not loaded (any more) - nothing to do.");
+                        ctx.Appeared.RemoveAt(i);
+                        continue;
+                    }
+
+                    var clock = Stopwatch.StartNew();
+                    AsyncOperation op = null;
+
+                    if (!Try($"UnloadSceneAsync('{hosted.Name}')", () => op = SceneManager.UnloadSceneAsync(scene)) || op == null)
+                    {
+                        failed.Add(scene.handle);
+                        ctx.Trouble.Add($"'{hosted.Name}' could not be unloaded (no operation)");
+                        continue;
+                    }
+
+                    while (!op.isDone && clock.Elapsed.TotalSeconds < TimeoutSeconds) yield return Tick();
+
+                    if (!op.isDone)
+                    {
+                        failed.Add(scene.handle);
+                        ctx.Trouble.Add($"'{hosted.Name}''s unload did not finish in {TimeoutSeconds:0} s");
+                        continue;
+                    }
+
+                    // By reference, not by index: a scene that appeared during this unload was appended to the list (the
+                    // sceneLoaded handler), so the index may have moved - never past i, but said plainly.
+                    ctx.Appeared.Remove(hosted);
+                    Log($"unloaded '{hosted.Name}' in {clock.ElapsedMilliseconds} ms. {Memory()}");
                 }
-
-                while (!op.isDone && clock.Elapsed.TotalSeconds < TimeoutSeconds) yield return Tick();
-
-                if (!op.isDone)
-                {
-                    ctx.Trouble.Add($"'{hosted.Name}''s unload did not finish in {TimeoutSeconds:0} s");
-                    continue;
-                }
-
-                ctx.Appeared.RemoveAt(i);
-                Log($"unloaded '{hosted.Name}' in {clock.ElapsedMilliseconds} ms. {Memory()}");
             }
 
             yield return Tick();
@@ -1172,6 +1238,740 @@ namespace QuestTree.QuestGraph
             if (ReferenceEquals(_current, ctx)) _current = null;
             RestartAdvised = why;
             Log($"EMERGENCY UNLOAD ({why}): started for [{string.Join(", ", started)}], not waited for. RESTART THE GAME ADVISED.");
+        }
+
+        // --- stage M2: waking the hosted scenes for a capture ------------------------------------------------------------
+
+        /// <summary>The location's own Id for <paramref name="locationId"/> as typed ("interchange" gives "Interchange") -
+        /// the key a raid capture of it is filed under (Player.Location / GameWorld.LocationId). Null with the reason when the
+        /// session has no such location. Never throws.</summary>
+        internal static string LocationKey(string locationId, out string why)
+        {
+            why = null;
+
+            try
+            {
+                if (string.IsNullOrWhiteSpace(locationId))
+                {
+                    why = "no location id was given";
+                    return null;
+                }
+
+                var location = FindLocation(locationId.Trim(), out why);
+                if (location == null) return null;
+
+                if (string.IsNullOrEmpty(location.Id))
+                {
+                    why = $"the location '{locationId}' has no Id";
+                    return null;
+                }
+
+                return location.Id;
+            }
+            catch (Exception ex)
+            {
+                why = $"finding the location threw {ex.GetType().Name}: {ex.Message}";
+                return null;
+            }
+        }
+
+        /// <summary>The scenes the run in progress has loaded - the map's, never the menu's (a baseline scene is never in
+        /// <see cref="RunContext.Appeared"/>). Empty outside a run.</summary>
+        internal static List<Scene> HostedScenes()
+        {
+            var ctx = _current;
+            var scenes = new List<Scene>();
+            if (ctx == null) return scenes;
+
+            foreach (var hosted in ctx.Appeared)
+            {
+                if (!IsLoaded(hosted.Scene)) continue;
+                if (ctx.BaselineHandles != null && ctx.BaselineHandles.Contains(hosted.Scene.handle)) continue;
+                if (scenes.Any(s => s.handle == hosted.Scene.handle)) continue;
+                scenes.Add(hosted.Scene);
+            }
+
+            return scenes;
+        }
+
+        /// <summary>Objects (renderers, transforms, activations, restores) handled between two yields of the wake and its
+        /// restore, so a map of 200,000 renderers never freezes the menu for seconds in one frame. Every yield goes
+        /// through the host's driver (<see cref="Tick"/>).</summary>
+        internal const int WakeChunk = 5000;
+
+        /// <summary>Stage M2 rollback: false wakes nothing, and a menu capture draws the hosted scenes as they loaded (with
+        /// Interchange's interiors switched off - play-test 2026-09-30).</summary>
+        internal static readonly bool WakeHostedScenes = true;
+
+        /// <summary>Stage M2 (review): the broad second pass - every inactive ancestor of capture geometry, every switched-off
+        /// capture-layer renderer, terrain and LOD group - on top of the culler lists. Off: the pass only COUNTS what it would
+        /// wake beyond the culler lists, so a play-test says whether the narrow rule is enough.</summary>
+        internal static readonly bool MenuWakeAllInactive = false;
+
+        /// <summary>Stage M2 (review) rollback: false leaves the menu's own capture-layer renderers drawing into the capture.</summary>
+        internal static readonly bool HideMenuGeometry = true;
+
+        /// <summary>
+        /// What the wake changed, as one journal in the order it was changed - so <see cref="Restore"/> undoes exactly
+        /// that, newest first, and nothing else. Each entry is recorded BEFORE its switch, so one whose Awake/OnEnable threw
+        /// after it went active is still put back. The restore can be spread over frames (<see cref="RestoreSpread"/>);
+        /// <see cref="Restore"/> finishes whatever is left at once, is idempotent and never throws - the menu capture calls
+        /// it from its whole-run finally.
+        /// </summary>
+        internal sealed class Wake
+        {
+            internal enum Kind
+            {
+                MenuHidden,
+                CullerDisabled,
+                Activated,
+                RendererEnabled,
+                ForceOffCleared,
+                TerrainEnabled,
+                LodEnabled,
+                AudioMuted,
+            }
+
+            private struct Entry
+            {
+                internal UnityEngine.Object Item;
+                internal Kind Kind;
+            }
+
+            private readonly List<Entry> _journal = new List<Entry>();
+            private readonly int[] _counts = new int[Enum.GetValues(typeof(Kind)).Length];
+
+            /// <summary>The hosted scenes' handles when the wake began: a woken entry anywhere else is said after the
+            /// restore.</summary>
+            internal HashSet<int> HostedHandles = new HashSet<int>();
+
+            private int _undone;
+            private int _back, _gone, _failed;
+            private string _first;
+            private bool _finished;
+            private Stopwatch _clock;
+
+            internal int Count(Kind kind) => _counts[(int)kind];
+
+            internal int Changes => _journal.Count;
+
+            /// <summary>Records one switch about to be made.</summary>
+            internal void Record(UnityEngine.Object item, Kind kind)
+            {
+                _journal.Add(new Entry { Item = item, Kind = kind });
+                _counts[(int)kind]++;
+            }
+
+            /// <summary>The woken entries that are switched off again - a script or a culler undid them - for the line
+            /// just before the first tile.</summary>
+            internal string StillOff()
+            {
+                int objects = 0, renderers = 0, forced = 0, lods = 0;
+
+                foreach (var e in _journal)
+                {
+                    try
+                    {
+                        if (e.Item == null) continue;
+
+                        switch (e.Kind)
+                        {
+                            case Kind.Activated when !((GameObject)e.Item).activeSelf: objects++; break;
+                            case Kind.RendererEnabled when !((Renderer)e.Item).enabled: renderers++; break;
+                            case Kind.ForceOffCleared when ((Renderer)e.Item).forceRenderingOff: forced++; break;
+                            case Kind.LodEnabled when !((LODGroup)e.Item).enabled: lods++; break;
+                        }
+                    }
+                    catch (Exception)
+                    {
+                        // A destroyed entry says nothing about the wake.
+                    }
+                }
+
+                return $"{objects} of {Count(Kind.Activated)} woken object(s) inactive again, {renderers} of " +
+                       $"{Count(Kind.RendererEnabled)} renderer(s) disabled again, {forced} of {Count(Kind.ForceOffCleared)} " +
+                       $"forceRenderingOff set again, {lods} of {Count(Kind.LodEnabled)} LODGroup(s) disabled again";
+            }
+
+            /// <summary>The restore, <see cref="WakeChunk"/> entries a frame.</summary>
+            internal IEnumerator RestoreSpread()
+            {
+                while (!Step(WakeChunk)) yield return Tick();
+                Finish();
+            }
+
+            /// <summary>Finishes the restore now (whatever <see cref="RestoreSpread"/> did not get to). Never throws.</summary>
+            internal void Restore()
+            {
+                try
+                {
+                    Step(int.MaxValue);
+                }
+                catch (Exception ex)
+                {
+                    _failed++;
+                    if (_first == null) _first = $"{ex.GetType().Name}: {ex.Message}";
+                }
+
+                Finish();
+            }
+
+            /// <summary>Undoes up to <paramref name="budget"/> entries, newest first. True when none is left.</summary>
+            private bool Step(int budget)
+            {
+                if (_clock == null) _clock = Stopwatch.StartNew();
+
+                for (var n = 0; n < budget && _undone < _journal.Count; n++)
+                {
+                    var e = _journal[_journal.Count - 1 - _undone];
+                    _undone++;
+
+                    if (e.Item == null)
+                    {
+                        _gone++;
+                        continue;
+                    }
+
+                    try
+                    {
+                        switch (e.Kind)
+                        {
+                            case Kind.MenuHidden: ((Renderer)e.Item).forceRenderingOff = false; break;
+                            case Kind.CullerDisabled: ((Behaviour)e.Item).enabled = true; break;
+                            case Kind.Activated: ((GameObject)e.Item).SetActive(false); break;
+                            case Kind.RendererEnabled: ((Renderer)e.Item).enabled = false; break;
+                            case Kind.ForceOffCleared: ((Renderer)e.Item).forceRenderingOff = true; break;
+                            case Kind.TerrainEnabled: ((Terrain)e.Item).enabled = false; break;
+                            case Kind.LodEnabled: ((LODGroup)e.Item).enabled = false; break;
+                            case Kind.AudioMuted: ((Behaviour)e.Item).enabled = true; break;
+                        }
+
+                        _back++;
+                    }
+                    catch (Exception ex)
+                    {
+                        // Deactivating runs OnDisable; one that throws must not stop the rest going back.
+                        _failed++;
+                        if (_first == null) _first = $"{ex.GetType().Name}: {ex.Message}";
+                    }
+                }
+
+                return _undone >= _journal.Count;
+            }
+
+            /// <summary>The restore's line, the foreign-scene check, and a restart advised when a switch would not go back.
+            /// Once.</summary>
+            private void Finish()
+            {
+                if (_finished) return;
+                _finished = true;
+
+                try
+                {
+                    if (_journal.Count == 0) return;
+
+                    Log($"wake restored: {_back} of {_journal.Count} switch(es) put back - " +
+                        string.Join(", ", Enum.GetValues(typeof(Kind)).Cast<Kind>().Where(k => Count(k) > 0).Select(k => $"{k} {Count(k)}")) +
+                        $"; {_gone} destroyed since, {_failed} threw{(_first != null ? $" (first: {_first})" : "")}; " +
+                        $"{_clock?.ElapsedMilliseconds ?? 0} ms.");
+
+                    // The wake touches the hosted scenes only (the menu's renderers are MenuHidden, on purpose): anything
+                    // else in the journal is an object that moved scene while woken, or a rule that reached too far.
+                    var foreign = new List<string>();
+                    var foreignCount = 0;
+
+                    foreach (var e in _journal)
+                    {
+                        if (e.Kind == Kind.MenuHidden || e.Item == null) continue;
+
+                        var go = e.Item as GameObject ?? (e.Item as Component)?.gameObject;
+                        if (go == null || HostedHandles.Contains(go.scene.handle)) continue;
+
+                        foreignCount++;
+                        if (foreign.Count < 10) foreign.Add($"{e.Kind} '{go.name}' in '{go.scene.name}'");
+                    }
+
+                    if (foreignCount > 0)
+                        Log($"wake: {foreignCount} restored entry(ies) are not in a hosted scene: {string.Join("; ", foreign)}.");
+
+                    if (_failed > 0 && RestartAdvised == null)
+                        RestartAdvised = $"{_failed} of the menu capture's wake switch(es) could not be put back";
+                }
+                catch (Exception ex)
+                {
+                    Plugin.LogSource?.LogWarning($"{_voice}the wake's restore line failed ({ex.GetType().Name}: {ex.Message}).");
+                }
+                finally
+                {
+                    _journal.Clear();
+                }
+            }
+        }
+
+        /// <summary>What the survey of the hosted scenes found, for the wake and its lines.</summary>
+        private sealed class WakeSurvey
+        {
+            internal readonly HashSet<Transform> Needed = new HashSet<Transform>();
+            internal readonly List<GameObject> Inactive = new List<GameObject>();
+            internal readonly List<Renderer> Geometry = new List<Renderer>();
+            internal readonly List<Terrain> Terrains = new List<Terrain>();
+            internal readonly List<LODGroup> Lods = new List<LODGroup>();
+            internal readonly List<DisablerCullingObject> Cullers = new List<DisablerCullingObject>();
+        }
+
+        /// <summary>Renderer types that draw effects, never a surface of the map: never woken. By name, as MeasureScene
+        /// reads AudioSource, so no module reference is needed.</summary>
+        private static readonly HashSet<string> EffectRenderers = new HashSet<string>(StringComparer.Ordinal)
+        {
+            "ParticleSystemRenderer", "TrailRenderer", "LineRenderer", "VFXRenderer",
+        };
+
+        private static bool IsGeometry(Renderer r, int mask) =>
+            r != null && (mask & (1 << r.gameObject.layer)) != 0 && !EffectRenderers.Contains(r.GetType().Name);
+
+        /// <summary>
+        /// Stage M2: readies the hosted map for a capture in the menu, recording every switch in <paramref name="wake"/>
+        /// for <see cref="Wake.Restore"/>. In order:
+        ///   1. the MENU's own renderers on a capture layer (its scenes and DontDestroyOnLoad) get forceRenderingOff, so the
+        ///      capture camera never draws the menu into the map, wherever they stand;
+        ///   2. the hosted scenes are surveyed, <see cref="WakeChunk"/> objects a frame;
+        ///   3. every DisablerCullingObject in the hosted scenes that owns a switched-off target, or sits in an inactive
+        ///      hierarchy the wake may switch on, is DISABLED - that unregisters it from the game's culling system
+        ///      (BaseSystemComponent.OnDisable), so no ManualUpdate switches its targets back off during the capture;
+        ///   4. the NARROW wake: the union of every hosted culler's _gameObjectsToTurnOff (activated when inactive) and
+        ///      _componentsToTurnOff / _compsToTurnOffWhoIgnoreInversedColliders (DisablerCullingObject.cs:20-30): a
+        ///      capture-layer Renderer enabled and its forceRenderingOff cleared, a LODGroup enabled, a capture-layer Terrain
+        ///      enabled; lights and other behaviours are left to MapCapture's own per-floor hold, as in a raid. A Perfect
+        ///      Culling renderer is woken only when a culler lists it;
+        ///   5. the BROAD pass (<see cref="MenuWakeAllInactive"/>): every inactive ancestor of capture geometry and every
+        ///      switched-off capture-layer renderer, terrain and LOD group. Off by default - it only counts what it would
+        ///      wake beyond step 4;
+        ///   6. every enabled AudioSource under a woken object is disabled (muted) for the capture.
+        /// The capture layers are MapCapture's own mask, so Triggers, CullingMask and the collider layers never count; effect
+        /// renderers never do either. Each activation is guarded on its own and counted (Awake/OnEnable run, as in
+        /// MapCapture.HoldScene); the exceptions the game logs meanwhile are counted from the host's log capture.
+        /// </summary>
+        /// <param name="wake">Where the switches are recorded.</param>
+        /// <param name="mask">The capture's culling mask (MapCapture.MenuCaptureMask).</param>
+        internal static IEnumerator WakeHosted(Wake wake, int mask)
+        {
+            if (!WakeHostedScenes)
+            {
+                Log("wake: switched off (WakeHostedScenes) - the hosted scenes are captured as they loaded.");
+                yield break;
+            }
+
+            var clock = Stopwatch.StartNew();
+            var errorsBefore = ErrorCounts();
+            List<Scene> scenes = null;
+
+            if (!Try("finding the hosted scenes", () => scenes = HostedScenes()) || scenes == null || scenes.Count == 0)
+            {
+                Log("wake: no hosted scene is loaded - nothing was switched on.");
+                yield break;
+            }
+
+            wake.HostedHandles = new HashSet<int>(scenes.Select(s => s.handle));
+
+            // 1. The menu's own geometry out of the picture.
+            if (HideMenuGeometry)
+            {
+                var hiding = HideMenuSide(wake, mask);
+                while (hiding.MoveNext()) yield return hiding.Current;
+            }
+
+            // 2. The survey, a chunk a frame.
+            var survey = new WakeSurvey();
+            var surveying = SurveyHosted(scenes, mask, survey);
+            while (surveying.MoveNext()) yield return surveying.Current;
+
+            var surveyMs = clock.ElapsedMilliseconds;
+            var throws = 0;
+            string firstThrow = null;
+
+            void Threw(Exception ex)
+            {
+                throws++;
+                if (firstThrow == null) firstThrow = $"{ex.GetType().Name}: {ex.Message}";
+            }
+
+            // The culler lists' union, in the hosted scenes only.
+            var objects = new List<GameObject>();
+            var objectSet = new HashSet<GameObject>();
+            var components = new List<Component>();
+            var componentSet = new HashSet<Component>();
+            var owning = new HashSet<DisablerCullingObject>();
+            var otherComponents = 0;
+
+            foreach (var culler in survey.Cullers)
+            {
+                try
+                {
+                    if (culler == null) continue;
+
+                    foreach (var go in culler._gameObjectsToTurnOff ?? new List<GameObject>())
+                    {
+                        if (go == null || go.activeSelf || !wake.HostedHandles.Contains(go.scene.handle)) continue;
+                        owning.Add(culler);
+                        if (objectSet.Add(go)) objects.Add(go);
+                    }
+
+                    foreach (var list in new[] { culler._componentsToTurnOff, culler._compsToTurnOffWhoIgnoreInversedColliders })
+                    foreach (var c in list ?? new List<Component>())
+                    {
+                        if (c == null || !wake.HostedHandles.Contains(c.gameObject.scene.handle)) continue;
+
+                        var off =
+                            c is Renderer r ? IsGeometry(r, mask) && (!r.enabled || r.forceRenderingOff) :
+                            c is LODGroup g ? !g.enabled :
+                            c is Terrain t ? (mask & (1 << t.gameObject.layer)) != 0 && !t.enabled :
+                            false;
+
+                        if (!(c is Renderer) && !(c is LODGroup) && !(c is Terrain))
+                        {
+                            otherComponents++;
+                            continue;
+                        }
+
+                        if (!off) continue;
+                        owning.Add(culler);
+                        if (componentSet.Add(c)) components.Add(c);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Threw(ex);
+                }
+            }
+
+            // 3. The cullers that could switch the wake back off: one owning a target it is about to lose, or one in an
+            // inactive hierarchy (activated, it would register and apply "not entered" - everything off).
+            foreach (var culler in survey.Cullers)
+            {
+                try
+                {
+                    if (culler == null || !culler.enabled) continue;
+                    if (!owning.Contains(culler) && culler.gameObject.activeInHierarchy) continue;
+
+                    wake.Record(culler, Wake.Kind.CullerDisabled);
+                    culler.enabled = false;
+                }
+                catch (Exception ex)
+                {
+                    Threw(ex);
+                }
+            }
+
+            yield return Tick();
+
+            // 4. The narrow wake: the culler lists.
+            var sinceYield = 0;
+
+            foreach (var go in objects)
+            {
+                try
+                {
+                    // A script woken earlier may have switched it on itself: only a still-inactive one is ours to record.
+                    if (go == null || go.activeSelf) continue;
+
+                    wake.Record(go, Wake.Kind.Activated);
+                    go.SetActive(true);
+                }
+                catch (Exception ex)
+                {
+                    Threw(ex);
+                }
+
+                if (++sinceYield < WakeChunk) continue;
+                sinceYield = 0;
+                yield return Tick();
+            }
+
+            foreach (var c in components) WakeComponent(wake, c, Threw);
+
+            var narrowMs = clock.ElapsedMilliseconds;
+            var hiddenByParent = objects.Count(o => o != null && o.activeSelf && !o.activeInHierarchy) +
+                                 components.Count(c => c != null && !c.gameObject.activeInHierarchy);
+
+            yield return Tick();
+
+            // 5. The broad pass - applied only with MenuWakeAllInactive, counted always.
+            var wouldObjects = 0;
+            var wouldComponents = 0;
+
+            foreach (var go in survey.Inactive)
+            {
+                if (go == null || go.activeSelf || !survey.Needed.Contains(go.transform)) continue;
+                wouldObjects++;
+
+                if (!MenuWakeAllInactive) continue;
+
+                try
+                {
+                    wake.Record(go, Wake.Kind.Activated);
+                    go.SetActive(true);
+                }
+                catch (Exception ex)
+                {
+                    Threw(ex);
+                }
+
+                if (++sinceYield < WakeChunk) continue;
+                sinceYield = 0;
+                yield return Tick();
+            }
+
+            foreach (var r in survey.Geometry)
+            {
+                if (r == null || (r.enabled && !r.forceRenderingOff)) continue;
+                wouldComponents++;
+                if (MenuWakeAllInactive) WakeComponent(wake, r, Threw);
+            }
+
+            foreach (var t in survey.Terrains)
+            {
+                if (t == null || t.enabled) continue;
+                wouldComponents++;
+                if (MenuWakeAllInactive) WakeComponent(wake, t, Threw);
+            }
+
+            foreach (var g in survey.Lods)
+            {
+                if (g == null || g.enabled) continue;
+                wouldComponents++;
+                if (MenuWakeAllInactive) WakeComponent(wake, g, Threw);
+            }
+
+            yield return Tick();
+
+            // 6. Muted: an audio source a woken object started (by name - the project references no audio module).
+            var muted = new HashSet<Behaviour>();
+            var woken = objects.Where(o => o != null && o.activeInHierarchy).ToList();
+            if (MenuWakeAllInactive) woken.AddRange(survey.Inactive.Where(o => o != null && o.activeInHierarchy));
+
+            foreach (var go in woken)
+            {
+                try
+                {
+                    foreach (var b in go.GetComponentsInChildren<Behaviour>(false))
+                    {
+                        if (b == null || !b.enabled || b.GetType().Name != "AudioSource" || !muted.Add(b)) continue;
+                        wake.Record(b, Wake.Kind.AudioMuted);
+                        b.enabled = false;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Threw(ex);
+                }
+
+                if (++sinceYield < WakeChunk) continue;
+                sinceYield = 0;
+                yield return Tick();
+            }
+
+            var errors = ErrorCounts();
+
+            Log($"wake: {scenes.Count} hosted scene(s), capture mask 0x{mask:X8}, {survey.Cullers.Count} culling object(s), " +
+                $"{wake.Count(Wake.Kind.CullerDisabled)} disabled for the capture. NARROW (the culler lists): " +
+                $"{objects.Count} inactive object(s) and {components.Count} switched-off renderer/LOD/terrain target(s) - " +
+                $"{wake.Count(Wake.Kind.Activated)} object(s) activated, {wake.Count(Wake.Kind.RendererEnabled)} renderer(s) enabled, " +
+                $"{wake.Count(Wake.Kind.ForceOffCleared)} forceRenderingOff cleared, {wake.Count(Wake.Kind.LodEnabled)} LODGroup(s) " +
+                $"and {wake.Count(Wake.Kind.TerrainEnabled)} terrain(s) enabled; {otherComponents} other listed component(s) " +
+                $"(lights, scripts) left to the capture's own hold; {hiddenByParent} target(s) still under an inactive parent. " +
+                $"BROAD ({(MenuWakeAllInactive ? "APPLIED" : "counted only")}): {wouldObjects} more inactive ancestor(s) of " +
+                $"capture geometry and {wouldComponents} more switched-off renderer/terrain/LOD group(s) beyond the lists. " +
+                $"{wake.Count(Wake.Kind.AudioMuted)} audio source(s) muted; {throws} switch(es) threw" +
+                $"{(firstThrow != null ? $" (first: {firstThrow})" : "")}, {errors[0] - errorsBefore[0]} exception(s) and " +
+                $"{errors[1] - errorsBefore[1]} error(s) logged by the game meanwhile; survey {surveyMs} ms, narrow " +
+                $"{narrowMs - surveyMs} ms, total {clock.ElapsedMilliseconds} ms. {Memory()}");
+        }
+
+        /// <summary>One culler-listed (or broad) component switched on: a capture-layer renderer enabled and its
+        /// forceRenderingOff cleared, a LODGroup or capture-layer terrain enabled. Recorded before each switch.</summary>
+        private static void WakeComponent(Wake wake, Component c, Action<Exception> threw)
+        {
+            try
+            {
+                switch (c)
+                {
+                    case Renderer r:
+                        if (!r.enabled)
+                        {
+                            wake.Record(r, Wake.Kind.RendererEnabled);
+                            r.enabled = true;
+                        }
+
+                        if (r.forceRenderingOff)
+                        {
+                            wake.Record(r, Wake.Kind.ForceOffCleared);
+                            r.forceRenderingOff = false;
+                        }
+
+                        break;
+
+                    case LODGroup g when !g.enabled:
+                        wake.Record(g, Wake.Kind.LodEnabled);
+                        g.enabled = true;
+                        break;
+
+                    case Terrain t when !t.enabled:
+                        wake.Record(t, Wake.Kind.TerrainEnabled);
+                        t.enabled = true;
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                threw(ex);
+            }
+        }
+
+        /// <summary>The survey, one root at a time, yielding whenever <see cref="WakeChunk"/> objects have been read: every
+        /// capture-layer renderer and terrain marks itself and its parents as needed (the broad rule), every inactive
+        /// GameObject is listed parents first (GetComponentsInChildren is depth-first pre-order), and every culling object
+        /// is listed.</summary>
+        private static IEnumerator SurveyHosted(List<Scene> scenes, int mask, WakeSurvey survey)
+        {
+            var read = 0;
+
+            foreach (var scene in scenes)
+            {
+                GameObject[] roots = null;
+                if (!Try("listing a hosted scene's roots", () => roots = IsLoaded(scene) ? scene.GetRootGameObjects() : null) ||
+                    roots == null)
+                    continue;
+
+                foreach (var root in roots)
+                {
+                    Try("surveying a hosted root", () => read += SurveyRoot(root, mask, survey));
+
+                    if (read < WakeChunk) continue;
+                    read = 0;
+                    yield return Tick();
+                }
+            }
+        }
+
+        /// <summary>One root of <see cref="SurveyHosted"/>; returns how many objects it read.</summary>
+        private static int SurveyRoot(GameObject root, int mask, WakeSurvey survey)
+        {
+            if (root == null) return 0;
+
+            var read = 0;
+
+            foreach (var r in root.GetComponentsInChildren<Renderer>(true))
+            {
+                read++;
+                if (!IsGeometry(r, mask)) continue;
+                survey.Geometry.Add(r);
+                MarkUp(r.transform, survey.Needed);
+            }
+
+            foreach (var t in root.GetComponentsInChildren<Terrain>(true))
+            {
+                read++;
+                if (t == null || (mask & (1 << t.gameObject.layer)) == 0) continue;
+                survey.Terrains.Add(t);
+                MarkUp(t.transform, survey.Needed);
+            }
+
+            // After the marks: a group counts when capture geometry is at or beneath it.
+            foreach (var g in root.GetComponentsInChildren<LODGroup>(true))
+            {
+                read++;
+                if (g != null && survey.Needed.Contains(g.transform)) survey.Lods.Add(g);
+            }
+
+            foreach (var c in root.GetComponentsInChildren<DisablerCullingObject>(true))
+                if (c != null) survey.Cullers.Add(c);
+
+            foreach (var t in root.GetComponentsInChildren<Transform>(true))
+            {
+                read++;
+                if (t != null && !t.gameObject.activeSelf) survey.Inactive.Add(t.gameObject);
+            }
+
+            return read;
+        }
+
+        /// <summary>Marks <paramref name="t"/> and every parent, stopping at the first already marked (its parents are).</summary>
+        private static void MarkUp(Transform t, HashSet<Transform> needed)
+        {
+            for (var walk = t; walk != null; walk = walk.parent)
+                if (!needed.Add(walk)) return;
+        }
+
+        /// <summary>Hides the MENU's own renderers from the capture: every renderer on a capture layer in a scene that is not
+        /// hosted, and in DontDestroyOnLoad, gets forceRenderingOff for the capture (recorded, put back by the restore) -
+        /// inside the map's rectangle or not, and whether active or not, so none can switch on into the picture. Logs how
+        /// many, and the bounds of the ones that were drawing.</summary>
+        private static IEnumerator HideMenuSide(Wake wake, int mask)
+        {
+            var roots = new List<GameObject>();
+
+            Try("listing the menu's own roots", () =>
+            {
+                for (var i = 0; i < SceneManager.sceneCount; i++)
+                {
+                    var scene = SceneManager.GetSceneAt(i);
+                    if (!IsLoaded(scene) || wake.HostedHandles.Contains(scene.handle)) continue;
+                    roots.AddRange(scene.GetRootGameObjects());
+                }
+
+                roots.AddRange(DdolRoots());
+            });
+
+            int hidden = 0, drawing = 0, read = 0, failed = 0;
+            var bounds = new Bounds();
+
+            foreach (var root in roots)
+            {
+                Renderer[] renderers = null;
+                if (!Try("listing a menu root's renderers", () => renderers = root != null ? root.GetComponentsInChildren<Renderer>(true) : null) ||
+                    renderers == null)
+                    continue;
+
+                foreach (var r in renderers)
+                {
+                    read++;
+
+                    try
+                    {
+                        if (r == null || r.forceRenderingOff || (mask & (1 << r.gameObject.layer)) == 0) continue;
+
+                        if (r.enabled && r.gameObject.activeInHierarchy)
+                        {
+                            var b = r.bounds;
+                            if (Finite(b.center) && Finite(b.size))
+                            {
+                                if (drawing == 0) bounds = b;
+                                else bounds.Encapsulate(b);
+                                drawing++;
+                            }
+                        }
+
+                        wake.Record(r, Wake.Kind.MenuHidden);
+                        r.forceRenderingOff = true;
+                        hidden++;
+                    }
+                    catch (Exception)
+                    {
+                        failed++;
+                    }
+                }
+
+                if (read < WakeChunk) continue;
+                read = 0;
+                yield return Tick();
+            }
+
+            Log($"menu side: {hidden} renderer(s) on capture layers outside the hosted scenes (the menu's own scenes and " +
+                $"DontDestroyOnLoad) hidden for the capture (forceRenderingOff), {drawing} of them drawing" +
+                (drawing > 0
+                    ? $", bounds x {F(bounds.min.x)}..{F(bounds.max.x)} z {F(bounds.min.z)}..{F(bounds.max.z)} y {F(bounds.min.y)}..{F(bounds.max.y)}"
+                    : "") +
+                (failed > 0 ? $"; {failed} would not switch" : "") + ".");
         }
 
         // --- the measurements --------------------------------------------------------------------------------------------

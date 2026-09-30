@@ -1107,6 +1107,11 @@ namespace QuestTree.QuestGraph
             /// here becomes its distance byte.</summary>
             internal Vector2 From;
 
+            /// <summary>Stage M2: every relief cell records distance step 0 instead of its distance from
+            /// <see cref="From"/> - a main-menu capture, which sees the whole map loaded, as its pictures do
+            /// (MapCapture.StepZero). False (the default) for every raid capture: steps exactly as before.</summary>
+            internal bool StepZero;
+
             /// <summary>The culling mask the PICTURE was drawn with - MapCapture's own, so a building
             /// in the mesh is a building in the picture. Big Red's shell is on HighPolyCollider, which
             /// is why this is the render mask and not the raycast one.</summary>
@@ -3540,7 +3545,7 @@ namespace QuestTree.QuestGraph
                     var dx = hit.point.x - from.x;
                     var dz = hit.point.z - from.y;
 
-                    band.Distance[n] = MapMeshFile.DistanceStep(Mathf.Sqrt(dx * dx + dz * dz));
+                    band.Distance[n] = job.Request.StepZero ? (byte)0 : MapMeshFile.DistanceStep(Mathf.Sqrt(dx * dx + dz * dz));
 
                     if (hit.point.y < job.Lowest) job.Lowest = hit.point.y;
                     if (hit.point.y > job.Highest) job.Highest = hit.point.y;

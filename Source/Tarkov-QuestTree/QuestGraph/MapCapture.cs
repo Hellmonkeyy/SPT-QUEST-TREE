@@ -1110,7 +1110,202 @@ namespace QuestTree.QuestGraph
             }
         }
 
+        // --- stage M2: the capture in the main menu ------------------------------------------------------------------
+
+        /// <summary>Stage M2a (review): what a menu capture's key adds to the location's Id - "bigmap-menu" - so it writes a
+        /// set of its own beside the raid set (its own captures folder), never merging into or winning over the raid
+        /// pictures while its lighting is not yet the menu rig. No upload is offered for it either. The Maps tab never asks
+        /// for such a key (MapCatalog looks sets up by the viewed location's id), so it is scanned and counted but not
+        /// drawn. Stage M2b/M3 decides when a menu capture writes the location's own key; "" does that now.</summary>
+        internal const string MenuCaptureKeySuffix = "-menu";
+
+        /// <summary>
+        /// Stage M2: one main-menu capture - what stands in for the raid's GameWorld. The map key (the location's Id plus
+        /// <see cref="MenuCaptureKeySuffix"/>), the identity the mesh builder's scene cache is keyed on (a raid keys it on
+        /// its GameWorld; each menu capture is its own "world"), <see cref="MenuMode"/>, which every menu branch of this
+        /// file reads, and the hook the wake's check runs from just before the first tile.
+        /// </summary>
+        internal sealed class MenuSession
+        {
+            /// <summary>The location id as it was asked for (the throwaway setting's text).</summary>
+            internal readonly string LocationId;
+
+            /// <summary>The capture's key: the location's own Id plus <see cref="MenuCaptureKeySuffix"/>.</summary>
+            internal readonly string Key;
+
+            /// <summary>What the scene cache is keyed on in place of a GameWorld.</summary>
+            internal readonly object Identity = new object();
+
+            /// <summary>Always true for a session: the flag the plan copies (Plan.MenuMode).</summary>
+            internal readonly bool MenuMode = true;
+
+            /// <summary>Run once, just before the capture's first tile - RunMenuCapture sets it to the wake's "switched
+            /// off again" count.</summary>
+            internal Action BeforeFirstTile;
+
+            /// <param name="locationId">As asked for.</param>
+            /// <param name="locationKey">The location's own Id (MenuMapHost.LocationKey).</param>
+            internal MenuSession(string locationId, string locationKey)
+            {
+                LocationId = locationId;
+                Key = locationKey + MenuCaptureKeySuffix;
+            }
+        }
+
+        /// <summary>Stage M2: adds a capture component for <paramref name="session"/> to a new root object of the ACTIVE
+        /// scene - the menu's own, since MenuMapHost loads every map scene additively and never makes one active - so the
+        /// map's unload never takes it. Nothing relies on it ticking (a plugin-made object may not tick in the menu -
+        /// memory ddol-objects-dead-in-menu): <see cref="RunMenuCapture"/> hands its run to MenuMapHost's work loop,
+        /// which runs on TrackerHotkey's coroutine. Null, with the reason, when it cannot be made.</summary>
+        /// <param name="session">The menu capture.</param>
+        /// <param name="why">Why nothing was installed.</param>
+        internal static MapCapture InstallForMenu(MenuSession session, out string why)
+        {
+            why = null;
+
+            try
+            {
+                if (session == null)
+                {
+                    why = "no menu session";
+                    return null;
+                }
+
+                if (ModEnvironment.IsHeadlessClient)
+                {
+                    why = "a headless client has no menu to capture from";
+                    return null;
+                }
+
+                if (IsCapturing)
+                {
+                    why = "a map capture is already running";
+                    return null;
+                }
+
+                // Any GameWorld at all - a raid's, or the hideout's, which can outlive a hideout visit - is a world the
+                // capture's scene-wide reads (FindObjectsOfType) would reach into beside the hosted map.
+                var world = Comfort.Common.Singleton<GameWorld>.Instance;
+                if (world != null)
+                {
+                    why = $"a GameWorld is set ({world.GetType().Name}) - restart the game and capture from the main menu " +
+                          "before visiting the hideout or a raid";
+                    return null;
+                }
+
+                var go = new GameObject("QuestTreeMenuMapCapture");
+                var runner = go.AddComponent<MapCapture>();
+                runner._menu = session;
+
+                // IsCapturing finds this one rather than an older reference.
+                _current = runner;
+                return runner;
+            }
+            catch (Exception ex)
+            {
+                why = $"{ex.GetType().Name}: {ex.Message}";
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Stage M2: a whole capture of the map MenuMapHost has loaded in the main menu - floors, 3D mesh, sides, the write
+        /// - for <c>MenuMapHost.Run(location, () =&gt; MapCapture.RunMenuCapture(session))</c>. Before the capture the
+        /// hosted scenes' switched-off geometry is switched on (MenuMapHost.WakeHosted: EFT hides interiors by culling
+        /// around a player the menu does not have), and in the finally - whatever ended the run, including the host
+        /// disposing it - the capture is cleaned up first (its own finally, innermost), then every switch is put back and
+        /// the component is destroyed. The lighting is today's (the capture's own straight-down light).
+        /// </summary>
+        /// <param name="session">The menu capture.</param>
+        internal static IEnumerator RunMenuCapture(MenuSession session)
+        {
+            const string tag = "QuestTree: menu capture: ";
+            var clock = Stopwatch.StartNew();
+            MapCapture runner = null;
+            var wake = new MenuMapHost.Wake();
+
+            try
+            {
+                runner = InstallForMenu(session, out var why);
+                if (runner == null)
+                {
+                    Plugin.LogSource?.LogWarning($"{tag}nothing was captured - {why}.");
+                    yield break;
+                }
+
+                Plugin.LogSource?.LogInfo($"{tag}{session.Key} (asked for as '{session.LocationId}') - waking the hosted scenes, then capturing.");
+
+                var waking = MenuMapHost.WakeHosted(wake, MenuCaptureMask());
+                while (waking.MoveNext()) yield return waking.Current;
+
+                // (review) whether anything switched the wake back off between the wake and the first tile
+                session.BeforeFirstTile = () =>
+                    Plugin.LogSource?.LogInfo($"{tag}{session.Key} just before the first tile: {wake.StillOff()}.");
+
+                // As the key press sets them: a person asked for this map, so it builds the mesh and takes the sides.
+                runner._running = true;
+                runner._automatic = false;
+                runner._skipMesh = false;
+                runner._verifyMesh = false;
+
+                // Yielded, not started: MenuMapHost's work loop drives a nested enumerator itself, so every frame of the
+                // capture is one of the host's (its dead-run check, its raid test, its cap) and none needs this component
+                // to tick.
+                yield return runner.Run();
+
+                // The capture has cleaned up (its own finally ran as it finished); the switches go back a chunk a frame. The
+                // finally below finishes whatever this did not get to.
+                yield return wake.RestoreSpread();
+
+                Plugin.LogSource?.LogInfo($"{tag}{session.Key} ended after {Ms(clock.Elapsed.TotalMilliseconds)} ms (the capture's own lines above say what it wrote).");
+            }
+            finally
+            {
+                // After the capture's own finally (the host disposes the innermost enumerator first): the capture has let
+                // the scene go before its original switches come back.
+                wake.Restore();
+
+                if (runner != null)
+                {
+                    runner._running = false;
+
+                    try
+                    {
+                        Destroy(runner.gameObject);
+                    }
+                    catch (Exception ex)
+                    {
+                        Plugin.LogSource?.LogWarning($"{tag}its component could not be destroyed ({ex.Message}).");
+                    }
+                }
+            }
+        }
+
+        /// <summary>Stage M2: the mask a menu capture draws with - <see cref="CaptureMask"/> of every layer, exactly what
+        /// <see cref="BuildCamera"/> builds in menu mode - for MenuMapHost.WakeHosted to decide what is geometry. The
+        /// once-a-session layer line is left for the capture itself, as <see cref="ProbeCaptureMask"/> does.</summary>
+        internal static int MenuCaptureMask()
+        {
+            var logged = _loggedLayers;
+
+            try
+            {
+                _loggedLayers = true;
+                return CaptureMask(~0);
+            }
+            finally
+            {
+                _loggedLayers = logged;
+            }
+        }
+
         private GameWorld _gameWorld;
+
+        /// <summary>Stage M2: the main-menu capture this component was installed for (<see cref="InstallForMenu"/>), or null
+        /// for a raid's. Every menu-mode branch in this file asks this, so a raid capture - which never has one - runs
+        /// exactly as before.</summary>
+        private MenuSession _menu;
+
         private bool _running;
         private bool _warnedOnPoll;
 
@@ -3487,6 +3682,9 @@ namespace QuestTree.QuestGraph
             // by the plugin object's poller.
             PollFlush();
 
+            // Stage M2: a menu capture has no key and no player - it is driven by MenuMapHost's work loop, never by a press.
+            if (_menu != null) return;
+
             if (!ModSettings.Ready || ModSettings.CaptureMapKey == null) return;
 
             try
@@ -3535,15 +3733,22 @@ namespace QuestTree.QuestGraph
             Cleanup();
 
             // Campaign speed step 1 (4): this component goes with the raid - a campaign's relief never outlives it, even
-            // when the raid ends mid-capture before MapCampaign's own OnDestroy
-            CampaignEnds();
+            // when the raid ends mid-capture before MapCampaign's own OnDestroy. Stage M2: a menu capture's component is
+            // no raid's and ends no campaign.
+            if (_menu == null) CampaignEnds();
         }
 
         /// <summary>Whether there is a raid with a living player to photograph. A dead player's world
         /// is still loaded, but the screen has moved on and the frames are not the player's to
-        /// spend.</summary>
+        /// spend.
+        ///
+        /// Stage M2: a menu capture skips this test - <see cref="RunMenuCapture"/> starts its run without asking - and a
+        /// menu component answers false here, so neither the key nor <see cref="TryStartCapture"/> can start a raid-style
+        /// capture on it.</summary>
         private bool PlayerIsAlive()
         {
+            if (_menu != null) return false;
+
             try
             {
                 var player = _gameWorld?.MainPlayer;
@@ -3614,6 +3819,22 @@ namespace QuestTree.QuestGraph
                     // capture, and then the loads stay in Develop, as before.
                     var loading = LoadAndPlan(plan, floor);
                     while (loading.MoveNext()) yield return loading.Current;
+
+                    // Stage M2 (review): the menu capture's check of its wake, once, just before the first tile
+                    if (_menu?.BeforeFirstTile != null)
+                    {
+                        var check = _menu.BeforeFirstTile;
+                        _menu.BeforeFirstTile = null;
+
+                        try
+                        {
+                            check();
+                        }
+                        catch (Exception ex)
+                        {
+                            Plugin.LogSource?.LogDebug($"QuestTree: the menu capture's first-tile check failed ({ex.Message}).");
+                        }
+                    }
 
                     // The tiles, the water rule and the scene hold around them - see RenderTiles. The floor phase's
                     // overrun (review F45) is asked before every render, late water tiles included.
@@ -4198,6 +4419,7 @@ namespace QuestTree.QuestGraph
                     WidthPx = widthPx,
                     HeightPx = heightPx,
                     MeshFile = MapMeshFile.FileNameFor(key),
+                    MenuMode = _menu != null && _menu.MenuMode,
                 };
 
                 if (plan.WidthPx < 1 || plan.HeightPx < 1)
@@ -4276,7 +4498,9 @@ namespace QuestTree.QuestGraph
                 // Campaign speed step 2: inside a held campaign the "previous capture" is the held set's meta - the last
                 // stop's, not the file, which is the last checkpoint's - held to the same checks. One that no longer fits
                 // is let go (its stops said lost) and this stop starts from disk, as the first stop of a campaign does.
-                var hold = LiveHold(key);
+                // Stage M2: a menu capture is no campaign stop - it never merges from, joins or starts a campaign's hold,
+                // whatever static a raid left behind; it reads and writes the files on disk.
+                var hold = plan.MenuMode ? null : LiveHold(key);
                 plan.Previous = LoadPrevious(plan, _needsGamma, RenderTag, hold?.Meta);
 
                 if (hold?.Meta != null && plan.Previous == null)
@@ -4286,7 +4510,7 @@ namespace QuestTree.QuestGraph
                     plan.Previous = LoadPrevious(plan, _needsGamma, RenderTag);
                 }
 
-                plan.Hold = hold ?? NewHold(plan);
+                plan.Hold = plan.MenuMode ? null : hold ?? NewHold(plan);
 
                 plan.Captures = plan.Previous == null ? 1 : Math.Max(1, plan.Previous.Captures) + 1;
                 plan.FirstCapturedAt = plan.Previous == null
@@ -4325,6 +4549,9 @@ namespace QuestTree.QuestGraph
                 if (plan.Reach != null) note = $"{note}, reach mask {plan.ReachCellsX}x{plan.ReachCellsZ}";
 
                 if (budgetNote != null) note = $"{note}, {budgetNote}";
+
+                // Stage M2: said in the header, so a set's log says which kind of capture wrote it
+                if (plan.MenuMode) note = $"{note}, MENU capture (every pixel step 0, no stand, no upload)";
 
                 Plugin.LogSource?.LogInfo(
                     $"QuestTree: capturing {key} - {plan.WidthPx}x{plan.HeightPx} px, " +
@@ -9098,7 +9325,19 @@ namespace QuestTree.QuestGraph
         /// <param name="col">The column.</param>
         /// <param name="textureRow">The row, 0 at the bottom.</param>
         private static byte NewStep(Plan plan, float[] dxSquared, float dzSquared, int col, int textureRow) =>
+            StepZero(plan) ? (byte)0 :
             plan.Side != null ? SideSteps(plan, col, textureRow) : Steps(Mathf.Sqrt(dxSquared[col] + dzSquared));
+
+        /// <summary>Stage M2 rollback: false has a menu capture record real distances - from the world origin, since
+        /// there is no player (CapturePoint) - instead of step 0.</summary>
+        private static readonly bool MenuStepZero = true;
+
+        /// <summary>Stage M2: whether every pixel this plan writes records step 0 - a menu capture, which saw the whole
+        /// map loaded with nothing streamed out, so no raid capture can see a pixel better. Step 0 is unbeatable
+        /// (CaptureMerge.Takes is strictly less), so a later raid capture never overwrites a menu pixel, and a side's
+        /// empty pixel settles at 0 as well. A raid plan never has MenuMode, so its steps are exactly as before.</summary>
+        /// <param name="plan">The capture's plan, or a side's own plan (which copies MenuMode).</param>
+        private static bool StepZero(Plan plan) => MenuStepZero && plan != null && plan.MenuMode;
 
         /// <summary>What the picture on disk has at one pixel: its recorded step, its colour, and whether it has a
         /// pixel there at all - the SIDECAR is the authority whenever there is one, the colour test only for a
@@ -9220,6 +9459,10 @@ namespace QuestTree.QuestGraph
         /// <param name="b1">One past the last row.</param>
         private static byte LowerStep(Plan plan, int a0, int a1, int b0, int b1)
         {
+            // Stage M2: every step a menu capture writes is 0, so 0 is also their lower bound - the tile skip then keeps
+            // a tile only where the disk already holds step 0 everywhere (an earlier menu capture).
+            if (StepZero(plan)) return 0;
+
             double xLo, xHi, zLo, zHi;
 
             if (plan.Side == null)
@@ -10460,12 +10703,19 @@ namespace QuestTree.QuestGraph
         /// <param name="note">A phrase for the log describing how the camera was built.</param>
         private bool BuildCamera(Plan plan, out string note)
         {
-            var main = LiveCamera();
+            // Stage M2: in the main menu the "live camera" is the menu's own, whose mask is scene data that would hide the
+            // map (the probe measured it) - so a menu capture copies nothing and draws every layer less the excluded ones.
+            var main = _menu != null ? null : LiveCamera();
             int copied;
 
             _camera = new GameObject("QuestTreeCaptureCamera").AddComponent<Camera>();
 
-            if (main != null)
+            if (_menu != null)
+            {
+                copied = ~0;
+                note = "a bare camera (menu capture: the menu camera's settings and mask are never copied)";
+            }
+            else if (main != null)
             {
                 // Settings only - rendering path, HDR, layer mask, clear flags - and no components.
                 _camera.CopyFrom(main);
@@ -10511,6 +10761,9 @@ namespace QuestTree.QuestGraph
             _camera.depth = -100f;
             var mask = CaptureMask(copied);
             _camera.cullingMask = mask;
+
+            // Stage M2: the mask is the one thing a menu capture decides differently, so it is on the record every time
+            if (_menu != null) note = $"{note}, mask 0x{mask:X8} [{MaskNames(mask)}]";
 
             // Kept for the 3D mesh's building walk, which filters renderers by what the PICTURE draws -
             // see Plan.RenderMask.
@@ -11345,6 +11598,10 @@ namespace QuestTree.QuestGraph
         /// <param name="textureRow">Its texture row, 0 at the picture's BOTTOM.</param>
         private static byte SideSteps(Plan side, int col, int textureRow)
         {
+            // Stage M2: a menu capture's side pixels are step 0 like its floors' (NewStep asks first; this covers any
+            // other caller).
+            if (StepZero(side)) return 0;
+
             var view = side.Side;
 
             MapSideView.GroundPointOf(view.Right, view.Up, view.Frame[0], view.Frame[2], side.Ppm, side.HeightPx,
@@ -11851,6 +12108,9 @@ namespace QuestTree.QuestGraph
 
                     // Campaign speed step 2: the side merges from and into the same held set as its capture
                     Hold = plan.Hold,
+
+                    // Stage M2: a menu capture's sides record step 0 as its floors do (SideSteps)
+                    MenuMode = plan.MenuMode,
                 };
 
                 side.TilesX = (side.SampleWidth + TileSize - 1) / TileSize;
@@ -12880,6 +13140,7 @@ namespace QuestTree.QuestGraph
                     MaxX = plan.Extent.MaxX,
                     MaxZ = plan.Extent.MaxZ,
                     From = plan.From,
+                    StepZero = StepZero(plan),
                     RenderMask = plan.RenderMask,
                     CullingKnown = _culling != null,
                     ProxyRenderers = _culling != null ? _proxyRenderers : null,
@@ -13068,6 +13329,9 @@ namespace QuestTree.QuestGraph
                 MaxX = plan.Extent.MaxX,
                 MaxZ = plan.Extent.MaxZ,
                 From = plan.From,
+
+                // Stage M2: a menu capture's relief cells record step 0, as its pixels do
+                StepZero = StepZero(plan),
                 RenderMask = plan.RenderMask,
 
                 // WP2: what the build adds to, and what it stamps its sidecar with
@@ -13374,12 +13638,14 @@ namespace QuestTree.QuestGraph
                 request.OcclusionCulled = _culling != null ? _occlusionCulled : null;
 
                 // WP2 (7): the raid's LOD map and path hashes, read once a raid rather than once a stop
-                _sceneCache = MapMeshBuilder.CacheFor(_sceneCache, _gameWorld);
+                // Stage M2: a menu capture has no GameWorld - its session's identity keys the cache instead
+                _sceneCache = MapMeshBuilder.CacheFor(_sceneCache, (object)_gameWorld ?? _menu?.Identity);
                 request.Scene = _sceneCache;
 
                 // Campaign speed step 1 (4): inside a campaign the relief is cast at its first stop and reused after; 0 (a
                 // key press, an automatic tick, or no campaign flag) casts it as before
-                request.ReliefSession = _inCampaign ? _campaignSession : 0;
+                // Stage M2: never a campaign's relief for a menu capture - its cells are its own, cast with step 0
+                request.ReliefSession = _inCampaign && _menu == null ? _campaignSession : 0;
 
                 if (request.Bands.Count == 0)
                 {
@@ -14134,15 +14400,25 @@ namespace QuestTree.QuestGraph
                 // this one, so an upload outlives the raid the capture was taken in. While a campaign or
                 // automatic capture holds this map (WP3) the capture is recorded as owed instead, and the
                 // hold's release uploads it once.
-                try
+                // Stage M2 (M2a): a menu capture is not offered yet - stage M2b takes MapTransfer's upload hold around it so
+                // exactly one upload follows the final write. Until then it stays on this machine.
+                if (plan.MenuMode)
                 {
-                    MapTransfer.UploadCapture(plan.Key);
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: the menu capture of {plan.Key} is not offered to the host (menu uploads come in a later stage).");
                 }
-                catch (Exception ex)
+                else
                 {
-                    Plugin.LogSource?.LogDebug(
-                        $"QuestTree: the capture of {plan.Key} could not be offered to the host ({ex.Message}) - it " +
-                        "stays on this machine.");
+                    try
+                    {
+                        MapTransfer.UploadCapture(plan.Key);
+                    }
+                    catch (Exception ex)
+                    {
+                        Plugin.LogSource?.LogDebug(
+                            $"QuestTree: the capture of {plan.Key} could not be offered to the host ({ex.Message}) - it " +
+                            "stays on this machine.");
+                    }
                 }
             }
             catch (Exception ex)
@@ -14662,6 +14938,11 @@ namespace QuestTree.QuestGraph
         /// the server files, the marker payloads and this folder all have to agree on one key.</summary>
         private string MapKey()
         {
+            // Stage M2: a menu capture has no GameWorld - its session carries the location's Id (what the raid's
+            // Player.Location and GameWorld.LocationId spell) plus MenuCaptureKeySuffix: "bigmap-menu", its own folder.
+            // Prepare still holds it to IsUsableKey.
+            if (_menu != null) return _menu.Key;
+
             try
             {
                 var map = _gameWorld?.MainPlayer?.Location;
@@ -15131,6 +15412,10 @@ namespace QuestTree.QuestGraph
             /// pixel's distance from here goes into the sidecar, and that is what decides whether this
             /// capture's view of a spot beats the one already on disk.</summary>
             public Vector2 From;
+
+            /// <summary>Stage M2: a main-menu capture (<see cref="RunMenuCapture"/>) - every pixel and relief cell it writes
+            /// records step 0 (<see cref="StepZero"/>), it records no stand and offers no upload. False on every raid plan.</summary>
+            public bool MenuMode;
 
             /// <summary>The meta of a capture of this map already on disk that this one may be merged
             /// into: same extent, same scale, same floors, same encoding. Null for a fresh capture -
@@ -16041,7 +16326,9 @@ namespace QuestTree.QuestGraph
                 ? new List<CaptureStand>()
                 : new List<CaptureStand>(before ?? new List<CaptureStand>());
 
-            if (completed) list.Add(new CaptureStand { X = plan.From.x, Z = plan.From.y, Capture = plan.Captures });
+            // Stage M2: a menu capture stood nowhere - it saw the whole map loaded - so it records no stand (a campaign's
+            // resume would otherwise read the world origin as a place the mesh was taken from)
+            if (completed && !plan.MenuMode) list.Add(new CaptureStand { X = plan.From.x, Z = plan.From.y, Capture = plan.Captures });
             if (list.Count > MaxStands) list.RemoveRange(0, list.Count - MaxStands);
 
             return list.Count > 0 ? list : null;

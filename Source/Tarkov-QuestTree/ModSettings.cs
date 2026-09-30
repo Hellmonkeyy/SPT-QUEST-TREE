@@ -339,6 +339,11 @@ namespace QuestTree
         /// key run QuestGraph/MenuMapHost on that location instead of the level list. Empty by default.</summary>
         public static ConfigEntry<string> MenuMapHostLocation { get; private set; }
 
+        /// <summary>THROWAWAY, with <see cref="MenuSceneProbeKey"/>: the stage M2a test hook. A location id here makes the probe
+        /// key host that map in the main menu AND take a whole map capture of it while it is loaded
+        /// (MapCapture.RunMenuCapture). Wins over <see cref="MenuMapHostLocation"/>. Empty by default.</summary>
+        public static ConfigEntry<string> MenuCaptureLocation { get; private set; }
+
         /// <summary>Which of the two quest marks the boxes wear. Kappa is the canonical list;
         /// Collector is what this install actually gates Collector behind, which a quest mod can
         /// make a very different set.</summary>
@@ -1081,6 +1086,15 @@ namespace QuestTree
                 "probe key hosts that whole map in the main menu instead of loading the levels above: every scene of the " +
                 "location's scenes preset is loaded additively, counted, and unloaded again. Its lines start \"QuestTree: menu " +
                 "map host:\" in BepInEx/LogOutput.log. Empty = the level list. Restart the game after using this, before any raid.");
+
+            MenuCaptureLocation = config.Bind(
+                "Advanced", "Menu capture location (throwaway)", "",
+                "Debug only, and temporary. When set to a location id (bigmap, Interchange, ...), the menu scene probe key hosts " +
+                "that whole map in the main menu and takes a full map capture of it (floors, 3D mesh, side views) into the " +
+                "captures folder under its own key, <id>-menu (e.g. bigmap-menu), beside the raid set and never merged into it; " +
+                "the Maps tab does not show it. Nothing is uploaded. " +
+                "Wins over the menu map host location. Its lines start \"QuestTree: menu capture:\", \"QuestTree: menu map host:\" " +
+                "and \"QuestTree: capturing\" in BepInEx/LogOutput.log. Restart the game after using this, before any raid.");
 
             // WP2: the 3D mesh's accumulation - out of Entries, so the in-panel Settings tab shows no row for them; F12 and
             // the cfg file only.

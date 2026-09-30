@@ -25,7 +25,8 @@ namespace QuestTree.QuestGraph
     /// player sits in the main menu (no raid, no GameWorld), and would the capture then see the whole map with nothing
     /// streamed out? This answers the first half only: it loads the listed build indices, measures what arrived, and
     /// unloads them again. It captures nothing. Delete this file with <see cref="ModSettings.MenuSceneProbeKey"/>,
-    /// <see cref="ModSettings.MenuSceneProbeLevels"/>, <see cref="ModSettings.MenuMapHostLocation"/> and the one line in
+    /// <see cref="ModSettings.MenuSceneProbeLevels"/>, <see cref="ModSettings.MenuMapHostLocation"/>,
+    /// <see cref="ModSettings.MenuCaptureLocation"/> (the stage M2a hook: host and capture) and the one line in
     /// TrackerHotkey.Update. Its proven machinery (the menu gate, the state snapshot/restore, the DontDestroyOnLoad diff,
     /// the dead-run check, the Streamer switch-off, the message counter, the per-scene counts) now lives in
     /// <see cref="MenuMapHost"/>, which this calls; with <see cref="ModSettings.MenuMapHostLocation"/> set, the key runs the
@@ -96,6 +97,10 @@ namespace QuestTree.QuestGraph
                     Log($"polling from {host.GetType().Name}; key {(string.IsNullOrEmpty(bound) ? "unbound" : bound)}, " +
                         $"levels \"{ModSettings.MenuSceneProbeLevels?.Value}\", {SceneManager.sceneCountInBuildSettings} scenes in the build list.");
 
+                    var capture = ModSettings.MenuCaptureLocation?.Value?.Trim();
+                    if (!string.IsNullOrEmpty(capture))
+                        Log($"menu capture location \"{capture}\" is set: the key hosts and captures that map instead of the levels.");
+
                     var hosted = ModSettings.MenuMapHostLocation?.Value?.Trim();
                     if (!string.IsNullOrEmpty(hosted))
                         Log($"menu map host location \"{hosted}\" is set: the key runs MenuMapHost on it instead of the levels.");
@@ -121,6 +126,32 @@ namespace QuestTree.QuestGraph
                 if (RestartAdvised != null)
                 {
                     Log($"refused: an earlier run could not restore the menu ({RestartAdvised}). RESTART THE GAME before probing again.");
+                    return;
+                }
+
+                // THROWAWAY test hook for stage M2a: a location id here hosts that map AND captures it while it is loaded.
+                // Wins over the stage M1 hook below.
+                var captured = ModSettings.MenuCaptureLocation?.Value?.Trim();
+                if (!string.IsNullOrEmpty(captured))
+                {
+                    // Before anything loads (re-review): under a GameWorld the hosted scenes would register into it.
+                    if (MenuMapHost.WorldSet(out var world))
+                    {
+                        Log($"the menu capture refused '{captured}': {MenuMapHost.WorkRefusal(world)}. Nothing was loaded.");
+                        return;
+                    }
+
+                    var key =MenuMapHost.LocationKey(captured, out var noKey);
+                    if (key == null)
+                    {
+                        Log($"the menu capture refused '{captured}': {noKey}.");
+                        return;
+                    }
+
+                    var session = new MapCapture.MenuSession(captured, key);
+                    Log($"running a menu capture of '{captured}' (location {key}, capture key {session.Key}) instead of the level list.");
+                    if (!MenuMapHost.Start(host, captured, () => MapCapture.RunMenuCapture(session), out var refused))
+                        Log($"the menu capture refused: {refused}.");
                     return;
                 }
 
