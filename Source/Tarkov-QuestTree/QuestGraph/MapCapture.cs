@@ -1294,6 +1294,9 @@ namespace QuestTree.QuestGraph
 
             /// <summary>Only the sidecar differs (a recorded attempt, the mesh unchanged): the next checkpoint writes it alone.</summary>
             public bool IndexDirty;
+
+            /// <summary>Campaign speed step 3: the standing points of the captures built into this mesh (<see cref="Stood"/>).</summary>
+            public List<CaptureStand> Stands;
         }
 
         /// <summary>
@@ -1934,6 +1937,10 @@ namespace QuestTree.QuestGraph
                 Accumulated = mesh.Accumulated,
                 Dirty = dirty,
                 IndexDirty = mesh.IndexChanged || (was?.IndexDirty ?? false),
+
+                // Campaign speed step 3: built onto the held mesh, its points; onto the stored one (none held yet, or the
+                // held one let go), the stored meta's; from scratch, this capture's alone
+                Stands = Stood(was != null ? was.Stands : hold.WrittenMeta?.Stands, plan, true, mesh.Accumulated),
             };
 
             plan.MeshHeld = true;
@@ -2154,6 +2161,9 @@ namespace QuestTree.QuestGraph
                     Mesh = mesh,
                     Atlas = mesh != null ? atlas : null,
                     Sides = sides,
+
+                    // Campaign speed step 3: the held mesh's points, or the written one's when the meta names that
+                    Stands = mesh == null ? null : hold.Mesh != null ? hold.Mesh.Stands : hold.WrittenMeta?.Stands,
                 };
 
                 hold.Unsaved++;
@@ -2594,6 +2604,10 @@ namespace QuestTree.QuestGraph
 
                 if (meta.Mesh == null) meta.Atlas = null;
 
+                // Campaign speed step 3: a mesh that fell back (any MeshWhy) is not the held one the held stands describe - the
+                // meta names the mesh on disk, so it names that mesh's stands
+                if (job.MeshWhy != null) meta.Stands = meta.Mesh != null ? job.WrittenMeta?.Stands : null;
+
                 // The sides, each in its own try, as CommitSides: one that will not go in place keeps the earlier one.
                 if (meta.Sides != null)
                 {
@@ -2843,6 +2857,7 @@ namespace QuestTree.QuestGraph
             Mesh = m.Mesh,
             Atlas = m.Atlas,
             Sides = m.Sides,
+            Stands = m.Stands,
         };
 
         /// <summary>The file names a meta accounts for - its floors and their sidecars, its mesh, its pages, its sides and their
@@ -3162,7 +3177,7 @@ namespace QuestTree.QuestGraph
         /// <param name="where">Where in the capture, for the debug line.</param>
         /// <param name="force">Campaign speed step 2: collect whatever the growth - a checkpoint's line reports the heap after a
         /// collection, which is the number that shows whether holding a campaign's set grows it from one checkpoint to the next.</param>
-        private static void CollectGarbage(string where, bool force = false)
+        internal static void CollectGarbage(string where, bool force = false)
         {
             try
             {
@@ -3882,6 +3897,7 @@ namespace QuestTree.QuestGraph
                         // and y range are the stored ones byte for byte - the stored mesh, sidecar and pages are carried
                         // (WriteMeta's CarriedMesh), not rewritten with a new date.
                         plan.MeshCarriedUnchanged = true;
+                        plan.MeshAccumulated = mesh.Accumulated;
 
                         // WP2 (fixes 2): a recorded attempt changed the sidecar - it is written beside the carried mesh (its
                         // sha is that mesh's), the mesh itself is not
@@ -7442,7 +7458,10 @@ namespace QuestTree.QuestGraph
         /// right failure: a map with no mask looks exactly as it did before this existed.
         /// </summary>
         /// <param name="plan">The capture's plan, for the extent the grid covers.</param>
-        private static byte[] BuildReach(Plan plan)
+        /// <param name="fromY">Campaign speed step 3: only NavMesh triangles whose mean height is at least this - one band's
+        /// own walkable area (see MapCapture.StoredSet.BuildMask). The capture passes nothing: every triangle.</param>
+        /// <param name="untilY">...and below this.</param>
+        private static byte[] BuildReach(Plan plan, float fromY = float.NegativeInfinity, float untilY = float.PositiveInfinity)
         {
             if (!ReachEnabled) return null;
 
@@ -7480,9 +7499,18 @@ namespace QuestTree.QuestGraph
                     var b = vertices[indices[t + 1]];
                     var c = vertices[indices[t + 2]];
 
+                    // Campaign speed step 3: a band's own mask takes only the triangles at its height; the capture's takes all.
+                    var y = (a.y + b.y + c.y) / 3f;
+                    if (y < fromY || y >= untilY) continue;
+
                     if (!Mark(plan, distance, cellsX, cellsZ, a, b, c)) continue;
                     triangles++;
                 }
+
+                // Campaign speed step 3: a band with no walkable triangle of its own has an empty mask, not "all reachable" -
+                // nothing there is anywhere a player stands.
+                if (triangles == 0 && (fromY > float.NegativeInfinity || untilY < float.PositiveInfinity))
+                    return new byte[cellsX * cellsZ];
 
                 if (triangles == 0)
                 {
@@ -13587,6 +13615,7 @@ namespace QuestTree.QuestGraph
 
                 foreach (var band in mesh.File.Bands) plan.MeshLevels.Add(band.Level);
 
+                plan.MeshAccumulated = mesh.Accumulated;
                 plan.Mesh = new CaptureMesh
                 {
                     File = plan.MeshFile,
@@ -14042,6 +14071,14 @@ namespace QuestTree.QuestGraph
                     Mesh = mesh,
                     Atlas = mesh != null ? atlas : null,
                     Sides = sides,
+
+                    // Campaign speed step 3: this capture's point when its mesh stage completed into the mesh named here - a
+                    // new file, or the stored one carried because nothing changed; a mesh carried because none was built
+                    // keeps the earlier points without this one
+                    Stands = mesh == null
+                        ? null
+                        : Stood(plan.Previous?.Stands, plan, plan.Mesh != null || plan.MeshCarriedUnchanged,
+                            plan.Mesh == null || plan.MeshAccumulated),
                 };
 
                 var json = JsonConvert.SerializeObject(meta, Formatting.Indented);
@@ -15168,6 +15205,10 @@ namespace QuestTree.QuestGraph
             /// <summary>WP2: the build changed nothing, so the stored mesh, sidecar and pages are carried (2.13).</summary>
             public bool MeshCarriedUnchanged;
 
+            /// <summary>Campaign speed step 3: the mesh this capture built was built onto a stored one (MapMeshBuilder's
+            /// Accumulated) - so the standing points before it still describe it (<see cref="Stood"/>).</summary>
+            public bool MeshAccumulated;
+
             /// <summary>WP2: a sidecar was staged beside the staged mesh.</summary>
             public bool IndexStaged;
 
@@ -15447,6 +15488,575 @@ namespace QuestTree.QuestGraph
             public byte[] UnhealedDist;
         }
 
+        // --- campaign resume (step 3): the stored set, read only ---------------------------------
+
+        /// <summary>
+        /// Campaign speed step 3: what a campaign needs to know about the set already on disk to leave out the stops that
+        /// can add nothing to it (MapCampaign's resume) - the pictures' geometry and files, each band's own walkable mask,
+        /// and the standing points of the captures whose 3D mesh stage completed (CaptureMeta.Stands). Built on the main
+        /// thread by <see cref="ReadStoredSet"/> (the masks need the NavMesh); its files are then decoded one at a time on a
+        /// worker by <see cref="ReadStoredDist"/> and <see cref="ReadStoredEmpty"/>. Nothing here writes.
+        /// </summary>
+        internal sealed class StoredSet
+        {
+            /// <summary>Why the set cannot be resumed from, or null when it can.</summary>
+            internal string Why;
+
+            internal string Key;
+            internal string Dir;
+
+            /// <summary>The stored extent, pixels per metre and picture size - the floor pixels' own geometry.</summary>
+            internal double MinX;
+
+            internal double MinZ;
+            internal double MaxX;
+            internal double MaxZ;
+            internal float Ppm;
+            internal int Width;
+            internal int Height;
+
+            /// <summary>The meta's first-captured stamp: whether a later capture merged into this set or replaced it
+            /// (<see cref="ResumeFirstCapturedAt"/>).</summary>
+            internal string FirstCapturedAt;
+
+            /// <summary>The floors, lowest band first (the order the capture sorts them in), and the sides.</summary>
+            internal readonly List<StoredPicture> Floors = new List<StoredPicture>();
+
+            internal readonly List<StoredPicture> Sides = new List<StoredPicture>();
+
+            /// <summary>Whether the meta names a stored 3D mesh whose file is there.</summary>
+            internal bool HasMesh;
+
+            /// <summary>Where the captures that built into the named mesh stood (world x, z), oldest first; empty when none
+            /// was recorded.</summary>
+            internal readonly List<Vector2> Stands = new List<Vector2>();
+
+            /// <summary>Main-thread milliseconds spent building this (the meta read and the masks).</summary>
+            internal double MainMs;
+
+            /// <summary>World x of a floor pixel column's centre - BuildDxSquared's arithmetic.</summary>
+            internal float PixelX(int col) => (float)(MinX + (col + 0.5d) / Ppm);
+
+            /// <summary>World z of a floor texture row's centre (row 0 at the bottom) - RowDzSquared's arithmetic.</summary>
+            internal float PixelZ(int textureRow) => (float)(MaxZ - (Height - 1 - textureRow + 0.5d) / Ppm);
+
+            /// <summary>
+            /// Each floor's OWN walkable mask - main thread only, the NavMesh is Unity's. The capture's BuildReach (its grid,
+            /// growth and ramp) over only the NavMesh triangles at the band's height: from the band's MinY up to the next
+            /// band's MinY (the lowest band from below everything, the top band to above everything) - the heights whose
+            /// floors the capture photographs in that band, which renders from its own floor up to the next one's
+            /// (FloorPlan.NextMinY). So a basement's never-seen pixel counts only where the basement is walkable, not
+            /// where the ground above it is.
+            /// </summary>
+            internal void BuildMasks()
+            {
+                for (var f = 0; f < Floors.Count; f++)
+                {
+                    // Widened by BandSlackMetres each way: a NavMesh is draped a little above or below the floor it covers, and
+                    // a wider band only makes more pixels count - the safe direction.
+                    var from = f == 0 ? float.NegativeInfinity : Floors[f].MinY - StoredPicture.BandSlackMetres;
+                    var until = f == Floors.Count - 1 ? float.PositiveInfinity : Floors[f + 1].MinY + StoredPicture.BandSlackMetres;
+
+                    Floors[f].BuildMask(this, from, until);
+                }
+            }
+        }
+
+        /// <summary>Campaign speed step 3: one stored floor or side, as <see cref="StoredSet"/> lists it.</summary>
+        internal sealed class StoredPicture
+        {
+            /// <summary>Metres each band's NavMesh height range is widened by on both sides (<see cref="StoredSet.BuildMasks"/>).</summary>
+            internal const float BandSlackMetres = 1f;
+
+            internal string Name;
+            internal string DistPath;
+
+            /// <summary>The picture itself - read for a side only, whose transparent pixels the heal needs.</summary>
+            internal string ColourPath;
+
+            internal int Width;
+            internal int Height;
+            internal float Ppm;
+
+            /// <summary>A floor: its band's lowest height.</summary>
+            internal float MinY;
+
+            /// <summary>A floor: its own walkable mask (<see cref="StoredSet.BuildMasks"/>), on a plan that holds only the
+            /// stored pixels' geometry. Its Reach is null when there is no NavMesh at all, and then every pixel counts, as
+            /// the capture then draws every pixel as reachable.</summary>
+            private Plan _mask;
+
+            /// <summary>Builds <see cref="_mask"/> from the NavMesh triangles at heights [from, until) - main thread.</summary>
+            internal void BuildMask(StoredSet set, float from, float until)
+            {
+                _mask = new Plan
+                {
+                    Key = set.Key,
+                    Dir = set.Dir,
+                    Extent = new MapExtentDto { MinX = set.MinX, MinZ = set.MinZ, MaxX = set.MaxX, MaxZ = set.MaxZ },
+                    Ppm = set.Ppm,
+                    WidthPx = set.Width,
+                    HeightPx = set.Height,
+                };
+
+                _mask.Reach = BuildReach(_mask, from, until);
+
+                // A band with no walkable triangle of its own (an empty mask) falls back to the all-storey mask: nothing on
+                // it would otherwise ever count, and a band nobody can stand on by this rule may still be one the NavMesh
+                // reaches from a height this split puts in the neighbouring band.
+                if (_mask.Reach != null && Array.TrueForAll(_mask.Reach, v => v == 0)) _mask.Reach = BuildReach(_mask);
+            }
+
+            /// <summary>A side: its basis and frame, which GroundPointOf needs for the ground point a pixel looks at.</summary>
+            internal bool Side;
+
+            internal double[] Right;
+            internal double[] Up;
+            internal double OriginR;
+            internal double OriginU;
+            internal float YMin;
+
+            /// <summary>Whether a floor pixel lies inside this band's walkable mask - what the capture would draw with an
+            /// alpha above zero, for this band's own floors. Pure arithmetic on the mask's arrays, so a worker may call
+            /// it.</summary>
+            internal bool Walkable(int col, int textureRow) => _mask?.Reach == null || ReachAt(_mask, col, textureRow) > 0f;
+        }
+
+        /// <summary>Campaign speed step 3: the sidecar's step for a distance - <see cref="Steps"/> itself, so the resume
+        /// compares in the same four-metre steps and with the same rounding the merge writes.</summary>
+        /// <param name="metres">Flat distance from the capturing player.</param>
+        internal static byte ResumeStep(float metres) => Steps(metres);
+
+        /// <summary>Campaign speed step 3: the step a sidecar stores for a pixel nothing has drawn.</summary>
+        internal const byte ResumeUnseen = DistanceEmpty;
+
+        /// <summary>
+        /// Campaign speed step 3, main thread: the stored set of a map as a resume needs it - null when the map has none, a
+        /// set with <see cref="StoredSet.Why"/> when it cannot be used. The meta is read and checked the way LoadPrevious
+        /// checks the parts it can check without a capture's plan (schema, floors, floor levels against the extent the capture
+        /// will use); the parts only a capture can decide (its pixels per metre, render tag, exposure) are checked after the
+        /// campaign's first capture instead (<see cref="ResumeFirstCapturedAt"/>). Never throws.
+        /// </summary>
+        /// <param name="key">The map's key.</param>
+        /// <param name="extent">The extent the capture will use (MapExtentProbe.TryProbeForCapture), for its floor levels.</param>
+        internal static StoredSet ReadStoredSet(string key, MapExtentDto extent)
+        {
+            var clock = Stopwatch.StartNew();
+            var set = new StoredSet { Key = key };
+
+            try
+            {
+                var root = StoredRoot();
+                if (root == null) return null;
+
+                set.Dir = Path.Combine(root, key);
+                var path = Path.Combine(set.Dir, $"{key}.map.json");
+                if (!File.Exists(path)) return null;
+
+                var meta = JsonConvert.DeserializeObject<CaptureMeta>(File.ReadAllText(path));
+
+                if (meta == null || meta.Extent == null || meta.Floors == null || meta.Floors.Count == 0)
+                    return Refuse(set, "its meta cannot be read");
+
+                if (meta.SchemaVersion != SchemaVersion) return Refuse(set, $"it is schema {meta.SchemaVersion}");
+
+                if (!(meta.PxPerMetre > 0f)) return Refuse(set, "it records no pixel size");
+
+                var mine = (extent?.Floors ?? new List<MapFloorDto>()).Where(f => f != null).Select(f => f.Level).OrderBy(l => l);
+                var theirs = meta.Floors.Where(f => f != null).Select(f => f.Level).OrderBy(l => l);
+                if (!mine.SequenceEqual(theirs)) return Refuse(set, "its floors are not the ones this raid would capture");
+
+                set.MinX = meta.Extent.MinX;
+                set.MinZ = meta.Extent.MinZ;
+                set.MaxX = meta.Extent.MaxX;
+                set.MaxZ = meta.Extent.MaxZ;
+                set.Ppm = meta.PxPerMetre;
+                set.FirstCapturedAt = FirstOf(meta);
+
+                foreach (var floor in meta.Floors.Where(f => f != null).OrderBy(f => f.MinY))
+                {
+                    if (set.Floors.Count == 0)
+                    {
+                        set.Width = floor.Width;
+                        set.Height = floor.Height;
+                    }
+
+                    if (floor.Width != set.Width || floor.Height != set.Height || floor.Width < 1 || floor.Height < 1)
+                        return Refuse(set, $"floor \"{floor.Name}\" is {floor.Width}x{floor.Height} px");
+
+                    var level = floor.Level.ToString(CultureInfo.InvariantCulture);
+                    set.Floors.Add(new StoredPicture
+                    {
+                        Name = floor.Name,
+                        DistPath = Path.Combine(set.Dir, $"{key}-{level}.dist.png"),
+                        Width = floor.Width,
+                        Height = floor.Height,
+                        Ppm = meta.PxPerMetre,
+                        MinY = floor.MinY,
+                    });
+                }
+
+                foreach (var side in meta.Sides ?? new List<CaptureSide>())
+                {
+                    if (side?.Right == null || side.Up == null || side.Right.Length < 3 || side.Up.Length < 3 ||
+                        side.Width < 1 || side.Height < 1 || !(side.PxPerMetre > 0f) || string.IsNullOrEmpty(side.File))
+                        continue;
+
+                    set.Sides.Add(new StoredPicture
+                    {
+                        Name = $"side {side.Dir}",
+                        DistPath = Path.Combine(set.Dir, SideDistFileName(key, side.Dir)),
+                        ColourPath = Path.Combine(set.Dir, side.File),
+                        Width = side.Width,
+                        Height = side.Height,
+                        Ppm = side.PxPerMetre,
+                        Side = true,
+                        Right = side.Right.Select(v => (double)v).ToArray(),
+                        Up = side.Up.Select(v => (double)v).ToArray(),
+                        OriginR = side.OriginR,
+                        OriginU = side.OriginU,
+                        YMin = side.YMin,
+                    });
+                }
+
+                set.HasMesh = meta.Mesh != null && !string.IsNullOrEmpty(meta.Mesh.File) &&
+                              File.Exists(Path.Combine(set.Dir, meta.Mesh.File));
+
+                if (set.HasMesh && meta.Stands != null)
+                    foreach (var stand in meta.Stands)
+                        if (stand != null && IsFinite(stand.X) && IsFinite(stand.Z))
+                            set.Stands.Add(new Vector2(stand.X, stand.Z));
+
+                set.BuildMasks();
+
+                set.MainMs = clock.Elapsed.TotalMilliseconds;
+                return set;
+            }
+            catch (Exception ex)
+            {
+                return Refuse(set, $"reading it threw ({ex.GetType().Name}: {ex.Message})");
+            }
+
+            StoredSet Refuse(StoredSet s, string why)
+            {
+                s.Why = why;
+                s.MainMs = clock.Elapsed.TotalMilliseconds;
+                return s;
+            }
+        }
+
+        /// <summary>Campaign speed step 3: the captures folder, without creating it as <see cref="CapturesRootDir"/> does -
+        /// a resume only reads. Null when the plugin has no file location.</summary>
+        private static string StoredRoot()
+        {
+            var modPath = Path.GetDirectoryName(typeof(MapCapture).Assembly.Location);
+            return string.IsNullOrEmpty(modPath) ? null : Path.Combine(modPath, "captures");
+        }
+
+        /// <summary>Campaign speed step 3, any thread: one stored distance sidecar as one byte a pixel in TEXTURE order (row 0
+        /// at the picture's bottom, the order the merge indexes it in: CopyRed of Unity's decode, whose first row is the PNG's
+        /// last) - or null, with why. See <see cref="DecodeStored"/>.</summary>
+        /// <param name="picture">The stored picture whose sidecar is wanted.</param>
+        /// <param name="why">When null is returned: why.</param>
+        internal static byte[] ReadStoredDist(StoredPicture picture, out string why) =>
+            DecodeStored(picture.DistPath, picture.Width, picture.Height, false, "distance sidecar", out why);
+
+        /// <summary>Campaign speed step 3, any thread: which pixels of a stored SIDE picture are <see cref="EmptyPixel"/> -
+        /// transparent black, what Develop leaves where nothing was drawn - as 1 (empty) or 0, in texture order; or null, with
+        /// why. What <see cref="HealSideDist"/> reads the colour for.</summary>
+        /// <param name="picture">The stored side.</param>
+        /// <param name="why">When null is returned: why.</param>
+        internal static byte[] ReadStoredEmpty(StoredPicture picture, out string why) =>
+            DecodeStored(picture.ColourPath, picture.Width, picture.Height, true, "picture", out why);
+
+        /// <summary>
+        /// Campaign speed step 3: the managed decode behind <see cref="ReadStoredDist"/> and <see cref="ReadStoredEmpty"/>,
+        /// so it can run off the main thread - 8-bit, non-interlaced, grey, grey-alpha, RGB or RGBA, any of the five row
+        /// filters, the zlib stream's Adler-32 checked. A file read wrong would let a campaign leave out a stop it needed,
+        /// so a file that is not exactly right is refused. Nothing is written.
+        /// </summary>
+        /// <param name="path">The PNG.</param>
+        /// <param name="width">The width it must be.</param>
+        /// <param name="height">The height it must be.</param>
+        /// <param name="empty">False: the first channel of each pixel. True: 1 where every channel is 0 (RGBA only).</param>
+        /// <param name="what">For the reasons.</param>
+        /// <param name="why">When null is returned: why.</param>
+        private static byte[] DecodeStored(string path, int width, int height, bool empty, string what, out string why)
+        {
+            why = null;
+
+            try
+            {
+                if (string.IsNullOrEmpty(path) || !File.Exists(path))
+                {
+                    why = $"it has no {what}";
+                    return null;
+                }
+
+                var file = File.ReadAllBytes(path);
+                byte[] png = { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A };
+
+                if (file.Length < 8 || !png.SequenceEqual(file.Take(8)))
+                {
+                    why = $"its {what} is not a PNG";
+                    return null;
+                }
+
+                var idat = new MemoryStream();
+                var bpp = 0;
+                var at = 8;
+
+                while (at + 12 <= file.Length)
+                {
+                    var length = (file[at] << 24) | (file[at + 1] << 16) | (file[at + 2] << 8) | file[at + 3];
+                    var type = Encoding.ASCII.GetString(file, at + 4, 4);
+                    var data = at + 8;
+
+                    if (length < 0 || data + (long)length + 4 > file.Length)
+                    {
+                        why = $"its {what} is cut short";
+                        return null;
+                    }
+
+                    if (type == "IHDR")
+                    {
+                        int Be(int o) => (file[o] << 24) | (file[o + 1] << 16) | (file[o + 2] << 8) | file[o + 3];
+
+                        var colour = file[data + 9];
+                        bpp = colour == 0 ? 1 : colour == 4 ? 2 : colour == 2 ? 3 : colour == 6 ? 4 : 0;
+
+                        if (length != 13 || Be(data) != width || Be(data + 4) != height || file[data + 8] != 8 ||
+                            bpp == 0 || file[data + 12] != 0 || (empty && bpp != 4))
+                        {
+                            why = $"its {what} is not an 8-bit {width}x{height} picture this reads";
+                            return null;
+                        }
+                    }
+                    else if (type == "IDAT")
+                    {
+                        idat.Write(file, data, length);
+                    }
+                    else if (type == "IEND")
+                    {
+                        break;
+                    }
+
+                    at = data + length + 4;
+                }
+
+                if (bpp == 0 || idat.Length < 6)
+                {
+                    why = $"its {what} has no picture data";
+                    return null;
+                }
+
+                var z = idat.GetBuffer();
+                var zLength = (int)idat.Length;
+
+                // deflate, no preset dictionary
+                if ((z[0] & 0x0F) != 8 || (z[1] & 0x20) != 0)
+                {
+                    why = $"its {what}'s data is not a zlib stream this reads";
+                    return null;
+                }
+
+                var stride = width * bpp;
+                var row = new byte[stride + 1];
+                var prior = new byte[stride];
+                var current = new byte[stride];
+                var result = new byte[width * height];
+                uint a = 1, b = 0;
+
+                using (var compressed = new MemoryStream(z, 2, zLength - 2, false))
+                using (var inflate = new System.IO.Compression.DeflateStream(compressed, System.IO.Compression.CompressionMode.Decompress))
+                {
+                    for (var y = 0; y < height; y++)
+                    {
+                        for (var got = 0; got < row.Length;)
+                        {
+                            var n = inflate.Read(row, got, row.Length - got);
+                            if (n <= 0)
+                            {
+                                why = $"its {what} ends at row {y} of {height}";
+                                return null;
+                            }
+
+                            got += n;
+                        }
+
+                        for (var i = 0; i < row.Length; i++)
+                        {
+                            a += row[i];
+                            if (a >= 65521) a -= 65521;
+                            b += a;
+                            if (b >= 65521) b -= 65521;
+                        }
+
+                        if (!UnfilterRow(row, current, prior, stride, bpp))
+                        {
+                            why = $"its {what}'s row {y} has filter {row[0]}";
+                            return null;
+                        }
+
+                        // PNG row y is texture row height - 1 - y.
+                        var into = (height - 1 - y) * width;
+
+                        if (empty)
+                            for (int x = 0, o = 0; x < width; x++, o += 4)
+                                result[into + x] = (byte)((current[o] | current[o + 1] | current[o + 2] | current[o + 3]) == 0 ? 1 : 0);
+                        else
+                            for (int x = 0, o = 0; x < width; x++, o += bpp)
+                                result[into + x] = current[o];
+
+                        var swap = prior;
+                        prior = current;
+                        current = swap;
+                    }
+                }
+
+                var adler = ((uint)z[zLength - 4] << 24) | ((uint)z[zLength - 3] << 16) | ((uint)z[zLength - 2] << 8) | z[zLength - 1];
+                if (adler != ((b << 16) | a))
+                {
+                    why = $"its {what}'s checksum does not match";
+                    return null;
+                }
+
+                return result;
+            }
+            catch (Exception ex)
+            {
+                why = $"its {what} could not be read ({ex.GetType().Name}: {ex.Message})";
+                return null;
+            }
+        }
+
+        /// <summary>
+        /// Campaign speed step 3: <see cref="HealSideDist"/> on a stored side as the resume reads it - the same rule on the
+        /// same two inputs: a pixel that is transparent black on disk AND carries a step is read as 255 (never seen) unless
+        /// the settle rule would keep it. That rule needs the collider skyline, which a campaign casts at its first stop -
+        /// after the resume has decided - so here there is none, and HealSideDist's own no-skyline branch applies: every
+        /// such pixel is healed. Stricter than the first stop's heal (which keeps the settled pixels above the skyline), so
+        /// it can only keep a stop the capture would not need, never leave out one it would.
+        /// </summary>
+        /// <param name="dist">The side's sidecar, texture order; healed in place.</param>
+        /// <param name="emptyPixels">1 where the side's picture is transparent black (<see cref="ReadStoredEmpty"/>).</param>
+        /// <returns>How many pixels were healed.</returns>
+        internal static int HealStoredSide(byte[] dist, byte[] emptyPixels)
+        {
+            var healed = 0;
+
+            for (var i = 0; i < dist.Length && i < emptyPixels.Length; i++)
+            {
+                if (dist[i] == DistanceEmpty || emptyPixels[i] == 0) continue;
+
+                dist[i] = DistanceEmpty;
+                healed++;
+            }
+
+            return healed;
+        }
+
+        /// <summary>Campaign speed step 3: one PNG row un-filtered - the five filters of the PNG specification.</summary>
+        /// <param name="row">The row as inflated: its filter byte, then the filtered bytes.</param>
+        /// <param name="current">Receives the row's bytes.</param>
+        /// <param name="prior">The row above, un-filtered (zeroes above the first).</param>
+        /// <param name="stride">Bytes in a row.</param>
+        /// <param name="bpp">Bytes in a pixel.</param>
+        private static bool UnfilterRow(byte[] row, byte[] current, byte[] prior, int stride, int bpp)
+        {
+            switch (row[0])
+            {
+                case 0:
+                    Buffer.BlockCopy(row, 1, current, 0, stride);
+                    return true;
+                case 1:
+                    for (var i = 0; i < stride; i++) current[i] = (byte)(row[i + 1] + (i >= bpp ? current[i - bpp] : 0));
+                    return true;
+                case 2:
+                    for (var i = 0; i < stride; i++) current[i] = (byte)(row[i + 1] + prior[i]);
+                    return true;
+                case 3:
+                    for (var i = 0; i < stride; i++) current[i] = (byte)(row[i + 1] + (((i >= bpp ? current[i - bpp] : 0) + prior[i]) >> 1));
+                    return true;
+                case 4:
+                    for (var i = 0; i < stride; i++)
+                    {
+                        int left = i >= bpp ? current[i - bpp] : 0, up = prior[i], corner = i >= bpp ? prior[i - bpp] : 0;
+                        int p = left + up - corner, pa = Math.Abs(p - left), pb = Math.Abs(p - up), pc = Math.Abs(p - corner);
+                        current[i] = (byte)(row[i + 1] + (pa <= pb && pa <= pc ? left : pb <= pc ? up : corner));
+                    }
+
+                    return true;
+                default:
+                    return false;
+            }
+        }
+
+        /// <summary>Campaign speed step 3: the first-captured stamp of the set a campaign is building - the held one while a
+        /// campaign holds it, else the one on disk - or null. A capture that MERGED into a set keeps its stamp; one that
+        /// replaced it (a different pixel size, render recipe or exposure, which only the capture can decide) starts a new
+        /// one. So a resume compares this after its first capture with what it read at the start, and visits the stops it
+        /// left out when they differ. Read only; never throws.</summary>
+        /// <param name="key">The map's key.</param>
+        internal static string ResumeFirstCapturedAt(string key)
+        {
+            try
+            {
+                var hold = _hold;
+                if (hold?.Meta != null && string.Equals(hold.Key, key, StringComparison.OrdinalIgnoreCase)) return FirstOf(hold.Meta);
+
+                var root = StoredRoot();
+                if (root == null) return null;
+
+                var path = Path.Combine(root, key, $"{key}.map.json");
+                if (!File.Exists(path)) return null;
+
+                var meta = JsonConvert.DeserializeObject<CaptureMeta>(File.ReadAllText(path));
+                return meta != null ? FirstOf(meta) : null;
+            }
+            catch
+            {
+                return null;
+            }
+        }
+
+        // --- campaign resume (step 3): where the mesh's captures stood --------------------------
+
+        /// <summary>Campaign speed step 3: standing points a meta keeps - the newest; the oldest go first. 256 is five
+        /// Interchange campaigns. Local only: MapTransferDto has no such field, so an upload drops it, and no viewer reads
+        /// it.</summary>
+        private const int MaxStands = 256;
+
+        /// <summary>Campaign speed step 3: the standing points a meta names - those of the captures whose 3D mesh stage
+        /// completed into the mesh that meta names. A mesh built from scratch starts the list again (the points before it
+        /// describe a mesh that is gone); a capture whose mesh stage did not complete adds nothing (its streamed buildings
+        /// are not in the mesh).</summary>
+        /// <param name="before">The list the mesh this one was built onto carried, or null.</param>
+        /// <param name="plan">The capture's plan: where it stood (From) and which capture it was.</param>
+        /// <param name="completed">Whether this capture's mesh stage completed into the mesh the meta names.</param>
+        /// <param name="accumulated">Whether that mesh was built onto a stored one rather than from scratch.</param>
+        private static List<CaptureStand> Stood(List<CaptureStand> before, Plan plan, bool completed, bool accumulated)
+        {
+            var list = completed && !accumulated
+                ? new List<CaptureStand>()
+                : new List<CaptureStand>(before ?? new List<CaptureStand>());
+
+            if (completed) list.Add(new CaptureStand { X = plan.From.x, Z = plan.From.y, Capture = plan.Captures });
+            if (list.Count > MaxStands) list.RemoveRange(0, list.Count - MaxStands);
+
+            return list.Count > 0 ? list : null;
+        }
+
+        /// <summary>Campaign speed step 3: one standing point in the meta.</summary>
+        private sealed class CaptureStand
+        {
+            [JsonProperty("x")] public float X { get; set; }
+            [JsonProperty("z")] public float Z { get; set; }
+
+            /// <summary>The capture's number (meta.captures when it was taken), for a person reading the file.</summary>
+            [JsonProperty("capture")] public int Capture { get; set; }
+        }
+
         // --- the meta file ---------------------------------------------------------------------
 
         /// <summary>The &lt;key&gt;.map.json beside the pictures: what they are of, where they sit in
@@ -15543,6 +16153,12 @@ namespace QuestTree.QuestGraph
             /// texture); a building range naming a page past this list falls back to the side views.</summary>
             [JsonProperty("atlas", NullValueHandling = NullValueHandling.Ignore)]
             public List<CaptureAtlas> Atlas { get; set; }
+
+            /// <summary>Campaign speed step 3: where the captures whose 3D mesh stage completed into <see cref="Mesh"/>
+            /// stood, oldest first, at most MaxStands - what a campaign's resume reads to know a stop's own area was
+            /// streamed into the mesh (see <see cref="Stood"/>). Local: no upload or viewer reads it.</summary>
+            [JsonProperty("stands", NullValueHandling = NullValueHandling.Ignore)]
+            public List<CaptureStand> Stands { get; set; }
         }
 
         /// <summary>One atlas page as the meta describes it (stage W). The JSON names are the contract.</summary>

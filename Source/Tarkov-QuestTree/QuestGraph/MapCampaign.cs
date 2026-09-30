@@ -205,6 +205,44 @@ namespace QuestTree.QuestGraph
         /// been measured; after one, twice its measured time (MapCapture.LastCheckpointSeconds).</summary>
         private const double WriteWaitSeconds = 120d;
 
+        /// <summary>Campaign speed step 3, the rollback: true - a campaign on a map that already has a stored set leaves out
+        /// the stops that can add nothing to it (<see cref="SurveyStored"/>) and says "resuming: N of M stops left". False:
+        /// every stop of the plan is visited, as before. The player's switch to force every stop is '3D map: rebuild from
+        /// scratch on the next capture' (see <see cref="WhyNoResume"/>).</summary>
+        internal const bool CampaignResume = true;
+
+        /// <summary>Campaign speed step 3: true - a stop is left out only when, besides the pictures, the stored set's meta
+        /// records a capture that STOOD in the stop's cell and whose 3D mesh stage completed into the mesh that meta names
+        /// (MapCapture's stands). The mesh merge adds the buildings the streamer loaded around the player, which no picture
+        /// shows; a completed capture from inside the cell is what proves that cell's area was streamed into the mesh. A set
+        /// written before stands were recorded has none, so its first campaign visits every stop. False: the pictures alone
+        /// decide.</summary>
+        internal const bool ResumeSkipsNeedBuildings = true;
+
+        /// <summary>Campaign speed step 3: how far past its own cell a stop's surroundings reach, as a share of a cell's side
+        /// on each axis. A stop stands within <see cref="CampaignSampleShare"/> of its cell's centre, so the pixels it is the
+        /// NEAREST stop to - the ones only it can win - reach past the cell's edge by up to that share; half a cell covers
+        /// them with room to spare, and is still inside the radius the streamer had loaded around a stop (the class
+        /// comment). Pixels further out are some other stop's to win.</summary>
+        private const float ResumeMarginShare = 0.5f;
+
+        /// <summary>Campaign speed step 3: sidecar steps (four metres each) by which a stored pixel must be FARTHER than this
+        /// stop would record for the stop to still be worth visiting. One, not zero: the stop is planned at its NavMesh point
+        /// and captured from where the player then stands, and the two can round to neighbouring steps - a stop captured
+        /// last campaign must not look one step closer than itself and be visited for ever.</summary>
+        private const int ResumeMarginSteps = 1;
+
+        /// <summary>Campaign speed step 3: pixels a stop may leave unimproved and still be left out - noise, not coverage.
+        /// Measured on the stored Customs set right after a full campaign: two stops that WERE captured still had a
+        /// handful (6 and 1) of side pixels in their surroundings recorded from ~300 m although they stand 20-80 m from
+        /// what those pixels look at - their own captures did not improve them, so another visit would not either. 64 px is
+        /// 1 m² of ground at 8 px/m; a ten-metre patch never seen is 6,400.</summary>
+        private const int ResumeIgnoredPixels = 64;
+
+        /// <summary>Campaign speed step 3: seconds the campaign waits for the stored set to be surveyed on its worker before
+        /// it gives up on resuming and visits every stop. Customs' one floor and four sides take a few seconds.</summary>
+        private const float ResumeWaitSeconds = 120f;
+
         /// <summary>The last stop's capture was still running when the campaign stopped waiting.</summary>
         private bool _stillCapturing;
 
@@ -537,12 +575,12 @@ namespace QuestTree.QuestGraph
                 // other players. Unknown counts as not solo.
                 if (!SoloRaid()) return;
 
-                if (!Prepare(out var stops, out var start, out var map)) return;
+                if (!Prepare(out var stops, out var start, out var map, out var grid)) return;
 
                 // Set here rather than inside the coroutine: Update can run again before the
                 // coroutine's first statement.
                 _running = true;
-                StartCoroutine(Run(stops, start, map));
+                StartCoroutine(Run(stops, start, map, grid));
             }
             catch (Exception ex)
             {
@@ -767,11 +805,13 @@ namespace QuestTree.QuestGraph
         /// <param name="stops">The sampled world positions to capture from, in visiting order.</param>
         /// <param name="start">Where the player was standing when the key was pressed.</param>
         /// <param name="map">The map's internal name, for the log lines.</param>
-        private bool Prepare(out List<Vector3> stops, out Vector3 start, out string map)
+        /// <param name="grid">The grid the stops were planned on and each stop's cell, for the resume (step 3).</param>
+        private bool Prepare(out List<Vector3> stops, out Vector3 start, out string map, out CampaignGrid grid)
         {
             stops = null;
             start = Vector3.zero;
             map = null;
+            grid = null;
 
             var player = _gameWorld?.MainPlayer;
             if (player == null) return false;
@@ -828,7 +868,27 @@ namespace QuestTree.QuestGraph
             // smaller than the nominal 120 m; the search radius follows the cell it searches.
             var radius = SampleRadius(cells, stepX, stepZ);
 
-            stops = Standable(cells, extent, start, radius, out var dropped);
+            stops = Standable(cells, extent, start, radius, out var dropped, out var kept);
+
+            var columns = 1;
+            var rows = 1;
+            foreach (var cell in cells)
+            {
+                columns = Math.Max(columns, cell.Col + 1);
+                rows = Math.Max(rows, cell.Row + 1);
+            }
+
+            grid = new CampaignGrid
+            {
+                Extent = extent,
+                MinX = minX,
+                MinZ = minZ,
+                StepX = stepX,
+                StepZ = stepZ,
+                Columns = columns,
+                Rows = rows,
+                Cells = kept,
+            };
 
             if (stops.Count == 0)
             {
@@ -914,11 +974,15 @@ namespace QuestTree.QuestGraph
         /// <param name="start">Where the player is standing, for the second height tried.</param>
         /// <param name="radius">How far from a cell's centre to search - see <see cref="SampleRadius"/>.</param>
         /// <param name="dropped">How many cells had nothing standable.</param>
+        /// <param name="kept">The cell of each returned stop, in the same order - the resume (step 3) asks about the cell
+        /// a stop stands for, not the point it found.</param>
         private static List<Vector3> Standable(
-            List<MapCampaignGrid.Stop> cells, MapExtentDto extent, Vector3 start, float radius, out int dropped)
+            List<MapCampaignGrid.Stop> cells, MapExtentDto extent, Vector3 start, float radius, out int dropped,
+            out List<MapCampaignGrid.Stop> kept)
         {
             var heights = Heights(extent, start.y);
             var stops = new List<Vector3>(cells.Count);
+            kept = new List<MapCampaignGrid.Stop>(cells.Count);
             dropped = 0;
 
             foreach (var cell in cells)
@@ -934,6 +998,7 @@ namespace QuestTree.QuestGraph
                     }
 
                     stops.Add(hit.position);
+                    kept.Add(cell);
                     found = true;
                     break;
                 }
@@ -976,6 +1041,403 @@ namespace QuestTree.QuestGraph
             return heights;
         }
 
+        // --- the resume (campaign speed step 3) ----------------------------------------------------
+
+        /// <summary>The grid a campaign's stops were planned on: the inset rectangle's corner, a cell's size, the grid's
+        /// shape, and the cell each stop stands for (parallel to the stops). What the resume measures a stop's
+        /// surroundings by.</summary>
+        private sealed class CampaignGrid
+        {
+            internal MapExtentDto Extent;
+            internal double MinX;
+            internal double MinZ;
+            internal double StepX;
+            internal double StepZ;
+            internal int Columns;
+            internal int Rows;
+            internal List<MapCampaignGrid.Stop> Cells;
+        }
+
+        /// <summary>What the survey of the stored set found, per stop of the plan: whether it is left out, and the counts
+        /// that decided it.</summary>
+        private sealed class ResumeSurvey
+        {
+            /// <summary>Why the survey could not decide, or null.</summary>
+            internal string Why;
+
+            internal bool[] Skip;
+
+            /// <summary>Floor pixels in reach this stop would draw at least <see cref="ResumeMarginSteps"/> + 1 steps closer
+            /// than stored, and floor pixels in reach never seen.</summary>
+            internal long[] FloorFarther;
+
+            internal long[] FloorUnseen;
+
+            /// <summary>The same for the side views, by the ground point each pixel looks at.</summary>
+            internal long[] SideFarther;
+
+            internal long[] SideUnseen;
+
+            /// <summary>Recorded stands of completed mesh stages in the stop's cell.</summary>
+            internal int[] Stands;
+
+            /// <summary>Side pixels the heal read as never seen.</summary>
+            internal long Healed;
+
+            /// <summary>Why the stored mesh lets no stop be left out, or null (<see cref="ResumeSkipsNeedBuildings"/>).</summary>
+            internal string BuildingsWhy;
+
+            /// <summary>The set's first-captured stamp as read, for the check after the first capture.</summary>
+            internal string FirstCapturedAt;
+
+            internal int Pictures;
+            internal double MainMs;
+            internal double WorkerMs;
+        }
+
+        /// <summary>Why this campaign visits every stop whatever is stored, or null when it may resume: the rollback, the
+        /// player's force-all switch ('3D map: rebuild from scratch on the next capture'), accumulation off (each capture
+        /// then builds the mesh alone, so a stop left out is buildings lost), or the last campaign's write still running
+        /// (its files may be mid-commit). "" for nothing worth saying.</summary>
+        /// <param name="map">The map, for the lines.</param>
+        /// <param name="stops">The plan's stops.</param>
+        private static string WhyNoResume(string map, int stops)
+        {
+            if (!CampaignResume || stops < 2) return "";
+
+            if (ModSettings.MeshRebuildNext?.Value ?? false)
+                return "'3D map: rebuild from scratch on the next capture' is on, which runs every stop";
+
+            if (!(ModSettings.MeshAccumulate?.Value ?? true))
+                return "'3D map: add to the stored mesh' is off, so every stop's buildings are its own";
+
+            if (MapCapture.CampaignWriting) return "the last campaign's stops are still being written";
+
+            return null;
+        }
+
+        /// <summary>The resume's lines: "resuming: N of M stops left (K skipped, already seen from close enough)" with the
+        /// time the survey took, at Info and into the journal; one Debug line per stop left out with the counts that decided
+        /// it; or why every stop runs. Silent for a map with nothing stored. Stops are named by their number in the plan,
+        /// as every other campaign line names them.</summary>
+        /// <param name="map">The map.</param>
+        /// <param name="stops">The plan's stops.</param>
+        /// <param name="survey">The survey, or null when there is none.</param>
+        /// <param name="why">Why there is none ("" for nothing to say).</param>
+        /// <param name="left">Stops left to visit.</param>
+        private static void SayResume(string map, List<Vector3> stops, ResumeSurvey survey, string why, int left)
+        {
+            if (survey == null)
+            {
+                if (!string.IsNullOrEmpty(why))
+                    Plugin.LogSource?.LogInfo($"QuestTree: not resuming the campaign on {map} - {why}; every stop runs.");
+                return;
+            }
+
+            var inv = CultureInfo.InvariantCulture;
+
+            for (var s = 0; s < stops.Count; s++)
+            {
+                if (!survey.Skip[s]) continue;
+
+                Plugin.LogSource?.LogDebug(
+                    $"QuestTree: resume: stop {(s + 1).ToString(inv)} of {stops.Count.ToString(inv)} at {At(stops[s])} left out - " +
+                    $"ground {survey.FloorFarther[s].ToString(inv)} px farther, {survey.FloorUnseen[s].ToString(inv)} never seen; " +
+                    $"sides {survey.SideFarther[s].ToString(inv)} farther, {survey.SideUnseen[s].ToString(inv)} never seen " +
+                    $"(up to {ResumeIgnoredPixels.ToString(inv)} ignored); {survey.Stands[s].ToString(inv)} completed capture(s) " +
+                    "stood in its cell.");
+            }
+
+            var skipped = stops.Count - left;
+            var line = $"resuming: {left.ToString(inv)} of {stops.Count.ToString(inv)} stops left ({skipped.ToString(inv)} " +
+                       "skipped, already seen from close enough)";
+
+            Plugin.LogSource?.LogInfo(
+                $"QuestTree: {line} - {survey.Pictures.ToString(inv)} stored picture(s) read in " +
+                $"{survey.WorkerMs.ToString("0", inv)} ms on a worker, {survey.MainMs.ToString("0", inv)} ms on the main thread " +
+                $"({survey.Healed.ToString(inv)} side pixel(s) healed)" +
+                (survey.BuildingsWhy != null ? $"; nothing is left out because {survey.BuildingsWhy}" : "") + ".");
+            MapCapture.Journal(map, line + ".");
+        }
+
+        /// <summary>
+        /// Campaign speed step 3, on a worker: which of the plan's stops can add nothing to the stored set. A stop is left
+        /// out only when all of these hold:
+        ///
+        ///   - GROUND. In its surroundings - its cell grown by <see cref="ResumeMarginShare"/> of a cell on each side - no
+        ///     pixel of any band that lies inside THAT BAND'S OWN walkable mask (MapCapture.StoredSet.BuildMasks) is stored
+        ///     as never seen, or as farther than this stop would record there by more than <see cref="ResumeMarginSteps"/>.
+        ///     "Would record" is the merge's own: the flat distance from the stop's standing point to the pixel's centre in
+        ///     the sidecar's four-metre steps (MapCapture.ResumeStep), and the merge takes a pixel only when that is strictly
+        ///     closer (CaptureMerge.Takes) - so a stop can only win pixels it stands closer to. Each band is judged on its own
+        ///     pixels: a basement that failed at a stop while the top band merged stays never seen there, and keeps the stop.
+        ///   - SIDES. Likewise every side pixel whose ground point (the SideSteps mapping) falls in the surroundings, after
+        ///     the capture's own heal (MapCapture.HealStoredSide).
+        ///   - BUILDINGS (<see cref="ResumeSkipsNeedBuildings"/>). The meta records a capture that stood in the stop's own
+        ///     cell and whose mesh stage completed into the mesh it names.
+        ///
+        /// Up to <see cref="ResumeIgnoredPixels"/> offending pixels are forgiven (see there).
+        ///
+        /// A stop that failed to capture last time is not left out by this rule: nothing near its standing point was then
+        /// photographed from there, so the pixels around it hold a neighbour's distance - dozens of steps farther than its
+        /// own step 0 - and it offends by thousands of pixels; and it recorded no stand.
+        ///
+        /// One picture decoded at a time (a side's sidecar with its picture's empty-pixel flags), so the peak is two
+        /// pictures' bytes. Never throws.
+        /// </summary>
+        /// <param name="set">The stored set, read on the main thread.</param>
+        /// <param name="grid">The plan's grid.</param>
+        /// <param name="stops">The plan's stops, where the player will stand (x and z are all that count).</param>
+        private static ResumeSurvey SurveyStored(MapCapture.StoredSet set, CampaignGrid grid, List<Vector3> stops)
+        {
+            var clock = Stopwatch.StartNew();
+            var n = stops.Count;
+            var r = new ResumeSurvey
+            {
+                Skip = new bool[n],
+                FloorFarther = new long[n],
+                FloorUnseen = new long[n],
+                SideFarther = new long[n],
+                SideUnseen = new long[n],
+                Stands = new int[n],
+                FirstCapturedAt = set.FirstCapturedAt,
+            };
+
+            try
+            {
+                if (grid?.Cells == null || grid.Cells.Count != n || grid.Columns < 1 || grid.Rows < 1 ||
+                    !(grid.StepX > 0d) || !(grid.StepZ > 0d))
+                {
+                    r.Why = "the plan has no grid to measure its stops by";
+                    return r;
+                }
+
+                // The one stop standing for each cell, -1 for a cell with nowhere to stand.
+                var stopAt = new int[grid.Columns * grid.Rows];
+                for (var c = 0; c < stopAt.Length; c++) stopAt[c] = -1;
+
+                var sx = new float[n];
+                var sz = new float[n];
+
+                for (var s = 0; s < n; s++)
+                {
+                    var cell = grid.Cells[s];
+                    if (cell.Col < 0 || cell.Col >= grid.Columns || cell.Row < 0 || cell.Row >= grid.Rows)
+                    {
+                        r.Why = "a stop's cell is outside the grid";
+                        return r;
+                    }
+
+                    stopAt[cell.Row * grid.Columns + cell.Col] = s;
+                    sx[s] = stops[s].x;
+                    sz[s] = stops[s].z;
+                }
+
+                foreach (var picture in set.Floors)
+                {
+                    var dist = MapCapture.ReadStoredDist(picture, out var why);
+                    if (dist == null)
+                    {
+                        r.Why = $"floor \"{picture.Name}\": {why}";
+                        return r;
+                    }
+
+                    r.Pictures++;
+                    SurveyFloor(set, picture, grid, stopAt, sx, sz, dist, r);
+                }
+
+                foreach (var picture in set.Sides)
+                {
+                    var dist = MapCapture.ReadStoredDist(picture, out var why);
+                    if (dist == null)
+                    {
+                        r.Why = $"{picture.Name}: {why}";
+                        return r;
+                    }
+
+                    // The capture's own repair on load (HealSideDist), without the skyline - see HealStoredSide.
+                    var empty = MapCapture.ReadStoredEmpty(picture, out why);
+                    if (empty == null)
+                    {
+                        r.Why = $"{picture.Name}: {why}";
+                        return r;
+                    }
+
+                    r.Healed += MapCapture.HealStoredSide(dist, empty);
+                    empty = null;
+
+                    r.Pictures += 2;
+                    SurveySide(picture, grid, stopAt, sx, sz, dist, r);
+                }
+
+                r.BuildingsWhy = ResumeSkipsNeedBuildings ? CountStands(set, grid, stopAt, r) : null;
+
+                for (var s = 0; s < n; s++)
+                {
+                    var offending = r.FloorFarther[s] + r.FloorUnseen[s] + r.SideFarther[s] + r.SideUnseen[s];
+                    var buildings = !ResumeSkipsNeedBuildings || (r.BuildingsWhy == null && r.Stands[s] > 0);
+                    r.Skip[s] = offending <= ResumeIgnoredPixels && buildings;
+                }
+
+                return r;
+            }
+            catch (Exception ex)
+            {
+                r.Why = $"surveying the stored set threw ({ex.GetType().Name}: {ex.Message})";
+                return r;
+            }
+            finally
+            {
+                r.WorkerMs = clock.Elapsed.TotalMilliseconds;
+            }
+        }
+
+        /// <summary>The cells whose surroundings (the cell grown by <see cref="ResumeMarginShare"/>) hold a coordinate, on
+        /// one axis: cell c's surroundings are [min + (c - m) step, min + (c + 1 + m) step), so c runs over
+        /// (u - 1 - m, u + m] with u the coordinate in cells. Empty (lo &gt; hi) off the grid.</summary>
+        /// <param name="v">The world coordinate.</param>
+        /// <param name="min">The grid's edge on this axis.</param>
+        /// <param name="step">A cell's size on this axis.</param>
+        /// <param name="count">Cells on this axis.</param>
+        /// <param name="lo">The first cell.</param>
+        /// <param name="hi">The last cell.</param>
+        private static void Around(double v, double min, double step, int count, out int lo, out int hi)
+        {
+            var u = (v - min) / step;
+            if (double.IsNaN(u) || double.IsInfinity(u))
+            {
+                lo = 0;
+                hi = -1;
+                return;
+            }
+
+            lo = Math.Max(0, (int)Math.Floor(u - 1d - ResumeMarginShare) + 1);
+            hi = Math.Min(count - 1, (int)Math.Floor(u + ResumeMarginShare));
+        }
+
+        /// <summary>One band's pixels against every stop whose surroundings hold them - the ground rule of
+        /// <see cref="SurveyStored"/>, in DevelopBand's float arithmetic, counted only inside the band's own mask.</summary>
+        private static void SurveyFloor(MapCapture.StoredSet set, MapCapture.StoredPicture band, CampaignGrid grid, int[] stopAt,
+            float[] sx, float[] sz, byte[] dist, ResumeSurvey r)
+        {
+            var w = set.Width;
+            var h = set.Height;
+            var colLo = new int[w];
+            var colHi = new int[w];
+            var px = new float[w];
+
+            for (var col = 0; col < w; col++)
+            {
+                px[col] = set.PixelX(col);
+                Around(px[col], grid.MinX, grid.StepX, grid.Columns, out colLo[col], out colHi[col]);
+            }
+
+            for (var row = 0; row < h; row++)
+            {
+                var pz = set.PixelZ(row);
+                Around(pz, grid.MinZ, grid.StepZ, grid.Rows, out var rowLo, out var rowHi);
+                if (rowLo > rowHi) continue;
+
+                var index = row * w;
+
+                for (var col = 0; col < w; col++, index++)
+                {
+                    int old = dist[index];
+
+                    // Nothing can be more than the margin closer than a step at or under the margin.
+                    if (old <= ResumeMarginSteps || colLo[col] > colHi[col]) continue;
+
+                    var walkable = -1;
+
+                    for (var cr = rowLo; cr <= rowHi; cr++)
+                    for (var cc = colLo[col]; cc <= colHi[col]; cc++)
+                    {
+                        var s = stopAt[cr * grid.Columns + cc];
+                        if (s < 0) continue;
+
+                        if (old != MapCapture.ResumeUnseen)
+                        {
+                            var dx = px[col] - sx[s];
+                            var dz = pz - sz[s];
+                            if (old <= MapCapture.ResumeStep(Mathf.Sqrt(dx * dx + dz * dz)) + ResumeMarginSteps) continue;
+                        }
+
+                        // Only pixels where this band is walkable count - asked once a pixel, and only when it matters.
+                        if (walkable < 0) walkable = band.Walkable(col, row) ? 1 : 0;
+                        if (walkable == 0) break;
+
+                        if (old == MapCapture.ResumeUnseen) r.FloorUnseen[s]++;
+                        else r.FloorFarther[s]++;
+                    }
+                }
+            }
+        }
+
+        /// <summary>One side view's pixels against every stop whose surroundings hold the ground point each looks at - the
+        /// side rule of <see cref="SurveyStored"/>, in SideSteps' arithmetic. Sides have no walkable mask: every pixel
+        /// counts.</summary>
+        private static void SurveySide(MapCapture.StoredPicture side, CampaignGrid grid, int[] stopAt, float[] sx, float[] sz,
+            byte[] dist, ResumeSurvey r)
+        {
+            var w = side.Width;
+            var h = side.Height;
+
+            for (var row = 0; row < h; row++)
+            {
+                var index = row * w;
+
+                for (var col = 0; col < w; col++, index++)
+                {
+                    int old = dist[index];
+                    if (old <= ResumeMarginSteps) continue;
+
+                    MapSideView.GroundPointOf(side.Right, side.Up, side.OriginR, side.OriginU, side.Ppm, h, side.YMin,
+                        col + 0.5d, h - row - 0.5d, out var x, out var z);
+
+                    Around(x, grid.MinX, grid.StepX, grid.Columns, out var colLo, out var colHi);
+                    Around(z, grid.MinZ, grid.StepZ, grid.Rows, out var rowLo, out var rowHi);
+
+                    for (var cr = rowLo; cr <= rowHi; cr++)
+                    for (var cc = colLo; cc <= colHi; cc++)
+                    {
+                        var s = stopAt[cr * grid.Columns + cc];
+                        if (s < 0) continue;
+
+                        if (old == MapCapture.ResumeUnseen)
+                        {
+                            r.SideUnseen[s]++;
+                            continue;
+                        }
+
+                        var dx = x - sx[s];
+                        var dz = z - sz[s];
+                        if (old > MapCapture.ResumeStep((float)Math.Sqrt(dx * dx + dz * dz)) + ResumeMarginSteps) r.SideFarther[s]++;
+                    }
+                }
+            }
+        }
+
+        /// <summary>The buildings rule of <see cref="SurveyStored"/>: the recorded stands of completed mesh stages counted
+        /// into the cell each lies in - or why no stop may be left out: no stored mesh, or none recorded (a set written
+        /// before stands were, or whose mesh has since been rebuilt with nothing recorded).</summary>
+        private static string CountStands(MapCapture.StoredSet set, CampaignGrid grid, int[] stopAt, ResumeSurvey r)
+        {
+            if (!set.HasMesh) return "there is no stored 3D mesh";
+            if (set.Stands.Count == 0) return "the stored 3D mesh records no capture's standing point yet";
+
+            foreach (var stand in set.Stands)
+            {
+                var c = (int)Math.Floor((stand.x - grid.MinX) / grid.StepX);
+                var k = (int)Math.Floor((stand.y - grid.MinZ) / grid.StepZ);
+                if (c < 0 || c >= grid.Columns || k < 0 || k >= grid.Rows) continue;
+
+                var s = stopAt[k * grid.Columns + c];
+                if (s >= 0) r.Stands[s]++;
+            }
+
+            return null;
+        }
+
         // --- the run ---------------------------------------------------------------------------
 
         /// <summary>One campaign: teleport, settle, capture, wait, repeat - and the player put back
@@ -994,7 +1456,8 @@ namespace QuestTree.QuestGraph
         /// <param name="stops">The sampled world positions to capture from, in visiting order.</param>
         /// <param name="start">Where the player was standing when the key was pressed.</param>
         /// <param name="map">The map's internal name, for the log lines.</param>
-        private IEnumerator Run(List<Vector3> stops, Vector3 start, string map)
+        /// <param name="grid">The plan's grid and each stop's cell, for the resume (step 3).</param>
+        private IEnumerator Run(List<Vector3> stops, Vector3 start, string map, CampaignGrid grid)
         {
             var clock = Stopwatch.StartNew();
             var captured = 0;
@@ -1036,6 +1499,11 @@ namespace QuestTree.QuestGraph
             var measuredSeconds = 0d;
             var measured = 0;
 
+            // Campaign speed step 3: stops of the plan left out by the resume, for the closing line; and whether that was
+            // every stop, which ends the campaign where it stands.
+            var leftOut = 0;
+            var nothingLeft = false;
+
             try
             {
                 // Campaign speed step 1 (4): a new campaign session - its first stop casts the relief, later stops reuse it.
@@ -1046,28 +1514,88 @@ namespace QuestTree.QuestGraph
                 _raidTimeUnreadableSaid = false;
                 _acceptingCancel = true;
 
-                SayRaidTimeAtStart(stops.Count);
+                // Campaign speed step 3: the stops that can add nothing to the stored set are left out - the plan's order
+                // kept, the rest simply not visited. The survey reads the stored sidecars on a worker; the frames go on.
+                ResumeSurvey survey = null;
+                var resumeWhy = WhyNoResume(map, stops.Count);
 
-                for (var i = 0; i < stops.Count; i++)
+                if (resumeWhy == null)
                 {
+                    var set = MapCapture.ReadStoredSet(map, grid?.Extent);
+
+                    if (set == null) resumeWhy = "";   // no stored set: a first campaign, nothing to say
+                    else if (set.Why != null) resumeWhy = $"the stored set cannot be read for it ({set.Why})";
+                    else
+                    {
+                        var job = System.Threading.Tasks.Task.Run(() => SurveyStored(set, grid, stops));
+                        var until = Time.realtimeSinceStartup + ResumeWaitSeconds;
+
+                        while (!job.IsCompleted && WhyStop() == null && Time.realtimeSinceStartup < until) yield return null;
+
+                        if (!job.IsCompleted) resumeWhy = WhyStop() ?? $"reading the stored set took over {Whole(ResumeWaitSeconds)} s";
+                        else if (job.IsFaulted) resumeWhy = $"reading the stored set failed ({job.Exception?.GetBaseException().Message})";
+                        else
+                        {
+                            survey = job.Result;
+                            survey.MainMs = set.MainMs;
+                            if (survey.Why != null)
+                            {
+                                resumeWhy = survey.Why;
+                                survey = null;
+                            }
+                        }
+
+                        // The decoded pictures (up to two at a time, a side's being its sidecar and its picture) died with
+                        // the worker; EFT's collector is off in a raid, so they are collected here, before the first stop
+                        // asks for memory of its own.
+                        set = null;
+                        if (job.IsCompleted) MapCapture.CollectGarbage("after the campaign's resume survey", force: true);
+                    }
+                }
+
+                var order = new List<int>(stops.Count);
+                for (var s = 0; s < stops.Count; s++)
+                    if (survey == null || !survey.Skip[s]) order.Add(s);
+
+                leftOut = stops.Count - order.Count;
+                SayResume(map, stops, survey, resumeWhy, order.Count);
+
+                // Whether the first capture has yet been checked for having merged into the set the survey read (see
+                // MapCapture.ResumeFirstCapturedAt) - only asked when a stop was left out.
+                var resumeCheck = leftOut > 0;
+
+                // Campaign speed step 3: nothing left is its own end - no stop, no raid-time line, no write, no teleport:
+                // the player stays where they stand (see the finally).
+                nothingLeft = order.Count == 0;
+                if (!nothingLeft) SayRaidTimeAtStart(order.Count);
+
+                // The plan's number of the last stop visited (0 before any) - every line names stops by the plan's numbers,
+                // whether or not a resume left some out.
+                var lastNumber = 0;
+
+                for (var k = 0; k < order.Count && stopped == null; k++)
+                {
+                    var i = order[k];
+
                     stopped = WhyStop();
                     if (stopped != null) break;
 
                     // The two chosen ends, checked only here - between stops, never mid-capture - so the stop in hand is
-                    // always finished first. `i` stops have been through the loop by now.
+                    // always finished first. lastNumber is the plan's number of the last stop visited.
                     if (_cancelRequested)
                     {
                         Plugin.LogSource?.LogInfo(
-                            $"QuestTree: campaign cancelled after stop {i} of {stops.Count}; " +
+                            $"QuestTree: campaign cancelled after stop {lastNumber} of {stops.Count}; " +
                             (ExtractEnabled() ? "going to an extract." : "going back to the start."));
                         endedEarly = "cancelled with the key";
                         break;
                     }
 
-                    // The next stop's own extra: the debug verification build runs inside the last stop's capture.
-                    var verifyNext = i == stops.Count - 1 && (ModSettings.MeshVerifyLastStop?.Value ?? false);
+                    // The next stop's own extra: the debug verification build runs inside the last stop's capture - the last
+                    // one VISITED (step 3).
+                    var verifyNext = k == order.Count - 1 && (ModSettings.MeshVerifyLastStop?.Value ?? false);
                     endedEarly = WhyOutOfTime(
-                        i, stops.Count, measuredSeconds, measured, verifyNext ? (float)MapCapture.VerifyExtraSeconds : 0f);
+                        lastNumber, stops.Count, measuredSeconds, measured, verifyNext ? (float)MapCapture.VerifyExtraSeconds : 0f);
                     if (endedEarly != null) break;
 
                     // Campaign speed step 2: a checkpoint whose write outlived its stop's wait finishes before anything moves -
@@ -1098,7 +1626,7 @@ namespace QuestTree.QuestGraph
                         if (_cancelRequested)
                         {
                             Plugin.LogSource?.LogInfo(
-                                $"QuestTree: campaign cancelled after stop {i} of {stops.Count}; " +
+                                $"QuestTree: campaign cancelled after stop {lastNumber} of {stops.Count}; " +
                                 (ExtractEnabled() ? "going to an extract." : "going back to the start."));
                             endedEarly = "cancelled with the key";
                             break;
@@ -1142,6 +1670,7 @@ namespace QuestTree.QuestGraph
                     }
 
                     lastStop = stop;
+                    lastNumber = i + 1;
 
                     // The streamer's turn: nothing here can hurry it, so this is simply time.
                     yield return new WaitForSeconds(CampaignSettleSeconds);
@@ -1155,7 +1684,7 @@ namespace QuestTree.QuestGraph
                     // F46). The side views take their y range from the stored one and only widen it (review F13), and the
                     // stop's wait is the capture's own worst case (MapCapture.WorstCaseSeconds, review F45). The last stop
                     // may also build the mesh from scratch for comparison (MeshVerifyLastStop), and waits for that too.
-                    var verify = i == stops.Count - 1 && (ModSettings.MeshVerifyLastStop?.Value ?? false);
+                    var verify = k == order.Count - 1 && (ModSettings.MeshVerifyLastStop?.Value ?? false);
 
                     // Campaign speed step 2: the stop the checkpoint line names
                     MapCapture.CampaignStopIs(i + 1);
@@ -1229,6 +1758,29 @@ namespace QuestTree.QuestGraph
 
                     Plugin.LogSource?.LogInfo(
                         $"QuestTree: campaign stop {i + 1} of {stops.Count} at {At(stop)} - captured.");
+
+                    // Campaign speed step 3: the stops left out were judged against the set on disk, which only holds if this
+                    // capture MERGED into it. One that replaced it (a different pixel size, render recipe or exposure - only
+                    // the capture can decide those) started a new set, and the stops left out are visited after all, at the
+                    // end, in the plan's order.
+                    if (resumeCheck)
+                    {
+                        resumeCheck = false;
+                        var now = MapCapture.ResumeFirstCapturedAt(map);
+
+                        if (!string.Equals(now, survey.FirstCapturedAt, StringComparison.Ordinal))
+                        {
+                            for (var s = 0; s < stops.Count; s++)
+                                if (survey.Skip[s]) order.Add(s);
+
+                            Plugin.LogSource?.LogInfo(
+                                $"QuestTree: resume on {map} called off - this campaign's first capture started the set " +
+                                $"afresh (first captured {now ?? "unknown"}, was {survey.FirstCapturedAt}), so the {leftOut} " +
+                                "stop(s) left out are visited after all, at the end.");
+                            MapCapture.Journal(map, $"resume called off - the first capture started the set afresh; {leftOut} stop(s) added back.");
+                            leftOut = 0;
+                        }
+                    }
                 }
 
                 completed = stopped == null;
@@ -1239,7 +1791,7 @@ namespace QuestTree.QuestGraph
                 // (MapCapture.WhenCampaignWritten), so the one upload sees it. Every end that leaves a world gets it (done,
                 // early for time, cancelled, a death, a failed stop); a capture still running (a death or a timeout mid-stop)
                 // is waited for by RestoreWhenDone, which starts the write after it.
-                if (_gameWorld != null && !MapCapture.IsCapturing)
+                if (!nothingLeft && _gameWorld != null && !MapCapture.IsCapturing)
                     MapCapture.StartCampaignWrite(stopped != null ? $"the campaign stopped ({stopped})"
                         : endedEarly != null ? $"the campaign ended early ({endedEarly})"
                         : "the campaign's last stop");
@@ -1264,7 +1816,25 @@ namespace QuestTree.QuestGraph
                 // WHENEVER a capture is still running (PART-07 review), not only on the timeout: a death or an abort
                 // breaks the wait loop with the stop's capture in flight, and releasing the hold here would let that
                 // capture write its meta unheld - a second upload, stopped and re-queued by the supersede guard.
-                if (MapCapture.IsCapturing)
+                if (nothingLeft)
+                {
+                    // Campaign speed step 3: nothing was visited, so nothing moves - no Finish, no extract, no write - and
+                    // the upload hold is let go without a line: no capture was written under it, so none is owed.
+                    ReleaseNothingLeft();
+                    _running = false;
+
+                    // automatic capture's "last capture" is where the player stands now - nothing moved them
+                    try
+                    {
+                        var player = _gameWorld != null ? _gameWorld.MainPlayer : null;
+                        if (player != null) endedAt = player.Transform.position;
+                    }
+                    catch (Exception)
+                    {
+                        // the start, as before
+                    }
+                }
+                else if (MapCapture.IsCapturing)
                 {
                     if (_stillCapturing)
                         Plugin.LogSource?.LogWarning(
@@ -1292,17 +1862,50 @@ namespace QuestTree.QuestGraph
                 _autoLastCaptureZ = endedAt.z;
                 _autoDueAt = Time.time;
 
-                var seconds = (clock.ElapsedMilliseconds / 1000d).ToString("0", CultureInfo.InvariantCulture);
-                var counts = $"{stops.Count} stop(s), {captured} captured, {skipped} skipped, {seconds} s{_campaignUploadNote}.";
+                if (nothingLeft)
+                {
+                    var line = $"nothing left to capture ({stops.Count.ToString(CultureInfo.InvariantCulture)} stops already " +
+                               "seen from close enough)";
+                    Plugin.LogSource?.LogInfo($"QuestTree: capture campaign on {map}: {line}.");
+                    MapCapture.Journal(map, line + ".");
+                }
+                else
+                {
+                    var seconds = (clock.ElapsedMilliseconds / 1000d).ToString("0", CultureInfo.InvariantCulture);
+                    var counts = $"{stops.Count} stop(s), {captured} captured, {skipped} skipped, " +
+                                 (leftOut > 0 ? $"{leftOut} left out (already seen from close enough), " : "") +
+                                 $"{seconds} s{_campaignUploadNote}.";
 
-                // "ended early", not "done": the map is not whole, and whoever reads the journal days later should not
-                // take a raid-time or keyed end for a campaign that visited every stop.
-                var outcome = stopped != null ? $"stopped ({stopped})"
-                    : endedEarly != null ? $"ended early ({endedEarly})"
-                    : "done";
+                    // "ended early", not "done": the map is not whole, and whoever reads the journal days later should not
+                    // take a raid-time or keyed end for a campaign that visited every stop.
+                    var outcome = stopped != null ? $"stopped ({stopped})"
+                        : endedEarly != null ? $"ended early ({endedEarly})"
+                        : "done";
 
-                Plugin.LogSource?.LogInfo($"QuestTree: capture campaign on {map} {outcome} - {counts}");
-                MapCapture.Journal(map, $"{outcome} - {counts}");
+                    Plugin.LogSource?.LogInfo($"QuestTree: capture campaign on {map} {outcome} - {counts}");
+                    MapCapture.Journal(map, $"{outcome} - {counts}");
+                }
+            }
+        }
+
+        /// <summary>Campaign speed step 3: the end of a campaign that had nothing left to visit - the session ended (as every
+        /// end does, see <see cref="ReleaseCampaignHold"/>) and the upload hold let go quietly: no capture was written under
+        /// it, so nothing is owed and there is no upload to announce. Never throws.</summary>
+        private void ReleaseNothingLeft()
+        {
+            MapCapture.CampaignEnds();
+
+            var hold = _campaignHold;
+            _campaignHold = null;
+            _campaignUploadNote = "";
+
+            try
+            {
+                if (hold != null) MapTransfer.ReleaseUploads(hold);
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogDebug($"QuestTree: the campaign's upload hold could not be released ({ex.Message}).");
             }
         }
 
