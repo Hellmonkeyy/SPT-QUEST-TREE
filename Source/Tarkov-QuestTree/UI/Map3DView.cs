@@ -1037,6 +1037,13 @@ namespace QuestTree.UI
             /// ground.</summary>
             public Material BuildingMaterial;
 
+            /// <summary>Pictures stage C: the roofs' material - the top picture drawn as EMISSION (the game's own light and
+            /// shadows, never lit twice) when <see cref="RoofsActive"/> holds on the emission path, else the SAME object as
+            /// <see cref="BuildingMaterial"/>, so everything that draws a roof with it draws exactly as before. A separate
+            /// material because BuildingMaterial stays the lit fallback that tints and side faces draw with while their own
+            /// material waits. Destroyed at teardown only when it is not BuildingMaterial.</summary>
+            public Material RoofMaterial;
+
             /// <summary>The geometry, which this floor does NOT own: it belongs to the static cache and
             /// outlives every view of this map. See <see cref="Built"/>.</summary>
             public Built Meshes;
@@ -1128,6 +1135,10 @@ namespace QuestTree.UI
 
             /// <summary>Building triangles textured from an atlas page, for the log line.</summary>
             public long AtlasTriangles;
+
+            /// <summary>Pictures stage C: top faces that had an atlas tile and took the top picture instead (counted in
+            /// <see cref="TopTriangles"/> too), for the log line.</summary>
+            public long RoofPictureTriangles;
 
             /// <summary>WP8 (V.2): the four shares by area, m2, and the walls tinted outside 40 degrees.</summary>
             public double AtlasArea;
@@ -1375,6 +1386,102 @@ namespace QuestTree.UI
         /// fallback, or with no pages (a capture from before Stage W), every building face keeps the stage U/V
         /// rule, exactly as before.</summary>
         private bool AtlasActive => _pageCount > 0 && !_flatColours;
+
+        /// <summary>
+        /// Pictures stage C: whether this build's roofs (top faces, n.y &gt;= <see cref="RoofNormalY"/>) take the captured,
+        /// game-lit top picture even where the atlas has a tile for them. Decided ONCE per build by
+        /// <see cref="DecideRoofs"/>, just before the build key, and not read live: the roof pass and the wall pass can be
+        /// snapshotted frames apart (StartWalls), and a setting flipped between them would put a triangle in both passes
+        /// or in neither. Without the atlas it changes nothing (every roof is on the picture already), so it is only true
+        /// with it.
+        /// </summary>
+        private bool RoofsActive => _roofsActive;
+
+        private bool _roofsActive;
+
+        /// <summary>Why this build's roofs are where they are, for the log line - captured by <see cref="DecideRoofs"/> with
+        /// the decision, so the line never reports a setting flipped since.</summary>
+        private enum RoofReason
+        {
+            NoAtlas,
+            SwitchedOff,
+            DensityUnknown,
+            TooCoarse,
+            Picture
+        }
+
+        private RoofReason _roofReason;
+
+        /// <summary>The density <see cref="DecideRoofs"/> decided on, px/m.</summary>
+        private float _roofPpm;
+
+        /// <summary>The lowest capture density over EVERY band of the map with a picture layer, px/m - per map, not per
+        /// selected floor, so stepping floors (which changes the drawn levels) never flips the roofs' source and rebuilds
+        /// the view. 0 when a floor's is unknown (a capture from before the meta carried it) or there is no floor - which
+        /// keeps the roofs on the atlas, today's look. A band with no picture layer is skipped: it is never drawn (Draw
+        /// waits for a picture that never comes).</summary>
+        private float PicturePpm
+        {
+            get
+            {
+                if (_file == null) return 0f;
+
+                var lowest = float.PositiveInfinity;
+
+                foreach (var band in _file.Bands)
+                {
+                    if (band == null) continue;
+
+                    var layer = LayerOf(band.Level);
+                    if (layer == null) continue;
+
+                    var ppm = layer.PxPerMetre;
+                    if (!(ppm > 0f) || float.IsInfinity(ppm)) return 0f;
+
+                    if (ppm < lowest) lowest = ppm;
+                }
+
+                return float.IsPositiveInfinity(lowest) ? 0f : lowest;
+            }
+        }
+
+        /// <summary>Sets <see cref="RoofsActive"/> for this build. Called after the shader (flat colours) and the atlas
+        /// pages are settled and before the build key, which carries the result.</summary>
+        private void DecideRoofs()
+        {
+            _roofPpm = PicturePpm;
+
+            // the clause is about the atlas's roofs: with no atlas (or flat colours) every roof is on the picture as ever
+            _roofReason = _flatColours || !AtlasActive ? RoofReason.NoAtlas
+                : !RoofsFromPicture || !ModSettings.RoofsFromPictureWanted ? RoofReason.SwitchedOff
+                : !(_roofPpm > 0f) ? RoofReason.DensityUnknown
+                : _roofPpm < RoofPictureMinPpm ? RoofReason.TooCoarse
+                : RoofReason.Picture;
+
+            _roofsActive = _roofReason == RoofReason.Picture;
+        }
+
+        /// <summary>The roofs clause of the build log line, from this build's decision (<see cref="DecideRoofs"/>). The
+        /// percentage is of the top faces (every one on the picture while this is on) that came off the atlas.</summary>
+        private string RoofsText(long pictureRoofs, long topTriangles)
+        {
+            switch (_roofReason)
+            {
+                case RoofReason.Picture:
+                    return string.Format(CultureInfo.InvariantCulture,
+                        ", roofs from the picture ({0:#,##0} faces, {1:0} % of top faces, taken from the atlas) at {2:0.#} px/m",
+                        pictureRoofs, topTriangles > 0 ? 100d * pictureRoofs / topTriangles : 0d, _roofPpm);
+                case RoofReason.SwitchedOff:
+                    return ", roofs atlas (switched off)";
+                case RoofReason.DensityUnknown:
+                    return ", roofs atlas (picture density unknown)";
+                case RoofReason.TooCoarse:
+                    return string.Format(CultureInfo.InvariantCulture, ", roofs atlas (picture {0:0.#} px/m < {1:0.#})",
+                        _roofPpm, RoofPictureMinPpm);
+                default:
+                    return "";
+            }
+        }
 
         /// <summary>Reads the entry's usable atlas pages into their slots - present and not already failed.</summary>
         private void TakeAtlas()
@@ -2305,9 +2412,13 @@ namespace QuestTree.UI
             // which faces are textured and which are tinted: the same mesh classified against four sides
             // and against none is two different builds. HERE and not earlier, because whether the sides
             // take part at all depends on the shader just resolved (SidesActive reads _flatColours).
+            // Pictures stage C: the roofs' source splits the triangles between the passes differently, so it is in the key
+            // too - a setting flipped, or a denser capture, rebuilds the cached meshes rather than drawing the old split.
+            DecideRoofs();
+
             var key = _meshPath + "|" + loaded.Stamp.ToString(CultureInfo.InvariantCulture) + "|" +
                       (SidesActive ? _sidesKey : "-") + "|atlas:" + (AtlasActive ? _pagesKey : "-") + "|" +
-                      FloorRangesKey();
+                      FloorRangesKey() + "|roofs:" + (RoofsActive ? "P" : "-");
 
             if (_builtKey != key)
             {
@@ -2412,12 +2523,21 @@ namespace QuestTree.UI
             // Counted as in use from here until this view releases it - see Built.
             meshes.Users++;
 
+            var building = Matte(new Material(shader) { name = $"QuestTreeMap3D-buildings-{level}" });
+
             _floors.Add(new Floor
             {
                 Level = level,
                 Layer = LayerOf(level),
                 GroundMaterial = MakeGroundMaterial(level),
-                BuildingMaterial = Matte(new Material(shader) { name = $"QuestTreeMap3D-buildings-{level}" }),
+                BuildingMaterial = building,
+                // Pictures stage C: the roofs on the emission recipe (opaque, no cutout - as the building material), so on
+                // the OPAQUE variant the side check proves, not the ground's cutout one: gated on _emissiveSides, and put
+                // back to the lit building material by Draw if that check fails (LitRoofs). Off the emission path the
+                // roofs share the lit building material, as before stage C.
+                RoofMaterial = _emissiveSides && RoofsActive
+                    ? Emissive(Matte(new Material(shader) { name = $"QuestTreeMap3D-roofs-{level}" }))
+                    : building,
                 Meshes = meshes
             });
         }
@@ -2447,6 +2567,7 @@ namespace QuestTree.UI
                 into.MovedRoofTriangles = data.MovedRoofTriangles;
                 into.GroundSkirtTriangles = data.GroundSkirtTriangles;
                 into.AtlasTriangles = data.AtlasTriangles;
+                into.RoofPictureTriangles = data.RoofPictureTriangles;
                 into.AtlasArea = data.AtlasArea;
                 into.TopArea = data.TopArea;
                 into.SideArea = data.SideArea;
@@ -2703,6 +2824,7 @@ namespace QuestTree.UI
             var movedRoofs = 0L;
             var skirts = 0L;
             var atlasTriangles = 0L;
+            var pictureRoofs = 0L;
             double atlasArea = 0d, topArea = 0d, sideArea = 0d, tintArea = 0d;
             var wallsOutside = 0L;
 
@@ -2712,6 +2834,7 @@ namespace QuestTree.UI
             foreach (var floor in _floors)
             {
                 atlasTriangles += floor.Meshes.AtlasTriangles;
+                pictureRoofs += floor.Meshes.RoofPictureTriangles;
                 atlasArea += floor.Meshes.AtlasArea;
                 topArea += floor.Meshes.TopArea;
                 sideArea += floor.Meshes.SideArea;
@@ -2755,6 +2878,7 @@ namespace QuestTree.UI
                     ? string.Format(CultureInfo.InvariantCulture, ", sides {0} ({1})",
                         _sideCount, string.Join(",", _sidesKey.ToCharArray()))
                     : ", sides 0") +
+                RoofsText(pictureRoofs, topTriangles) +
                 (faces > 0
                     ? (AtlasActive
                         ? string.Format(CultureInfo.InvariantCulture, ", faces atlas {0:0} % / top {1:0} % / sides {2:0} % / tint {3:0} %",
@@ -3757,6 +3881,11 @@ namespace QuestTree.UI
                     }
                 }
 
+                // Pictures stage C: the roofs' emission at the ground's scale, so a roof and the street beside it agree
+                var roofs = floor?.RoofMaterial;
+                if (roofs != null && roofs != floor.BuildingMaterial && roofs.IsKeywordEnabled("_EMISSION"))
+                    MatchEmissionScale(roofs);
+
                 var sides = floor?.Meshes?.Sides;
                 if (sides == null) continue;
 
@@ -4047,11 +4176,19 @@ namespace QuestTree.UI
                     string verdict;
                     try
                     {
-                        verdict = !SidesActive || !_emissiveSides || _sideEmission != SideEmission.Unproven
+                        // the opaque variant is proven on a side picture, or - a capture without sides - on the roofs
+                        // (stage C), which draw with the same variant
+                        var roofsToProve = !SidesActive && floor.RoofMaterial != null &&
+                                           floor.RoofMaterial != floor.BuildingMaterial &&
+                                           floor.RoofMaterial.IsKeywordEnabled("_EMISSION");
+
+                        verdict = !(SidesActive || roofsToProve) || !_emissiveSides || _sideEmission != SideEmission.Unproven
                             ? ""   // nothing on the emission path to prove, or proven (or failed) already this session
                             : !usable
                                 ? "no Unlit/Texture to compare with, skipped"
-                                : SideVerdict(floor, unlit, ref unlitReference);
+                                : SidesActive
+                                    ? SideVerdict(floor, unlit, ref unlitReference)
+                                    : RoofVerdict(floor, unlit, ref unlitReference);
                     }
                     catch (Exception ex)
                     {
@@ -4137,10 +4274,9 @@ namespace QuestTree.UI
         /// </summary>
         private string SideVerdict(Floor floor, Shader unlit, ref Material unlitReference)
         {
-            var width = _rt.width;
-            var height = _rt.height;
             var anyPicture = false;
             var tries = 0;
+            var dark = 0;
 
             for (var slot = 0; slot < floor.Meshes.Sides.Length && tries < SideMeshTries; slot++)
             {
@@ -4156,54 +4292,163 @@ namespace QuestTree.UI
                     var mesh = side.Meshes[i];
                     if (mesh == null) continue;
 
-                    var at = _camera.WorldToViewportPoint(mesh.bounds.center);
-                    if (at.z <= 0f || at.x < 0f || at.x > 1f || at.y < 0f || at.y > 1f) continue;
+                    var result = ReadOpaque(mesh, material, picture, unlit, ref unlitReference, out var read, out var expected);
+                    if (result < 0) continue;   // its centre is off screen: not a try
 
                     tries++;
+                    if (result == 0) continue;   // this chunk's centre is in the air between its buildings - the next one
 
-                    // the window around the projected centre, clipped to the view
-                    var px = Mathf.RoundToInt(at.x * (width - 1));
-                    var py = Mathf.RoundToInt(at.y * (height - 1));
-                    var x0 = Mathf.Max(0, px - SideSearchRadius);
-                    var y0 = Mathf.Max(0, py - SideSearchRadius);
-                    var x1 = Mathf.Min(width - 1, px + SideSearchRadius);
-                    var y1 = Mathf.Min(height - 1, py + SideSearchRadius);
-                    var window = new RectInt(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
-
-                    var one = new List<Mesh>(1) { mesh };
-
-                    // one reference material for the whole check: its picture is whichever part used it last
-                    unlitReference = ReferenceFor(unlitReference, unlit, picture);
-                    var expected = RenderFrame(one, unlitReference, false, window);
-                    var backdrop = RenderFrame(null, null, false, window);
-
-                    var pixel = CoveredNear(expected, backdrop, window.width, window.height, px - x0, py - y0);
-                    if (pixel < 0) continue;   // this chunk's centre is in the air between its buildings - the next one
-
-                    var read = RenderAtUnitEmission(one, material, false, window);
-
-                    var ok = Near(read[pixel], expected[pixel], EmissionCheckTolerance);
-                    _sideEmission = ok ? SideEmission.Proven : SideEmission.Failed;
-
-                    if (!ok)
+                    if (result == OpaqueTooDark)
                     {
-                        // lit for the rest of the session: Draw rebuilds each emissive side material lit, from the next render
-                        _emissiveSides = false;
-                        _forceRender = true;
+                        dark++;
+                        continue;
                     }
 
+                    var ok = SettleOpaque(read, expected);
+
                     return string.Format(CultureInfo.InvariantCulture, "side {0} reads {1}/{2}/{3} vs picture {4}/{5}/{6}: {7}",
-                        SideOrder[slot], read[pixel].r, read[pixel].g, read[pixel].b,
-                        expected[pixel].r, expected[pixel].g, expected[pixel].b,
-                        ok ? "ok" : "MISMATCH, the sides are drawn lit");
+                        SideOrder[slot], read.r, read.g, read.b, expected.r, expected.g, expected.b,
+                        ok ? "ok" : "MISMATCH, the sides and roofs are drawn lit");
                 }
             }
+
+            // left Unproven: the next build checks again, and a pass is never made of a picture black either way
+            if (dark > 0)
+                return string.Format(CultureInfo.InvariantCulture,
+                    "{0} of {1} side mesh(es) too dark to judge, skipped (too dark to judge)", dark, tries);
 
             if (tries > 0)
                 return string.Format(CultureInfo.InvariantCulture,
                     "nothing drawn within {0} px of the centres of {1} side mesh(es), skipped", SideSearchRadius, tries);
 
             return anyPicture ? "no side mesh's centre on screen, skipped" : null;
+        }
+
+        /// <summary>
+        /// Pictures stage C review S1: the opaque check of <see cref="SideVerdict"/> made on the ROOFS, for a capture without
+        /// side pictures - the roofs' emissive material is the same opaque Standard _EMISSION variant, and nothing else
+        /// would prove it. The selected floor's roof meshes, up to <see cref="SideMeshTries"/>, the same way. Its log
+        /// verdict, "" when there is nothing to prove, or null to try again on a later render (the roofs' picture is not
+        /// on their material yet). A MISMATCH puts the opaque variant on the lit path for the session: Draw then gives
+        /// the roofs the lit building material (<see cref="RoofMaterialOf"/>).
+        /// </summary>
+        private string RoofVerdict(Floor floor, Shader unlit, ref Material unlitReference)
+        {
+            var material = floor.RoofMaterial;
+            if (material == null || material == floor.BuildingMaterial || !material.IsKeywordEnabled("_EMISSION")) return "";
+
+            var picture = material.mainTexture;
+            if (picture == null) return null;
+
+            var tries = 0;
+            var dark = 0;
+
+            for (var i = 0; i < floor.Meshes.Buildings.Count && tries < SideMeshTries; i++)
+            {
+                var mesh = floor.Meshes.Buildings[i];
+                if (mesh == null) continue;
+
+                var result = ReadOpaque(mesh, material, picture, unlit, ref unlitReference, out var read, out var expected);
+                if (result < 0) continue;
+
+                tries++;
+                if (result == 0) continue;
+
+                if (result == OpaqueTooDark)
+                {
+                    dark++;
+                    continue;
+                }
+
+                var ok = SettleOpaque(read, expected);
+
+                return string.Format(CultureInfo.InvariantCulture, "roofs read {0}/{1}/{2} vs picture {3}/{4}/{5}: {6}",
+                    read.r, read.g, read.b, expected.r, expected.g, expected.b,
+                    ok ? "ok" : "MISMATCH, the roofs and sides are drawn lit");
+            }
+
+            // left Unproven: the next build checks again, and a pass is never made of a picture black either way
+            if (dark > 0)
+                return string.Format(CultureInfo.InvariantCulture,
+                    "{0} of {1} roof mesh(es) too dark to judge, skipped (too dark to judge)", dark, tries);
+
+            if (tries > 0)
+                return string.Format(CultureInfo.InvariantCulture,
+                    "nothing drawn within {0} px of the centres of {1} roof mesh(es), skipped", SideSearchRadius, tries);
+
+            return "no roof mesh's centre on screen, skipped";
+        }
+
+        /// <summary>
+        /// One mesh of the opaque check: drawn with the Unlit reference and against an empty frame, both read back only in
+        /// the window of <see cref="SideSearchRadius"/> around its projected bounds centre; when a pixel there is covered,
+        /// drawn with <paramref name="material"/> at unit emission and that pixel returned in both reads. -1 when the
+        /// centre is off screen (not a try), 0 when nothing near it is covered, 1 when compared,
+        /// <see cref="OpaqueTooDark"/> when the covered pixel's picture is too dark to tell a broken emission from a
+        /// working one (a broken variant draws the black albedo, which reads about black too).
+        /// </summary>
+        private int ReadOpaque(Mesh mesh, Material material, Texture picture, Shader unlit, ref Material unlitReference,
+            out Color32 read, out Color32 expected)
+        {
+            read = expected = default;
+
+            var width = _rt.width;
+            var height = _rt.height;
+
+            var at = _camera.WorldToViewportPoint(mesh.bounds.center);
+            if (at.z <= 0f || at.x < 0f || at.x > 1f || at.y < 0f || at.y > 1f) return -1;
+
+            // the window around the projected centre, clipped to the view
+            var px = Mathf.RoundToInt(at.x * (width - 1));
+            var py = Mathf.RoundToInt(at.y * (height - 1));
+            var x0 = Mathf.Max(0, px - SideSearchRadius);
+            var y0 = Mathf.Max(0, py - SideSearchRadius);
+            var x1 = Mathf.Min(width - 1, px + SideSearchRadius);
+            var y1 = Mathf.Min(height - 1, py + SideSearchRadius);
+            var window = new RectInt(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
+
+            var one = new List<Mesh>(1) { mesh };
+
+            // one reference material for the whole check: its picture is whichever part used it last
+            unlitReference = ReferenceFor(unlitReference, unlit, picture);
+            var reference = RenderFrame(one, unlitReference, false, window);
+            var backdrop = RenderFrame(null, null, false, window);
+
+            var pixel = CoveredNear(reference, backdrop, window.width, window.height, px - x0, py - y0);
+            if (pixel < 0) return 0;
+
+            expected = reference[pixel];
+
+            // a near-black texel would pass whatever the emission does: not evidence, so no emission render either
+            if (Math.Max(expected.r, Math.Max(expected.g, expected.b)) <= OpaqueDarkMax) return OpaqueTooDark;
+
+            read = RenderAtUnitEmission(one, material, false, window)[pixel];
+
+            return 1;
+        }
+
+        /// <summary><see cref="ReadOpaque"/>'s result for a covered pixel too dark to judge.</summary>
+        private const int OpaqueTooDark = 2;
+
+        /// <summary>The brightest a reference pixel's max channel can be and still be too dark for the opaque check: three
+        /// tolerances, so a broken emission (about black) cannot land within the tolerance of it.</summary>
+        private const int OpaqueDarkMax = 3 * EmissionCheckTolerance;
+
+        /// <summary>Records the opaque check's outcome for the session and returns whether it passed. A MISMATCH puts the
+        /// sides and the roofs on the lit path for the rest of the session: Draw rebuilds each emissive side material lit
+        /// and gives the roofs the building material, from the next render.</summary>
+        private bool SettleOpaque(Color32 read, Color32 expected)
+        {
+            var ok = Near(read, expected, EmissionCheckTolerance);
+            _sideEmission = ok ? SideEmission.Proven : SideEmission.Failed;
+
+            if (!ok)
+            {
+                _emissiveSides = false;
+                _forceRender = true;
+            }
+
+            return ok;
         }
 
         /// <summary>Stage D: <see cref="RenderFrame"/> with the material's _EmissionColor at white for that one render and put
@@ -5482,6 +5727,10 @@ namespace QuestTree.UI
             public readonly Dictionary<int, List<MeshData>> Atlas = new Dictionary<int, List<MeshData>>();
             public long AtlasTriangles;
 
+            /// <summary>Pictures stage C: atlas top faces given the top picture instead - see
+            /// <see cref="Built.RoofPictureTriangles"/>.</summary>
+            public long RoofPictureTriangles;
+
             /// <summary>WP8 (V.2): the same four shares by AREA, m2, and the walls tinted for facing no side within
             /// 40 degrees.</summary>
             public double AtlasArea;
@@ -5518,6 +5767,10 @@ namespace QuestTree.UI
             public string MapKey = "";
             public bool Flat;
             public bool SidesActive;
+
+            /// <summary>Pictures stage C: <see cref="RoofsActive"/> as this build decided it.</summary>
+            public bool RoofsFromPicture;
+
             public readonly DynamicMapsLibrary.SidePicture[] Sides = new DynamicMapsLibrary.SidePicture[4];
             public (int Level, float Low, float High)[] FloorRanges = new (int, float, float)[0];
             public float SpanX;
@@ -5565,6 +5818,31 @@ namespace QuestTree.UI
 
             /// <summary>The tile range <paramref name="k"/> of the building last loaded draws with.</summary>
             public int TileOfRange(int k) => _rangeTile[k];
+
+            /// <summary>
+            /// Pictures stage C: whether a face the atlas would texture is a ROOF that takes the top picture instead - true
+            /// only under <see cref="RoofsFromPicture"/> and for an upward face, n.y &gt;= <see cref="RoofNormalY"/> of its
+            /// unit normal: faces <see cref="ViewFor"/> then sends to <see cref="TopView"/> under both of its rules. An
+            /// underside (the top camera never saw it), a wall and a degenerate face keep the atlas. Asked only for faces
+            /// with an atlas range, by the roof pass and <see cref="WallTriangle"/> alike, so the two still split every
+            /// triangle exactly once. A face on an alpha tile keeps the atlas (review). No square root and no allocation: n.y &gt;= k|n| with k &gt; 0 is n.y &gt; 0 and
+            /// n.y^2 &gt;= k^2 |n|^2 - this runs over every atlas triangle of the map.
+            /// </summary>
+            public bool RoofOnPicture(int range, Vector3 a, Vector3 b, Vector3 c)
+            {
+                if (!RoofsFromPicture) return false;
+
+                // a tile on an alpha page (leaf cards, grates, catwalks) keeps its cutout: on the opaque picture it would
+                // draw as a solid quad
+                if (Tiles != null && Tiles.AlphaTile(TileOfRange(range))) return false;
+
+                var n = Vector3.Cross(b - a, c - a);
+                var squared = n.sqrMagnitude;
+
+                if (!(squared > 1e-12f) || !(n.y > 0f)) return false;
+
+                return n.y * n.y >= RoofNormalY * RoofNormalY * squared;
+            }
 
             /// <summary>The raw material UV of vertex <paramref name="i"/> of the building last loaded, in range
             /// <paramref name="k"/> - see <see cref="AtlasUvOf"/>.</summary>
@@ -5837,8 +6115,10 @@ namespace QuestTree.UI
                 // Ground a building owns is the relief's, in both passes: the roof pass skips it the same way.
                 if (GroundSkirt(pa, pb, pc)) return false;
 
-                // An atlas face is textured by its own material, never tinted.
-                if (AtlasRangeAt(i) >= 0) return false;
+                // An atlas face is textured by its own material, never tinted - unless it is a roof on the top picture
+                // (stage C), which the roof pass takes: ViewFor below then says TopView, so it is not a wall either.
+                var range = AtlasRangeAt(i);
+                if (range >= 0 && !RoofOnPicture(range, pa, pb, pc)) return false;
 
                 a = pa;
                 b = pb;
@@ -5949,6 +6229,7 @@ namespace QuestTree.UI
                 MapKey = _mapKey,
                 Flat = _flatColours,
                 SidesActive = SidesActive,
+                RoofsFromPicture = RoofsActive,
                 FloorRanges = _floorRanges.ToArray(),
                 SpanX = (float)(_file.MaxX - _file.MinX),
                 SpanZ = (float)(_file.MaxZ - _file.MinZ)
@@ -6150,8 +6431,16 @@ namespace QuestTree.UI
                         continue;
                     }
 
-                    // An atlas face first: the game's own material, the file's own raw UVs.
+                    // An atlas face first: the game's own material, the file's own raw UVs - unless it is a roof and this
+                    // build takes the roofs from the top picture (stage C): then it falls through to ViewFor, which sends
+                    // it to the top picture like any roof without a tile. WallTriangle asks the same two questions.
                     var range = p.AtlasRangeAt(i);
+
+                    if (range >= 0 && p.RoofOnPicture(range, p.Position(a), p.Position(b), p.Position(c)))
+                    {
+                        data.RoofPictureTriangles++;
+                        range = -1;
+                    }
 
                     if (range >= 0)
                     {
@@ -6531,6 +6820,14 @@ namespace QuestTree.UI
         /// <summary>WP8 rollback: walls take a side picture within 40 degrees. False: every wall without an atlas tile
         /// takes the tint.</summary>
         internal static readonly bool SideWalls = true;
+
+        /// <summary>Pictures stage C rollback: false keeps every roof with an atlas tile on the atlas (raw albedo lit by the
+        /// map's sun), whatever the setting says. Static readonly so the branch is not code the compiler folds away.</summary>
+        internal static readonly bool RoofsFromPicture = true;
+
+        /// <summary>Pictures stage C: the least capture density, px/m, at which a roof takes the top picture rather than its
+        /// atlas tile. Under it (a 4 px/m capture: 0.25 m a pixel) a roof would be blurrier than the atlas's own texture.</summary>
+        private const float RoofPictureMinPpm = 8f;
 
         /// <summary>WP8 (V.3) debug switch, OFF in every build: draws the building faces by SOURCE - atlas textured as
         /// usual, an atlas FLAT tile magenta, top-picture faces blue, side-picture faces orange, tints grey - and logs
@@ -7333,6 +7630,7 @@ namespace QuestTree.UI
         {
             var ground = floor.GroundMaterial;
             var walls = floor.BuildingMaterial;
+            var roofs = RoofMaterialOf(floor);
 
             if (ground == null || walls == null) return;
 
@@ -7340,12 +7638,15 @@ namespace QuestTree.UI
             // has to be asked, because the picture cache can release a floor's texture under us - and a
             // material whose mainTexture has been destroyed draws white, not the last picture. Both
             // materials are checked, since either can be the one holding the destroyed reference.
-            if (!_flatColours && (ground.mainTexture == null || walls.mainTexture == null) &&
+            if (!_flatColours && (ground.mainTexture == null || walls.mainTexture == null || roofs.mainTexture == null) &&
                 floor.Layer != null && floor.Layer.TryGetSprite(out var sprite) &&
                 sprite != null && sprite.texture != null)
             {
                 SetPicture(ground, sprite.texture, _emissiveGround);   // and its emission map, on the emission path
                 walls.mainTexture = sprite.texture;
+
+                // stage C: the roofs' own material, when it is one (made only on the emission path, so emissive)
+                if (roofs != walls) SetPicture(roofs, sprite.texture, _emissiveGround);
             }
 
             // NOT DRAWN until its picture is on it. A textured shader with a null _MainTex samples white,
@@ -7384,7 +7685,7 @@ namespace QuestTree.UI
             // Every mesh is drawn whole: the dollhouse cut is the camera's oblique near plane (ApplyCut), which
             // clips each triangle on the GPU at the cut height. The peel still leaves out every band over the
             // chosen floor.
-            var roofMaterial = debug ? DebugOr(DebugTop, walls) : walls;
+            var roofMaterial = debug ? DebugOr(DebugTop, roofs) : roofs;
 
             for (var i = 0; i < meshes.Buildings.Count; i++)
             {
@@ -7403,7 +7704,7 @@ namespace QuestTree.UI
                 // reach below the cut, and that sliver takes the chosen floor's picture - the one at the cut - not
                 // this filing band's (review F28).
                 var owner = FloorAt(roof.Level) ?? FloorAt(_selectedLevel);
-                var material = owner != null && owner.BuildingMaterial != null ? owner.BuildingMaterial : walls;
+                var material = owner != null && owner.BuildingMaterial != null ? RoofMaterialOf(owner) : roofs;
 
                 if (material == null) continue;
 
@@ -7521,6 +7822,27 @@ namespace QuestTree.UI
                     if (mesh != null) Submit(mesh, draw);
                 }
             }
+        }
+
+        /// <summary>
+        /// Pictures stage C review S1: a floor's roof material, put back to the lit building material first when the opaque
+        /// emission variant has failed its check this session (<see cref="_emissiveSides"/> false) - as a side's is by
+        /// <see cref="LitSideMaterial"/>, so a machine whose opaque _EMISSION variant is broken draws lit roofs, not black
+        /// ones. Asked for the owner of a roof on another floor too, whose own Draw may come later in the frame.
+        /// </summary>
+        /// <param name="floor">The floor; its BuildingMaterial is not null.</param>
+        private Material RoofMaterialOf(Floor floor)
+        {
+            var roofs = floor.RoofMaterial;
+            if (roofs == null) return floor.BuildingMaterial;
+
+            if (!_emissiveSides && roofs != floor.BuildingMaterial && roofs.IsKeywordEnabled("_EMISSION"))
+            {
+                Discard(roofs);
+                floor.RoofMaterial = roofs = floor.BuildingMaterial;
+            }
+
+            return roofs;
         }
 
         /// <summary>The debug switch's colours, by source (see <see cref="DebugFaceSources"/>).</summary>
@@ -8373,9 +8695,12 @@ namespace QuestTree.UI
                 // Texture2D to the flat view's Image. Destroying the material never destroys what was
                 // assigned to it, which is exactly what is wanted here.
                 Discard(floor.GroundMaterial);
+                // stage C: the roofs' material is its own object only on the emission path - else it IS the buildings'
+                if (floor.RoofMaterial != null && floor.RoofMaterial != floor.BuildingMaterial) Discard(floor.RoofMaterial);
                 Discard(floor.BuildingMaterial);
 
                 floor.GroundMaterial = null;
+                floor.RoofMaterial = null;
                 floor.BuildingMaterial = null;
             }
 

@@ -254,6 +254,16 @@ namespace QuestTree
         /// so a plugin that failed to initialise never attaches the stack.</summary>
         public static bool PostProcessingWanted => Ready && MapPostProcessing != null && MapPostProcessing.Value;
 
+        /// <summary>Pictures stage C (2026-09-29): whether the 3D map's roofs take the captured, game-lit top picture (lit by
+        /// the game's sun and shadowed by its buildings) instead of the material atlas's unlit albedo. The picture is only
+        /// used when the capture is dense enough (8 px/m or more): below that a roof would be blurrier than its atlas
+        /// texture. F12 only; a change rebuilds the viewport.</summary>
+        public static ConfigEntry<bool> MapRoofsFromPicture { get; private set; }
+
+        /// <summary>Read by the 3D map when it keys and builds its mesh; false before Init has run, so a plugin that failed to
+        /// initialise keeps the roofs on the atlas, today's look.</summary>
+        public static bool RoofsFromPictureWanted => Ready && MapRoofsFromPicture != null && MapRoofsFromPicture.Value;
+
         /// <summary>Whether a finished capture is offered to the host this profile plays on - see
         /// QuestGraph/MapTransfer.cs. On by default because the HOST decides: a host that does not
         /// want other people's pictures refuses them itself, and its refusal costs one line a
@@ -1027,6 +1037,12 @@ namespace QuestTree
                 "has the stack's resources loaded (the log's first-frame line says). Off: the map is lit by its own " +
                 "exposure budget with no post-processing, which costs a few milliseconds less per redraw.");
 
+            MapRoofsFromPicture = config.Bind(
+                "Advanced", "3D map: roofs from the captured picture", true,
+                "On, the default: the 3D map's roofs take the captured, game-lit picture (the game's own sun and shadows) when " +
+                "the capture is dense enough (8 px/m or more); a coarser capture, or Off, keeps the roofs on the material " +
+                "atlas (sharp textures lit by the map's own sun). Takes effect when the map redraws.");
+
             MeshFoliage = config.Bind(
                 "Advanced", "3D map: include trees and bushes", true,
                 "On, the 3D map's mesh keeps trees and bushes (renderers drawn with the game's SpeedTree shaders), each read at " +
@@ -1107,6 +1123,7 @@ namespace QuestTree
             MapLighting.SettingChanged += Raise;
             MapPostProcessing.SettingChanged += Raise;
             MapShadows.SettingChanged += Raise;
+            MapRoofsFromPicture.SettingChanged += Raise;
             ColorActive.SettingChanged += Raise;
             ColorAvailable.SettingChanged += Raise;
             ColorCompleted.SettingChanged += Raise;
