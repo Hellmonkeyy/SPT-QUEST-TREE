@@ -335,6 +335,10 @@ namespace QuestTree
         /// is Customs' custom_Terrain.</summary>
         public static ConfigEntry<string> MenuSceneProbeLevels { get; private set; }
 
+        /// <summary>THROWAWAY, with <see cref="MenuSceneProbeKey"/>: the stage M1 test hook. A location id here makes the probe
+        /// key run QuestGraph/MenuMapHost on that location instead of the level list. Empty by default.</summary>
+        public static ConfigEntry<string> MenuMapHostLocation { get; private set; }
+
         /// <summary>Which of the two quest marks the boxes wear. Kappa is the canonical list;
         /// Collector is what this install actually gates Collector behind, which a quest mod can
         /// make a very different set.</summary>
@@ -1070,6 +1074,13 @@ namespace QuestTree
                 "Debug only, and temporary. The build indices (a comma list) the menu scene probe loads, one at a time. " +
                 "17 is Customs' terrain scene. Only scenes under Assets/Content/Locations/ are accepted. Restart the game after using " +
                 "this, before any raid.");
+
+            MenuMapHostLocation = config.Bind(
+                "Advanced", "Menu map host location (throwaway)", "",
+                "Debug only, and temporary. When set to a location id (bigmap, Interchange, icebreaker, ...), the menu scene " +
+                "probe key hosts that whole map in the main menu instead of loading the levels above: every scene of the " +
+                "location's scenes preset is loaded additively, counted, and unloaded again. Its lines start \"QuestTree: menu " +
+                "map host:\" in BepInEx/LogOutput.log. Empty = the level list. Restart the game after using this, before any raid.");
 
             // WP2: the 3D mesh's accumulation - out of Entries, so the in-panel Settings tab shows no row for them; F12 and
             // the cfg file only.

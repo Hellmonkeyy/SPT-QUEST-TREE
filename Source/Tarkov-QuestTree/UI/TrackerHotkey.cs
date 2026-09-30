@@ -44,6 +44,10 @@ namespace QuestTree.UI
             // QuestGraph/MeshProbe.cs.
             QuestGraph.MenuMeshProbe.PollFromHotkey(this);
 
+            // The menu map host's dead-run check (it and the probe below share one run slot): a run whose host died or whose
+            // coroutine stopped yielding has its scenes unloaded. First, so a dead run is freed before a key press is read.
+            QuestGraph.MenuMapHost.PollFromHotkey(this);
+
             // THROWAWAY (the menu scene experiment): the menu scene probe's key, hosted here for the same reason. Delete with
             // QuestGraph/MenuSceneProbe.cs.
             QuestGraph.MenuSceneProbe.PollFromHotkey(this);
