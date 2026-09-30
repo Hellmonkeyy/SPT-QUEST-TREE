@@ -194,6 +194,13 @@ namespace QuestTree
         /// within seconds unless the player steps out. See MapCampaign.Finish.</summary>
         public static ConfigEntry<bool> CampaignEndAtExtract { get; private set; }
 
+        /// <summary>Whether a capture campaign ends itself before the raid's time runs out: before each stop it compares
+        /// the raid's time left with an average stop plus the walk into an extract, and when that no longer fits it stops
+        /// and ends as a finished campaign does - at an extract. On by default: a Customs stop at the sharpest setting
+        /// takes one and a half minutes, so a campaign can be longer than the raid, and a raid that runs out is MIA and
+        /// the gear with it. See MapCampaign.Run.</summary>
+        public static ConfigEntry<bool> CampaignStopForRaidTime { get; private set; }
+
         /// <summary>Whether a raid captures the map by itself every few seconds as the player moves
         /// about it - the map-building raid's setting. Off by default: it hitches every few seconds,
         /// which is a price only somebody building a map picture is getting anything for.</summary>
@@ -881,7 +888,8 @@ namespace QuestTree
                 "it leaves you standing still for a second and a half at every stop and for the length of each " +
                 "capture. Customs is 9 x 5 cells of 115 x 100 m, about 33 stops once the cells with nowhere to " +
                 "stand are dropped. The first stop builds the 3D map whole (up to a couple of minutes); every later " +
-                "stop only adds what it newly sees. The log's closing line gives the campaign's real duration. Needs " +
+                "stop only adds what it newly sees. The log's closing line gives the campaign's real duration. Press " +
+                "the key again while a campaign runs to stop it once the stop in hand is captured. Needs " +
                 "'Harvest quest zones in raid' on, like the single capture key. With 'Map capture campaign: end at an " +
                 "extract' on, a campaign that finishes leaves you at an extract instead - whose timer starts at once, " +
                 "so the raid ends within seconds unless you step out.");
@@ -891,9 +899,22 @@ namespace QuestTree
                 "When a whole-map capture campaign has visited every stop, teleport you into the nearest extract you can " +
                 "use right now - one open to your side and spawn, not a vehicle, co-op or flare exit, and with any " +
                 "requirement (payment, switch, empty slot) already met - instead of back to where you pressed the key. " +
-                "A campaign that stops early (you died, stops failed) still puts you back. When no extract qualifies, " +
+                "A campaign you stop with its key, or one that stops in time to extract, counts as finished and ends at " +
+                "an extract too; one that stops for anything else (you died, stops failed) still puts you back. When no " +
+                "extract qualifies, " +
                 "the log says why for each and you are put back. Landing in the extract starts its extraction timer, so " +
                 "the raid ends within seconds unless you step out of it.");
+
+            CampaignStopForRaidTime = config.Bind(
+                "Map", "Map capture campaign: stop in time to extract", true,
+                "Before each stop of a whole-map capture campaign, check the raid's time left against what one more stop " +
+                "and getting into an extract need (the campaign's average stop so far, plus a minute and a half). When it " +
+                "no longer fits, the campaign stops there and ends as a finished one does - at an extract, if one can be " +
+                "used - rather than running the raid out and leaving you MIA. With 'Map capture campaign: end at an " +
+                "extract' off you are put back where you started instead, so it keeps five minutes for you to walk out " +
+                "rather than a minute and a half. If no extract can be used when the campaign ends, you are put back with " +
+                "only the minute and a half - that cannot be known in advance. Off, the campaign visits every stop " +
+                "whatever the clock says.");
 
             AutoCapture = config.Bind(
                 "Map", "Capture the map automatically while I play", false,
@@ -1084,6 +1105,7 @@ namespace QuestTree
                 TraderColours, ShowCredits,
                 PinLabels, ColorActive, ColorAvailable, ColorCompleted, ColorLocked, ColorGated, ColorFailed, ColorAccent, Tooltips,
                 HoverSounds, RememberLastView, OpenTracker, CaptureMapKey, CampaignKey, CampaignEndAtExtract,
+                CampaignStopForRaidTime,
                 AutoCapture, AutoCaptureSeconds, CaptureResolution,
                 UploadCaptures, MapPictureSource, MapLabels, MapMode
             });
@@ -1131,6 +1153,7 @@ namespace QuestTree
             CaptureMapKey.SettingChanged += Raise;
             CampaignKey.SettingChanged += Raise;
             CampaignEndAtExtract.SettingChanged += Raise;   // the Settings tab's campaign note says where a campaign ends
+            CampaignStopForRaidTime.SettingChanged += Raise;   // ...and whether it stops in time to extract
             AutoCapture.SettingChanged += Raise;
             AutoCaptureSeconds.SettingChanged += Raise;
             CaptureResolution.SettingChanged += Raise;

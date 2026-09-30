@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.Globalization;
+using Comfort.Common;
 using EFT;
 using EFT.Interactive;
 using UnityEngine;
@@ -17,7 +18,9 @@ namespace QuestTree.QuestGraph
     ///   - the CAMPAIGN key: one press teleports the player across a grid of standable spots covering
     ///     the map, captures at each, and then leaves the player standing in the nearest extract they
     ///     can use (see <see cref="Finish"/>) - or, with that setting off, a stopped campaign, or no
-    ///     usable extract, puts them back where they pressed it;
+    ///     usable extract, puts them back where they pressed it. Pressing the key again, or the raid's
+    ///     time left running short (see <see cref="WhyOutOfTime"/>), ends it after the stop in hand as
+    ///     though it had finished;
     ///   - AUTO capture: while the player plays, a capture every few seconds once they have moved,
     ///     so a raid spent walking the map builds the picture by itself.
     ///
@@ -135,6 +138,51 @@ namespace QuestTree.QuestGraph
         /// whose floor sits above the ground (or whose top is at waist height) still counts when any of these is inside.</summary>
         private static readonly float[] ExtractBodyHeights = { 0.1f, 0.9f, 1.6f };
 
+        /// <summary>Rollback for the raid-time guard: false = a campaign visits every stop whatever the raid's clock says,
+        /// as before, whatever <see cref="ModSettings.CampaignStopForRaidTime"/> says. The setting is the player's switch;
+        /// this is the code's.</summary>
+        internal const bool StopForRaidTime = true;
+
+        /// <summary>Rollback for stopping a campaign with its own key: false = the key does nothing while a campaign runs,
+        /// as before.</summary>
+        internal const bool CancelByKey = true;
+
+        /// <summary>Seconds of raid time kept back, on top of one more stop, for getting out: the teleport into the
+        /// extract and the extract's own countdown once the player is in it - seven to ten seconds on most exits, more on
+        /// some - and a few steps to walk when the campaign lands BESIDE a trigger. Generous on purpose: the two ways of
+        /// being wrong are one stop fewer on the map, which the next raid fills, and MIA with the player's gear, which
+        /// nothing fills.</summary>
+        private const float ExtractReserveSeconds = 90f;
+
+        /// <summary>The reserve instead of <see cref="ExtractReserveSeconds"/> when an early end will NOT send the player to
+        /// an extract - "end at an extract" or <see cref="EndAtExtract"/> off - so they are put back at the start and have
+        /// to walk out: five minutes, a walk across most of a map. A campaign whose extract search then finds nothing
+        /// usable cannot be told apart in advance and keeps the 90 s.</summary>
+        private const float WalkOutReserveSeconds = 300f;
+
+        /// <summary>What the guard assumes a stop costs before any stop has been measured, in seconds. The first stop of
+        /// a Customs campaign at 8 px/m took about 156 s (it builds the 3D mesh whole; every later stop only adds to it,
+        /// 74-105 s), so the first guess is the dear one - the guard's job is to be wrong on the safe side.</summary>
+        private const float FirstStopGuessSeconds = 156f;
+
+        /// <summary>What the opening estimate assumes EVERY stop costs, in seconds: about the middle of the 74-105 s the
+        /// later stops of a Customs campaign at 8 px/m took. Only for the line at the start - the guard itself measures.</summary>
+        private const float PlanStopGuessSeconds = 90f;
+
+        /// <summary>Set by the campaign key while a campaign runs (<see cref="CancelByKey"/>): the campaign finishes the
+        /// stop in hand - never cut short mid-capture - and then ends as a finished one does. Read at the top of each
+        /// stop; cleared when a campaign starts and when it ends.</summary>
+        private bool _cancelRequested;
+
+        /// <summary>Whether the running campaign is still in its loop of stops, where a cancel can still take effect.
+        /// False once the loop is over - a campaign waiting for its last capture to let go has nothing left to stop, and
+        /// the key says so rather than promising a stop it cannot make.</summary>
+        private bool _acceptingCancel;
+
+        /// <summary>Whether the running campaign has said why it cannot read the raid's time left. Once per campaign:
+        /// a clock that cannot be read before one stop cannot be read before the next either.</summary>
+        private bool _raidTimeUnreadableSaid;
+
         /// <summary>Seconds a single stop waits for its capture: the capture's own worst case with every cap in
         /// force (MapCapture.WorstCaseSeconds, review F45), so this only fires for a capture that has stopped
         /// finishing. Past it the campaign stops, having said so, and puts the player back once the capture
@@ -184,8 +232,9 @@ namespace QuestTree.QuestGraph
         /// <param name="map">The campaign's map.</param>
         /// <param name="captured">Stops captured before the campaign stopped waiting.</param>
         /// <param name="stops">Stops the campaign planned.</param>
-        /// <param name="lastStop">The last planned stop, for <see cref="Finish"/>'s distance.</param>
-        /// <param name="completed">Whether the campaign visited every stop - see <see cref="Finish"/>.</param>
+        /// <param name="lastStop">The last stop the player was moved to, for <see cref="Finish"/>'s distance.</param>
+        /// <param name="completed">Whether the campaign finished - every stop, or ended early for raid time or by the
+        /// key - see <see cref="Finish"/>.</param>
         private IEnumerator RestoreWhenDone(Vector3 start, string map, int captured, int stops, Vector3 lastStop, bool completed)
         {
             try
@@ -208,7 +257,8 @@ namespace QuestTree.QuestGraph
         /// <param name="map">The campaign's map.</param>
         /// <param name="captured">How many stops were captured.</param>
         /// <param name="stops">How many stops the campaign planned.</param>
-        /// <param name="what">"campaign done", "campaign stopped" or "campaign ended with the raid".</param>
+        /// <param name="what">"campaign done", "campaign ended early", "campaign stopped" or "campaign ended with the
+        /// raid".</param>
         private void ReleaseCampaignHold(string map, int captured, int stops, string what)
         {
             var hold = _campaignHold;
@@ -403,8 +453,9 @@ namespace QuestTree.QuestGraph
             }
         }
 
-        /// <summary>The campaign key. Refuses, saying why, while a campaign or a capture is already
-        /// running, and outside a raid with a living player.</summary>
+        /// <summary>The campaign key. While a campaign runs it asks that campaign to stop (see
+        /// <see cref="RequestCancel"/>); otherwise it refuses, saying why, while a capture is running and
+        /// outside a raid with a living player.</summary>
         private void PollCampaignKey()
         {
             if (!ModSettings.Ready || ModSettings.CampaignKey == null) return;
@@ -419,9 +470,7 @@ namespace QuestTree.QuestGraph
 
                 if (_running)
                 {
-                    Plugin.LogSource?.LogInfo(
-                        "QuestTree: a capture campaign is already running - the key does nothing until it " +
-                        "has finished.");
+                    RequestCancel();
                     return;
                 }
 
@@ -461,6 +510,190 @@ namespace QuestTree.QuestGraph
                 _warnedOnPoll = true;
                 Plugin.LogSource?.LogWarning($"QuestTree: the capture campaign key failed ({ex.Message}).");
             }
+        }
+
+        /// <summary>The campaign key pressed while a campaign runs: asks it to stop once the stop in hand is captured, and
+        /// says so. The capture is never cut short - a stop abandoned mid-capture is a picture half-written and a player
+        /// moved out from under it - and the campaign then ends as a finished one does (see <see cref="Run"/>). With
+        /// <see cref="CancelByKey"/> off, the old refusal.
+        ///
+        /// Said in the log only: the campaign has no on-screen notice of its own anywhere, and the key is pressed by
+        /// somebody who has the console or the log open to watch the stops go by.</summary>
+        private void RequestCancel()
+        {
+            // One test for both refusals, and the constant beside a field rather than alone: a bare `if (!CancelByKey)`
+            // is a compile-time constant whose body the build reports as unreachable code.
+            if (!(CancelByKey && _acceptingCancel))
+            {
+                Plugin.LogSource?.LogInfo(!_acceptingCancel
+                    ? "QuestTree: the capture campaign is already ending - it is waiting for its last capture to finish."
+                    : "QuestTree: a capture campaign is already running - the key does nothing until it has finished.");
+                return;
+            }
+
+            if (_cancelRequested)
+            {
+                Plugin.LogSource?.LogInfo(
+                    "QuestTree: the capture campaign's stop is already requested - it ends once the stop in hand is captured.");
+                return;
+            }
+
+            _cancelRequested = true;
+            Plugin.LogSource?.LogInfo(
+                "QuestTree: capture campaign stop requested - it finishes the stop in hand, then " +
+                (ExtractEnabled() ? "goes to an extract." : "puts you back where you started."));
+        }
+
+        /// <summary>Whether a campaign that ends as finished looks for an extract at all: the code's switch and the
+        /// player's - the same test <see cref="Finish"/> makes. Asked by the stop lines, which would otherwise promise
+        /// an extract the setting has turned off.</summary>
+        private static bool ExtractEnabled() => EndAtExtract && (ModSettings.CampaignEndAtExtract?.Value ?? true);
+
+        /// <summary>Whether the raid-time guard is on: the code's switch and the player's.</summary>
+        private static bool TimeGuardEnabled() =>
+            StopForRaidTime && (ModSettings.CampaignStopForRaidTime?.Value ?? true);
+
+        /// <summary>
+        /// The raid's time left, in seconds, as the game's own raid timer counts it: the running game's
+        /// <c>AbstractGame.GameTimer</c> (<c>EFT.AbstractGame.GameTimer</c>, an <c>EFT.GameTimer</c> made in
+        /// <c>AbstractGame.Create</c> from the raid's session time), whose <c>SessionTime</c> is the raid's length - kept
+        /// current by <c>ChangeSessionTime</c> when the raid's time is changed - and whose <c>GetPastTime()</c> is the
+        /// time since the timer started, capped at that length. The game's own escape time is the same two added up
+        /// (<c>EscapeDateTime = StartDateTime + SessionTime</c>); they are read here through public members rather than
+        /// through the private escape date. <c>Singleton&lt;AbstractGame&gt;</c> is how the game itself reaches the
+        /// timer (ExfiltrationController stamps an exit's start time with <c>GameTimer.PastTimeSeconds()</c>).
+        ///
+        /// False, with why, when there is no running game, its timer has not started or has stopped, or the raid has no
+        /// length at all. Never throws.
+        /// </summary>
+        /// <param name="seconds">The raid's time left, never negative.</param>
+        /// <param name="why">When false: why it could not be read.</param>
+        private static bool TryRaidSecondsLeft(out float seconds, out string why)
+        {
+            seconds = 0f;
+            why = null;
+
+            try
+            {
+                if (!Singleton<AbstractGame>.Instantiated)
+                {
+                    why = "there is no running game to ask";
+                    return false;
+                }
+
+                var timer = Singleton<AbstractGame>.Instance.GameTimer;
+                if (timer == null)
+                {
+                    why = "the game has no raid timer";
+                    return false;
+                }
+
+                if (timer.Status != GameTimer.EGameTimerStatus.Started)
+                {
+                    why = $"the raid timer is {timer.Status}, not running";
+                    return false;
+                }
+
+                var length = timer.SessionTime;
+                if (!length.HasValue || length.Value <= TimeSpan.Zero)
+                {
+                    why = "the raid has no time limit";
+                    return false;
+                }
+
+                var left = (length.Value - timer.GetPastTime()).TotalSeconds;
+                if (double.IsNaN(left) || double.IsInfinity(left))
+                {
+                    why = "the raid timer gave no number";
+                    return false;
+                }
+
+                seconds = (float)Math.Max(0d, left);
+                return true;
+            }
+            catch (Exception ex)
+            {
+                why = $"reading the raid timer threw ({ex.Message})";
+                return false;
+            }
+        }
+
+        /// <summary>
+        /// The raid-time guard, asked before each stop: a reason to end the campaign NOW so the player gets out in time,
+        /// or null to carry on. One more stop is taken to cost the average of the stops measured so far - or
+        /// <see cref="FirstStopGuessSeconds"/> before any has been - and getting out <see cref="ExtractReserveSeconds"/>
+        /// more; with less than that left in the raid, the campaign ends here. The average includes the first stop's
+        /// whole mesh build, so it runs high for the rest of a campaign: wrong on the side of one stop fewer, never on the
+        /// side of MIA. An unreadable clock carries on - the behaviour before this guard - and says why once.
+        /// </summary>
+        /// <param name="done">Stops the campaign has been through, for the line.</param>
+        /// <param name="total">Stops the campaign planned.</param>
+        /// <param name="measuredSeconds">The summed duration of the stops captured so far, in seconds.</param>
+        /// <param name="measured">How many stops that sum covers.</param>
+        /// <param name="extraSeconds">What the next stop costs on top of an ordinary one: the debug verification build's
+        /// <see cref="MapCapture.VerifyExtraSeconds"/> when the next stop is the last and MeshVerifyLastStop is on.</param>
+        private string WhyOutOfTime(int done, int total, double measuredSeconds, int measured, float extraSeconds)
+        {
+            if (!TimeGuardEnabled()) return null;
+
+            if (!TryRaidSecondsLeft(out var left, out var why))
+            {
+                if (!_raidTimeUnreadableSaid)
+                {
+                    _raidTimeUnreadableSaid = true;
+                    Plugin.LogSource?.LogInfo(
+                        $"QuestTree: the capture campaign cannot read the raid's time left ({why}) - it visits every " +
+                        "stop without watching the clock.");
+                }
+
+                return null;
+            }
+
+            var stop = measured > 0 ? (float)(measuredSeconds / measured) : FirstStopGuessSeconds;
+            // A player who will not be sent to an extract - the setting or the rollback off - has to walk to one, so
+            // they are left the walk-out reserve. "No extract qualifies" cannot be known until Finish looks, so that
+            // case keeps the ordinary reserve.
+            var need = stop + extraSeconds + (ExtractEnabled() ? ExtractReserveSeconds : WalkOutReserveSeconds);
+            if (left >= need) return null;
+
+            Plugin.LogSource?.LogInfo(
+                $"QuestTree: campaign stopped at stop {done} of {total} for raid time - {Whole(left)} s left, a stop " +
+                $"needs ~{Whole(need)} s; " + (ExtractEnabled() ? "going to an extract." : "going back to the start."));
+
+            return $"for raid time, {Whole(left)} s left";
+        }
+
+        /// <summary>The line at a campaign's start: the raid's time left against a first guess at the campaign's length
+        /// (<see cref="PlanStopGuessSeconds"/> a stop), and a warning when that plus <see cref="ExtractReserveSeconds"/>
+        /// will not fit - saying whether the guard will end it in time or nothing will. Never throws: the reading does
+        /// not, and the rest is arithmetic.</summary>
+        /// <param name="stops">Stops the campaign planned.</param>
+        private void SayRaidTimeAtStart(int stops)
+        {
+            if (!TryRaidSecondsLeft(out var left, out var why))
+            {
+                _raidTimeUnreadableSaid = true;
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: the capture campaign cannot read the raid's time left ({why}) - " +
+                    (TimeGuardEnabled()
+                        ? "so it cannot stop in time to extract, and visits every stop without watching the clock."
+                        : "not that it would watch it: 'stop in time to extract' is off."));
+                return;
+            }
+
+            var estimate = stops * PlanStopGuessSeconds;
+            Plugin.LogSource?.LogInfo(
+                $"QuestTree: raid time left {Minutes(left)} min, estimated campaign ~{Minutes(estimate)} min ({stops} stops).");
+
+            if (estimate + ExtractReserveSeconds <= left) return;
+
+            Plugin.LogSource?.LogWarning(TimeGuardEnabled()
+                ? $"QuestTree: the capture campaign will probably not fit in this raid's {Minutes(left)} min left - it " +
+                  "stops early, when the time left is no longer enough for another stop and an extract, and the rest of " +
+                  "the map waits for another raid."
+                : $"QuestTree: the capture campaign will probably not fit in this raid's {Minutes(left)} min left and " +
+                  "'stop in time to extract' is off - press the campaign key again to stop it, or the raid runs out " +
+                  "and you are MIA.");
         }
 
         /// <summary>Whether this raid is one nobody else is in, which is the only kind a campaign may
@@ -704,7 +937,11 @@ namespace QuestTree.QuestGraph
         // --- the run ---------------------------------------------------------------------------
 
         /// <summary>One campaign: teleport, settle, capture, wait, repeat - and the player put back
-        /// where they started whatever happens.
+        /// where they started whatever happens, or at an extract when it finished (see <see cref="Finish"/>).
+        ///
+        /// Between stops, and only there, two chosen ends are checked: the campaign key pressed again
+        /// (<see cref="RequestCancel"/>) and the raid's time left no longer enough for one more stop and an extract
+        /// (<see cref="WhyOutOfTime"/>). Both let the stop in hand finish and count as a finished campaign.
         ///
         /// Written with a try/finally and no catch because C# forbids a yield inside a try that has a
         /// catch, and the finally is the point: it is what guarantees the player is not left standing
@@ -736,19 +973,58 @@ namespace QuestTree.QuestGraph
             _campaignUploadNote = "";
             _campaignHold = MapTransfer.HoldUploads(this, map, "capture campaign", preempts: true);
 
-            // Set only on the line after the loop, so it is true for a campaign that went through every stop and false
+            // Set only on the line after the loop, so it is true for a campaign that went through every stop - or that
+            // ended early ON PURPOSE, for raid time or at the player's key (`endedEarly`), which are finished campaigns
+            // too: the player is to get out, not be put back where they started with the clock still running - and false
             // for every other end: a break (death, raid over, two failures in a row, a capture past its worst case) sets
             // `stopped`, and an exception reaches the finally without passing that line - whereas `stopped` alone is
             // still null after an exception, which is why the finally cannot ask it.
             var completed = false;
-            var lastStop = stops[stops.Count - 1];
+
+            // Why a campaign ended before its last stop by choice - "for raid time, ...", "cancelled with the key" - or
+            // null. Kept apart from `stopped` because these ends count as finished (see `completed`).
+            string endedEarly = null;
+
+            // The last place the player was moved to, for Finish's "m from the last stop": the start until the first
+            // teleport, so an early end - even one before any stop - measures from where the player really was.
+            var lastStop = start;
+
+            // The raid-time guard's measurements: the summed seconds of the stops captured so far, from the teleport to the
+            // capture letting go, and how many.
+            var measuredSeconds = 0d;
+            var measured = 0;
 
             try
             {
+                _cancelRequested = false;
+                _raidTimeUnreadableSaid = false;
+                _acceptingCancel = true;
+
+                SayRaidTimeAtStart(stops.Count);
+
                 for (var i = 0; i < stops.Count; i++)
                 {
                     stopped = WhyStop();
                     if (stopped != null) break;
+
+                    // The two chosen ends, checked only here - between stops, never mid-capture - so the stop in hand is
+                    // always finished first. `i` stops have been through the loop by now.
+                    if (_cancelRequested)
+                    {
+                        Plugin.LogSource?.LogInfo(
+                            $"QuestTree: campaign cancelled after stop {i} of {stops.Count}; " +
+                            (ExtractEnabled() ? "going to an extract." : "going back to the start."));
+                        endedEarly = "cancelled with the key";
+                        break;
+                    }
+
+                    // The next stop's own extra: the debug verification build runs inside the last stop's capture.
+                    var verifyNext = i == stops.Count - 1 && (ModSettings.MeshVerifyLastStop?.Value ?? false);
+                    endedEarly = WhyOutOfTime(
+                        i, stops.Count, measuredSeconds, measured, verifyNext ? (float)MapCapture.VerifyExtraSeconds : 0f);
+                    if (endedEarly != null) break;
+
+                    var stopBegan = clock.Elapsed.TotalSeconds;
 
                     var stop = stops[i];
 
@@ -783,6 +1059,8 @@ namespace QuestTree.QuestGraph
 
                         continue;
                     }
+
+                    lastStop = stop;
 
                     // The streamer's turn: nothing here can hurry it, so this is simply time.
                     yield return new WaitForSeconds(CampaignSettleSeconds);
@@ -860,6 +1138,11 @@ namespace QuestTree.QuestGraph
                     captured++;
                     _lastCaptured = captured;
 
+                    // Captured stops only: a skipped one costs a fraction of a stop and would drag the average down, and
+                    // an average that runs low is the one that strands a player.
+                    measuredSeconds += clock.Elapsed.TotalSeconds - stopBegan;
+                    measured++;
+
                     Plugin.LogSource?.LogInfo(
                         $"QuestTree: campaign stop {i + 1} of {stops.Count} at {At(stop)} - captured.");
                 }
@@ -868,6 +1151,10 @@ namespace QuestTree.QuestGraph
             }
             finally
             {
+                // Nothing left to cancel: the loop is over, whichever way it ended.
+                _acceptingCancel = false;
+                _cancelRequested = false;
+
                 // Where the player is left, for automatic capture's "last capture" below: the start, unless Finish
                 // moved them to an extract.
                 var endedAt = start;
@@ -895,7 +1182,9 @@ namespace QuestTree.QuestGraph
                 else
                 {
                     endedAt = Finish(start, lastStop, completed);
-                    ReleaseCampaignHold(map, captured, stops.Count, stopped == null ? "campaign done" : "campaign stopped");
+                    ReleaseCampaignHold(
+                        map, captured, stops.Count,
+                        stopped != null ? "campaign stopped" : endedEarly != null ? "campaign ended early" : "campaign done");
                     _running = false;
                 }
 
@@ -911,13 +1200,14 @@ namespace QuestTree.QuestGraph
                 var seconds = (clock.ElapsedMilliseconds / 1000d).ToString("0", CultureInfo.InvariantCulture);
                 var counts = $"{stops.Count} stop(s), {captured} captured, {skipped} skipped, {seconds} s{_campaignUploadNote}.";
 
-                Plugin.LogSource?.LogInfo(stopped == null
-                    ? $"QuestTree: capture campaign on {map} done - {counts}"
-                    : $"QuestTree: capture campaign on {map} stopped ({stopped}) - {counts}");
+                // "ended early", not "done": the map is not whole, and whoever reads the journal days later should not
+                // take a raid-time or keyed end for a campaign that visited every stop.
+                var outcome = stopped != null ? $"stopped ({stopped})"
+                    : endedEarly != null ? $"ended early ({endedEarly})"
+                    : "done";
 
-                MapCapture.Journal(map, stopped == null
-                    ? $"done - {counts}"
-                    : $"stopped ({stopped}) - {counts}");
+                Plugin.LogSource?.LogInfo($"QuestTree: capture campaign on {map} {outcome} - {counts}");
+                MapCapture.Journal(map, $"{outcome} - {counts}");
             }
         }
 
@@ -1010,12 +1300,14 @@ namespace QuestTree.QuestGraph
         // --- the end at an extract --------------------------------------------------------------
 
         /// <summary>
-        /// Where a campaign leaves the player, and the position it left them at. A campaign that visited EVERY stop
-        /// (<paramref name="completed"/>) ends with the player standing in the nearest extract they can use right now,
-        /// so a map-building raid ends with a walk of a few metres rather than a trip back across the map from where the
-        /// key was pressed. Every other end - a death, the raid gone, two failed stops in a row, a capture past its worst
-        /// case, an exception, the setting or <see cref="EndAtExtract"/> off, or no usable extract - is the old
-        /// <see cref="Restore"/>, because a campaign that did not finish is one the player may want to run again from
+        /// Where a campaign leaves the player, and the position it left them at. A campaign that FINISHED
+        /// (<paramref name="completed"/>) - visited every stop, or ended early on purpose because the raid's time left was
+        /// running short or the player pressed the key again - ends with the player standing in the nearest extract they
+        /// can use right now, so a map-building raid ends with a walk of a few metres rather than a trip back across the
+        /// map from where the key was pressed. The two early ends count because both mean "get me out": one is the clock
+        /// saying so, the other the player. Every other end - a death, the raid gone, two failed stops in a row, a capture
+        /// past its worst case, an exception, the setting or <see cref="EndAtExtract"/> off, or no usable extract - is the
+        /// old <see cref="Restore"/>, because a campaign that did not finish is one the player may want to run again from
         /// where they stood.
         ///
         /// Nothing is restored first because nothing needs it: the campaign changes the player's POSITION and nothing
@@ -1025,8 +1317,9 @@ namespace QuestTree.QuestGraph
         /// Never throws: the callers are finallys, and the lines after them (the upload hold, _running) must run.
         /// </summary>
         /// <param name="start">Where the player was standing when the key was pressed.</param>
-        /// <param name="lastStop">The last planned stop, which the closing line measures from.</param>
-        /// <param name="completed">Whether the campaign went through every stop.</param>
+        /// <param name="lastStop">The last stop the player was moved to, which the closing line measures from.</param>
+        /// <param name="completed">Whether the campaign finished: every stop, or an early end for raid time or by the
+        /// key.</param>
         /// <returns>Where the player was left: the extract's landing point, or <paramref name="start"/>.</returns>
         private Vector3 Finish(Vector3 start, Vector3 lastStop, bool completed)
         {
@@ -1580,6 +1873,13 @@ namespace QuestTree.QuestGraph
 
         private static string F(double v) =>
             double.IsNaN(v) || double.IsInfinity(v) ? "n/a" : v.ToString("0", CultureInfo.InvariantCulture);
+
+        /// <summary>Seconds as minutes to one decimal, for the raid-time lines: a whole minute is too coarse when the
+        /// question is whether a 90 s stop still fits.</summary>
+        private static string Minutes(float seconds) =>
+            float.IsNaN(seconds) || float.IsInfinity(seconds)
+                ? "n/a"
+                : (seconds / 60f).ToString("0.0", CultureInfo.InvariantCulture);
     }
 
     /// <summary>

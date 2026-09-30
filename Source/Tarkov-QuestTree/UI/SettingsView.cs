@@ -411,7 +411,12 @@ namespace QuestTree.UI
                   (QuestGraph.MapCampaign.EndAtExtract && ModSettings.CampaignEndAtExtract.Value
                       ? "leaves you in the nearest extract you can use, whose extraction timer starts at once - the raid " +
                         "ends within seconds unless you step out (or puts you back where you pressed it, if none can be used)"
-                      : "puts you back where you pressed it");
+                      : "puts you back where you pressed it") +
+                  ". Press it again to stop once the stop in hand is captured" +
+                  (QuestGraph.MapCampaign.StopForRaidTime && ModSettings.CampaignStopForRaidTime.Value
+                      ? "; it also stops by itself when the raid's time left is no longer enough for another stop and " +
+                        "an extract"
+                      : "; it does NOT watch the raid's clock - a campaign longer than the raid leaves you MIA");
 
             var auto = ModSettings.AutoCapture.Value
                 ? $"Automatic capture is ON: one every {ModSettings.AutoCaptureSeconds.Value} s once you have " +
