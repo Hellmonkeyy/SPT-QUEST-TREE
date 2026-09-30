@@ -86,6 +86,10 @@ namespace QuestTree.UI
 
             /// <summary>Why the spot shadows failed (or why the probe could not run), null on a pass.</summary>
             public string Why;
+
+            /// <summary>Play-test 2026-09-29: per distance tried, largest first, whether a pair passed and what it read -
+            /// "20000 pass 0.050/0.40 r0.17", "2000 FAIL r0.95 ratio ..." - for the probe's line.</summary>
+            public string Distances = "";
         }
 
         /// <summary>Rollback: false skips the probe entirely - <see cref="Run"/> returns null and logs nothing, and the
@@ -160,8 +164,12 @@ namespace QuestTree.UI
         /// <summary>QualitySettings.shadowDistance for the probe: the quad is 500 m from the camera.</summary>
         private const float ProbeShadowDistance = 5000f;
 
-        /// <summary>The shadow test: shade / lit at most this.</summary>
-        private const float ShadowRatioMax = 0.15f;
+        /// <summary>The shadow test: shade / lit at most this. Play-test 2026-09-29: 0.15 failed a shadow that works - the
+        /// log's ratio 0.17 is 83 % of the light taken at shadowStrength 1; soft PCF, the shadow texel's footprint over the
+        /// centre block and the residual ambient leave some light there. 0.3 passes the 0.17 measured in play, the
+        /// SELF-TEST "shadow" (the box casting nothing) still reads about 1 and fails, and a bias pair that shifts the
+        /// shadow half off the centre block (about 0.5) no longer passes (review 2026-09-29). Was 0.15f.</summary>
+        private const float ShadowRatioMax = 0.3f;
 
         /// <summary>The acne test: the quad tilted this far from the light...</summary>
         private const float AcneTilt = 60f;
@@ -262,11 +270,12 @@ namespace QuestTree.UI
 
             return string.Format(CultureInfo.InvariantCulture,
                 "QuestTree: 3D map light probe - spot shadows {0} (ratio {1:0.00}, D {2:0} m, near read {3:0} m, bias {4:0.000}/{5:0.00}, " +
-                "map {6} px{7}), attenuation x{8:0.00}; emission {9}; scene lights on the layer: {10}{11}.",
+                "map {6} px{7}), attenuation x{8:0.00}; emission {9}; scene lights on the layer: {10}{11}; distances {12}.",
                 result.SpotShadows ? "pass" : "FAIL " + result.Why,
                 result.ShadowRatio, result.MaxDistanceOk, result.NearPlaneRead, result.Bias, result.NormalBias,
                 result.ResolutionEffective, map, result.Attenuation, emission,
-                result.SceneLights, result.SceneLights > 0 ? ", disabled during the probe" : "");
+                result.SceneLights, result.SceneLights > 0 ? ", disabled during the probe" : "",
+                result.Distances.Length > 0 ? result.Distances : "none tried");
         }
 
         /// <summary>The largest shadow map this machine can hold, up to <see cref="SpotShadowMapMax"/>.</summary>
@@ -320,6 +329,10 @@ namespace QuestTree.UI
             public float Ratio;
             public bool Pass;
             public string Why;
+
+            /// <summary>The shadow test and the acne test, each judged on its own (play-test 2026-09-29).</summary>
+            public bool ShadowOk;
+            public bool AcneOk;
         }
 
         /// <summary>
@@ -516,36 +529,58 @@ namespace QuestTree.UI
 
         /// <summary>
         /// The distances largest first, and at each the bias pairs largest first; the first pair that passes both tests
-        /// ends the sweep. With none passing, the result reports the first pair tried at the smallest distance - the
-        /// setting closest to what the viewer would fall back to - with its own reason.
+        /// ends THAT DISTANCE's pairs (play-test 2026-09-29: every distance is still tried, and each one's outcome is kept in
+        /// <see cref="Result.Distances"/> for the line). The result is the largest distance that passed. With none passing,
+        /// it reports the first pair tried at the smallest distance - the setting closest to what the viewer would fall
+        /// back to - with its own reason.
         /// </summary>
         private static void Sweep(Rig rig, Result result)
         {
             var reported = default(Attempt);
             var found = false;
+            var f = CultureInfo.InvariantCulture;
+            var distances = "";
 
-            for (var d = 0; d < SweepDistances.Length && !found; d++)
+            // Play-test 2026-09-29: EVERY distance is tried (its bias pairs until one passes) and recorded, so the line
+            // says which D passed; the one kept is still the LARGEST that passed - the first, largest first.
+            for (var d = 0; d < SweepDistances.Length; d++)
             {
                 var near = PlaceSpot(rig, SweepDistances[d]);
+                var passed = default(Attempt);
+                var first = default(Attempt);
+                var any = false;
 
-                for (var b = 0; b < SweepBiases.Length && !found; b++)
+                for (var b = 0; b < SweepBiases.Length && !any; b++)
                 {
-                    for (var n = 0; n < SweepNormalBiases.Length && !found; n++)
+                    for (var n = 0; n < SweepNormalBiases.Length && !any; n++)
                     {
                         var attempt = Try(rig, SweepDistances[d], SweepBiases[b], SweepNormalBiases[n], near);
 
-                        if (attempt.Pass)
-                        {
-                            reported = attempt;
-                            found = true;
-                        }
-                        else if (b == 0 && n == 0)
-                        {
-                            reported = attempt;   // overwritten per distance: the smallest distance's first pair is kept
-                        }
+                        if (b == 0 && n == 0) first = attempt;
+                        if (!attempt.Pass) continue;
+
+                        passed = attempt;
+                        any = true;
                     }
                 }
+
+                distances += string.Format(f, "{0}{1:0} {2}", distances.Length > 0 ? " | " : "", SweepDistances[d],
+                    any
+                        ? string.Format(f, "pass {0:0.000}/{1:0.00} r{2:0.00}", passed.Bias, passed.NormalBias, passed.Ratio)
+                        : string.Format(f, "FAIL r{0:0.00} {1}", first.Ratio, first.Why));
+
+                if (any && !found)
+                {
+                    reported = passed;
+                    found = true;
+                }
+                else if (!found)
+                {
+                    reported = first;   // overwritten per distance: the smallest distance's first pair is kept
+                }
             }
+
+            result.Distances = distances;
 
             result.SpotShadows = found;
             result.ShadowRatio = reported.Ratio;
@@ -607,11 +642,12 @@ namespace QuestTree.UI
 
             attempt.Ratio = shade / attempt.Lit;
 
-            if (attempt.Ratio > ShadowRatioMax)
-            {
-                attempt.Why = string.Format(CultureInfo.InvariantCulture, "ratio {0:0.00} over {1:0.00}", attempt.Ratio, ShadowRatioMax);
-                return attempt;
-            }
+            // Play-test 2026-09-29: the shadow test and the acne test are judged each on its own - a failed shadow test no
+            // longer skips the acne test, so the line names every test that failed, and a pair passes only on both.
+            attempt.ShadowOk = attempt.Ratio <= ShadowRatioMax;
+            var shadowWhy = attempt.ShadowOk
+                ? null
+                : string.Format(CultureInfo.InvariantCulture, "ratio {0:0.00} over {1:0.00}", attempt.Ratio, ShadowRatioMax);
 
             // The reference is the same tilted quad NOT receiving shadows, not lit x cos(tilt): the desktop Standard shader's
             // diffuse is Disney's, not Lambert's, and at roughness 1 with the view on the light it reads about 1.1 x the
@@ -622,23 +658,28 @@ namespace QuestTree.UI
             Draw(rig, rig.Quad, tilt, rig.White, ShadowCastingMode.On, false);
             var expected = Block(Shoot(rig), Size / 2 - 2, Size / 2 - 2);
 
+            string acneWhy = null;
+
             if (expected < LitMin * 0.5f)
             {
-                attempt.Why = string.Format(CultureInfo.InvariantCulture, "acne: the tilted reference {0:0.000} too dark to judge", expected);
-                return attempt;
+                acneWhy = string.Format(CultureInfo.InvariantCulture, "acne: the tilted reference {0:0.000} too dark to judge", expected);
             }
-
-            Draw(rig, rig.Quad, tilt, rig.White, ShadowCastingMode.On, true);
-            var centre = Block(Shoot(rig), Size / 2 - 2, Size / 2 - 2);
-
-            if (Mathf.Abs(centre - expected) > AcneTolerance * expected)
+            else
             {
-                attempt.Why = string.Format(CultureInfo.InvariantCulture, "acne: the tilted quad read {0:0.000}, {1:0.000} unshadowed",
-                    centre, expected);
-                return attempt;
+                Draw(rig, rig.Quad, tilt, rig.White, ShadowCastingMode.On, true);
+                var centre = Block(Shoot(rig), Size / 2 - 2, Size / 2 - 2);
+
+                if (Mathf.Abs(centre - expected) > AcneTolerance * expected)
+                    acneWhy = string.Format(CultureInfo.InvariantCulture, "acne: the tilted quad read {0:0.000}, {1:0.000} unshadowed",
+                        centre, expected);
             }
 
-            attempt.Pass = true;
+            attempt.AcneOk = acneWhy == null;
+            attempt.Pass = attempt.ShadowOk && attempt.AcneOk;
+            attempt.Why = attempt.Pass ? null
+                : shadowWhy != null && acneWhy != null ? shadowWhy + "; " + acneWhy
+                : shadowWhy ?? acneWhy;
+
             return attempt;
         }
 

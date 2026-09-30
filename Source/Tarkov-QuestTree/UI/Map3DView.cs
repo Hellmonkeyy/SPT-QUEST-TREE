@@ -127,9 +127,21 @@ namespace QuestTree.UI
         /// </summary>
         private const float WhiteInSunTonemap = 1.8f;
 
-        /// <summary>The white-in-the-sun anchor this view renders with: <see cref="WhiteInSunTonemap"/> on the tonemap path,
+        /// <summary>The white-in-the-sun anchor this view renders with: the calibrated <see cref="_tonemapAnchor"/> on the tonemap path,
         /// <see cref="WhiteInSun"/> on the plain one.</summary>
-        private float WhiteAnchor => _tonemapOn ? WhiteInSunTonemap : WhiteInSun;
+        private float WhiteAnchor => _tonemapOn ? _tonemapAnchor : WhiteInSun;
+
+        /// <summary>
+        /// Play-test 2026-09-29: the tonemap path's anchor as this view's calibration MEASURED it - the v whose read is
+        /// <see cref="AnchorReadTarget"/> on the curve (<see cref="InverseTonemap"/>), clamped to [<see cref="WhiteInSun"/>,
+        /// the top sample]. <see cref="WhiteInSunTonemap"/> until the calibration runs. By PPv2's ACES fit in gamma space
+        /// with +0.6 EV, 1.8 reads about 0.96 - at the very top of the range the line reports against - and 1.0 about
+        /// 0.88; the anchor taken from the curve lands a sunlit white at 0.9 whatever the grade really does.
+        /// </summary>
+        private float _tonemapAnchor = WhiteInSunTonemap;
+
+        /// <summary>What a white up-facing surface in the sun should read after the tonemap: bright, under white.</summary>
+        private const float AnchorReadTarget = 0.9f;
 
         /// <summary>The building shader's diffuse share of the light: the Standard shader keeps a dielectric specular
         /// reserve - 0.22 in gamma space, 0.04 in linear - and a Lambert shader (the Legacy family) keeps none.</summary>
@@ -1140,6 +1152,12 @@ namespace QuestTree.UI
             /// <see cref="TopTriangles"/> too), for the log line.</summary>
             public long RoofPictureTriangles;
 
+            /// <summary>Play-test 2026-09-29: upward atlas faces kept on the atlas because their tile is cut out
+            /// (Prep.RoofKeptCutOut), and their area in m2, for the log line.</summary>
+            public long RoofCutOutTriangles;
+
+            public double RoofCutOutArea;
+
             /// <summary>WP8 (V.2): the four shares by area, m2, and the walls tinted outside 40 degrees.</summary>
             public double AtlasArea;
 
@@ -1462,15 +1480,22 @@ namespace QuestTree.UI
         }
 
         /// <summary>The roofs clause of the build log line, from this build's decision (<see cref="DecideRoofs"/>). The
-        /// percentage is of the top faces (every one on the picture while this is on) that came off the atlas.</summary>
-        private string RoofsText(long pictureRoofs, long topTriangles)
+        /// percentage is of the top faces (every one on the picture while this is on) that came off the atlas. Play-test
+        /// 2026-09-29: the upward atlas faces kept on the atlas as cut out, by count and by area against the top faces'
+        /// area, and how the tiles' opacity was read (<see cref="TileStore.OpacityNote"/>) - the exclusion that left 98 %
+        /// of the building area on the atlas when it went by page.</summary>
+        private string RoofsText(long pictureRoofs, long topTriangles, long cutOutRoofs, double cutOutArea, double topArea)
         {
             switch (_roofReason)
             {
                 case RoofReason.Picture:
+                    var opacity = _heldTiles?.OpacityNote ?? "";
                     return string.Format(CultureInfo.InvariantCulture,
-                        ", roofs from the picture ({0:#,##0} faces, {1:0} % of top faces, taken from the atlas) at {2:0.#} px/m",
-                        pictureRoofs, topTriangles > 0 ? 100d * pictureRoofs / topTriangles : 0d, _roofPpm);
+                        ", roofs from the picture ({0:#,##0} faces, {1:0} % of top faces, taken from the atlas) at {2:0.#} px/m, " +
+                        "{3:#,##0} top faces kept on the atlas as cut out ({4:0} % of the top area){5}",
+                        pictureRoofs, topTriangles > 0 ? 100d * pictureRoofs / topTriangles : 0d, _roofPpm,
+                        cutOutRoofs, cutOutArea + topArea > 0d ? 100d * cutOutArea / (cutOutArea + topArea) : 0d,
+                        opacity.Length > 0 ? " (" + opacity + ")" : " (tile opacity not read: whole alpha pages kept)");
                 case RoofReason.SwitchedOff:
                     return ", roofs atlas (switched off)";
                 case RoofReason.DensityUnknown:
@@ -2531,12 +2556,13 @@ namespace QuestTree.UI
                 Layer = LayerOf(level),
                 GroundMaterial = MakeGroundMaterial(level),
                 BuildingMaterial = building,
-                // Pictures stage C: the roofs on the emission recipe (opaque, no cutout - as the building material), so on
-                // the OPAQUE variant the side check proves, not the ground's cutout one: gated on _emissiveSides, and put
-                // back to the lit building material by Draw if that check fails (LitRoofs). Off the emission path the
-                // roofs share the lit building material, as before stage C.
+                // Pictures stage C: the roofs on the emission recipe - since the 2026-09-29 review on the CUTOUT variant the
+                // probe and the ground proved, at cutoff 0 (EmissiveNoClip: the roofs sample the ground picture, whose alpha
+                // is the reach mask, and must never be clipped by it). Gated on _emissiveSides, and put back to the lit
+                // building material by Draw if the side/roof check fails (LitRoofs). Off the emission path the roofs share
+                // the lit building material, as before stage C.
                 RoofMaterial = _emissiveSides && RoofsActive
-                    ? Emissive(Matte(new Material(shader) { name = $"QuestTreeMap3D-roofs-{level}" }))
+                    ? EmissiveNoClip(Matte(new Material(shader) { name = $"QuestTreeMap3D-roofs-{level}" }))
                     : building,
                 Meshes = meshes
             });
@@ -2568,6 +2594,8 @@ namespace QuestTree.UI
                 into.GroundSkirtTriangles = data.GroundSkirtTriangles;
                 into.AtlasTriangles = data.AtlasTriangles;
                 into.RoofPictureTriangles = data.RoofPictureTriangles;
+                into.RoofCutOutTriangles = data.RoofCutOutTriangles;
+                into.RoofCutOutArea = data.RoofCutOutArea;
                 into.AtlasArea = data.AtlasArea;
                 into.TopArea = data.TopArea;
                 into.SideArea = data.SideArea;
@@ -2652,9 +2680,10 @@ namespace QuestTree.UI
                                 // Spot-sun stage B: a side picture is a finished image, as the ground's is (captured in
                                 // raid under the game's light, graded) - drawn as emission, never lit again. The flag
                                 // follows the ground's (the sides use the buildings' shader, which is Standard whenever
-                                // the ground's is) unless the opaque variant failed its check this session
-                                // (_sideEmission). Its _EmissionMap follows the picture wherever Draw assigns it.
-                                if (_emissiveSides) Emissive(sideMaterial);
+                                // the ground's is) unless the variant failed its check this session (_sideEmission). Its
+                                // _EmissionMap follows the picture wherever Draw assigns it. Review 2026-09-29: on the proven
+                                // CUTOUT variant at cutoff 0 (EmissiveNoClip), not the unproven opaque one.
+                                if (_emissiveSides) EmissiveNoClip(sideMaterial);
 
                                 into.Sides[s] = new SideTexture { Material = sideMaterial };
                             }
@@ -2825,6 +2854,8 @@ namespace QuestTree.UI
             var skirts = 0L;
             var atlasTriangles = 0L;
             var pictureRoofs = 0L;
+            var cutOutRoofs = 0L;
+            var cutOutRoofArea = 0d;
             double atlasArea = 0d, topArea = 0d, sideArea = 0d, tintArea = 0d;
             var wallsOutside = 0L;
 
@@ -2835,6 +2866,8 @@ namespace QuestTree.UI
             {
                 atlasTriangles += floor.Meshes.AtlasTriangles;
                 pictureRoofs += floor.Meshes.RoofPictureTriangles;
+                cutOutRoofs += floor.Meshes.RoofCutOutTriangles;
+                cutOutRoofArea += floor.Meshes.RoofCutOutArea;
                 atlasArea += floor.Meshes.AtlasArea;
                 topArea += floor.Meshes.TopArea;
                 sideArea += floor.Meshes.SideArea;
@@ -2878,7 +2911,7 @@ namespace QuestTree.UI
                     ? string.Format(CultureInfo.InvariantCulture, ", sides {0} ({1})",
                         _sideCount, string.Join(",", _sidesKey.ToCharArray()))
                     : ", sides 0") +
-                RoofsText(pictureRoofs, topTriangles) +
+                RoofsText(pictureRoofs, topTriangles, cutOutRoofs, cutOutRoofArea, topArea) +
                 (faces > 0
                     ? (AtlasActive
                         ? string.Format(CultureInfo.InvariantCulture, ", faces atlas {0:0} % / top {1:0} % / sides {2:0} % / tint {3:0} %",
@@ -3627,8 +3660,9 @@ namespace QuestTree.UI
         private bool _emissiveGround;
 
         /// <summary>Whether this build draws the side pictures as emission: as <see cref="_emissiveGround"/> (the sides use
-        /// the buildings' shader, which is Standard whenever the ground's is), unless the OPAQUE emission variant failed its
-        /// check this session (<see cref="_sideEmission"/>) - the probe proved only the cutout one.</summary>
+        /// the buildings' shader, which is Standard whenever the ground's is), unless the side/roof emission check failed
+        /// this session (<see cref="_sideEmission"/>). Since the 2026-09-29 review the sides and roofs draw on the cutout
+        /// variant at cutoff 0 (<see cref="EmissiveNoClip"/>); the check proves that material, not an opaque variant.</summary>
         private bool _emissiveSides;
 
         /// <summary>Why <see cref="_emissiveGround"/> is false, for the first-frame line; empty when it is true.</summary>
@@ -3694,10 +3728,9 @@ namespace QuestTree.UI
         /// must not multiply the pictures without bound.</summary>
         private const float EmissionScaleMax = 4f;
 
-        /// <summary>The targets the calibration line reports against (it does not act on them): the anchor's white should
-        /// read bright but under white, and a 0.32 mid-shadow should not be crushed.</summary>
-        private const float AnchorReadMin = 0.82f;
-        private const float AnchorReadMax = 0.96f;
+        /// <summary>The target the calibration line reports against (it does not act on it): a 0.32 mid-shadow should not
+        /// be crushed. Review 2026-09-29: the anchor's own read range (was 0.82..0.96) is gone - the anchor is taken from
+        /// the curve at <see cref="AnchorReadTarget"/>, and the line says CLAMPED when it cannot be.</summary>
         private const float ShadowReadMin = 0.2f;
 
         /// <summary>The Standard shader's _EmissionColor, looked up once: the calibration, the checks and the per-draw
@@ -3728,6 +3761,7 @@ namespace QuestTree.UI
 
             _emissionScale = 1f;
             _tonemapRead = false;
+            _tonemapAnchor = WhiteInSunTonemap;
             _tonemapFallback = null;
 
             try
@@ -3776,9 +3810,13 @@ namespace QuestTree.UI
                     var centre = eye.position + eye.forward * CalibrationDistance + eye.right * (-halfWidth + column * (i + 0.5f));
                     meshes[i] = CalibrationQuad(centre, right, up, toward);
 
+                    // Play-test 2026-09-29 (every quad read 0.00, yet drawn differed from empty): the quads were on the
+                    // OPAQUE _EMISSION variant, which nothing had proven - a build without it falls back to the keyword-less
+                    // variant, the black albedo with the light off, exactly 0/0/0. The CUTOUT emission recipe is the one the
+                    // light probe and the ground proved (Map3DLightProbe's rig.Emissive); the white texel's alpha 1 passes the clip.
                     var material = Matte(new Material(shader) { name = "QuestTreeMap3D-calibration-" + i.ToString(f) });
                     material.mainTexture = white;
-                    Emissive(material);
+                    EmissiveNoClip(material);
                     var v = CalibrationValues[i];
                     material.SetColor(EmissionColorId, new Color(v, v, v, 1f));
                     materials[i] = material;
@@ -3792,7 +3830,17 @@ namespace QuestTree.UI
 
                 var window = new RectInt(0, y0, width, y1 - y0 + 1);
 
+                // a pixel between quads 0 and 1 (each quad is 70 % of its column): the backdrop in both renders when only
+                // the quads went black, black in the drawn one too when the whole render did
+                var gapX = Mathf.Clamp(Mathf.RoundToInt((1f / count) * (width - 1)), 0, width - 1);
+                var gap = (py[0] - y0) * width + gapX;
+
                 _calibrating = true;
+
+                // Play-test 2026-09-29: a warm-up render first, discarded - the camera's first render with a freshly added
+                // PostProcessLayer is the one the calibration used to read, and nothing else proves that render is whole
+                RenderWindow(window, null);
+
                 var drawn = RenderWindow(window, () =>
                 {
                     for (var i = 0; i < count; i++)
@@ -3812,27 +3860,49 @@ namespace QuestTree.UI
 
                 var brightest = (py[count - 1] - y0) * width + px[count - 1];
                 var clipped = TonemapAt(1.8f) - TonemapAt(1f) < CalibrationClipStep;
-                var notDrawn = Near(drawn[brightest], empty[brightest], 5);
 
-                if (notDrawn) TonemapFallback("calibration failed (the quads were not drawn)");
+                // Play-test 2026-09-29: every quad at black is not a clip - no emission reached the frame - so it is NOT
+                // DRAWN, like quads that read the backdrop; CLIPPED is kept for a curve that really flattens above 1
+                var black = true;
+                for (var i = 0; i < count; i++) black &= _tonemapCurve[i] < 1.5f / 255f;
+
+                // review 2026-09-29: the anchor is taken from the curve, so "out of range" could hardly fire; what can is
+                // the anchor pinned at an end - the curve reaches 0.9 below 0.92 or never by 2.5
+                var anchorClamped = false;
+                var notDrawn = black || Near(drawn[brightest], empty[brightest], 5);
+
+                if (notDrawn)
+                    TonemapFallback(black ? "NOT DRAWN (every quad read black)" : "NOT DRAWN (the quads read the backdrop)");
                 else if (clipped) TonemapFallback("CLIPPED");
-                else _emissionScale = Mathf.Clamp(InverseTonemap(PictureMidGrey) / PictureMidGrey, EmissionScaleMin, EmissionScaleMax);
+                else
+                {
+                    _emissionScale = Mathf.Clamp(InverseTonemap(PictureMidGrey) / PictureMidGrey, EmissionScaleMin, EmissionScaleMax);
+                    var wanted = InverseTonemap(AnchorReadTarget);
+                    _tonemapAnchor = Mathf.Clamp(wanted, WhiteInSun, CalibrationValues[count - 1]);
+                    anchorClamped = wanted <= WhiteInSun || wanted >= CalibrationValues[count - 1];
+                    _plan = null;   // the exposure budget follows the anchor
+                }
 
-                var anchorRead = TonemapAt(WhiteInSunTonemap);
-                var inRange = anchorRead >= AnchorReadMin && anchorRead <= AnchorReadMax && TonemapAt(0.32f) >= ShadowReadMin;
+                var anchorRead = TonemapAt(_tonemapOn ? _tonemapAnchor : WhiteInSunTonemap);
+                var shadowOk = TonemapAt(0.32f) >= ShadowReadMin;
 
                 Plugin.LogSource?.LogInfo(string.Format(
                     f,
                     "QuestTree: 3D map tonemap calibration - T(0.18/0.32/0.5/1.0/1.8/2.5) = {0:0.00}/{1:0.00}/{2:0.00}/{3:0.00}/{4:0.00}/{5:0.00}, " +
-                    "emission scale x{6:0.00}, white in the sun {7:0.00} reads {8:0.00} {9}, {10}{11}",
+                    "emission scale x{6:0.00}, white in the sun {7:0.00} reads {8:0.00} {9} (1.80 reads {12:0.00}), " +
+                    "gap {13}/{14}/{15} vs backdrop {16}/{17}/{18}, {10}{11}",
                     _tonemapCurve[0], _tonemapCurve[1], _tonemapCurve[2], _tonemapCurve[3], _tonemapCurve[4], _tonemapCurve[5],
-                    _emissionScale, WhiteInSunTonemap, anchorRead, inRange ? "ok" : "out of range",
-                    notDrawn ? "NOT DRAWN" : clipped ? "CLIPPED" : "hdr",
+                    _emissionScale, _tonemapOn ? _tonemapAnchor : WhiteInSunTonemap, anchorRead,
+                    anchorClamped ? "CLAMPED (0.90 is not on the curve between 0.92 and 2.5)" : shadowOk ? "ok" : "ok, 0.32 crushed",
+                    notDrawn ? (black ? "NOT DRAWN (every quad black)" : "NOT DRAWN") : clipped ? "CLIPPED" : "hdr",
                     notDrawn || clipped
                         ? string.Format(f, " - tonemap {0}: the plain anchor {1:0.00} and the ambient floor are used{2}",
                             notDrawn ? "not calibrated" : "clipped", WhiteInSun,
-                            SelfTest == "tonemap" ? " (SELF-TEST: LDR target forced)" : "")
-                        : "."));
+                            SelfTest == "tonemap" ? " (SELF-TEST: LDR target forced)" : "") +
+                          ", post-processing taken off"
+                        : ".",
+                    TonemapAt(WhiteInSunTonemap),
+                    drawn[gap].r, drawn[gap].g, drawn[gap].b, empty[gap].r, empty[gap].g, empty[gap].b));
             }
             catch (Exception ex)
             {
@@ -3858,13 +3928,31 @@ namespace QuestTree.UI
         /// <see cref="_tonemapOn"/>), the ambient floor (the lazy plan is cleared so it is resolved again with it) and the
         /// pictures at their own value - the materials already made are brought to it here, since a fallback can come
         /// mid-view (the stack detached) after BeginBuild made them at the calibrated scale: each floor's ground (its
-        /// emission, or the lit fallback's _Color, which carries the scale too) and its side pictures.</summary>
+        /// emission, or the lit fallback's _Color, which carries the scale too) and its side pictures.
+        /// Play-test 2026-09-29: and the post-processing OFF for the view - the stack taken off the camera
+        /// (<see cref="Map3DPostProcess.TakeOff"/>), allowHDR false and the ARGB32 target - so a fallback renders exactly as
+        /// the tonemap setting off does. Before, the stack stayed on and graded the plain anchor's frame with ACES and +0.6
+        /// EV, which drew the whole view blown out.</summary>
         private void TonemapFallback(string why)
         {
             _tonemapOn = false;
             _tonemapFallback = why;
             _emissionScale = 1f;
+            _tonemapAnchor = WhiteInSunTonemap;
             _plan = null;
+
+            if (_postProcessAttached || Map3DPostProcess.Attached) Map3DPostProcess.TakeOff(_camera, "tonemap " + why);
+            _postProcessAttached = false;
+            _hdrTarget = false;
+
+            if (_camera != null)
+            {
+                _camera.allowHDR = false;
+
+                // remade as ARGB32 now when the camera draws into it; inside RenderWindow the camera is on a temporary of
+                // the old descriptor, which that render may finish on, and the next Draw's EnsureRenderTexture remakes it
+                if (_camera.targetTexture == _rt) EnsureRenderTexture();
+            }
 
             for (var i = 0; i < _floors.Count; i++)
             {
@@ -3957,12 +4045,17 @@ namespace QuestTree.UI
 
             if (_tonemapOn)
                 return string.Format(f, "{0}, post-exposure {1:0.00}, anchor {2:0.00} reads {3:0.00}, ambient floor {4}, emission x{5:0.00}",
-                    Map3DPostProcess.TonemapperName, Map3DPostProcess.PostExposure, WhiteInSunTonemap,
-                    _tonemapRead ? TonemapAt(WhiteInSunTonemap) : -1f,
+                    Map3DPostProcess.TonemapperName, Map3DPostProcess.PostExposure, _tonemapAnchor,
+                    _tonemapRead ? TonemapAt(_tonemapAnchor) : -1f,
                     AmbientFloorOfSunTonemap > 0f ? AmbientFloorOfSunTonemap.ToString("0.00", f) : "off",
                     _emissionScale);
 
             if (!ModSettings.PostProcessingWanted) return "off (setting)";
+
+            // play-test 2026-09-29: a fallback takes the stack off, so its reason comes before "not attached"
+            if (_tonemapFallback != null)
+                return string.Format(f, "{0}, plain anchor {1:0.00}, post-processing taken off", _tonemapFallback, WhiteInSun);
+
             if (!_postProcessAttached) return string.Format(f, "off (not attached), plain anchor {0:0.00}", WhiteInSun);
 
             return string.Format(f, "{0}, plain anchor {1:0.00}", _tonemapFallback ?? "off", WhiteInSun);
@@ -4028,7 +4121,40 @@ namespace QuestTree.UI
         /// <param name="material">The material, returned.</param>
         private Material Emissive(Material material)
         {
+            return EmissiveCore(material);
+        }
+
+        /// <summary>
+        /// Review 2026-09-29: the emission recipe for the roofs, the side pictures and the tonemap calibration's quads, on
+        /// the CUTOUT variant (<see cref="MakeCutout"/> + <see cref="Emissive"/>, _ALPHATEST_ON with _EMISSION) - the one
+        /// the light probe and the ground proved - instead of the opaque _EMISSION variant nothing proved, which the
+        /// calibration's all-black read says the game build probably lacks. _Cutoff 0, so nothing is ever clipped: the
+        /// roofs sample the ground picture, whose alpha is the reach mask, and a side picture has no mask. Shadows are
+        /// unchanged: the cutout ShadowCaster clips at the same 0 (alpha x _Color.a 1 is never under it). The queue is
+        /// AlphaTest, drawn after the opaque geometry with depth written, like the ground.
+        /// </summary>
+        /// <param name="material">The material, returned.</param>
+        private Material EmissiveNoClip(Material material)
+        {
+            MakeCutout(material);
+            if (material.HasProperty("_Cutoff")) material.SetFloat("_Cutoff", 0f);
+
+            return EmissiveCore(material);
+        }
+
+        /// <summary>The body of <see cref="Emissive"/>, shared with <see cref="EmissiveNoClip"/>.</summary>
+        private Material EmissiveCore(Material material)
+        {
             if (material.HasProperty("_Color")) material.SetColor("_Color", new Color(0f, 0f, 0f, 1f));
+
+            // Play-test 2026-09-29 (emission check MISMATCH, centre 216/207/193 against the picture's 188/181/172): the black
+            // albedo stops the diffuse, but NOT the specular. A dielectric (Matte's metallic 0) keeps Standard's fixed 4 %
+            // specular colour whatever the albedo, and the _SPECULARHIGHLIGHTS_OFF keyword Matte asks for is a
+            // shader_feature the game's build strips when no shipped material used it - so the sun's highlight came back
+            // (the excess, 28/26/21, is the sun's own colour 0.98/0.91/0.76). Metallic 1 makes the specular colour the
+            // albedo, black: BRDF1 then zeroes the direct specular outright (specularTerm *= any(specColor)) and the
+            // diffuse share with it, through a uniform no build can strip. The emission is untouched by either.
+            if (material.HasProperty("_Metallic")) material.SetFloat("_Metallic", 1f);
             if (material.HasProperty("_EmissionMap")) material.SetTexture("_EmissionMap", material.mainTexture);
             // alpha 1, as MatchEmissionScale compares it (white x scale would scale the alpha too)
             if (material.HasProperty("_EmissionColor"))
@@ -4122,7 +4248,8 @@ namespace QuestTree.UI
         /// must differ from the backdrop (an empty render), and with no fog or post-processing it must match the picture's
         /// own texel within <see cref="ReferenceTexelTolerance"/>; either failing is a skip, said so, never an ok.
         ///
-        /// SIDES (the OPAQUE emission variant, which the probe never proved - review S1), once per build until it passes:
+        /// SIDES (their EmissiveNoClip material - the cutout variant at cutoff 0, as the roofs; review 2026-09-29), once per
+        /// build until it passes:
         /// one side mesh of the selected floor whose bounds centre is on screen, drawn with its material and with the
         /// Unlit reference; the pixel nearest that centre which the reference covers (differs from the backdrop) is
         /// compared. A pass marks the sides proven for the session; a MISMATCH puts them on the lit path for the session
@@ -4176,8 +4303,8 @@ namespace QuestTree.UI
                     string verdict;
                     try
                     {
-                        // the opaque variant is proven on a side picture, or - a capture without sides - on the roofs
-                        // (stage C), which draw with the same variant
+                        // the sides' and roofs' material (cutout variant, cutoff 0) is proven on a side picture, or - a
+                        // capture without sides - on the roofs (stage C), which draw with the same recipe
                         var roofsToProve = !SidesActive && floor.RoofMaterial != null &&
                                            floor.RoofMaterial != floor.BuildingMaterial &&
                                            floor.RoofMaterial.IsKeywordEnabled("_EMISSION");
@@ -4325,11 +4452,11 @@ namespace QuestTree.UI
         }
 
         /// <summary>
-        /// Pictures stage C review S1: the opaque check of <see cref="SideVerdict"/> made on the ROOFS, for a capture without
-        /// side pictures - the roofs' emissive material is the same opaque Standard _EMISSION variant, and nothing else
-        /// would prove it. The selected floor's roof meshes, up to <see cref="SideMeshTries"/>, the same way. Its log
+        /// Pictures stage C review S1: the check of <see cref="SideVerdict"/> made on the ROOFS, for a capture without side
+        /// pictures - the roofs' emissive material is the same recipe (<see cref="EmissiveNoClip"/>: the cutout Standard
+        /// _EMISSION variant at cutoff 0, review 2026-09-29), and nothing else would prove it with a no-clip cutoff. The selected floor's roof meshes, up to <see cref="SideMeshTries"/>, the same way. Its log
         /// verdict, "" when there is nothing to prove, or null to try again on a later render (the roofs' picture is not
-        /// on their material yet). A MISMATCH puts the opaque variant on the lit path for the session: Draw then gives
+        /// on their material yet). A MISMATCH puts that recipe on the lit path for the session: Draw then gives
         /// the roofs the lit building material (<see cref="RoofMaterialOf"/>).
         /// </summary>
         private string RoofVerdict(Floor floor, Shader unlit, ref Material unlitReference)
@@ -4380,7 +4507,8 @@ namespace QuestTree.UI
         }
 
         /// <summary>
-        /// One mesh of the opaque check: drawn with the Unlit reference and against an empty frame, both read back only in
+        /// One mesh of the side/roof check (the EmissiveNoClip material - named "opaque" from before the 2026-09-29 review,
+        /// when it was the opaque variant): drawn with the Unlit reference and against an empty frame, both read back only in
         /// the window of <see cref="SideSearchRadius"/> around its projected bounds centre; when a pixel there is covered,
         /// drawn with <paramref name="material"/> at unit emission and that pixel returned in both reads. -1 when the
         /// centre is off screen (not a try), 0 when nothing near it is covered, 1 when compared,
@@ -5138,6 +5266,376 @@ namespace QuestTree.UI
             /// <summary>HQ S3.11: whether a tile is on an alpha page.</summary>
             public bool AlphaTile(int tile) => AlphaPage(PageOf(tile));
 
+            // --- which alpha-page tiles are really cut out (play-test 2026-09-29) ------------------------------------
+
+            /// <summary>
+            /// Play-test 2026-09-29: whether a tile is GENUINELY cut out - it has at least one texel the viewer's clip at 0.5
+            /// throws away - rather than merely sitting on an alpha page. The builder marks a whole PAGE alpha as soon as one
+            /// cut-out tile lands on it (MapMeshBuilder.AlphaMaskOf), and the packer mixes opaque tiles onto the same
+            /// pages: on the 2026-09-29 Woods capture 3 of 7 pages were alpha and 92 % of the top-face AREA sat on them, of
+            /// which 435 of 459 tiles had not one clear texel. Keeping every alpha-page tile's roof on the atlas left the
+            /// roofs-from-the-picture setting moving 2 % of the building area. Only a tile with a clear texel keeps its
+            /// cutout; an opaque one on an alpha page takes the picture like any other roof.
+            ///
+            /// Not a page's tile, or not an alpha page: false. The measurement not made yet, or not possible for the
+            /// page (see <see cref="MeasureOpacity"/>): true - the old whole-page rule, which can only keep a roof on the
+            /// atlas, never draw a leaf card as a solid quad. Workers call <see cref="WaitOpacity"/> first.
+            /// </summary>
+            public bool CutOutTile(int tile)
+            {
+                if (!AlphaTile(tile)) return false;
+
+                var measured = _opacity != null && _opacity.Status == TaskStatus.RanToCompletion ? _opacity.Result : null;
+                if (measured == null || tile < 0 || tile >= measured.CutOut.Length) return true;
+
+                return measured.CutOut[tile];
+            }
+
+            /// <summary>What <see cref="MeasureOpacity"/> found: per tile whether it is cut out (true for every alpha-page tile
+            /// it could not read), and one line for the build log.</summary>
+            private sealed class Opacity
+            {
+                public bool[] CutOut;
+                public string Note = "";
+            }
+
+            /// <summary>The opacity measurement, started by <see cref="EnsureOpacity"/>; null until then.</summary>
+            private Task<Opacity> _opacity;
+
+            /// <summary>MAIN THREAD, from the build's snapshot when the roofs take the picture: starts the per-tile opacity
+            /// measurement on a worker, once per store. Nothing here touches Unity, so the worker needs nothing from the
+            /// main thread and a prep waiting on it cannot deadlock.</summary>
+            public void EnsureOpacity()
+            {
+                if (_opacity != null || File == null) return;
+
+                var tiles = new (int Page, int X, int Y, int W, int H)[Tiles.Count];
+                for (var i = 0; i < tiles.Length; i++) tiles[i] = (Tiles[i].Page, Tiles[i].X, Tiles[i].Y, Tiles[i].W, Tiles[i].H);
+
+                var alphaPages = new bool[MaxAtlasPages];
+                for (var page = 0; page < MaxAtlasPages; page++) alphaPages[page] = AlphaPage(page) && _tilesOfPage[page] != null;
+
+                var paths = (string[])_paths.Clone();
+                var masks = (string[])_alphaPaths.Clone();
+
+                _opacity = Task.Run(() => MeasureOpacity(tiles, alphaPages, paths, masks));
+            }
+
+            /// <summary>WORKER: waits for <see cref="EnsureOpacity"/>'s measurement, so every triangle of a build is routed on
+            /// the same answer (the roof pass and the wall pass must split each triangle exactly once). Returns at once when
+            /// none was started - <see cref="CutOutTile"/> then keeps the whole-page rule for the build.</summary>
+            public void WaitOpacity(CancellationToken cancel)
+            {
+                var task = _opacity;
+                if (task == null) return;
+
+                try
+                {
+                    task.Wait(cancel);
+                }
+                catch (AggregateException)
+                {
+                    // MeasureOpacity catches its own failures; a fault here still leaves CutOutTile on the whole-page rule
+                }
+            }
+
+            /// <summary>The opacity measurement's clause for the build line, or "" when it was not made or not finished.</summary>
+            public string OpacityNote =>
+                _opacity != null && _opacity.Status == TaskStatus.RanToCompletion && _opacity.Result != null ? _opacity.Result.Note : "";
+
+            /// <summary>The alpha a texel must reach to survive the viewer's clip (MakeCutout's _Cutoff 0.5).</summary>
+            private const byte ClipAlpha = 128;
+
+            /// <summary>
+            /// WORKER. For each alpha page with tiles, the alpha the tile store will cut from - the page's own mask file when
+            /// it has one (a host's JPEG page: its red channel, as <see cref="ApplyAlphaMask"/> reads it), else the page PNG's
+            /// alpha channel - streamed row by row through <see cref="PngAlphaRows"/>, and every tile with one texel under
+            /// <see cref="ClipAlpha"/> marked cut out. A page that cannot be read (missing, a JPEG with no mask, a mask of
+            /// another size, a PNG this reader does not take) keeps every tile cut out: the old rule for that page, said in
+            /// the note. Never throws.
+            /// </summary>
+            private static Opacity MeasureOpacity((int Page, int X, int Y, int W, int H)[] tiles, bool[] alphaPages,
+                string[] paths, string[] masks)
+            {
+                var result = new Opacity { CutOut = new bool[tiles.Length] };
+                var f = CultureInfo.InvariantCulture;
+                int read = 0, opaque = 0, cut = 0, unknown = 0;
+                var failures = "";
+
+                for (var i = 0; i < tiles.Length; i++) result.CutOut[i] = alphaPages[tiles[i].Page];
+
+                for (var page = 0; page < MaxAtlasPages; page++)
+                {
+                    if (!alphaPages[page]) continue;
+
+                    var onPage = new List<int>();
+                    for (var i = 0; i < tiles.Length; i++)
+                        if (tiles[i].Page == page) onPage.Add(i);
+
+                    string why;
+                    try
+                    {
+                        why = MeasurePage(page, paths[page], masks[page], tiles, onPage, result.CutOut);
+                    }
+                    catch (Exception ex)
+                    {
+                        why = ex.GetType().Name + ": " + ex.Message;
+                    }
+
+                    if (why != null)
+                    {
+                        // the old rule for the whole page: every tile on it keeps its cutout
+                        foreach (var i in onPage) result.CutOut[i] = true;
+                        unknown += onPage.Count;
+                        failures += string.Format(f, "{0}page {1} unread ({2})", failures.Length > 0 ? ", " : "", page, why);
+                        continue;
+                    }
+
+                    read++;
+                    foreach (var i in onPage)
+                        if (result.CutOut[i]) cut++;
+                        else opaque++;
+                }
+
+                result.Note = string.Format(f, "alpha tiles {0} opaque / {1} cut out over {2} page(s) read{3}{4}",
+                    opaque, cut, read,
+                    unknown > 0 ? string.Format(f, ", {0} kept cut out unread", unknown) : "",
+                    failures.Length > 0 ? " - " + failures : "");
+
+                return result;
+            }
+
+            /// <summary>One alpha page of <see cref="MeasureOpacity"/>: null when read (<paramref name="cutOut"/> set for each
+            /// tile on it), else why not. A tile's rect is from the page's BOTTOM (TileStore.Cut); a PNG's row 0 is its top,
+            /// so a tile covers PNG rows height - Y - H .. height - Y - 1.</summary>
+            private static string MeasurePage(int page, string path, string mask, (int Page, int X, int Y, int W, int H)[] tiles,
+                List<int> onPage, bool[] cutOut)
+            {
+                if (string.IsNullOrEmpty(path) || !System.IO.File.Exists(path)) return "no page file";
+
+                var fromMask = !string.IsNullOrEmpty(mask);
+                string source;
+                int pageWidth = 0, pageHeight = 0;
+
+                if (fromMask)
+                {
+                    // the store applies a mask only when it is the page's own size (ApplyAlphaMask); the page's size from its
+                    // header - the first 64 KB holds a PNG's IHDR and a JPEG's frame header alike
+                    var head = new byte[64 * 1024];
+                    int got;
+                    using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read))
+                        got = stream.Read(head, 0, head.Length);
+                    if (got < head.Length) Array.Resize(ref head, got);
+
+                    if (!DynamicMapsLibrary.PictureSize(head, out pageWidth, out pageHeight)) return "page size unreadable";
+                    if (!System.IO.File.Exists(mask)) return "no mask file";
+                    source = mask;
+                }
+                else
+                {
+                    source = path;
+                }
+
+                var bytes = System.IO.File.ReadAllBytes(source);
+                var starts = new int[onPage.Count];
+                var ends = new int[onPage.Count];
+                var height = 0;
+
+                var why = PngAlphaRows(bytes, fromMask, (width, h) =>
+                {
+                    if (fromMask && (width != pageWidth || h != pageHeight))
+                        return string.Format(CultureInfo.InvariantCulture, "mask {0}x{1} is not the page's {2}x{3}", width, h,
+                            pageWidth, pageHeight);
+
+                    height = h;
+                    for (var k = 0; k < onPage.Count; k++)
+                    {
+                        var t = tiles[onPage[k]];
+                        if (t.X < 0 || t.Y < 0 || t.W <= 0 || t.H <= 0 || t.X + t.W > width || t.Y + t.H > h)
+                            return string.Format(CultureInfo.InvariantCulture, "tile {0} outside the page", onPage[k]);
+
+                        starts[k] = h - t.Y - t.H;
+                        ends[k] = h - t.Y - 1;
+                        cutOut[onPage[k]] = false;   // proven opaque until a clear texel is found
+                    }
+
+                    return null;
+                }, (row, alpha, stride, offset) =>
+                {
+                    for (var k = 0; k < onPage.Count; k++)
+                    {
+                        var index = onPage[k];
+                        if (cutOut[index] || row < starts[k] || row > ends[k]) continue;
+
+                        var t = tiles[index];
+                        for (var x = t.X; x < t.X + t.W; x++)
+                        {
+                            if (alpha[x * stride + offset] >= ClipAlpha) continue;
+
+                            cutOut[index] = true;
+                            break;
+                        }
+                    }
+                });
+
+                return why;
+            }
+
+            /// <summary>
+            /// WORKER. A minimal PNG reader for the one question <see cref="MeasurePage"/> asks: 8-bit, non-interlaced,
+            /// grey (0), RGB (2), grey+alpha (4) or RGBA (6) - what the capture and the host write. The IDAT data is
+            /// inflated as one stream (zlib's two header bytes skipped: .NET's DeflateStream takes raw deflate) and each
+            /// scanline unfiltered against the one before. <paramref name="header"/> gets (width, height) and may refuse
+            /// the picture; <paramref name="row"/> gets (PNG row, the unfiltered bytes, bytes per pixel, the byte offset of
+            /// the channel read). The channel: for a mask (<paramref name="mask"/>) the first one (grey, or red, as the
+            /// store's ApplyAlphaMask reads it); for a page its alpha - and a page with no alpha channel is opaque
+            /// throughout, which is what the store would cut from it, so every row then reads 255. Null when read, else
+            /// why not.
+            /// </summary>
+            private static string PngAlphaRows(byte[] png, bool mask, Func<int, int, string> header,
+                Action<int, byte[], int, int> row)
+            {
+                if (png.Length < 33 || png[0] != 0x89 || png[1] != 0x50 || png[2] != 0x4E || png[3] != 0x47) return "not a PNG";
+
+                int width = 0, height = 0, depth = 0, colour = -1, interlace = 0;
+                var idat = new MemoryStream();
+                var at = 8;
+
+                while (at + 8 <= png.Length)
+                {
+                    var length = (png[at] << 24) | (png[at + 1] << 16) | (png[at + 2] << 8) | png[at + 3];
+                    var type = System.Text.Encoding.ASCII.GetString(png, at + 4, 4);
+                    var data = at + 8;
+                    if (length < 0 || data + length > png.Length) return "truncated chunk " + type;
+
+                    if (type == "IHDR" && length >= 13)
+                    {
+                        width = (png[data] << 24) | (png[data + 1] << 16) | (png[data + 2] << 8) | png[data + 3];
+                        height = (png[data + 4] << 24) | (png[data + 5] << 16) | (png[data + 6] << 8) | png[data + 7];
+                        depth = png[data + 8];
+                        colour = png[data + 9];
+                        interlace = png[data + 12];
+                    }
+                    else if (type == "IDAT")
+                    {
+                        idat.Write(png, data, length);
+                    }
+                    else if (type == "tRNS")
+                    {
+                        // review 2026-09-29: a transparency chunk makes texels clear that this reader would count as
+                        // opaque - refused, so the page keeps the whole-page rule (roofs stay on the atlas: the safe side)
+                        return "tRNS chunk";
+                    }
+                    else if (type == "IEND")
+                    {
+                        break;
+                    }
+
+                    at = data + length + 4;   // past the CRC
+                }
+
+                if (width <= 0 || height <= 0 || width > 1 << 14 || height > 1 << 14) return "no usable IHDR";
+                if (depth != 8 || interlace != 0) return string.Format(CultureInfo.InvariantCulture, "depth {0}, interlace {1}", depth, interlace);
+
+                int bpp;
+                switch (colour)
+                {
+                    case 0: bpp = 1; break;
+                    case 2: bpp = 3; break;
+                    case 4: bpp = 2; break;
+                    case 6: bpp = 4; break;
+                    default: return string.Format(CultureInfo.InvariantCulture, "colour type {0}", colour);
+                }
+
+                // the channel read, or -1: a page with no alpha channel is opaque
+                var offset = mask ? 0 : colour == 6 ? 3 : colour == 4 ? 1 : -1;
+
+                var refused = header(width, height);
+                if (refused != null) return refused;
+
+                if (idat.Length < 2) return "no image data";
+                idat.Position = 0;
+                var cmf = idat.ReadByte();
+                var flg = idat.ReadByte();
+                if ((cmf & 0x0F) != 8 || (flg & 0x20) != 0) return "not a plain zlib stream";
+
+                var stride = width * bpp;
+                var previous = new byte[stride];
+                var current = new byte[stride];
+                var opaqueRow = offset < 0 ? new byte[] { 255 } : null;
+
+                using (var inflate = new System.IO.Compression.DeflateStream(idat, System.IO.Compression.CompressionMode.Decompress))
+                {
+                    var filter = new byte[1];
+
+                    for (var y = 0; y < height; y++)
+                    {
+                        if (!ReadFully(inflate, filter, 1) || !ReadFully(inflate, current, stride))
+                            return string.Format(CultureInfo.InvariantCulture, "image data ends at row {0}", y);
+
+                        if (!Unfilter(filter[0], current, previous, bpp))
+                            return string.Format(CultureInfo.InvariantCulture, "filter {0} at row {1}", filter[0], y);
+
+                        if (opaqueRow != null) row(y, opaqueRow, 0, 0);   // every x reads index 0: 255
+                        else row(y, current, bpp, offset);
+
+                        var swap = previous;
+                        previous = current;
+                        current = swap;
+                    }
+                }
+
+                return null;
+            }
+
+            /// <summary>Reads exactly <paramref name="count"/> bytes, or false at the stream's end.</summary>
+            private static bool ReadFully(Stream stream, byte[] buffer, int count)
+            {
+                var done = 0;
+                while (done < count)
+                {
+                    var got = stream.Read(buffer, done, count - done);
+                    if (got <= 0) return false;
+                    done += got;
+                }
+
+                return true;
+            }
+
+            /// <summary>PNG's five scanline filters undone in place (the spec's reconstruction), against the previous row's
+            /// unfiltered bytes (zero before the first row). False for a filter type the spec does not have.</summary>
+            private static bool Unfilter(byte type, byte[] line, byte[] above, int bpp)
+            {
+                var n = line.Length;
+
+                switch (type)
+                {
+                    case 0:
+                        return true;
+                    case 1:
+                        for (var i = bpp; i < n; i++) line[i] = (byte)(line[i] + line[i - bpp]);
+                        return true;
+                    case 2:
+                        for (var i = 0; i < n; i++) line[i] = (byte)(line[i] + above[i]);
+                        return true;
+                    case 3:
+                        for (var i = 0; i < n; i++)
+                            line[i] = (byte)(line[i] + (((i >= bpp ? line[i - bpp] : 0) + above[i]) >> 1));
+                        return true;
+                    case 4:
+                        for (var i = 0; i < n; i++)
+                        {
+                            int a = i >= bpp ? line[i - bpp] : 0, b = above[i], c = i >= bpp ? above[i - bpp] : 0;
+                            int p = a + b - c, pa = Math.Abs(p - a), pb = Math.Abs(p - b), pc = Math.Abs(p - c);
+                            line[i] = (byte)(line[i] + (pa <= pb && pa <= pc ? a : pb <= pc ? b : c));
+                        }
+
+                        return true;
+                    default:
+                        return false;
+                }
+            }
+
             /// <summary>Whether a page could not be had at all (missing, unreadable, will not decode, too big).</summary>
             public bool PageFailed(int page) => page >= 0 && page < MaxAtlasPages && _pageFailed[page];
 
@@ -5731,6 +6229,11 @@ namespace QuestTree.UI
             /// <see cref="Built.RoofPictureTriangles"/>.</summary>
             public long RoofPictureTriangles;
 
+            /// <summary>See <see cref="Built.RoofCutOutTriangles"/>.</summary>
+            public long RoofCutOutTriangles;
+
+            public double RoofCutOutArea;
+
             /// <summary>WP8 (V.2): the same four shares by AREA, m2, and the walls tinted for facing no side within
             /// 40 degrees.</summary>
             public double AtlasArea;
@@ -5825,17 +6328,25 @@ namespace QuestTree.UI
             /// unit normal: faces <see cref="ViewFor"/> then sends to <see cref="TopView"/> under both of its rules. An
             /// underside (the top camera never saw it), a wall and a degenerate face keep the atlas. Asked only for faces
             /// with an atlas range, by the roof pass and <see cref="WallTriangle"/> alike, so the two still split every
-            /// triangle exactly once. A face on an alpha tile keeps the atlas (review). No square root and no allocation: n.y &gt;= k|n| with k &gt; 0 is n.y &gt; 0 and
-            /// n.y^2 &gt;= k^2 |n|^2 - this runs over every atlas triangle of the map.
+            /// triangle exactly once. A face on a CUT-OUT tile keeps the atlas (review; play-test 2026-09-29: a tile with a
+            /// clear texel, <see cref="TileStore.CutOutTile"/> - no longer every tile of an alpha page).
             /// </summary>
-            public bool RoofOnPicture(int range, Vector3 a, Vector3 b, Vector3 c)
+            public bool RoofOnPicture(int range, Vector3 a, Vector3 b, Vector3 c) =>
+                RoofsFromPicture && UpFacing(a, b, c) && !CutOutRange(range);
+
+            /// <summary>Play-test 2026-09-29: an upward atlas face that stays on the atlas ONLY because its tile is cut out
+            /// (leaf cards, grates, catwalks - on the opaque picture it would draw as a solid quad). Counted by the roof
+            /// pass for the build line, so the exclusion's share is on record.</summary>
+            public bool RoofKeptCutOut(int range, Vector3 a, Vector3 b, Vector3 c) =>
+                RoofsFromPicture && UpFacing(a, b, c) && CutOutRange(range);
+
+            /// <summary>Whether range <paramref name="range"/>'s tile is genuinely cut out (<see cref="TileStore.CutOutTile"/>).</summary>
+            private bool CutOutRange(int range) => Tiles != null && Tiles.CutOutTile(TileOfRange(range));
+
+            /// <summary>n.y &gt;= <see cref="RoofNormalY"/> of the unit normal. No square root and no allocation: n.y &gt;= k|n|
+            /// with k &gt; 0 is n.y &gt; 0 and n.y^2 &gt;= k^2 |n|^2 - this runs over every atlas triangle of the map.</summary>
+            private static bool UpFacing(Vector3 a, Vector3 b, Vector3 c)
             {
-                if (!RoofsFromPicture) return false;
-
-                // a tile on an alpha page (leaf cards, grates, catwalks) keeps its cutout: on the opaque picture it would
-                // draw as a solid quad
-                if (Tiles != null && Tiles.AlphaTile(TileOfRange(range))) return false;
-
                 var n = Vector3.Cross(b - a, c - a);
                 var squared = n.sqrMagnitude;
 
@@ -6241,6 +6752,10 @@ namespace QuestTree.UI
             {
                 prep.Tiles = _heldTiles;
                 for (var page = 0; page < _pages.Length; page++) prep.PagePresent[page] = _pages[page] != null;
+
+                // play-test 2026-09-29: which alpha-page tiles are really cut out, measured once per store on a worker;
+                // PrepareFloor and PrepareWalls wait for it, so both passes route on the same answer
+                if (prep.RoofsFromPicture) _heldTiles.EnsureOpacity();
             }
 
             return prep;
@@ -6252,6 +6767,9 @@ namespace QuestTree.UI
         {
             var band = p.File.Band(level);
             var data = new FloorData { Level = level, Cells = band?.CellCount ?? 0L };
+
+            // play-test 2026-09-29: the roof routing reads the tiles' measured opacity (Prep.RoofOnPicture)
+            if (p.RoofsFromPicture) p.Tiles?.WaitOpacity(cancel);
 
             if (band != null && p.SpanX > 0f && p.SpanZ > 0f)
             {
@@ -6441,6 +6959,13 @@ namespace QuestTree.UI
                         data.RoofPictureTriangles++;
                         range = -1;
                     }
+                    else if (range >= 0 && p.RoofKeptCutOut(range, p.Position(a), p.Position(b), p.Position(c)))
+                    {
+                        // play-test 2026-09-29: the exclusion on record - it left 98 % of the roof area on the atlas when it
+                        // was by page
+                        data.RoofCutOutTriangles++;
+                        data.RoofCutOutArea += TriangleArea(p.Position(a), p.Position(b), p.Position(c));
+                    }
 
                     if (range >= 0)
                     {
@@ -6603,6 +7128,9 @@ namespace QuestTree.UI
         private static WallData PrepareWalls(Prep p, int level, Color32[] palette, int width, int height, CancellationToken cancel)
         {
             if (!(p.SpanX > 0f) || !(p.SpanZ > 0f)) return null;
+
+            // play-test 2026-09-29: WallTriangle asks RoofOnPicture too, and must get the roof pass's answer
+            if (p.RoofsFromPicture) p.Tiles?.WaitOpacity(cancel);
 
             // --- walk 1: which buildings have walls, and in what colour
             var walled = new List<int>();
@@ -7791,7 +8319,7 @@ namespace QuestTree.UI
                 var material = side?.Material;
                 if (material == null) continue;
 
-                // Stage B review S1: the opaque emission variant failed its check this session - a side material still
+                // Stage B review S1: the side/roof emission material failed its check this session - a side material still
                 // carrying it (made before the check, or cached by another view) is rebuilt lit, as the lit path makes it
                 if (!_emissiveSides && material.IsKeywordEnabled("_EMISSION")) material = side.Material = LitSideMaterial(material);
                 else if (_emissiveSides && material.IsKeywordEnabled("_EMISSION")) MatchEmissionScale(material);
@@ -7825,9 +8353,9 @@ namespace QuestTree.UI
         }
 
         /// <summary>
-        /// Pictures stage C review S1: a floor's roof material, put back to the lit building material first when the opaque
-        /// emission variant has failed its check this session (<see cref="_emissiveSides"/> false) - as a side's is by
-        /// <see cref="LitSideMaterial"/>, so a machine whose opaque _EMISSION variant is broken draws lit roofs, not black
+        /// Pictures stage C review S1: a floor's roof material, put back to the lit building material first when the side/roof
+        /// emission material has failed its check this session (<see cref="_emissiveSides"/> false) - as a side's is by
+        /// <see cref="LitSideMaterial"/>, so a machine whose cutout _EMISSION variant is broken draws lit roofs, not black
         /// ones. Asked for the owner of a roof on another floor too, whose own Draw may come later in the frame.
         /// </summary>
         /// <param name="floor">The floor; its BuildingMaterial is not null.</param>

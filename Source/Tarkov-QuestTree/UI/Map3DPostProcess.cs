@@ -116,6 +116,10 @@ namespace QuestTree.UI
         /// <summary>The last failure's one-line reason, so <see cref="Describe"/> can say why it is off.</summary>
         private static string _failure;
 
+        /// <summary>Why the viewer took the stack off (<see cref="TakeOff"/>), for <see cref="Describe"/>; cleared by
+        /// <see cref="Attach"/>.</summary>
+        private static string _offReason;
+
         /// <summary>Whether the layer and the volume are really on the camera now. Internal since spot-sun stage D: the
         /// viewer decides HDR and its exposure anchor on this, not on the setting, which asks without knowing whether the
         /// game had the stack's resources.</summary>
@@ -254,6 +258,7 @@ namespace QuestTree.UI
             if (!ReferenceEquals(_camera, null) || !ReferenceEquals(_profile, null) || Attached) Detach(_camera);
 
             _failure = null;
+            _offReason = null;
             _cutUndone = 0;
 
             if (!Wanted) { note = "post-processing off (setting)"; return false; }
@@ -511,6 +516,20 @@ namespace QuestTree.UI
             _camera = null;
         }
 
+        /// <summary>
+        /// MAIN THREAD. Play-test 2026-09-29: the viewer's tonemap fallback (a calibration that read NOT DRAWN or CLIPPED,
+        /// or failed) takes the whole stack off its camera, so the plain anchor's frame is not graded with ACES and the
+        /// post-exposure - which drew the view blown out to white. <paramref name="reason"/> is what
+        /// <see cref="Describe"/> says from then on. Safe with nothing attached.
+        /// </summary>
+        internal static void TakeOff(Camera camera, string reason)
+        {
+            // only the camera attached (or none): another view's stack is not this view's to take off, nor to describe
+            var ours = ReferenceEquals(_camera, null) || ReferenceEquals(camera, _camera);
+            Detach(camera);
+            if (ours) _offReason = reason;
+        }
+
         /// <summary>For the viewer's first-frame log line: what is running, or why nothing is.</summary>
         internal static string Describe()
         {
@@ -529,6 +548,7 @@ namespace QuestTree.UI
             }
 
             if (!Wanted) return "post-processing off (setting)";
+            if (_offReason != null) return $"post-processing off ({_offReason})";
             if (_failure != null) return $"post-processing unavailable ({_failure})";
             if (!Usable(_resources)) return "post-processing unavailable (no resources)";
             return "post-processing not attached";
