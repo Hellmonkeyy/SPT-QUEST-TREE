@@ -1949,6 +1949,13 @@ namespace QuestTree.UI
             using (var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 1 << 16))
                 parsed = MapMeshFile.Read(stream, maxTriangles);
 
+            // review 2026-09-29 (Q4): a stored set's relief pillars (a stack's cap, a hall's roof panels draped with the
+            // picture) despiked as the builder does it, so host sets and shipped seeds heal without a recapture. Here, on
+            // the read's worker, once per read and before the file is cached or any floor is prepared from it - so no
+            // PrepareFloor ever sees a half-despiked band and a rebuild from the cache pays nothing. A throw keeps the
+            // relief as stored.
+            DespikeRead(parsed, path);
+
             lock (CacheLock)
             {
                 // Only if nothing dropped the cache while this read was in flight. A read started before
@@ -1963,6 +1970,27 @@ namespace QuestTree.UI
             }
 
             return new Loaded { File = parsed, Stamp = stamp };
+        }
+
+        /// <summary>WORKER. A just-read file's top band despiked (MapMeshBuilder.DespikeStored), timed and logged; a throw
+        /// is logged and the relief kept as stored.</summary>
+        /// <param name="file">The file just read.</param>
+        /// <param name="path">Its path, for the line.</param>
+        private static void DespikeRead(MapMeshFile file, string path)
+        {
+            try
+            {
+                var clock = System.Diagnostics.Stopwatch.StartNew();
+                var moved = MapMeshBuilder.DespikeStored(file);
+
+                Plugin.LogSource?.LogInfo(
+                    $"QuestTree: 3D map relief of {Path.GetFileName(path)} - {moved.ToString(CultureInfo.InvariantCulture)} stored cell(s) " +
+                    $"despiked on load, in {clock.ElapsedMilliseconds.ToString(CultureInfo.InvariantCulture)} ms.");
+            }
+            catch (Exception ex)
+            {
+                Plugin.LogSource?.LogWarning($"QuestTree: the 3D map's relief despike failed ({ex.GetType().Name}: {ex.Message}) - drawn as stored.");
+            }
         }
 
         /// <summary>A graphics card's share the 3D view may fill with building triangles: a quarter of its

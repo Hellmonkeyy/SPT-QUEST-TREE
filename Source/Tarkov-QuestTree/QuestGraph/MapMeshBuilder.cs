@@ -600,6 +600,45 @@ namespace QuestTree.QuestGraph
         internal static readonly bool GroundUnderBuildings = true;
 
         /// <summary>
+        /// Play-test 2026-09-29 (fat bluish cylinders round Customs' smokestacks, white spikes in the Scav Base hall): where a
+        /// column has no terrain hit the highest collider is the relief (PickTopHit), so a stack's cap and a hall's roof
+        /// panels stood in the relief as pillars with the picture draped down them. With this on, once the relief is merged
+        /// and before the ground goes under the buildings, the top band takes a morphological top-hat (ReliefDespike): a cell
+        /// more than <see cref="ReliefDespike.DespikeRiseMetres"/> over the band's opening with a
+        /// <see cref="ReliefDespike.DespikeWindowMetres"/> window goes down to it; a cell whose hit was the terrain never
+        /// moves. It runs on the MERGED relief, so a stored set heals at its next capture. Every stop, not in the recipe;
+        /// false leaves the relief as cast.
+        /// </summary>
+        internal static readonly bool DespikeRelief = true;
+
+        /// <summary>
+        /// Play-test 2026-09-29: the under-buildings flood gives each covered area the LOWEST ground at its edge, not the
+        /// ground nearest each cell. The breadth-first flood let whichever uncovered cell reached a covered one first set
+        /// its height, and an uncovered high cell (a stack's cap no building triangle lay over) seeded its neighbours with
+        /// its own height, which the only-down rule then kept. Lowest-first costs the slope under a building on a hill (it
+        /// goes flat at the downhill edge, under the building's own floor). False is the breadth-first flood.
+        /// </summary>
+        internal static readonly bool LowestSeedFlood = true;
+
+        /// <summary>
+        /// Play-test 2026-09-29: a PROP's triangles cover a cell for the under-buildings pass where the cell's column met no
+        /// terrain (a mesh floor, a band that did not anchor), so a roof panel or a crate's collider top on such ground is
+        /// flooded down like a building's; where the terrain was met the relief is already the terrain under the prop and
+        /// the prop is skipped whole, as before. Trees never cover. False skips every prop, as before.
+        /// </summary>
+        internal static readonly bool PropsCoverWithoutTerrain = true;
+
+        /// <summary>
+        /// Play-test 2026-09-29 (review): the deepest the under-buildings flood may lower a cell, in metres under its own cast
+        /// height. The lowest-first flood gives a covered area its lowest edge, and a covered area spanning a slope - a
+        /// bridge deck over a valley, a long building on a hillside - would take its downhill edge and dig the bank under a
+        /// bridge's end down to the river. A cell whose fill lies deeper than this keeps its cast height; a cell whose column
+        /// met the terrain never goes under the terrain whatever the bound (<see cref="BandWork.TerrainDropCm"/>). Twelve
+        /// metres is four storeys: a building's roof over its own ground floor, not a valley.
+        /// </summary>
+        internal const float FloodMaxDropMetres = 12f;
+
+        /// <summary>
         /// Test 2026-09-28 (the crane): the top band's ground is ANCHORED TO THE TERRAIN. A ray from above hits whatever
         /// collider is highest - a crane's box collider, a car's roof, a tree's trunk capsule, a bridge deck - and the
         /// first-hit rule made each a slab in the relief draped with stretched ground pixels. With this on, the top band
@@ -2525,6 +2564,18 @@ namespace QuestTree.QuestGraph
             /// <summary>WP2: the cells filled from the stored relief (this cast left them empty), and how many.</summary>
             internal bool[] FromBase;
 
+            /// <summary>Play-test 2026-09-29: per cell, <see cref="GroundWon"/> and <see cref="GroundUnder"/> bits from the
+            /// cast (GroundFlagsOf); null on a band that did not anchor (an interior band, no ground layer), where nothing is
+            /// known about the terrain. A cell filled from the stored relief carries 0 - the stored file keeps no flags.</summary>
+            internal byte[] Ground;
+
+            /// <summary>Play-test 2026-09-29: per cell where <see cref="GroundUnder"/> is set, how far under the relief hit
+            /// the terrain hit lay, in whole centimetres rounded DOWN (so the hit less this is never under the terrain) and
+            /// 255 at most (PickTopHit keeps it within <see cref="ThinSurfaceMetres"/>). A byte, not the terrain's height:
+            /// EFT runs the raid with the GC off, and this is held for the whole campaign. The flood's floor
+            /// (<see cref="FloodMaxDropMetres"/>). Null where <see cref="Ground"/> is.</summary>
+            internal byte[] TerrainDropCm;
+
             internal int Filled;
 
             internal int Cells => Width * Height;
@@ -3380,6 +3431,11 @@ namespace QuestTree.QuestGraph
             var ys = job.HitYs;
             var ground = job.HitGround;
 
+            // play-test 2026-09-29: what each cell's column knew about the terrain, for the despike and the under-buildings
+            // pass - only an anchoring band knows, so only it keeps the array
+            if (anchoring && band.Ground == null) band.Ground = new byte[band.Cells];
+            if (anchoring && band.TerrainDropCm == null) band.TerrainDropCm = new byte[band.Cells];
+
             var commands = new NativeArray<RaycastCommand>(count, Allocator.TempJob);
             var results = default(NativeArray<RaycastHit>);
 
@@ -3445,6 +3501,8 @@ namespace QuestTree.QuestGraph
                     {
                         chosen = PickTopHit(ys, ground, used, floor, out var anchored, band.ThinTally);
                         if (anchored) band.Anchored++;
+
+                        if (band.Ground != null) band.Ground[n] = GroundFlagsOf(ys, ground, used, floor, chosen, out band.TerrainDropCm[n]);
                     }
                     else
                     {
@@ -3564,6 +3622,52 @@ namespace QuestTree.QuestGraph
 
             anchored = chosen != highest;
             return chosen;
+        }
+
+        /// <summary>A <see cref="BandWork.Ground"/> bit: the cell's relief IS a hit on a ground layer - the terrain itself,
+        /// never moved by the despike.</summary>
+        internal const byte GroundWon = 1;
+
+        /// <summary>A <see cref="BandWork.Ground"/> bit: the cell's column met a ground layer somewhere in the band, so the
+        /// relief there was anchored to the terrain and a prop's triangles over it are not what the relief stands on.</summary>
+        internal const byte GroundUnder = 2;
+
+        /// <summary>
+        /// Play-test 2026-09-29: what one column knew about the terrain, as <see cref="GroundWon"/> and
+        /// <see cref="GroundUnder"/> bits - the same hits and floor PickTopHit weighed, so the two cannot disagree about
+        /// which hits were the band's. Floats and bools in, a byte out.
+        /// </summary>
+        /// <param name="ys">The hits' world y.</param>
+        /// <param name="ground">Whether each hit is on a ground layer.</param>
+        /// <param name="used">How many of the arrays are hits.</param>
+        /// <param name="floorY">The band's lowest y.</param>
+        /// <param name="chosen">PickTopHit's answer, or -1.</param>
+        /// <param name="terrainDropCm">How far under the chosen hit the highest ground hit lies, in whole centimetres
+        /// rounded down, 0..255 (<see cref="BandWork.TerrainDropCm"/>); 0 without a ground hit or a chosen one.</param>
+        internal static byte GroundFlagsOf(float[] ys, bool[] ground, int used, float floorY, int chosen, out byte terrainDropCm)
+        {
+            terrainDropCm = 0;
+            if (ys == null || ground == null) return 0;
+
+            byte flags = 0;
+            var terrain = -1;
+
+            // the highest ground hit - the one PickTopHit anchors to
+            for (var k = 0; k < used && k < ys.Length && k < ground.Length; k++)
+                if (ground[k] && IsFinite(ys[k]) && ys[k] >= floorY && (terrain < 0 || ys[k] > ys[terrain]))
+                    terrain = k;
+
+            if (terrain >= 0) flags |= GroundUnder;
+
+            if (chosen >= 0 && chosen < used && chosen < ground.Length && chosen < ys.Length)
+            {
+                if (ground[chosen]) flags |= GroundWon;
+
+                if (terrain >= 0 && ys[chosen] > ys[terrain])
+                    terrainDropCm = (byte)Math.Min(255d, Math.Floor((ys[chosen] - ys[terrain]) * 100d));
+            }
+
+            return flags;
         }
 
         /// <summary>The thin-surface check's bin for a rise over the ground hit (<see cref="ThinTallyEdges"/>).</summary>
@@ -3726,6 +3830,11 @@ namespace QuestTree.QuestGraph
             internal int[] BelowFloor;
             internal int[] Anchored;
             internal int[][] Thin;
+
+            /// <summary>Play-test 2026-09-29: each band's <see cref="BandWork.Ground"/> bits, null where the band kept none.</summary>
+            internal byte[][] Ground;
+            internal byte[][] TerrainDropCm;
+
             internal int Rays;
             internal float Lowest;
             internal float Highest;
@@ -3803,6 +3912,13 @@ namespace QuestTree.QuestGraph
                 Array.Copy(held.TopY[i], band.TopY, band.Cells);
                 Array.Copy(held.Thin[i], band.ThinTally, band.ThinTally.Length);
 
+                // the first stop's terrain bits with its heights - the same cast, so they still describe it
+                var groundHeld = held.Ground != null && i < held.Ground.Length ? held.Ground[i] : null;
+                var dropHeld = held.TerrainDropCm != null && i < held.TerrainDropCm.Length ? held.TerrainDropCm[i] : null;
+                var bothHeld = groundHeld != null && groundHeld.Length == band.Cells && dropHeld != null && dropHeld.Length == band.Cells;
+                band.Ground = bothHeld ? (byte[])groundHeld.Clone() : null;
+                band.TerrainDropCm = bothHeld ? (byte[])dropHeld.Clone() : null;
+
                 // The first stop's distance bytes, as they are - NOT recomputed from this stop's player (review): the heights
                 // are the same at every stop (colliders do not stream) and the distances only arbitrate later merges, while a
                 // per-stop recompute made SameRelief fail at every stop and the mesh never Unchanged.
@@ -3861,6 +3977,8 @@ namespace QuestTree.QuestGraph
                 BelowFloor = new int[n],
                 Anchored = new int[n],
                 Thin = new int[n][],
+                Ground = new byte[n][],
+                TerrainDropCm = new byte[n][],
                 Rays = job.Rays,
                 Lowest = job.Lowest,
                 Highest = job.Highest,
@@ -3874,6 +3992,8 @@ namespace QuestTree.QuestGraph
                 held.Distance[i] = (byte[])band.Distance.Clone();
                 held.TopY[i] = (float[])band.TopY.Clone();
                 held.Thin[i] = (int[])band.ThinTally.Clone();
+                held.Ground[i] = (byte[])band.Ground?.Clone();
+                held.TerrainDropCm[i] = (byte[])band.TerrainDropCm?.Clone();
                 held.Hits[i] = band.Hits;
                 held.Saturated[i] = band.Saturated;
                 held.BelowFloor[i] = band.BelowFloor;
@@ -12841,9 +12961,9 @@ namespace QuestTree.QuestGraph
                 file.AlphaPages = (file.AlphaPages | basis.AlphaPages) & ((1 << pages) - 1);
             }
 
-            // test 2026-09-28: the relief under the buildings goes to the ground around them - its own step, so a throw
-            // leaves the relief as cast and the merge standing
-            if (GroundUnderBuildings) Step(job, "the ground under the buildings", () => LowerReliefUnderBuildings(job, file, rows));
+            // play-test 2026-09-29: the top band's ground - the pillars out of it (a stack's cap, a hall's roof panels) and the
+            // relief under the buildings - on the merged relief, so a stored set heals too (ReliefGround)
+            ReliefGround(job, file, rows);
 
             result.Accumulated = stored != null;
             result.BasePages = stored != null ? basis.AtlasPages : 0;
@@ -12955,40 +13075,72 @@ namespace QuestTree.QuestGraph
             return true;
         }
 
-        /// <summary>
-        /// Test 2026-09-28: the top band's cells that the buildings cover from above are lowered to the ground at the
-        /// buildings' edges. Every non-vertical triangle of every building that is not a tree or a prop is rasterised onto the top
-        /// band's grid (the cells a ray from above would have hit on it); then the uncovered cells next to covered ones
-        /// seed a breadth-first flood over the covered cells, each covered cell taking the height code of the seed that
-        /// reaches it first - the ground at the nearest edge, so a slope carries under the building. A covered cell with
-        /// no hit stays a hole; a covered area with no uncovered neighbour at all (nothing around it was measured) is left
-        /// as cast. Arrays only; logged with the cells and buildings it touched and its time.
-        /// </summary>
-        /// <param name="job">The build, for the line.</param>
-        /// <param name="file">The merged file.</param>
-        /// <param name="rows">The sidecar rows, one per building in order (their kind).</param>
-        private static void LowerReliefUnderBuildings(Job job, MapMeshFile file, List<MapMeshIndex.Entry> rows)
+        /// <summary>The file's top band - the highest level with heights - or null. Pure (no Unity call): the viewer's worker
+        /// asks it which band to despike.</summary>
+        /// <param name="file">The file.</param>
+        internal static MapMeshFile.ReliefBand TopBandOf(MapMeshFile file)
         {
-            if (file?.Bands == null || file.Bands.Count == 0 || file.Buildings == null) return;
-
-            var clock = Stopwatch.StartNew();
-
-            // the top band: the highest level
             MapMeshFile.ReliefBand top = null;
+            if (file?.Bands == null) return null;
+
             foreach (var band in file.Bands)
                 if (band != null && band.Heights != null && (top == null || band.Level > top.Level)) top = band;
 
-            if (top == null || top.Width < 2 || top.Height < 2) return;
+            return top;
+        }
 
-            var w = top.Width;
-            var h = top.Height;
-            var cell = (double)top.CellMetres;
+        /// <summary>Play-test 2026-09-29: the band this build cast for a band of the file, when it kept terrain bits for it
+        /// (<see cref="BandWork.Ground"/>, <see cref="BandWork.TerrainDropCm"/>) on the same grid - or null (no such band,
+        /// another grid, or a band that did not anchor).</summary>
+        /// <param name="job">The build.</param>
+        /// <param name="band">A band of the merged file.</param>
+        private static BandWork TerrainOf(Job job, MapMeshFile.ReliefBand band)
+        {
+            if (band == null) return null;
+
+            var cells = band.Width * band.Height;
+
+            foreach (var work in job.Bands)
+                if (work?.Source != null && work.Source.Level == band.Level && work.Width == band.Width && work.Height == band.Height &&
+                    work.Ground != null && work.Ground.Length == cells && work.TerrainDropCm != null && work.TerrainDropCm.Length == cells)
+                    return work;
+
+            return null;
+        }
+
+        /// <summary>
+        /// Play-test 2026-09-29: which of a band's cells the file's stored meshes cover from above
+        /// (ReliefDespike.CoverTriangles: <see cref="ReliefDespike.CoverBuilding"/> / <see cref="ReliefDespike.CoverProp"/> at
+        /// or above the hit for the flood, <see cref="ReliefDespike.CoverFootprint"/> reaching the ground for the despike) -
+        /// the one rasterisation both passes read. A tree covers nothing. A prop covers only where its column met no terrain
+        /// (<see cref="PropsCoverWithoutTerrain"/>): where it did, the relief is the terrain under the prop already, and a
+        /// prop whose whole footprint is over the terrain is skipped without rasterising, which keeps the pass as cheap as
+        /// it was (thousands of small boxes). With no row kinds (the viewer, which holds no sidecar) every mesh covers as a
+        /// building. Pure arrays over the file: callable on a worker.
+        /// </summary>
+        /// <param name="file">The file whose buildings and range these are.</param>
+        /// <param name="band">The band to cover - the top band.</param>
+        /// <param name="rows">The sidecar rows, one per building in order (their kind), or null when unknown.</param>
+        /// <param name="terrainBits">The band's <see cref="BandWork.Ground"/> bits, or null when unknown.</param>
+        /// <param name="ground">The band's opening (ReliefDespike.OpenedCodes) - the ground the footprint bit is judged
+        /// against - or null to judge it against the hit.</param>
+        /// <param name="buildings">The meshes that covered a cell at the hit.</param>
+        /// <param name="props">Of them, the props.</param>
+        internal static byte[] CoverMask(MapMeshFile file, MapMeshFile.ReliefBand band, IList<MapMeshIndex.Entry> rows, byte[] terrainBits,
+            ushort[] ground, out int buildings, out int props)
+        {
+            buildings = 0;
+            props = 0;
+
+            if (file?.Buildings == null || band?.Heights == null || band.Width < 1 || band.Height < 1) return null;
+
+            var w = band.Width;
+            var h = band.Height;
+            var cell = (double)band.CellMetres;
             var q = (double)MapMeshFile.MaxQuantised;
             var sx = (file.MaxX - file.MinX) / q / cell;   // a quantised x code to a column, fractional
             var sz = (file.MaxZ - file.MinZ) / q / cell;
-            var covered = new bool[w * h];
-            var buildingsCovering = 0;
-            var heights = top.Heights;
+            var cover = new byte[w * h];
 
             // a triangle covers a cell only when it is AT OR ABOVE the cell's cast hit (less a slack): a bunker or a car
             // park under the ground is below the hit and must not flatten the hill over it
@@ -12999,132 +13151,264 @@ namespace QuestTree.QuestGraph
             {
                 var b = file.Buildings[i];
                 if (b?.Indices == null || b.X == null || b.Z == null || b.Y == null) continue;
-                // a tree is not a building for the ground; nor is a prop (PART-11 3.5): where the top band is anchored to the
-                // terrain (TerrainAnchoredGround, a ground layer, a terrain hit under the cell) the ground under a crate or a
-                // car is the terrain already, and the pass is spared thousands of small boxes. Where it is not anchored (an
-                // interior band, no ground layer, a mesh floor) a prop's collider top stays a slab - the item 7 campaign checks
-                // car and container slabs on such ground
-                if (i < rows.Count && rows[i] != null && (rows[i].Foliage || rows[i].Prop)) continue;
 
-                var touched = false;
-                var indices = b.Indices;
+                // a tree is not a building for the ground. A prop (PART-11 3.5) is not either where the top band is anchored
+                // to the terrain (TerrainAnchoredGround, a ground layer, a terrain hit under the cell): the ground under a
+                // crate or a car is the terrain already. Play-test 2026-09-29: where the column met NO terrain (a mesh
+                // floor, a band that did not anchor) a prop's collider top was the relief - the Scav Base hall's roof panels
+                // at 17-20 m over a 1 m floor - so there it covers
+                var kindRow = rows != null && i < rows.Count ? rows[i] : null;
+                if (kindRow != null && kindRow.Foliage) continue;
 
-                for (var t = 0; t + 2 < indices.Length; t += 3)
-                {
-                    int v0 = (int)indices[t], v1 = (int)indices[t + 1], v2 = (int)indices[t + 2];
-                    if (v0 >= b.X.Length || v1 >= b.X.Length || v2 >= b.X.Length) continue;
+                var prop = kindRow != null && kindRow.Prop;
+                if (prop && (!PropsCoverWithoutTerrain || AllOverTerrain(b, sx, sz, w, h, terrainBits))) continue;
 
-                    double x0 = b.X[v0] * sx, z0 = b.Z[v0] * sz;
-                    double x1 = b.X[v1] * sx, z1 = b.Z[v1] * sz;
-                    double x2 = b.X[v2] * sx, z2 = b.Z[v2] * sz;
+                var touched = prop
+                    ? ReliefDespike.CoverTriangles(b.X, b.Y, b.Z, b.Indices, sx, sz, band.Heights, w, h, slackCodes, ReliefDespike.CoverProp, cover,
+                        terrainBits, GroundUnder, ground)
+                    : ReliefDespike.CoverTriangles(b.X, b.Y, b.Z, b.Indices, sx, sz, band.Heights, w, h, slackCodes, ReliefDespike.CoverBuilding, cover,
+                        null, 0, ground);
 
-                    // the triangle's footprint (twice its area in cells): a vertical face covers nothing
-                    var area2 = (x1 - x0) * (z2 - z0) - (x2 - x0) * (z1 - z0);
-                    if (Math.Abs(area2) < 1e-3) continue;
-
-                    var topCode = Math.Max(b.Y[v0], Math.Max(b.Y[v1], b.Y[v2]));
-
-                    var minCol = Math.Max(0, (int)Math.Floor(Math.Min(x0, Math.Min(x1, x2))));
-                    var maxCol = Math.Min(w - 1, (int)Math.Floor(Math.Max(x0, Math.Max(x1, x2))));
-                    var minRow = Math.Max(0, (int)Math.Floor(Math.Min(z0, Math.Min(z1, z2))));
-                    var maxRow = Math.Min(h - 1, (int)Math.Floor(Math.Max(z0, Math.Max(z1, z2))));
-                    if (minCol > maxCol || minRow > maxRow) continue;
-
-                    var inv = 1d / area2;
-
-                    for (var row = minRow; row <= maxRow; row++)
-                    {
-                        var pz = row + 0.5;
-
-                        for (var col = minCol; col <= maxCol; col++)
-                        {
-                            var px = col + 0.5;
-
-                            // barycentric edge functions, sign-normalised by the area
-                            var e0 = ((x1 - x0) * (pz - z0) - (px - x0) * (z1 - z0)) * inv;
-                            var e1 = ((x2 - x1) * (pz - z1) - (px - x1) * (z2 - z1)) * inv;
-                            var e2 = ((x0 - x2) * (pz - z2) - (px - x2) * (z0 - z2)) * inv;
-
-                            if (e0 < 0d || e1 < 0d || e2 < 0d) continue;
-
-                            var n = row * w + col;
-                            var hit = heights[n];
-                            if (hit == MapMeshFile.NoHit || topCode + slackCodes < hit) continue;   // under the ground, or no ground
-
-                            covered[n] = true;
-                            touched = true;
-                        }
-                    }
-                }
-
-                if (touched) buildingsCovering++;
+                if (!touched) continue;
+                buildings++;
+                if (prop) props++;
             }
 
-            // the flood: every uncovered measured cell next to a covered one seeds its own height inward
-            var fill = new ushort[w * h];
-            var queue = new Queue<int>();
+            return cover;
+        }
 
-            for (var n = 0; n < w * h; n++)
+        /// <summary>
+        /// Review 2026-09-29 (Q4), for the viewer's worker: a STORED file's top band despiked as the builder does it, so host
+        /// sets and shipped seeds heal without a recapture. The despike only - the flood needs the terrain bits and the
+        /// sidecar's kinds, which a stored file does not hold. A stored file keeps no terrain bits either, so nothing is
+        /// protected as terrain; every cell no stored mesh reaches the ground over is protected (<see cref="CoverMask"/>
+        /// with no kinds, so trees and props count as buildings). Idempotent: a band the builder already despiked moves 0.
+        /// Pure arrays; writes the band's codes in place.
+        /// </summary>
+        /// <param name="file">The stored file.</param>
+        /// <returns>The cells moved.</returns>
+        internal static int DespikeStored(MapMeshFile file)
+        {
+            var top = TopBandOf(file);
+            if (top == null || top.Width < 2 || top.Height < 2) return 0;
+
+            var opened = ReliefDespike.OpenedCodes(top.Heights, top.Width, top.Height, top.CellMetres);
+            var cover = CoverMask(file, top, null, null, opened, out _, out _);
+            if (opened == null || cover == null) return 0;
+
+            var protect = new bool[cover.Length];
+            for (var n = 0; n < cover.Length; n++) protect[n] = (cover[n] & ReliefDespike.CoverFootprint) == 0;
+
+            return ReliefDespike.DespikeCodes(top.Heights, opened, top.Width, top.Height, file.YMin, file.YMax, ReliefDespike.DespikeRiseMetres,
+                protect);
+        }
+
+        /// <summary>
+        /// Play-test 2026-09-29: the merged top band's ground passes, in order - one cover mask, the despike
+        /// (<see cref="DespikeRelief"/>), the flood under the buildings (<see cref="GroundUnderBuildings"/>), and the despike
+        /// again (review F2: the flood's fills can leave a new pillar where a covered area took a high edge, and the
+        /// despike is idempotent, so a second pass costs only its time). Each its own step, so a throw leaves the relief as
+        /// the step before left it. On the main thread: the merge's no-op test (SameRelief) reads the relief straight
+        /// after, inside the same synchronous step, so a worker would need Finish split across frames - the line says what
+        /// it costs per stop instead.
+        /// </summary>
+        /// <param name="job">The build.</param>
+        /// <param name="file">The merged file.</param>
+        /// <param name="rows">The sidecar rows, one per building in order.</param>
+        private static void ReliefGround(Job job, MapMeshFile file, List<MapMeshIndex.Entry> rows)
+        {
+            if (!DespikeRelief && !GroundUnderBuildings) return;
+
+            var top = TopBandOf(file);
+            if (top == null || top.Width < 2 || top.Height < 2) return;
+
+            var clock = Stopwatch.StartNew();
+            var cells = top.Width * top.Height;
+            var terrain = TerrainOf(job, top);
+            ushort[] floor = null;
+            ushort[] opened = null;
+            byte[] cover = null;
+            bool[] protect = null;
+            var coverBuildings = 0;
+            var coverProps = 0;
+
+            // review F4: the terrain floor from the hits AS CAST, before anything moves them
+            Step(job, "the terrain under the relief", () => floor = TerrainFloor(file, top, terrain));
+
+            Step(job, "the buildings' cover", () =>
             {
-                if (covered[n] || heights[n] == MapMeshFile.NoHit) continue;
+                opened = ReliefDespike.OpenedCodes(top.Heights, top.Width, top.Height, top.CellMetres);
+                cover = CoverMask(file, top, rows, terrain?.Ground, opened, out coverBuildings, out coverProps);
+            });
 
-                var col = n % w;
-                var row = n / w;
-                var seeds = (col > 0 && covered[n - 1]) || (col + 1 < w && covered[n + 1]) ||
-                            (row > 0 && covered[n - w]) || (row + 1 < h && covered[n + w]);
-                if (!seeds) continue;
+            if (cover == null || cover.Length != cells) return;
 
-                fill[n] = heights[n];
-                queue.Enqueue(n);
-            }
+            var coverMs = clock.ElapsedMilliseconds;
 
-            var reached = new bool[w * h];
-            foreach (var n in queue) reached[n] = true;
-
-            while (queue.Count > 0)
+            if (DespikeRelief)
             {
-                var n = queue.Dequeue();
-                var col = n % w;
-                var row = n / w;
-                var code = fill[n];
+                // protected: every cell whose column met the terrain (review F4 - the relief there is the terrain, or a road
+                // within ThinSurfaceMetres of it), and every cell no stored mesh reaches the ground over (a real structure
+                // with colliders and no stored mesh: a picture-draped column is the better failure than one that vanishes)
+                protect = new bool[cells];
 
-                void Visit(int m)
-                {
-                    if (reached[m] || !covered[m]) return;
-                    reached[m] = true;
-                    fill[m] = code;
-                    queue.Enqueue(m);
-                }
+                for (var n = 0; n < cells; n++)
+                    protect[n] = (terrain != null && (terrain.Ground[n] & GroundUnder) != 0) ||
+                                 (cover[n] & ReliefDespike.CoverFootprint) == 0;
 
-                if (col > 0) Visit(n - 1);
-                if (col + 1 < w) Visit(n + 1);
-                if (row > 0) Visit(n - w);
-                if (row + 1 < h) Visit(n + w);
+                Step(job, "the relief's spikes", () => DespikeTopBand(job, file, top, opened, protect, "before the flood"));
             }
 
-            var lowered = 0;
-            var keptLower = 0;
-            var coveredCells = 0;
+            if (GroundUnderBuildings)
+                Step(job, "the ground under the buildings", () => LowerReliefUnderBuildings(job, file, top, cover, floor, coverBuildings, coverProps));
 
-            for (var n = 0; n < w * h; n++)
-            {
-                if (!covered[n]) continue;
-                coveredCells++;
-                if (!reached[n] || heights[n] == MapMeshFile.NoHit) continue;
-
-                // only ever DOWN: a cell the cast already measured lower than the edge (a sunken yard) keeps its hit
-                if (fill[n] < heights[n])
-                {
-                    heights[n] = fill[n];
-                    lowered++;
-                }
-                else if (fill[n] > heights[n]) keptLower++;
-            }
+            // review F2: again after the flood, against the relief the flood left
+            if (DespikeRelief && GroundUnderBuildings)
+                Step(job, "the relief's spikes after the flood", () =>
+                    DespikeTopBand(job, file, top, ReliefDespike.OpenedCodes(top.Heights, top.Width, top.Height, top.CellMetres), protect,
+                        "after the flood"));
 
             Plugin.LogSource?.LogInfo(
+                $"QuestTree: relief ground passes for {job.Request.Map} on the main thread in {clock.ElapsedMilliseconds} ms " +
+                $"(the cover and the opening {coverMs} ms).");
+        }
+
+        /// <summary>
+        /// Play-test 2026-09-29: per cell of the top band, the lowest code the flood may lower it to - the terrain its column
+        /// met: the hit less <see cref="BandWork.TerrainDropCm"/>, the drop rounded DOWN in codes so the floor never lies
+        /// under the terrain; <see cref="MapMeshFile.NoHit"/> where the column met no terrain. Null without terrain bits.
+        /// </summary>
+        private static ushort[] TerrainFloor(MapMeshFile file, MapMeshFile.ReliefBand top, BandWork terrain)
+        {
+            var span = (double)file.YMax - file.YMin;
+            if (terrain == null || !(span > 0d)) return null;
+
+            var codesPerMetre = MapMeshFile.MaxQuantised / span;
+            var heights = top.Heights;
+            var floor = new ushort[heights.Length];
+
+            for (var n = 0; n < floor.Length; n++)
+            {
+                floor[n] = MapMeshFile.NoHit;
+                if ((terrain.Ground[n] & GroundUnder) == 0 || heights[n] == MapMeshFile.NoHit) continue;
+
+                var drop = (int)Math.Floor(terrain.TerrainDropCm[n] * 0.01 * codesPerMetre);
+                floor[n] = (ushort)Math.Max(0, heights[n] - drop);
+            }
+
+            return floor;
+        }
+
+        /// <summary>
+        /// Play-test 2026-09-29: the top band's pillars lowered to the ground around them (ReliefDespike, see
+        /// <see cref="DespikeRelief"/>) against an opening already taken, the protected cells staying. Logged with the
+        /// count, the window, the rise, what was protected, and its time.
+        /// </summary>
+        /// <param name="job">The build, for the line.</param>
+        /// <param name="file">The merged file.</param>
+        /// <param name="top">Its top band.</param>
+        /// <param name="opened">The band's opening, taken on its current codes.</param>
+        /// <param name="protect">The cells never to move.</param>
+        /// <param name="when">Which pass, for the line.</param>
+        private static void DespikeTopBand(Job job, MapMeshFile file, MapMeshFile.ReliefBand top, ushort[] opened, bool[] protect, string when)
+        {
+            var clock = Stopwatch.StartNew();
+            var moved = ReliefDespike.DespikeCodes(top.Heights, opened, top.Width, top.Height, file.YMin, file.YMax,
+                ReliefDespike.DespikeRiseMetres, protect);
+
+            var kept = 0;
+            if (protect != null)
+                foreach (var p in protect)
+                    if (p) kept++;
+
+            var inv = CultureInfo.InvariantCulture;
+            Plugin.LogSource?.LogInfo(
+                $"QuestTree: relief for {job.Request.Map} - {N(moved)} cell(s) despiked {when} " +
+                $"(window {ReliefDespike.DespikeWindowMetres.ToString("0.#", inv)} m, rise {ReliefDespike.DespikeRiseMetres.ToString("0.#", inv)} m), " +
+                $"{N(kept)} protected (terrain, or no stored mesh over them), in {clock.ElapsedMilliseconds.ToString(inv)} ms.");
+        }
+
+        /// <summary>
+        /// Test 2026-09-28: the top band's cells that the buildings cover from above are lowered to the ground at the
+        /// buildings' edges. The cover is <see cref="CoverMask"/>'s (a tree never covers, a prop only over no terrain); the
+        /// uncovered cells next to covered ones then seed a flood over the covered cells (ReliefDespike.Flood): with
+        /// <see cref="LowestSeedFlood"/> a cell takes the LOWEST edge that reaches it when that is within
+        /// <see cref="FloodMaxDropMetres"/> of its cast height, else the nearest edge; without, the nearest edge. Only ever
+        /// down, never under the terrain its column met. A covered cell with no hit stays a hole; a covered area with no
+        /// uncovered neighbour at all (nothing around it was measured) is left as cast. Logged with the cells and buildings
+        /// it touched and its time.
+        /// </summary>
+        /// <param name="job">The build, for the line.</param>
+        /// <param name="file">The merged file.</param>
+        /// <param name="top">Its top band.</param>
+        /// <param name="cover">The top band's cover mask.</param>
+        /// <param name="floor">The terrain floor (<see cref="TerrainFloor"/>), or null.</param>
+        /// <param name="buildingsCovering">The meshes that covered a cell, for the line.</param>
+        /// <param name="propsCovering">Of them, the props.</param>
+        private static void LowerReliefUnderBuildings(Job job, MapMeshFile file, MapMeshFile.ReliefBand top, byte[] cover, ushort[] floor,
+            int buildingsCovering, int propsCovering)
+        {
+            var clock = Stopwatch.StartNew();
+            var w = top.Width;
+            var h = top.Height;
+            var span = (double)file.YMax - file.YMin;
+            var maxDrop = span > 0d ? FloodMaxDropMetres * MapMeshFile.MaxQuantised / span : double.PositiveInfinity;
+
+            var lowered = ReliefDespike.Flood(top.Heights, cover, w, h, LowestSeedFlood, maxDrop, floor, out var coveredCells, out var keptLower,
+                out var nearest, out var leftAsCast);
+
+            var inv = CultureInfo.InvariantCulture;
+            Plugin.LogSource?.LogInfo(
                 $"QuestTree: relief under {job.Request.Map}'s buildings - {N(coveredCells)} cell(s) under {N(buildingsCovering)} building(s) " +
-                $"({(100d * coveredCells / Math.Max(1, w * h)).ToString("0.0", CultureInfo.InvariantCulture)} % of the top band), " +
-                $"{N(lowered)} lowered to the ground at the buildings' edges, {N(keptLower)} already lower and kept, in {clock.ElapsedMilliseconds} ms.");
+                (propsCovering > 0 ? $"({N(propsCovering)} of them props over no terrain) " : "") +
+                $"({(100d * coveredCells / Math.Max(1, w * h)).ToString("0.0", inv)} % of the top band), " +
+                $"{N(lowered)} lowered to the ground at the buildings' edges" +
+                (LowestSeedFlood
+                    ? $" ({N(nearest)} to the nearest edge, the lowest lying more than {FloodMaxDropMetres.ToString("0", inv)} m under them), " +
+                      $"{N(leftAsCast)} left as cast (no edge within reach lower)"
+                    : "") +
+                $", {N(keptLower)} already lower and kept" + (floor != null ? ", never under the terrain" : "") +
+                $", in {clock.ElapsedMilliseconds} ms.");
+        }
+
+        /// <summary>
+        /// Play-test 2026-09-29: whether every cell under a prop's footprint box met the terrain - then none of its triangles
+        /// can cover a cell (<see cref="PropsCoverWithoutTerrain"/>) and the prop is skipped without rasterising, which keeps
+        /// the pass as cheap as it was on a terrain map (thousands of small boxes). False when nothing is known about the
+        /// terrain (<paramref name="bits"/> null) or the box leaves the grid.
+        /// </summary>
+        /// <param name="b">The prop.</param>
+        /// <param name="sx">A quantised x code to a column, fractional.</param>
+        /// <param name="sz">A quantised z code to a row.</param>
+        /// <param name="w">The grid's columns.</param>
+        /// <param name="h">The grid's rows.</param>
+        /// <param name="bits">The top band's terrain bits, or null.</param>
+        private static bool AllOverTerrain(MapMeshFile.Building b, double sx, double sz, int w, int h, byte[] bits)
+        {
+            if (bits == null || b.X.Length == 0) return false;
+
+            ushort minX = ushort.MaxValue, maxX = 0, minZ = ushort.MaxValue, maxZ = 0;
+
+            for (var v = 0; v < b.X.Length && v < b.Z.Length; v++)
+            {
+                if (b.X[v] < minX) minX = b.X[v];
+                if (b.X[v] > maxX) maxX = b.X[v];
+                if (b.Z[v] < minZ) minZ = b.Z[v];
+                if (b.Z[v] > maxZ) maxZ = b.Z[v];
+            }
+
+            var c0 = (int)Math.Floor(minX * sx);
+            var c1 = (int)Math.Floor(maxX * sx);
+            var r0 = (int)Math.Floor(minZ * sz);
+            var r1 = (int)Math.Floor(maxZ * sz);
+            if (c0 < 0 || r0 < 0 || c1 >= w || r1 >= h || c0 > c1 || r0 > r1) return false;
+
+            for (var row = r0; row <= r1; row++)
+            for (var col = c0; col <= c1; col++)
+                if ((bits[row * w + col] & GroundUnder) == 0)
+                    return false;
+
+            return true;
         }
 
         /// <summary>HQ S2.8: the buildings stored at a LOD level above 0 after this stop - kept stored rows and this
